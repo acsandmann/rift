@@ -1,0 +1,195 @@
+# rift config
+# Copy this file to ~/.rift.toml or $HOME/.rift.toml
+
+[settings]
+# Animations
+# - animate: master switch for all window animations
+# - animation_duration: seconds per animation (>= 0.0, typical 0.15–0.35)
+# - animation_fps: frames per second (> 0.0). 60–120 recommended.
+# - animation_easing: easing curve. One of:
+#   linear,
+#   ease_in_out,
+#   ease_in_sine, ease_out_sine, ease_in_out_sine,
+#   ease_in_quad, ease_out_quad, ease_in_out_quad,
+#   ease_in_cubic, ease_out_cubic, ease_in_out_cubic,
+#   ease_in_quart, ease_out_quart, ease_in_out_quart,
+#   ease_in_quint, ease_out_quint, ease_in_out_quint,
+#   ease_in_expo, ease_out_expo, ease_in_out_expo,
+#   ease_in_circ, ease_out_circ, ease_in_out_circ
+animate = true
+animation_duration = 0.2
+animation_fps = 100.0
+animation_easing = "ease_in_out_cubic"
+
+# Space activation behavior
+# - If true, spaces start inactive (rift does not manage windows there)
+#   and you must toggle activation via a keybind (toggle_space_activated).
+# - If false, spaces are managed by default and you can disable specific ones.
+# Default is true; uncomment to change.
+#default_disable = false
+
+# Mouse/Focus behavior
+# - focus_follows_mouse: moving the mouse into a window focuses it
+# - mouse_follows_focus: when focus changes, move the mouse to the focused window
+# - mouse_hides_on_focus: hide the mouse cursor after focusing a window
+focus_follows_mouse = true
+mouse_follows_focus = false
+mouse_hides_on_focus = true
+
+# Prevent certain apps from stealing focus/causing workspace switches
+# Provide bundle identifiers (e.g., "com.apple.Spotlight")
+# Examples:
+#   "com.apple.dock", "com.apple.systemuiserver", "com.apple.SecurityAgent",
+#   "com.raycast.macos", "com.apple.Spotlight"
+auto_focus_blacklist = []
+
+# Run commands on start
+#
+# Tip: You can subscribe to rift events and trigger your own scripts. The command will
+# receive environment variables with context:
+#   RIFT_EVENT_TYPE            # "workspace_changed" | "windows_changed"
+#   RIFT_WORKSPACE_ID          # workspace id
+#   RIFT_WORKSPACE_NAME        # workspace name
+#   RIFT_WINDOW_COUNT          # number of windows (windows_changed only)
+#   RIFT_WINDOWS               # comma-separated window ids (windows_changed only)
+#   RIFT_EVENT_JSON            # full JSON payload of the event
+#
+# Example (sketchybar integration):
+# run_on_start = [
+#   "rift-cli subscribe cli --event workspace_changed --command sh --args -c --args 'sketchybar --trigger rift_workspace_changed RIFT_WORKSPACE_NAME=\"$RIFT_WORKSPACE_NAME\" RIFT_WORKSPACE_ID=\"$RIFT_WORKSPACE_ID\"'",
+#   "rift-cli subscribe cli --event windows_changed --command sh --args -c --args 'sketchybar --trigger rift_windows_changed RIFT_WORKSPACE_NAME=\"$RIFT_WORKSPACE_NAME\" RIFT_WINDOW_COUNT=\"$RIFT_WINDOW_COUNT\"'"
+# ]
+
+run_on_start = []
+
+[settings.layout]
+# Layout system
+# - mode: "traditional" (i3/sway-like containers) or "bsp" (binary space partitioning)
+#   defaults to "traditional" if omitted
+mode = "traditional"
+
+[settings.layout.stack]
+# How much of each stacked window sticks out (in pixels)
+# Set to 0.0 to have them directly on top of each other.
+# Recommended: 30-50 for clear edges while keeping focus visible.
+stack_offset = 30.0
+
+[settings.layout.gaps]
+# Gap configuration
+# - outer: space between windows and screen edges
+# - inner: space between tiled windows
+
+[settings.layout.gaps.outer]
+top = 6
+left = 0
+bottom = 0
+right = 0
+
+[settings.layout.gaps.inner]
+horizontal = 0
+vertical = 0
+
+[virtual_workspaces]
+# Virtual workspaces
+# - enabled: if false, rift behaves like a simple tiling WM with a single space
+# - default_workspace_count: number of workspaces to create on startup (1–32)
+# - auto_assign_windows: when true, new windows can be auto-assigned using app_rules
+# - preserve_focus_per_workspace: remember last focused window per workspace
+enabled = true
+default_workspace_count = 4
+auto_assign_windows = true
+preserve_focus_per_workspace = true
+
+# Workspace names (indexed order). If fewer than default_workspace_count are provided,
+# remaining workspaces are named "Workspace X".
+# Do not provide more names than default_workspace_count.
+workspace_names = [
+	"first"
+]
+
+# App rules (automatic assignment)
+# You can match by bundle id (app_id) or by app name substring (app_name).
+# - workspace: target workspace index (0-based). If omitted or out of range, falls back to active workspace.
+# - floating: whether new windows of this app should float by default.
+# Examples:
+#   { app_id = "dev.zed.Zed", workspace = 0, floating = false }
+#   { app_id = "com.apple.finder", floating = true }
+#   { app_name = "Calendar", floating = true }
+app_rules = []
+
+# Modifier combinations that can be reused in key bindings
+# Define common modifier combinations to avoid repetition.
+# Example usage: with `comb1 = "Alt + Shift"`, you can write:
+#   "comb1 + H" = { move_node = "left" }
+[modifier_combinations]
+comb1 = "Alt + Shift"
+
+[keys]
+# Key binding syntax
+# - Use quotes around the key: "Alt + Shift + H"
+# - Supported modifiers: Alt, Ctrl, Shift, Meta (Meta = Command ⌘ on macOS)
+# - Arrow keys can be written as ArrowUp/ArrowDown/ArrowLeft/ArrowRight, or just Up/Down/Left/Right
+# - Spacing is flexible: "Alt+Down" and "Alt + Down" are equivalent
+# - Key values map to commands (see list below)
+
+# ommands
+# - toggle_space_activated
+# - next_workspace / prev_workspace
+# - switch_to_workspace = N
+# - move_window_to_workspace = N
+# - create_workspace
+# - switch_to_last_workspace
+# - move_focus = "left"|"right"|"up"|"down"
+# - move_node = "left"|"right"|"up"|"down"
+# - join_window = "left"|"right"|"up"|"down"
+# - stack_windows / unstack_windows / unjoin_windows
+# - toggle_focus_floating / toggle_window_floating / toggle_fullscreen
+# - resize_window_grow / resize_window_shrink
+# - debug / serialize / save_and_exit
+# - show_timing
+
+"Alt + Z" = "toggle_space_activated"
+
+"Alt + H" = { move_focus = "left" }
+"Alt + J" = { move_focus = "down" }
+"Alt + K" = { move_focus = "up" }
+"Alt + L" = { move_focus = "right" }
+
+"comb1 + H" = { move_node = "left" }
+"comb1 + J" = { move_node = "down" }
+"comb1 + K" = { move_node = "up" }
+"comb1 + L" = { move_node = "right" }
+
+"Alt + 0" = { switch_to_workspace = 0 }
+"Alt + 1" = { switch_to_workspace = 1 }
+"Alt + 2" = { switch_to_workspace = 2 }
+"Alt + 3" = { switch_to_workspace = 3 }
+
+"comb1 + 0" = { move_window_to_workspace = 0 }
+"comb1 + 1" = { move_window_to_workspace = 1 }
+"comb1 + 2" = { move_window_to_workspace = 2 }
+"comb1 + 3" = { move_window_to_workspace = 3 }
+
+"Alt + Tab" = "switch_to_last_workspace"
+
+"Alt + Shift + Left" = { join_window = "left" }
+"Alt + Shift + Right" = { join_window = "right" }
+"Alt + Shift + Up" = { join_window = "up" }
+"Alt + Shift + Down" = { join_window = "down" }
+"Alt + Comma" = "stack_windows"
+"Alt + Slash" = "unstack_windows"
+"Alt + Ctrl + E" = "unjoin_windows" # FIXME: doesnt work
+
+"Alt + Shift + Space" = "toggle_window_floating"
+"Alt + F" = "toggle_fullscreen"
+"comb1 + Ctrl + Space" = "toggle_focus_floating" # briefly bring focus to floating window
+
+# smartly resize windows
+"Alt + Shift + Equal" = "resize_window_grow"
+"Alt + Shift + Minus" = "resize_window_shrink"
+
+"Alt + Shift + D" = "debug" # prints layout tree
+
+"Alt + Ctrl + M" = "show_timing"
+"Alt + Ctrl + S" = "serialize"
+"Alt + Ctrl + Q" = "save_and_exit"
