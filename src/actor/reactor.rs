@@ -565,10 +565,13 @@ impl Reactor {
                     if let Some(workspace_id) = self.layout_engine.active_workspace(space) {
                         let workspace_name = self
                             .layout_engine
-                            .workspace_name(workspace_id)
+                            .workspace_name(space, workspace_id)
                             .unwrap_or_else(|| format!("Workspace {:?}", workspace_id));
-                        let broadcast_event =
-                            BroadcastEvent::WorkspaceChanged { workspace_id, workspace_name };
+                        let broadcast_event = BroadcastEvent::WorkspaceChanged {
+                            workspace_id,
+                            workspace_name,
+                            space_id: space,
+                        };
                         _ = self.event_broadcaster.send(broadcast_event);
                     }
                 }
@@ -786,29 +789,42 @@ impl Reactor {
     fn handle_workspace_query(&self) -> WorkspaceQueryResponse {
         let mut workspaces = Vec::new();
 
-        let workspace_list = self.layout_engine.list_workspaces_readonly();
+        let space_id = self.screens.first().and_then(|s| s.space);
+        let workspace_list: Vec<(crate::model::VirtualWorkspaceId, String)> =
+            if let Some(space) = space_id {
+                self.layout_engine
+                    .virtual_workspace_manager()
+                    .list_workspaces_readonly(space)
+                    .into_iter()
+                    .map(|(id, name)| (id, name.to_string()))
+                    .collect()
+            } else {
+                Vec::new()
+            };
 
         for (workspace_id, workspace_name) in workspace_list {
-            let space_id = self.screens.first().and_then(|s| s.space);
             let is_active = if let Some(space) = space_id {
                 self.layout_engine.active_workspace(space) == Some(workspace_id)
             } else {
                 false
             };
 
-            let workspace_windows = if is_active && space_id.is_some() {
-                self.layout_engine.windows_in_active_workspace(space_id.unwrap())
-            } else {
-                if let Some(workspace_info) =
-                    self.layout_engine.virtual_workspace_manager().workspace_info(workspace_id)
-                {
-                    workspace_info.windows().collect()
+            let workspace_windows_ids: Vec<crate::actor::app::WindowId> =
+                if let Some(space) = space_id {
+                    if is_active {
+                        self.layout_engine.windows_in_active_workspace(space)
+                    } else {
+                        self.layout_engine
+                            .virtual_workspace_manager()
+                            .workspace_info(space, workspace_id)
+                            .map(|ws| ws.windows().collect())
+                            .unwrap_or_default()
+                    }
                 } else {
                     Vec::new()
-                }
-            };
+                };
 
-            let windows: Vec<WindowData> = workspace_windows
+            let windows: Vec<WindowData> = workspace_windows_ids
                 .into_iter()
                 .filter_map(|wid| self.create_window_data(wid))
                 .collect();
@@ -1290,7 +1306,7 @@ impl Reactor {
                         if let Some(window_workspace) = self
                             .layout_engine
                             .virtual_workspace_manager()
-                            .workspace_for_window(*wid)
+                            .workspace_for_window(space, *wid)
                         {
                             return active_workspace == window_workspace;
                         }
@@ -1343,7 +1359,9 @@ impl Reactor {
         };
 
         let workspace_manager = self.layout_engine.virtual_workspace_manager();
-        let Some(window_workspace) = workspace_manager.workspace_for_window(app_window_id) else {
+        let Some(window_workspace) =
+            workspace_manager.workspace_for_window(window_space, app_window_id)
+        else {
             return;
         };
 
@@ -1354,7 +1372,11 @@ impl Reactor {
         if window_workspace != current_workspace {
             self.last_auto_workspace_switch = Some(std::time::Instant::now());
 
-            let workspaces = self.layout_engine.list_workspaces_readonly();
+            let workspaces = workspace_manager
+                .list_workspaces_readonly(window_space)
+                .into_iter()
+                .map(|(id, name)| (id, name.to_string()))
+                .collect::<Vec<_>>();
             if let Some((workspace_index, _)) =
                 workspaces.iter().enumerate().find(|(_, (ws_id, _))| *ws_id == window_workspace)
             {
@@ -1545,7 +1567,7 @@ impl Reactor {
                         let is_active = self
                             .layout_engine
                             .virtual_workspace_manager()
-                            .workspace_for_window(wid)
+                            .workspace_for_window(space, wid)
                             .map_or(false, |ws| ws == active_ws);
 
                         if is_active {

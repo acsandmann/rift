@@ -231,10 +231,15 @@ impl MachHandler {
     fn execute_cli_subscription(event: &BroadcastEvent, subscription: &CliSubscription) {
         let mut env_vars = HashMap::default();
         match event {
-            BroadcastEvent::WorkspaceChanged { workspace_id, workspace_name } => {
+            BroadcastEvent::WorkspaceChanged {
+                workspace_id,
+                workspace_name,
+                space_id,
+            } => {
                 env_vars.insert("RIFT_EVENT_TYPE".to_string(), "workspace_changed".to_string());
                 env_vars.insert("RIFT_WORKSPACE_ID".to_string(), format!("{:?}", workspace_id));
                 env_vars.insert("RIFT_WORKSPACE_NAME".to_string(), workspace_name.clone());
+                env_vars.insert("RIFT_SPACE_ID".to_string(), space_id.to_string());
             }
             BroadcastEvent::WindowsChanged {
                 workspace_id,

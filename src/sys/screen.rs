@@ -31,6 +31,10 @@ impl SpaceId {
     pub fn get(&self) -> u64 { self.0.get() }
 }
 
+impl ToString for SpaceId {
+    fn to_string(&self) -> String { self.get().to_string() }
+}
+
 pub struct ScreenCache<S: System = Actual> {
     system: S,
     uuids: Vec<CFString>,
