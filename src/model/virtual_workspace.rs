@@ -272,7 +272,6 @@ impl VirtualWorkspaceManager {
         workspace_id: VirtualWorkspaceId,
     ) -> bool {
         trace_misc("assign_window_to_workspace", || {
-            // Validate that the target workspace exists and belongs to the provided macOS Space
             if !self.workspaces.contains_key(workspace_id)
                 || self.workspaces.get(workspace_id).map(|w| w.space) != Some(space)
             {
@@ -283,15 +282,15 @@ impl VirtualWorkspaceManager {
                 return false;
             }
 
-            // Find any existing mapping for this window across ALL spaces
-            let existing_mapping: Option<(SpaceId, VirtualWorkspaceId)> = self
-                .window_to_workspace
-                .iter()
-                .find_map(|(&(existing_space, wid), &ws_id)| {
-                    if wid == window_id { Some((existing_space, ws_id)) } else { None }
+            let existing_mapping: Option<(SpaceId, VirtualWorkspaceId)> =
+                self.window_to_workspace.iter().find_map(|(&(existing_space, wid), &ws_id)| {
+                    if wid == window_id {
+                        Some((existing_space, ws_id))
+                    } else {
+                        None
+                    }
                 });
 
-            // If the window is already known on another macOS Space, disallow cross-space moves
             if let Some((existing_space, old_workspace_id)) = existing_mapping {
                 if existing_space != space {
                     error!(
@@ -301,14 +300,12 @@ impl VirtualWorkspaceManager {
                     return false;
                 }
 
-                // Cleanly remove from the old workspace within the same space
                 if let Some(old_workspace) = self.workspaces.get_mut(old_workspace_id) {
                     old_workspace.remove_window(window_id);
                 }
                 self.window_to_workspace.remove(&(existing_space, window_id));
             }
 
-            // Insert into the new workspace (same Space)
             if let Some(workspace) = self.workspaces.get_mut(workspace_id) {
                 workspace.add_window(window_id);
                 self.window_to_workspace.insert((space, window_id), workspace_id);

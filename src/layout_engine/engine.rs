@@ -929,20 +929,18 @@ impl LayoutEngine {
                 EventResponse::default()
             }
             LayoutCommand::MoveWindowToWorkspace(workspace_index) => {
-                // Determine the true macOS Space for the focused window, and only move within that Space
                 let focused_window = match self.focused_window {
                     Some(wid) => wid,
                     None => return EventResponse::default(),
                 };
 
-                // Infer the window's space from current layouts/floating sets
                 let inferred_spaces = self.spaces_with_window(focused_window);
                 let op_space = if inferred_spaces.contains(&space) {
                     space
                 } else {
                     match inferred_spaces.first().copied() {
                         Some(s) => s,
-                        None => space, // Fallback; no known space association (should be rare)
+                        None => space, // NOTE: this should rarely if not ever occur
                     }
                 };
 
@@ -952,9 +950,8 @@ impl LayoutEngine {
                 };
                 let target_workspace_id = *target_workspace_id;
 
-                let Some(current_workspace_id) = self
-                    .virtual_workspace_manager
-                    .workspace_for_window(op_space, focused_window)
+                let Some(current_workspace_id) =
+                    self.virtual_workspace_manager.workspace_for_window(op_space, focused_window)
                 else {
                     return EventResponse::default();
                 };
@@ -967,18 +964,18 @@ impl LayoutEngine {
 
                 if is_floating {
                     self.floating.remove_active(op_space, focused_window.pid, focused_window);
-                } else if let Some(_layout) = self.workspace_layouts.active(op_space, current_workspace_id) {
+                } else if let Some(_layout) =
+                    self.workspace_layouts.active(op_space, current_workspace_id)
+                {
                     self.tree.remove_window(focused_window);
                 }
 
-                // This will fail if attempting to move across macOS Spaces; we only continue on success
                 let assigned = self.virtual_workspace_manager.assign_window_to_workspace(
                     op_space,
                     focused_window,
                     target_workspace_id,
                 );
                 if !assigned {
-                    // Re-add to previous structures if we removed above
                     if is_floating {
                         self.floating.add_active(op_space, focused_window.pid, focused_window);
                     } else if let Some(prev_layout) =
@@ -990,7 +987,9 @@ impl LayoutEngine {
                 }
 
                 if !is_floating {
-                    if let Some(target_layout) = self.workspace_layouts.active(op_space, target_workspace_id) {
+                    if let Some(target_layout) =
+                        self.workspace_layouts.active(op_space, target_workspace_id)
+                    {
                         self.tree.add_window_after_selection(target_layout, focused_window);
                     }
                 }
@@ -1001,16 +1000,25 @@ impl LayoutEngine {
                     if is_floating {
                         self.floating.add_active(op_space, focused_window.pid, focused_window);
                     }
-                    return EventResponse { focus_window: Some(focused_window), raise_windows: vec![] };
+                    return EventResponse {
+                        focus_window: Some(focused_window),
+                        raise_windows: vec![],
+                    };
                 } else if Some(current_workspace_id) == active_workspace {
                     self.focused_window = None;
-                    self.virtual_workspace_manager
-                        .set_last_focused_window(op_space, current_workspace_id, None);
+                    self.virtual_workspace_manager.set_last_focused_window(
+                        op_space,
+                        current_workspace_id,
+                        None,
+                    );
 
                     let remaining_windows =
                         self.virtual_workspace_manager.windows_in_active_workspace(op_space);
                     if let Some(&new_focus) = remaining_windows.first() {
-                        return EventResponse { focus_window: Some(new_focus), raise_windows: vec![] };
+                        return EventResponse {
+                            focus_window: Some(new_focus),
+                            raise_windows: vec![],
+                        };
                     }
                 }
 

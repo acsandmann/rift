@@ -10,6 +10,11 @@ aerospace worked well for me but there were a few things i missed like animation
 ### credits
 rift originally began as a fork(and licensed as such) of [glide-wm](https://github.com/glide-wm/glide) but has since diverged significantly. it uses numerous private api's which were reverse engineered by yabai and other projects. it is not affiliated with glide-wm or yabai in any way.
 
+### usage
+```sh
+cargo run --bin rift --release
+```
+
 ### config
 default config in rift.default.toml
 
