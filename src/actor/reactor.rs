@@ -790,14 +790,8 @@ impl Reactor {
         let mut workspaces = Vec::new();
 
         let space_id = self.screens.first().and_then(|s| s.space);
-        let workspace_list: Vec<(crate::model::VirtualWorkspaceId, String)> =
-            if let Some(space) = space_id {
-                self.layout_engine
-                    .virtual_workspace_manager()
-                    .list_workspaces_readonly(space)
-                    .into_iter()
-                    .map(|(id, name)| (id, name.to_string()))
-                    .collect()
+            let workspace_list: Vec<(crate::model::VirtualWorkspaceId, String)> = if let Some(space) = space_id {
+                self.layout_engine.virtual_workspace_manager().list_workspaces(space)
             } else {
                 Vec::new()
             };
@@ -1373,10 +1367,7 @@ impl Reactor {
             self.last_auto_workspace_switch = Some(std::time::Instant::now());
 
             let workspaces = workspace_manager
-                .list_workspaces_readonly(window_space)
-                .into_iter()
-                .map(|(id, name)| (id, name.to_string()))
-                .collect::<Vec<_>>();
+                .list_workspaces(window_space);
             if let Some((workspace_index, _)) =
                 workspaces.iter().enumerate().find(|(_, (ws_id, _))| *ws_id == window_workspace)
             {

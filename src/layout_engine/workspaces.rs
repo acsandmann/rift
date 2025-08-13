@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use super::{LayoutId, LayoutSystem};
 use crate::sys::screen::SpaceId;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Default)]
 pub(crate) struct WorkspaceLayouts {
     map: crate::common::collections::HashMap<
         (SpaceId, crate::model::VirtualWorkspaceId),
@@ -38,13 +38,7 @@ impl From<CGSize> for Size {
     }
 }
 
-impl Default for WorkspaceLayouts {
-    fn default() -> Self { Self { map: Default::default() } }
-}
-
 impl WorkspaceLayouts {
-    pub(crate) fn new() -> Self { Self::default() }
-
     pub(crate) fn ensure_active_for_space(
         &mut self,
         space: SpaceId,

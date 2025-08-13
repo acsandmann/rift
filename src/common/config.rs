@@ -41,11 +41,8 @@ pub enum ConfigCommand {
     ReloadConfig,
 }
 
-// These functions are kept for backward compatibility but could be inlined where used
 pub fn data_dir() -> PathBuf { dirs::home_dir().unwrap().join(".rift") }
-
 pub fn restore_file() -> PathBuf { data_dir().join("layout.ron") }
-
 pub fn config_file() -> PathBuf { dirs::home_dir().unwrap().join(".rift.toml") }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
@@ -243,9 +240,10 @@ pub struct Settings {
     pub run_on_start: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AnimationEasing {
+    #[default]
     EaseInOut,
     Linear,
     EaseInSine,
@@ -271,15 +269,11 @@ pub enum AnimationEasing {
     EaseInOutCirc,
 }
 
-impl Default for AnimationEasing {
-    fn default() -> Self { AnimationEasing::EaseInOut }
-}
-
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct LayoutSettings {
     /// Layout mode: "traditional" (i3/sway style containers)
-    #[serde(default = "default_layout_mode")]
+    #[serde(default)]
     pub mode: LayoutMode,
     /// Stack system configuration
     #[serde(default)]
@@ -290,10 +284,11 @@ pub struct LayoutSettings {
 }
 
 /// Layout mode enum
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum LayoutMode {
     /// Traditional container-based tiling (i3/sway style)
+    #[default]
     Traditional,
     /// Binary space partitioning tiling
     Bsp,
@@ -311,7 +306,7 @@ pub struct StackSettings {
 }
 
 /// Gap configuration for window spacing
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct GapSettings {
     /// Outer gaps (space between windows and screen edges)
@@ -323,7 +318,7 @@ pub struct GapSettings {
 }
 
 /// Outer gap configuration (space between windows and screen edges)
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct OuterGaps {
     /// Gap at the top of the screen
@@ -341,7 +336,7 @@ pub struct OuterGaps {
 }
 
 /// Inner gap configuration (space between windows)
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct InnerGaps {
     /// Horizontal gap between windows
@@ -352,29 +347,10 @@ pub struct InnerGaps {
     pub vertical: f64,
 }
 
-impl Default for LayoutSettings {
-    fn default() -> Self {
-        Self {
-            mode: default_layout_mode(),
-            stack: StackSettings::default(),
-            gaps: GapSettings::default(),
-        }
-    }
-}
-
 impl Default for StackSettings {
     fn default() -> Self {
         Self {
             stack_offset: default_stack_offset(),
-        }
-    }
-}
-
-impl Default for GapSettings {
-    fn default() -> Self {
-        Self {
-            outer: OuterGaps::default(),
-            inner: InnerGaps::default(),
         }
     }
 }
@@ -590,24 +566,9 @@ impl InnerGaps {
     }
 }
 
-impl Default for OuterGaps {
-    fn default() -> Self {
-        Self {
-            top: 0.0,
-            left: 0.0,
-            bottom: 0.0,
-            right: 0.0,
-        }
-    }
-}
-
-impl Default for InnerGaps {
-    fn default() -> Self { Self { horizontal: 0.0, vertical: 0.0 } }
-}
+// Default for OuterGaps/InnerGaps now derived
 
 fn yes() -> bool { true }
-
-fn default_layout_mode() -> LayoutMode { LayoutMode::Traditional }
 
 fn default_stack_offset() -> f64 { 40.0 }
 

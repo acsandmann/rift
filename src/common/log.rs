@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::layer::SubscriberExt;
@@ -70,4 +70,12 @@ fn print_histograms(timing_layer: &TimingLayer) {
         }
         println!();
     });
+}
+
+pub fn trace_misc<T>(desc: &str, f: impl FnOnce() -> T) -> T {
+    let start = Instant::now();
+    let out = f();
+    let end = Instant::now();
+    tracing::trace!(time = ?(end - start), "{desc}");
+    out
 }

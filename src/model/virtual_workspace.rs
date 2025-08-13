@@ -1,14 +1,14 @@
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
 
 use accessibility_sys::pid_t;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use serde::{Deserialize, Serialize};
 use slotmap::{SlotMap, new_key_type};
-use tracing::{error, trace, warn};
+use tracing::{error, warn};
 
 use crate::actor::app::WindowId;
 use crate::common::config::{AppWorkspaceRule, VirtualWorkspaceSettings};
+use crate::common::log::trace_misc;
 use crate::sys::screen::SpaceId;
 
 new_key_type! {
@@ -86,8 +86,6 @@ pub struct VirtualWorkspaceManager {
     #[serde(skip)]
     app_rules: Vec<AppWorkspaceRule>,
     #[serde(skip)]
-    workspace_list_cache: HashMap<SpaceId, Vec<(VirtualWorkspaceId, String)>>,
-    #[serde(skip)]
     max_workspaces: usize,
     #[serde(skip)]
     default_workspace_count: usize,
@@ -117,7 +115,6 @@ impl VirtualWorkspaceManager {
             floating_positions: HashMap::new(),
             workspace_counter: 1,
             app_rules: config.app_rules.clone(),
-            workspace_list_cache: HashMap::new(),
             max_workspaces: 32,
             default_workspace_count: config.default_workspace_count,
             default_workspace_names: config.workspace_names.clone(),
@@ -146,7 +143,6 @@ impl VirtualWorkspaceManager {
         if let Some(&first_id) = ids.first() {
             self.active_workspace_per_space.insert(space, (None, first_id));
         }
-        self.workspace_list_cache.remove(&space);
     }
 
     pub fn create_workspace(
@@ -172,7 +168,7 @@ impl VirtualWorkspaceManager {
         let workspace = VirtualWorkspace::new(name, space);
         let workspace_id = self.workspaces.insert(workspace);
         self.workspaces_by_space.entry(space).or_default().push(workspace_id);
-        self.workspace_list_cache.remove(&space);
+
         Ok(workspace_id)
     }
 
@@ -536,30 +532,23 @@ impl VirtualWorkspaceManager {
         }
     }
 
-    pub fn list_workspaces(&mut self, space: SpaceId) -> &[(VirtualWorkspaceId, String)] {
-        self.ensure_space_initialized(space);
-        if !self.workspace_list_cache.contains_key(&space) {
-            let ids = self.workspaces_by_space.get(&space).cloned().unwrap_or_default();
-            let mut workspaces: Vec<_> = ids
-                .into_iter()
-                .filter_map(|id| self.workspaces.get(id).map(|ws| (id, ws.name.clone())))
-                .collect();
-            workspaces.sort_by(|a, b| a.1.cmp(&b.1));
-            self.workspace_list_cache.insert(space, workspaces);
-        }
-        self.workspace_list_cache.get(&space).unwrap()
-    }
-
-    pub fn list_workspaces_readonly(&self, space: SpaceId) -> Vec<(VirtualWorkspaceId, &str)> {
-        let ids = match self.workspaces_by_space.get(&space) {
-            Some(v) => v.clone(),
-            None => return Vec::new(),
-        };
+    pub fn list_workspaces(&self, space: SpaceId) -> Vec<(VirtualWorkspaceId, String)> {
+        let ids = self.workspaces_by_space.get(&space).cloned().unwrap_or_default();
         let mut workspaces: Vec<_> = ids
             .into_iter()
-            .filter_map(|id| self.workspaces.get(id).map(|ws| (id, ws.name.as_str())))
+            .filter_map(|id| self.workspaces.get(id).map(|ws| (id, ws.name.clone())))
             .collect();
-        workspaces.sort_by(|a, b| a.1.cmp(b.1));
+        workspaces.sort_by(|a, b| a.1.cmp(&b.1));
+        workspaces
+    }
+
+    pub fn list_workspaces_readonly(&self, space: SpaceId) -> Vec<(VirtualWorkspaceId, String)> {
+        let ids = self.workspaces_by_space.get(&space).cloned().unwrap_or_default();
+        let mut workspaces: Vec<_> = ids
+            .into_iter()
+            .filter_map(|id| self.workspaces.get(id).map(|ws| (id, ws.name.clone())))
+            .collect();
+        workspaces.sort_by(|a, b| a.1.cmp(&b.1));
         workspaces
     }
 
@@ -574,7 +563,7 @@ impl VirtualWorkspaceManager {
         }
         if let Some(workspace) = self.workspaces.get_mut(workspace_id) {
             workspace.name = new_name;
-            self.workspace_list_cache.remove(&space);
+
             true
         } else {
             false
@@ -784,14 +773,6 @@ pub struct WorkspaceStats {
     pub total_windows: usize,
     pub active_spaces: usize,
     pub workspace_window_counts: HashMap<VirtualWorkspaceId, usize>,
-}
-
-fn trace_misc<T>(desc: &str, f: impl FnOnce() -> T) -> T {
-    let start = Instant::now();
-    let out = f();
-    let end = Instant::now();
-    trace!(time = ?(end - start), "{desc}");
-    out
 }
 
 #[cfg(test)]

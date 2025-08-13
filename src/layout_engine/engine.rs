@@ -269,17 +269,17 @@ impl LayoutEngine {
             VirtualWorkspaceManager::new_with_config(virtual_workspace_config);
 
         let tree = match layout_settings.mode {
-            crate::common::config::LayoutMode::Traditional => {
-                LayoutSystemKind::Traditional(crate::layout_engine::TraditionalLayoutSystem::new())
-            }
+            crate::common::config::LayoutMode::Traditional => LayoutSystemKind::Traditional(
+                crate::layout_engine::TraditionalLayoutSystem::default(),
+            ),
             crate::common::config::LayoutMode::Bsp => {
-                LayoutSystemKind::Bsp(crate::layout_engine::BspLayoutSystem::new())
+                LayoutSystemKind::Bsp(crate::layout_engine::BspLayoutSystem::default())
             }
         };
 
         LayoutEngine {
             tree,
-            workspace_layouts: WorkspaceLayouts::new(),
+            workspace_layouts: WorkspaceLayouts::default(),
             floating: FloatingManager::new(),
             focused_window: None,
             virtual_workspace_manager,
@@ -789,13 +789,14 @@ impl LayoutEngine {
         let workspace_id = match self.virtual_workspace_manager.active_workspace(space) {
             Some(ws) => ws,
             None => {
-                let list = self.virtual_workspace_manager.list_workspaces_readonly(space);
+                let list = self
+                    .virtual_workspace_manager
+                    .list_workspaces(space);
                 if let Some((first_id, _)) = list.first() {
                     *first_id
                 } else {
                     let _ = self.virtual_workspace_manager.active_workspace(space);
-                    self.virtual_workspace_manager
-                        .list_workspaces_readonly(space)
+                    self.virtual_workspace_manager.list_workspaces(space)
                         .first()
                         .map(|(id, _)| *id)
                         .expect("No active workspace for space and none could be created")

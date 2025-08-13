@@ -2,7 +2,6 @@ use std::cell::RefCell;
 use std::mem::replace;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
 
 use core_foundation::runloop::{CFRunLoop, kCFRunLoopCommonModes};
 use core_graphics::event::{
@@ -14,6 +13,7 @@ use tracing::{Span, debug, error, trace, warn};
 
 use super::reactor::{self, Event};
 use crate::common::config::Config;
+use crate::common::log::trace_misc;
 use crate::sys::event;
 use crate::sys::geometry::{CGRectExt, ToICrate};
 use crate::sys::screen::CoordinateConverter;
@@ -226,14 +226,6 @@ impl State {
 
         new_window
     }
-}
-
-fn trace_misc<T>(desc: &str, f: impl FnOnce() -> T) -> T {
-    let start = Instant::now();
-    let out = f();
-    let end = Instant::now();
-    trace!(time = ?(end - start), "{desc}");
-    out
 }
 
 /// https://developer.apple.com/documentation/appkit/nswindowlevel?language=objc
