@@ -312,7 +312,10 @@ impl LayoutEngine {
             LayoutEvent::SpaceExposed(space, size) => {
                 self.debug_tree(space);
 
-                let workspaces = self.virtual_workspace_manager.list_workspaces(space).to_vec();
+                let workspaces = self
+                    .virtual_workspace_manager_mut()
+                    .list_workspaces(space)
+                    .to_vec();
                 self.workspace_layouts.ensure_active_for_space(
                     space,
                     size,
@@ -712,7 +715,7 @@ impl LayoutEngine {
         }
     }
 
-    pub fn calculate_layout(&self, space: SpaceId, screen: CGRect) -> Vec<(WindowId, CGRect)> {
+    pub fn calculate_layout(&mut self, space: SpaceId, screen: CGRect) -> Vec<(WindowId, CGRect)> {
         let layout = self.layout(space);
         self.tree.calculate_layout(
             layout,
@@ -785,18 +788,16 @@ impl LayoutEngine {
         None
     }
 
-    fn layout(&self, space: SpaceId) -> LayoutId {
+    fn layout(&mut self, space: SpaceId) -> LayoutId {
         let workspace_id = match self.virtual_workspace_manager.active_workspace(space) {
             Some(ws) => ws,
             None => {
-                let list = self
-                    .virtual_workspace_manager
-                    .list_workspaces(space);
+                let list = self.virtual_workspace_manager_mut().list_workspaces(space);
                 if let Some((first_id, _)) = list.first() {
                     *first_id
                 } else {
                     let _ = self.virtual_workspace_manager.active_workspace(space);
-                    self.virtual_workspace_manager.list_workspaces(space)
+                    self.virtual_workspace_manager_mut().list_workspaces(space)
                         .first()
                         .map(|(id, _)| *id)
                         .expect("No active workspace for space and none could be created")
@@ -903,7 +904,7 @@ impl LayoutEngine {
                 EventResponse::default()
             }
             LayoutCommand::SwitchToWorkspace(workspace_index) => {
-                let workspaces = self.virtual_workspace_manager.list_workspaces(space);
+                let workspaces = self.virtual_workspace_manager_mut().list_workspaces(space);
                 if let Some((workspace_id, _)) = workspaces.get(*workspace_index) {
                     let workspace_id = *workspace_id;
                     self.virtual_workspace_manager.set_active_workspace(space, workspace_id);
@@ -945,7 +946,7 @@ impl LayoutEngine {
                     }
                 };
 
-                let workspaces = self.virtual_workspace_manager.list_workspaces(op_space);
+                let workspaces = self.virtual_workspace_manager_mut().list_workspaces(op_space);
                 let Some((target_workspace_id, _)) = workspaces.get(*workspace_index) else {
                     return EventResponse::default();
                 };

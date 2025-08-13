@@ -372,7 +372,6 @@ impl Reactor {
                 | Event::WindowsDiscovered { .. }
         );
 
-        let mut animation_focus_wid = None;
         let raised_window = self.main_window_tracker.handle_event(&event);
         let mut is_resize = false;
         let mut window_was_destroyed = false;
@@ -441,7 +440,6 @@ impl Reactor {
                 }
                 if let Some(space) = self.best_space_for_window(&frame) {
                     if self.window_is_standard(wid) {
-                        animation_focus_wid = Some(wid);
                         self.send_layout_event(LayoutEvent::WindowAdded(space, wid));
                     }
                 }
@@ -451,21 +449,15 @@ impl Reactor {
             }
             Event::WindowDestroyed(wid) => {
                 let window_server_id = self.windows.get(&wid).and_then(|w| w.window_server_id);
-                let window_existed = self.windows.remove(&wid).is_some();
-
-                if window_existed {
-                    if let Some(ws_id) = window_server_id {
-                        self.window_ids.remove(&ws_id);
-                        self.window_server_info.remove(&ws_id);
-                        self.visible_windows.remove(&ws_id);
-                    }
-
-                    self.send_layout_event(LayoutEvent::WindowRemoved(wid));
+                if let Some(ws_id) = window_server_id {
+                    self.window_ids.remove(&ws_id);
+                    self.window_server_info.remove(&ws_id);
+                    self.visible_windows.remove(&ws_id);
                 } else {
                     debug!(?wid, "Received WindowDestroyed for unknown window - ignoring");
-
-                    self.send_layout_event(LayoutEvent::WindowRemoved(wid));
                 }
+                self.windows.remove(&wid);
+                self.send_layout_event(LayoutEvent::WindowRemoved(wid));
                 window_was_destroyed = true;
             }
             Event::WindowServerDestroyed(wsid) => {
@@ -526,11 +518,7 @@ impl Reactor {
                     .zip(spaces)
                     .map(|(frame, space)| Screen { frame, space })
                     .collect();
-                let screens = self.screens.clone();
-                for screen in screens {
-                    let Some(space) = screen.space else { continue };
-                    self.send_layout_event(LayoutEvent::SpaceExposed(space, screen.frame.size));
-                }
+                self.expose_all_spaces();
                 self.update_complete_window_server_info(ws_info);
                 // FIXME: Update visible windows if space changed
             }
@@ -547,15 +535,9 @@ impl Reactor {
                 for (space, screen) in spaces.iter().zip(&mut self.screens) {
                     screen.space = *space;
                 }
-                let screens = self.screens.clone();
-                for screen in screens {
-                    let Some(space) = screen.space else {
-                        continue;
-                    };
-                    self.send_layout_event(LayoutEvent::SpaceExposed(space, screen.frame.size));
-                }
+                self.expose_all_spaces();
                 if let Some(main_window) = self.main_window() {
-                    let spaces = spaces.iter().copied().flatten().collect();
+                    let spaces = self.visible_spaces();
                     self.send_layout_event(LayoutEvent::WindowFocused(spaces, main_window));
                 }
                 self.update_complete_window_server_info(ws_info);
@@ -581,80 +563,7 @@ impl Reactor {
             }
             Event::MouseMovedOverWindow(wsid) => {
                 let Some(&wid) = self.window_ids.get(&wsid) else { return };
-                let Some(window) = self.windows.get(&wid) else { return };
-                if self.best_space_for_window(&window.frame_monotonic).is_none() {
-                    return;
-                }
-
-                if let Some(space) = self.best_space_for_window(&window.frame_monotonic) {
-                    if !self.layout_engine.is_window_in_active_workspace(space, wid) {
-                        trace!("Ignoring mouse over window {:?} - not in active workspace", wid);
-                        return;
-                    }
-                }
-
-                // Occlusion guard for ffm autoraise:
-                // If raising the window under the mouse would fully occlude any floating
-                // window (same layer) that is currently above it in the stacking order,
-                // skip the raise to avoid hiding a smaller target window the user is
-                // likely reaching for.
-                let mut should_raise = true;
-
-                if let Some(candidate_wsid) = window.window_server_id {
-                    let space_ids: Vec<u64> =
-                        self.screens.iter().flat_map(|s| s.space).map(|sid| sid.get()).collect();
-
-                    if !space_ids.is_empty() {
-                        let candidate_layer =
-                            self.window_server_info.get(&candidate_wsid).map(|info| info.layer);
-
-                        if let Some(cl) = candidate_layer {
-                            let order = crate::sys::window_server::space_window_list_for_connection(
-                                &space_ids, 0, false,
-                            );
-
-                            let candidate_u32 = candidate_wsid.as_u32();
-
-                            for above_u32 in order {
-                                if above_u32 == candidate_u32 {
-                                    break;
-                                }
-
-                                let above_wsid = WindowServerId::new(above_u32);
-
-                                let Some(&above_wid) = self.window_ids.get(&above_wsid) else {
-                                    continue;
-                                };
-
-                                if !self.layout_engine.is_window_floating(above_wid) {
-                                    continue;
-                                }
-
-                                let Some(ol) =
-                                    self.window_server_info.get(&above_wsid).map(|info| info.layer)
-                                else {
-                                    continue;
-                                };
-                                if ol != cl {
-                                    continue;
-                                }
-
-                                let Some(above_state) = self.windows.get(&above_wid) else {
-                                    continue;
-                                };
-                                let above_frame = above_state.frame_monotonic;
-                                let candidate_frame = window.frame_monotonic;
-
-                                if candidate_frame.intersection(&above_frame).same_as(above_frame) {
-                                    should_raise = false;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if should_raise {
+                if self.should_raise_on_mouse_over(wid) {
                     self.raise_window(wid, Quiet::No, None);
                 }
             }
@@ -762,13 +671,13 @@ impl Reactor {
             }
         }
         if let Some(raised_window) = raised_window {
-            let spaces = self.screens.iter().flat_map(|screen| screen.space).collect();
+            let spaces = self.visible_spaces();
             self.send_layout_event(LayoutEvent::WindowFocused(spaces, raised_window));
         }
         // always run layout update if a window was destroyed to ensure proper redistribution,
         // otherwise only run if not in drag mode to avoid interfering with ongoing operations
         if !self.in_drag || window_was_destroyed {
-            self.update_layout(animation_focus_wid, is_resize, self.is_workspace_switch);
+            self.update_layout(is_resize, self.is_workspace_switch);
         }
 
         self.is_workspace_switch = false;
@@ -786,12 +695,13 @@ impl Reactor {
         }
     }
 
-    fn handle_workspace_query(&self) -> WorkspaceQueryResponse {
+    fn handle_workspace_query(&mut self) -> WorkspaceQueryResponse {
         let mut workspaces = Vec::new();
 
         let space_id = self.screens.first().and_then(|s| s.space);
-            let workspace_list: Vec<(crate::model::VirtualWorkspaceId, String)> = if let Some(space) = space_id {
-                self.layout_engine.virtual_workspace_manager().list_workspaces(space)
+        let workspace_list: Vec<(crate::model::VirtualWorkspaceId, String)> =
+            if let Some(space) = space_id {
+                self.layout_engine.virtual_workspace_manager_mut().list_workspaces(space)
             } else {
                 Vec::new()
             };
@@ -851,19 +761,7 @@ impl Reactor {
     }
 
     fn handle_window_info_query(&self, window_id: WindowId) -> Option<WindowData> {
-        let window_state = self.windows.get(&window_id)?;
-        let app = self.apps.get(&window_id.pid)?;
-
-        let preferred_name = app.info.localized_name.clone().or_else(|| app.info.bundle_id.clone());
-
-        Some(WindowData {
-            id: window_id,
-            title: window_state.title.clone(),
-            frame: window_state.frame_monotonic,
-            is_floating: self.layout_engine.is_window_floating(window_id),
-            is_focused: self.main_window() == Some(window_id),
-            bundle_id: preferred_name,
-        })
+        self.create_window_data(window_id)
     }
 
     fn handle_applications_query(&self) -> Vec<ApplicationData> {
@@ -948,82 +846,81 @@ impl Reactor {
     }
 
     fn handle_config_command(&mut self, cmd: ConfigCommand) {
-        use std::sync::Arc;
-
         debug!("Handling config command: {:?}", cmd);
 
-        // Create a mutable copy of the config
         let mut new_config = (*self.config).clone();
         let mut config_changed = false;
 
+        macro_rules! set_flag {
+            ($path:expr, $value:expr, $name:literal) => {{
+                $path = $value;
+                config_changed = true;
+                info!("Updated {} to: {}", $name, $value);
+            }};
+        }
+
+        let mut set_range = |name: &str, target: &mut f64, value: f64, min: f64, max: f64| {
+            if value >= min && value <= max {
+                *target = value;
+                config_changed = true;
+                info!("Updated {} to: {}", name, value);
+            } else {
+                warn!(
+                    "Invalid {} value: {}. Must be between {} and {}",
+                    name, value, min, max
+                );
+            }
+        };
+
         match cmd {
-            ConfigCommand::SetAnimate(value) => {
-                new_config.settings.animate = value;
+            ConfigCommand::SetAnimate(v) => set_flag!(new_config.settings.animate, v, "animate"),
+            ConfigCommand::SetAnimationDuration(v) => set_range(
+                "animation_duration",
+                &mut new_config.settings.animation_duration,
+                v,
+                0.0,
+                5.0,
+            ),
+            ConfigCommand::SetAnimationFps(v) => set_range(
+                "animation_fps",
+                &mut new_config.settings.animation_fps,
+                v,
+                0.0,
+                240.0,
+            ),
+            ConfigCommand::SetAnimationEasing(v) => {
+                new_config.settings.animation_easing = v.clone();
                 config_changed = true;
-                info!("Updated animate setting to: {}", value);
+                info!(
+                    "Updated animation_easing to: {:?}",
+                    new_config.settings.animation_easing
+                );
             }
-            ConfigCommand::SetAnimationDuration(value) => {
-                if value > 0.0 && value <= 5.0 {
-                    new_config.settings.animation_duration = value;
-                    config_changed = true;
-                    info!("Updated animation_duration to: {}", value);
-                } else {
-                    warn!(
-                        "Invalid animation_duration value: {}. Must be between 0.0 and 5.0",
-                        value
-                    );
-                }
+            ConfigCommand::SetMouseFollowsFocus(v) => {
+                set_flag!(new_config.settings.mouse_follows_focus, v, "mouse_follows_focus")
             }
-            ConfigCommand::SetAnimationFps(value) => {
-                if value > 0.0 && value <= 240.0 {
-                    new_config.settings.animation_fps = value;
-                    config_changed = true;
-                    info!("Updated animation_fps to: {}", value);
-                } else {
-                    warn!(
-                        "Invalid animation_fps value: {}. Must be between 0.0 and 240.0",
-                        value
-                    );
-                }
+            ConfigCommand::SetMouseHidesOnFocus(v) => set_flag!(
+                new_config.settings.mouse_hides_on_focus,
+                v,
+                "mouse_hides_on_focus"
+            ),
+            ConfigCommand::SetFocusFollowsMouse(v) => {
+                set_flag!(new_config.settings.focus_follows_mouse, v, "focus_follows_mouse")
             }
-            ConfigCommand::SetAnimationEasing(value) => {
-                new_config.settings.animation_easing = value.clone();
-                config_changed = true;
-                info!("Updated animation_easing to: {:?}", value);
-            }
-            ConfigCommand::SetMouseFollowsFocus(value) => {
-                new_config.settings.mouse_follows_focus = value;
-                config_changed = true;
-                info!("Updated mouse_follows_focus to: {}", value);
-            }
-            ConfigCommand::SetMouseHidesOnFocus(value) => {
-                new_config.settings.mouse_hides_on_focus = value;
-                config_changed = true;
-                info!("Updated mouse_hides_on_focus to: {}", value);
-            }
-            ConfigCommand::SetFocusFollowsMouse(value) => {
-                new_config.settings.focus_follows_mouse = value;
-                config_changed = true;
-                info!("Updated focus_follows_mouse to: {}", value);
-            }
-            ConfigCommand::SetStackOffset(value) => {
-                if value >= 0.0 && value <= 200.0 {
-                    new_config.settings.layout.stack.stack_offset = value;
-                    config_changed = true;
-                    info!("Updated stack_offset to: {}", value);
-                } else {
-                    warn!(
-                        "Invalid stack_offset value: {}. Must be between 0.0 and 200.0",
-                        value
-                    );
-                }
-            }
+            ConfigCommand::SetStackOffset(v) => set_range(
+                "stack_offset",
+                &mut new_config.settings.layout.stack.stack_offset,
+                v,
+                0.0,
+                200.0,
+            ),
             ConfigCommand::SetOuterGaps { top, left, bottom, right } => {
-                if top >= 0.0 && left >= 0.0 && bottom >= 0.0 && right >= 0.0 {
-                    new_config.settings.layout.gaps.outer.top = top;
-                    new_config.settings.layout.gaps.outer.left = left;
-                    new_config.settings.layout.gaps.outer.bottom = bottom;
-                    new_config.settings.layout.gaps.outer.right = right;
+                if [top, left, bottom, right].into_iter().all(|v| v >= 0.0) {
+                    let gaps = &mut new_config.settings.layout.gaps.outer;
+                    gaps.top = top;
+                    gaps.left = left;
+                    gaps.bottom = bottom;
+                    gaps.right = right;
                     config_changed = true;
                     info!(
                         "Updated outer gaps to: top={}, left={}, bottom={}, right={}",
@@ -1035,8 +932,9 @@ impl Reactor {
             }
             ConfigCommand::SetInnerGaps { horizontal, vertical } => {
                 if horizontal >= 0.0 && vertical >= 0.0 {
-                    new_config.settings.layout.gaps.inner.horizontal = horizontal;
-                    new_config.settings.layout.gaps.inner.vertical = vertical;
+                    let gaps = &mut new_config.settings.layout.gaps.inner;
+                    gaps.horizontal = horizontal;
+                    gaps.vertical = vertical;
                     config_changed = true;
                     info!(
                         "Updated inner gaps to: horizontal={}, vertical={}",
@@ -1073,12 +971,9 @@ impl Reactor {
             },
         }
 
-        // Apply the new config if it changed
         if config_changed {
             self.config = Arc::new(new_config);
-
-            // Trigger layout update to apply new settings immediately
-            self.update_layout(None, false, true);
+            self.update_layout(false, true);
         }
     }
 
@@ -1232,6 +1127,23 @@ impl Reactor {
         self.best_screen_for_window(frame)?.space
     }
 
+    fn visible_spaces(&self) -> Vec<SpaceId> {
+        self.screens.iter().flat_map(|screen| screen.space).collect()
+    }
+
+    fn visible_space_ids_u64(&self) -> Vec<u64> {
+        self.visible_spaces().into_iter().map(|sid| sid.get()).collect()
+    }
+
+    fn expose_all_spaces(&mut self) {
+        let screens = self.screens.clone();
+        for screen in screens {
+            let Some(space) = screen.space else { continue };
+            let _ = self.layout_engine.virtual_workspace_manager_mut().list_workspaces(space);
+            self.send_layout_event(LayoutEvent::SpaceExposed(space, screen.frame.size));
+        }
+    }
+
     fn window_is_standard(&self, id: WindowId) -> bool {
         let Some(window) = self.windows.get(&id) else {
             return false;
@@ -1252,6 +1164,73 @@ impl Reactor {
         for space in self.screens.iter().flat_map(|screen| screen.space) {
             self.layout_engine.debug_tree_desc(space, "after event", false);
         }
+    }
+
+    // Returns true if the window should be raised on mouse over considering
+    // active workspace membership and occlusion of floating windows above it.
+    fn should_raise_on_mouse_over(&self, wid: WindowId) -> bool {
+        let Some(window) = self.windows.get(&wid) else {
+            return false;
+        };
+
+        let Some(space) = self.best_space_for_window(&window.frame_monotonic) else {
+            return false;
+        };
+
+        if !self.layout_engine.is_window_in_active_workspace(space, wid) {
+            trace!("Ignoring mouse over window {:?} - not in active workspace", wid);
+            return false;
+        }
+
+        let Some(candidate_wsid) = window.window_server_id else {
+            return true;
+        };
+        let space_ids: Vec<u64> = self.visible_space_ids_u64();
+        if space_ids.is_empty() {
+            return true;
+        }
+
+        let Some(candidate_layer) = self.window_server_info.get(&candidate_wsid).map(|i| i.layer)
+        else {
+            return true;
+        };
+
+        let order =
+            crate::sys::window_server::space_window_list_for_connection(&space_ids, 0, false);
+        let candidate_u32 = candidate_wsid.as_u32();
+
+        for above_u32 in order {
+            if above_u32 == candidate_u32 {
+                break;
+            }
+
+            let above_wsid = WindowServerId::new(above_u32);
+            let Some(&above_wid) = self.window_ids.get(&above_wsid) else {
+                continue;
+            };
+            if !self.layout_engine.is_window_floating(above_wid) {
+                continue;
+            }
+
+            let Some(above_layer) = self.window_server_info.get(&above_wsid).map(|i| i.layer)
+            else {
+                continue;
+            };
+            if above_layer != candidate_layer {
+                continue;
+            }
+
+            let Some(above_state) = self.windows.get(&above_wid) else {
+                continue;
+            };
+            let above_frame = above_state.frame_monotonic;
+            let candidate_frame = window.frame_monotonic;
+            if candidate_frame.intersection(&above_frame).same_as(above_frame) {
+                return false;
+            }
+        }
+
+        true
     }
 
     fn process_windows_for_app_rules(
@@ -1366,8 +1345,8 @@ impl Reactor {
         if window_workspace != current_workspace {
             self.last_auto_workspace_switch = Some(std::time::Instant::now());
 
-            let workspaces = workspace_manager
-                .list_workspaces(window_space);
+            let workspaces =
+                self.layout_engine.virtual_workspace_manager_mut().list_workspaces(window_space);
             if let Some((workspace_index, _)) =
                 workspaces.iter().enumerate().find(|(_, (ws_id, _))| *ws_id == window_workspace)
             {
@@ -1466,12 +1445,7 @@ impl Reactor {
     }
 
     #[instrument(skip(self), fields())]
-    pub fn update_layout(
-        &mut self,
-        _new_wid: Option<WindowId>,
-        is_resize: bool,
-        is_workspace_switch: bool,
-    ) {
+    pub fn update_layout(&mut self, is_resize: bool, is_workspace_switch: bool) {
         let screens = self.screens.clone();
         let main_window = self.main_window();
         trace!(?main_window);
@@ -1553,7 +1527,6 @@ impl Reactor {
                         };
                         let handle = app_state.handle.clone();
                         let txid = window.next_txid();
-                        //let is_new = Some(wid) == new_wid;
 
                         let is_active = self
                             .layout_engine
@@ -1827,7 +1800,6 @@ pub mod tests {
         ));
         let (raise_manager_tx, mut raise_manager_rx) = mpsc::unbounded_channel();
         reactor.raise_manager_tx = raise_manager_tx;
-
         let screen1 = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
         let screen2 = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
         reactor.handle_event(Event::ScreenParametersChanged(

@@ -3,12 +3,14 @@ use std::collections::{HashMap, HashSet};
 use accessibility_sys::pid_t;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
 use slotmap::{SlotMap, new_key_type};
 use tracing::{error, warn};
 
 use crate::actor::app::WindowId;
 use crate::common::config::{AppWorkspaceRule, VirtualWorkspaceSettings};
 use crate::common::log::trace_misc;
+use crate::sys::geometry::CGRectDef;
 use crate::sys::screen::SpaceId;
 
 new_key_type! {
@@ -211,21 +213,7 @@ impl VirtualWorkspaceManager {
         current: VirtualWorkspaceId,
         skip_empty: Option<bool>,
     ) -> Option<VirtualWorkspaceId> {
-        let ids = self.workspaces_by_space.get(&space)?;
-        let mut workspace_ids: Vec<_> = ids
-            .iter()
-            .copied()
-            .filter(|id| {
-                if let Some(ws) = self.workspaces.get(*id) {
-                    skip_empty.map_or(true, |skip| !skip || !ws.windows.is_empty())
-                } else {
-                    false
-                }
-            })
-            .collect();
-        workspace_ids
-            .sort_by_key(|id| self.workspaces.get(*id).map(|w| w.name.clone()).unwrap_or_default());
-
+        let workspace_ids = self.filtered_workspace_ids(space, skip_empty);
         let current_pos = workspace_ids.iter().position(|&id| id == current)?;
         let next_pos = (current_pos + 1) % workspace_ids.len();
         workspace_ids.get(next_pos).copied()
@@ -237,21 +225,7 @@ impl VirtualWorkspaceManager {
         current: VirtualWorkspaceId,
         skip_empty: Option<bool>,
     ) -> Option<VirtualWorkspaceId> {
-        let ids = self.workspaces_by_space.get(&space)?;
-        let mut workspace_ids: Vec<_> = ids
-            .iter()
-            .copied()
-            .filter(|id| {
-                if let Some(ws) = self.workspaces.get(*id) {
-                    skip_empty.map_or(true, |skip| !skip || !ws.windows.is_empty())
-                } else {
-                    false
-                }
-            })
-            .collect();
-        workspace_ids
-            .sort_by_key(|id| self.workspaces.get(*id).map(|w| w.name.clone()).unwrap_or_default());
-
+        let workspace_ids = self.filtered_workspace_ids(space, skip_empty);
         let current_pos = workspace_ids.iter().position(|&id| id == current)?;
         let prev_pos = if current_pos == 0 {
             workspace_ids.len() - 1
@@ -532,7 +506,8 @@ impl VirtualWorkspaceManager {
         }
     }
 
-    pub fn list_workspaces(&self, space: SpaceId) -> Vec<(VirtualWorkspaceId, String)> {
+    pub fn list_workspaces(&mut self, space: SpaceId) -> Vec<(VirtualWorkspaceId, String)> {
+        self.ensure_space_initialized(space);
         let ids = self.workspaces_by_space.get(&space).cloned().unwrap_or_default();
         let mut workspaces: Vec<_> = ids
             .into_iter()
@@ -542,14 +517,28 @@ impl VirtualWorkspaceManager {
         workspaces
     }
 
-    pub fn list_workspaces_readonly(&self, space: SpaceId) -> Vec<(VirtualWorkspaceId, String)> {
-        let ids = self.workspaces_by_space.get(&space).cloned().unwrap_or_default();
-        let mut workspaces: Vec<_> = ids
-            .into_iter()
-            .filter_map(|id| self.workspaces.get(id).map(|ws| (id, ws.name.clone())))
+    fn filtered_workspace_ids(
+        &self,
+        space: SpaceId,
+        skip_empty: Option<bool>,
+    ) -> Vec<VirtualWorkspaceId> {
+        let Some(ids) = self.workspaces_by_space.get(&space) else {
+            return Vec::new();
+        };
+        let mut workspace_ids: Vec<_> = ids
+            .iter()
+            .copied()
+            .filter(|id| {
+                if let Some(ws) = self.workspaces.get(*id) {
+                    skip_empty.map_or(true, |skip| !skip || !ws.windows.is_empty())
+                } else {
+                    false
+                }
+            })
             .collect();
-        workspaces.sort_by(|a, b| a.1.cmp(&b.1));
-        workspaces
+        workspace_ids
+            .sort_by_key(|id| self.workspaces.get(*id).map(|w| w.name.clone()).unwrap_or_default());
+        workspace_ids
     }
 
     pub fn rename_workspace(
@@ -708,50 +697,24 @@ impl VirtualWorkspaceManager {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct SerializableRect {
-    pub x: f64,
-    pub y: f64,
-    pub width: f64,
-    pub height: f64,
-}
-
-impl From<CGRect> for SerializableRect {
-    fn from(rect: CGRect) -> Self {
-        Self {
-            x: rect.origin.x,
-            y: rect.origin.y,
-            width: rect.size.width,
-            height: rect.size.height,
-        }
-    }
-}
-
-impl From<SerializableRect> for CGRect {
-    fn from(rect: SerializableRect) -> Self {
-        CGRect::new(
-            CGPoint::new(rect.x, rect.y),
-            CGSize::new(rect.width, rect.height),
-        )
-    }
-}
-
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FloatingWindowPositions {
-    positions: HashMap<WindowId, SerializableRect>,
+    #[serde_as(as = "HashMap<_, CGRectDef>")]
+    positions: HashMap<WindowId, CGRect>,
 }
 
 impl FloatingWindowPositions {
     pub fn store_position(&mut self, window_id: WindowId, position: CGRect) {
-        self.positions.insert(window_id, position.into());
+        self.positions.insert(window_id, position);
     }
 
     pub fn get_position(&self, window_id: WindowId) -> Option<CGRect> {
-        self.positions.get(&window_id).map(|rect| (*rect).into())
+        self.positions.get(&window_id).copied()
     }
 
     pub fn remove_position(&mut self, window_id: WindowId) -> Option<CGRect> {
-        self.positions.remove(&window_id).map(|rect| rect.into())
+        self.positions.remove(&window_id)
     }
 
     pub fn windows(&self) -> impl Iterator<Item = WindowId> + '_ { self.positions.keys().copied() }
