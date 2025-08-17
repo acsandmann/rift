@@ -29,6 +29,7 @@ use tracing::{Span, debug, error, info, instrument, trace, warn};
 use super::mouse;
 use crate::actor::app::{AppInfo, AppThreadHandle, Quiet, Request, WindowId, WindowInfo, pid_t};
 use crate::actor::broadcast::BroadcastEvent;
+use crate::actor::menu;
 use crate::actor::raise_manager::{self, RaiseRequest};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
 use crate::common::config::{Config, ConfigCommand};
@@ -38,7 +39,7 @@ use crate::layout_engine::{self as layout, LayoutCommand, LayoutEngine, LayoutEv
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt, Round, SameAs};
-use crate::sys::screen::SpaceId;
+use crate::sys::screen::{SpaceId, get_active_space_number};
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 
 pub type Sender = tokio::sync::mpsc::UnboundedSender<(Span, Event)>;
@@ -221,6 +222,7 @@ pub struct Reactor {
     is_workspace_switch: bool,
     record: Record,
     mouse_tx: Option<mouse::Sender>,
+    menu_tx: Option<menu::Sender>,
     raise_manager_tx: raise_manager::Sender,
     event_broadcaster: broadcast::Sender<BroadcastEvent>,
     app_rules_recently_applied: std::time::Instant,
@@ -291,6 +293,7 @@ impl Reactor {
         record: Record,
         mouse_tx: mouse::Sender,
         broadcast_tx: broadcast::Sender<BroadcastEvent>,
+        menu_tx: menu::Sender,
     ) -> Sender {
         let (events_tx, events) = unbounded_channel();
         let events_tx_clone = events_tx.clone();
@@ -299,6 +302,7 @@ impl Reactor {
             .spawn(move || {
                 let mut reactor = Reactor::new(config, layout_engine, record, broadcast_tx);
                 reactor.mouse_tx.replace(mouse_tx);
+                reactor.menu_tx.replace(menu_tx);
                 Executor::run(reactor.run(events, events_tx_clone));
             })
             .unwrap();
@@ -328,6 +332,7 @@ impl Reactor {
             is_workspace_switch: false,
             record,
             mouse_tx: None,
+            menu_tx: None,
             raise_manager_tx,
             event_broadcaster: broadcast_tx,
             app_rules_recently_applied: std::time::Instant::now(),
@@ -370,6 +375,11 @@ impl Reactor {
                 | Event::WindowDestroyed(..)
                 | Event::WindowServerDestroyed(..)
                 | Event::WindowsDiscovered { .. }
+                | Event::ApplicationLaunched { .. }
+                | Event::ApplicationTerminated(..)
+                | Event::ApplicationThreadTerminated(..)
+                | Event::SpaceChanged(..)
+                | Event::ScreenParametersChanged(..)
         );
 
         let raised_window = self.main_window_tracker.handle_event(&event);
@@ -404,8 +414,6 @@ impl Reactor {
                 if !all_windows.is_empty() {
                     self.process_windows_for_app_rules(pid, all_windows, app_info);
                 }
-
-                // Let the unified layout update at the end of handle_event apply changes
             }
             Event::ApplicationTerminated(pid) => {
                 if let Some(app) = self.apps.get_mut(&pid) {
@@ -674,10 +682,13 @@ impl Reactor {
             let spaces = self.visible_spaces();
             self.send_layout_event(LayoutEvent::WindowFocused(spaces, raised_window));
         }
-        // always run layout update if a window was destroyed to ensure proper redistribution,
-        // otherwise only run if not in drag mode to avoid interfering with ongoing operations
+
         if !self.in_drag || window_was_destroyed {
             self.update_layout(is_resize, self.is_workspace_switch);
+        }
+
+        if !self.in_drag || window_was_destroyed {
+            self.update_menu();
         }
 
         self.is_workspace_switch = false;
@@ -695,10 +706,35 @@ impl Reactor {
         }
     }
 
+    fn update_menu(&mut self) {
+        let menu_tx = match self.menu_tx.as_ref() {
+            Some(tx) => tx.clone(),
+            None => return,
+        };
+
+        let active_space =
+            match self.main_window_space().or_else(|| self.screens.first().and_then(|s| s.space)) {
+                Some(space) => space,
+                None => return,
+            };
+
+        let workspaces = self.handle_workspace_query().workspaces;
+        let active_workspace = self.layout_engine.active_workspace(active_space);
+        let windows = self.handle_windows_query(Some(active_space));
+
+        let _ = menu_tx.send(menu::Event::Update {
+            active_space,
+            workspaces,
+            active_workspace,
+            windows,
+        });
+    }
+
     fn handle_workspace_query(&mut self) -> WorkspaceQueryResponse {
         let mut workspaces = Vec::new();
 
-        let space_id = self.screens.first().and_then(|s| s.space);
+        let space_id =
+            get_active_space_number().or_else(|| self.screens.first().and_then(|s| s.space));
         let workspace_list: Vec<(crate::model::VirtualWorkspaceId, String)> =
             if let Some(space) = space_id {
                 self.layout_engine.virtual_workspace_manager_mut().list_workspaces(space)
@@ -728,10 +764,45 @@ impl Reactor {
                     Vec::new()
                 };
 
-            let windows: Vec<WindowData> = workspace_windows_ids
-                .into_iter()
-                .filter_map(|wid| self.create_window_data(wid))
-                .collect();
+            let predicted_positions = if !is_active {
+                if let Some(space) = space_id {
+                    let screen_frame = self
+                        .screens
+                        .iter()
+                        .find(|s| s.space == Some(space))
+                        .map(|s| s.frame)
+                        .or_else(|| self.screens.first().map(|s| s.frame));
+
+                    if let Some(frame) = screen_frame {
+                        self.layout_engine.calculate_layout_for_workspace(
+                            space,
+                            workspace_id,
+                            frame,
+                        )
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    vec![]
+                }
+            } else {
+                vec![]
+            };
+
+            let predicted_map: std::collections::HashMap<WindowId, CGRect> =
+                predicted_positions.into_iter().collect();
+
+            let mut windows: Vec<WindowData> = Vec::new();
+            for wid in workspace_windows_ids.into_iter() {
+                if let Some(mut wd) = self.create_window_data(wid) {
+                    if !is_active {
+                        if let Some(pred) = predicted_map.get(&wid).copied() {
+                            wd.frame = pred;
+                        }
+                    }
+                    windows.push(wd);
+                }
+            }
 
             workspaces.push(WorkspaceData {
                 id: format!("{:?}", workspace_id),

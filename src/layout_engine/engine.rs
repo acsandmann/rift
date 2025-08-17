@@ -312,10 +312,8 @@ impl LayoutEngine {
             LayoutEvent::SpaceExposed(space, size) => {
                 self.debug_tree(space);
 
-                let workspaces = self
-                    .virtual_workspace_manager_mut()
-                    .list_workspaces(space)
-                    .to_vec();
+                let workspaces =
+                    self.virtual_workspace_manager_mut().list_workspaces(space).to_vec();
                 self.workspace_layouts.ensure_active_for_space(
                     space,
                     size,
@@ -778,6 +776,38 @@ impl LayoutEngine {
         positions.into_iter().collect()
     }
 
+    pub fn calculate_layout_for_workspace(
+        &self,
+        space: SpaceId,
+        workspace_id: crate::model::VirtualWorkspaceId,
+        screen: CGRect,
+    ) -> Vec<(WindowId, CGRect)> {
+        let mut positions = HashMap::default();
+
+        if let Some(layout) = self.workspace_layouts.active(space, workspace_id) {
+            let tiled_positions = self.tree.calculate_layout(
+                layout,
+                screen,
+                self.layout_settings.stack.stack_offset,
+                &self.layout_settings.gaps,
+            );
+            for (wid, rect) in tiled_positions {
+                positions.insert(wid, rect);
+            }
+        }
+
+        let floating_positions = self
+            .virtual_workspace_manager
+            .get_workspace_floating_positions(space, workspace_id);
+        for (window_id, stored_position) in floating_positions {
+            if self.floating.is_floating(window_id) {
+                positions.insert(window_id, stored_position);
+            }
+        }
+
+        positions.into_iter().collect()
+    }
+
     fn get_app_bundle_id_for_window(&self, _window_id: WindowId) -> Option<String> {
         // The bundle ID is stored in the app info, which we can access via the PID
         // Note: This would need to be available from the reactor state, but since
@@ -797,7 +827,8 @@ impl LayoutEngine {
                     *first_id
                 } else {
                     let _ = self.virtual_workspace_manager.active_workspace(space);
-                    self.virtual_workspace_manager_mut().list_workspaces(space)
+                    self.virtual_workspace_manager_mut()
+                        .list_workspaces(space)
                         .first()
                         .map(|(id, _)| *id)
                         .expect("No active workspace for space and none could be created")

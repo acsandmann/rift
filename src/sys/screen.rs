@@ -7,10 +7,11 @@ use core_foundation::base::TCFType;
 use core_foundation::string::CFString;
 use core_graphics::display::{CGDisplayBounds, CGGetActiveDisplayList};
 use core_graphics_types::base::{CGError, kCGErrorSuccess};
+use objc2::rc::Retained;
 use objc2::{ClassType, msg_send};
 use objc2_app_kit::NSScreen;
 use objc2_core_foundation::{CGPoint, CGRect};
-use objc2_foundation::{MainThreadMarker, NSNumber, ns_string};
+use objc2_foundation::{MainThreadMarker, NSArray, NSDictionary, NSNumber, ns_string};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
@@ -247,6 +248,31 @@ impl NSScreenExt for NSScreen {
     }
 }
 
+pub fn get_active_space_number() -> Option<SpaceId> {
+    let cid = unsafe { CGSMainConnectionID() };
+    let space_info = unsafe { Retained::from_raw(CGSCopyManagedDisplaySpaces(cid))? };
+    let active_id = unsafe { CGSGetActiveSpace(cid) };
+    for screen in space_info {
+        let screen: Retained<NSDictionary> = screen.downcast().ok()?;
+        let spaces: Retained<NSArray> =
+            unsafe { screen.valueForKey(ns_string!("Spaces")) }?.downcast().ok()?;
+        for space in spaces {
+            let Some(id) = (|| {
+                let space: Retained<NSDictionary> = space.downcast().ok()?;
+                let id: Retained<NSNumber> =
+                    unsafe { space.valueForKey(ns_string!("ManagedSpaceID")) }?.downcast().ok()?;
+                Some(id)
+            })() else {
+                continue;
+            };
+            if id.as_u64() == active_id {
+                return Some(SpaceId::new(id.as_u64()));
+            }
+        }
+    }
+    None
+}
+
 /// Utilities for querying the current system configuration. For diagnostic purposes only.
 #[allow(dead_code)]
 pub mod diagnostic {
@@ -274,9 +300,10 @@ pub mod diagnostic {
         unsafe { CFArray::wrap_under_create_rule(CGSCopyManagedDisplays(CGSMainConnectionID())) }
     }
 
-    pub fn managed_display_spaces() -> CFArray<SpaceId> {
+    pub fn managed_display_spaces() -> Retained<NSArray> {
         unsafe {
-            CFArray::wrap_under_create_rule(CGSCopyManagedDisplaySpaces(CGSMainConnectionID()))
+            Retained::from_raw(CGSCopyManagedDisplaySpaces(CGSMainConnectionID()))
+                .expect("CGSCopyManagedDisplaySpaces returned null")
         }
     }
 }

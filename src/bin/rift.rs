@@ -2,6 +2,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
+use objc2::MainThreadMarker;
+use rift_wm::actor::menu::Menu;
 use rift_wm::actor::mouse::{self, Mouse};
 use rift_wm::actor::notification_center::NotificationCenter;
 use rift_wm::actor::reactor::{self, Reactor};
@@ -188,12 +190,14 @@ fn main() {
         )
     };
     let (mouse_tx, mouse_rx) = mouse::channel();
+    let (menu_tx, menu_rx) = rift_wm::actor::channel();
     let events_tx = Reactor::spawn(
         config.clone(),
         layout,
         reactor::Record::new(opt.record.as_deref()),
         mouse_tx.clone(),
         broadcast_tx.clone(),
+        menu_tx.clone(),
     );
 
     {
@@ -241,6 +245,15 @@ fn main() {
         }
     });
 
+    let mtm = MainThreadMarker::new().unwrap();
+    {
+        use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+        let app = NSApplication::sharedApplication(mtm);
+        let _ = app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+        unsafe {
+            let _: () = objc2::msg_send![&*app, finishLaunching];
+        }
+    }
     let wm_config = wm_controller::Config {
         one_space: opt.one,
         restore_file: restore_file(),
@@ -251,12 +264,14 @@ fn main() {
     let notification_center = NotificationCenter::new(wm_controller_sender.clone());
 
     let mouse = Mouse::new(config.clone(), events_tx, mouse_rx);
+    let menu = Menu::new(config.clone(), menu_rx, mtm);
 
     Executor::run(async move {
         join!(
             wm_controller.run(),
             notification_center.watch_for_notifications(),
             mouse.run(),
+            menu.run(),
         );
     });
 }

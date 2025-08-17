@@ -235,6 +235,8 @@ pub struct Settings {
     pub auto_focus_blacklist: Vec<String>,
     #[serde(default)]
     pub layout: LayoutSettings,
+    #[serde(default)]
+    pub ui: UiSettings,
     /// Commands to run on startup (e.g., for subscribing to events)
     #[serde(default)]
     pub run_on_start: Vec<String>,
@@ -267,6 +269,15 @@ pub enum AnimationEasing {
     EaseInCirc,
     EaseOutCirc,
     EaseInOutCirc,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct UiSettings {
+    #[serde(default = "yes")]
+    pub menubar: bool,
+    #[serde(default)]
+    pub menubar_show_all_workspaces: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]

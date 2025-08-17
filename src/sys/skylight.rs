@@ -11,6 +11,7 @@ use core_foundation::string::CFStringRef;
 use core_graphics::base::CGError;
 use core_graphics::display::{CFArrayRef, CGWindowID};
 use objc2_core_foundation::{CGPoint, CGRect};
+use objc2_foundation::NSArray;
 use once_cell::sync::Lazy;
 
 use super::process::ProcessSerialNumber;
@@ -60,7 +61,7 @@ unsafe extern "C" {
     pub fn CGSGetActiveSpace(cid: c_int) -> u64;
     pub fn CGSCopySpaces(cid: c_int, mask: CGSSpaceMask) -> CFArrayRef;
     pub fn CGSCopyManagedDisplays(cid: c_int) -> CFArrayRef;
-    pub fn CGSCopyManagedDisplaySpaces(cid: c_int) -> CFArrayRef;
+    pub fn CGSCopyManagedDisplaySpaces(cid: c_int) -> *mut NSArray;
     pub fn CGSManagedDisplayGetCurrentSpace(cid: c_int, uuid: CFStringRef) -> u64;
     pub fn CGSCopyBestManagedDisplayForRect(cid: c_int, rect: CGRect) -> CFStringRef;
 

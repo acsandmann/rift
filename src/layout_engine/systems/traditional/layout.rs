@@ -284,14 +284,19 @@ impl Layout {
         }
         if (actual_total - expected_total).abs() > 0.01 || needs_normalization {
             let share = 1.0;
-            for &child in &children {
-                unsafe {
-                    let info = &mut *(&self.info as *const _
-                        as *mut slotmap::SecondaryMap<NodeId, LayoutInfo>);
+            unsafe {
+                let info = &mut *(&self.info as *const _
+                    as *mut slotmap::SecondaryMap<NodeId, LayoutInfo>);
+                for &child in &children {
                     info[child].size = share;
                 }
+                info[node].total = children.len() as f32;
             }
         }
+        debug_assert!({
+            let sum_children: f32 = children.iter().map(|c| self.info[*c].size).sum();
+            (sum_children - self.info[node].total).abs() < 0.01
+        });
         let total = self.info[node].total;
         let inner_gap = if horizontal {
             gaps.inner.horizontal

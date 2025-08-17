@@ -89,6 +89,12 @@ right = 0
 horizontal = 0
 vertical = 0
 
+[settings.ui]
+# Show the Rift menubar preview icon
+menubar = true
+# if true, show all workspaces; if false, only those with windows
+menubar_show_all_workspaces = false
+
 [virtual_workspaces]
 # Virtual workspaces
 # - enabled: if false, rift behaves like a simple tiling WM with a single space
