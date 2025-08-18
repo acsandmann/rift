@@ -29,7 +29,7 @@ dispatchr = { git = "https://github.com/drewcrawford/dispatchr" }
 livesplit-hotkey = "0.8.0"
 nix = { version = "0.30.1", features = ["process"] }
 objc2 = "0.6.1"
-objc2-app-kit = { version = "0.3.1", default-features = true, features = [
+objc2-app-kit = { version = "0.3.1", default-features = false, features = [
     "NSApplication",
     "NSEvent",
     "NSGraphics",
@@ -38,8 +38,16 @@ objc2-app-kit = { version = "0.3.1", default-features = true, features = [
     "NSScreen",
     "NSWindow",
     "NSWorkspace",
+    "NSBezierPath",
+    "NSColor",
+    "NSImage",
+    "NSGraphicsContext",
+    "NSStatusBar",
+    "NSStatusItem",
+    "NSButton",
+    "NSStatusBarButton"
 ] }
-objc2-core-foundation = { version = "0.3.1", features = [
+objc2-core-foundation = { version = "0.3.1", default-features = false, features = [
     "CFCGTypes",
     "CFRunLoop",
     "CFDate",
