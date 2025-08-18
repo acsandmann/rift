@@ -274,10 +274,50 @@ pub enum AnimationEasing {
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct UiSettings {
-    #[serde(default = "yes")]
-    pub menubar: bool,
+    pub menu_bar: MenuBarSettings,
+    pub stack_line: StackLineSettings,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct MenuBarSettings {
+    #[serde(default = "no")]
+    pub enabled: bool,
+    #[serde(default = "no")]
+    pub show_empty: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct StackLineSettings {
+    #[serde(default = "no")]
+    pub enabled: bool,
     #[serde(default)]
-    pub menubar_show_all_workspaces: bool,
+    pub thickness: f64,
+    #[serde(default)]
+    pub horiz_placement: HorizontalPlacement,
+    #[serde(default)]
+    pub vert_placement: VerticalPlacement,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HorizontalPlacement {
+    #[default]
+    Top,
+    Bottom,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VerticalPlacement {
+    #[default]
+    Left,
+    Right,
+}
+
+impl StackLineSettings {
+    pub fn thickness(&self) -> f64 { if self.enabled { self.thickness } else { 0.0 } }
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]

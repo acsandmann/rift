@@ -153,6 +153,9 @@ impl Layout {
         screen: CGRect,
         stack_offset: f64,
         gaps: &crate::common::config::GapSettings,
+        stack_line_thickness: f64,
+        stack_line_horiz: crate::common::config::HorizontalPlacement,
+        stack_line_vert: crate::common::config::VerticalPlacement,
     ) -> Vec<(WindowId, CGRect)> {
         use objc2_core_foundation::{CGPoint, CGSize};
         let mut sizes = vec![];
@@ -184,6 +187,9 @@ impl Layout {
             &mut sizes,
             stack_offset,
             gaps,
+            stack_line_thickness,
+            stack_line_horiz,
+            stack_line_vert,
         );
         sizes
     }
@@ -198,6 +204,9 @@ impl Layout {
         sizes: &mut Vec<(WindowId, CGRect)>,
         stack_offset: f64,
         gaps: &crate::common::config::GapSettings,
+        stack_line_thickness: f64,
+        stack_line_horiz: crate::common::config::HorizontalPlacement,
+        stack_line_vert: crate::common::config::VerticalPlacement,
     ) {
         let info = &self.info[node];
         let rect = if info.is_fullscreen { screen } else { rect };
@@ -217,8 +226,72 @@ impl Layout {
                     return;
                 }
                 let is_horizontal = matches!(info.kind, HorizontalStack);
+                let mut container_rect = rect;
+                let reserve = stack_line_thickness.max(0.0);
+                if reserve > 0.0 {
+                    use objc2_core_foundation::{CGPoint, CGSize};
+                    if is_horizontal {
+                        match stack_line_horiz {
+                            crate::common::config::HorizontalPlacement::Top => {
+                                let new_h = (container_rect.size.height - reserve).max(0.0);
+                                container_rect = CGRect {
+                                    origin: CGPoint {
+                                        x: container_rect.origin.x,
+                                        y: container_rect.origin.y + reserve,
+                                    },
+                                    size: CGSize {
+                                        width: container_rect.size.width,
+                                        height: new_h,
+                                    },
+                                };
+                            }
+                            crate::common::config::HorizontalPlacement::Bottom => {
+                                let new_h = (container_rect.size.height - reserve).max(0.0);
+                                container_rect = CGRect {
+                                    origin: CGPoint {
+                                        x: container_rect.origin.x,
+                                        y: container_rect.origin.y,
+                                    },
+                                    size: CGSize {
+                                        width: container_rect.size.width,
+                                        height: new_h,
+                                    },
+                                };
+                            }
+                        }
+                    } else {
+                        match stack_line_vert {
+                            crate::common::config::VerticalPlacement::Right => {
+                                let new_w = (container_rect.size.width - reserve).max(0.0);
+                                container_rect = CGRect {
+                                    origin: CGPoint {
+                                        x: container_rect.origin.x,
+                                        y: container_rect.origin.y,
+                                    },
+                                    size: CGSize {
+                                        width: new_w,
+                                        height: container_rect.size.height,
+                                    },
+                                };
+                            }
+                            crate::common::config::VerticalPlacement::Left => {
+                                let new_w = (container_rect.size.width - reserve).max(0.0);
+                                container_rect = CGRect {
+                                    origin: CGPoint {
+                                        x: container_rect.origin.x + reserve,
+                                        y: container_rect.origin.y,
+                                    },
+                                    size: CGSize {
+                                        width: new_w,
+                                        height: container_rect.size.height,
+                                    },
+                                };
+                            }
+                        }
+                    }
+                }
                 let layout = self.calculate_always_visible_stack_layout(
-                    rect,
+                    container_rect,
                     children.len(),
                     stack_offset,
                     is_horizontal,
@@ -242,15 +315,40 @@ impl Layout {
                         sizes,
                         stack_offset,
                         gaps,
+                        stack_line_thickness,
+                        stack_line_horiz,
+                        stack_line_vert,
                     );
                 }
             }
-            Horizontal => {
-                self.layout_axis(map, window, node, rect, screen, sizes, stack_offset, gaps, true)
-            }
-            Vertical => {
-                self.layout_axis(map, window, node, rect, screen, sizes, stack_offset, gaps, false)
-            }
+            Horizontal => self.layout_axis(
+                map,
+                window,
+                node,
+                rect,
+                screen,
+                sizes,
+                stack_offset,
+                gaps,
+                true,
+                stack_line_thickness,
+                stack_line_horiz,
+                stack_line_vert,
+            ),
+            Vertical => self.layout_axis(
+                map,
+                window,
+                node,
+                rect,
+                screen,
+                sizes,
+                stack_offset,
+                gaps,
+                false,
+                stack_line_thickness,
+                stack_line_horiz,
+                stack_line_vert,
+            ),
         }
     }
 
@@ -265,6 +363,9 @@ impl Layout {
         stack_offset: f64,
         gaps: &crate::common::config::GapSettings,
         horizontal: bool,
+        stack_line_thickness: f64,
+        stack_line_horiz: crate::common::config::HorizontalPlacement,
+        stack_line_vert: crate::common::config::VerticalPlacement,
     ) {
         use objc2_core_foundation::{CGPoint, CGSize};
         let children: Vec<_> = node.children(map).collect();
@@ -340,7 +441,19 @@ impl Layout {
                 }
             }
             .round();
-            self.apply_with_gaps(map, window, child, child_rect, screen, sizes, stack_offset, gaps);
+            self.apply_with_gaps(
+                map,
+                window,
+                child,
+                child_rect,
+                screen,
+                sizes,
+                stack_offset,
+                gaps,
+                stack_line_thickness,
+                stack_line_horiz,
+                stack_line_vert,
+            );
             offset += seg_len;
             if i < children.len() - 1 {
                 offset += inner_gap;

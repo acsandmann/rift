@@ -8,7 +8,6 @@ pub mod event;
 pub mod executor;
 pub mod geometry;
 pub mod mach;
-pub mod menubar;
 pub mod observer;
 pub mod power;
 pub mod process;

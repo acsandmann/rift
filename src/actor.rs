@@ -4,11 +4,12 @@ use tracing::Span;
 
 pub mod app;
 pub mod broadcast;
-pub mod menu;
+pub mod menu_bar;
 pub mod mouse;
 pub mod notification_center;
 pub mod raise_manager;
 pub mod reactor;
+pub mod stack_line;
 pub mod wm_controller;
 
 pub struct Sender<Event>(UnboundedSender<(Span, Event)>);

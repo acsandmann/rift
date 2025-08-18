@@ -29,13 +29,13 @@ use tracing::{Span, debug, error, info, instrument, trace, warn};
 use super::mouse;
 use crate::actor::app::{AppInfo, AppThreadHandle, Quiet, Request, WindowId, WindowInfo, pid_t};
 use crate::actor::broadcast::BroadcastEvent;
-use crate::actor::menu;
 use crate::actor::raise_manager::{self, RaiseRequest};
+use crate::actor::{menu_bar, stack_line};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
 use crate::common::config::{Config, ConfigCommand};
 use crate::common::heavy::is_heavy;
 use crate::common::log::{self, MetricsCommand};
-use crate::layout_engine::{self as layout, LayoutCommand, LayoutEngine, LayoutEvent};
+use crate::layout_engine::{self as layout, LayoutCommand, LayoutEngine, LayoutEvent, LayoutKind};
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt, Round, SameAs};
@@ -50,6 +50,7 @@ use std::path::PathBuf;
 use crate::model::server::{
     ApplicationData, LayoutStateData, WindowData, WorkspaceData, WorkspaceQueryResponse,
 };
+use crate::model::tree::NodeId;
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
@@ -222,12 +223,28 @@ pub struct Reactor {
     is_workspace_switch: bool,
     record: Record,
     mouse_tx: Option<mouse::Sender>,
-    menu_tx: Option<menu::Sender>,
+    menu_tx: Option<menu_bar::Sender>,
+    stack_line_tx: Option<stack_line::Sender>,
     raise_manager_tx: raise_manager::Sender,
     event_broadcaster: broadcast::Sender<BroadcastEvent>,
     app_rules_recently_applied: std::time::Instant,
     last_auto_workspace_switch: Option<std::time::Instant>,
     last_sls_notification_ids: Vec<u32>,
+    // Cache last-emitted selected index per group NodeId for StackLine
+    stack_line_selection_cache: HashMap<NodeId, usize>,
+    // Cache last-emitted GroupsUpdated payload per space to avoid redundant updates
+    stack_line_groups_cache: HashMap<SpaceId, Vec<GroupSig>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct GroupSig {
+    node_id: NodeId,
+    kind: LayoutKind,
+    x_q2: i64,
+    y_q2: i64,
+    w_q2: i64,
+    h_q2: i64,
+    total: usize,
 }
 
 #[derive(Debug)]
@@ -293,7 +310,8 @@ impl Reactor {
         record: Record,
         mouse_tx: mouse::Sender,
         broadcast_tx: broadcast::Sender<BroadcastEvent>,
-        menu_tx: menu::Sender,
+        menu_tx: menu_bar::Sender,
+        stack_line_tx: stack_line::Sender,
     ) -> Sender {
         let (events_tx, events) = unbounded_channel();
         let events_tx_clone = events_tx.clone();
@@ -303,6 +321,7 @@ impl Reactor {
                 let mut reactor = Reactor::new(config, layout_engine, record, broadcast_tx);
                 reactor.mouse_tx.replace(mouse_tx);
                 reactor.menu_tx.replace(menu_tx);
+                reactor.stack_line_tx.replace(stack_line_tx);
                 Executor::run(reactor.run(events, events_tx_clone));
             })
             .unwrap();
@@ -333,11 +352,14 @@ impl Reactor {
             record,
             mouse_tx: None,
             menu_tx: None,
+            stack_line_tx: None,
             raise_manager_tx,
             event_broadcaster: broadcast_tx,
             app_rules_recently_applied: std::time::Instant::now(),
             last_auto_workspace_switch: None,
             last_sls_notification_ids: Vec::new(),
+            stack_line_selection_cache: HashMap::default(),
+            stack_line_groups_cache: HashMap::default(),
         }
     }
 
@@ -588,6 +610,12 @@ impl Reactor {
                 let visible_spaces =
                     self.screens.iter().flat_map(|screen| screen.space).collect::<Vec<_>>();
 
+                if matches!(cmd, LayoutCommand::StackWindows | LayoutCommand::UnstackWindows) {
+                    for space in visible_spaces.iter().copied() {
+                        self.stack_line_groups_cache.remove(&space);
+                    }
+                }
+
                 let is_workspace_switch = matches!(
                     cmd,
                     LayoutCommand::NextWorkspace(_)
@@ -722,7 +750,7 @@ impl Reactor {
         let active_workspace = self.layout_engine.active_workspace(active_space);
         let windows = self.handle_windows_query(Some(active_space));
 
-        let _ = menu_tx.send(menu::Event::Update {
+        let _ = menu_tx.send(menu_bar::Event::Update {
             active_space,
             workspaces,
             active_workspace,
@@ -778,6 +806,9 @@ impl Reactor {
                             space,
                             workspace_id,
                             frame,
+                            self.config.settings.ui.stack_line.thickness(),
+                            self.config.settings.ui.stack_line.horiz_placement,
+                            self.config.settings.ui.stack_line.vert_placement,
                         )
                     } else {
                         vec![]
@@ -1520,13 +1551,16 @@ impl Reactor {
         let screens = self.screens.clone();
         let main_window = self.main_window();
         trace!(?main_window);
-
+        let mut seen_groups: HashSet<NodeId> = HashSet::default();
         for screen in screens {
             let Some(space) = screen.space else { continue };
             trace!(?screen);
             let layout = self.layout_engine.calculate_layout_with_virtual_workspaces(
                 space,
                 screen.frame.clone(),
+                self.config.settings.ui.stack_line.thickness(),
+                self.config.settings.ui.stack_line.horiz_placement,
+                self.config.settings.ui.stack_line.vert_placement,
                 |wid| {
                     self.windows
                         .get(&wid)
@@ -1535,6 +1569,80 @@ impl Reactor {
                 },
             );
             trace!(?layout, "Layout");
+
+            if self.config.settings.ui.stack_line.enabled {
+                if let Some(tx) = &self.stack_line_tx {
+                    let group_infos =
+                        self.layout_engine.collect_group_containers_in_selection_path(
+                            space,
+                            screen.frame,
+                            self.config.settings.ui.stack_line.thickness(),
+                            self.config.settings.ui.stack_line.horiz_placement,
+                            self.config.settings.ui.stack_line.vert_placement,
+                        );
+                    if group_infos.is_empty() {
+                        let prev = self.stack_line_groups_cache.get(&space);
+                        if prev.map(|v| v.is_empty()).unwrap_or(false) == false {
+                            _ = tx.try_send(crate::actor::stack_line::Event::GroupsUpdated {
+                                space_id: space,
+                                groups: Vec::new(),
+                            });
+                            self.stack_line_groups_cache.insert(space, Vec::new());
+                        }
+                    } else {
+                        for g in &group_infos {
+                            let _ = seen_groups.insert(g.node_id);
+                        }
+
+                        let quant = |v: f64| -> i64 { (v * 2.0).round() as i64 };
+                        let sigs: Vec<GroupSig> = group_infos
+                            .iter()
+                            .map(|g| GroupSig {
+                                node_id: g.node_id,
+                                kind: g.container_kind,
+                                x_q2: quant(g.frame.origin.x),
+                                y_q2: quant(g.frame.origin.y),
+                                w_q2: quant(g.frame.size.width),
+                                h_q2: quant(g.frame.size.height),
+                                total: g.total_count,
+                            })
+                            .collect();
+                        let prev =
+                            self.stack_line_groups_cache.get(&space).cloned().unwrap_or_default();
+                        if prev != sigs {
+                            let groups: Vec<crate::actor::stack_line::GroupInfo> = group_infos
+                                .iter()
+                                .map(|g| crate::actor::stack_line::GroupInfo {
+                                    node_id: g.node_id,
+                                    space_id: space,
+                                    container_kind: g.container_kind,
+                                    frame: g.frame,
+                                    total_count: g.total_count,
+                                    selected_index: g.selected_index,
+                                })
+                                .collect();
+                            _ = tx.try_send(crate::actor::stack_line::Event::GroupsUpdated {
+                                space_id: space,
+                                groups,
+                            });
+                            self.stack_line_groups_cache.insert(space, sigs);
+                        }
+
+                        for g in group_infos {
+                            let prev = self.stack_line_selection_cache.get(&g.node_id).copied();
+                            if prev != Some(g.selected_index) {
+                                _ = tx.try_send(
+                                    crate::actor::stack_line::Event::GroupSelectionChanged {
+                                        node_id: g.node_id,
+                                        selected_index: g.selected_index,
+                                    },
+                                );
+                                self.stack_line_selection_cache.insert(g.node_id, g.selected_index);
+                            }
+                        }
+                    }
+                }
+            }
 
             if is_workspace_switch {
                 for &(wid, target_frame) in &layout {
@@ -1650,6 +1758,9 @@ impl Reactor {
                     }
                 }
             }
+        }
+        if !seen_groups.is_empty() {
+            self.stack_line_selection_cache.retain(|k, _| seen_groups.contains(k));
         }
     }
 }
@@ -1975,14 +2086,26 @@ pub mod tests {
         ));
         reactor.handle_event(Event::ApplicationGloballyActivated(1));
         apps.simulate_until_quiet(&mut reactor);
-        let default = reactor.layout_engine.calculate_layout(space, full_screen);
+        let default = reactor.layout_engine.calculate_layout(
+            space,
+            full_screen,
+            0.0,
+            crate::common::config::HorizontalPlacement::Top,
+            crate::common::config::VerticalPlacement::Right,
+        );
 
         assert!(reactor.layout_engine.selected_window(space).is_some());
         reactor.handle_event(Event::Command(Command::Layout(LayoutCommand::MoveNode(
             Direction::Up,
         ))));
         apps.simulate_until_quiet(&mut reactor);
-        let modified = reactor.layout_engine.calculate_layout(space, full_screen);
+        let modified = reactor.layout_engine.calculate_layout(
+            space,
+            full_screen,
+            0.0,
+            crate::common::config::HorizontalPlacement::Top,
+            crate::common::config::VerticalPlacement::Right,
+        );
         assert_ne!(default, modified);
 
         reactor.handle_event(Event::ScreenParametersChanged(
@@ -2026,7 +2149,13 @@ pub mod tests {
         apps.simulate_until_quiet(&mut reactor);
 
         assert_eq!(
-            reactor.layout_engine.calculate_layout(space, full_screen),
+            reactor.layout_engine.calculate_layout(
+                space,
+                full_screen,
+                0.0,
+                crate::common::config::HorizontalPlacement::Top,
+                crate::common::config::VerticalPlacement::Right,
+            ),
             modified
         );
     }

@@ -7,8 +7,8 @@ use crate::actor;
 use crate::common::config::Config;
 use crate::model::VirtualWorkspaceId;
 use crate::model::server::{WindowData, WorkspaceData};
-use crate::sys::menubar::MenuIcon;
 use crate::sys::screen::SpaceId;
+use crate::ui::menu_bar::MenuIcon;
 
 #[derive(Debug, Clone)]
 pub enum Event {
@@ -32,7 +32,7 @@ pub type Receiver = actor::Receiver<Event>;
 impl Menu {
     pub fn new(config: Arc<Config>, rx: Receiver, mtm: MainThreadMarker) -> Self {
         Self {
-            icon: config.settings.ui.menubar.then(|| MenuIcon::new(mtm)),
+            icon: config.settings.ui.menu_bar.enabled.then(|| MenuIcon::new(mtm)),
             config,
             rx,
         }
@@ -58,7 +58,7 @@ impl Menu {
             windows,
         } = event;
 
-        let show_all = self.config.settings.ui.menubar_show_all_workspaces;
+        let show_all = self.config.settings.ui.menu_bar.show_empty;
         icon.update(active_space, workspaces, active_workspace, windows, show_all);
     }
 }

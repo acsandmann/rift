@@ -17,6 +17,15 @@ use crate::common::config::LayoutSettings;
 use crate::model::VirtualWorkspaceManager;
 use crate::sys::screen::SpaceId;
 
+#[derive(Debug, Clone)]
+pub struct GroupContainerInfo {
+    pub node_id: crate::model::tree::NodeId,
+    pub container_kind: super::LayoutKind,
+    pub frame: CGRect,
+    pub total_count: usize,
+    pub selected_index: usize,
+}
+
 #[non_exhaustive]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
@@ -713,13 +722,23 @@ impl LayoutEngine {
         }
     }
 
-    pub fn calculate_layout(&mut self, space: SpaceId, screen: CGRect) -> Vec<(WindowId, CGRect)> {
+    pub fn calculate_layout(
+        &mut self,
+        space: SpaceId,
+        screen: CGRect,
+        stack_line_thickness: f64,
+        stack_line_horiz: crate::common::config::HorizontalPlacement,
+        stack_line_vert: crate::common::config::VerticalPlacement,
+    ) -> Vec<(WindowId, CGRect)> {
         let layout = self.layout(space);
         self.tree.calculate_layout(
             layout,
             screen,
             self.layout_settings.stack.stack_offset,
             &self.layout_settings.gaps,
+            stack_line_thickness,
+            stack_line_horiz,
+            stack_line_vert,
         )
     }
 
@@ -727,6 +746,9 @@ impl LayoutEngine {
         &self,
         space: SpaceId,
         screen: CGRect,
+        stack_line_thickness: f64,
+        stack_line_horiz: crate::common::config::HorizontalPlacement,
+        stack_line_vert: crate::common::config::VerticalPlacement,
         get_window_size: F,
     ) -> Vec<(WindowId, CGRect)>
     where
@@ -743,6 +765,9 @@ impl LayoutEngine {
                     screen,
                     self.layout_settings.stack.stack_offset,
                     &self.layout_settings.gaps,
+                    stack_line_thickness,
+                    stack_line_horiz,
+                    stack_line_vert,
                 );
                 for (wid, rect) in tiled_positions {
                     positions.insert(wid, rect);
@@ -776,11 +801,37 @@ impl LayoutEngine {
         positions.into_iter().collect()
     }
 
+    pub fn collect_group_containers_in_selection_path(
+        &mut self,
+        space: SpaceId,
+        screen: CGRect,
+        stack_line_thickness: f64,
+        stack_line_horiz: crate::common::config::HorizontalPlacement,
+        stack_line_vert: crate::common::config::VerticalPlacement,
+    ) -> Vec<GroupContainerInfo> {
+        let layout_id = self.layout(space);
+        match &self.tree {
+            LayoutSystemKind::Traditional(s) => s.collect_group_containers_in_selection_path(
+                layout_id,
+                screen,
+                self.layout_settings.stack.stack_offset,
+                &self.layout_settings.gaps,
+                stack_line_thickness,
+                stack_line_horiz,
+                stack_line_vert,
+            ),
+            _ => Vec::new(),
+        }
+    }
+
     pub fn calculate_layout_for_workspace(
         &self,
         space: SpaceId,
         workspace_id: crate::model::VirtualWorkspaceId,
         screen: CGRect,
+        stack_line_thickness: f64,
+        stack_line_horiz: crate::common::config::HorizontalPlacement,
+        stack_line_vert: crate::common::config::VerticalPlacement,
     ) -> Vec<(WindowId, CGRect)> {
         let mut positions = HashMap::default();
 
@@ -790,6 +841,9 @@ impl LayoutEngine {
                 screen,
                 self.layout_settings.stack.stack_offset,
                 &self.layout_settings.gaps,
+                stack_line_thickness,
+                stack_line_horiz,
+                stack_line_vert,
             );
             for (wid, rect) in tiled_positions {
                 positions.insert(wid, rect);

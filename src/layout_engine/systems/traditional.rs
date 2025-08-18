@@ -93,6 +93,9 @@ impl LayoutSystem for TraditionalLayoutSystem {
         screen: CGRect,
         stack_offset: f64,
         gaps: &crate::common::config::GapSettings,
+        stack_line_thickness: f64,
+        stack_line_horiz: crate::common::config::HorizontalPlacement,
+        stack_line_vert: crate::common::config::VerticalPlacement,
     ) -> Vec<(WindowId, CGRect)> {
         self.tree.data.layout.get_sizes_with_gaps(
             &self.tree.map,
@@ -101,6 +104,9 @@ impl LayoutSystem for TraditionalLayoutSystem {
             screen,
             stack_offset,
             gaps,
+            stack_line_thickness,
+            stack_line_horiz,
+            stack_line_vert,
         )
     }
 
@@ -326,6 +332,164 @@ impl LayoutSystem for TraditionalLayoutSystem {
     fn rebalance(&mut self, layout: Self::LayoutId) {
         let root = self.root(layout);
         self.rebalance_node(root)
+    }
+}
+
+impl TraditionalLayoutSystem {
+    pub(crate) fn collect_group_containers_in_selection_path(
+        &self,
+        layout: <TraditionalLayoutSystem as LayoutSystem>::LayoutId,
+        screen: CGRect,
+        stack_offset: f64,
+        gaps: &crate::common::config::GapSettings,
+        stack_line_thickness: f64,
+        stack_line_horiz: crate::common::config::HorizontalPlacement,
+        stack_line_vert: crate::common::config::VerticalPlacement,
+    ) -> Vec<crate::layout_engine::engine::GroupContainerInfo> {
+        use objc2_core_foundation::{CGPoint, CGSize};
+
+        use crate::layout_engine::LayoutKind::*;
+        use crate::layout_engine::systems::traditional::stack::StackLayoutResult;
+        use crate::sys::geometry::Round;
+
+        let mut out = Vec::new();
+        let map = &self.tree.map;
+
+        let tiling_area = if gaps.outer.top == 0.0
+            && gaps.outer.left == 0.0
+            && gaps.outer.bottom == 0.0
+            && gaps.outer.right == 0.0
+        {
+            screen
+        } else {
+            CGRect {
+                origin: CGPoint {
+                    x: screen.origin.x + gaps.outer.left,
+                    y: screen.origin.y + gaps.outer.top,
+                },
+                size: CGSize {
+                    width: (screen.size.width - gaps.outer.left - gaps.outer.right).max(0.0),
+                    height: (screen.size.height - gaps.outer.top - gaps.outer.bottom).max(0.0),
+                },
+            }
+            .round()
+        };
+
+        let mut node = self.root(layout);
+        let mut rect = tiling_area;
+
+        loop {
+            let kind = self.tree.data.layout.kind(node);
+            let children: Vec<_> = node.children(map).collect();
+
+            if matches!(kind, HorizontalStack | VerticalStack) {
+                if children.is_empty() {
+                    break;
+                }
+
+                let local_sel =
+                    self.tree.data.selection.local_selection(map, node).unwrap_or(children[0]);
+                let selected_index = children.iter().position(|&c| c == local_sel).unwrap_or(0);
+
+                out.push(crate::layout_engine::engine::GroupContainerInfo {
+                    node_id: node,
+                    container_kind: kind,
+                    frame: rect,
+                    total_count: children.len(),
+                    selected_index,
+                });
+
+                let mut container_rect = rect;
+                let reserve = stack_line_thickness.max(0.0);
+                let is_horizontal = matches!(kind, HorizontalStack);
+                if reserve > 0.0 {
+                    if is_horizontal {
+                        match stack_line_horiz {
+                            crate::common::config::HorizontalPlacement::Top => {
+                                let new_h = (container_rect.size.height - reserve).max(0.0);
+                                container_rect = CGRect {
+                                    origin: CGPoint {
+                                        x: container_rect.origin.x,
+                                        y: container_rect.origin.y + reserve,
+                                    },
+                                    size: CGSize {
+                                        width: container_rect.size.width,
+                                        height: new_h,
+                                    },
+                                };
+                            }
+                            crate::common::config::HorizontalPlacement::Bottom => {
+                                let new_h = (container_rect.size.height - reserve).max(0.0);
+                                container_rect = CGRect {
+                                    origin: CGPoint {
+                                        x: container_rect.origin.x,
+                                        y: container_rect.origin.y,
+                                    },
+                                    size: CGSize {
+                                        width: container_rect.size.width,
+                                        height: new_h,
+                                    },
+                                };
+                            }
+                        }
+                    } else {
+                        match stack_line_vert {
+                            crate::common::config::VerticalPlacement::Right => {
+                                let new_w = (container_rect.size.width - reserve).max(0.0);
+                                container_rect = CGRect {
+                                    origin: CGPoint {
+                                        x: container_rect.origin.x,
+                                        y: container_rect.origin.y,
+                                    },
+                                    size: CGSize {
+                                        width: new_w,
+                                        height: container_rect.size.height,
+                                    },
+                                };
+                            }
+                            crate::common::config::VerticalPlacement::Left => {
+                                let new_w = (container_rect.size.width - reserve).max(0.0);
+                                container_rect = CGRect {
+                                    origin: CGPoint {
+                                        x: container_rect.origin.x + reserve,
+                                        y: container_rect.origin.y,
+                                    },
+                                    size: CGSize {
+                                        width: new_w,
+                                        height: container_rect.size.height,
+                                    },
+                                };
+                            }
+                        }
+                    }
+                }
+
+                let layout_res = StackLayoutResult::new(
+                    container_rect,
+                    children.len(),
+                    stack_offset,
+                    is_horizontal,
+                );
+                rect = layout_res.get_focused_frame_for_index(selected_index, selected_index);
+
+                node = local_sel;
+                continue;
+            }
+
+            if let Some(next) = self
+                .tree
+                .data
+                .selection
+                .local_selection(map, node)
+                .or_else(|| node.first_child(map))
+            {
+                node = next;
+                continue;
+            }
+            break;
+        }
+
+        out
     }
 }
 

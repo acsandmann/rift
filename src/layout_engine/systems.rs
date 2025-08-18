@@ -26,6 +26,9 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
         screen: CGRect,
         stack_offset: f64,
         gaps: &crate::common::config::GapSettings,
+        stack_line_thickness: f64,
+        stack_line_horiz: crate::common::config::HorizontalPlacement,
+        stack_line_vert: crate::common::config::VerticalPlacement,
     ) -> Vec<(WindowId, CGRect)>;
 
     fn selected_window(&self, layout: Self::LayoutId) -> Option<WindowId>;
@@ -121,12 +124,29 @@ impl LayoutSystem for LayoutSystemKind {
         screen: CGRect,
         stack_offset: f64,
         gaps: &crate::common::config::GapSettings,
+        stack_line_thickness: f64,
+        stack_line_horiz: crate::common::config::HorizontalPlacement,
+        stack_line_vert: crate::common::config::VerticalPlacement,
     ) -> Vec<(WindowId, CGRect)> {
         match self {
-            LayoutSystemKind::Traditional(s) => {
-                s.calculate_layout(layout, screen, stack_offset, gaps)
-            }
-            LayoutSystemKind::Bsp(s) => s.calculate_layout(layout, screen, stack_offset, gaps),
+            LayoutSystemKind::Traditional(s) => s.calculate_layout(
+                layout,
+                screen,
+                stack_offset,
+                gaps,
+                stack_line_thickness,
+                stack_line_horiz,
+                stack_line_vert,
+            ),
+            LayoutSystemKind::Bsp(s) => s.calculate_layout(
+                layout,
+                screen,
+                stack_offset,
+                gaps,
+                stack_line_thickness,
+                stack_line_horiz,
+                stack_line_vert,
+            ),
         }
     }
 

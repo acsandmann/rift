@@ -11,7 +11,7 @@ use objc2::rc::Retained;
 use objc2::{ClassType, msg_send};
 use objc2_app_kit::NSScreen;
 use objc2_core_foundation::{CGPoint, CGRect};
-use objc2_foundation::{MainThreadMarker, NSArray, NSDictionary, NSNumber, ns_string};
+use objc2_foundation::{MainThreadMarker, NSArray, NSNumber, ns_string};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
@@ -249,28 +249,12 @@ impl NSScreenExt for NSScreen {
 }
 
 pub fn get_active_space_number() -> Option<SpaceId> {
-    let cid = unsafe { CGSMainConnectionID() };
-    let space_info = unsafe { Retained::from_raw(CGSCopyManagedDisplaySpaces(cid))? };
-    let active_id = unsafe { CGSGetActiveSpace(cid) };
-    for screen in space_info {
-        let screen: Retained<NSDictionary> = screen.downcast().ok()?;
-        let spaces: Retained<NSArray> =
-            unsafe { screen.valueForKey(ns_string!("Spaces")) }?.downcast().ok()?;
-        for space in spaces {
-            let Some(id) = (|| {
-                let space: Retained<NSDictionary> = space.downcast().ok()?;
-                let id: Retained<NSNumber> =
-                    unsafe { space.valueForKey(ns_string!("ManagedSpaceID")) }?.downcast().ok()?;
-                Some(id)
-            })() else {
-                continue;
-            };
-            if id.as_u64() == active_id {
-                return Some(SpaceId::new(id.as_u64()));
-            }
-        }
+    let active_id = unsafe { CGSGetActiveSpace(CGSMainConnectionID()) };
+    if active_id == 0 {
+        None
+    } else {
+        Some(SpaceId::new(active_id))
     }
-    None
 }
 
 /// Utilities for querying the current system configuration. For diagnostic purposes only.

@@ -82,6 +82,7 @@ pub struct WmController {
     config: Config,
     events_tx: reactor::Sender,
     mouse_tx: mouse::Sender,
+    stack_line_tx: Option<crate::actor::stack_line::Sender>,
     receiver: Receiver,
     sender: WeakSender,
     starting_space: Option<SpaceId>,
@@ -101,12 +102,14 @@ impl WmController {
         config: Config,
         events_tx: reactor::Sender,
         mouse_tx: mouse::Sender,
+        stack_line_tx: crate::actor::stack_line::Sender,
     ) -> (Self, Sender) {
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         let this = Self {
             config,
             events_tx,
             mouse_tx,
+            stack_line_tx: Some(stack_line_tx),
             receiver,
             sender: sender.downgrade(),
             starting_space: None,
@@ -222,6 +225,11 @@ impl WmController {
                     Span::current(),
                     mouse::Request::ScreenParametersChanged(frames, converter),
                 ));
+                if let Some(tx) = &self.stack_line_tx {
+                    _ = tx.try_send(crate::actor::stack_line::Event::ScreenParametersChanged(
+                        converter,
+                    ));
+                }
             }
             SpaceChanged(spaces) => {
                 self.handle_space_changed(spaces);

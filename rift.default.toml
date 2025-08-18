@@ -89,11 +89,12 @@ right = 0
 horizontal = 0
 vertical = 0
 
-[settings.ui]
-# Show the Rift menubar preview icon
-menubar = true
-# if true, show all workspaces; if false, only those with windows
-menubar_show_all_workspaces = false
+[settings.ui.menu_bar]
+# enable menu bar workspace indicators
+enabled = true
+# if enabled, it will show all workspaces including empty ones. disabled because this
+# tends to take up too much room in the menubar and then is auto hidden by macos
+show_empty = false
 
 [virtual_workspaces]
 # Virtual workspaces

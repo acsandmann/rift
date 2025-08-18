@@ -3,16 +3,18 @@ use std::sync::Arc;
 
 use clap::Parser;
 use objc2::MainThreadMarker;
-use rift_wm::actor::menu::Menu;
+use rift_wm::actor::menu_bar::Menu;
 use rift_wm::actor::mouse::{self, Mouse};
 use rift_wm::actor::notification_center::NotificationCenter;
 use rift_wm::actor::reactor::{self, Reactor};
+use rift_wm::actor::stack_line::StackLine;
 use rift_wm::actor::wm_controller::{self, WmController};
 use rift_wm::common::config::{Config, config_file, restore_file};
 use rift_wm::common::log;
 use rift_wm::layout_engine::LayoutEngine;
 use rift_wm::server;
 use rift_wm::sys::executor::Executor;
+use rift_wm::sys::screen::CoordinateConverter;
 use rift_wm::sys::window_notify::{self, take_receiver};
 use tokio::join;
 use tracing::{error, trace};
@@ -191,6 +193,7 @@ fn main() {
     };
     let (mouse_tx, mouse_rx) = mouse::channel();
     let (menu_tx, menu_rx) = rift_wm::actor::channel();
+    let (stack_line_tx, stack_line_rx) = rift_wm::actor::channel();
     let events_tx = Reactor::spawn(
         config.clone(),
         layout,
@@ -198,6 +201,7 @@ fn main() {
         mouse_tx.clone(),
         broadcast_tx.clone(),
         menu_tx.clone(),
+        stack_line_tx.clone(),
     );
 
     {
@@ -259,12 +263,23 @@ fn main() {
         restore_file: restore_file(),
         config: config.clone(),
     };
-    let (wm_controller, wm_controller_sender) =
-        WmController::new(wm_config, events_tx.clone(), mouse_tx.clone());
+    let (wm_controller, wm_controller_sender) = WmController::new(
+        wm_config,
+        events_tx.clone(),
+        mouse_tx.clone(),
+        stack_line_tx.clone(),
+    );
     let notification_center = NotificationCenter::new(wm_controller_sender.clone());
 
-    let mouse = Mouse::new(config.clone(), events_tx, mouse_rx);
+    let mouse = Mouse::new(config.clone(), events_tx.clone(), mouse_rx);
     let menu = Menu::new(config.clone(), menu_rx, mtm);
+    let stack_line = StackLine::new(
+        config.clone(),
+        stack_line_rx,
+        mtm,
+        events_tx,
+        CoordinateConverter::default(),
+    );
 
     Executor::run(async move {
         join!(
@@ -272,6 +287,7 @@ fn main() {
             notification_center.watch_for_notifications(),
             mouse.run(),
             menu.run(),
+            stack_line.run(),
         );
     });
 }
