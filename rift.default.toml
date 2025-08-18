@@ -95,6 +95,15 @@ enabled = true
 # if enabled, it will show all workspaces including empty ones. disabled because this
 # tends to take up too much room in the menubar and then is auto hidden by macos
 show_empty = false
+[settings.ui.stack_line]
+# experimental stack line indicator (defaults to off)
+enabled = false
+# in a horizontal stack where the line will be (top/bottom)
+horiz_placement = "top"
+# in a vertical stack where the line will be (left/right)
+vert_placement = "left"
+# how thick the line indicator will be (in px)
+thickness = 3.0
 
 [virtual_workspaces]
 # Virtual workspaces
