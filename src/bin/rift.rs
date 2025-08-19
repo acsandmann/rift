@@ -207,6 +207,7 @@ fn main() {
     let wn_actor = window_notify_actor::WindowNotify::new(events_tx.clone(), wnd_rx, &[
         CGSEventType::WindowDestroyed,
         CGSEventType::ServerWindowDidCreate,
+        CGSEventType::ServerWindowDidTerminate,
     ]);
 
     let events_tx_mach = events_tx.clone();

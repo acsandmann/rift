@@ -78,6 +78,7 @@ impl MainWindowTracker {
             | Event::QueryLayoutState { .. }
             | Event::QueryMetrics(..)
             | Event::QueryConfig(..)
+            | Event::ApplyConfig { .. }
             | Event::ApplyAppRulesToExistingWindows { .. }
             | Event::WindowServerDestroyed(..)
             | Event::WindowServerAppeared(..) => return None,

@@ -176,6 +176,12 @@ pub enum Event {
     QueryMetrics(r#continue::Sender<serde_json::Value>),
     #[serde(skip)]
     QueryConfig(r#continue::Sender<serde_json::Value>),
+    #[serde(skip)]
+    ApplyConfig {
+        cmd: crate::common::config::ConfigCommand,
+        #[serde(skip)]
+        response: r#continue::Sender<Result<(), String>>,
+    },
 
     /// Apply app rules to existing windows when a space is activated
     ApplyAppRulesToExistingWindows {
@@ -668,7 +674,13 @@ impl Reactor {
             }
             Event::Command(Command::Metrics(cmd)) => log::handle_command(cmd),
             Event::Command(Command::Config(cmd)) => {
-                self.handle_config_command(cmd);
+                if let Err(e) = self.handle_config_command(cmd) {
+                    warn!("Config command failed: {}", e);
+                }
+            }
+            Event::ApplyConfig { cmd, response } => {
+                let res = self.handle_config_command(cmd);
+                let _ = response.send(res);
             }
             Event::Command(Command::Reactor(ReactorCommand::Debug)) => {
                 for screen in &self.screens {
@@ -1145,11 +1157,12 @@ impl Reactor {
         })
     }
 
-    fn handle_config_command(&mut self, cmd: ConfigCommand) {
-        debug!("Handling config command: {:?}", cmd);
+    fn handle_config_command(&mut self, cmd: ConfigCommand) -> Result<(), String> {
+        debug!("Applying config command: {:?}", cmd);
 
         let mut new_config = (*self.config).clone();
         let mut config_changed = false;
+        let mut errors: Vec<String> = Vec::new();
 
         macro_rules! set_flag {
             ($path:expr, $value:expr, $name:literal) => {{
@@ -1165,10 +1178,10 @@ impl Reactor {
                 config_changed = true;
                 info!("Updated {} to: {}", name, value);
             } else {
-                warn!(
+                errors.push(format!(
                     "Invalid {} value: {}. Must be between {} and {}",
                     name, value, min, max
-                );
+                ));
             }
         };
 
@@ -1199,11 +1212,13 @@ impl Reactor {
             ConfigCommand::SetMouseFollowsFocus(v) => {
                 set_flag!(new_config.settings.mouse_follows_focus, v, "mouse_follows_focus")
             }
-            ConfigCommand::SetMouseHidesOnFocus(v) => set_flag!(
-                new_config.settings.mouse_hides_on_focus,
-                v,
-                "mouse_hides_on_focus"
-            ),
+            ConfigCommand::SetMouseHidesOnFocus(v) => {
+                set_flag!(
+                    new_config.settings.mouse_hides_on_focus,
+                    v,
+                    "mouse_hides_on_focus"
+                )
+            }
             ConfigCommand::SetFocusFollowsMouse(v) => {
                 set_flag!(new_config.settings.focus_follows_mouse, v, "focus_follows_mouse")
             }
@@ -1227,7 +1242,7 @@ impl Reactor {
                         top, left, bottom, right
                     );
                 } else {
-                    warn!("Invalid outer gap values. All values must be >= 0.0");
+                    errors.push("Invalid outer gap values. All values must be >= 0.0".to_string());
                 }
             }
             ConfigCommand::SetInnerGaps { horizontal, vertical } => {
@@ -1241,7 +1256,7 @@ impl Reactor {
                         horizontal, vertical
                     );
                 } else {
-                    warn!("Invalid inner gap values. All values must be >= 0.0");
+                    errors.push("Invalid inner gap values. All values must be >= 0.0".to_string());
                 }
             }
             ConfigCommand::SetWorkspaceNames(names) => {
@@ -1250,31 +1265,107 @@ impl Reactor {
                     config_changed = true;
                     info!("Updated workspace names to: {:?}", names);
                 } else {
-                    warn!("Too many workspace names provided. Maximum is 32");
+                    errors.push("Too many workspace names provided. Maximum is 32".to_string());
                 }
             }
+
+            ConfigCommand::Set { key, value } => match serde_json::to_value(&new_config) {
+                Ok(mut cfg_val) => {
+                    let parts: Vec<&str> = key.split('.').collect();
+                    if parts.is_empty() {
+                        errors.push("Empty config key provided".to_string());
+                    } else {
+                        let mut cur = &mut cfg_val;
+                        let mut failed = false;
+                        for (i, part) in parts.iter().enumerate() {
+                            if i + 1 == parts.len() {
+                                if let Some(obj) = cur.as_object_mut() {
+                                    obj.insert(part.to_string(), value.clone());
+                                } else {
+                                    errors.push(format!("Invalid config path: {}", key));
+                                    failed = true;
+                                }
+                            } else {
+                                if let Some(obj) = cur.as_object_mut() {
+                                    if !obj.contains_key(*part) {
+                                        obj.insert(part.to_string(), serde_json::json!({}));
+                                    }
+                                    cur = obj.get_mut(*part).unwrap();
+                                } else {
+                                    errors.push(format!("Invalid config path: {}", key));
+                                    failed = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if !failed {
+                            match serde_json::from_value::<Config>(cfg_val) {
+                                Ok(cfg2) => {
+                                    new_config = cfg2;
+                                    config_changed = true;
+                                    info!("Updated {} to {}", key, value);
+                                }
+                                Err(e) => {
+                                    errors.push(format!(
+                                        "Failed to deserialize config after setting '{}': {}",
+                                        key, e
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    errors.push(format!("Failed to serialize config for modification: {}", e));
+                }
+            },
+
             ConfigCommand::GetConfig => {
                 let config_json = serde_json::to_string_pretty(&*self.config)
                     .unwrap_or_else(|e| format!("Error serializing config: {}", e));
                 info!("Current config:\n{}", config_json);
+                return Ok(());
             }
             ConfigCommand::SaveConfig => match self.save_config_to_file() {
-                Ok(()) => info!("Config saved successfully"),
-                Err(e) => error!("Failed to save config: {}", e),
+                Ok(()) => {
+                    info!("Config saved successfully");
+                    return Ok(());
+                }
+                Err(e) => return Err(format!("Failed to save config: {}", e)),
             },
             ConfigCommand::ReloadConfig => match self.reload_config_from_file() {
                 Ok(()) => {
                     info!("Config reloaded successfully");
-                    config_changed = true;
+                    return Ok(());
                 }
-                Err(e) => error!("Failed to reload config: {}", e),
+                Err(e) => return Err(format!("Failed to reload config: {}", e)),
             },
         }
 
+        if !errors.is_empty() {
+            return Err(errors.join("; "));
+        }
+
+        let validation_issues = new_config.validate();
+        if !validation_issues.is_empty() {
+            return Err(validation_issues.join("; "));
+        }
+
         if config_changed {
+            let fixes = new_config.auto_fix_values();
+            if fixes > 0 {
+                let more_issues = new_config.validate();
+                if !more_issues.is_empty() {
+                    return Err(more_issues.join("; "));
+                }
+            }
+
             self.config = Arc::new(new_config);
             self.update_layout(false, true);
         }
+
+        Ok(())
     }
 
     fn save_config_to_file(&self) -> Result<(), Box<dyn std::error::Error>> {
@@ -2015,13 +2106,48 @@ impl Reactor {
 #[cfg(test)]
 pub mod tests {
     use objc2_core_foundation::{CGPoint, CGSize};
+    use serde_json::json;
     use test_log::test;
 
     use super::testing::*;
     use super::*;
     use crate::actor::app::Request;
+    use crate::common::config::ConfigCommand;
     use crate::layout_engine::{Direction, LayoutEngine};
     use crate::sys::window_server::WindowServerId;
+
+    #[test]
+    fn test_config_set_and_validation() {
+        let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+            &crate::common::config::VirtualWorkspaceSettings::default(),
+            &crate::common::config::LayoutSettings::default(),
+            None,
+        ));
+
+        assert_eq!(reactor.config.settings.layout.stack.stack_offset, 40.0);
+
+        let res = reactor.handle_config_command(ConfigCommand::SetStackOffset(50.0));
+        assert!(res.is_ok());
+        assert_eq!(reactor.config.settings.layout.stack.stack_offset, 50.0);
+
+        let res = reactor.handle_config_command(ConfigCommand::SetStackOffset(-10.0));
+        assert!(res.is_err());
+
+        let val = json!(10.0);
+        let res = reactor.handle_config_command(ConfigCommand::Set {
+            key: "settings.layout.gaps.outer.top".to_string(),
+            value: val,
+        });
+        assert!(res.is_ok());
+        assert_eq!(reactor.config.settings.layout.gaps.outer.top, 10.0);
+
+        let bad = json!(-5.0);
+        let res = reactor.handle_config_command(ConfigCommand::Set {
+            key: "settings.layout.gaps.inner.horizontal".to_string(),
+            value: bad,
+        });
+        assert!(res.is_err());
+    }
 
     #[test]
     fn it_ignores_stale_resize_events() {

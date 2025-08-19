@@ -5,6 +5,7 @@ use anyhow::bail;
 use livesplit_hotkey::Hotkey;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::actor::wm_controller::WmCommand;
 
@@ -35,6 +36,13 @@ pub enum ConfigCommand {
     },
 
     SetWorkspaceNames(Vec<String>),
+
+    /// Generic setter for arbitrary config paths using dot-separated keys.
+    /// Example: key = "settings.animate", value = true
+    Set {
+        key: String,
+        value: Value,
+    },
 
     GetConfig,
     SaveConfig,

@@ -6,6 +6,7 @@ use rift_wm::layout_engine as layout;
 use rift_wm::layout_engine::Direction;
 use rift_wm::model::server::{ApplicationData, LayoutStateData, WindowData, WorkspaceData};
 use rift_wm::server::{RiftCommand, RiftMachClient, RiftRequest};
+use serde_json::Value;
 
 #[derive(Parser)]
 #[command(name = "rift-cli")]
@@ -182,6 +183,16 @@ enum ConfigCommands {
         names: Vec<String>,
     },
 
+    /// Generic set: set an arbitrary config key (dot-separated path) to a JSON value.
+    /// Example: rift-cli execute config set --key settings.animate --value true
+    Set {
+        /// Dot-separated key path (e.g. settings.animate or settings.layout.gaps.outer.top)
+        key: String,
+        /// Value should be valid JSON (true, 1, "string", {"a":1}), but if it's not valid JSON
+        /// it will be treated as a string.
+        value: String,
+    },
+
     /// Get current config
     Get,
 
@@ -274,8 +285,15 @@ fn main() {
                     println!("{}", serde_json::to_string_pretty(&data).unwrap());
                 }
             },
-            rift_wm::server::RiftResponse::Error { message } => {
-                eprintln!("Error: {}", message);
+            rift_wm::server::RiftResponse::Error { error } => {
+                match serde_json::to_string_pretty(&error) {
+                    Ok(pretty) => {
+                        eprintln!("{}", pretty);
+                    }
+                    Err(_) => {
+                        eprintln!("Error: {}", error);
+                    }
+                }
                 process::exit(1);
             }
             _ => {
@@ -487,8 +505,16 @@ fn build_request(command: Commands) -> Result<RiftRequest, String> {
                         ConfigCommands::SetWorkspaceNames { names } => {
                             ConfigCommand::SetWorkspaceNames(names)
                         }
+
+                        ConfigCommands::Set { key, value } => {
+                            let parsed_value: Value = match serde_json::from_str(&value) {
+                                Ok(v) => v,
+                                Err(_) => Value::String(value.clone()),
+                            };
+                            ConfigCommand::Set { key, value: parsed_value }
+                        }
+
                         ConfigCommands::Get => {
-                            // Use direct query instead of command for Get
                             return Ok(RiftRequest::GetConfig);
                         }
                         ConfigCommands::Save => ConfigCommand::SaveConfig,
@@ -502,10 +528,28 @@ fn build_request(command: Commands) -> Result<RiftRequest, String> {
                 )),
             };
 
-            Ok(RiftRequest::ExecuteCommand {
-                command: serde_json::to_string(&rift_command).unwrap(),
-                args: vec![],
-            })
+            {
+                let maybe_config_json = match &rift_command {
+                    RiftCommand::Reactor(reactor::Command::Config(cfg_cmd)) => {
+                        match serde_json::to_string(cfg_cmd) {
+                            Ok(s) => Some(s),
+                            Err(_) => None,
+                        }
+                    }
+                    _ => None,
+                };
+
+                let command_str = serde_json::to_string(&rift_command).unwrap();
+                if let Some(cfg_json) = maybe_config_json {
+                    let args = vec!["__apply_config__".to_string(), cfg_json];
+                    Ok(RiftRequest::ExecuteCommand { command: command_str, args })
+                } else {
+                    Ok(RiftRequest::ExecuteCommand {
+                        command: command_str,
+                        args: vec![],
+                    })
+                }
+            }
         }
         Commands::Subscribe { subscribe } => match subscribe {
             SubscribeCommands::Mach { event } => Ok(RiftRequest::Subscribe { event }),

@@ -30,6 +30,7 @@ pub enum CGSEventType {
     WindowResized = 807,
     WindowCreated = 811, // this seems to behave more like a focus changed (also window_id increments)
     ServerWindowDidCreate = 1000,
+    ServerWindowDidTerminate = 1003,
     // All = 0xFFFF_FFFF,
 }
 
@@ -46,6 +47,8 @@ impl std::convert::TryFrom<u32> for CGSEventType {
             806 => Ok(CGSEventType::WindowMoved),
             807 => Ok(CGSEventType::WindowResized),
             811 => Ok(CGSEventType::WindowCreated),
+            1000 => Ok(CGSEventType::ServerWindowDidCreate),
+            1003 => Ok(CGSEventType::ServerWindowDidTerminate),
             other => Err(other),
         }
     }
@@ -59,6 +62,7 @@ impl Display for CGSEventType {
             CGSEventType::WindowResized => write!(f, "WindowResized"),
             CGSEventType::WindowCreated => write!(f, "WindowCreated"),
             CGSEventType::ServerWindowDidCreate => write!(f, "ServerWindowDidCreate"),
+            CGSEventType::ServerWindowDidTerminate => write!(f, "ServerWindowDidTerminate"),
         }
     }
 }

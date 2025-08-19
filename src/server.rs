@@ -65,7 +65,7 @@ pub enum RiftRequest {
 #[serde(untagged)]
 pub enum RiftResponse {
     Success { data: serde_json::Value },
-    Error { message: String },
+    Error { error: serde_json::Value },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -355,7 +355,7 @@ impl MachHandler {
                 Err(e) => {
                     error!("{}", e);
                     RiftResponse::Error {
-                        message: "Failed to get workspace response".to_string(),
+                        error: serde_json::json!({ "message": "Failed to get workspace response", "details": format!("{}", e) }),
                     }
                 }
             },
@@ -370,7 +370,7 @@ impl MachHandler {
                     Err(e) => {
                         error!("{}", e);
                         RiftResponse::Error {
-                            message: "Failed to get windows response".to_string(),
+                            error: serde_json::json!({ "message": "Failed to get windows response", "details": format!("{}", e) }),
                         }
                     }
                 }
@@ -382,7 +382,7 @@ impl MachHandler {
                     None => {
                         error!("Invalid window_id format: {}", window_id);
                         return RiftResponse::Error {
-                            message: "Invalid window_id format".to_string(),
+                            error: serde_json::json!({ "message": "Invalid window_id format", "window_id": window_id }),
                         };
                     }
                 };
@@ -392,12 +392,12 @@ impl MachHandler {
                         data: serde_json::to_value(window).unwrap(),
                     },
                     Ok(None) => RiftResponse::Error {
-                        message: "Window not found".to_string(),
+                        error: serde_json::json!({ "message": "Window not found" }),
                     },
                     Err(e) => {
                         error!("{}", e);
                         RiftResponse::Error {
-                            message: "Failed to get window info response".to_string(),
+                            error: serde_json::json!({ "message": "Failed to get window info response", "details": format!("{}", e) }),
                         }
                     }
                 }
@@ -409,12 +409,12 @@ impl MachHandler {
                         data: serde_json::to_value(layout_state).unwrap(),
                     },
                     Ok(None) => RiftResponse::Error {
-                        message: "Space not found or inactive".to_string(),
+                        error: serde_json::json!({ "message": "Space not found or inactive" }),
                     },
                     Err(e) => {
                         error!("{}", e);
                         RiftResponse::Error {
-                            message: "Failed to get layout state response".to_string(),
+                            error: serde_json::json!({ "message": "Failed to get layout state response", "details": format!("{}", e) }),
                         }
                     }
                 }
@@ -428,7 +428,7 @@ impl MachHandler {
                     Err(e) => {
                         error!("{}", e);
                         RiftResponse::Error {
-                            message: "Failed to get applications response".to_string(),
+                            error: serde_json::json!({ "message": "Failed to get applications response", "details": format!("{}", e) }),
                         }
                     }
                 }
@@ -439,7 +439,7 @@ impl MachHandler {
                 Err(e) => {
                     error!("{}", e);
                     RiftResponse::Error {
-                        message: "Failed to get metrics response".to_string(),
+                        error: serde_json::json!({ "message": "Failed to get metrics response", "details": format!("{}", e) }),
                     }
                 }
             },
@@ -449,31 +449,67 @@ impl MachHandler {
                 Err(e) => {
                     error!("{}", e);
                     RiftResponse::Error {
-                        message: "Failed to get config response".to_string(),
+                        error: serde_json::json!({ "message": "Failed to get config response", "details": format!("{}", e) }),
                     }
                 }
             },
 
-            RiftRequest::ExecuteCommand { command, args: _ } => {
+            RiftRequest::ExecuteCommand { command, args } => {
                 match serde_json::from_str::<RiftCommand>(&command) {
                     Ok(RiftCommand::Reactor(reactor_command)) => {
-                        let event = Event::Command(reactor_command);
+                        if args.len() >= 2 && args[0] == "__apply_config__" {
+                            match serde_json::from_str::<crate::common::config::ConfigCommand>(
+                                &args[1],
+                            ) {
+                                Ok(cfg_cmd) => {
+                                    match self.perform_query(|tx| Event::ApplyConfig {
+                                        cmd: cfg_cmd,
+                                        response: tx,
+                                    }) {
+                                        Ok(apply_result) => match apply_result {
+                                            Ok(()) => RiftResponse::Success {
+                                                data: serde_json::json!(
+                                                    "Config applied successfully"
+                                                ),
+                                            },
+                                            Err(msg) => RiftResponse::Error {
+                                                error: serde_json::json!({ "message": msg }),
+                                            },
+                                        },
+                                        Err(e) => {
+                                            error!("{}", e);
+                                            RiftResponse::Error {
+                                                error: serde_json::json!({ "message": format!("Failed to apply config: {}", e) }),
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Failed to parse config command from args: {}", e);
+                                    RiftResponse::Error {
+                                        error: serde_json::json!({ "message": format!("Invalid config command in args: {}", e) }),
+                                    }
+                                }
+                            }
+                        } else {
+                            let event = Event::Command(reactor_command);
 
-                        if let Err(e) = self.reactor_tx.try_send(event) {
-                            error!("Failed to send command to reactor: {}", e);
-                            return RiftResponse::Error {
-                                message: "Failed to execute command".to_string(),
-                            };
-                        }
+                            if let Err(e) = self.reactor_tx.try_send(event) {
+                                error!("Failed to send command to reactor: {}", e);
+                                return RiftResponse::Error {
+                                    error: serde_json::json!({ "message": "Failed to execute command", "details": format!("{}", e) }),
+                                };
+                            }
 
-                        RiftResponse::Success {
-                            data: serde_json::json!("Command executed successfully"),
+                            RiftResponse::Success {
+                                data: serde_json::json!("Command executed successfully"),
+                            }
                         }
                     }
                     Err(e) => {
                         error!("Failed to parse command: {}", e);
                         RiftResponse::Error {
-                            message: format!("Invalid command format: {}", e),
+                            error: serde_json::json!({ "message": format!("Invalid command format: {}", e) }),
                         }
                     }
                 }
@@ -619,7 +655,7 @@ impl MachHandler {
             }
         } else {
             RiftResponse::Error {
-                message: "Failed to access CLI subscriptions".to_string(),
+                error: serde_json::json!({ "message": "Failed to parse request" }),
             }
         }
     }
@@ -693,7 +729,7 @@ unsafe extern "C" fn handle_mach_request_c(
         Err(e) => {
             error!("Failed to parse request: {}", e);
             let error_response = RiftResponse::Error {
-                message: format!("Invalid request format: {}", e),
+                error: serde_json::json!({ "message": format!("Invalid request format: {}", e) }),
             };
             send_response(original_msg, &error_response);
             return;
