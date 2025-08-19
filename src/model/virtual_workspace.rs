@@ -9,7 +9,7 @@ use slotmap::{SlotMap, new_key_type};
 use tracing::{error, warn};
 
 use crate::actor::app::WindowId;
-use crate::common::config::{AppWorkspaceRule, VirtualWorkspaceSettings};
+use crate::common::config::{AppWorkspaceRule, VirtualWorkspaceSettings, WorkspaceSelector};
 use crate::common::log::trace_misc;
 use crate::sys::geometry::CGRectDef;
 use crate::sys::screen::SpaceId;
@@ -589,25 +589,47 @@ impl VirtualWorkspaceManager {
         let rule_match =
             self.find_matching_app_rule(app_bundle_id, app_name, window_title).cloned();
         if let Some(rule) = rule_match {
-            let target_workspace_id = if let Some(workspace_idx) = rule.workspace {
-                let len = self.workspaces_by_space.get(&space).map(|v| v.len()).unwrap_or(0);
-                if workspace_idx >= len {
-                    tracing::warn!(
-                        "App rule references non-existent workspace index {}, falling back to active workspace",
-                        workspace_idx
-                    );
-                    self.get_default_workspace(space)?
-                } else {
-                    let workspaces = self.list_workspaces(space);
-                    if let Some((workspace_id, _)) = workspaces.get(workspace_idx) {
-                        *workspace_id
-                    } else {
-                        warn!(
-                            "App rule references invalid workspace index {}, falling back to active workspace",
+            let target_workspace_id = if let Some(ref ws_sel) = rule.workspace {
+                let maybe_idx: Option<usize> = match ws_sel {
+                    WorkspaceSelector::Index(i) => Some(*i),
+                    WorkspaceSelector::Name(name) => {
+                        let workspaces = self.list_workspaces(space);
+                        match workspaces.iter().position(|(_, n)| n == name) {
+                            Some(idx) => Some(idx),
+                            None => {
+                                tracing::warn!(
+                                    "App rule references workspace name '{}' which could not be resolved for space {:?}; falling back to default workspace",
+                                    name,
+                                    space
+                                );
+                                None
+                            }
+                        }
+                    }
+                };
+
+                if let Some(workspace_idx) = maybe_idx {
+                    let len = self.workspaces_by_space.get(&space).map(|v| v.len()).unwrap_or(0);
+                    if workspace_idx >= len {
+                        tracing::warn!(
+                            "App rule references non-existent workspace index {}, falling back to active workspace",
                             workspace_idx
                         );
                         self.get_default_workspace(space)?
+                    } else {
+                        let workspaces = self.list_workspaces(space);
+                        if let Some((workspace_id, _)) = workspaces.get(workspace_idx) {
+                            *workspace_id
+                        } else {
+                            tracing::warn!(
+                                "App rule references invalid workspace index {}, falling back to active workspace",
+                                workspace_idx
+                            );
+                            self.get_default_workspace(space)?
+                        }
                     }
+                } else {
+                    self.get_default_workspace(space)?
                 }
             } else {
                 self.get_default_workspace(space)?

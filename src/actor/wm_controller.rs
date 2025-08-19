@@ -13,6 +13,8 @@ use objc2_foundation::MainThreadMarker;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, instrument};
 
+use crate::common::config::WorkspaceSelector;
+
 pub type Sender = actor::Sender<WmEvent>;
 
 type Receiver = actor::Receiver<WmEvent>;
@@ -59,8 +61,8 @@ pub enum WmCmd {
 
     NextWorkspace,
     PrevWorkspace,
-    SwitchToWorkspace(usize),
-    MoveWindowToWorkspace(usize),
+    SwitchToWorkspace(WorkspaceSelector),
+    MoveWindowToWorkspace(WorkspaceSelector),
     CreateWorkspace,
     SwitchToLastWorkspace,
 }
@@ -265,15 +267,51 @@ impl WmController {
                     layout::LayoutCommand::PrevWorkspace(None),
                 )));
             }
-            Command(Wm(SwitchToWorkspace(workspace_index))) => {
-                self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
-                    layout::LayoutCommand::SwitchToWorkspace(workspace_index),
-                )));
+            Command(Wm(SwitchToWorkspace(ws_sel))) => {
+                let maybe_index: Option<usize> = match &ws_sel {
+                    WorkspaceSelector::Index(i) => Some(*i),
+                    WorkspaceSelector::Name(name) => self
+                        .config
+                        .config
+                        .virtual_workspaces
+                        .workspace_names
+                        .iter()
+                        .position(|n| n == name),
+                };
+
+                if let Some(workspace_index) = maybe_index {
+                    self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
+                        layout::LayoutCommand::SwitchToWorkspace(workspace_index),
+                    )));
+                } else {
+                    tracing::warn!(
+                        "Hotkey requested switch to workspace {:?} but it could not be resolved; ignoring",
+                        ws_sel
+                    );
+                }
             }
-            Command(Wm(MoveWindowToWorkspace(workspace_index))) => {
-                self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
-                    layout::LayoutCommand::MoveWindowToWorkspace(workspace_index),
-                )));
+            Command(Wm(MoveWindowToWorkspace(ws_sel))) => {
+                let maybe_index: Option<usize> = match &ws_sel {
+                    WorkspaceSelector::Index(i) => Some(*i),
+                    WorkspaceSelector::Name(name) => self
+                        .config
+                        .config
+                        .virtual_workspaces
+                        .workspace_names
+                        .iter()
+                        .position(|n| n == name),
+                };
+
+                if let Some(workspace_index) = maybe_index {
+                    self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
+                        layout::LayoutCommand::MoveWindowToWorkspace(workspace_index),
+                    )));
+                } else {
+                    tracing::warn!(
+                        "Hotkey requested move window to workspace {:?} but it could not be resolved; ignoring",
+                        ws_sel
+                    );
+                }
             }
             Command(Wm(CreateWorkspace)) => {
                 self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(

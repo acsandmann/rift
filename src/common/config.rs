@@ -64,13 +64,22 @@ pub struct VirtualWorkspaceSettings {
     pub app_rules: Vec<AppWorkspaceRule>,
 }
 
+// Allow specifying a workspace by numeric index or by name in the config.
+// This supports both `workspace = 2` and `workspace = "coding"` in app rules.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[serde(untagged)]
+pub enum WorkspaceSelector {
+    Index(usize),
+    Name(String),
+}
+
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct AppWorkspaceRule {
     /// Application bundle identifier (e.g., "com.apple.Terminal")
     pub app_id: Option<String>,
-    /// Target workspace index (0 based). If None, window goes to active workspace.
-    pub workspace: Option<usize>,
+    /// Target workspace index (0 based) OR workspace name. If None, window goes to active workspace.
+    pub workspace: Option<WorkspaceSelector>,
     /// Whether windows should be floating in this workspace
     #[serde(default)]
     pub floating: bool,
@@ -141,11 +150,13 @@ impl VirtualWorkspaceSettings {
             }
 
             if let Some(ref workspace) = rule.workspace {
-                if *workspace >= self.default_workspace_count {
-                    issues.push(format!(
-                        "App rule {} references workspace {} but only {} workspaces will be created",
-                        index, workspace, self.default_workspace_count
-                    ));
+                if let WorkspaceSelector::Index(idx) = workspace {
+                    if *idx >= self.default_workspace_count {
+                        issues.push(format!(
+                            "App rule {} references workspace {} but only {} workspaces will be created",
+                            index, idx, self.default_workspace_count
+                        ));
+                    }
                 }
             }
 
@@ -205,9 +216,11 @@ impl VirtualWorkspaceSettings {
 
         for rule in &mut self.app_rules {
             if let Some(ref workspace) = rule.workspace {
-                if *workspace >= self.default_workspace_count {
-                    rule.workspace = None;
-                    fixes += 1;
+                if let WorkspaceSelector::Index(idx) = workspace {
+                    if *idx >= self.default_workspace_count {
+                        rule.workspace = None;
+                        fixes += 1;
+                    }
                 }
             }
         }
