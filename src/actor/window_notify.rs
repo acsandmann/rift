@@ -112,10 +112,12 @@ impl WindowNotify {
                                 CGSEventType::WindowDestroyed => events_tx.send(
                                     Event::WindowServerDestroyed(WindowServerId::new(window_id)),
                                 ),
-                                CGSEventType::WindowCreated => events_tx.send(
+                                CGSEventType::ServerWindowDidCreate => events_tx.send(
                                     Event::WindowServerAppeared(WindowServerId::new(window_id)),
                                 ),
-                                CGSEventType::WindowMoved | CGSEventType::WindowResized => {}
+                                CGSEventType::WindowCreated
+                                | CGSEventType::WindowMoved
+                                | CGSEventType::WindowResized => {}
                             }
                         } else {
                             trace!("event had no window id: {:?}", evt);

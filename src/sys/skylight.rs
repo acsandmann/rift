@@ -28,7 +28,8 @@ pub enum CGSEventType {
     WindowDestroyed = 804,
     WindowMoved = 806,
     WindowResized = 807,
-    WindowCreated = 811,
+    WindowCreated = 811, // this seems to behave more like a focus changed (also window_id increments)
+    ServerWindowDidCreate = 1000,
     // All = 0xFFFF_FFFF,
 }
 
@@ -57,6 +58,7 @@ impl Display for CGSEventType {
             CGSEventType::WindowMoved => write!(f, "WindowMoved"),
             CGSEventType::WindowResized => write!(f, "WindowResized"),
             CGSEventType::WindowCreated => write!(f, "WindowCreated"),
+            CGSEventType::ServerWindowDidCreate => write!(f, "ServerWindowDidCreate"),
         }
     }
 }

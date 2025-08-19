@@ -206,7 +206,7 @@ fn main() {
     let (_, wnd_rx) = rift_wm::actor::channel();
     let wn_actor = window_notify_actor::WindowNotify::new(events_tx.clone(), wnd_rx, &[
         CGSEventType::WindowDestroyed,
-        CGSEventType::WindowCreated,
+        CGSEventType::ServerWindowDidCreate,
     ]);
 
     let events_tx_mach = events_tx.clone();
