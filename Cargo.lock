@@ -1417,6 +1417,7 @@ dependencies = [
  "core-foundation",
  "core-graphics 0.23.2",
  "core-graphics-types",
+ "crossbeam-queue",
  "dirs",
  "dispatchr",
  "futures-task",

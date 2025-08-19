@@ -1,20 +1,14 @@
 use std::convert::Infallible;
 use std::ffi::{CString, c_void};
-use std::future::Future as _;
 use std::os::raw::c_char;
-use std::pin::Pin;
-use std::sync::{Arc, Mutex, OnceLock};
-use std::task::{Context, Poll, Waker};
-use std::time::{Duration, Instant};
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use r#continue::continuation;
 use core_foundation::date::CFAbsoluteTimeGetCurrent;
 use core_foundation::runloop::{
     CFRunLoop, CFRunLoopTimer, CFRunLoopTimerContext, CFRunLoopTimerRef, kCFRunLoopDefaultMode,
 };
-use dispatchr::semaphore::Managed;
-use dispatchr::time::Time;
-use futures_task::{ArcWake, waker};
 use nix::unistd::{ForkResult, execvp, fork};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
@@ -23,6 +17,7 @@ use crate::actor::broadcast::BroadcastEvent;
 use crate::actor::reactor::{self, Event};
 use crate::common::collections::HashMap;
 use crate::model::server::WorkspaceQueryResponse;
+use crate::sys::dispatch::block_on;
 use crate::sys::mach::{
     mach_msg_header_t, mach_send_message, mach_send_request, mach_server_run, send_mach_reply,
 };
@@ -342,7 +337,7 @@ impl MachHandler {
                     };
                 }
 
-                match block_on_continuation(cont_fut, Duration::from_secs(5)) {
+                match block_on(cont_fut, Duration::from_secs(5)) {
                     Ok(WorkspaceQueryResponse { workspaces }) => RiftResponse::Success {
                         data: serde_json::to_value(workspaces).unwrap(),
                     },
@@ -367,7 +362,7 @@ impl MachHandler {
                     };
                 }
 
-                match block_on_continuation(cont_fut, Duration::from_secs(5)) {
+                match block_on(cont_fut, Duration::from_secs(5)) {
                     Ok(windows) => RiftResponse::Success {
                         data: serde_json::to_value(windows).unwrap(),
                     },
@@ -402,7 +397,7 @@ impl MachHandler {
                     };
                 }
 
-                match block_on_continuation(cont_fut, Duration::from_secs(5)) {
+                match block_on(cont_fut, Duration::from_secs(5)) {
                     Ok(Some(window)) => RiftResponse::Success {
                         data: serde_json::to_value(window).unwrap(),
                     },
@@ -429,7 +424,7 @@ impl MachHandler {
                     };
                 }
 
-                match block_on_continuation(cont_fut, Duration::from_secs(5)) {
+                match block_on(cont_fut, Duration::from_secs(5)) {
                     Ok(Some(layout_state)) => RiftResponse::Success {
                         data: serde_json::to_value(layout_state).unwrap(),
                     },
@@ -456,7 +451,7 @@ impl MachHandler {
                     };
                 }
 
-                match block_on_continuation(cont_fut, Duration::from_secs(5)) {
+                match block_on(cont_fut, Duration::from_secs(5)) {
                     Ok(applications) => RiftResponse::Success {
                         data: serde_json::to_value(applications).unwrap(),
                     },
@@ -479,7 +474,7 @@ impl MachHandler {
                     };
                 }
 
-                match block_on_continuation(cont_fut, Duration::from_secs(5)) {
+                match block_on(cont_fut, Duration::from_secs(5)) {
                     Ok(metrics) => RiftResponse::Success { data: metrics },
                     Err(e) => {
                         error!("Failed to get metrics response: {}", e);
@@ -500,7 +495,7 @@ impl MachHandler {
                     };
                 }
 
-                match block_on_continuation(cont_fut, Duration::from_secs(5)) {
+                match block_on(cont_fut, Duration::from_secs(5)) {
                     Ok(config) => RiftResponse::Success { data: config },
                     Err(e) => {
                         error!("Failed to get config response: {}", e);
@@ -717,44 +712,6 @@ unsafe fn schedule_event_send(runloop: &CFRunLoop, client_port: ClientPort, even
         &mut context,
     );
     runloop.add_timer(&timer, unsafe { kCFRunLoopDefaultMode });
-}
-
-pub fn block_on_continuation<T: Send + 'static>(
-    mut fut: r#continue::Future<T>,
-    timeout: Duration,
-) -> Result<T, String> {
-    struct GcdWaker {
-        sem: Managed,
-    }
-    impl ArcWake for GcdWaker {
-        fn wake_by_ref(this: &Arc<Self>) { this.sem.signal(); }
-    }
-
-    let sem = Managed::new(0);
-    let waker: Waker = waker(Arc::new(GcdWaker { sem: sem.clone() }));
-    let mut cx = Context::from_waker(&waker);
-
-    let deadline = Instant::now() + timeout;
-
-    loop {
-        match Pin::new(&mut fut).poll(&mut cx) {
-            Poll::Ready(v) => return Ok(v),
-            Poll::Pending => {
-                let now = Instant::now();
-                if now >= deadline {
-                    return Err("Timeout".into());
-                }
-
-                let remaining = deadline - now;
-                let ns = i64::try_from(remaining.as_nanos()).unwrap_or(i64::MAX);
-                let t = Time::NOW.new_after(ns);
-
-                if sem.wait(t) != 0 {
-                    return Err("Timeout".into());
-                }
-            }
-        }
-    }
 }
 
 unsafe extern "C" fn handle_mach_request_c(

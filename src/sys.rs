@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod axuielement;
+pub mod dispatch;
 pub mod display_link;
 pub mod enhanced_ui;
 pub mod event;

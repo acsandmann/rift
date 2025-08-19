@@ -721,17 +721,6 @@ impl Config {
     }
 
     fn normalize_hotkey_string(key: &str) -> String {
-        // Map standalone direction words to Arrow* while preserving all separators/spaces.
-        fn map_word(word: &str) -> &str {
-            match word {
-                "Up" => "ArrowUp",
-                "Down" => "ArrowDown",
-                "Left" => "ArrowLeft",
-                "Right" => "ArrowRight",
-                _ => word,
-            }
-        }
-
         let mut out = String::with_capacity(key.len());
         let mut word = String::new();
 
@@ -740,7 +729,18 @@ impl Config {
                 word.push(ch);
             } else {
                 if !word.is_empty() {
-                    out.push_str(map_word(&word));
+                    let token = if word.len() == 1 {
+                        word.to_ascii_uppercase()
+                    } else {
+                        match word.to_lowercase().as_str() {
+                            "up" => "ArrowUp".to_string(),
+                            "down" => "ArrowDown".to_string(),
+                            "left" => "ArrowLeft".to_string(),
+                            "right" => "ArrowRight".to_string(),
+                            _ => word.clone(),
+                        }
+                    };
+                    out.push_str(&token);
                     word.clear();
                 }
                 out.push(ch);
@@ -748,7 +748,18 @@ impl Config {
         }
 
         if !word.is_empty() {
-            out.push_str(map_word(&word));
+            let token = if word.len() == 1 {
+                word.to_ascii_uppercase()
+            } else {
+                match word.to_lowercase().as_str() {
+                    "up" => "ArrowUp".to_string(),
+                    "down" => "ArrowDown".to_string(),
+                    "left" => "ArrowLeft".to_string(),
+                    "right" => "ArrowRight".to_string(),
+                    _ => word.clone(),
+                }
+            };
+            out.push_str(&token);
         }
 
         out

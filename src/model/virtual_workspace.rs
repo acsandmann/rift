@@ -667,36 +667,45 @@ impl VirtualWorkspaceManager {
         window_title: Option<&str>,
     ) -> Option<&AppWorkspaceRule> {
         self.app_rules.iter().find(|rule| {
-            if let Some(bundle_id) = app_bundle_id {
-                if let Some(ref rule_app_id) = rule.app_id {
-                    if rule_app_id == bundle_id {
-                        return true;
+            if let Some(ref rule_app_id) = rule.app_id {
+                match app_bundle_id {
+                    Some(bundle_id) if rule_app_id == bundle_id => {}
+                    _ => return false,
+                }
+            }
+
+            if let Some(ref rule_name) = rule.app_name {
+                match app_name {
+                    Some(name) => {
+                        if !(name.contains(rule_name) || rule_name.contains(name)) {
+                            return false;
+                        }
                     }
+                    None => return false,
                 }
             }
 
-            if let (Some(name), Some(rule_name)) = (app_name, &rule.app_name) {
-                if name.contains(rule_name) || rule_name.contains(name) {
-                    return true;
+            if let Some(ref rule_re) = rule.title_regex {
+                if rule_re.is_empty() {
+                    return false;
                 }
-            }
-
-            if let (Some(title), Some(rule_re)) = (window_title, &rule.title_regex) {
-                if !rule_re.is_empty() {
-                    match Regex::new(rule_re) {
+                match window_title {
+                    Some(title) => match Regex::new(rule_re) {
                         Ok(re) => {
-                            if re.is_match(title) {
-                                return true;
+                            if !re.is_match(title) {
+                                return false;
                             }
                         }
                         Err(e) => {
                             warn!("Invalid title_regex '{}' in app rule: {}", rule_re, e);
+                            return false;
                         }
-                    }
+                    },
+                    None => return false,
                 }
             }
 
-            false
+            true
         })
     }
 

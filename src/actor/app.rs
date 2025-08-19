@@ -648,7 +648,13 @@ impl State {
         if !is_frontmost && make_key_result.is_ok() && is_standard {
             let (tx, rx) = continuation();
             let quiet_activation = if wids.len() == 1 { quiet } else { Quiet::Yes };
-            this.last_activated = Some((Instant::now(), quiet_activation, tx));
+
+            if let Some((_, _, prev_tx)) =
+                this.last_activated.replace((Instant::now(), quiet_activation, tx))
+            {
+                let _ = prev_tx.send(());
+            }
+
             drop(this);
             trace!("Awaiting activation");
             select! {
@@ -873,6 +879,14 @@ impl State {
             if let Err(err) = res {
                 debug!(?notif, ?elem, "Adding notification failed with error {err}");
             }
+        }
+    }
+}
+
+impl Drop for State {
+    fn drop(&mut self) {
+        if let Some((_, _, tx)) = self.last_activated.take() {
+            let _ = tx.send(());
         }
     }
 }
