@@ -20,17 +20,14 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 pub use replay::{Record, replay};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
-use tokio::sync::mpsc::unbounded_channel;
-// Add these imports for the query system
 use tokio::sync::oneshot;
-use tokio::sync::{broadcast, mpsc};
-use tracing::{Span, debug, error, info, instrument, trace, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 use super::mouse;
 use crate::actor::app::{AppInfo, AppThreadHandle, Quiet, Request, WindowId, WindowInfo, pid_t};
-use crate::actor::broadcast::BroadcastEvent;
+use crate::actor::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::actor::raise_manager::{self, RaiseRequest};
-use crate::actor::{menu_bar, stack_line};
+use crate::actor::{self, menu_bar, stack_line};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
 use crate::common::config::{Config, ConfigCommand};
 use crate::common::heavy::is_heavy;
@@ -42,8 +39,8 @@ use crate::sys::geometry::{CGRectDef, CGRectExt, Round, SameAs};
 use crate::sys::screen::{SpaceId, get_active_space_number};
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 
-pub type Sender = tokio::sync::mpsc::UnboundedSender<(Span, Event)>;
-type Receiver = tokio::sync::mpsc::UnboundedReceiver<(Span, Event)>;
+pub type Sender = actor::Sender<Event>;
+type Receiver = actor::Receiver<Event>;
 
 use std::path::PathBuf;
 
@@ -115,6 +112,8 @@ pub enum Event {
     WindowDestroyed(WindowId),
     #[serde(skip)]
     WindowServerDestroyed(crate::sys::window_server::WindowServerId),
+    #[serde(skip)]
+    WindowServerAppeared(crate::sys::window_server::WindowServerId),
     WindowFrameChanged(
         WindowId,
         #[serde(with = "CGRectDef")] CGRect,
@@ -217,6 +216,7 @@ pub struct Reactor {
     window_server_info: HashMap<WindowServerId, WindowServerInfo>,
     window_ids: HashMap<WindowServerId, WindowId>,
     visible_windows: HashSet<WindowServerId>,
+    observed_window_server_ids: HashSet<WindowServerId>,
     screens: Vec<Screen>,
     main_window_tracker: MainWindowTracker,
     in_drag: bool,
@@ -226,13 +226,11 @@ pub struct Reactor {
     menu_tx: Option<menu_bar::Sender>,
     stack_line_tx: Option<stack_line::Sender>,
     raise_manager_tx: raise_manager::Sender,
-    event_broadcaster: broadcast::Sender<BroadcastEvent>,
+    event_broadcaster: BroadcastSender,
     app_rules_recently_applied: std::time::Instant,
     last_auto_workspace_switch: Option<std::time::Instant>,
     last_sls_notification_ids: Vec<u32>,
-    // Cache last-emitted selected index per group NodeId for StackLine
     stack_line_selection_cache: HashMap<NodeId, usize>,
-    // Cache last-emitted GroupsUpdated payload per space to avoid redundant updates
     stack_line_groups_cache: HashMap<SpaceId, Vec<GroupSig>>,
 }
 
@@ -309,11 +307,11 @@ impl Reactor {
         layout_engine: LayoutEngine,
         record: Record,
         mouse_tx: mouse::Sender,
-        broadcast_tx: broadcast::Sender<BroadcastEvent>,
+        broadcast_tx: BroadcastSender,
         menu_tx: menu_bar::Sender,
         stack_line_tx: stack_line::Sender,
     ) -> Sender {
-        let (events_tx, events) = unbounded_channel();
+        let (events_tx, events) = actor::channel();
         let events_tx_clone = events_tx.clone();
         thread::Builder::new()
             .name("reactor".to_string())
@@ -332,11 +330,11 @@ impl Reactor {
         config: Arc<Config>,
         layout_engine: LayoutEngine,
         mut record: Record,
-        broadcast_tx: broadcast::Sender<BroadcastEvent>,
+        broadcast_tx: BroadcastSender,
     ) -> Reactor {
         // FIXME: Remove apps that are no longer running from restored state.
         record.start(&config, &layout_engine);
-        let (raise_manager_tx, _rx) = mpsc::unbounded_channel();
+        let (raise_manager_tx, _rx) = actor::channel();
         Reactor {
             config,
             apps: HashMap::default(),
@@ -358,13 +356,14 @@ impl Reactor {
             app_rules_recently_applied: std::time::Instant::now(),
             last_auto_workspace_switch: None,
             last_sls_notification_ids: Vec::new(),
+            observed_window_server_ids: HashSet::default(),
             stack_line_selection_cache: HashMap::default(),
             stack_line_groups_cache: HashMap::default(),
         }
     }
 
     pub async fn run(mut self, events: Receiver, events_tx: Sender) {
-        let (raise_manager_tx, raise_manager_rx) = mpsc::unbounded_channel();
+        let (raise_manager_tx, raise_manager_rx) = actor::channel();
         self.raise_manager_tx = raise_manager_tx.clone();
 
         let mouse_tx = self.mouse_tx.clone();
@@ -396,6 +395,7 @@ impl Reactor {
             Event::WindowCreated(..)
                 | Event::WindowDestroyed(..)
                 | Event::WindowServerDestroyed(..)
+                | Event::WindowServerAppeared(..)
                 | Event::WindowsDiscovered { .. }
                 | Event::ApplicationLaunched { .. }
                 | Event::ApplicationTerminated(..)
@@ -462,11 +462,13 @@ impl Reactor {
                 // FIXME: We assume all windows are on the main screen.
                 if let Some(wsid) = window.sys_id {
                     self.window_ids.insert(wsid, wid);
+                    self.observed_window_server_ids.remove(&wsid);
                 }
                 let frame = window.frame;
                 self.windows.insert(wid, window.into());
                 if let Some(info) = ws_info {
-                    self.window_server_info.insert(info.id, info);
+                    self.window_server_info.insert(info.id, info.clone());
+                    self.observed_window_server_ids.remove(&info.id);
                 }
                 if let Some(space) = self.best_space_for_window(&frame) {
                     if self.window_is_standard(wid) {
@@ -502,6 +504,18 @@ impl Reactor {
                     );
                 }
                 return;
+            }
+            Event::WindowServerAppeared(wsid) => {
+                if self.window_server_info.contains_key(&wsid)
+                    || self.observed_window_server_ids.contains(&wsid)
+                {
+                    debug!(
+                        ?wsid,
+                        "Received WindowServerAppeared for known window - ignoring"
+                    );
+                    return;
+                }
+                self.observed_window_server_ids.insert(wsid);
             }
             Event::WindowFrameChanged(wid, new_frame, last_seen, requested, mouse_state) => {
                 if let Some(window) = self.windows.get_mut(&wid) {
@@ -599,11 +613,11 @@ impl Reactor {
             }
             Event::RaiseCompleted { window_id, sequence_id } => {
                 let msg = raise_manager::Event::RaiseCompleted { window_id, sequence_id };
-                _ = self.raise_manager_tx.send((Span::current(), msg));
+                _ = self.raise_manager_tx.send(msg);
             }
             Event::RaiseTimeout { sequence_id } => {
                 let msg = raise_manager::Event::RaiseTimeout { sequence_id };
-                _ = self.raise_manager_tx.send((Span::current(), msg));
+                _ = self.raise_manager_tx.send(msg);
             }
             Event::Command(Command::Layout(cmd)) => {
                 info!(?cmd);
@@ -665,7 +679,192 @@ impl Reactor {
                 }
             }
             Event::Command(Command::Reactor(ReactorCommand::Serialize)) => {
-                println!("{}", self.layout_engine.serialize_to_string());
+                let layout_engine_ron = self.layout_engine.serialize_to_string();
+                let vwm = self.layout_engine.virtual_workspace_manager_mut();
+
+                let stats = vwm.get_stats();
+                let mut workspace_window_counts = serde_json::Map::new();
+                for (ws_id, count) in &stats.workspace_window_counts {
+                    workspace_window_counts
+                        .insert(format!("{:?}", ws_id), serde_json::json!(*count));
+                }
+
+                let mut spaces_intermediate: Vec<(
+                    u64,
+                    Vec<(
+                        crate::model::VirtualWorkspaceId,
+                        String,
+                        bool,
+                        Vec<crate::actor::app::WindowId>,
+                        Option<crate::actor::app::WindowId>,
+                        Vec<(crate::actor::app::WindowId, objc2_core_foundation::CGRect)>,
+                    )>,
+                )> = Vec::new();
+
+                for screen in &self.screens {
+                    if let Some(space) = screen.space {
+                        let workspaces = vwm.list_workspaces(space);
+                        let active_ws = vwm.active_workspace(space);
+
+                        let mut ws_entries = Vec::new();
+                        for (workspace_id, workspace_name) in workspaces {
+                            let window_ids: Vec<crate::actor::app::WindowId> =
+                                if let Some(ws) = vwm.workspace_info(space, workspace_id) {
+                                    ws.windows().collect()
+                                } else {
+                                    Vec::new()
+                                };
+
+                            let last_focused = vwm.last_focused_window(space, workspace_id);
+
+                            let floating_positions =
+                                vwm.get_workspace_floating_positions(space, workspace_id);
+
+                            ws_entries.push((
+                                workspace_id,
+                                workspace_name,
+                                active_ws == Some(workspace_id),
+                                window_ids,
+                                last_focused,
+                                floating_positions,
+                            ));
+                        }
+
+                        spaces_intermediate.push((space.get(), ws_entries));
+                    }
+                }
+
+                let mut mapping_intermediate: Vec<(
+                    u64,
+                    crate::actor::app::WindowId,
+                    crate::model::VirtualWorkspaceId,
+                )> = Vec::new();
+                for ((space, window_id), workspace_id) in &vwm.window_to_workspace {
+                    mapping_intermediate.push((space.get(), *window_id, *workspace_id));
+                }
+
+                let _ = vwm;
+
+                let mut included_windows: HashSet<crate::actor::app::WindowId> = HashSet::default();
+
+                let mut spaces_json = Vec::new();
+                for (space_num, ws_entries) in spaces_intermediate {
+                    let mut ws_json = Vec::new();
+                    for (
+                        workspace_id,
+                        workspace_name,
+                        is_active,
+                        window_ids,
+                        last_focused,
+                        floating_positions,
+                    ) in ws_entries
+                    {
+                        let mut windows_json = Vec::new();
+                        for wid in window_ids {
+                            if let Some(window_data) = self.create_window_data(wid) {
+                                let v = serde_json::to_value(&window_data).unwrap_or_else(
+                                    |_| serde_json::json!({ "id": wid.to_debug_string() }),
+                                );
+                                windows_json.push(v);
+                            } else {
+                                windows_json
+                                    .push(serde_json::json!({ "id": wid.to_debug_string() }));
+                            }
+
+                            let _ = included_windows.insert(wid);
+                        }
+
+                        let last_focused_json = last_focused.map(|w| w.to_debug_string());
+
+                        let floating_json: Vec<serde_json::Value> = floating_positions
+                            .into_iter()
+                            .map(|(wid, rect)| {
+                                serde_json::json!({
+                                    "window": wid.to_debug_string(),
+                                    "rect": {
+                                        "x": rect.origin.x,
+                                        "y": rect.origin.y,
+                                        "w": rect.size.width,
+                                        "h": rect.size.height
+                                    }
+                                })
+                            })
+                            .collect();
+
+                        ws_json.push(serde_json::json!({
+                            "id": format!("{:?}", workspace_id),
+                            "name": workspace_name,
+                            "is_active": is_active,
+                            "windows": windows_json,
+                            "last_focused": last_focused_json,
+                            "floating_positions": floating_json,
+                        }));
+                    }
+
+                    spaces_json.push(serde_json::json!({
+                        "space": space_num,
+                        "workspaces": ws_json,
+                    }));
+                }
+
+                let mut mapping = Vec::new();
+                for (space_num, window_id, workspace_id) in mapping_intermediate {
+                    let window_json = if let Some(window_data) = self.create_window_data(window_id)
+                    {
+                        serde_json::to_value(&window_data).unwrap_or_else(
+                            |_| serde_json::json!({ "id": window_id.to_debug_string() }),
+                        )
+                    } else {
+                        serde_json::json!({ "id": window_id.to_debug_string() })
+                    };
+
+                    let _ = included_windows.insert(window_id);
+
+                    mapping.push(serde_json::json!({
+                        "space": space_num,
+                        "window": window_json,
+                        "workspace": format!("{:?}", workspace_id)
+                    }));
+                }
+
+                let known_managed_windows: Vec<serde_json::Value> = self
+                    .windows
+                    .keys()
+                    .filter(|w| !included_windows.contains(*w))
+                    .map(|w| {
+                        if let Some(window_data) = self.create_window_data(*w) {
+                            serde_json::to_value(&window_data).unwrap_or_else(
+                                |_| serde_json::json!({ "id": w.to_debug_string() }),
+                            )
+                        } else {
+                            serde_json::json!({ "id": w.to_debug_string() })
+                        }
+                    })
+                    .collect();
+
+                let reactor_summary = serde_json::json!({
+                    "apps": self.apps.len(),
+                    "managed_windows": self.windows.len(),
+                    "window_server_info": self.window_server_info.len(),
+                    "visible_window_server_ids": self.visible_windows.len(),
+                    "screens": self.screens.len(),
+                    "known_managed_windows": known_managed_windows,
+                });
+
+                let out = serde_json::json!({
+                    "layout_engine_ron": layout_engine_ron,
+                    "virtual_workspace_manager": {
+                        "total_workspaces": stats.total_workspaces,
+                        "total_windows": stats.total_windows,
+                        "active_spaces": stats.active_spaces,
+                        "workspace_window_counts": workspace_window_counts,
+                    },
+                    "spaces": spaces_json,
+                    "window_to_workspace": mapping,
+                    "reactor": reactor_summary,
+                });
+
+                println!("{}", serde_json::to_string_pretty(&out).unwrap());
             }
             Event::Command(Command::Reactor(ReactorCommand::SaveAndExit)) => {
                 match self.layout_engine.save(crate::common::config::restore_file()) {
@@ -1119,7 +1318,14 @@ impl Reactor {
     }
 
     fn update_partial_window_server_info(&mut self, ws_info: Vec<WindowServerInfo>) {
+        // Mark visible windows and remove any corresponding observed WSID markers
+        // for ids we now have server info for.
         self.visible_windows.extend(ws_info.iter().map(|info| info.id));
+        for info in ws_info.iter() {
+            // If we've been observing this server id from SLS callbacks, clear it.
+            self.observed_window_server_ids.remove(&info.id);
+        }
+
         for info in ws_info.iter().filter(|i| i.layer == 0) {
             let Some(wid) = self.window_ids.get(&info.id) else {
                 continue;
@@ -1503,7 +1709,7 @@ impl Reactor {
             app_handles,
         });
 
-        _ = self.raise_manager_tx.send((Span::current(), msg));
+        _ = self.raise_manager_tx.send(msg);
     }
 
     #[instrument(skip(self))]
@@ -1512,14 +1718,11 @@ impl Reactor {
         if let Some(app) = self.apps.get(&wid.pid) {
             app_handles.insert(wid.pid, app.handle.clone());
         }
-        _ = self.raise_manager_tx.send((
-            Span::current(),
-            raise_manager::Event::RaiseRequest(RaiseRequest {
-                raise_windows: vec![vec![wid]],
-                focus_window: Some((wid, warp)),
-                app_handles,
-            }),
-        ));
+        _ = self.raise_manager_tx.send(raise_manager::Event::RaiseRequest(RaiseRequest {
+            raise_windows: vec![vec![wid]],
+            focus_window: Some((wid, warp)),
+            app_handles,
+        }));
     }
 
     fn main_window(&self) -> Option<WindowId> { self.main_window_tracker.main_window() }
@@ -1980,7 +2183,7 @@ pub mod tests {
             &crate::common::config::LayoutSettings::default(),
             None,
         ));
-        let (raise_manager_tx, mut raise_manager_rx) = mpsc::unbounded_channel();
+        let (raise_manager_tx, mut raise_manager_rx) = actor::channel();
         reactor.raise_manager_tx = raise_manager_tx;
         let screen1 = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
         let screen2 = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
@@ -2038,7 +2241,7 @@ pub mod tests {
             &crate::common::config::LayoutSettings::default(),
             None,
         ));
-        let (raise_manager_tx, mut raise_manager_rx) = mpsc::unbounded_channel();
+        let (raise_manager_tx, mut raise_manager_rx) = actor::channel();
         reactor.raise_manager_tx = raise_manager_tx;
 
         reactor.handle_events(apps.make_app(1, make_windows(1)));

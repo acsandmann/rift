@@ -4,14 +4,13 @@ use std::path::PathBuf;
 
 use objc2_core_foundation::{CGRect, CGSize};
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
 use tracing::debug;
 
 use super::{
     Direction, FloatingManager, LayoutId, LayoutSystem, LayoutSystemKind, WorkspaceLayouts,
 };
 use crate::actor::app::{AppInfo, WindowId, pid_t};
-use crate::actor::broadcast::BroadcastEvent;
+use crate::actor::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::common::collections::{BTreeSet, HashMap};
 use crate::common::config::LayoutSettings;
 use crate::model::VirtualWorkspaceManager;
@@ -91,7 +90,7 @@ pub struct LayoutEngine {
     #[serde(skip)]
     layout_settings: LayoutSettings,
     #[serde(skip)]
-    broadcast_tx: Option<broadcast::Sender<BroadcastEvent>>,
+    broadcast_tx: Option<BroadcastSender>,
 }
 
 impl LayoutEngine {
@@ -272,7 +271,7 @@ impl LayoutEngine {
     pub fn new(
         virtual_workspace_config: &crate::common::config::VirtualWorkspaceSettings,
         layout_settings: &LayoutSettings,
-        broadcast_tx: Option<broadcast::Sender<BroadcastEvent>>,
+        broadcast_tx: Option<BroadcastSender>,
     ) -> Self {
         let virtual_workspace_manager =
             VirtualWorkspaceManager::new_with_config(virtual_workspace_config);

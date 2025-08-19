@@ -3,10 +3,10 @@ use std::sync::Arc;
 
 use accessibility_sys::pid_t;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
-use tracing::{Span, debug};
+use tracing::debug;
 
 use super::{Event, Reactor, Record, Requested, TransactionId};
+use crate::actor;
 use crate::actor::app::{AppThreadHandle, Request, WindowId};
 use crate::common::collections::BTreeMap;
 use crate::common::config::Config;
@@ -21,7 +21,7 @@ impl Reactor {
         config.settings.default_disable = false;
         config.settings.animate = false;
         let record = Record::new_for_test(tempfile::NamedTempFile::new().unwrap());
-        let (broadcast_tx, _) = tokio::sync::broadcast::channel(128);
+        let (broadcast_tx, _) = actor::channel();
         Reactor::new(Arc::new(config), layout, record, broadcast_tx)
     }
 
@@ -72,8 +72,8 @@ pub fn make_window(idx: usize) -> WindowInfo {
 pub fn make_windows(count: usize) -> Vec<WindowInfo> { (1..=count).map(make_window).collect() }
 
 pub struct Apps {
-    tx: UnboundedSender<(Span, Request)>,
-    rx: UnboundedReceiver<(Span, Request)>,
+    tx: actor::Sender<Request>,
+    rx: actor::Receiver<Request>,
     pub windows: BTreeMap<WindowId, WindowState>,
 }
 
@@ -87,7 +87,7 @@ pub struct WindowState {
 
 impl Apps {
     pub fn new() -> Apps {
-        let (tx, rx) = unbounded_channel();
+        let (tx, rx) = actor::channel();
         Apps {
             tx,
             rx,

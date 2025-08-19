@@ -9,9 +9,10 @@ use core_graphics::event::{
 };
 use objc2_core_foundation::{CGPoint, CGRect};
 use objc2_foundation::{MainThreadMarker, NSInteger};
-use tracing::{Span, debug, error, trace, warn};
+use tracing::{debug, error, trace, warn};
 
 use super::reactor::{self, Event};
+use crate::actor;
 use crate::common::config::Config;
 use crate::common::log::trace_misc;
 use crate::sys::event;
@@ -56,10 +57,8 @@ impl Default for State {
     }
 }
 
-pub type Sender = tokio::sync::mpsc::UnboundedSender<(Span, Request)>;
-pub type Receiver = tokio::sync::mpsc::UnboundedReceiver<(Span, Request)>;
-
-pub fn channel() -> (Sender, Receiver) { tokio::sync::mpsc::unbounded_channel() }
+pub type Sender = actor::Sender<Request>;
+pub type Receiver = actor::Receiver<Request>;
 
 impl Mouse {
     pub fn new(config: Arc<Config>, events_tx: reactor::Sender, requests_rx: Receiver) -> Self {
@@ -166,13 +165,13 @@ impl Mouse {
         }
         match event_type {
             CGEventType::LeftMouseUp => {
-                _ = self.events_tx.send((Span::current().clone(), Event::MouseUp));
+                _ = self.events_tx.send(Event::MouseUp);
             }
             CGEventType::MouseMoved if self.config.settings.focus_follows_mouse => {
                 let loc = event.location();
                 trace!("Mouse moved {loc:?}");
                 if let Some(wsid) = state.track_mouse_move(loc.to_icrate(), mtm) {
-                    _ = self.events_tx.send((Span::current(), Event::MouseMovedOverWindow(wsid)));
+                    _ = self.events_tx.send(Event::MouseMovedOverWindow(wsid));
                 }
             }
             _ => (),

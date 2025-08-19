@@ -79,7 +79,8 @@ impl MainWindowTracker {
             | Event::QueryMetrics(..)
             | Event::QueryConfig(..)
             | Event::ApplyAppRulesToExistingWindows { .. }
-            | Event::WindowServerDestroyed(..) => return None,
+            | Event::WindowServerDestroyed(..)
+            | Event::WindowServerAppeared(..) => return None,
         };
         if Some(event_pid) == self.global_frontmost && quiet_edge == Quiet::No {
             if let Some(wid) = self.main_window() {

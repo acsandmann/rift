@@ -10,42 +10,34 @@ use std::ffi::c_void;
 use std::sync::Mutex;
 
 use once_cell::sync::Lazy;
-use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tracing::{debug, trace};
 
 use super::skylight::{
     SLSMainConnectionID, SLSRegisterConnectionNotifyProc, SLSRequestNotificationsForWindows, cid_t,
 };
+use crate::actor;
 use crate::common::collections::HashMap;
-
-const CHANNEL_SIZE: usize = 8;
-
-#[repr(u32)]
-pub enum CGSEventType {
-    WINDOW_DESTROYED = 804,
-    WINDOW_MOVED = 806,
-    WINDOW_RESIZED = 807,
-    WINDOW_CREATED = 811,
-    ALL = 0xFFFF_FFFF,
-}
+use crate::sys::skylight::CGSEventType;
 
 type Wid = u32;
 
 #[derive(Debug, Clone)]
 pub struct EventData {
-    pub event_type: u32,
+    pub event_type: CGSEventType,
     pub window_id: Option<Wid>,
 }
 
-static EVENT_CHANNELS: Lazy<Mutex<HashMap<u32, (Sender<EventData>, Option<Receiver<EventData>>)>>> =
-    Lazy::new(|| Mutex::new(HashMap::default()));
+static EVENT_CHANNELS: Lazy<
+    Mutex<HashMap<CGSEventType, (actor::Sender<EventData>, Option<actor::Receiver<EventData>>)>>,
+> = Lazy::new(|| Mutex::new(HashMap::default()));
 
 static G_CONNECTION: Lazy<cid_t> = Lazy::new(|| unsafe { SLSMainConnectionID() });
 
-static REGISTERED_EVENTS: Lazy<Mutex<crate::common::collections::HashSet<u32>>> =
+static REGISTERED_EVENTS: Lazy<Mutex<crate::common::collections::HashSet<CGSEventType>>> =
     Lazy::new(|| Mutex::new(crate::common::collections::HashSet::default()));
 
-pub fn init(event: u32) -> i32 {
+pub fn init(event: CGSEventType) -> i32 {
+    let event = event.into();
     let mut registered = REGISTERED_EVENTS.lock().unwrap();
     if registered.contains(&event) {
         debug!("Event {} already registered, skipping", event);
@@ -54,7 +46,7 @@ pub fn init(event: u32) -> i32 {
 
     let mut channels = EVENT_CHANNELS.lock().unwrap();
     if !channels.contains_key(&event) {
-        let (tx, rx) = channel::<EventData>(CHANNEL_SIZE);
+        let (tx, rx) = actor::channel::<EventData>();
         channels.insert(event, (tx, Some(rx)));
     }
 
@@ -76,7 +68,7 @@ pub fn init(event: u32) -> i32 {
     }
 }
 
-pub fn take_receiver(event: u32) -> Receiver<EventData> {
+pub fn take_receiver(event: CGSEventType) -> actor::Receiver<EventData> {
     let mut channels = EVENT_CHANNELS.lock().unwrap();
     let (_tx, rx_opt) = channels.get_mut(&event).unwrap_or_else(|| {
         panic!(
@@ -101,7 +93,7 @@ pub fn update_window_notifications(window_ids: &[u32]) {
 }
 
 extern "C" fn connection_callback(
-    event: u32,
+    event: CGSEventType,
     data: *mut c_void,
     _len: usize,
     _context: *mut c_void,
@@ -120,7 +112,7 @@ extern "C" fn connection_callback(
 
     let channels = EVENT_CHANNELS.lock().unwrap();
     if let Some((sender, _)) = channels.get(&event) {
-        if let Err(e) = sender.blocking_send(event_data.clone()) {
+        if let Err(e) = sender.try_send(event_data.clone()) {
             debug!("Failed to send event {}: {}", event, e);
         } else {
             trace!(
@@ -129,6 +121,6 @@ extern "C" fn connection_callback(
             );
         }
     } else {
-        trace!("No channel registered for event {}. {:?}", event, channels);
+        trace!("No channel registered for event {}.", event);
     }
 }

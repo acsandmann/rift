@@ -18,3 +18,6 @@ pub enum BroadcastEvent {
         windows: Vec<String>,
     },
 }
+
+pub type BroadcastSender = crate::actor::Sender<BroadcastEvent>;
+pub type BroadcastReceiver = crate::actor::Receiver<BroadcastEvent>;

@@ -11,11 +11,11 @@ use objc2_app_kit::NSScreen;
 use objc2_core_foundation::CGRect;
 use objc2_foundation::MainThreadMarker;
 use serde::{Deserialize, Serialize};
-use tracing::{Span, debug, error, info, instrument, trace};
+use tracing::{debug, error, info, instrument};
 
-pub type Sender = tokio::sync::mpsc::UnboundedSender<(Span, WmEvent)>;
-type WeakSender = tokio::sync::mpsc::WeakUnboundedSender<(Span, WmEvent)>;
-type Receiver = tokio::sync::mpsc::UnboundedReceiver<(Span, WmEvent)>;
+pub type Sender = actor::Sender<WmEvent>;
+
+type Receiver = actor::Receiver<WmEvent>;
 
 use crate::actor::app::AppInfo;
 use crate::actor::{self, mouse, reactor};
@@ -84,7 +84,7 @@ pub struct WmController {
     mouse_tx: mouse::Sender,
     stack_line_tx: Option<crate::actor::stack_line::Sender>,
     receiver: Receiver,
-    sender: WeakSender,
+    sender: Sender,
     starting_space: Option<SpaceId>,
     cur_space: Vec<Option<SpaceId>>,
     cur_screen_id: Vec<ScreenId>,
@@ -103,15 +103,15 @@ impl WmController {
         events_tx: reactor::Sender,
         mouse_tx: mouse::Sender,
         stack_line_tx: crate::actor::stack_line::Sender,
-    ) -> (Self, Sender) {
-        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    ) -> (Self, actor::Sender<WmEvent>) {
+        let (sender, receiver) = actor::channel();
         let this = Self {
             config,
             events_tx,
             mouse_tx,
             stack_line_tx: Some(stack_line_tx),
             receiver,
-            sender: sender.downgrade(),
+            sender: sender.clone(),
             starting_space: None,
             cur_space: Vec::new(),
             cur_screen_id: Vec::new(),
@@ -143,14 +143,9 @@ impl WmController {
         use self::WmEvent::*;
         match event {
             AppEventsRegistered => {
-                _ = self
-                    .mouse_tx
-                    .send((Span::current(), mouse::Request::SetEventProcessing(false)));
+                _ = self.mouse_tx.send(mouse::Request::SetEventProcessing(false));
 
-                let Some(sender) = self.sender.upgrade() else {
-                    error!("Failed to upgrade weak sender reference");
-                    return;
-                };
+                let sender = self.sender.clone();
                 let mouse_tx = self.mouse_tx.clone();
                 std::thread::spawn(move || {
                     use std::time::Duration;
@@ -160,26 +155,20 @@ impl WmController {
 
                     Executor::run(async move {
                         Timer::sleep(Duration::from_millis(250)).await;
-                        let _ = sender.send((Span::current(), WmEvent::DiscoverRunningApps));
+                        let _ = sender.send(WmEvent::DiscoverRunningApps);
 
                         Timer::sleep(Duration::from_millis(350)).await;
-                        _ = mouse_tx.send((
-                            tracing::Span::current(),
-                            mouse::Request::SetEventProcessing(true),
-                        ));
+                        _ = mouse_tx.send(mouse::Request::SetEventProcessing(true));
                     });
                 });
             }
             DiscoverRunningApps => {
                 if !self.screen_params_received {
-                    let Some(sender) = self.sender.upgrade() else {
-                        error!("Failed to upgrade weak sender reference");
-                        return;
-                    };
+                    let sender = self.sender.clone();
                     std::thread::spawn(move || {
                         use std::time::Duration;
                         std::thread::sleep(Duration::from_millis(200));
-                        let _ = sender.send((Span::current(), WmEvent::DiscoverRunningApps));
+                        let _ = sender.send(WmEvent::DiscoverRunningApps);
                     });
                     return;
                 }
@@ -191,40 +180,39 @@ impl WmController {
                 self.new_app(pid, info);
             }
             AppGloballyActivated(pid) => {
-                _ = self.mouse_tx.send((Span::current(), mouse::Request::EnforceHidden));
+                _ = self.mouse_tx.send(mouse::Request::EnforceHidden);
 
                 if self.login_window_pid == Some(pid) {
                     info!("Login window activated");
                     self.login_window_active = true;
-                    self.send_event(Event::SpaceChanged(self.active_spaces(), self.get_windows()));
+                    self.events_tx
+                        .send(Event::SpaceChanged(self.active_spaces(), self.get_windows()));
                 }
 
-                self.send_event(Event::ApplicationGloballyActivated(pid));
+                self.events_tx.send(Event::ApplicationGloballyActivated(pid));
             }
             AppGloballyDeactivated(pid) => {
                 if self.login_window_pid == Some(pid) {
                     info!("Login window deactivated");
                     self.login_window_active = false;
-                    self.send_event(Event::SpaceChanged(self.active_spaces(), self.get_windows()));
+                    self.events_tx
+                        .send(Event::SpaceChanged(self.active_spaces(), self.get_windows()));
                 }
-                self.send_event(Event::ApplicationGloballyDeactivated(pid));
+                self.events_tx.send(Event::ApplicationGloballyDeactivated(pid));
             }
             AppTerminated(pid) => {
-                self.send_event(Event::ApplicationTerminated(pid));
+                self.events_tx.send(Event::ApplicationTerminated(pid));
             }
             ScreenParametersChanged(frames, ids, converter, spaces) => {
                 self.screen_params_received = true;
                 self.cur_screen_id = ids;
                 self.handle_space_changed(spaces);
-                self.send_event(Event::ScreenParametersChanged(
+                self.events_tx.send(Event::ScreenParametersChanged(
                     frames.clone(),
                     self.active_spaces(),
                     self.get_windows(),
                 ));
-                _ = self.mouse_tx.send((
-                    Span::current(),
-                    mouse::Request::ScreenParametersChanged(frames, converter),
-                ));
+                _ = self.mouse_tx.send(mouse::Request::ScreenParametersChanged(frames, converter));
                 if let Some(tx) = &self.stack_line_tx {
                     _ = tx.try_send(crate::actor::stack_line::Event::ScreenParametersChanged(
                         converter,
@@ -233,7 +221,8 @@ impl WmController {
             }
             SpaceChanged(spaces) => {
                 self.handle_space_changed(spaces);
-                self.send_event(Event::SpaceChanged(self.active_spaces(), self.get_windows()));
+                self.events_tx
+                    .send(Event::SpaceChanged(self.active_spaces(), self.get_windows()));
             }
             PowerStateChanged(is_low_power_mode) => {
                 info!("Power state changed: low power mode = {}", is_low_power_mode);
@@ -256,7 +245,7 @@ impl WmController {
                         self.disabled_spaces.remove(&space);
                     }
 
-                    self.send_event(reactor::Event::SpaceChanged(
+                    self.events_tx.send(reactor::Event::SpaceChanged(
                         self.active_spaces(),
                         self.get_windows(),
                     ));
@@ -267,32 +256,32 @@ impl WmController {
                 }
             }
             Command(Wm(NextWorkspace)) => {
-                self.send_event(reactor::Event::Command(reactor::Command::Layout(
+                self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
                     layout::LayoutCommand::NextWorkspace(None),
                 )));
             }
             Command(Wm(PrevWorkspace)) => {
-                self.send_event(reactor::Event::Command(reactor::Command::Layout(
+                self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
                     layout::LayoutCommand::PrevWorkspace(None),
                 )));
             }
             Command(Wm(SwitchToWorkspace(workspace_index))) => {
-                self.send_event(reactor::Event::Command(reactor::Command::Layout(
+                self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
                     layout::LayoutCommand::SwitchToWorkspace(workspace_index),
                 )));
             }
             Command(Wm(MoveWindowToWorkspace(workspace_index))) => {
-                self.send_event(reactor::Event::Command(reactor::Command::Layout(
+                self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
                     layout::LayoutCommand::MoveWindowToWorkspace(workspace_index),
                 )));
             }
             Command(Wm(CreateWorkspace)) => {
-                self.send_event(reactor::Event::Command(reactor::Command::Layout(
+                self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
                     layout::LayoutCommand::CreateWorkspace,
                 )));
             }
             Command(Wm(SwitchToLastWorkspace)) => {
-                self.send_event(reactor::Event::Command(reactor::Command::Layout(
+                self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
                     layout::LayoutCommand::SwitchToLastWorkspace,
                 )));
             }
@@ -300,7 +289,7 @@ impl WmController {
                 self.exec_cmd(cmd);
             }
             Command(ReactorCommand(cmd)) => {
-                self.send_event(reactor::Event::Command(cmd));
+                self.events_tx.send(reactor::Event::Command(cmd));
             }
         }
     }
@@ -353,14 +342,9 @@ impl WmController {
         spaces
     }
 
-    fn send_event(&mut self, event: reactor::Event) {
-        trace!(?event, "Sending event");
-        let _ = self.events_tx.send((Span::current().clone(), event));
-    }
-
     fn register_hotkeys(&mut self) {
         debug!("register_hotkeys");
-        let mgr = HotkeyManager::new(self.sender.upgrade().unwrap());
+        let mgr = HotkeyManager::new(self.sender.clone());
         for (key, cmd) in &self.config.config.keys {
             mgr.register_wm(key.modifiers, key.key_code, cmd.clone());
         }
@@ -415,7 +399,7 @@ impl WmController {
 
         for (pid, windows) in windows_by_pid {
             if let Some(app_info) = self.get_app_info_for_pid(pid) {
-                self.send_event(reactor::Event::ApplyAppRulesToExistingWindows {
+                self.events_tx.send(reactor::Event::ApplyAppRulesToExistingWindows {
                     pid,
                     app_info,
                     windows,

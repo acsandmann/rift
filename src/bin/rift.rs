@@ -4,10 +4,11 @@ use std::sync::Arc;
 use clap::Parser;
 use objc2::MainThreadMarker;
 use rift_wm::actor::menu_bar::Menu;
-use rift_wm::actor::mouse::{self, Mouse};
+use rift_wm::actor::mouse::Mouse;
 use rift_wm::actor::notification_center::NotificationCenter;
 use rift_wm::actor::reactor::{self, Reactor};
 use rift_wm::actor::stack_line::StackLine;
+use rift_wm::actor::window_notify as window_notify_actor;
 use rift_wm::actor::wm_controller::{self, WmController};
 use rift_wm::common::config::{Config, config_file, restore_file};
 use rift_wm::common::log;
@@ -15,7 +16,7 @@ use rift_wm::layout_engine::LayoutEngine;
 use rift_wm::server;
 use rift_wm::sys::executor::Executor;
 use rift_wm::sys::screen::CoordinateConverter;
-use rift_wm::sys::window_notify::{self, take_receiver};
+use rift_wm::sys::skylight::CGSEventType;
 use tokio::join;
 use tracing::{error, trace};
 
@@ -162,8 +163,6 @@ fn main() {
     log::init_logging();
     install_panic_hook();
 
-    let _ = window_notify::init(window_notify::CGSEventType::WINDOW_DESTROYED as u32);
-
     let mut config = if config_file().exists() {
         Config::read(&config_file()).unwrap()
     } else {
@@ -180,7 +179,7 @@ fn main() {
 
     execute_startup_commands(&config.settings.run_on_start);
 
-    let (broadcast_tx, _broadcast_rx) = tokio::sync::broadcast::channel(256);
+    let (broadcast_tx, broadcast_rx) = rift_wm::actor::channel();
 
     let layout = if opt.restore {
         LayoutEngine::load(restore_file()).unwrap()
@@ -191,7 +190,7 @@ fn main() {
             Some(broadcast_tx.clone()),
         )
     };
-    let (mouse_tx, mouse_rx) = mouse::channel();
+    let (mouse_tx, mouse_rx) = rift_wm::actor::channel();
     let (menu_tx, menu_rx) = rift_wm::actor::channel();
     let (stack_line_tx, stack_line_rx) = rift_wm::actor::channel();
     let events_tx = Reactor::spawn(
@@ -204,45 +203,26 @@ fn main() {
         stack_line_tx.clone(),
     );
 
-    {
-        let mut rx = take_receiver(window_notify::CGSEventType::WINDOW_DESTROYED as u32);
-        let events_tx_clone = events_tx.clone();
-        std::thread::spawn(move || {
-            loop {
-                match rx.blocking_recv() {
-                    Some(event) => {
-                        if let Some(window_id) = event.window_id {
-                            let _ = events_tx_clone.send((
-                                tracing::Span::current(),
-                                rift_wm::actor::reactor::Event::WindowServerDestroyed(
-                                    rift_wm::sys::window_server::WindowServerId::new(window_id),
-                                ),
-                            ));
-                        }
-                    }
-                    None => {
-                        // The sender has been dropped, exit the loop.
-                        break;
-                    }
-                }
-            }
-        });
-    }
+    let (_, wnd_rx) = rift_wm::actor::channel();
+    let wn_actor = window_notify_actor::WindowNotify::new(events_tx.clone(), wnd_rx, &[
+        CGSEventType::WindowDestroyed,
+        CGSEventType::WindowCreated,
+    ]);
 
     let events_tx_mach = events_tx.clone();
     std::thread::spawn(move || {
         server::run_mach_server(events_tx_mach);
     });
 
-    let mach_bridge_rx = broadcast_tx.subscribe();
+    let mach_bridge_rx = broadcast_rx;
     std::thread::spawn(move || {
         let mut rx = mach_bridge_rx;
         loop {
             match rx.blocking_recv() {
-                Ok(event) => {
+                Some((_span, event)) => {
                     crate::server::forward_broadcast_event(event);
                 }
-                Err(_) => {
+                None => {
                     break;
                 }
             }
@@ -288,6 +268,7 @@ fn main() {
             mouse.run(),
             menu.run(),
             stack_line.run(),
+            wn_actor.run(),
         );
     });
 }

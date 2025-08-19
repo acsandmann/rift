@@ -13,7 +13,7 @@ use objc2_core_foundation::CGRect;
 use objc2_foundation::{
     MainThreadMarker, NSNotification, NSNotificationCenter, NSObject, NSString,
 };
-use tracing::{Span, debug, info_span, trace, warn};
+use tracing::{debug, info_span, trace, warn};
 
 use super::wm_controller::{self, WmEvent};
 use crate::actor::app::AppInfo;
@@ -155,9 +155,7 @@ impl NotificationCenterInner {
         }
     }
 
-    fn send_event(&self, event: WmEvent) {
-        _ = self.ivars().events_tx.send((Span::current().clone(), event));
-    }
+    fn send_event(&self, event: WmEvent) { _ = self.ivars().events_tx.send(event); }
 
     fn running_application(
         &self,

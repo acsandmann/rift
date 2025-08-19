@@ -35,8 +35,8 @@ impl HotkeyManager {
         self.hook
             .register(Hotkey { modifiers, key_code }, move || {
                 seq += 1;
-                let span = info_span!("hotkey::press", ?key_code, ?seq);
-                events_tx.send((span, WmEvent::Command(cmd.clone()))).unwrap()
+                let _ = info_span!("hotkey::press", ?key_code, ?seq);
+                events_tx.send(WmEvent::Command(cmd.clone()))
             })
             .unwrap();
     }

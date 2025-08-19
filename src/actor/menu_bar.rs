@@ -42,8 +42,7 @@ impl Menu {
         if self.icon.is_none() {
             return;
         }
-        while let Some((span, event)) = self.rx.recv().await {
-            let _guard = span.enter();
+        while let Some((_, event)) = self.rx.recv().await {
             self.handle_event(event);
         }
     }

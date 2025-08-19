@@ -25,9 +25,6 @@ use objc2::rc::Retained;
 use objc2_app_kit::NSRunningApplication;
 use objc2_core_foundation::{CGPoint, CGRect};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::{
-    UnboundedReceiver as Receiver, UnboundedSender as Sender, unbounded_channel as channel,
-};
 use tokio::sync::oneshot;
 use tokio::{join, select};
 use tokio_stream::StreamExt;
@@ -35,6 +32,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, Span, debug, error, info, instrument, trace, warn};
 
+use crate::actor;
 use crate::actor::reactor::{self, Event, Requested, TransactionId};
 use crate::common::collections::HashMap;
 use crate::sys::app::NSRunningApplicationExt;
@@ -168,19 +166,16 @@ impl WindowId {
 
 #[derive(Clone)]
 pub struct AppThreadHandle {
-    requests_tx: Sender<(Span, Request)>,
+    requests_tx: actor::Sender<Request>,
 }
 
 impl AppThreadHandle {
-    pub(crate) fn new_for_test(requests_tx: Sender<(Span, Request)>) -> Self {
+    pub(crate) fn new_for_test(requests_tx: actor::Sender<Request>) -> Self {
         let this = AppThreadHandle { requests_tx };
         this
     }
 
-    pub fn send(&self, req: Request) -> anyhow::Result<()> {
-        self.requests_tx.send((Span::current(), req))?;
-        Ok(())
-    }
+    pub fn send(&self, req: Request) -> anyhow::Result<()> { Ok(self.requests_tx.send(req)) }
 }
 
 impl Debug for AppThreadHandle {
@@ -238,7 +233,7 @@ struct State {
     main_window: Option<WindowId>,
     last_activated: Option<(Instant, Quiet, oneshot::Sender<()>)>,
     is_frontmost: bool,
-    raises_tx: Sender<(Span, RaiseRequest)>,
+    raises_tx: actor::Sender<RaiseRequest>,
 }
 
 struct WindowState {
@@ -269,10 +264,10 @@ impl State {
     async fn run(
         mut self,
         info: AppInfo,
-        requests_tx: Sender<(Span, Request)>,
-        requests_rx: Receiver<(Span, Request)>,
-        notifications_rx: Receiver<(AXUIElement, String)>,
-        raises_rx: Receiver<(Span, RaiseRequest)>,
+        requests_tx: actor::Sender<Request>,
+        requests_rx: actor::Receiver<Request>,
+        notifications_rx: actor::Receiver<(AXUIElement, String)>,
+        raises_rx: actor::Receiver<RaiseRequest>,
     ) {
         let handle = AppThreadHandle { requests_tx };
         if !self.init(handle, info) {
@@ -288,11 +283,11 @@ impl State {
 
     async fn handle_incoming(
         this: &RefCell<Self>,
-        requests_rx: Receiver<(Span, Request)>,
-        notifications_rx: Receiver<(AXUIElement, String)>,
+        requests_rx: actor::Receiver<Request>,
+        notifications_rx: actor::Receiver<(AXUIElement, String)>,
     ) {
         pub enum Incoming {
-            Notification((AXUIElement, String)),
+            Notification((Span, (AXUIElement, String))),
             Request((Span, Request)),
         }
 
@@ -339,14 +334,14 @@ impl State {
                         },
                     }
                 }
-                Incoming::Notification((elem, notif)) => {
+                Incoming::Notification((_, (elem, notif))) => {
                     this.handle_notification(elem, &notif);
                 }
             }
         }
     }
 
-    async fn handle_raises(this: &RefCell<Self>, mut rx: Receiver<(Span, RaiseRequest)>) {
+    async fn handle_raises(this: &RefCell<Self>, mut rx: actor::Receiver<RaiseRequest>) {
         while let Some((span, raise)) = rx.recv().await {
             let RaiseRequest(wids, token, sequence_id, quiet) = raise;
             if let Err(e) = Self::handle_raise_request(this, wids, &token, sequence_id, quiet)
@@ -392,22 +387,15 @@ impl State {
         self.main_window = self.app.main_window().ok().and_then(|w| self.id(&w).ok());
         self.is_frontmost = self.app.frontmost().map(|b| b.into()).unwrap_or(false);
 
-        if self
-            .events_tx
-            .send((Span::current(), Event::ApplicationLaunched {
-                pid: self.pid,
-                handle,
-                info,
-                is_frontmost: self.is_frontmost,
-                main_window: self.main_window,
-                visible_windows: windows,
-                window_server_info,
-            }))
-            .is_err()
-        {
-            debug!(pid = ?self.pid, "Failed to send ApplicationLaunched event, exiting thread");
-            return false;
-        };
+        self.events_tx.send(Event::ApplicationLaunched {
+            pid: self.pid,
+            handle,
+            info,
+            is_frontmost: self.is_frontmost,
+            main_window: self.main_window,
+            visible_windows: windows,
+            window_server_info,
+        });
 
         true
     }
@@ -533,11 +521,7 @@ impl State {
             }
             &mut Request::Raise(ref wids, ref token, sequence_id, quiet) => {
                 self.raises_tx
-                    .send((
-                        Span::current(),
-                        RaiseRequest(wids.clone(), token.clone(), sequence_id, quiet),
-                    ))
-                    .unwrap();
+                    .send(RaiseRequest(wids.clone(), token.clone(), sequence_id, quiet));
             }
         }
         Ok(false)
@@ -547,7 +531,6 @@ impl State {
     fn handle_notification(&mut self, elem: AXUIElement, notif: &str) {
         trace!(?notif, ?elem, "Got notification");
         #[allow(non_upper_case_globals)]
-        #[forbid(non_snake_case)]
         match notif {
             kAXApplicationActivatedNotification | kAXApplicationDeactivatedNotification => {
                 _ = self.on_activation_changed();
@@ -848,7 +831,7 @@ impl State {
         }
     }
 
-    fn send_event(&self, event: Event) { self.events_tx.send((Span::current(), event)).unwrap(); }
+    fn send_event(&self, event: Event) { self.events_tx.send(event); }
 
     fn window(&self, wid: WindowId) -> Result<&WindowState, accessibility::Error> {
         assert_eq!(wid.pid, self.pid);
@@ -920,11 +903,11 @@ fn app_thread_main(pid: pid_t, info: AppInfo, events_tx: reactor::Sender) {
         info!(?pid, ?bundle_id, "Making observer failed; exiting app thread");
         return;
     };
-    let (notifications_tx, notifications_rx) = channel();
+    let (notifications_tx, notifications_rx) = actor::channel();
     let observer =
         observer.install(move |elem, notif| _ = notifications_tx.send((elem, notif.to_owned())));
 
-    let (raises_tx, raises_rx) = channel();
+    let (raises_tx, raises_rx) = actor::channel();
     let state = State {
         pid,
         running_app,
@@ -940,7 +923,7 @@ fn app_thread_main(pid: pid_t, info: AppInfo, events_tx: reactor::Sender) {
         raises_tx,
     };
 
-    let (requests_tx, requests_rx) = channel();
+    let (requests_tx, requests_rx) = actor::channel();
     Executor::run(state.run(info, requests_tx, requests_rx, notifications_rx, raises_rx));
 }
 

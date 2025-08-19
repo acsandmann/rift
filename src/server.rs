@@ -331,7 +331,7 @@ impl MachHandler {
                 let (tokio_tx, tokio_rx) = oneshot::channel();
                 let event = Event::QueryWorkspaces(tokio_tx);
 
-                if let Err(e) = self.reactor_tx.send((tracing::Span::current(), event)) {
+                if let Err(e) = self.reactor_tx.try_send(event) {
                     error!("Failed to send workspace query: {}", e);
                     return RiftResponse::Error {
                         message: "Failed to query workspaces".to_string(),
@@ -356,7 +356,7 @@ impl MachHandler {
                 let (tokio_tx, tokio_rx) = oneshot::channel();
                 let event = Event::QueryWindows { space_id, response: tokio_tx };
 
-                if let Err(e) = self.reactor_tx.send((tracing::Span::current(), event)) {
+                if let Err(e) = self.reactor_tx.try_send(event) {
                     error!("Failed to send windows query: {}", e);
                     return RiftResponse::Error {
                         message: "Failed to query windows".to_string(),
@@ -390,7 +390,7 @@ impl MachHandler {
                 let (tokio_tx, tokio_rx) = oneshot::channel();
                 let event = Event::QueryWindowInfo { window_id, response: tokio_tx };
 
-                if let Err(e) = self.reactor_tx.send((tracing::Span::current(), event)) {
+                if let Err(e) = self.reactor_tx.try_send(event) {
                     error!("Failed to send window info query: {}", e);
                     return RiftResponse::Error {
                         message: "Failed to query window info".to_string(),
@@ -416,7 +416,7 @@ impl MachHandler {
                 let (tokio_tx, tokio_rx) = oneshot::channel();
                 let event = Event::QueryLayoutState { space_id, response: tokio_tx };
 
-                if let Err(e) = self.reactor_tx.send((tracing::Span::current(), event)) {
+                if let Err(e) = self.reactor_tx.try_send(event) {
                     error!("Failed to send layout state query: {}", e);
                     return RiftResponse::Error {
                         message: "Failed to query layout state".to_string(),
@@ -442,7 +442,7 @@ impl MachHandler {
                 let (tokio_tx, tokio_rx) = oneshot::channel();
                 let event = Event::QueryApplications(tokio_tx);
 
-                if let Err(e) = self.reactor_tx.send((tracing::Span::current(), event)) {
+                if let Err(e) = self.reactor_tx.try_send(event) {
                     error!("Failed to send applications query: {}", e);
                     return RiftResponse::Error {
                         message: "Failed to query applications".to_string(),
@@ -465,7 +465,7 @@ impl MachHandler {
                 let (tokio_tx, tokio_rx) = oneshot::channel();
                 let event = Event::QueryMetrics(tokio_tx);
 
-                if let Err(e) = self.reactor_tx.send((tracing::Span::current(), event)) {
+                if let Err(e) = self.reactor_tx.try_send(event) {
                     error!("Failed to send metrics query: {}", e);
                     return RiftResponse::Error {
                         message: "Failed to query metrics".to_string(),
@@ -486,7 +486,7 @@ impl MachHandler {
                 let (tokio_tx, tokio_rx) = oneshot::channel();
                 let event = Event::QueryConfig(tokio_tx);
 
-                if let Err(e) = self.reactor_tx.send((tracing::Span::current(), event)) {
+                if let Err(e) = self.reactor_tx.try_send(event) {
                     error!("Failed to send config query: {}", e);
                     return RiftResponse::Error {
                         message: "Failed to query config".to_string(),
@@ -508,7 +508,7 @@ impl MachHandler {
                     Ok(RiftCommand::Reactor(reactor_command)) => {
                         let event = Event::Command(reactor_command);
 
-                        if let Err(e) = self.reactor_tx.send((tracing::Span::current(), event)) {
+                        if let Err(e) = self.reactor_tx.try_send(event) {
                             error!("Failed to send command to reactor: {}", e);
                             return RiftResponse::Error {
                                 message: "Failed to execute command".to_string(),

@@ -6,11 +6,11 @@ use std::sync::Arc;
 
 #[cfg(test)]
 use tempfile::NamedTempFile;
-use tokio::sync::mpsc::unbounded_channel;
 use tracing::Span;
 
 use super::{Event, Reactor};
 use crate::actor::app::{AppThreadHandle, Request};
+use crate::actor::{self};
 use crate::common::config::Config;
 use crate::layout_engine::LayoutEngine;
 
@@ -70,17 +70,15 @@ pub fn replay(
     mut on_event: impl FnMut(Span, Request) + Send + 'static,
 ) -> anyhow::Result<()> {
     let file = BufReader::new(File::open(path)?);
-    let (tx, mut rx) = unbounded_channel();
+    let (tx, mut rx) = actor::channel();
     let handle = AppThreadHandle::new_for_test(tx);
     DESERIALIZE_THREAD_HANDLE.with(|h| h.borrow_mut().replace(handle));
     let mut lines = file.lines();
     let config = ron::de::from_str(&lines.next().expect("Empty restore file")?)?;
     let layout = ron::de::from_str(&lines.next().expect("Expected layout line")?)?;
-    let (broadcast_tx, _) = tokio::sync::broadcast::channel(128);
+    let (broadcast_tx, _) = actor::channel();
     let mut reactor = Reactor::new(Arc::new(config), layout, Record::new(None), broadcast_tx);
     std::thread::spawn(move || {
-        // Unfortunately we have to spawn a thread because the reactor blocks
-        // on raise requests currently.
         while let Some((span, request)) = rx.blocking_recv() {
             on_event(span, request);
         }

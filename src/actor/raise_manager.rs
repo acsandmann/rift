@@ -4,12 +4,11 @@ use std::time::{Duration, Instant};
 use accessibility_sys::pid_t;
 use objc2_core_foundation::CGPoint;
 use rustc_hash::FxHashMap as HashMap;
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{Span, debug, trace, warn};
+use tracing::{debug, trace, warn};
 
 use crate::actor::app::{AppThreadHandle, Quiet, Request, WindowId};
-use crate::actor::{mouse, reactor};
+use crate::actor::{self, mouse, reactor};
 use crate::sys::timer::Timer;
 
 /// Messages that can be sent to the raise manager
@@ -57,8 +56,8 @@ struct ActiveSequence {
     timed_out: bool,
 }
 
-pub type Sender = mpsc::UnboundedSender<(Span, Event)>;
-type Receiver = mpsc::UnboundedReceiver<(Span, Event)>;
+pub type Sender = actor::Sender<Event>;
+type Receiver = actor::Receiver<Event>;
 
 const TIMEOUT_DURATION: Duration = Duration::from_millis(250);
 
@@ -107,10 +106,7 @@ impl RaiseManager {
                             // relayed back to us. We send these events through
                             // the reactor so that we can record/replay them.
                             sequence.timed_out = true;
-                            let _ = events_tx.send((
-                                tracing::Span::current(),
-                                reactor::Event::RaiseTimeout { sequence_id: sequence.sequence_id }
-                            ));
+                            events_tx.send(reactor::Event::RaiseTimeout { sequence_id: sequence.sequence_id });
                         }
                     }
                 }
@@ -297,7 +293,7 @@ impl RaiseManager {
                 {
                     // For now we don't wait for the last window to be raised;
                     // send the warp as soon as we send the raise request.
-                    _ = mouse_tx.send((Span::current(), mouse::Request::Warp(warp)));
+                    _ = mouse_tx.send(mouse::Request::Warp(warp));
                 }
             }
         }
@@ -318,18 +314,15 @@ impl RaiseManager {
 
 #[cfg(test)]
 mod tests {
-    use tokio::sync::mpsc;
 
     use super::*;
+    use crate::actor;
     use crate::actor::app::{AppThreadHandle, WindowId};
     use crate::sys::executor::Executor;
 
-    fn create_test_app_handles() -> (
-        HashMap<i32, AppThreadHandle>,
-        mpsc::UnboundedReceiver<(Span, Request)>,
-    ) {
+    fn create_test_app_handles() -> (HashMap<i32, AppThreadHandle>, actor::Receiver<Request>) {
         let mut app_handles = HashMap::default();
-        let (app_tx, app_rx) = mpsc::unbounded_channel();
+        let (app_tx, app_rx) = actor::channel();
         let app_handle = AppThreadHandle::new_for_test(app_tx);
         app_handles.insert(1, app_handle);
         (app_handles, app_rx)
@@ -347,7 +340,7 @@ mod tests {
         })
     }
 
-    fn collect_requests(app_rx: &mut mpsc::UnboundedReceiver<(Span, Request)>) -> Vec<Request> {
+    fn collect_requests(app_rx: &mut actor::Receiver<Request>) -> Vec<Request> {
         let mut requests = Vec::new();
         while let Ok((_, request)) = app_rx.try_recv() {
             requests.push(request);
@@ -471,7 +464,7 @@ mod tests {
     fn test_all_raises_complete_triggers_focus() {
         Executor::run(async {
             let mut raise_manager = RaiseManager::new();
-            let (mouse_tx, mut mouse_rx) = mpsc::unbounded_channel();
+            let (mouse_tx, mut mouse_rx) = actor::channel();
             raise_manager.mouse_tx = Some(mouse_tx);
 
             let (app_handles, mut app_rx) = create_test_app_handles();

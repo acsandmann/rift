@@ -3,6 +3,7 @@
 // https://github.com/koekeishiya/yabai/blob/d55a647913ab72d8d8b348bee2d3e59e52ce4a5d/src/misc/extern.h.
 
 use std::ffi::{c_int, c_uint, c_void};
+use std::fmt::Display;
 
 use accessibility_sys::{AXError, AXUIElementRef};
 use bitflags::bitflags;
@@ -20,6 +21,45 @@ pub static G_CONNECTION: Lazy<cid_t> = Lazy::new(|| unsafe { SLSMainConnectionID
 
 #[allow(non_camel_case_types)]
 pub type cid_t = i32;
+
+#[repr(u32)]
+#[derive(Hash, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CGSEventType {
+    WindowDestroyed = 804,
+    WindowMoved = 806,
+    WindowResized = 807,
+    WindowCreated = 811,
+    // All = 0xFFFF_FFFF,
+}
+
+impl From<CGSEventType> for u32 {
+    fn from(e: CGSEventType) -> Self { e as u32 }
+}
+
+impl std::convert::TryFrom<u32> for CGSEventType {
+    type Error = u32;
+
+    fn try_from(v: u32) -> Result<Self, Self::Error> {
+        match v {
+            804 => Ok(CGSEventType::WindowDestroyed),
+            806 => Ok(CGSEventType::WindowMoved),
+            807 => Ok(CGSEventType::WindowResized),
+            811 => Ok(CGSEventType::WindowCreated),
+            other => Err(other),
+        }
+    }
+}
+
+impl Display for CGSEventType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CGSEventType::WindowDestroyed => write!(f, "WindowDestroyed"),
+            CGSEventType::WindowMoved => write!(f, "WindowMoved"),
+            CGSEventType::WindowResized => write!(f, "WindowResized"),
+            CGSEventType::WindowCreated => write!(f, "WindowCreated"),
+        }
+    }
+}
 
 bitflags! {
     #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -86,8 +126,8 @@ unsafe extern "C" {
     ) -> i32;
     pub fn SLSRegisterConnectionNotifyProc(
         cid: cid_t,
-        callback: extern "C" fn(u32, *mut c_void, usize, *mut c_void, cid_t),
-        event: u32,
+        callback: extern "C" fn(CGSEventType, *mut c_void, usize, *mut c_void, cid_t),
+        event: CGSEventType,
         data: *mut c_void,
     ) -> i32;
     pub fn SLSRequestNotificationsForWindows(
