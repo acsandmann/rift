@@ -1,9 +1,14 @@
 use std::convert::Infallible;
 use std::ffi::{CString, c_void};
 use std::os::raw::c_char;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::task::{Context, RawWaker, RawWakerVTable, Waker};
+use std::thread;
+use std::time::{Duration, Instant};
 
+use r#continue::continuation;
 use core_foundation::date::CFAbsoluteTimeGetCurrent;
 use core_foundation::runloop::{
     CFRunLoop, CFRunLoopTimer, CFRunLoopTimerContext, CFRunLoopTimerRef, kCFRunLoopDefaultMode,
@@ -12,7 +17,6 @@ use dispatchr::semaphore::Managed;
 use dispatchr::time::Time;
 use nix::unistd::{ForkResult, execvp, fork};
 use serde::{Deserialize, Serialize};
-use tokio::sync::oneshot;
 use tracing::{debug, error, info, warn};
 
 use crate::actor::broadcast::BroadcastEvent;
@@ -328,8 +332,8 @@ impl MachHandler {
             RiftRequest::UnsubscribeCli { event } => self.handle_cli_unsubscribe(event),
             RiftRequest::ListCliSubscriptions => self.handle_list_cli_subscriptions(),
             RiftRequest::GetWorkspaces => {
-                let (tokio_tx, tokio_rx) = oneshot::channel();
-                let event = Event::QueryWorkspaces(tokio_tx);
+                let (cont_tx, cont_fut) = continuation::<WorkspaceQueryResponse>();
+                let event = Event::QueryWorkspaces(cont_tx);
 
                 if let Err(e) = self.reactor_tx.try_send(event) {
                     error!("Failed to send workspace query: {}", e);
@@ -338,7 +342,7 @@ impl MachHandler {
                     };
                 }
 
-                match wait_for(tokio_rx, Duration::from_secs(5)) {
+                match block_on_continuation(cont_fut, Duration::from_secs(5)) {
                     Ok(WorkspaceQueryResponse { workspaces }) => RiftResponse::Success {
                         data: serde_json::to_value(workspaces).unwrap(),
                     },
@@ -353,8 +357,8 @@ impl MachHandler {
             RiftRequest::GetWindows { space_id: _ } => {
                 let space_id = None;
 
-                let (tokio_tx, tokio_rx) = oneshot::channel();
-                let event = Event::QueryWindows { space_id, response: tokio_tx };
+                let (cont_tx, cont_fut) = continuation::<Vec<crate::model::server::WindowData>>();
+                let event = Event::QueryWindows { space_id, response: cont_tx };
 
                 if let Err(e) = self.reactor_tx.try_send(event) {
                     error!("Failed to send windows query: {}", e);
@@ -363,7 +367,7 @@ impl MachHandler {
                     };
                 }
 
-                match wait_for(tokio_rx, Duration::from_secs(5)) {
+                match block_on_continuation(cont_fut, Duration::from_secs(5)) {
                     Ok(windows) => RiftResponse::Success {
                         data: serde_json::to_value(windows).unwrap(),
                     },
@@ -387,8 +391,9 @@ impl MachHandler {
                     }
                 };
 
-                let (tokio_tx, tokio_rx) = oneshot::channel();
-                let event = Event::QueryWindowInfo { window_id, response: tokio_tx };
+                let (cont_tx, cont_fut) =
+                    continuation::<Option<crate::model::server::WindowData>>();
+                let event = Event::QueryWindowInfo { window_id, response: cont_tx };
 
                 if let Err(e) = self.reactor_tx.try_send(event) {
                     error!("Failed to send window info query: {}", e);
@@ -397,7 +402,7 @@ impl MachHandler {
                     };
                 }
 
-                match wait_for(tokio_rx, Duration::from_secs(5)) {
+                match block_on_continuation(cont_fut, Duration::from_secs(5)) {
                     Ok(Some(window)) => RiftResponse::Success {
                         data: serde_json::to_value(window).unwrap(),
                     },
@@ -413,8 +418,9 @@ impl MachHandler {
                 }
             }
             RiftRequest::GetLayoutState { space_id } => {
-                let (tokio_tx, tokio_rx) = oneshot::channel();
-                let event = Event::QueryLayoutState { space_id, response: tokio_tx };
+                let (cont_tx, cont_fut) =
+                    continuation::<Option<crate::model::server::LayoutStateData>>();
+                let event = Event::QueryLayoutState { space_id, response: cont_tx };
 
                 if let Err(e) = self.reactor_tx.try_send(event) {
                     error!("Failed to send layout state query: {}", e);
@@ -423,7 +429,7 @@ impl MachHandler {
                     };
                 }
 
-                match wait_for(tokio_rx, Duration::from_secs(5)) {
+                match block_on_continuation(cont_fut, Duration::from_secs(5)) {
                     Ok(Some(layout_state)) => RiftResponse::Success {
                         data: serde_json::to_value(layout_state).unwrap(),
                     },
@@ -439,8 +445,9 @@ impl MachHandler {
                 }
             }
             RiftRequest::GetApplications => {
-                let (tokio_tx, tokio_rx) = oneshot::channel();
-                let event = Event::QueryApplications(tokio_tx);
+                let (cont_tx, cont_fut) =
+                    continuation::<Vec<crate::model::server::ApplicationData>>();
+                let event = Event::QueryApplications(cont_tx);
 
                 if let Err(e) = self.reactor_tx.try_send(event) {
                     error!("Failed to send applications query: {}", e);
@@ -449,7 +456,7 @@ impl MachHandler {
                     };
                 }
 
-                match wait_for(tokio_rx, Duration::from_secs(5)) {
+                match block_on_continuation(cont_fut, Duration::from_secs(5)) {
                     Ok(applications) => RiftResponse::Success {
                         data: serde_json::to_value(applications).unwrap(),
                     },
@@ -462,8 +469,8 @@ impl MachHandler {
                 }
             }
             RiftRequest::GetMetrics => {
-                let (tokio_tx, tokio_rx) = oneshot::channel();
-                let event = Event::QueryMetrics(tokio_tx);
+                let (cont_tx, cont_fut) = continuation::<serde_json::Value>();
+                let event = Event::QueryMetrics(cont_tx);
 
                 if let Err(e) = self.reactor_tx.try_send(event) {
                     error!("Failed to send metrics query: {}", e);
@@ -472,7 +479,7 @@ impl MachHandler {
                     };
                 }
 
-                match wait_for(tokio_rx, Duration::from_secs(5)) {
+                match block_on_continuation(cont_fut, Duration::from_secs(5)) {
                     Ok(metrics) => RiftResponse::Success { data: metrics },
                     Err(e) => {
                         error!("Failed to get metrics response: {}", e);
@@ -483,8 +490,8 @@ impl MachHandler {
                 }
             }
             RiftRequest::GetConfig => {
-                let (tokio_tx, tokio_rx) = oneshot::channel();
-                let event = Event::QueryConfig(tokio_tx);
+                let (cont_tx, cont_fut) = continuation::<serde_json::Value>();
+                let event = Event::QueryConfig(cont_tx);
 
                 if let Err(e) = self.reactor_tx.try_send(event) {
                     error!("Failed to send config query: {}", e);
@@ -493,7 +500,7 @@ impl MachHandler {
                     };
                 }
 
-                match wait_for(tokio_rx, Duration::from_secs(5)) {
+                match block_on_continuation(cont_fut, Duration::from_secs(5)) {
                     Ok(config) => RiftResponse::Success { data: config },
                     Err(e) => {
                         error!("Failed to get config response: {}", e);
@@ -712,27 +719,67 @@ unsafe fn schedule_event_send(runloop: &CFRunLoop, client_port: ClientPort, even
     runloop.add_timer(&timer, unsafe { kCFRunLoopDefaultMode });
 }
 
-fn wait_for<T: Send + 'static>(rx: oneshot::Receiver<T>, timeout: Duration) -> Result<T, String> {
-    let sema = Managed::new(0);
-    let out = Arc::new(Mutex::new(None));
-
-    {
-        let sema = sema.clone();
-        let out = Arc::clone(&out);
-        std::thread::spawn(move || {
-            let result = rx.blocking_recv().map_err(|_| "Channel closed".into());
-            let mut out_lock = out.lock().unwrap();
-            *out_lock = Some(result);
-            sema.signal();
-        });
+fn block_on_continuation<T: Send + 'static>(
+    mut fut: r#continue::Future<T>,
+    timeout: Duration,
+) -> Result<T, String> {
+    // Create a RawWaker that unparks this thread when woken.
+    struct ThreadWaker {
+        thread: thread::Thread,
+        signaled: Arc<AtomicBool>,
     }
 
-    let deadline = Time::new_after(Time::NOW, timeout.as_nanos() as i64);
-    if sema.wait(deadline) == 0 {
-        let mut out_lock = out.lock().unwrap();
-        out_lock.take().unwrap_or_else(|| Err("Channel closed".into()))
-    } else {
-        Err("Timeout".into())
+    unsafe fn clone_raw(data: *const ()) -> RawWaker {
+        let tw = &*(data as *const ThreadWaker);
+        let cloned = Box::into_raw(Box::new(ThreadWaker {
+            thread: tw.thread.clone(),
+            signaled: Arc::new(AtomicBool::new(tw.signaled.load(Ordering::SeqCst))),
+        }));
+        RawWaker::new(cloned as *const (), &VTABLE)
+    }
+    unsafe fn wake_raw(data: *const ()) {
+        let tw = Box::from_raw(data as *mut ThreadWaker);
+        tw.signaled.store(true, Ordering::SeqCst);
+        tw.thread.unpark();
+        // drop tw
+    }
+    unsafe fn wake_by_ref_raw(data: *const ()) {
+        let tw = &*(data as *const ThreadWaker);
+        tw.signaled.store(true, Ordering::SeqCst);
+        tw.thread.unpark();
+    }
+    unsafe fn drop_raw(data: *const ()) { let _ = Box::from_raw(data as *mut ThreadWaker); }
+
+    static VTABLE: RawWakerVTable =
+        RawWakerVTable::new(clone_raw, wake_raw, wake_by_ref_raw, drop_raw);
+
+    let signaled = Arc::new(AtomicBool::new(false));
+    let tw = Box::new(ThreadWaker {
+        thread: thread::current(),
+        signaled: signaled.clone(),
+    });
+
+    let raw = RawWaker::new(Box::into_raw(tw) as *const (), &VTABLE);
+    let waker = unsafe { Waker::from_raw(raw) };
+    let mut cx = Context::from_waker(&waker);
+
+    let start = Instant::now();
+    let deadline = start + timeout;
+
+    loop {
+        match Pin::new(&mut fut).poll(&mut cx) {
+            std::task::Poll::Ready(val) => return Ok(val),
+            std::task::Poll::Pending => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err("Timeout".into());
+                }
+                // Park the thread until woken or timeout for remaining duration
+                let remaining = deadline - now;
+                thread::park_timeout(remaining);
+                // loop and poll again; if woken, poll should progress
+            }
+        }
     }
 }
 
