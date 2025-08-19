@@ -76,6 +76,11 @@ pub struct AppWorkspaceRule {
     pub floating: bool,
     /// Optional: Application name pattern (alternative to app_id)
     pub app_name: Option<String>,
+    /// Optional: Regular expression to match window title (applies to window.title)
+    ///
+    /// If present, this regex will be used when attempting to match a window by
+    /// title.
+    pub title_regex: Option<String>,
 }
 
 impl Default for VirtualWorkspaceSettings {
@@ -113,11 +118,15 @@ impl VirtualWorkspaceSettings {
         // Validate rules and check duplicates in a single pass
         let mut seen_app_ids = crate::common::collections::HashSet::default();
         let mut seen_app_names = crate::common::collections::HashSet::default();
+        let mut seen_title_regexes = crate::common::collections::HashSet::default();
 
         for (index, rule) in self.app_rules.iter().enumerate() {
             let app_id_empty = rule.app_id.as_ref().map_or(true, |id| id.is_empty());
-            if app_id_empty && rule.app_name.is_none() {
-                issues.push(format!("App rule {} has no app_id or app_name specified", index));
+            if app_id_empty && rule.app_name.is_none() && rule.title_regex.is_none() {
+                issues.push(format!(
+                    "App rule {} has no app_id, app_name, or title_regex specified",
+                    index
+                ));
             }
 
             if let Some(ref workspace) = rule.workspace {
@@ -145,6 +154,14 @@ impl VirtualWorkspaceSettings {
             if let Some(ref app_name) = rule.app_name {
                 if !seen_app_names.insert(app_name) {
                     issues.push(format!("Duplicate app_name '{}' in rule {}", app_name, index));
+                }
+            }
+
+            if let Some(ref title_re) = rule.title_regex {
+                if title_re.is_empty() {
+                    issues.push(format!("App rule {} has empty title_regex", index));
+                } else if !seen_title_regexes.insert(title_re) {
+                    issues.push(format!("Duplicate title_regex '{}' in rule {}", title_re, index));
                 }
             }
         }
@@ -176,7 +193,7 @@ impl VirtualWorkspaceSettings {
         let initial_rule_count = self.app_rules.len();
         self.app_rules.retain(|rule| {
             let app_id_valid = rule.app_id.as_ref().map_or(false, |id| !id.is_empty());
-            app_id_valid || rule.app_name.is_some()
+            app_id_valid || rule.app_name.is_some() || rule.title_regex.is_some()
         });
         fixes += initial_rule_count - self.app_rules.len();
 

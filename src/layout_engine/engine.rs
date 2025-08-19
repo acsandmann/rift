@@ -58,7 +58,7 @@ pub enum LayoutCommand {
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum LayoutEvent {
-    WindowsOnScreenUpdated(SpaceId, pid_t, Vec<WindowId>, Option<AppInfo>),
+    WindowsOnScreenUpdated(SpaceId, pid_t, Vec<(WindowId, Option<String>)>, Option<AppInfo>),
     AppClosed(pid_t),
     WindowAdded(SpaceId, WindowId),
     WindowRemoved(WindowId),
@@ -329,11 +329,11 @@ impl LayoutEngine {
                     &mut self.tree,
                 );
             }
-            LayoutEvent::WindowsOnScreenUpdated(space, pid, mut windows, app_info) => {
+            LayoutEvent::WindowsOnScreenUpdated(space, pid, mut windows_with_titles, app_info) => {
                 self.debug_tree(space);
                 self.floating.clear_active_for_app(space, pid);
                 let mut floating_active_accum = Vec::new();
-                windows.retain(|wid| {
+                windows_with_titles.retain(|(wid, _)| {
                     let is_floating = self.floating.is_floating(*wid);
                     if is_floating {
                         floating_active_accum.push(*wid);
@@ -349,13 +349,14 @@ impl LayoutEngine {
                     Vec<WindowId>,
                 > = HashMap::default();
 
-                for wid in windows {
+                for (wid, title_opt) in windows_with_titles {
                     let assigned_workspace = if let Some(ref app_info) = app_info {
                         match self.virtual_workspace_manager.assign_window_with_app_info(
                             wid,
                             space,
                             app_info.bundle_id.as_deref(),
                             app_info.localized_name.as_deref(),
+                            title_opt.as_deref(),
                         ) {
                             Ok((workspace_id, should_float)) => {
                                 if should_float {

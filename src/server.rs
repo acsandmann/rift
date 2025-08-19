@@ -1,11 +1,10 @@
 use std::convert::Infallible;
 use std::ffi::{CString, c_void};
+use std::future::Future as _;
 use std::os::raw::c_char;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::task::{Context, RawWaker, RawWakerVTable, Waker};
-use std::thread;
+use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 use r#continue::continuation;
@@ -15,6 +14,7 @@ use core_foundation::runloop::{
 };
 use dispatchr::semaphore::Managed;
 use dispatchr::time::Time;
+use futures_task::{ArcWake, waker};
 use nix::unistd::{ForkResult, execvp, fork};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
@@ -719,65 +719,39 @@ unsafe fn schedule_event_send(runloop: &CFRunLoop, client_port: ClientPort, even
     runloop.add_timer(&timer, unsafe { kCFRunLoopDefaultMode });
 }
 
-fn block_on_continuation<T: Send + 'static>(
+pub fn block_on_continuation<T: Send + 'static>(
     mut fut: r#continue::Future<T>,
     timeout: Duration,
 ) -> Result<T, String> {
-    // Create a RawWaker that unparks this thread when woken.
-    struct ThreadWaker {
-        thread: thread::Thread,
-        signaled: Arc<AtomicBool>,
+    struct GcdWaker {
+        sem: Managed,
+    }
+    impl ArcWake for GcdWaker {
+        fn wake_by_ref(this: &Arc<Self>) { this.sem.signal(); }
     }
 
-    unsafe fn clone_raw(data: *const ()) -> RawWaker {
-        let tw = &*(data as *const ThreadWaker);
-        let cloned = Box::into_raw(Box::new(ThreadWaker {
-            thread: tw.thread.clone(),
-            signaled: Arc::new(AtomicBool::new(tw.signaled.load(Ordering::SeqCst))),
-        }));
-        RawWaker::new(cloned as *const (), &VTABLE)
-    }
-    unsafe fn wake_raw(data: *const ()) {
-        let tw = Box::from_raw(data as *mut ThreadWaker);
-        tw.signaled.store(true, Ordering::SeqCst);
-        tw.thread.unpark();
-        // drop tw
-    }
-    unsafe fn wake_by_ref_raw(data: *const ()) {
-        let tw = &*(data as *const ThreadWaker);
-        tw.signaled.store(true, Ordering::SeqCst);
-        tw.thread.unpark();
-    }
-    unsafe fn drop_raw(data: *const ()) { let _ = Box::from_raw(data as *mut ThreadWaker); }
-
-    static VTABLE: RawWakerVTable =
-        RawWakerVTable::new(clone_raw, wake_raw, wake_by_ref_raw, drop_raw);
-
-    let signaled = Arc::new(AtomicBool::new(false));
-    let tw = Box::new(ThreadWaker {
-        thread: thread::current(),
-        signaled: signaled.clone(),
-    });
-
-    let raw = RawWaker::new(Box::into_raw(tw) as *const (), &VTABLE);
-    let waker = unsafe { Waker::from_raw(raw) };
+    let sem = Managed::new(0);
+    let waker: Waker = waker(Arc::new(GcdWaker { sem: sem.clone() }));
     let mut cx = Context::from_waker(&waker);
 
-    let start = Instant::now();
-    let deadline = start + timeout;
+    let deadline = Instant::now() + timeout;
 
     loop {
         match Pin::new(&mut fut).poll(&mut cx) {
-            std::task::Poll::Ready(val) => return Ok(val),
-            std::task::Poll::Pending => {
+            Poll::Ready(v) => return Ok(v),
+            Poll::Pending => {
                 let now = Instant::now();
                 if now >= deadline {
                     return Err("Timeout".into());
                 }
-                // Park the thread until woken or timeout for remaining duration
+
                 let remaining = deadline - now;
-                thread::park_timeout(remaining);
-                // loop and poll again; if woken, poll should progress
+                let ns = i64::try_from(remaining.as_nanos()).unwrap_or(i64::MAX);
+                let t = Time::NOW.new_after(ns);
+
+                if sem.wait(t) != 0 {
+                    return Err("Timeout".into());
+                }
             }
         }
     }

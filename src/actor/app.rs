@@ -19,13 +19,13 @@ use accessibility_sys::{
     kAXWindowDeminiaturizedNotification, kAXWindowMiniaturizedNotification,
     kAXWindowMovedNotification, kAXWindowResizedNotification, kAXWindowRole,
 };
+use r#continue::continuation;
 use core_foundation::runloop::CFRunLoop;
 use core_foundation::string::CFString;
 use objc2::rc::Retained;
 use objc2_app_kit::NSRunningApplication;
 use objc2_core_foundation::{CGPoint, CGRect};
 use serde::{Deserialize, Serialize};
-use tokio::sync::oneshot;
 use tokio::{join, select};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -231,7 +231,7 @@ struct State {
     windows: HashMap<WindowId, WindowState>,
     last_window_idx: u32,
     main_window: Option<WindowId>,
-    last_activated: Option<(Instant, Quiet, oneshot::Sender<()>)>,
+    last_activated: Option<(Instant, Quiet, r#continue::Sender<()>)>,
     is_frontmost: bool,
     raises_tx: actor::Sender<RaiseRequest>,
 }
@@ -646,7 +646,7 @@ impl State {
         }
 
         if !is_frontmost && make_key_result.is_ok() && is_standard {
-            let (tx, rx) = oneshot::channel();
+            let (tx, rx) = continuation();
             let quiet_activation = if wids.len() == 1 { quiet } else { Quiet::Yes };
             this.last_activated = Some((Instant::now(), quiet_activation, tx));
             drop(this);

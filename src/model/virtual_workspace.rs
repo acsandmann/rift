@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use accessibility_sys::pid_t;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use slotmap::{SlotMap, new_key_type};
@@ -578,13 +579,15 @@ impl VirtualWorkspaceManager {
         space: SpaceId,
         app_bundle_id: Option<&str>,
         app_name: Option<&str>,
+        window_title: Option<&str>,
     ) -> Result<(VirtualWorkspaceId, bool), WorkspaceError> {
         self.ensure_space_initialized(space);
         if self.workspaces_by_space.get(&space).map(|v| v.is_empty()).unwrap_or(true) {
             return Err(WorkspaceError::NoWorkspacesAvailable);
         }
 
-        let rule_match = self.find_matching_app_rule(app_bundle_id, app_name).cloned();
+        let rule_match =
+            self.find_matching_app_rule(app_bundle_id, app_name, window_title).cloned();
         if let Some(rule) = rule_match {
             let target_workspace_id = if let Some(workspace_idx) = rule.workspace {
                 let len = self.workspaces_by_space.get(&space).map(|v| v.len()).unwrap_or(0);
@@ -661,6 +664,7 @@ impl VirtualWorkspaceManager {
         &self,
         app_bundle_id: Option<&str>,
         app_name: Option<&str>,
+        window_title: Option<&str>,
     ) -> Option<&AppWorkspaceRule> {
         self.app_rules.iter().find(|rule| {
             if let Some(bundle_id) = app_bundle_id {
@@ -674,6 +678,21 @@ impl VirtualWorkspaceManager {
             if let (Some(name), Some(rule_name)) = (app_name, &rule.app_name) {
                 if name.contains(rule_name) || rule_name.contains(name) {
                     return true;
+                }
+            }
+
+            if let (Some(title), Some(rule_re)) = (window_title, &rule.title_regex) {
+                if !rule_re.is_empty() {
+                    match Regex::new(rule_re) {
+                        Ok(re) => {
+                            if re.is_match(title) {
+                                return true;
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Invalid title_regex '{}' in app rule: {}", rule_re, e);
+                        }
+                    }
                 }
             }
 

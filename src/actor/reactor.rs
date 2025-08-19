@@ -20,7 +20,6 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 pub use replay::{Record, replay};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
-use tokio::sync::oneshot;
 use tracing::{debug, error, info, instrument, trace, warn};
 
 use super::mouse;
@@ -152,31 +151,31 @@ pub enum Event {
 
     // Query events with response channels (not serialized)
     #[serde(skip)]
-    QueryWorkspaces(oneshot::Sender<WorkspaceQueryResponse>),
+    QueryWorkspaces(r#continue::Sender<WorkspaceQueryResponse>),
     #[serde(skip)]
     QueryWindows {
         space_id: Option<SpaceId>,
         #[serde(skip)]
-        response: oneshot::Sender<Vec<WindowData>>,
+        response: r#continue::Sender<Vec<WindowData>>,
     },
     #[serde(skip)]
     QueryWindowInfo {
         window_id: WindowId,
         #[serde(skip)]
-        response: oneshot::Sender<Option<WindowData>>,
+        response: r#continue::Sender<Option<WindowData>>,
     },
     #[serde(skip)]
-    QueryApplications(oneshot::Sender<Vec<ApplicationData>>),
+    QueryApplications(r#continue::Sender<Vec<ApplicationData>>),
     #[serde(skip)]
     QueryLayoutState {
         space_id: u64,
         #[serde(skip)]
-        response: oneshot::Sender<Option<LayoutStateData>>,
+        response: r#continue::Sender<Option<LayoutStateData>>,
     },
     #[serde(skip)]
-    QueryMetrics(oneshot::Sender<serde_json::Value>),
+    QueryMetrics(r#continue::Sender<serde_json::Value>),
     #[serde(skip)]
-    QueryConfig(oneshot::Sender<serde_json::Value>),
+    QueryConfig(r#continue::Sender<serde_json::Value>),
 
     /// Apply app rules to existing windows when a space is activated
     ApplyAppRulesToExistingWindows {
@@ -1411,10 +1410,35 @@ impl Reactor {
         for screen in screens {
             let Some(space) = screen.space else { continue };
             let windows_for_space = app_windows.remove(&space).unwrap_or_default();
+
+            if !windows_for_space.is_empty() {
+                for wid in &windows_for_space {
+                    let title_opt = self.windows.get(wid).map(|w| w.title.clone());
+                    let _ = self
+                        .layout_engine
+                        .virtual_workspace_manager_mut()
+                        .assign_window_with_app_info(
+                            *wid,
+                            space,
+                            app_info.as_ref().and_then(|a| a.bundle_id.as_deref()),
+                            app_info.as_ref().and_then(|a| a.localized_name.as_deref()),
+                            title_opt.as_deref(),
+                        );
+                }
+            }
+
+            let windows_with_titles: Vec<(WindowId, Option<String>)> = windows_for_space
+                .iter()
+                .map(|&wid| {
+                    let title_opt = self.windows.get(&wid).map(|w| w.title.clone());
+                    (wid, title_opt)
+                })
+                .collect();
+
             self.send_layout_event(LayoutEvent::WindowsOnScreenUpdated(
                 space,
                 pid,
-                windows_for_space,
+                windows_with_titles,
                 app_info.clone(),
             ));
         }
@@ -1552,10 +1576,30 @@ impl Reactor {
         };
 
         if !window_ids.is_empty() {
+            for wid in &window_ids {
+                let title_opt = self.windows.get(wid).map(|w| w.title.clone());
+                let _ =
+                    self.layout_engine.virtual_workspace_manager_mut().assign_window_with_app_info(
+                        *wid,
+                        primary_space,
+                        (&app_info.bundle_id).as_deref(),
+                        (&app_info.localized_name).as_deref(),
+                        title_opt.as_deref(),
+                    );
+            }
+
+            let windows_with_titles: Vec<(WindowId, Option<String>)> = window_ids
+                .iter()
+                .map(|&wid| {
+                    let title_opt = self.windows.get(&wid).map(|w| w.title.clone());
+                    (wid, title_opt)
+                })
+                .collect();
+
             self.send_layout_event(LayoutEvent::WindowsOnScreenUpdated(
                 primary_space,
                 pid,
-                window_ids,
+                windows_with_titles,
                 Some(app_info),
             ));
         }
