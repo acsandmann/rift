@@ -315,6 +315,26 @@ impl MachHandler {
         }
     }
 
+    fn perform_query<T>(
+        &self,
+        make_event: impl FnOnce(r#continue::Sender<T>) -> Event,
+    ) -> Result<T, String>
+    where
+        T: Send + 'static,
+    {
+        let (cont_tx, cont_fut) = continuation::<T>();
+        let event = make_event(cont_tx);
+
+        if let Err(e) = self.reactor_tx.try_send(event) {
+            return Err(format!("Failed to send query: {}", e));
+        }
+
+        match block_on(cont_fut, Duration::from_secs(5)) {
+            Ok(res) => Ok(res),
+            Err(e) => Err(format!("Failed to get response: {}", e)),
+        }
+    }
+
     fn handle_request(&self, request: RiftRequest, client_port: ClientPort) -> RiftResponse {
         debug!("Handling request: {:?} from client {}", request, client_port);
 
@@ -326,56 +346,37 @@ impl MachHandler {
             }
             RiftRequest::UnsubscribeCli { event } => self.handle_cli_unsubscribe(event),
             RiftRequest::ListCliSubscriptions => self.handle_list_cli_subscriptions(),
-            RiftRequest::GetWorkspaces => {
-                let (cont_tx, cont_fut) = continuation::<WorkspaceQueryResponse>();
-                let event = Event::QueryWorkspaces(cont_tx);
 
-                if let Err(e) = self.reactor_tx.try_send(event) {
-                    error!("Failed to send workspace query: {}", e);
-                    return RiftResponse::Error {
-                        message: "Failed to query workspaces".to_string(),
-                    };
-                }
-
-                match block_on(cont_fut, Duration::from_secs(5)) {
-                    Ok(WorkspaceQueryResponse { workspaces }) => RiftResponse::Success {
-                        data: serde_json::to_value(workspaces).unwrap(),
-                    },
-                    Err(e) => {
-                        error!("Failed to get workspace response: {}", e);
-                        RiftResponse::Error {
-                            message: "Failed to get workspace response".to_string(),
-                        }
+            RiftRequest::GetWorkspaces => match self.perform_query(|tx| Event::QueryWorkspaces(tx))
+            {
+                Ok(WorkspaceQueryResponse { workspaces }) => RiftResponse::Success {
+                    data: serde_json::to_value(workspaces).unwrap(),
+                },
+                Err(e) => {
+                    error!("{}", e);
+                    RiftResponse::Error {
+                        message: "Failed to get workspace response".to_string(),
                     }
                 }
-            }
-            RiftRequest::GetWindows { space_id: _ } => {
-                let space_id = None;
+            },
 
-                let (cont_tx, cont_fut) = continuation::<Vec<crate::model::server::WindowData>>();
-                let event = Event::QueryWindows { space_id, response: cont_tx };
+            RiftRequest::GetWindows { space_id } => {
+                let space_id = space_id.map(|id| crate::sys::screen::SpaceId::new(id));
 
-                if let Err(e) = self.reactor_tx.try_send(event) {
-                    error!("Failed to send windows query: {}", e);
-                    return RiftResponse::Error {
-                        message: "Failed to query windows".to_string(),
-                    };
-                }
-
-                match block_on(cont_fut, Duration::from_secs(5)) {
+                match self.perform_query(|tx| Event::QueryWindows { space_id, response: tx }) {
                     Ok(windows) => RiftResponse::Success {
                         data: serde_json::to_value(windows).unwrap(),
                     },
                     Err(e) => {
-                        error!("Failed to get windows response: {}", e);
+                        error!("{}", e);
                         RiftResponse::Error {
                             message: "Failed to get windows response".to_string(),
                         }
                     }
                 }
             }
+
             RiftRequest::GetWindowInfo { window_id } => {
-                // Accept either debug string or raw WindowId string; parse via helper
                 let window_id = match crate::actor::app::WindowId::from_debug_string(&window_id) {
                     Some(wid) => wid,
                     None => {
@@ -386,18 +387,7 @@ impl MachHandler {
                     }
                 };
 
-                let (cont_tx, cont_fut) =
-                    continuation::<Option<crate::model::server::WindowData>>();
-                let event = Event::QueryWindowInfo { window_id, response: cont_tx };
-
-                if let Err(e) = self.reactor_tx.try_send(event) {
-                    error!("Failed to send window info query: {}", e);
-                    return RiftResponse::Error {
-                        message: "Failed to query window info".to_string(),
-                    };
-                }
-
-                match block_on(cont_fut, Duration::from_secs(5)) {
+                match self.perform_query(|tx| Event::QueryWindowInfo { window_id, response: tx }) {
                     Ok(Some(window)) => RiftResponse::Success {
                         data: serde_json::to_value(window).unwrap(),
                     },
@@ -405,26 +395,16 @@ impl MachHandler {
                         message: "Window not found".to_string(),
                     },
                     Err(e) => {
-                        error!("Failed to get window info response: {}", e);
+                        error!("{}", e);
                         RiftResponse::Error {
                             message: "Failed to get window info response".to_string(),
                         }
                     }
                 }
             }
+
             RiftRequest::GetLayoutState { space_id } => {
-                let (cont_tx, cont_fut) =
-                    continuation::<Option<crate::model::server::LayoutStateData>>();
-                let event = Event::QueryLayoutState { space_id, response: cont_tx };
-
-                if let Err(e) = self.reactor_tx.try_send(event) {
-                    error!("Failed to send layout state query: {}", e);
-                    return RiftResponse::Error {
-                        message: "Failed to query layout state".to_string(),
-                    };
-                }
-
-                match block_on(cont_fut, Duration::from_secs(5)) {
+                match self.perform_query(|tx| Event::QueryLayoutState { space_id, response: tx }) {
                     Ok(Some(layout_state)) => RiftResponse::Success {
                         data: serde_json::to_value(layout_state).unwrap(),
                     },
@@ -432,79 +412,48 @@ impl MachHandler {
                         message: "Space not found or inactive".to_string(),
                     },
                     Err(e) => {
-                        error!("Failed to get layout state response: {}", e);
+                        error!("{}", e);
                         RiftResponse::Error {
                             message: "Failed to get layout state response".to_string(),
                         }
                     }
                 }
             }
+
             RiftRequest::GetApplications => {
-                let (cont_tx, cont_fut) =
-                    continuation::<Vec<crate::model::server::ApplicationData>>();
-                let event = Event::QueryApplications(cont_tx);
-
-                if let Err(e) = self.reactor_tx.try_send(event) {
-                    error!("Failed to send applications query: {}", e);
-                    return RiftResponse::Error {
-                        message: "Failed to query applications".to_string(),
-                    };
-                }
-
-                match block_on(cont_fut, Duration::from_secs(5)) {
+                match self.perform_query(|tx| Event::QueryApplications(tx)) {
                     Ok(applications) => RiftResponse::Success {
                         data: serde_json::to_value(applications).unwrap(),
                     },
                     Err(e) => {
-                        error!("Failed to get applications response: {}", e);
+                        error!("{}", e);
                         RiftResponse::Error {
                             message: "Failed to get applications response".to_string(),
                         }
                     }
                 }
             }
-            RiftRequest::GetMetrics => {
-                let (cont_tx, cont_fut) = continuation::<serde_json::Value>();
-                let event = Event::QueryMetrics(cont_tx);
 
-                if let Err(e) = self.reactor_tx.try_send(event) {
-                    error!("Failed to send metrics query: {}", e);
-                    return RiftResponse::Error {
-                        message: "Failed to query metrics".to_string(),
-                    };
-                }
-
-                match block_on(cont_fut, Duration::from_secs(5)) {
-                    Ok(metrics) => RiftResponse::Success { data: metrics },
-                    Err(e) => {
-                        error!("Failed to get metrics response: {}", e);
-                        RiftResponse::Error {
-                            message: "Failed to get metrics response".to_string(),
-                        }
+            RiftRequest::GetMetrics => match self.perform_query(|tx| Event::QueryMetrics(tx)) {
+                Ok(metrics) => RiftResponse::Success { data: metrics },
+                Err(e) => {
+                    error!("{}", e);
+                    RiftResponse::Error {
+                        message: "Failed to get metrics response".to_string(),
                     }
                 }
-            }
-            RiftRequest::GetConfig => {
-                let (cont_tx, cont_fut) = continuation::<serde_json::Value>();
-                let event = Event::QueryConfig(cont_tx);
+            },
 
-                if let Err(e) = self.reactor_tx.try_send(event) {
-                    error!("Failed to send config query: {}", e);
-                    return RiftResponse::Error {
-                        message: "Failed to query config".to_string(),
-                    };
-                }
-
-                match block_on(cont_fut, Duration::from_secs(5)) {
-                    Ok(config) => RiftResponse::Success { data: config },
-                    Err(e) => {
-                        error!("Failed to get config response: {}", e);
-                        RiftResponse::Error {
-                            message: "Failed to get config response".to_string(),
-                        }
+            RiftRequest::GetConfig => match self.perform_query(|tx| Event::QueryConfig(tx)) {
+                Ok(config) => RiftResponse::Success { data: config },
+                Err(e) => {
+                    error!("{}", e);
+                    RiftResponse::Error {
+                        message: "Failed to get config response".to_string(),
                     }
                 }
-            }
+            },
+
             RiftRequest::ExecuteCommand { command, args: _ } => {
                 match serde_json::from_str::<RiftCommand>(&command) {
                     Ok(RiftCommand::Reactor(reactor_command)) => {

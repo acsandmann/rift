@@ -81,6 +81,12 @@ pub struct AppWorkspaceRule {
     /// If present, this regex will be used when attempting to match a window by
     /// title.
     pub title_regex: Option<String>,
+    /// Optional: Substring to search for in window title (applies to window.title)
+    ///
+    /// If present, rift will internally treat this as a substring match and will
+    /// construct a regex to match titles containing this substring. This allows
+    /// people who don't want to write full regexes to match by a simple substring.
+    pub title_substring: Option<String>,
 }
 
 impl Default for VirtualWorkspaceSettings {
@@ -119,12 +125,17 @@ impl VirtualWorkspaceSettings {
         let mut seen_app_ids = crate::common::collections::HashSet::default();
         let mut seen_app_names = crate::common::collections::HashSet::default();
         let mut seen_title_regexes = crate::common::collections::HashSet::default();
+        let mut seen_title_substrings = crate::common::collections::HashSet::default();
 
         for (index, rule) in self.app_rules.iter().enumerate() {
             let app_id_empty = rule.app_id.as_ref().map_or(true, |id| id.is_empty());
-            if app_id_empty && rule.app_name.is_none() && rule.title_regex.is_none() {
+            if app_id_empty
+                && rule.app_name.is_none()
+                && rule.title_regex.is_none()
+                && rule.title_substring.is_none()
+            {
                 issues.push(format!(
-                    "App rule {} has no app_id, app_name, or title_regex specified",
+                    "App rule {} has no app_id, app_name, title_regex, or title_substring specified",
                     index
                 ));
             }
@@ -164,6 +175,17 @@ impl VirtualWorkspaceSettings {
                     issues.push(format!("Duplicate title_regex '{}' in rule {}", title_re, index));
                 }
             }
+
+            if let Some(ref title_sub) = rule.title_substring {
+                if title_sub.is_empty() {
+                    issues.push(format!("App rule {} has empty title_substring", index));
+                } else if !seen_title_substrings.insert(title_sub) {
+                    issues.push(format!(
+                        "Duplicate title_substring '{}' in rule {}",
+                        title_sub, index
+                    ));
+                }
+            }
         }
 
         issues
@@ -193,7 +215,10 @@ impl VirtualWorkspaceSettings {
         let initial_rule_count = self.app_rules.len();
         self.app_rules.retain(|rule| {
             let app_id_valid = rule.app_id.as_ref().map_or(false, |id| !id.is_empty());
-            app_id_valid || rule.app_name.is_some() || rule.title_regex.is_some()
+            app_id_valid
+                || rule.app_name.is_some()
+                || rule.title_regex.is_some()
+                || rule.title_substring.is_some()
         });
         fixes += initial_rule_count - self.app_rules.len();
 

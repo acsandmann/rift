@@ -131,9 +131,17 @@ workspace_names = [
 # - floating: whether new windows matched by this rule should float by default.
 #
 # Matching semantics
-# - Rules are evaluated in order and the first rule that matches is applied.
+# - Rules are evaluated to find all rules that match a given window.
+# - If multiple matching rules share the same non-empty `app_id`, the rule with
+#   the most specified conditions (i.e., the more specific rule — counts include
+#   presence of `app_name`, `title_regex`, `title_substring`, and `workspace`)
+#   will be preferred. If multiple rules are tied for specificity, the rule
+#   appearing earlier in the configuration wins.
+# - If there are multiple matching rules that do not share the same `app_id`,
+#   the rule with the highest specificity (most conditions) is chosen; ties are
+#   broken by rule order (earlier wins).
 # - Within a single rule, any fields you specify are combined conjunctively.
-#   That means a rule only matches if every non empty field in the rule matches
+#   That means a rule only matches if every non-empty field in the rule matches
 #   the window being tested. Fields you omit act as wildcards and do not
 #   participate in matching.
 #
@@ -165,6 +173,14 @@ workspace_names = [
 #
 # Note: If a rule's `title_regex` is present it must be a valid regex string.
 # If the regex is invalid that rule will not match and a warning will be logged.
+# Alternatively, you can provide `title_substring` to match titles that contain a literal
+# substring (for example: `title_substring = "bob"` will match any window with "bob" in its title).
+# `title_substring` is matched literally (case-sensitive). For advanced patterns, keep using `title_regex`.
+#
+# Examples using `title_substring`:
+# app_rules = [
+#   { title_substring = "Preferences", floating = true },
+# ]
 #
 # By default there are no app rules; uncomment or add rules above as needed.
 app_rules = []

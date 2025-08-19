@@ -666,11 +666,13 @@ impl VirtualWorkspaceManager {
         app_name: Option<&str>,
         window_title: Option<&str>,
     ) -> Option<&AppWorkspaceRule> {
-        self.app_rules.iter().find(|rule| {
+        let mut matches: Vec<(usize, &AppWorkspaceRule, usize)> = Vec::new();
+
+        for (idx, rule) in self.app_rules.iter().enumerate() {
             if let Some(ref rule_app_id) = rule.app_id {
                 match app_bundle_id {
                     Some(bundle_id) if rule_app_id == bundle_id => {}
-                    _ => return false,
+                    _ => continue,
                 }
             }
 
@@ -678,35 +680,117 @@ impl VirtualWorkspaceManager {
                 match app_name {
                     Some(name) => {
                         if !(name.contains(rule_name) || rule_name.contains(name)) {
-                            return false;
+                            continue;
                         }
                     }
-                    None => return false,
+                    None => continue,
                 }
             }
 
             if let Some(ref rule_re) = rule.title_regex {
                 if rule_re.is_empty() {
-                    return false;
+                    continue;
                 }
                 match window_title {
                     Some(title) => match Regex::new(rule_re) {
                         Ok(re) => {
                             if !re.is_match(title) {
-                                return false;
+                                continue;
                             }
                         }
                         Err(e) => {
                             warn!("Invalid title_regex '{}' in app rule: {}", rule_re, e);
-                            return false;
+                            continue;
                         }
                     },
-                    None => return false,
+                    None => continue,
                 }
             }
 
-            true
-        })
+            if let Some(ref title_sub) = rule.title_substring {
+                if title_sub.is_empty() {
+                    continue;
+                }
+                match window_title {
+                    Some(title) => {
+                        if !title.contains(title_sub) {
+                            continue;
+                        }
+                    }
+                    None => continue,
+                }
+            }
+
+            let mut score = 0usize;
+            if rule.app_id.as_ref().map_or(false, |s| !s.is_empty()) {
+                score += 1;
+            }
+            if rule.app_name.as_ref().map_or(false, |s| !s.is_empty()) {
+                score += 1;
+            }
+            if rule.title_regex.as_ref().map_or(false, |s| !s.is_empty()) {
+                score += 1;
+            }
+            if rule.title_substring.as_ref().map_or(false, |s| !s.is_empty()) {
+                score += 1;
+            }
+            if rule.workspace.is_some() {
+                score += 1;
+            }
+
+            matches.push((idx, rule, score));
+        }
+
+        if matches.is_empty() {
+            return None;
+        }
+
+        if matches.len() == 1 {
+            return Some(matches[0].1);
+        }
+
+        use std::collections::HashMap;
+        let mut groups: HashMap<&str, Vec<&(usize, &AppWorkspaceRule, usize)>> = HashMap::new();
+        for entry in &matches {
+            if let Some(ref app_id) = entry.1.app_id {
+                if !app_id.is_empty() {
+                    groups.entry(app_id.as_str()).or_default().push(entry);
+                }
+            }
+        }
+
+        if !groups.is_empty() {
+            let mut candidate_group_key: Option<&str> = None;
+            let mut candidate_group_first_idx: Option<usize> = None;
+
+            for (key, vec_entries) in groups.iter() {
+                if vec_entries.len() > 1 {
+                    let first_idx = vec_entries.iter().map(|e| e.0).min().unwrap_or(usize::MAX);
+                    if candidate_group_key.is_none()
+                        || first_idx < candidate_group_first_idx.unwrap()
+                    {
+                        candidate_group_key = Some(*key);
+                        candidate_group_first_idx = Some(first_idx);
+                    }
+                }
+            }
+
+            if let Some(key) = candidate_group_key {
+                if let Some(vec_entries) = groups.get(key) {
+                    let best = vec_entries
+                        .iter()
+                        .copied()
+                        .max_by(|a, b| a.2.cmp(&b.2).then_with(|| b.0.cmp(&a.0)));
+                    if let Some(best_entry) = best {
+                        return Some(best_entry.1);
+                    }
+                }
+            }
+        }
+
+        let best_overall = matches.iter().max_by(|a, b| a.2.cmp(&b.2).then_with(|| b.0.cmp(&a.0)));
+
+        best_overall.map(|(_, rule, _)| *rule)
     }
 
     pub fn get_stats(&self) -> WorkspaceStats {
