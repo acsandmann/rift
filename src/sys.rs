@@ -1,5 +1,6 @@
 //! Utilities for interfacing with OS-specific APIs.
 
+pub mod accessibility;
 pub mod app;
 pub mod axuielement;
 pub mod dispatch;
@@ -14,6 +15,7 @@ pub mod power;
 pub mod process;
 pub mod run_loop;
 pub mod screen;
+pub mod service;
 pub mod skylight;
 pub mod timer;
 pub mod window_notify;
