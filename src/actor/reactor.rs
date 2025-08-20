@@ -475,9 +475,32 @@ impl Reactor {
                     self.window_server_info.insert(info.id, info.clone());
                     self.observed_window_server_ids.remove(&info.id);
                 }
+
                 if let Some(space) = self.best_space_for_window(&frame) {
                     if self.window_is_standard(wid) {
-                        self.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+                        let mut should_add = true;
+                        if let Some(candidate_wsid) =
+                            self.windows.get(&wid).and_then(|w| w.window_server_id)
+                        {
+                            let space_ids: Vec<u64> = self.visible_space_ids_u64();
+                            if !space_ids.is_empty() {
+                                let order =
+                                    crate::sys::window_server::space_window_list_for_connection(
+                                        &space_ids, 0, false,
+                                    );
+                                let candidate_u32 = candidate_wsid.as_u32();
+                                if !order.into_iter().any(|id| id == candidate_u32) {
+                                    debug!(
+                                        "wsid {:?} for window {:?} not found in list of verified windows",
+                                        candidate_wsid, wid
+                                    );
+                                    should_add = false;
+                                }
+                            }
+                        }
+                        if should_add {
+                            self.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+                        }
                     }
                 }
                 if mouse_state == MouseState::Down {
