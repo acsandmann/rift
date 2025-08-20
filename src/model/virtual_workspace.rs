@@ -586,6 +586,10 @@ impl VirtualWorkspaceManager {
             return Err(WorkspaceError::NoWorkspacesAvailable);
         }
 
+        if let Some(existing_ws) = self.window_to_workspace.get(&(space, window_id)).copied() {
+            return Ok((existing_ws, false));
+        }
+
         let rule_match =
             self.find_matching_app_rule(app_bundle_id, app_name, window_title).cloned();
         if let Some(rule) = rule_match {
