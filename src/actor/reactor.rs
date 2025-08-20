@@ -471,9 +471,10 @@ impl Reactor {
                 }
                 let frame = window.frame;
                 self.windows.insert(wid, window.into());
+
                 if let Some(info) = ws_info {
-                    self.window_server_info.insert(info.id, info.clone());
                     self.observed_window_server_ids.remove(&info.id);
+                    self.window_server_info.insert(info.id, info);
                 }
 
                 if let Some(space) = self.best_space_for_window(&frame) {
