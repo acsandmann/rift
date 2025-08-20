@@ -3,9 +3,9 @@ use std::process;
 use clap::{Parser, Subcommand};
 use rift_wm::actor::reactor;
 use rift_wm::layout_engine as layout;
-use rift_wm::layout_engine::Direction;
 use rift_wm::model::server::{ApplicationData, LayoutStateData, WindowData, WorkspaceData};
 use rift_wm::server::{RiftCommand, RiftMachClient, RiftRequest};
+use rift_wm::sys::service;
 use serde_json::Value;
 
 #[derive(Parser)]
@@ -33,6 +33,25 @@ enum Commands {
         #[command(subcommand)]
         subscribe: SubscribeCommands,
     },
+    /// Manage the launchd service for rift
+    Service {
+        #[command(subcommand)]
+        service: ServiceCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServiceCommands {
+    /// Install the per-user launchd service
+    Install,
+    /// Uninstall the per-user launchd service
+    Uninstall,
+    /// Start (or bootstrap) the service
+    Start,
+    /// Stop (or bootout/kill) the service
+    Stop,
+    /// Restart the service (kickstart -k)
+    Restart,
 }
 
 #[derive(Subcommand)]
@@ -239,6 +258,19 @@ enum SubscribeCommands {
 fn main() {
     let cli = Cli::parse();
 
+    if let Commands::Service { service } = &cli.command {
+        match handle_service_command(service) {
+            Ok(msg) => {
+                println!("{}", msg);
+                process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("{}", e);
+                process::exit(1);
+            }
+        }
+    }
+
     let request = match build_request(cli.command) {
         Ok(req) => req,
         Err(e) => {
@@ -248,51 +280,26 @@ fn main() {
     };
 
     let client = match RiftMachClient::connect() {
-        Ok(client) => client,
+        Ok(c) => c,
         Err(e) => {
             eprintln!("Failed to connect to rift: {}", e);
-            eprintln!("Make sure rift is running with Mach server enabled.");
             process::exit(1);
         }
     };
 
-    let response = client.send_request(&request);
-
-    match response {
-        Ok(response) => match response {
-            rift_wm::server::RiftResponse::Success { data } => match &request {
-                RiftRequest::GetWorkspaces => {
-                    let typed: Vec<WorkspaceData> = serde_json::from_value(data).unwrap();
-                    println!("{}", serde_json::to_string_pretty(&typed).unwrap());
+    // Send request and handle response.
+    match client.send_request(&request) {
+        Ok(resp) => match resp {
+            rift_wm::server::RiftResponse::Success { data } => {
+                if let Err(e) = handle_success_response(&request, data) {
+                    eprintln!("Failed to handle response: {}", e);
+                    process::exit(1);
                 }
-                RiftRequest::GetWindows { .. } => {
-                    let typed: Vec<WindowData> = serde_json::from_value(data).unwrap();
-                    println!("{}", serde_json::to_string_pretty(&typed).unwrap());
-                }
-                RiftRequest::GetWindowInfo { .. } => {
-                    let typed: WindowData = serde_json::from_value(data).unwrap();
-                    println!("{}", serde_json::to_string_pretty(&typed).unwrap());
-                }
-                RiftRequest::GetApplications => {
-                    let typed: Vec<ApplicationData> = serde_json::from_value(data).unwrap();
-                    println!("{}", serde_json::to_string_pretty(&typed).unwrap());
-                }
-                RiftRequest::GetLayoutState { .. } => {
-                    let typed: LayoutStateData = serde_json::from_value(data).unwrap();
-                    println!("{}", serde_json::to_string_pretty(&typed).unwrap());
-                }
-                _ => {
-                    println!("{}", serde_json::to_string_pretty(&data).unwrap());
-                }
-            },
+            }
             rift_wm::server::RiftResponse::Error { error } => {
                 match serde_json::to_string_pretty(&error) {
-                    Ok(pretty) => {
-                        eprintln!("{}", pretty);
-                    }
-                    Err(_) => {
-                        eprintln!("Error: {}", error);
-                    }
+                    Ok(pretty) => eprintln!("{}", pretty),
+                    Err(_) => eprintln!("Error: {}", error),
                 }
                 process::exit(1);
             }
@@ -308,257 +315,298 @@ fn main() {
     }
 }
 
+fn handle_service_command(cmd: &ServiceCommands) -> Result<&'static str, String> {
+    match cmd {
+        ServiceCommands::Install => service::service_install()
+            .map(|_| "Service installed.")
+            .map_err(|e| format!("Failed to install service: {}", e)),
+        ServiceCommands::Uninstall => service::service_uninstall()
+            .map(|_| "Service uninstalled.")
+            .map_err(|e| format!("Failed to uninstall service: {}", e)),
+        ServiceCommands::Start => service::service_start()
+            .map(|_| "Service started.")
+            .map_err(|e| format!("Failed to start service: {}", e)),
+        ServiceCommands::Stop => service::service_stop()
+            .map(|_| "Service stopped.")
+            .map_err(|e| format!("Failed to stop service: {}", e)),
+        ServiceCommands::Restart => service::service_restart()
+            .map(|_| "Service restarted.")
+            .map_err(|e| format!("Failed to restart service: {}", e)),
+    }
+}
+
 fn build_request(command: Commands) -> Result<RiftRequest, String> {
     match command {
-        Commands::Query { query } => match query {
-            QueryCommands::Workspaces => Ok(RiftRequest::GetWorkspaces),
-            QueryCommands::Windows { space_id } => Ok(RiftRequest::GetWindows { space_id }),
-            QueryCommands::Window { window_id } => Ok(RiftRequest::GetWindowInfo { window_id }),
-            QueryCommands::Applications => Ok(RiftRequest::GetApplications),
-            QueryCommands::Layout { space_id } => Ok(RiftRequest::GetLayoutState { space_id }),
-            QueryCommands::Metrics => Ok(RiftRequest::GetMetrics),
-        },
-        Commands::Execute { command } => {
-            let rift_command = match command {
-                ExecuteCommands::Window { window_cmd } => match window_cmd {
-                    WindowCommands::Next => RiftCommand::Reactor(reactor::Command::Layout(
-                        layout::LayoutCommand::NextWindow,
-                    )),
-                    WindowCommands::Prev => RiftCommand::Reactor(reactor::Command::Layout(
-                        layout::LayoutCommand::PrevWindow,
-                    )),
-                    WindowCommands::Focus { direction } => {
-                        let dir = match direction.as_str() {
-                            "up" => Direction::Up,
-                            "down" => Direction::Down,
-                            "left" => Direction::Left,
-                            "right" => Direction::Right,
-                            _ => {
-                                return Err(
-                                    "Invalid direction. Use: up, down, left, right".to_string()
-                                );
-                            }
-                        };
-                        RiftCommand::Reactor(reactor::Command::Layout(
-                            layout::LayoutCommand::MoveFocus(dir),
-                        ))
-                    }
-                    WindowCommands::ToggleFloat => RiftCommand::Reactor(reactor::Command::Layout(
-                        layout::LayoutCommand::ToggleWindowFloating,
-                    )),
-                    WindowCommands::ToggleFullscreen => RiftCommand::Reactor(
-                        reactor::Command::Layout(layout::LayoutCommand::ToggleFullscreen),
-                    ),
-                    WindowCommands::ResizeGrow => RiftCommand::Reactor(reactor::Command::Layout(
-                        layout::LayoutCommand::ResizeWindowGrow,
-                    )),
-                    WindowCommands::ResizeShrink => RiftCommand::Reactor(reactor::Command::Layout(
-                        layout::LayoutCommand::ResizeWindowShrink,
-                    )),
-                },
-                ExecuteCommands::Workspace { workspace_cmd } => match workspace_cmd {
-                    WorkspaceCommands::Next { skip_empty } => RiftCommand::Reactor(
-                        reactor::Command::Layout(layout::LayoutCommand::NextWorkspace(skip_empty)),
-                    ),
-                    WorkspaceCommands::Prev { skip_empty } => RiftCommand::Reactor(
-                        reactor::Command::Layout(layout::LayoutCommand::PrevWorkspace(skip_empty)),
-                    ),
-                    WorkspaceCommands::Switch { workspace_id } => {
-                        RiftCommand::Reactor(reactor::Command::Layout(
-                            layout::LayoutCommand::SwitchToWorkspace(workspace_id),
-                        ))
-                    }
-                    WorkspaceCommands::MoveWindow { workspace_id } => {
-                        RiftCommand::Reactor(reactor::Command::Layout(
-                            layout::LayoutCommand::MoveWindowToWorkspace(workspace_id),
-                        ))
-                    }
-                    WorkspaceCommands::Create => RiftCommand::Reactor(reactor::Command::Layout(
-                        layout::LayoutCommand::CreateWorkspace,
-                    )),
-                    WorkspaceCommands::Last => RiftCommand::Reactor(reactor::Command::Layout(
-                        layout::LayoutCommand::SwitchToLastWorkspace,
-                    )),
-                },
-                ExecuteCommands::Layout { layout_cmd } => match layout_cmd {
-                    LayoutCommands::Ascend => RiftCommand::Reactor(reactor::Command::Layout(
-                        layout::LayoutCommand::Ascend,
-                    )),
-                    LayoutCommands::Descend => RiftCommand::Reactor(reactor::Command::Layout(
-                        layout::LayoutCommand::Descend,
-                    )),
-                    LayoutCommands::MoveNode { direction } => {
-                        let dir = match direction.as_str() {
-                            "up" => Direction::Up,
-                            "down" => Direction::Down,
-                            "left" => Direction::Left,
-                            "right" => Direction::Right,
-                            _ => {
-                                return Err(
-                                    "Invalid direction. Use: up, down, left, right".to_string()
-                                );
-                            }
-                        };
-                        RiftCommand::Reactor(reactor::Command::Layout(
-                            layout::LayoutCommand::MoveNode(dir),
-                        ))
-                    }
-                    LayoutCommands::JoinWindow { direction } => {
-                        let dir = match direction.as_str() {
-                            "up" => Direction::Up,
-                            "down" => Direction::Down,
-                            "left" => Direction::Left,
-                            "right" => Direction::Right,
-                            _ => {
-                                return Err(
-                                    "Invalid direction. Use: up, down, left, right".to_string()
-                                );
-                            }
-                        };
-                        RiftCommand::Reactor(reactor::Command::Layout(
-                            layout::LayoutCommand::JoinWindow(dir),
-                        ))
-                    }
-                    LayoutCommands::Stack => RiftCommand::Reactor(reactor::Command::Layout(
-                        layout::LayoutCommand::StackWindows,
-                    )),
-                    LayoutCommands::Unstack => RiftCommand::Reactor(reactor::Command::Layout(
-                        layout::LayoutCommand::UnstackWindows,
-                    )),
-                    LayoutCommands::Unjoin => RiftCommand::Reactor(reactor::Command::Layout(
-                        layout::LayoutCommand::UnjoinWindows,
-                    )),
-                    LayoutCommands::ToggleFocusFloat => RiftCommand::Reactor(
-                        reactor::Command::Layout(layout::LayoutCommand::ToggleFocusFloating),
-                    ),
-                },
-                ExecuteCommands::Config { config_cmd } => {
-                    use rift_wm::common::config::{AnimationEasing, ConfigCommand};
+        Commands::Query { query } => build_query_request(query),
+        Commands::Execute { command } => build_execute_request(command),
+        Commands::Subscribe { subscribe } => build_subscribe_request(subscribe),
+        Commands::Service { .. } => Err(
+            "Service commands are handled locally and should not be sent to the rift server."
+                .to_string(),
+        ),
+    }
+}
 
-                    let cmd = match config_cmd {
-                        ConfigCommands::SetAnimate { value } => {
-                            let bool_value = match value.to_lowercase().as_str() {
-                                "true" | "on" => true,
-                                "false" | "off" => false,
-                                _ => {
-                                    return Err(format!(
-                                        "Invalid boolean value: {}. Use true/false",
-                                        value
-                                    ));
-                                }
-                            };
-                            ConfigCommand::SetAnimate(bool_value)
-                        }
-                        ConfigCommands::SetAnimationDuration { value } => {
-                            ConfigCommand::SetAnimationDuration(value)
-                        }
-                        ConfigCommands::SetAnimationFps { value } => {
-                            ConfigCommand::SetAnimationFps(value)
-                        }
-                        ConfigCommands::SetAnimationEasing { value } => {
-                            let easing = match value.as_str() {
-                                "ease_in_out" => AnimationEasing::EaseInOut,
-                                "linear" => AnimationEasing::Linear,
-                                "ease_in_sine" => AnimationEasing::EaseInSine,
-                                "ease_out_sine" => AnimationEasing::EaseOutSine,
-                                "ease_in_out_sine" => AnimationEasing::EaseInOutSine,
-                                "ease_in_quad" => AnimationEasing::EaseInQuad,
-                                "ease_out_quad" => AnimationEasing::EaseOutQuad,
-                                "ease_in_out_quad" => AnimationEasing::EaseInOutQuad,
-                                "ease_in_cubic" => AnimationEasing::EaseInCubic,
-                                "ease_out_cubic" => AnimationEasing::EaseOutCubic,
-                                "ease_in_out_cubic" => AnimationEasing::EaseInOutCubic,
-                                "ease_in_quart" => AnimationEasing::EaseInQuart,
-                                "ease_out_quart" => AnimationEasing::EaseOutQuart,
-                                "ease_in_out_quart" => AnimationEasing::EaseInOutQuart,
-                                "ease_in_quint" => AnimationEasing::EaseInQuint,
-                                "ease_out_quint" => AnimationEasing::EaseOutQuint,
-                                "ease_in_out_quint" => AnimationEasing::EaseInOutQuint,
-                                "ease_in_expo" => AnimationEasing::EaseInExpo,
-                                "ease_out_expo" => AnimationEasing::EaseOutExpo,
-                                "ease_in_out_expo" => AnimationEasing::EaseInOutExpo,
-                                "ease_in_circ" => AnimationEasing::EaseInCirc,
-                                "ease_out_circ" => AnimationEasing::EaseOutCirc,
-                                "ease_in_out_circ" => AnimationEasing::EaseInOutCirc,
-                                _ => return Err(format!("Invalid animation easing: {}", value)),
-                            };
-                            ConfigCommand::SetAnimationEasing(easing)
-                        }
-                        ConfigCommands::SetMouseFollowsFocus { value } => {
-                            ConfigCommand::SetMouseFollowsFocus(value)
-                        }
-                        ConfigCommands::SetMouseHidesOnFocus { value } => {
-                            ConfigCommand::SetMouseHidesOnFocus(value)
-                        }
-                        ConfigCommands::SetFocusFollowsMouse { value } => {
-                            ConfigCommand::SetFocusFollowsMouse(value)
-                        }
-                        ConfigCommands::SetStackOffset { value } => {
-                            ConfigCommand::SetStackOffset(value)
-                        }
-                        ConfigCommands::SetOuterGaps { top, left, bottom, right } => {
-                            ConfigCommand::SetOuterGaps { top, left, bottom, right }
-                        }
-                        ConfigCommands::SetInnerGaps { horizontal, vertical } => {
-                            ConfigCommand::SetInnerGaps { horizontal, vertical }
-                        }
-                        ConfigCommands::SetWorkspaceNames { names } => {
-                            ConfigCommand::SetWorkspaceNames(names)
-                        }
+fn build_query_request(query: QueryCommands) -> Result<RiftRequest, String> {
+    match query {
+        QueryCommands::Workspaces => Ok(RiftRequest::GetWorkspaces),
+        QueryCommands::Windows { space_id } => Ok(RiftRequest::GetWindows { space_id }),
+        QueryCommands::Window { window_id } => Ok(RiftRequest::GetWindowInfo { window_id }),
+        QueryCommands::Applications => Ok(RiftRequest::GetApplications),
+        QueryCommands::Layout { space_id } => Ok(RiftRequest::GetLayoutState { space_id }),
+        QueryCommands::Metrics => Ok(RiftRequest::GetMetrics),
+    }
+}
 
-                        ConfigCommands::Set { key, value } => {
-                            let parsed_value: Value = match serde_json::from_str(&value) {
-                                Ok(v) => v,
-                                Err(_) => Value::String(value.clone()),
-                            };
-                            ConfigCommand::Set { key, value: parsed_value }
-                        }
+fn build_subscribe_request(sub: SubscribeCommands) -> Result<RiftRequest, String> {
+    match sub {
+        SubscribeCommands::Mach { event } => Ok(RiftRequest::Subscribe { event }),
+        SubscribeCommands::Cli { event, command, args } => {
+            Ok(RiftRequest::SubscribeCli { event, command, args })
+        }
+        SubscribeCommands::UnsubMach { event } => Ok(RiftRequest::Unsubscribe { event }),
+        SubscribeCommands::UnsubCli { event } => Ok(RiftRequest::UnsubscribeCli { event }),
+        SubscribeCommands::ListCli => Ok(RiftRequest::ListCliSubscriptions),
+    }
+}
 
-                        ConfigCommands::Get => {
-                            return Ok(RiftRequest::GetConfig);
-                        }
-                        ConfigCommands::Save => ConfigCommand::SaveConfig,
-                        ConfigCommands::Reload => ConfigCommand::ReloadConfig,
-                    };
+fn build_execute_request(execute: ExecuteCommands) -> Result<RiftRequest, String> {
+    let rift_command = match execute {
+        ExecuteCommands::Window { window_cmd } => map_window_command(window_cmd)?,
+        ExecuteCommands::Workspace { workspace_cmd } => map_workspace_command(workspace_cmd)?,
+        ExecuteCommands::Layout { layout_cmd } => map_layout_command(layout_cmd)?,
+        ExecuteCommands::Config { config_cmd } => map_config_command(config_cmd)?,
+        ExecuteCommands::ShowTiming => RiftCommand::Reactor(reactor::Command::Metrics(
+            rift_wm::common::log::MetricsCommand::ShowTiming,
+        )),
+    };
 
-                    RiftCommand::Reactor(reactor::Command::Config(cmd))
-                }
-                ExecuteCommands::ShowTiming => RiftCommand::Reactor(reactor::Command::Metrics(
-                    rift_wm::common::log::MetricsCommand::ShowTiming,
-                )),
-            };
-
-            {
-                let maybe_config_json = match &rift_command {
-                    RiftCommand::Reactor(reactor::Command::Config(cfg_cmd)) => {
-                        match serde_json::to_string(cfg_cmd) {
-                            Ok(s) => Some(s),
-                            Err(_) => None,
-                        }
-                    }
-                    _ => None,
-                };
-
-                let command_str = serde_json::to_string(&rift_command).unwrap();
-                if let Some(cfg_json) = maybe_config_json {
-                    let args = vec!["__apply_config__".to_string(), cfg_json];
-                    Ok(RiftRequest::ExecuteCommand { command: command_str, args })
-                } else {
-                    Ok(RiftRequest::ExecuteCommand {
-                        command: command_str,
-                        args: vec![],
-                    })
-                }
+    let maybe_config_json = match &rift_command {
+        RiftCommand::Reactor(reactor::Command::Config(cfg_cmd)) => {
+            match serde_json::to_string(cfg_cmd) {
+                Ok(s) => Some(s),
+                Err(_) => None,
             }
         }
-        Commands::Subscribe { subscribe } => match subscribe {
-            SubscribeCommands::Mach { event } => Ok(RiftRequest::Subscribe { event }),
-            SubscribeCommands::Cli { event, command, args } => {
-                Ok(RiftRequest::SubscribeCli { event, command, args })
-            }
-            SubscribeCommands::UnsubMach { event } => Ok(RiftRequest::Unsubscribe { event }),
-            SubscribeCommands::UnsubCli { event } => Ok(RiftRequest::UnsubscribeCli { event }),
-            SubscribeCommands::ListCli => Ok(RiftRequest::ListCliSubscriptions),
-        },
+        _ => None,
+    };
+
+    let command_str = serde_json::to_string(&rift_command)
+        .map_err(|e| format!("Failed to serialize command: {}", e))?;
+
+    if let Some(cfg_json) = maybe_config_json {
+        Ok(RiftRequest::ExecuteCommand {
+            command: command_str,
+            args: vec!["__apply_config__".to_string(), cfg_json],
+        })
+    } else {
+        Ok(RiftRequest::ExecuteCommand {
+            command: command_str,
+            args: vec![],
+        })
     }
+}
+
+fn map_window_command(cmd: WindowCommands) -> Result<RiftCommand, String> {
+    use layout::LayoutCommand as LC;
+    match cmd {
+        WindowCommands::Next => Ok(RiftCommand::Reactor(reactor::Command::Layout(LC::NextWindow))),
+        WindowCommands::Prev => Ok(RiftCommand::Reactor(reactor::Command::Layout(LC::PrevWindow))),
+        WindowCommands::Focus { direction } => Ok(RiftCommand::Reactor(reactor::Command::Layout(
+            LC::MoveFocus(direction.into()),
+        ))),
+        WindowCommands::ToggleFloat => Ok(RiftCommand::Reactor(reactor::Command::Layout(
+            LC::ToggleWindowFloating,
+        ))),
+        WindowCommands::ToggleFullscreen => Ok(RiftCommand::Reactor(reactor::Command::Layout(
+            LC::ToggleFullscreen,
+        ))),
+        WindowCommands::ResizeGrow => Ok(RiftCommand::Reactor(reactor::Command::Layout(
+            LC::ResizeWindowGrow,
+        ))),
+        WindowCommands::ResizeShrink => Ok(RiftCommand::Reactor(reactor::Command::Layout(
+            LC::ResizeWindowShrink,
+        ))),
+    }
+}
+
+fn map_workspace_command(cmd: WorkspaceCommands) -> Result<RiftCommand, String> {
+    use layout::LayoutCommand as LC;
+    match cmd {
+        WorkspaceCommands::Next { skip_empty } => Ok(RiftCommand::Reactor(
+            reactor::Command::Layout(LC::NextWorkspace(skip_empty)),
+        )),
+        WorkspaceCommands::Prev { skip_empty } => Ok(RiftCommand::Reactor(
+            reactor::Command::Layout(LC::PrevWorkspace(skip_empty)),
+        )),
+        WorkspaceCommands::Switch { workspace_id } => Ok(RiftCommand::Reactor(
+            reactor::Command::Layout(LC::SwitchToWorkspace(workspace_id)),
+        )),
+        WorkspaceCommands::MoveWindow { workspace_id } => Ok(RiftCommand::Reactor(
+            reactor::Command::Layout(LC::MoveWindowToWorkspace(workspace_id)),
+        )),
+        WorkspaceCommands::Create => Ok(RiftCommand::Reactor(reactor::Command::Layout(
+            LC::CreateWorkspace,
+        ))),
+        WorkspaceCommands::Last => Ok(RiftCommand::Reactor(reactor::Command::Layout(
+            LC::SwitchToLastWorkspace,
+        ))),
+    }
+}
+
+fn map_layout_command(cmd: LayoutCommands) -> Result<RiftCommand, String> {
+    use layout::LayoutCommand as LC;
+    match cmd {
+        LayoutCommands::Ascend => Ok(RiftCommand::Reactor(reactor::Command::Layout(LC::Ascend))),
+        LayoutCommands::Descend => Ok(RiftCommand::Reactor(reactor::Command::Layout(LC::Descend))),
+        LayoutCommands::MoveNode { direction } => Ok(RiftCommand::Reactor(
+            reactor::Command::Layout(LC::MoveNode(direction.into())),
+        )),
+        LayoutCommands::JoinWindow { direction } => Ok(RiftCommand::Reactor(
+            reactor::Command::Layout(LC::JoinWindow(direction.into())),
+        )),
+        LayoutCommands::Stack => {
+            Ok(RiftCommand::Reactor(reactor::Command::Layout(LC::StackWindows)))
+        }
+        LayoutCommands::Unstack => Ok(RiftCommand::Reactor(reactor::Command::Layout(
+            LC::UnstackWindows,
+        ))),
+        LayoutCommands::Unjoin => {
+            Ok(RiftCommand::Reactor(reactor::Command::Layout(LC::UnjoinWindows)))
+        }
+        LayoutCommands::ToggleFocusFloat => Ok(RiftCommand::Reactor(reactor::Command::Layout(
+            LC::ToggleFocusFloating,
+        ))),
+    }
+}
+
+fn map_config_command(cmd: ConfigCommands) -> Result<RiftCommand, String> {
+    use rift_wm::common::config::{AnimationEasing, ConfigCommand};
+
+    let cfg_cmd = match cmd {
+        ConfigCommands::SetAnimate { value } => {
+            let bool_value = match value.to_lowercase().as_str() {
+                "true" | "on" => true,
+                "false" | "off" => false,
+                _ => return Err(format!("Invalid boolean value: {}. Use true/false", value)),
+            };
+            ConfigCommand::SetAnimate(bool_value)
+        }
+        ConfigCommands::SetAnimationDuration { value } => {
+            ConfigCommand::SetAnimationDuration(value)
+        }
+        ConfigCommands::SetAnimationFps { value } => ConfigCommand::SetAnimationFps(value),
+        ConfigCommands::SetAnimationEasing { value } => {
+            let easing = match value.as_str() {
+                "ease_in_out" => AnimationEasing::EaseInOut,
+                "linear" => AnimationEasing::Linear,
+                "ease_in_sine" => AnimationEasing::EaseInSine,
+                "ease_out_sine" => AnimationEasing::EaseOutSine,
+                "ease_in_out_sine" => AnimationEasing::EaseInOutSine,
+                "ease_in_quad" => AnimationEasing::EaseInQuad,
+                "ease_out_quad" => AnimationEasing::EaseOutQuad,
+                "ease_in_out_quad" => AnimationEasing::EaseInOutQuad,
+                "ease_in_cubic" => AnimationEasing::EaseInCubic,
+                "ease_out_cubic" => AnimationEasing::EaseOutCubic,
+                "ease_in_out_cubic" => AnimationEasing::EaseInOutCubic,
+                "ease_in_quart" => AnimationEasing::EaseInQuart,
+                "ease_out_quart" => AnimationEasing::EaseOutQuart,
+                "ease_in_out_quart" => AnimationEasing::EaseInOutQuart,
+                "ease_in_quint" => AnimationEasing::EaseInQuint,
+                "ease_out_quint" => AnimationEasing::EaseOutQuint,
+                "ease_in_out_quint" => AnimationEasing::EaseInOutQuint,
+                "ease_in_expo" => AnimationEasing::EaseInExpo,
+                "ease_out_expo" => AnimationEasing::EaseOutExpo,
+                "ease_in_out_expo" => AnimationEasing::EaseInOutExpo,
+                "ease_in_circ" => AnimationEasing::EaseInCirc,
+                "ease_out_circ" => AnimationEasing::EaseOutCirc,
+                "ease_in_out_circ" => AnimationEasing::EaseInOutCirc,
+                _ => return Err(format!("Invalid animation easing: {}", value)),
+            };
+            ConfigCommand::SetAnimationEasing(easing)
+        }
+        ConfigCommands::SetMouseFollowsFocus { value } => {
+            ConfigCommand::SetMouseFollowsFocus(value)
+        }
+        ConfigCommands::SetMouseHidesOnFocus { value } => {
+            ConfigCommand::SetMouseHidesOnFocus(value)
+        }
+        ConfigCommands::SetFocusFollowsMouse { value } => {
+            ConfigCommand::SetFocusFollowsMouse(value)
+        }
+        ConfigCommands::SetStackOffset { value } => ConfigCommand::SetStackOffset(value),
+        ConfigCommands::SetOuterGaps { top, left, bottom, right } => {
+            ConfigCommand::SetOuterGaps { top, left, bottom, right }
+        }
+        ConfigCommands::SetInnerGaps { horizontal, vertical } => {
+            ConfigCommand::SetInnerGaps { horizontal, vertical }
+        }
+        ConfigCommands::SetWorkspaceNames { names } => ConfigCommand::SetWorkspaceNames(names),
+        ConfigCommands::Set { key, value } => {
+            let parsed_value: Value = match serde_json::from_str(&value) {
+                Ok(v) => v,
+                Err(_) => Value::String(value.clone()),
+            };
+            ConfigCommand::Set { key, value: parsed_value }
+        }
+        ConfigCommands::Get => {
+            return Err("__get_config_request__".to_string());
+        }
+        ConfigCommands::Save => ConfigCommand::SaveConfig,
+        ConfigCommands::Reload => ConfigCommand::ReloadConfig,
+    };
+
+    Ok(RiftCommand::Reactor(reactor::Command::Config(cfg_cmd)))
+}
+
+fn handle_success_response(request: &RiftRequest, data: serde_json::Value) -> Result<(), String> {
+    match request {
+        RiftRequest::GetWorkspaces => {
+            let typed: Vec<WorkspaceData> = serde_json::from_value(data)
+                .map_err(|e| format!("Deserialization error: {}", e))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&typed).map_err(|e| e.to_string())?
+            );
+        }
+        RiftRequest::GetWindows { .. } => {
+            let typed: Vec<WindowData> = serde_json::from_value(data)
+                .map_err(|e| format!("Deserialization error: {}", e))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&typed).map_err(|e| e.to_string())?
+            );
+        }
+        RiftRequest::GetWindowInfo { .. } => {
+            let typed: WindowData = serde_json::from_value(data)
+                .map_err(|e| format!("Deserialization error: {}", e))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&typed).map_err(|e| e.to_string())?
+            );
+        }
+        RiftRequest::GetApplications => {
+            let typed: Vec<ApplicationData> = serde_json::from_value(data)
+                .map_err(|e| format!("Deserialization error: {}", e))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&typed).map_err(|e| e.to_string())?
+            );
+        }
+        RiftRequest::GetLayoutState { .. } => {
+            let typed: LayoutStateData = serde_json::from_value(data)
+                .map_err(|e| format!("Deserialization error: {}", e))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&typed).map_err(|e| e.to_string())?
+            );
+        }
+        _ => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?
+            );
+        }
+    }
+    Ok(())
 }

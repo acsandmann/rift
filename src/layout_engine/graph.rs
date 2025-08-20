@@ -25,6 +25,18 @@ impl Direction {
     }
 }
 
+impl From<String> for Direction {
+    fn from(s: String) -> Self {
+        match s.as_str() {
+            "left" => Direction::Left,
+            "right" => Direction::Right,
+            "up" => Direction::Up,
+            "down" => Direction::Down,
+            _ => panic!("Invalid direction string: {}", s),
+        }
+    }
+}
+
 #[allow(unused)]
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -63,6 +63,16 @@ fn main() {
     log::init_logging();
     install_panic_hook();
 
+    let mtm = MainThreadMarker::new().unwrap();
+    {
+        use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+        let app = NSApplication::sharedApplication(mtm);
+        let _ = app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+        unsafe {
+            let _: () = objc2::msg_send![&*app, finishLaunching];
+        }
+    }
+
     ensure_accessibility_permission();
 
     let mut config = if config_file().exists() {
@@ -132,15 +142,6 @@ fn main() {
         }
     });
 
-    let mtm = MainThreadMarker::new().unwrap();
-    {
-        use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
-        let app = NSApplication::sharedApplication(mtm);
-        let _ = app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-        unsafe {
-            let _: () = objc2::msg_send![&*app, finishLaunching];
-        }
-    }
     let wm_config = wm_controller::Config {
         one_space: opt.one,
         restore_file: restore_file(),

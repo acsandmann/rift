@@ -27,7 +27,20 @@ fn plist_contents() -> io::Result<String> {
     let exe_path = env::current_exe().map_err(|_| {
         io::Error::new(io::ErrorKind::Other, "unable to retrieve path of executable")
     })?;
-    let exe_str = exe_path
+
+    let preferred_agent_path = exe_path.with_file_name("rift");
+    if !preferred_agent_path.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "rift agent executable '{}' not found next to current executable; \
+place the 'rift' binary adjacent to the CLI or install the agent first",
+                preferred_agent_path.display()
+            ),
+        ));
+    }
+
+    let exe_str = preferred_agent_path
         .to_str()
         .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "non-UTF8 executable path"))?;
 
@@ -40,12 +53,14 @@ fn plist_contents() -> io::Result<String> {
     <string>{name}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{exe}</string>
+    	<string>{exe}</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
         <string>{path_env}</string>
+        <key>RUST_LOG</key>
+        <string>error,warn,info</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>
@@ -60,8 +75,6 @@ fn plist_contents() -> io::Result<String> {
     <string>/tmp/rift_{user}.out.log</string>
     <key>StandardErrorPath</key>
     <string>/tmp/rift_{user}.err.log</string>
-    <key>ProcessType</key>
-    <string>Interactive</string>
     <key>Nice</key>
     <integer>-20</integer>
 </dict>
