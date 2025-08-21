@@ -13,7 +13,7 @@ rift is a tiling window for macos. it is inspired by i3/sway/hyprland and aerosp
 	* tiling layout system(like i3/sway)
 	* binary space partioning system(like bspwm)
 - menubar integration that shows the state of play ![menubar](assets/menubar.png)
-- does **NOT** require disabling of SIP for any of the features above (only wm that allows animations without disabling SIP)
+- does **NOT** require disabling of SIP
 - allows "displays have separate spaces" to be enabled without any issues (most/all wms ask for it to be disabled). this allows you to have a full screen app on one display whilst using the other display normally.
 
 ### motivation
