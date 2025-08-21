@@ -1,3 +1,5 @@
+// many ideas for how this works were taken from https://github.com/xiamaz/YabaiIndicator
+
 use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2_app_kit::{
