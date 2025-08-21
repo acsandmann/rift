@@ -13,8 +13,8 @@ use rift_wm::actor::wm_controller::{self, WmController};
 use rift_wm::common::config::{Config, config_file, restore_file};
 use rift_wm::common::log;
 use rift_wm::common::util::execute_startup_commands;
+use rift_wm::ipc;
 use rift_wm::layout_engine::LayoutEngine;
-use rift_wm::server;
 use rift_wm::sys::accessibility::ensure_accessibility_permission;
 use rift_wm::sys::executor::Executor;
 use rift_wm::sys::screen::CoordinateConverter;
@@ -123,17 +123,20 @@ fn main() {
     ]);
 
     let events_tx_mach = events_tx.clone();
-    std::thread::spawn(move || {
-        server::run_mach_server(events_tx_mach);
-    });
+    let server_state = ipc::run_mach_server(events_tx_mach);
 
     let mach_bridge_rx = broadcast_rx;
+
+    let server_state_for_bridge = server_state.clone();
     std::thread::spawn(move || {
         let mut rx = mach_bridge_rx;
+        let server_state = server_state_for_bridge;
         loop {
             match rx.blocking_recv() {
                 Some((_span, event)) => {
-                    crate::server::forward_broadcast_event(event);
+                    if let Ok(state) = server_state.read() {
+                        state.publish(event);
+                    }
                 }
                 None => {
                     break;

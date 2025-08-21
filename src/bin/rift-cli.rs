@@ -2,9 +2,9 @@ use std::process;
 
 use clap::{Parser, Subcommand};
 use rift_wm::actor::reactor;
+use rift_wm::ipc::{RiftCommand, RiftMachClient, RiftRequest, RiftResponse};
 use rift_wm::layout_engine as layout;
 use rift_wm::model::server::{ApplicationData, LayoutStateData, WindowData, WorkspaceData};
-use rift_wm::server::{RiftCommand, RiftMachClient, RiftRequest};
 use rift_wm::sys::service;
 use serde_json::Value;
 
@@ -290,13 +290,13 @@ fn main() {
     // Send request and handle response.
     match client.send_request(&request) {
         Ok(resp) => match resp {
-            rift_wm::server::RiftResponse::Success { data } => {
+            RiftResponse::Success { data } => {
                 if let Err(e) = handle_success_response(&request, data) {
                     eprintln!("Failed to handle response: {}", e);
                     process::exit(1);
                 }
             }
-            rift_wm::server::RiftResponse::Error { error } => {
+            RiftResponse::Error { error } => {
                 match serde_json::to_string_pretty(&error) {
                     Ok(pretty) => eprintln!("{}", pretty),
                     Err(_) => eprintln!("Error: {}", error),
