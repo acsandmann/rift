@@ -58,7 +58,12 @@ pub enum LayoutCommand {
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum LayoutEvent {
-    WindowsOnScreenUpdated(SpaceId, pid_t, Vec<(WindowId, Option<String>)>, Option<AppInfo>),
+    WindowsOnScreenUpdated(
+        SpaceId,
+        pid_t,
+        Vec<(WindowId, Option<String>, Option<String>, Option<String>)>,
+        Option<AppInfo>,
+    ),
     AppClosed(pid_t),
     WindowAdded(SpaceId, WindowId),
     WindowRemoved(WindowId),
@@ -333,7 +338,7 @@ impl LayoutEngine {
                 self.debug_tree(space);
                 self.floating.clear_active_for_app(space, pid);
                 let mut floating_active_accum = Vec::new();
-                windows_with_titles.retain(|(wid, _)| {
+                windows_with_titles.retain(|(wid, _, _, _)| {
                     let is_floating = self.floating.is_floating(*wid);
                     if is_floating {
                         floating_active_accum.push(*wid);
@@ -349,14 +354,20 @@ impl LayoutEngine {
                     Vec<WindowId>,
                 > = HashMap::default();
 
-                for (wid, title_opt) in windows_with_titles {
-                    let assigned_workspace = if let Some(ref app_info) = app_info {
+                for (wid, title_opt, ax_role_opt, ax_subrole_opt) in windows_with_titles {
+                    let assigned_workspace = if let Some(workspace_id) =
+                        self.virtual_workspace_manager.workspace_for_window(space, wid)
+                    {
+                        workspace_id
+                    } else if let Some(ref app_info) = app_info {
                         match self.virtual_workspace_manager.assign_window_with_app_info(
                             wid,
                             space,
                             app_info.bundle_id.as_deref(),
                             app_info.localized_name.as_deref(),
                             title_opt.as_deref(),
+                            ax_role_opt.as_deref(),
+                            ax_subrole_opt.as_deref(),
                         ) {
                             Ok((workspace_id, should_float)) => {
                                 if should_float {
@@ -374,10 +385,6 @@ impl LayoutEngine {
                                         .expect("No active workspace available")
                                 }),
                         }
-                    } else if let Some(workspace_id) =
-                        self.virtual_workspace_manager.workspace_for_window(space, wid)
-                    {
-                        workspace_id
                     } else {
                         self.virtual_workspace_manager
                             .auto_assign_window(wid, space)
@@ -387,7 +394,6 @@ impl LayoutEngine {
                                     .expect("No active workspace available")
                             })
                     };
-
                     windows_by_workspace.entry(assigned_workspace).or_default().push(wid);
                 }
 

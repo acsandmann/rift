@@ -66,6 +66,8 @@ pub fn make_window(idx: usize) -> WindowInfo {
         sys_id: Some(WindowServerId::new(idx as u32)),
         bundle_id: None,
         path: None,
+        ax_role: None,
+        ax_subrole: None,
     }
 }
 

@@ -580,6 +580,8 @@ impl VirtualWorkspaceManager {
         app_bundle_id: Option<&str>,
         app_name: Option<&str>,
         window_title: Option<&str>,
+        ax_role: Option<&str>,
+        ax_subrole: Option<&str>,
     ) -> Result<(VirtualWorkspaceId, bool), WorkspaceError> {
         self.ensure_space_initialized(space);
         if self.workspaces_by_space.get(&space).map(|v| v.is_empty()).unwrap_or(true) {
@@ -590,8 +592,10 @@ impl VirtualWorkspaceManager {
             return Ok((existing_ws, false));
         }
 
-        let rule_match =
-            self.find_matching_app_rule(app_bundle_id, app_name, window_title).cloned();
+        let rule_match = self
+            .find_matching_app_rule(app_bundle_id, app_name, window_title, ax_role, ax_subrole)
+            .cloned();
+
         if let Some(rule) = rule_match {
             let target_workspace_id = if let Some(ref ws_sel) = rule.workspace {
                 let maybe_idx: Option<usize> = match ws_sel {
@@ -691,6 +695,8 @@ impl VirtualWorkspaceManager {
         app_bundle_id: Option<&str>,
         app_name: Option<&str>,
         window_title: Option<&str>,
+        ax_role: Option<&str>,
+        ax_subrole: Option<&str>,
     ) -> Option<&AppWorkspaceRule> {
         let mut matches: Vec<(usize, &AppWorkspaceRule, usize)> = Vec::new();
 
@@ -747,6 +753,34 @@ impl VirtualWorkspaceManager {
                 }
             }
 
+            if let Some(ref rule_ax_role) = rule.ax_role {
+                if rule_ax_role.is_empty() {
+                    continue;
+                }
+                match ax_role {
+                    Some(r) => {
+                        if r != rule_ax_role.as_str() {
+                            continue;
+                        }
+                    }
+                    None => continue,
+                }
+            }
+
+            if let Some(ref rule_ax_sub) = rule.ax_subrole {
+                if rule_ax_sub.is_empty() {
+                    continue;
+                }
+                match ax_subrole {
+                    Some(sr) => {
+                        if sr != rule_ax_sub.as_str() {
+                            continue;
+                        }
+                    }
+                    None => continue,
+                }
+            }
+
             let mut score = 0usize;
             if rule.app_id.as_ref().map_or(false, |s| !s.is_empty()) {
                 score += 1;
@@ -758,6 +792,12 @@ impl VirtualWorkspaceManager {
                 score += 1;
             }
             if rule.title_substring.as_ref().map_or(false, |s| !s.is_empty()) {
+                score += 1;
+            }
+            if rule.ax_role.as_ref().map_or(false, |s| !s.is_empty()) {
+                score += 1;
+            }
+            if rule.ax_subrole.as_ref().map_or(false, |s| !s.is_empty()) {
                 score += 1;
             }
             if rule.workspace.is_some() {

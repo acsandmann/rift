@@ -282,6 +282,8 @@ struct WindowState {
     window_server_id: Option<WindowServerId>,
     bundle_id: Option<String>,
     bundle_path: Option<PathBuf>,
+    ax_role: Option<String>,
+    ax_subrole: Option<String>,
 }
 
 impl WindowState {
@@ -293,7 +295,7 @@ impl WindowState {
 }
 
 impl From<WindowInfo> for WindowState {
-    fn from(info: WindowInfo) -> Self {
+    fn from(info: WindowInfo) -> WindowState {
         WindowState {
             title: info.title,
             frame_monotonic: info.frame,
@@ -302,6 +304,8 @@ impl From<WindowInfo> for WindowState {
             window_server_id: info.sys_id,
             bundle_id: info.bundle_id,
             bundle_path: info.path,
+            ax_role: info.ax_role,
+            ax_subrole: info.ax_subrole,
         }
     }
 }
@@ -1538,15 +1542,24 @@ impl Reactor {
                             app_info.as_ref().and_then(|a| a.bundle_id.as_deref()),
                             app_info.as_ref().and_then(|a| a.localized_name.as_deref()),
                             title_opt.as_deref(),
+                            self.windows.get(wid).and_then(|w| w.ax_role.as_deref()),
+                            self.windows.get(wid).and_then(|w| w.ax_subrole.as_deref()),
                         );
                 }
             }
 
-            let windows_with_titles: Vec<(WindowId, Option<String>)> = windows_for_space
+            let windows_with_titles: Vec<(
+                WindowId,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            )> = windows_for_space
                 .iter()
                 .map(|&wid| {
                     let title_opt = self.windows.get(&wid).map(|w| w.title.clone());
-                    (wid, title_opt)
+                    let ax_role = self.windows.get(&wid).and_then(|w| w.ax_role.clone());
+                    let ax_subrole = self.windows.get(&wid).and_then(|w| w.ax_subrole.clone());
+                    (wid, title_opt, ax_role, ax_subrole)
                 })
                 .collect();
 
@@ -1700,14 +1713,23 @@ impl Reactor {
                         (&app_info.bundle_id).as_deref(),
                         (&app_info.localized_name).as_deref(),
                         title_opt.as_deref(),
+                        self.windows.get(wid).and_then(|w| w.ax_role.as_deref()),
+                        self.windows.get(wid).and_then(|w| w.ax_subrole.as_deref()),
                     );
             }
 
-            let windows_with_titles: Vec<(WindowId, Option<String>)> = window_ids
+            let windows_with_titles: Vec<(
+                WindowId,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            )> = window_ids
                 .iter()
                 .map(|&wid| {
                     let title_opt = self.windows.get(&wid).map(|w| w.title.clone());
-                    (wid, title_opt)
+                    let ax_role = self.windows.get(&wid).and_then(|w| w.ax_role.clone());
+                    let ax_subrole = self.windows.get(&wid).and_then(|w| w.ax_subrole.clone());
+                    (wid, title_opt, ax_role, ax_subrole)
                 })
                 .collect();
 

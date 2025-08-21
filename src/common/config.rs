@@ -104,6 +104,16 @@ pub struct AppWorkspaceRule {
     /// construct a regex to match titles containing this substring. This allows
     /// people who don't want to write full regexes to match by a simple substring.
     pub title_substring: Option<String>,
+
+    /// Optional: Accessibility role to match (AXRole). If present, it must be a
+    /// non-empty string and will be compared against the accessibility role
+    /// reported by the AX APIs for a window (exact string match).
+    pub ax_role: Option<String>,
+
+    /// Optional: Accessibility subrole to match (AXSubrole). If present, it must be a
+    /// non-empty string and will be compared against the accessibility subrole
+    /// reported by the AX APIs for a window (exact string match).
+    pub ax_subrole: Option<String>,
 }
 
 impl Default for VirtualWorkspaceSettings {
@@ -143,6 +153,8 @@ impl VirtualWorkspaceSettings {
         let mut seen_app_names = crate::common::collections::HashSet::default();
         let mut seen_title_regexes = crate::common::collections::HashSet::default();
         let mut seen_title_substrings = crate::common::collections::HashSet::default();
+        let mut seen_ax_roles = crate::common::collections::HashSet::default();
+        let mut seen_ax_subroles = crate::common::collections::HashSet::default();
 
         for (index, rule) in self.app_rules.iter().enumerate() {
             let app_id_empty = rule.app_id.as_ref().map_or(true, |id| id.is_empty());
@@ -150,6 +162,8 @@ impl VirtualWorkspaceSettings {
                 && rule.app_name.is_none()
                 && rule.title_regex.is_none()
                 && rule.title_substring.is_none()
+                && rule.ax_role.is_none()
+                && rule.ax_subrole.is_none()
             {
                 issues.push(format!(
                     "App rule {} has no app_id, app_name, title_regex, or title_substring specified",
@@ -205,6 +219,22 @@ impl VirtualWorkspaceSettings {
                     ));
                 }
             }
+
+            if let Some(ref ax_role) = rule.ax_role {
+                if ax_role.is_empty() {
+                    issues.push(format!("App rule {} has empty ax_role", index));
+                } else if !seen_ax_roles.insert(ax_role) {
+                    issues.push(format!("Duplicate ax_role '{}' in rule {}", ax_role, index));
+                }
+            }
+
+            if let Some(ref ax_sub) = rule.ax_subrole {
+                if ax_sub.is_empty() {
+                    issues.push(format!("App rule {} has empty ax_subrole", index));
+                } else if !seen_ax_subroles.insert(ax_sub) {
+                    issues.push(format!("Duplicate ax_subrole '{}' in rule {}", ax_sub, index));
+                }
+            }
         }
 
         issues
@@ -240,6 +270,8 @@ impl VirtualWorkspaceSettings {
                 || rule.app_name.is_some()
                 || rule.title_regex.is_some()
                 || rule.title_substring.is_some()
+                || rule.ax_role.is_some()
+                || rule.ax_subrole.is_some()
         });
         fixes += initial_rule_count - self.app_rules.len();
 

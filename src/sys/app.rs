@@ -73,6 +73,8 @@ pub struct WindowInfo {
     pub sys_id: Option<WindowServerId>,
     pub bundle_id: Option<String>,
     pub path: Option<PathBuf>,
+    pub ax_role: Option<String>,
+    pub ax_subrole: Option<String>,
 }
 
 impl TryFrom<&AXUIElement> for WindowInfo {
@@ -83,6 +85,9 @@ impl TryFrom<&AXUIElement> for WindowInfo {
         let frame = element.frame()?;
         let is_standard =
             element.role()? == kAXWindowRole && element.subrole()? == kAXStandardWindowSubrole;
+
+        let ax_role = element.role().ok().map(|r| r.to_string());
+        let ax_subrole = element.subrole().ok().map(|s| s.to_string());
 
         let id = WindowServerId::try_from(element).ok();
 
@@ -112,6 +117,8 @@ impl TryFrom<&AXUIElement> for WindowInfo {
             sys_id: id,
             bundle_id,
             path,
+            ax_role,
+            ax_subrole,
         })
     }
 }
