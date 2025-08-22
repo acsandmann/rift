@@ -168,6 +168,12 @@ fn main() {
         CoordinateConverter::default(),
     );
 
+    println!(
+        "NOTICE: by default rift starts in a deactivated state.
+        you must activate it by using the toggle_spaces_activated command.
+        by default this is bound to Alt+Z but can be changed in the config file."
+    );
+
     Executor::run(async move {
         join!(
             wm_controller.run(),
