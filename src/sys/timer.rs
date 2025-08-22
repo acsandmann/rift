@@ -88,7 +88,8 @@
 use std::ffi::c_void;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
+use parking_lot::Mutex;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
@@ -229,7 +230,7 @@ impl Timer {
             let timer_ref = unsafe { &*info.cast::<Weak<Mutex<TimerState>>>() };
 
             let Some(timer) = timer_ref.upgrade() else { return };
-            let mut state = timer.lock().unwrap();
+            let mut state = timer.lock();
             state.status = TimerStatus::Fired;
             if let Some(waker) = state.waker.take() {
                 waker.wake();
@@ -265,7 +266,8 @@ impl Timer {
         let current_loop = CFRunLoop::current().expect("Failed to get current run loop");
         current_loop.add_timer(Some(&cf_timer), unsafe { kCFRunLoopCommonModes });
 
-        if let Ok(mut state) = inner.lock() {
+        {
+            let mut state = inner.lock();
             state.cf_timer = Some(cf_timer);
         }
 
@@ -274,7 +276,7 @@ impl Timer {
 
     /// Sets the next time the timer will fire.
     pub fn set_next_fire(&self, delay: Duration) {
-        let mut state = self.inner.lock().unwrap();
+        let mut state = self.inner.lock();
         let Some(cf_timer) = state.cf_timer.as_mut() else {
             return;
         };
@@ -287,14 +289,13 @@ impl Timer {
     /// After calling this method, awaiting the timer will complete immediately
     /// without the timer having fired. `next()` will return `None`.
     pub fn cancel(&self) {
-        if let Ok(mut state) = self.inner.lock() {
-            if let Some(cf_timer) = state.cf_timer.take() {
-                cf_timer.invalidate();
-            }
-            state.status = TimerStatus::Cancelled;
-            if let Some(waker) = state.waker.take() {
-                waker.wake();
-            }
+        let mut state = self.inner.lock();
+        if let Some(cf_timer) = state.cf_timer.take() {
+            cf_timer.invalidate();
+        }
+        state.status = TimerStatus::Cancelled;
+        if let Some(waker) = state.waker.take() {
+            waker.wake();
         }
     }
 
@@ -308,7 +309,7 @@ impl Stream for Timer {
     type Item = ();
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let mut state = self.inner.lock().unwrap();
+        let mut state = self.inner.lock();
         match state.status {
             TimerStatus::Cancelled => Poll::Ready(None),
             TimerStatus::Fired => {

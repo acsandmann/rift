@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::Arc;
+use parking_lot::{Condvar, Mutex, RwLock};
 use std::time::Duration;
 
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
@@ -139,7 +140,8 @@ impl Animation {
         }
 
         with_system_enhanced_ui_disabled(|| {
-            let windows = Arc::new(self.windows);
+            // Use RwLock for thread-safe interior mutability
+            let windows = Arc::new(RwLock::new(self.windows));
             let counter = Arc::new(AtomicU32::new(0));
             let total = self.frames;
             let easing = self.easing;
@@ -163,12 +165,9 @@ impl Animation {
                 let t = (idx as f64 + 1.0) / total as f64;
                 let s = ease_value(t, &easing);
 
-                for w in windows_cloned.iter() {
-                    let should_update = unsafe {
-                        let mut_ref = &mut *(w as *const _ as *mut WindowAnim);
-                        mut_ref.should_update(current_time)
-                    };
-                    if !should_update {
+                let mut windows_mut = windows_cloned.write();
+                for w in windows_mut.iter_mut() {
+                    if !w.should_update(current_time) {
                         continue;
                     }
 
@@ -186,20 +185,13 @@ impl Animation {
                     if pos_changed || size_changed {
                         let _ = w.handle.send(Request::SetWindowFrame(w.wid, rect, w.txid, false));
 
-                        unsafe {
-                            let mut_ref = &mut *(w as *const _ as *mut WindowAnim);
-                            let frame_time = mut_ref
-                                .last_update_time
-                                .map(|last| current_time.duration_since(last))
-                                .unwrap_or(Duration::ZERO);
-                            mut_ref.update_performance(frame_time);
-                            mut_ref.last = rect;
-                        }
+                        let frame_time = w.last_update_time
+                            .map(|last| current_time.duration_since(last))
+                            .unwrap_or(Duration::ZERO);
+                        w.update_performance(frame_time);
+                        w.last = rect;
                     }
-                    unsafe {
-                        let mut_ref = &mut *(w as *const _ as *mut WindowAnim);
-                        mut_ref.last_update_time = Some(current_time);
-                    }
+                    w.last_update_time = Some(current_time);
                 }
 
                 if idx + 1 >= total {
@@ -207,7 +199,8 @@ impl Animation {
                         SLSReenableUpdate(*G_CONNECTION);
                     }
 
-                    for w in windows_cloned.iter() {
+                    let windows_ref = windows_cloned.read();
+                    for w in windows_ref.iter() {
                         let mut final_rect = w.to;
                         if w.bounds != CGRect::zero() {
                             final_rect = clamp_to_bounds(final_rect, w.bounds);
@@ -220,7 +213,7 @@ impl Animation {
                     }
 
                     let (lock, cvar) = &*done_pair_cb;
-                    let mut done = lock.lock().unwrap();
+                    let mut done = lock.lock();
                     *done = true;
                     cvar.notify_one();
                     return false;
@@ -236,9 +229,9 @@ impl Animation {
             _link.start();
 
             let (lock, cvar) = &*done_pair;
-            let mut done = lock.lock().unwrap();
+            let mut done = lock.lock();
             while !*done {
-                done = cvar.wait(done).unwrap();
+                cvar.wait(&mut done);
             }
         });
     }

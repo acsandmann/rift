@@ -76,6 +76,7 @@ objc2-foundation = { version = "0.3.1", default-features = false, features = [
 ] }
 objc2-quartz-core = { version = "0.3.0", default-features = true }
 once_cell = "1.21.3"
+parking_lot = "0.12"
 ron = "0.9.0-alpha.1"
 rustc-hash = "2.0.0"
 serde = { version = "1.0.201", features = ["derive"] }
