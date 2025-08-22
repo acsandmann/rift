@@ -56,7 +56,8 @@ impl WindowNotify {
             }
         }
 
-        while let Some((_, request)) = requests_rx.recv().await {
+        while let Some((span, request)) = requests_rx.recv().await {
+            let _ = span.enter();
             if let Request::Stop = request {
                 debug!("received Stop request");
                 break;

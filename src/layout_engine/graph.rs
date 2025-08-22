@@ -37,6 +37,16 @@ impl From<String> for Direction {
     }
 }
 
+impl Direction {
+    pub fn step(&self, i: usize, len: usize) -> usize {
+        match *self {
+            Direction::Left => (i + len - 1) % len,
+            Direction::Right => (i + 1) % len,
+            _ => 0,
+        }
+    }
+}
+
 #[allow(unused)]
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

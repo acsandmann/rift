@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
@@ -138,30 +138,31 @@ impl Animation {
             let _ = w.handle.send(Request::BeginWindowAnimation(w.wid));
         }
 
-        let windows = Arc::new(self.windows);
-        let counter = Arc::new(AtomicU32::new(0));
-        let finished = Arc::new(AtomicBool::new(false));
+        with_system_enhanced_ui_disabled(|| {
+            let windows = Arc::new(self.windows);
+            let counter = Arc::new(AtomicU32::new(0));
+            let total = self.frames;
+            let easing = self.easing;
+            let size_eps = self.size_threshold;
 
-        let total = self.frames;
-        let easing = self.easing;
-        let size_eps = self.size_threshold;
+            let done_pair: Arc<(Mutex<bool>, Condvar)> =
+                Arc::new((Mutex::new(false), Condvar::new()));
+            let done_pair_cb = Arc::clone(&done_pair);
 
-        let windows_cloned = windows.clone();
-        let counter_cloned = counter.clone();
-        let finished_cloned = finished.clone();
+            let windows_cloned = windows.clone();
+            let counter_cloned = counter.clone();
 
-        let _link = DisplayLink::new(move || {
-            let current_time = std::time::Instant::now();
+            let _link = DisplayLink::new(move || {
+                let current_time = std::time::Instant::now();
 
-            unsafe {
-                SLSDisableUpdate(*G_CONNECTION);
-            }
+                unsafe {
+                    SLSDisableUpdate(*G_CONNECTION);
+                }
 
-            let idx = counter_cloned.fetch_add(1, Ordering::SeqCst);
-            let t = (idx as f64 + 1.0) / total as f64;
-            let s = ease_value(t, &easing);
+                let idx = counter_cloned.fetch_add(1, Ordering::SeqCst);
+                let t = (idx as f64 + 1.0) / total as f64;
+                let s = ease_value(t, &easing);
 
-            with_system_enhanced_ui_disabled(|| {
                 for w in windows_cloned.iter() {
                     let should_update = unsafe {
                         let mut_ref = &mut *(w as *const _ as *mut WindowAnim);
@@ -200,40 +201,46 @@ impl Animation {
                         mut_ref.last_update_time = Some(current_time);
                     }
                 }
-            });
 
-            if idx + 1 >= total {
+                if idx + 1 >= total {
+                    unsafe {
+                        SLSReenableUpdate(*G_CONNECTION);
+                    }
+
+                    for w in windows_cloned.iter() {
+                        let mut final_rect = w.to;
+                        if w.bounds != CGRect::zero() {
+                            final_rect = clamp_to_bounds(final_rect, w.bounds);
+                        }
+
+                        let _ = w
+                            .handle
+                            .send(Request::SetWindowFrame(w.wid, final_rect, w.txid, false));
+                        let _ = w.handle.send(Request::EndWindowAnimation(w.wid));
+                    }
+
+                    let (lock, cvar) = &*done_pair_cb;
+                    let mut done = lock.lock().unwrap();
+                    *done = true;
+                    cvar.notify_one();
+                    return false;
+                }
+
                 unsafe {
                     SLSReenableUpdate(*G_CONNECTION);
                 }
+                true
+            })
+            .expect("Failed to create display link");
 
-                for w in windows_cloned.iter() {
-                    let mut final_rect = w.to;
-                    if w.bounds != CGRect::zero() {
-                        final_rect = clamp_to_bounds(final_rect, w.bounds);
-                    }
+            _link.start();
 
-                    let _ =
-                        w.handle.send(Request::SetWindowFrame(w.wid, final_rect, w.txid, false));
-                    let _ = w.handle.send(Request::EndWindowAnimation(w.wid));
-                }
-
-                finished_cloned.store(true, Ordering::SeqCst);
-                return false;
+            let (lock, cvar) = &*done_pair;
+            let mut done = lock.lock().unwrap();
+            while !*done {
+                done = cvar.wait(done).unwrap();
             }
-
-            unsafe {
-                SLSReenableUpdate(*G_CONNECTION);
-            }
-            true
-        })
-        .expect("Failed to create display link");
-
-        _link.start();
-
-        while !finished.load(Ordering::SeqCst) {
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        });
     }
 
     pub fn skip_to_end(self) {

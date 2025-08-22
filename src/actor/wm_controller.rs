@@ -135,7 +135,7 @@ impl WmController {
         }
     }
 
-    #[instrument(skip(self))]
+    #[instrument(name = "wm_controller::handle_event", skip(self))]
     pub fn handle_event(&mut self, event: WmEvent) {
         debug!("handle_event");
         use reactor::Event;

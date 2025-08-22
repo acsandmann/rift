@@ -36,6 +36,7 @@ use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt, Round, SameAs};
 use crate::sys::screen::{SpaceId, get_active_space_number};
+use crate::sys::timer::Timer;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 
 pub type Sender = actor::Sender<Event>;
@@ -183,6 +184,9 @@ pub enum Event {
         response: r#continue::Sender<Result<(), String>>,
     },
 
+    #[serde(skip)]
+    MenuUpdateTick,
+
     /// Apply app rules to existing windows when a space is activated
     ApplyAppRulesToExistingWindows {
         pid: pid_t,
@@ -237,6 +241,8 @@ pub struct Reactor {
     last_sls_notification_ids: Vec<u32>,
     stack_line_selection_cache: HashMap<NodeId, usize>,
     stack_line_groups_cache: HashMap<SpaceId, Vec<GroupSig>>,
+    self_tx: Option<Sender>,
+    menu_update_scheduled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -368,6 +374,8 @@ impl Reactor {
             observed_window_server_ids: HashSet::default(),
             stack_line_selection_cache: HashMap::default(),
             stack_line_groups_cache: HashMap::default(),
+            self_tx: None,
+            menu_update_scheduled: false,
         }
     }
 
@@ -376,6 +384,8 @@ impl Reactor {
         self.raise_manager_tx = raise_manager_tx.clone();
 
         let mouse_tx = self.mouse_tx.clone();
+        // Keep a self-sender for scheduling internal events (debounced menu updates)
+        self.self_tx = Some(events_tx.clone());
         let reactor_task = self.run_reactor_loop(events);
         let raise_manager_task = RaiseManager::run(raise_manager_rx, events_tx, mouse_tx);
 
@@ -396,6 +406,7 @@ impl Reactor {
         }
     }
 
+    #[instrument(name = "reactor::handle_event", skip(self), fields(event=?event))]
     fn handle_event(&mut self, event: Event) {
         self.log_event(&event);
         self.record.on_event(&event);
@@ -943,6 +954,11 @@ impl Reactor {
                 let config = self.handle_config_query();
                 let _ = response.send(config);
             }
+            Event::MenuUpdateTick => {
+                // Clear scheduled flag and perform a single menu update
+                self.menu_update_scheduled = false;
+                self.update_menu();
+            }
         }
         if let Some(raised_window) = raised_window {
             let spaces = self.visible_spaces();
@@ -954,7 +970,7 @@ impl Reactor {
         }
 
         if !self.in_drag || window_was_destroyed {
-            self.update_menu();
+            self.schedule_menu_update();
         }
 
         self.is_workspace_switch = false;
@@ -970,6 +986,21 @@ impl Reactor {
                 self.last_sls_notification_ids = ids;
             }
         }
+    }
+
+    fn schedule_menu_update(&mut self) {
+        if self.menu_update_scheduled {
+            return;
+        }
+        let Some(tx) = self.self_tx.clone() else { return };
+        self.menu_update_scheduled = true;
+        std::thread::spawn(move || {
+            use std::time::Duration;
+            Executor::run(async move {
+                Timer::sleep(Duration::from_millis(150)).await;
+                tx.send(Event::MenuUpdateTick);
+            });
+        });
     }
 
     fn update_menu(&mut self) {

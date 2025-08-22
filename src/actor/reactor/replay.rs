@@ -80,6 +80,7 @@ pub fn replay(
     let mut reactor = Reactor::new(Arc::new(config), layout, Record::new(None), broadcast_tx);
     std::thread::spawn(move || {
         while let Some((span, request)) = rx.blocking_recv() {
+            let _ = span.enter();
             on_event(span, request);
         }
     });

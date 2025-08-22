@@ -42,12 +42,13 @@ impl Menu {
         if self.icon.is_none() {
             return;
         }
-        while let Some((_, event)) = self.rx.recv().await {
+        while let Some((span, event)) = self.rx.recv().await {
+            let _ = span.enter();
             self.handle_event(event);
         }
     }
 
-    #[instrument(skip(self))]
+    #[instrument(name = "menu_bar::handle_event", skip(self))]
     fn handle_event(&mut self, event: Event) {
         let Some(icon) = &mut self.icon else { return };
         let Event::Update {

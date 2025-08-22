@@ -59,29 +59,7 @@ impl MainWindowTracker {
                 app.main_window = wid;
                 (pid, quiet)
             }
-            Event::ApplicationTerminated(..)
-            | Event::WindowsDiscovered { .. }
-            | Event::WindowCreated(..)
-            | Event::WindowDestroyed(..)
-            | Event::WindowFrameChanged(..)
-            | Event::ScreenParametersChanged(..)
-            | Event::SpaceChanged(..)
-            | Event::MouseUp
-            | Event::MouseMovedOverWindow(..)
-            | Event::RaiseCompleted { .. }
-            | Event::RaiseTimeout { .. }
-            | Event::Command(..)
-            | Event::QueryWorkspaces(..)
-            | Event::QueryWindows { .. }
-            | Event::QueryWindowInfo { .. }
-            | Event::QueryApplications(..)
-            | Event::QueryLayoutState { .. }
-            | Event::QueryMetrics(..)
-            | Event::QueryConfig(..)
-            | Event::ApplyConfig { .. }
-            | Event::ApplyAppRulesToExistingWindows { .. }
-            | Event::WindowServerDestroyed(..)
-            | Event::WindowServerAppeared(..) => return None,
+            _ => return None,
         };
         if Some(event_pid) == self.global_frontmost && quiet_edge == Quiet::No {
             if let Some(wid) = self.main_window() {

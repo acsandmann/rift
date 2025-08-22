@@ -111,7 +111,8 @@ impl Mouse {
             }
         }
 
-        while let Some((_span, request)) = requests_rx.recv().await {
+        while let Some((span, request)) = requests_rx.recv().await {
+            let _ = span.enter();
             this.on_request(request);
         }
     }

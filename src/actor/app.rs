@@ -6,6 +6,7 @@
 use std::cell::RefCell;
 use std::fmt::Debug;
 use std::num::NonZeroU32;
+use std::sync::LazyLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -233,7 +234,6 @@ struct State {
     last_activated: Option<(Instant, Quiet, r#continue::Sender<()>)>,
     is_frontmost: bool,
     raises_tx: actor::Sender<RaiseRequest>,
-    raise_mutex: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 struct WindowState {
@@ -629,11 +629,10 @@ impl State {
 
         check_cancel()?;
 
-        let app_mutex = {
-            let this = this_ref.borrow();
-            this.raise_mutex.clone()
-        };
-
+        static MUTEX: LazyLock<tokio::sync::Mutex<()>> =
+            LazyLock::new(|| tokio::sync::Mutex::new(()));
+        let mut mutex_guard = Some(MUTEX.lock().await);
+        check_cancel()?;
         let mut this = this_ref.borrow_mut();
 
         let is_frontmost: bool = trace("is_frontmost", &this.app, || this.app.frontmost())?.into();
@@ -673,8 +672,6 @@ impl State {
                 make_key_result={make_key_result:?} is_standard={is_standard:?}"
             )
         }
-
-        let mut mutex_guard = Some(app_mutex.lock().await);
 
         for (i, &wid) in wids.iter().enumerate() {
             debug_assert_eq!(wid.pid, this.pid);
@@ -938,7 +935,6 @@ fn app_thread_main(pid: pid_t, info: AppInfo, events_tx: reactor::Sender) {
         last_activated: None,
         is_frontmost: false,
         raises_tx,
-        raise_mutex: std::sync::Arc::new(tokio::sync::Mutex::new(())),
     };
 
     let (requests_tx, requests_rx) = actor::channel();

@@ -8,8 +8,12 @@ build = "build.rs"
 name = "rift"
 test = false
 
-[profile]
-release.panic = "abort"
+[profile.release]
+debug = 1            # or "line" on newer toolchains
+codegen-units = 1
+lto = "fat"
+panic = "abort"
+
 
 [lib]
 doctest = false
