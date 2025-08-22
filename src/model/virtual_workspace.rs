@@ -214,10 +214,27 @@ impl VirtualWorkspaceManager {
         current: VirtualWorkspaceId,
         skip_empty: Option<bool>,
     ) -> Option<VirtualWorkspaceId> {
-        let workspace_ids = self.filtered_workspace_ids(space, skip_empty);
-        let current_pos = workspace_ids.iter().position(|&id| id == current)?;
-        let next_pos = (current_pos + 1) % workspace_ids.len();
-        workspace_ids.get(next_pos).copied()
+        let ids = self.workspaces_by_space.get(&space)?;
+        if ids.is_empty() {
+            return None;
+        }
+
+        let current_pos = ids.iter().position(|&id| id == current)?;
+
+        let len = ids.len();
+        for offset in 1..=len {
+            let idx = (current_pos + offset) % len;
+            let candidate = ids[idx];
+            if !skip_empty.unwrap_or(false) {
+                return Some(candidate);
+            } else if let Some(ws) = self.workspaces.get(candidate) {
+                if !ws.windows.is_empty() {
+                    return Some(candidate);
+                }
+            }
+        }
+
+        None
     }
 
     pub fn prev_workspace(
@@ -226,14 +243,27 @@ impl VirtualWorkspaceManager {
         current: VirtualWorkspaceId,
         skip_empty: Option<bool>,
     ) -> Option<VirtualWorkspaceId> {
-        let workspace_ids = self.filtered_workspace_ids(space, skip_empty);
-        let current_pos = workspace_ids.iter().position(|&id| id == current)?;
-        let prev_pos = if current_pos == 0 {
-            workspace_ids.len() - 1
-        } else {
-            current_pos - 1
-        };
-        workspace_ids.get(prev_pos).copied()
+        let ids = self.workspaces_by_space.get(&space)?;
+        if ids.is_empty() {
+            return None;
+        }
+
+        let current_pos = ids.iter().position(|&id| id == current)?;
+        let len = ids.len();
+
+        for offset in 1..=len {
+            let idx = (current_pos + len - (offset % len)) % len;
+            let candidate = ids[idx];
+            if !skip_empty.unwrap_or(false) {
+                return Some(candidate);
+            } else if let Some(ws) = self.workspaces.get(candidate) {
+                if !ws.windows.is_empty() {
+                    return Some(candidate);
+                }
+            }
+        }
+
+        None
     }
 
     pub fn assign_window_to_workspace(
@@ -516,30 +546,6 @@ impl VirtualWorkspaceManager {
             .collect();
         workspaces.sort_by(|a, b| a.1.cmp(&b.1));
         workspaces
-    }
-
-    fn filtered_workspace_ids(
-        &self,
-        space: SpaceId,
-        skip_empty: Option<bool>,
-    ) -> Vec<VirtualWorkspaceId> {
-        let Some(ids) = self.workspaces_by_space.get(&space) else {
-            return Vec::new();
-        };
-        let mut workspace_ids: Vec<_> = ids
-            .iter()
-            .copied()
-            .filter(|id| {
-                if let Some(ws) = self.workspaces.get(*id) {
-                    skip_empty.map_or(true, |skip| !skip || !ws.windows.is_empty())
-                } else {
-                    false
-                }
-            })
-            .collect();
-        workspace_ids
-            .sort_by_key(|id| self.workspaces.get(*id).map(|w| w.name.clone()).unwrap_or_default());
-        workspace_ids
     }
 
     pub fn rename_workspace(
