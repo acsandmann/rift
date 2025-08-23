@@ -157,17 +157,16 @@ impl ServerState {
             BroadcastEvent::WindowsChanged { .. } => "windows_changed",
         };
 
-        let subs_snapshot = {
-            let guard = self.cli_subscriptions.lock();
-            guard.clone()
-        };
-
+        // Collect relevant subscriptions without full HashMap clone
         let mut relevant: Vec<CliSubscription> = Vec::new();
-        if let Some(list) = subs_snapshot.get(event_name) {
-            relevant.extend(list.clone());
-        }
-        if let Some(list) = subs_snapshot.get("*") {
-            relevant.extend(list.clone());
+        {
+            let guard = self.cli_subscriptions.lock();
+            if let Some(list) = guard.get(event_name) {
+                relevant.extend(list.iter().cloned());
+            }
+            if let Some(list) = guard.get("*") {
+                relevant.extend(list.iter().cloned());
+            }
         }
 
         for subscription in relevant {
