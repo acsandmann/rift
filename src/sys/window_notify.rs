@@ -7,7 +7,7 @@
 // https://github.com/NUIKit/CGSInternal/blob/c4f6f559d624dc1cfc2bf24c8c19dbf653317fcf/CGSEvent.h#L21
 
 use std::ffi::c_void;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 use once_cell::sync::Lazy;
 use tracing::{debug, trace};
@@ -38,13 +38,13 @@ static REGISTERED_EVENTS: Lazy<Mutex<crate::common::collections::HashSet<CGSEven
 
 pub fn init(event: CGSEventType) -> i32 {
     let event = event.into();
-    let mut registered = REGISTERED_EVENTS.lock().unwrap();
+    let mut registered = REGISTERED_EVENTS.lock();
     if registered.contains(&event) {
         debug!("Event {} already registered, skipping", event);
         return 1;
     }
 
-    let mut channels = EVENT_CHANNELS.lock().unwrap();
+    let mut channels = EVENT_CHANNELS.lock();
     if !channels.contains_key(&event) {
         let (tx, rx) = actor::channel::<EventData>();
         channels.insert(event, (tx, Some(rx)));
@@ -69,7 +69,7 @@ pub fn init(event: CGSEventType) -> i32 {
 }
 
 pub fn take_receiver(event: CGSEventType) -> actor::Receiver<EventData> {
-    let mut channels = EVENT_CHANNELS.lock().unwrap();
+    let mut channels = EVENT_CHANNELS.lock();
     let (_tx, rx_opt) = channels.get_mut(&event).unwrap_or_else(|| {
         panic!(
             "window_notify::take_receiver({}) called for unregistered event",
@@ -110,7 +110,7 @@ extern "C" fn connection_callback(
 
     debug!("received: {:?}", event_data);
 
-    let channels = EVENT_CHANNELS.lock().unwrap();
+    let channels = EVENT_CHANNELS.lock();
     if let Some((sender, _)) = channels.get(&event) {
         if let Err(e) = sender.try_send(event_data.clone()) {
             debug!("Failed to send event {}: {}", event, e);

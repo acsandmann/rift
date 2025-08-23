@@ -629,9 +629,9 @@ impl State {
 
         check_cancel()?;
 
-        static MUTEX: LazyLock<tokio::sync::Mutex<()>> =
-            LazyLock::new(|| tokio::sync::Mutex::new(()));
-        let mut mutex_guard = Some(MUTEX.lock().await);
+        static MUTEX: LazyLock<parking_lot::Mutex<()>> =
+            LazyLock::new(|| parking_lot::Mutex::new(()));
+        let mut mutex_guard = Some(MUTEX.lock());
         check_cancel()?;
         let mut this = this_ref.borrow_mut();
 

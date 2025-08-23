@@ -5,7 +5,8 @@ use std::future::Future;
 use std::mem;
 use std::pin::Pin;
 use std::rc::{Rc, Weak};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 use std::task::{Context, Poll, Wake};
 
 use core_foundation::runloop::CFRunLoop;
@@ -92,7 +93,7 @@ impl State {
 struct WakerImpl(Mutex<WakeupHandle>);
 
 impl Wake for WakerImpl {
-    fn wake(self: Arc<Self>) { self.0.lock().unwrap().wake(); }
+    fn wake(self: Arc<Self>) { self.0.lock().wake(); }
 }
 
 #[cfg(test)]

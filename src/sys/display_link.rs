@@ -1,6 +1,7 @@
 use std::ffi::c_void;
 use std::ptr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 
 pub type CVReturn = i32;
 pub type CVOptionFlags = u32;
@@ -65,9 +66,8 @@ extern "C" fn display_link_callback(
         if timestamp.video_refresh_period > 0 && timestamp.video_time_scale > 0 {
             let refresh_rate =
                 timestamp.video_time_scale as f64 / timestamp.video_refresh_period as f64;
-            if let Ok(mut rate) = data.refresh_rate.lock() {
-                *rate = Some(refresh_rate);
-            }
+            let mut rate = data.refresh_rate.lock();
+            *rate = Some(refresh_rate);
         }
     }
 
@@ -130,7 +130,7 @@ impl DisplayLink {
     /// Returns None if the refresh rate hasn't been determined yet.
     /// You may need to start the DisplayLink briefly to get this information.
     pub fn refresh_rate(&self) -> Option<f64> {
-        self.refresh_rate.lock().ok().and_then(|rate| *rate)
+        *self.refresh_rate.lock()
     }
 
     /// Get the display's refresh rate, starting the DisplayLink briefly if needed.
