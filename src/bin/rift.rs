@@ -134,9 +134,8 @@ fn main() {
         loop {
             match rx.blocking_recv() {
                 Some((_span, event)) => {
-                    if let Ok(state) = server_state.read() {
-                        state.publish(event);
-                    }
+                    let state = server_state.read();
+                    state.publish(event);
                 }
                 None => {
                     break;

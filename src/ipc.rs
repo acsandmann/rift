@@ -22,15 +22,14 @@ type ClientPort = u32;
 pub fn run_mach_server(reactor_tx: reactor::Sender) -> SharedServerState {
     info!("Spawning background Mach server thread and returning SharedServerState");
 
-    let shared_state: SharedServerState = std::sync::Arc::new(std::sync::RwLock::new(
+    let shared_state: SharedServerState = std::sync::Arc::new(parking_lot::RwLock::new(
         crate::ipc::subscriptions::ServerState::new(),
     ));
 
     let thread_state = shared_state.clone();
     std::thread::spawn(move || {
-        if let Ok(s) = thread_state.write() {
-            s.set_runloop(Some(CFRunLoop::get_current()));
-        }
+        let s = thread_state.write();
+        s.set_runloop(Some(CFRunLoop::get_current()));
 
         let handler = MachHandler::new(reactor_tx, thread_state.clone());
         unsafe {
@@ -117,25 +116,22 @@ impl MachHandler {
 
         match request {
             RiftRequest::Subscribe { event } => {
-                if let Ok(state) = self.server_state.read() {
-                    state.subscribe_client(client_port, event.clone());
-                }
+                let state = self.server_state.read();
+                state.subscribe_client(client_port, event.clone());
                 RiftResponse::Success {
                     data: serde_json::json!({ "subscribed": event }),
                 }
             }
             RiftRequest::Unsubscribe { event } => {
-                if let Ok(state) = self.server_state.read() {
-                    state.unsubscribe_client(client_port, event.clone());
-                }
+                let state = self.server_state.read();
+                state.unsubscribe_client(client_port, event.clone());
                 RiftResponse::Success {
                     data: serde_json::json!({ "unsubscribed": event }),
                 }
             }
             RiftRequest::SubscribeCli { event, command, args } => {
-                if let Ok(state) = self.server_state.read() {
-                    state.subscribe_cli(event.clone(), command.clone(), args.clone());
-                }
+                let state = self.server_state.read();
+                state.subscribe_cli(event.clone(), command.clone(), args.clone());
                 RiftResponse::Success {
                     data: serde_json::json!({
                         "cli_subscribed": event,
@@ -145,20 +141,15 @@ impl MachHandler {
                 }
             }
             RiftRequest::UnsubscribeCli { event } => {
-                if let Ok(state) = self.server_state.read() {
-                    state.unsubscribe_cli(event.clone());
-                }
+                let state = self.server_state.read();
+                state.unsubscribe_cli(event.clone());
                 RiftResponse::Success {
                     data: serde_json::json!({ "cli_unsubscribed": event }),
                 }
             }
             RiftRequest::ListCliSubscriptions => {
-                let data = if let Ok(state) = self.server_state.read() {
-                    state.list_cli_subscriptions()
-                } else {
-                    serde_json::json!({"cli_subscriptions": [], "total_count": 0})
-                };
-
+                let state = self.server_state.read();
+                let data = state.list_cli_subscriptions();
                 RiftResponse::Success { data }
             }
 

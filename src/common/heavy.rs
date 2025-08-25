@@ -1,7 +1,7 @@
 // TODO: this cannot be the best way to do this
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 use once_cell::sync::Lazy;
 
@@ -52,7 +52,7 @@ pub fn is_heavy(pid: pid_t, bundle_id: &str, bundle_path: &PathBuf) -> bool {
         return true;
     }
 
-    let mut cache = HEAVY_CACHE.lock().unwrap();
+    let mut cache = HEAVY_CACHE.lock();
     if let Some(&cached) = cache.get(&pid) {
         return cached;
     }

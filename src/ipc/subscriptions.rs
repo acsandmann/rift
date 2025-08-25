@@ -1,6 +1,7 @@
 use std::ffi::{CString, c_void};
 use std::os::raw::c_char;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
+use parking_lot::{Mutex, RwLock};
 
 use core_foundation::date::CFAbsoluteTimeGetCurrent;
 use core_foundation::runloop::{
@@ -39,30 +40,27 @@ impl ServerState {
     }
 
     pub fn set_runloop(&self, rl: Option<CFRunLoop>) {
-        if let Ok(mut guard) = self.runloop.lock() {
-            *guard = rl;
-        }
+        let mut guard = self.runloop.lock();
+        *guard = rl;
     }
 
     pub fn subscribe_client(&self, client_port: ClientPort, event: String) {
         info!("Client {} subscribing to event: {}", client_port, event);
-        if let Ok(mut guard) = self.subscriptions.lock() {
-            let subs = guard.entry(client_port).or_insert_with(Vec::new);
-            if !subs.contains(&event) {
-                subs.push(event);
-                info!("Client {} now subscribed to: {:?}", client_port, subs);
-            }
+        let mut guard = self.subscriptions.lock();
+        let subs = guard.entry(client_port).or_insert_with(Vec::new);
+        if !subs.contains(&event) {
+            subs.push(event);
+            info!("Client {} now subscribed to: {:?}", client_port, subs);
         }
     }
 
     pub fn unsubscribe_client(&self, client_port: ClientPort, event: String) {
         info!("Client {} unsubscribing from event: {}", client_port, event);
-        if let Ok(mut guard) = self.subscriptions.lock() {
-            if let Some(events) = guard.get_mut(&client_port) {
-                events.retain(|e| e != &event);
-                if events.is_empty() {
-                    guard.remove(&client_port);
-                }
+        let mut guard = self.subscriptions.lock();
+        if let Some(events) = guard.get_mut(&client_port) {
+            events.retain(|e| e != &event);
+            if events.is_empty() {
+                guard.remove(&client_port);
             }
         }
     }
@@ -75,30 +73,28 @@ impl ServerState {
 
         let subscription = CliSubscription { command, args };
 
-        if let Ok(mut guard) = self.cli_subscriptions.lock() {
-            let list = guard.entry(event.clone()).or_insert_with(Vec::new);
-            let is_duplicate = list
-                .iter()
-                .any(|s| s.command == subscription.command && s.args == subscription.args);
-            if !is_duplicate {
-                list.push(subscription);
-                info!("CLI now subscribed to '{}'", event);
-            } else {
-                info!("Duplicate CLI subscription ignored for '{}'", event);
-            }
+        let mut guard = self.cli_subscriptions.lock();
+        let list = guard.entry(event.clone()).or_insert_with(Vec::new);
+        let is_duplicate = list
+            .iter()
+            .any(|s| s.command == subscription.command && s.args == subscription.args);
+        if !is_duplicate {
+            list.push(subscription);
+            info!("CLI now subscribed to '{}'", event);
+        } else {
+            info!("Duplicate CLI subscription ignored for '{}'", event);
         }
     }
 
     pub fn unsubscribe_cli(&self, event: String) {
         info!("CLI unsubscribing from event: {}", event);
-        if let Ok(mut guard) = self.cli_subscriptions.lock() {
-            let removed = guard.remove(&event).map(|v| v.len()).unwrap_or(0);
-            info!("Removed {} CLI subscriptions for event '{}'", removed, event);
-        }
+        let mut guard = self.cli_subscriptions.lock();
+        let removed = guard.remove(&event).map(|v| v.len()).unwrap_or(0);
+        info!("Removed {} CLI subscriptions for event '{}'", removed, event);
     }
 
     pub fn list_cli_subscriptions(&self) -> Value {
-        if let Ok(guard) = self.cli_subscriptions.lock() {
+        let guard = self.cli_subscriptions.lock();
             let mut subscription_list: Vec<Value> = Vec::new();
             for (event, subs) in guard.iter() {
                 for s in subs {
@@ -108,17 +104,11 @@ impl ServerState {
                         "args": s.args,
                     }));
                 }
-            }
-            serde_json::json!({
-                "cli_subscriptions": subscription_list,
-                "total_count": subscription_list.len()
-            })
-        } else {
-            serde_json::json!({
-                "cli_subscriptions": [],
-                "total_count": 0
-            })
         }
+        serde_json::json!({
+            "cli_subscriptions": subscription_list,
+            "total_count": subscription_list.len()
+        })
     }
 
     pub fn publish(&self, event: BroadcastEvent) {
@@ -133,11 +123,8 @@ impl ServerState {
         };
 
         let subscriptions_snapshot = {
-            if let Ok(guard) = self.subscriptions.lock() {
-                guard.clone()
-            } else {
-                HashMap::default()
-            }
+            let guard = self.subscriptions.lock();
+            guard.clone()
         };
 
         for (client_port, events) in subscriptions_snapshot {
@@ -150,10 +137,9 @@ impl ServerState {
                     }
                 };
 
-                let maybe_runloop = if let Ok(rl_guard) = self.runloop.lock() {
+                let maybe_runloop = {
+                    let rl_guard = self.runloop.lock();
                     rl_guard.clone()
-                } else {
-                    None
                 };
 
                 if let Some(ref rl) = maybe_runloop {
@@ -171,20 +157,16 @@ impl ServerState {
             BroadcastEvent::WindowsChanged { .. } => "windows_changed",
         };
 
-        let subs_snapshot = {
-            if let Ok(guard) = self.cli_subscriptions.lock() {
-                guard.clone()
-            } else {
-                HashMap::default()
-            }
-        };
-
+        // Collect relevant subscriptions without full HashMap clone
         let mut relevant: Vec<CliSubscription> = Vec::new();
-        if let Some(list) = subs_snapshot.get(event_name) {
-            relevant.extend(list.clone());
-        }
-        if let Some(list) = subs_snapshot.get("*") {
-            relevant.extend(list.clone());
+        {
+            let guard = self.cli_subscriptions.lock();
+            if let Some(list) = guard.get(event_name) {
+                relevant.extend(list.iter().cloned());
+            }
+            if let Some(list) = guard.get("*") {
+                relevant.extend(list.iter().cloned());
+            }
         }
 
         for subscription in relevant {
@@ -210,9 +192,8 @@ impl ServerState {
     }
 
     pub fn remove_client(&self, client_port: ClientPort) {
-        if let Ok(mut guard) = self.subscriptions.lock() {
-            guard.remove(&client_port);
-        }
+        let mut guard = self.subscriptions.lock();
+        guard.remove(&client_port);
     }
 }
 
