@@ -1,11 +1,11 @@
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use parking_lot::{Condvar, Mutex, RwLock};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use once_cell::sync::Lazy;
+use parking_lot::{Condvar, Mutex, RwLock};
 
 use super::TransactionId;
 use crate::actor::app::{AppThreadHandle, Request, WindowId};
@@ -185,7 +185,8 @@ impl Animation {
                     if pos_changed || size_changed {
                         let _ = w.handle.send(Request::SetWindowFrame(w.wid, rect, w.txid, false));
 
-                        let frame_time = w.last_update_time
+                        let frame_time = w
+                            .last_update_time
                             .map(|last| current_time.duration_since(last))
                             .unwrap_or(Duration::ZERO);
                         w.update_performance(frame_time);
@@ -193,6 +194,8 @@ impl Animation {
                     }
                     w.last_update_time = Some(current_time);
                 }
+
+                drop(windows_mut);
 
                 if idx + 1 >= total {
                     unsafe {
