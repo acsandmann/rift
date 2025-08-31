@@ -96,6 +96,7 @@ tracing-tree = { version = "0.3.0", features = ["time"] }
 continue = { git = "https://github.com/drewcrawford/continue" }
 futures-task = "0.3.31"
 regex = "1.11.0"
+smallvec = "1.15.1"
 
 [dev-dependencies]
 pretty_assertions = "1.4.0"

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use objc2::MainThreadMarker;
+use tokio::time::{Duration, sleep};
 use tracing::instrument;
 
 use crate::actor;
@@ -42,9 +43,43 @@ impl Menu {
         if self.icon.is_none() {
             return;
         }
-        while let Some((span, event)) = self.rx.recv().await {
-            let _ = span.enter();
-            self.handle_event(event);
+
+        const DEBOUNCE_MS: u64 = 150;
+
+        let mut pending: Option<Event> = None;
+
+        loop {
+            if pending.is_none() {
+                match self.rx.recv().await {
+                    Some((span, event)) => {
+                        let _ = span.enter();
+                        pending = Some(event);
+                    }
+                    None => break,
+                }
+            } else {
+                tokio::select! {
+                    maybe_msg = self.rx.recv() => {
+                        match maybe_msg {
+                            Some((span, event)) => {
+                                let _ = span.enter();
+                                pending = Some(event);
+                            }
+                            None => {
+                                if let Some(ev) = pending.take() {
+                                    self.handle_event(ev);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    _ = sleep(Duration::from_millis(DEBOUNCE_MS)) => {
+                        if let Some(ev) = pending.take() {
+                            self.handle_event(ev);
+                        }
+                    }
+                }
+            }
         }
     }
 

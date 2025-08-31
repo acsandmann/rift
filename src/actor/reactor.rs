@@ -11,6 +11,8 @@ mod replay;
 #[cfg(test)]
 mod testing;
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::{mem, thread};
 
@@ -29,14 +31,12 @@ use crate::actor::raise_manager::{self, RaiseRequest};
 use crate::actor::{self, menu_bar, stack_line};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
 use crate::common::config::{Config, ConfigCommand};
-use crate::common::heavy::is_heavy;
 use crate::common::log::{self, MetricsCommand};
 use crate::layout_engine::{self as layout, LayoutCommand, LayoutEngine, LayoutEvent, LayoutKind};
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt, Round, SameAs};
 use crate::sys::screen::{SpaceId, get_active_space_number};
-use crate::sys::timer::Timer;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 
 pub type Sender = actor::Sender<Event>;
@@ -184,9 +184,6 @@ pub enum Event {
         response: r#continue::Sender<Result<(), String>>,
     },
 
-    #[serde(skip)]
-    MenuUpdateTick,
-
     /// Apply app rules to existing windows when a space is activated
     ApplyAppRulesToExistingWindows {
         pid: pid_t,
@@ -230,6 +227,8 @@ pub struct Reactor {
     main_window_tracker: MainWindowTracker,
     in_drag: bool,
     is_workspace_switch: bool,
+    workspace_switch_generation: u64,
+    active_workspace_switch: Option<u64>,
     record: Record,
     mouse_tx: Option<mouse::Sender>,
     menu_tx: Option<menu_bar::Sender>,
@@ -241,8 +240,7 @@ pub struct Reactor {
     last_sls_notification_ids: Vec<u32>,
     stack_line_selection_cache: HashMap<NodeId, usize>,
     stack_line_groups_cache: HashMap<SpaceId, Vec<GroupSig>>,
-    self_tx: Option<Sender>,
-    menu_update_scheduled: bool,
+    menu_update_signature: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -286,7 +284,9 @@ struct WindowState {
     is_ax_standard: bool,
     last_sent_txid: TransactionId,
     window_server_id: Option<WindowServerId>,
+    #[allow(unused)]
     bundle_id: Option<String>,
+    #[allow(unused)]
     bundle_path: Option<PathBuf>,
     ax_role: Option<String>,
     ax_subrole: Option<String>,
@@ -362,6 +362,8 @@ impl Reactor {
             main_window_tracker: MainWindowTracker::default(),
             in_drag: false,
             is_workspace_switch: false,
+            workspace_switch_generation: 0,
+            active_workspace_switch: None,
             record,
             mouse_tx: None,
             menu_tx: None,
@@ -374,8 +376,7 @@ impl Reactor {
             observed_window_server_ids: HashSet::default(),
             stack_line_selection_cache: HashMap::default(),
             stack_line_groups_cache: HashMap::default(),
-            self_tx: None,
-            menu_update_scheduled: false,
+            menu_update_signature: None,
         }
     }
 
@@ -384,8 +385,6 @@ impl Reactor {
         self.raise_manager_tx = raise_manager_tx.clone();
 
         let mouse_tx = self.mouse_tx.clone();
-        // Keep a self-sender for scheduling internal events (debounced menu updates)
-        self.self_tx = Some(events_tx.clone());
         let reactor_task = self.run_reactor_loop(events);
         let raise_manager_task = RaiseManager::run(raise_manager_rx, events_tx, mouse_tx);
 
@@ -681,11 +680,13 @@ impl Reactor {
                         | LayoutCommand::SwitchToWorkspace(_)
                         | LayoutCommand::SwitchToLastWorkspace
                 );
-
                 if is_workspace_switch {
                     if let Some(space) = self.main_window_space() {
                         self.store_current_floating_positions(space);
                     }
+                    self.workspace_switch_generation =
+                        self.workspace_switch_generation.wrapping_add(1);
+                    self.active_workspace_switch = Some(self.workspace_switch_generation);
                 }
 
                 let response = match &cmd {
@@ -954,26 +955,26 @@ impl Reactor {
                 let config = self.handle_config_query();
                 let _ = response.send(config);
             }
-            Event::MenuUpdateTick => {
-                // Clear scheduled flag and perform a single menu update
-                self.menu_update_scheduled = false;
-                self.update_menu();
-            }
         }
         if let Some(raised_window) = raised_window {
             let spaces = self.visible_spaces();
             self.send_layout_event(LayoutEvent::WindowFocused(spaces, raised_window));
         }
 
+        let mut layout_changed = false;
         if !self.in_drag || window_was_destroyed {
-            self.update_layout(is_resize, self.is_workspace_switch);
+            layout_changed = self.update_layout(is_resize, self.is_workspace_switch);
         }
 
         if !self.in_drag || window_was_destroyed {
-            self.schedule_menu_update();
+            self.maybe_send_menu_update();
         }
 
         self.is_workspace_switch = false;
+        if self.active_workspace_switch.is_some() && !layout_changed {
+            self.active_workspace_switch = None;
+            trace!("Workspace switch stabilized with no further frame changes");
+        }
 
         if should_update_notifications {
             use crate::sys::window_notify;
@@ -988,22 +989,7 @@ impl Reactor {
         }
     }
 
-    fn schedule_menu_update(&mut self) {
-        if self.menu_update_scheduled {
-            return;
-        }
-        let Some(tx) = self.self_tx.clone() else { return };
-        self.menu_update_scheduled = true;
-        std::thread::spawn(move || {
-            use std::time::Duration;
-            Executor::run(async move {
-                Timer::sleep(Duration::from_millis(150)).await;
-                tx.send(Event::MenuUpdateTick);
-            });
-        });
-    }
-
-    fn update_menu(&mut self) {
+    fn maybe_send_menu_update(&mut self) {
         let menu_tx = match self.menu_tx.as_ref() {
             Some(tx) => tx.clone(),
             None => return,
@@ -1018,6 +1004,29 @@ impl Reactor {
         let workspaces = self.handle_workspace_query().workspaces;
         let active_workspace = self.layout_engine.active_workspace(active_space);
         let windows = self.handle_windows_query(Some(active_space));
+
+        let signature_value = serde_json::json!({
+            "space": active_space.get(),
+            "active_workspace": active_workspace.map(|w| format!("{:?}", w)),
+            "workspaces": workspaces.iter().map(|ws| {
+                serde_json::json!({
+                    "id": ws.id,
+                    "window_count": ws.window_count,
+                    "name": ws.name,
+                })
+            }).collect::<Vec<_>>(),
+            "windows": windows.iter().map(|w| w.id.to_debug_string()).collect::<Vec<_>>(),
+        });
+
+        let signature_str = serde_json::to_string(&signature_value).unwrap_or_default();
+        let mut hasher = DefaultHasher::new();
+        signature_str.hash(&mut hasher);
+        let sig = hasher.finish();
+
+        if self.menu_update_signature == Some(sig) {
+            return;
+        }
+        self.menu_update_signature = Some(sig);
 
         let _ = menu_tx.send(menu_bar::Event::Update {
             active_space,
@@ -1421,7 +1430,7 @@ impl Reactor {
             }
 
             self.config = Arc::new(new_config);
-            self.update_layout(false, true);
+            let _ = self.update_layout(false, true);
         }
 
         Ok(())
@@ -1962,11 +1971,12 @@ impl Reactor {
     }
 
     #[instrument(skip(self), fields())]
-    pub fn update_layout(&mut self, is_resize: bool, is_workspace_switch: bool) {
+    pub fn update_layout(&mut self, is_resize: bool, is_workspace_switch: bool) -> bool {
         let screens = self.screens.clone();
         let main_window = self.main_window();
         trace!(?main_window);
         let mut seen_groups: HashSet<NodeId> = HashSet::default();
+        let mut any_frame_changed = false;
         for screen in screens {
             let Some(space) = screen.space else { continue };
             trace!(?screen);
@@ -2059,7 +2069,8 @@ impl Reactor {
                 }
             }
 
-            if is_workspace_switch {
+            let suppress_animation = is_workspace_switch || self.active_workspace_switch.is_some();
+            if suppress_animation {
                 for &(wid, target_frame) in &layout {
                     let Some(window) = self.windows.get_mut(&wid) else {
                         debug!(?wid, "Skipping layout - window no longer exists");
@@ -2070,6 +2081,7 @@ impl Reactor {
                     if target_frame.same_as(current_frame) {
                         continue;
                     }
+                    any_frame_changed = true;
                     trace!(
                         ?wid,
                         ?current_frame,
@@ -2115,11 +2127,10 @@ impl Reactor {
                         if target_frame.same_as(current_frame) {
                             continue;
                         }
-                        let Some(app_state) = self.apps.get(&wid.pid) else {
+                        let Some(app_state) = &self.apps.get(&wid.pid) else {
                             debug!(?wid, "Skipping for window - app no longer exists");
                             continue;
                         };
-                        let handle = app_state.handle.clone();
                         let txid = window.next_txid();
 
                         let is_active = self
@@ -2130,7 +2141,7 @@ impl Reactor {
 
                         if is_active {
                             trace!(?wid, ?current_frame, ?target_frame, "Animating visible window");
-                            let pid = wid.pid;
+                            /*let pid = wid.pid;
                             let heavy = match (&window.bundle_id, &window.bundle_path) {
                                 (Some(bundle_id), Some(bundle_path)) => {
                                     is_heavy(pid, bundle_id, bundle_path)
@@ -2145,6 +2156,14 @@ impl Reactor {
                                 screen.frame,
                                 txid,
                                 heavy,
+                            );*/
+                            anim.add_window(
+                                &app_state.handle,
+                                wid,
+                                current_frame,
+                                target_frame,
+                                false,
+                                txid,
                             );
                             animated_count += 1;
                         } else {
@@ -2154,9 +2173,12 @@ impl Reactor {
                                 ?target_frame,
                                 "Direct positioning hidden window"
                             );
-                            if let Err(e) =
-                                handle.send(Request::SetWindowFrame(wid, target_frame, txid, true))
-                            {
+                            if let Err(e) = app_state.handle.send(Request::SetWindowFrame(
+                                wid,
+                                target_frame,
+                                txid,
+                                true,
+                            )) {
                                 debug!(?wid, ?e, "Failed to send frame request for hidden window");
                                 continue;
                             }
@@ -2177,6 +2199,9 @@ impl Reactor {
         if !seen_groups.is_empty() {
             self.stack_line_selection_cache.retain(|k, _| seen_groups.contains(k));
         }
+
+        self.maybe_send_menu_update();
+        any_frame_changed
     }
 }
 

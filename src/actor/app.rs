@@ -38,12 +38,13 @@ use crate::common::collections::HashMap;
 use crate::sys::app::NSRunningApplicationExt;
 pub use crate::sys::app::{AppInfo, WindowInfo, pid_t};
 use crate::sys::axuielement::AXUIElementExt;
-use crate::sys::enhanced_ui::with_enhanced_ui_disabled;
+use crate::sys::enhanced_ui::{with_enhanced_ui_disabled, with_system_enhanced_ui_disabled};
 use crate::sys::event;
 use crate::sys::executor::Executor;
-use crate::sys::geometry::ToCGType;
+use crate::sys::geometry::{ToCGType, ToICrate};
 use crate::sys::observer::Observer;
 use crate::sys::process::ProcessInfo;
+use crate::sys::skylight::{G_CONNECTION, SLSDisableUpdate, SLSReenableUpdate};
 use crate::sys::window_server::{self, WindowServerId};
 
 /// An identifier representing a window.
@@ -190,6 +191,7 @@ pub enum Request {
     GetVisibleWindows,
 
     SetWindowFrame(WindowId, CGRect, TransactionId, bool),
+    SetBatchWindowFrame(Vec<(WindowId, CGRect)>, TransactionId),
     SetWindowPos(WindowId, CGPoint, TransactionId, bool),
 
     BeginWindowAnimation(WindowId),
@@ -502,6 +504,29 @@ impl State {
                     Requested(true),
                     None,
                 ));
+            }
+            &mut Request::SetBatchWindowFrame(ref mut frames, txid) => {
+                unsafe { SLSDisableUpdate(*G_CONNECTION) };
+                let _ = with_system_enhanced_ui_disabled(|| {
+                    for (wid, frame) in frames.iter() {
+                        let window = self.window_mut(*wid)?;
+                        window.last_seen_txid = txid;
+                        window.elem.set_size(frame.size.to_cgtype())?;
+                        window.elem.set_position(frame.origin.to_cgtype())?;
+                        window.elem.set_size(frame.size.to_cgtype())?;
+
+                        let frame = window.elem.frame()?;
+                        self.send_event(Event::WindowFrameChanged(
+                            *wid,
+                            frame.to_icrate(),
+                            txid,
+                            Requested(true),
+                            None,
+                        ));
+                    }
+                    Ok::<(), accessibility::Error>(())
+                });
+                unsafe { SLSReenableUpdate(*G_CONNECTION) };
             }
             &mut Request::BeginWindowAnimation(wid) => {
                 let window = self.window(wid)?;

@@ -1480,6 +1480,7 @@ dependencies = [
  "serde_with",
  "shell-escape",
  "slotmap",
+ "smallvec",
  "static_assertions",
  "tempfile",
  "test-log",
