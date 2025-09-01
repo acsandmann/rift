@@ -1,4 +1,3 @@
-use std::thread;
 use std::time::{Duration, Instant};
 
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
@@ -6,6 +5,7 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use super::TransactionId;
 use crate::actor::app::{AppThreadHandle, Request, WindowId};
 use crate::common::config::AnimationEasing;
+use crate::sys::timer::Timer;
 
 #[derive(Debug)]
 pub struct Animation<'a> {
@@ -81,7 +81,7 @@ impl<'a> Animation<'a> {
             if duration < Duration::ZERO {
                 continue;
             }
-            thread::sleep(duration);
+            Timer::sleep(duration);
 
             for (&(handle, wid, _, to, _, txid), rect) in self.windows.iter().zip(&next_frames) {
                 let mut rect = *rect;

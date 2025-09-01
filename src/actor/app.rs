@@ -469,29 +469,22 @@ impl State {
                 let window = self.window_mut(wid)?;
                 window.last_seen_txid = txid;
                 // https://github.com/koekeishiya/yabai/blob/17c023039eae6a50d18285fce4d8d12f4a8c3626/src/window_manager.c#L729
-                // reason for size->position->size
-                // optional disabling of enhanced ui has to be cleaner this is doing too much (as in the if stmt)
+                // TODO: optional disabling of enhanced ui has to be cleaner this is doing too much (as in the if stmt)
                 if eui {
                     with_enhanced_ui_disabled(&window.elem, || {
-                        trace("set_size_1", &window.elem, || {
-                            window.elem.set_size(frame.size.to_cgtype())
-                        })?;
                         trace("set_position", &window.elem, || {
                             window.elem.set_position(frame.origin.to_cgtype())
                         })?;
-                        trace("set_size_2", &window.elem, || {
+                        trace("set_size", &window.elem, || {
                             window.elem.set_size(frame.size.to_cgtype())
                         })?;
                         Ok::<(), accessibility::Error>(())
                     })?;
                 } else {
-                    trace("set_size_1", &window.elem, || {
-                        window.elem.set_size(frame.size.to_cgtype())
-                    })?;
                     trace("set_position", &window.elem, || {
                         window.elem.set_position(frame.origin.to_cgtype())
                     })?;
-                    trace("set_size_2", &window.elem, || {
+                    trace("set_size", &window.elem, || {
                         window.elem.set_size(frame.size.to_cgtype())
                     })?;
                 }

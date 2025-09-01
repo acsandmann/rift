@@ -17,7 +17,7 @@
 #   ease_in_expo, ease_out_expo, ease_in_out_expo,
 #   ease_in_circ, ease_out_circ, ease_in_out_circ
 animate = true
-animation_duration = 0.2
+animation_duration = 0.3
 animation_fps = 100.0
 animation_easing = "ease_in_out_cubic"
 

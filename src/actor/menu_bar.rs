@@ -1,7 +1,7 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use objc2::MainThreadMarker;
-use tokio::time::{Duration, sleep};
 use tracing::instrument;
 
 use crate::actor;
@@ -9,6 +9,7 @@ use crate::common::config::Config;
 use crate::model::VirtualWorkspaceId;
 use crate::model::server::{WindowData, WorkspaceData};
 use crate::sys::screen::SpaceId;
+use crate::sys::timer::Timer;
 use crate::ui::menu_bar::MenuIcon;
 
 #[derive(Debug, Clone)]
@@ -73,7 +74,7 @@ impl Menu {
                             }
                         }
                     }
-                    _ = sleep(Duration::from_millis(DEBOUNCE_MS)) => {
+                    _ = Timer::sleep(Duration::from_millis(DEBOUNCE_MS)) => {
                         if let Some(ev) = pending.take() {
                             self.handle_event(ev);
                         }
