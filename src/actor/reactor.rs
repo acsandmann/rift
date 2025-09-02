@@ -36,6 +36,7 @@ use crate::layout_engine::{self as layout, LayoutCommand, LayoutEngine, LayoutEv
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt, Round, SameAs};
+use crate::sys::power;
 use crate::sys::screen::{SpaceId, get_active_space_number};
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 
@@ -1005,24 +1006,15 @@ impl Reactor {
         let active_workspace = self.layout_engine.active_workspace(active_space);
         let windows = self.handle_windows_query(Some(active_space));
 
-        let signature_value = serde_json::json!({
-            "space": active_space.get(),
-            "active_workspace": active_workspace.map(|w| format!("{:?}", w)),
-            "workspaces": workspaces.iter().map(|ws| {
-                serde_json::json!({
-                    "id": ws.id,
-                    "window_count": ws.window_count,
-                    "name": ws.name,
-                })
-            }).collect::<Vec<_>>(),
-            "windows": windows.iter().map(|w| w.id.to_debug_string()).collect::<Vec<_>>(),
-        });
-
-        let signature_str = serde_json::to_string(&signature_value).unwrap_or_default();
         let mut hasher = DefaultHasher::new();
-        signature_str.hash(&mut hasher);
+        active_space.get().hash(&mut hasher);
+        if let Some(ws) = active_workspace {
+            ws.hash(&mut hasher);
+        }
+        for w in windows.iter() {
+            w.id.hash(&mut hasher);
+        }
         let sig = hasher.finish();
-
         if self.menu_update_signature == Some(sig) {
             return;
         }
@@ -1787,15 +1779,6 @@ impl Reactor {
 
         use crate::sys::app::NSRunningApplicationExt;
 
-        // TODO: remove?
-        const AUTO_SWITCH_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(500);
-        if let Some(last_switch) = self.last_auto_workspace_switch {
-            if last_switch.elapsed() < AUTO_SWITCH_COOLDOWN {
-                debug!("Auto workspace switch on cooldown, ignoring app activation");
-                return;
-            }
-        }
-
         let visible_spaces: HashSet<SpaceId> =
             self.screens.iter().filter_map(|s| s.space).collect();
         let app_is_on_visible_workspace = self.windows.iter().any(|(wid, window_state)| {
@@ -2071,6 +2054,7 @@ impl Reactor {
 
             let suppress_animation = is_workspace_switch || self.active_workspace_switch.is_some();
             if suppress_animation {
+                let mut per_app: HashMap<pid_t, Vec<(WindowId, CGRect)>> = HashMap::default();
                 for &(wid, target_frame) in &layout {
                     let Some(window) = self.windows.get_mut(&wid) else {
                         debug!(?wid, "Skipping layout - window no longer exists");
@@ -2089,24 +2073,50 @@ impl Reactor {
                         "Instant workspace positioning"
                     );
 
-                    let Some(app_state) = self.apps.get(&wid.pid) else {
-                        debug!(?wid, "Skipping layout update for window - app no longer exists");
+                    per_app.entry(wid.pid).or_default().push((wid, target_frame));
+                }
+
+                for (pid, frames) in per_app.into_iter() {
+                    if frames.is_empty() {
+                        continue;
+                    }
+
+                    let Some(app_state) = self.apps.get(&pid) else {
+                        debug!(?pid, "Skipping layout update for app - app no longer exists");
                         continue;
                     };
-                    let handle = app_state.handle.clone();
-                    let txid = window.next_txid();
 
-                    if let Err(e) =
-                        handle.send(Request::SetWindowFrame(wid, target_frame, txid, true))
+                    let handle = app_state.handle.clone();
+
+                    let first_wid = frames[0].0;
+                    let txid = if let Some(window) = self.windows.get_mut(&first_wid) {
+                        let tx = window.next_txid();
+                        for (wid, _) in frames.iter().skip(1) {
+                            if let Some(w) = self.windows.get_mut(wid) {
+                                w.last_sent_txid = tx;
+                            }
+                        }
+                        tx
+                    } else {
+                        TransactionId::default()
+                    };
+
+                    let frames_to_send = frames.clone();
+                    if let Err(e) = handle.send(Request::SetBatchWindowFrame(frames_to_send, txid))
                     {
                         debug!(
-                            ?wid,
+                            ?pid,
                             ?e,
-                            "Failed to send window frame request - app may have quit, continuing with other windows"
+                            "Failed to send batch frame request - app may have quit"
                         );
                         continue;
                     }
-                    window.frame_monotonic = target_frame;
+
+                    for (wid, target_frame) in frames {
+                        if let Some(window) = self.windows.get_mut(&wid) {
+                            window.frame_monotonic = target_frame;
+                        }
+                    }
                 }
             } else {
                 if let Some(active_ws) = self.layout_engine.active_workspace(space) {
@@ -2187,7 +2197,8 @@ impl Reactor {
                     }
 
                     if animated_count > 0 {
-                        if is_resize || !self.config.settings.animate {
+                        let low_power = power::is_low_power_mode_enabled();
+                        if is_resize || !self.config.settings.animate || low_power {
                             anim.skip_to_end();
                         } else {
                             anim.run();

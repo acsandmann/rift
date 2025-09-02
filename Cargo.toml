@@ -9,11 +9,10 @@ name = "rift"
 test = false
 
 [profile.release]
-debug = 1            # or "line" on newer toolchains
+debug = 1
 codegen-units = 1
-lto = "fat"
 panic = "abort"
-
+incremental = true
 
 [lib]
 doctest = false

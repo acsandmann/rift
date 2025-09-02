@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -7,6 +6,7 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use tracing::instrument;
 
 use crate::actor::{self, reactor};
+use crate::common::collections::HashMap;
 use crate::common::config::{Config, HorizontalPlacement, VerticalPlacement};
 use crate::layout_engine::LayoutKind;
 use crate::model::tree::NodeId;
@@ -61,7 +61,7 @@ impl StackLine {
             config,
             rx,
             mtm,
-            indicators: HashMap::new(),
+            indicators: HashMap::default(),
             reactor_tx,
             coordinate_converter,
         }
