@@ -37,7 +37,6 @@ use crate::actor::reactor::{self, Event, Requested, TransactionId};
 use crate::common::collections::HashMap;
 use crate::sys::app::NSRunningApplicationExt;
 pub use crate::sys::app::{AppInfo, WindowInfo, pid_t};
-use crate::sys::axuielement::AXUIElementExt;
 use crate::sys::enhanced_ui::{with_enhanced_ui_disabled, with_system_enhanced_ui_disabled};
 use crate::sys::event;
 use crate::sys::executor::Executor;
@@ -456,7 +455,7 @@ impl State {
                         window.elem.set_position(pos.to_cgtype())
                     })?;
                 }
-                let frame = trace("frame", &window.elem, || window.elem.fframe(wid))?;
+                let frame = trace("frame", &window.elem, || window.elem.frame())?.to_icrate();
                 self.send_event(Event::WindowFrameChanged(
                     wid,
                     frame,
@@ -489,7 +488,7 @@ impl State {
                     })?;
                 }
 
-                let frame = trace("frame", &window.elem, || window.elem.fframe(wid))?;
+                let frame = trace("frame", &window.elem, || window.elem.frame())?.to_icrate();
                 self.send_event(Event::WindowFrameChanged(
                     wid,
                     frame,
@@ -528,7 +527,7 @@ impl State {
             &mut Request::EndWindowAnimation(wid) => {
                 let &WindowState { ref elem, last_seen_txid } = self.window(wid)?;
                 self.restart_notifications_after_animation(elem);
-                let frame = trace("frame", elem, || elem.fframe(wid))?;
+                let frame = trace("frame", &elem, || elem.frame())?.to_icrate();
                 self.send_event(Event::WindowFrameChanged(
                     wid,
                     frame,
@@ -585,12 +584,12 @@ impl State {
                     return;
                 };
                 let last_seen = self.window(wid).unwrap().last_seen_txid;
-                let Ok(frame) = elem.fframe(wid) else {
+                let Ok(frame) = elem.frame() else {
                     return;
                 };
                 self.send_event(Event::WindowFrameChanged(
                     wid,
-                    frame,
+                    frame.to_icrate(),
                     last_seen,
                     Requested(false),
                     Some(event::get_mouse_state()),
