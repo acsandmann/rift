@@ -6,7 +6,8 @@ use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{Direction, LayoutKind, Orientation};
-use crate::model::tree::{NodeId, Tree};
+use crate::model::selection::*;
+use crate::model::tree::{NodeId, NodeMap, Tree};
 
 #[derive(Serialize, Deserialize, Clone)]
 enum NodeKind {
@@ -23,13 +24,12 @@ enum NodeKind {
 #[derive(Serialize, Deserialize, Clone, Copy)]
 struct LayoutState {
     root: NodeId,
-    selection: NodeId,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct BspLayoutSystem {
     layouts: slotmap::SlotMap<crate::layout_engine::LayoutId, LayoutState>,
-    tree: Tree<()>,
+    tree: Tree<Components>,
     kind: slotmap::SecondaryMap<NodeId, NodeKind>,
     window_to_node: HashMap<WindowId, NodeId>,
 }
@@ -42,7 +42,7 @@ impl Default for BspLayoutSystem {
     fn default() -> Self {
         Self {
             layouts: Default::default(),
-            tree: Tree::new(),
+            tree: Tree::with_observer(Components::default()),
             kind: Default::default(),
             window_to_node: Default::default(),
         }
@@ -205,8 +205,21 @@ impl BspLayoutSystem {
         None
     }
 
-    fn insert_window_at_selection(&mut self, state: &mut LayoutState, wid: WindowId) {
-        let sel = state.selection;
+    fn selection_of_layout(&self, layout: crate::layout_engine::LayoutId) -> Option<NodeId> {
+        self.layouts
+            .get(layout)
+            .map(|s| self.tree.data.selection.current_selection(s.root))
+    }
+
+    fn insert_window_at_selection(
+        &mut self,
+        layout: crate::layout_engine::LayoutId,
+        wid: WindowId,
+    ) {
+        let Some(state) = self.layouts.get(layout).copied() else {
+            return;
+        };
+        let sel = self.tree.data.selection.current_selection(state.root);
         match self.kind.get_mut(sel) {
             Some(NodeKind::Leaf { window, fullscreen }) => {
                 if window.is_none() {
@@ -227,13 +240,13 @@ impl BspLayoutSystem {
                     });
                     left.detach(&mut self.tree).push_back(sel);
                     right.detach(&mut self.tree).push_back(sel);
-                    state.selection = right;
+                    self.tree.data.selection.select(&self.tree.map, right);
                 }
             }
             Some(NodeKind::Split { .. }) => {
                 let leaf = self.descend_to_leaf(sel);
-                state.selection = leaf;
-                self.insert_window_at_selection(state, wid);
+                self.tree.data.selection.select(&self.tree.map, leaf);
+                self.insert_window_at_selection(layout, wid);
             }
             None => {}
         }
@@ -252,16 +265,17 @@ impl BspLayoutSystem {
             self.window_to_node.remove(&wid);
             let fallback = self.cleanup_after_removal(node_id);
 
-            let sel_snapshot = self.layouts.get(layout).map(|s| s.selection);
+            let sel_snapshot = self
+                .layouts
+                .get(layout)
+                .map(|s| self.tree.data.selection.current_selection(s.root));
             let needs_reset = sel_snapshot.and_then(|sel| self.kind.get(sel)).is_none();
             let new_sel = if needs_reset {
                 self.descend_to_leaf(fallback)
             } else {
                 self.descend_to_leaf(sel_snapshot.unwrap())
             };
-            if let Some(state) = self.layouts.get_mut(layout) {
-                state.selection = new_sel;
-            }
+            self.tree.data.selection.select(&self.tree.map, new_sel);
         }
     }
 
@@ -326,10 +340,52 @@ impl BspLayoutSystem {
     }
 
     fn selection_window(&self, state: &LayoutState) -> Option<WindowId> {
-        match self.kind.get(state.selection) {
+        let sel = self.tree.data.selection.current_selection(state.root);
+        match self.kind.get(sel) {
             Some(NodeKind::Leaf { window, .. }) => *window,
             _ => None,
         }
+    }
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct Components {
+    selection: Selection,
+}
+
+impl crate::model::tree::Observer for Components {
+    fn added_to_forest(&mut self, map: &NodeMap, node: NodeId) {
+        self.dispatch_event(map, TreeEvent::AddedToForest(node))
+    }
+
+    fn added_to_parent(&mut self, map: &NodeMap, node: NodeId) {
+        self.dispatch_event(map, TreeEvent::AddedToParent(node))
+    }
+
+    fn removing_from_parent(&mut self, map: &NodeMap, node: NodeId) {
+        self.dispatch_event(map, TreeEvent::RemovingFromParent(node))
+    }
+
+    fn removed_child(tree: &mut Tree<Self>, parent: NodeId) {
+        if parent.parent(&tree.map).is_none() {
+            return;
+        }
+        if parent.is_empty(&tree.map) {
+            parent.detach(tree).remove();
+        } else if parent.first_child(&tree.map) == parent.last_child(&tree.map) {
+            let child = parent.first_child(&tree.map).unwrap();
+            child.detach(tree).insert_after(parent).finish();
+        }
+    }
+
+    fn removed_from_forest(&mut self, map: &NodeMap, node: NodeId) {
+        self.dispatch_event(map, TreeEvent::RemovedFromForest(node))
+    }
+}
+
+impl Components {
+    fn dispatch_event(&mut self, map: &NodeMap, event: TreeEvent) {
+        self.selection.handle_event(map, event);
     }
 }
 
@@ -338,7 +394,7 @@ impl LayoutSystem for BspLayoutSystem {
 
     fn create_layout(&mut self) -> Self::LayoutId {
         let leaf = self.make_leaf(None);
-        let state = LayoutState { root: leaf, selection: leaf };
+        let state = LayoutState { root: leaf };
         self.layouts.insert(state)
     }
 
@@ -434,25 +490,25 @@ impl LayoutSystem for BspLayoutSystem {
     fn visible_windows_under_selection(&self, layout: Self::LayoutId) -> Vec<WindowId> {
         let mut out = Vec::new();
         if let Some(state) = self.layouts.get(layout).copied() {
-            if self.kind.get(state.selection).is_some() {
-                let leaf = self.descend_to_leaf(state.selection);
-                self.collect_windows_under(leaf, &mut out);
+            if let Some(sel) = self.selection_of_layout(layout) {
+                if self.kind.get(sel).is_some() {
+                    let leaf = self.descend_to_leaf(sel);
+                    self.collect_windows_under(leaf, &mut out);
+                }
             }
         }
         out
     }
 
     fn ascend_selection(&mut self, layout: Self::LayoutId) -> bool {
-        if let Some(sel) = self.layouts.get(layout).map(|s| s.selection) {
+        if let Some(sel) = self.selection_of_layout(layout) {
             if self.kind.get(sel).is_none() {
                 return false;
             }
             let parent_opt = sel.parent(&self.tree.map);
             if let Some(parent) = parent_opt {
                 let new_sel = self.descend_to_leaf(parent);
-                if let Some(state) = self.layouts.get_mut(layout) {
-                    state.selection = new_sel;
-                }
+                self.tree.data.selection.select(&self.tree.map, new_sel);
                 return true;
             }
         }
@@ -460,13 +516,10 @@ impl LayoutSystem for BspLayoutSystem {
     }
 
     fn descend_selection(&mut self, layout: Self::LayoutId) -> bool {
-        let sel_snapshot = self.layouts.get(layout).map(|s| s.selection);
-        if let Some(sel) = sel_snapshot {
+        if let Some(sel) = self.selection_of_layout(layout) {
             let new_sel = self.descend_to_leaf(sel);
             if new_sel != sel {
-                if let Some(state) = self.layouts.get_mut(layout) {
-                    state.selection = new_sel;
-                }
+                self.tree.data.selection.select(&self.tree.map, new_sel);
                 return true;
             }
         }
@@ -482,7 +535,7 @@ impl LayoutSystem for BspLayoutSystem {
         if raise_windows.is_empty() {
             return (None, vec![]);
         }
-        let sel_snapshot = self.layouts.get(layout).map(|s| s.selection);
+        let sel_snapshot = self.selection_of_layout(layout);
         let Some(current_sel) = sel_snapshot else {
             return (None, vec![]);
         };
@@ -490,9 +543,7 @@ impl LayoutSystem for BspLayoutSystem {
         let Some(next_leaf) = self.find_neighbor_leaf(current_leaf, direction) else {
             return (None, vec![]);
         };
-        if let Some(state) = self.layouts.get_mut(layout) {
-            state.selection = next_leaf;
-        }
+        self.tree.data.selection.select(&self.tree.map, next_leaf);
         let focus = match &self.kind[next_leaf] {
             NodeKind::Leaf { window, .. } => *window,
             _ => None,
@@ -501,12 +552,8 @@ impl LayoutSystem for BspLayoutSystem {
     }
 
     fn add_window_after_selection(&mut self, layout: Self::LayoutId, wid: WindowId) {
-        if let Some(state_sel) = self.layouts.get(layout).copied() {
-            let mut tmp = state_sel;
-            self.insert_window_at_selection(&mut tmp, wid);
-            if let Some(state_mut) = self.layouts.get_mut(layout) {
-                *state_mut = tmp;
-            }
+        if self.layouts.get(layout).is_some() {
+            self.insert_window_at_selection(layout, wid);
         }
     }
 
@@ -575,11 +622,9 @@ impl LayoutSystem for BspLayoutSystem {
             }
             if let Some(state) = self.layouts.get(layout).copied() {
                 let belongs = self.belongs_to_layout(state, node);
-                if let Some(state_mut) = self.layouts.get_mut(layout) {
-                    if belongs {
-                        state_mut.selection = node;
-                        return true;
-                    }
+                if belongs {
+                    self.tree.data.selection.select(&self.tree.map, node);
+                    return true;
                 }
             }
         }
@@ -611,7 +656,7 @@ impl LayoutSystem for BspLayoutSystem {
     }
 
     fn move_selection(&mut self, layout: Self::LayoutId, direction: Direction) -> bool {
-        let sel_snapshot = self.layouts.get(layout).map(|s| s.selection);
+        let sel_snapshot = self.selection_of_layout(layout);
         let Some(sel) = sel_snapshot else {
             return false;
         };
@@ -641,9 +686,7 @@ impl LayoutSystem for BspLayoutSystem {
         if let Some(w) = b_window {
             self.window_to_node.insert(w, sel_leaf);
         }
-        if let Some(state) = self.layouts.get_mut(layout) {
-            state.selection = neighbor_leaf;
-        }
+        self.tree.data.selection.select(&self.tree.map, neighbor_leaf);
         true
     }
 
@@ -671,7 +714,8 @@ impl LayoutSystem for BspLayoutSystem {
             return;
         };
 
-        let target = self.descend_to_leaf(state.selection);
+        let sel = self.tree.data.selection.current_selection(state.root);
+        let target = self.descend_to_leaf(sel);
         match self.kind.get(target).cloned() {
             Some(NodeKind::Leaf { window, .. }) => {
                 let left = self.make_leaf(window);
@@ -682,17 +726,14 @@ impl LayoutSystem for BspLayoutSystem {
                 self.kind.insert(target, NodeKind::Split { orientation, ratio: 0.5 });
                 left.detach(&mut self.tree).push_back(target);
                 right.detach(&mut self.tree).push_back(target);
-                if let Some(st) = self.layouts.get_mut(layout) {
-                    st.selection = right;
-                }
+                self.tree.data.selection.select(&self.tree.map, right);
             }
             _ => {}
         }
     }
 
     fn toggle_fullscreen_of_selection(&mut self, layout: Self::LayoutId) -> Vec<WindowId> {
-        let sel_snapshot = self.layouts.get(layout).map(|s| s.selection);
-        if let Some(sel) = sel_snapshot {
+        if let Some(sel) = self.selection_of_layout(layout) {
             let sel_leaf = self.descend_to_leaf(sel);
             if let Some(NodeKind::Leaf { window: Some(w), fullscreen }) =
                 self.kind.get_mut(sel_leaf)
@@ -715,7 +756,7 @@ impl LayoutSystem for BspLayoutSystem {
     fn unjoin_selection(&mut self, _layout: Self::LayoutId) {}
 
     fn resize_selection_by(&mut self, layout: Self::LayoutId, amount: f64) {
-        let sel_snapshot = self.layouts.get(layout).map(|s| s.selection);
+        let sel_snapshot = self.selection_of_layout(layout);
         let Some(mut node) = sel_snapshot else {
             return;
         };
