@@ -206,6 +206,14 @@ impl NodeId {
 
     #[track_caller]
     pub fn is_empty(self, map: &NodeMap) -> bool { map[self].first_child.is_none() }
+
+    /// Removes this node and its subtree from the forest if it is a root.
+    /// Panics if called on a non-root node.
+    #[track_caller]
+    pub fn remove_root<O: Observer>(self, tree: &mut Tree<O>) {
+        assert!(self.parent(&tree.map).is_none(), "remove_root called on non-root node");
+        tree.map.map.remove(self).unwrap().delete_recursive(tree, self);
+    }
 }
 
 pub trait Observer
@@ -241,6 +249,11 @@ impl<'a, O: Observer> UnattachedNode<'a, O> {
 }
 
 impl<'a, O: Observer> UnattachedNode<'a, O> {
+    /// Consumes this unattached node and returns its `NodeId` without
+    /// creating an `OwnedNode` root guard. The node remains in the forest
+    /// as a root until attached or explicitly removed.
+    pub fn into_id(self) -> NodeId { self.id }
+
     #[track_caller]
     pub(crate) fn push_back(self, parent: NodeId) -> NodeId {
         self.attach_with(|this| this.id.link_under_back(parent, &mut this.tree.map))

@@ -2,6 +2,7 @@ pub mod engine;
 mod floating;
 pub(crate) mod graph;
 pub mod systems;
+pub mod utils;
 mod workspaces;
 
 pub use engine::{EventResponse, LayoutCommand, LayoutEngine, LayoutEvent};

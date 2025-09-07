@@ -5,193 +5,178 @@ use super::LayoutSystem;
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
 use crate::layout_engine::{Direction, LayoutKind, Orientation};
-
-slotmap::new_key_type! { pub struct BspNodeId; }
+use crate::layout_engine::utils::compute_tiling_area;
+use crate::model::tree::{NodeId, Tree};
 
 #[derive(Serialize, Deserialize, Clone)]
 enum NodeKind {
-    Split {
-        orientation: Orientation,
-        ratio: f32,
-        first: BspNodeId,
-        second: BspNodeId,
-    },
-    Leaf {
-        window: Option<WindowId>,
-        fullscreen: bool,
-    },
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-struct Node {
-    parent: Option<BspNodeId>,
-    kind: NodeKind,
+    Split { orientation: Orientation, ratio: f32 },
+    Leaf { window: Option<WindowId>, fullscreen: bool },
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
 struct LayoutState {
-    root: BspNodeId,
-    selection: BspNodeId,
+    root: NodeId,
+    selection: NodeId,
 }
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize)]
 pub struct BspLayoutSystem {
     layouts: slotmap::SlotMap<crate::layout_engine::LayoutId, LayoutState>,
-    nodes: slotmap::SlotMap<BspNodeId, Node>,
-    window_to_node: HashMap<WindowId, BspNodeId>,
+    tree: Tree<()>,
+    kind: slotmap::SecondaryMap<NodeId, NodeKind>,
+    window_to_node: HashMap<WindowId, NodeId>,
 }
 
 impl BspLayoutSystem {
     pub fn new() -> Self { Self::default() }
 }
 
+impl Default for BspLayoutSystem {
+    fn default() -> Self {
+        Self { layouts: Default::default(), tree: Tree::new(), kind: Default::default(), window_to_node: Default::default() }
+    }
+}
+
 impl BspLayoutSystem {
-    fn make_leaf(&mut self, window: Option<WindowId>) -> BspNodeId {
-        self.nodes.insert(Node {
-            parent: None,
-            kind: NodeKind::Leaf { window, fullscreen: false },
-        })
+    fn make_leaf(&mut self, window: Option<WindowId>) -> NodeId {
+        let id = self.tree.mk_node().into_id();
+        self.kind
+            .insert(id, NodeKind::Leaf { window, fullscreen: false });
+        if let Some(w) = window {
+            self.window_to_node.insert(w, id);
+        }
+        id
     }
 
-    fn descend_to_leaf(&self, mut node: BspNodeId) -> BspNodeId {
-        while let Some(n) = self.nodes.get(node) {
-            match &n.kind {
-                NodeKind::Leaf { .. } => return node,
-                NodeKind::Split { first, .. } => {
-                    node = *first;
+    fn descend_to_leaf(&self, mut node: NodeId) -> NodeId {
+        loop {
+            match self.kind.get(node) {
+                Some(NodeKind::Leaf { .. }) => return node,
+                Some(NodeKind::Split { .. }) => {
+                    if let Some(child) = node.first_child(&self.tree.map) {
+                        node = child;
+                    } else {
+                        return node;
+                    }
+                }
+                None => return node,
+            }
+        }
+    }
+
+    fn collect_windows_under(&self, node: NodeId, out: &mut Vec<WindowId>) {
+        match self.kind.get(node) {
+            Some(NodeKind::Leaf { window, .. }) => {
+                if let Some(w) = window { out.push(*w); }
+            }
+            Some(NodeKind::Split { .. }) => {
+                for child in node.children(&self.tree.map) {
+                    self.collect_windows_under(child, out);
                 }
             }
+            None => {}
+        }
+    }
+
+    fn find_layout_root(&self, mut node: NodeId) -> NodeId {
+        while let Some(p) = node.parent(&self.tree.map) {
+            node = p;
         }
         node
     }
 
-    fn collect_windows_under(&self, node: BspNodeId, out: &mut Vec<WindowId>) {
-        let Some(n) = self.nodes.get(node) else {
-            return;
-        };
-        match &n.kind {
-            NodeKind::Leaf { window, .. } => {
-                if let Some(w) = window {
-                    out.push(*w);
-                }
-            }
-            NodeKind::Split { first, second, .. } => {
-                self.collect_windows_under(*first, out);
-                self.collect_windows_under(*second, out);
-            }
-        }
-    }
-
-    fn find_layout_root(&self, mut node: BspNodeId) -> BspNodeId {
-        while let Some(n) = self.nodes.get(node) {
-            if let Some(p) = n.parent {
-                node = p;
-            } else {
-                break;
-            }
-        }
-        node
-    }
-
-    fn belongs_to_layout(&self, layout: LayoutState, node: BspNodeId) -> bool {
-        if self.nodes.get(node).is_none() {
+    fn belongs_to_layout(&self, layout: LayoutState, node: NodeId) -> bool {
+        if self.kind.get(node).is_none() {
             return false;
         }
         self.find_layout_root(node) == layout.root
     }
 
-    fn cleanup_after_removal(&mut self, node: BspNodeId) -> BspNodeId {
-        let Some(parent_id) = self.nodes[node].parent else {
-            return node;
-        };
-        let (first, second, _orientation, _ratio) = match self.nodes[parent_id].kind.clone() {
-            NodeKind::Split {
-                first,
-                second,
-                orientation,
-                ratio,
-            } => (first, second, orientation, ratio),
-            NodeKind::Leaf { .. } => return parent_id,
-        };
-        let sibling = if node == first { second } else { first };
-        let sibling_kind = self.nodes[sibling].kind.clone();
-        self.nodes[parent_id].kind = sibling_kind.clone();
+    fn cleanup_after_removal(&mut self, node: NodeId) -> NodeId {
+        let Some(parent_id) = node.parent(&self.tree.map) else { return node; };
+        let NodeKind::Split { .. } = self.kind[parent_id] else { return parent_id };
+
+        let children: Vec<_> = parent_id.children(&self.tree.map).collect();
+        if children.len() != 2 { return parent_id; }
+        let sibling = if children[0] == node { children[1] } else { children[0] };
+
+        let sibling_kind = self.kind[sibling].clone();
+        self.kind.insert(parent_id, sibling_kind.clone());
         match sibling_kind {
-            NodeKind::Split {
-                first: s_first,
-                second: s_second,
-                ..
-            } => {
-                self.nodes[s_first].parent = Some(parent_id);
-                self.nodes[s_second].parent = Some(parent_id);
+            NodeKind::Split { .. } => {
+                let sib_children: Vec<_> = sibling.children(&self.tree.map).collect();
+                for c in sib_children {
+                    c.detach(&mut self.tree).push_back(parent_id);
+                }
             }
             NodeKind::Leaf { window, .. } => {
-                if let Some(w) = window {
-                    self.window_to_node.insert(w, parent_id);
-                }
+                if let Some(w) = window { self.window_to_node.insert(w, parent_id); }
             }
         }
 
-        self.nodes.remove(node);
-        self.nodes.remove(sibling);
+        node.detach(&mut self.tree).remove();
+        sibling.detach(&mut self.tree).remove();
+        self.kind.remove(node);
+        self.kind.remove(sibling);
         parent_id
     }
 
-    fn descend_to_edge_leaf(&self, mut node: BspNodeId, direction: Direction) -> BspNodeId {
+    fn descend_to_edge_leaf(&self, mut node: NodeId, direction: Direction) -> NodeId {
         loop {
-            let Some(n) = self.nodes.get(node) else {
-                return node;
-            };
-            match &n.kind {
-                NodeKind::Leaf { .. } => return node,
-                NodeKind::Split { orientation, first, second, .. } => {
+            match self.kind.get(node) {
+                Some(NodeKind::Leaf { .. }) => return node,
+                Some(NodeKind::Split { orientation, .. }) => {
+                    let first = node.first_child(&self.tree.map);
+                    let second = first.and_then(|f| f.next_sibling(&self.tree.map));
                     let go_second = match (orientation, direction) {
-                        (Orientation::Horizontal, Direction::Left) => true, // rightmost of left subtree
-                        (Orientation::Horizontal, Direction::Right) => false, // leftmost of right subtree
-                        (Orientation::Vertical, Direction::Up) => true, // bottommost of upper subtree
-                        (Orientation::Vertical, Direction::Down) => false, // topmost of lower subtree
-                        _ => false, // orientation not aligned with direction: descend first child deterministically
+                        (Orientation::Horizontal, Direction::Left) => true,
+                        (Orientation::Horizontal, Direction::Right) => false,
+                        (Orientation::Vertical, Direction::Up) => true,
+                        (Orientation::Vertical, Direction::Down) => false,
+                        _ => false,
                     };
-                    node = if go_second { *second } else { *first };
+                    node = if go_second { second.unwrap_or(node) } else { first.unwrap_or(node) };
                 }
+                None => return node,
             }
         }
     }
 
-    fn find_neighbor_leaf(&self, from_leaf: BspNodeId, direction: Direction) -> Option<BspNodeId> {
+    fn find_neighbor_leaf(&self, from_leaf: NodeId, direction: Direction) -> Option<NodeId> {
         let mut child = from_leaf;
-        let mut parent_opt = self.nodes[child].parent;
+        let mut parent_opt = child.parent(&self.tree.map);
         while let Some(parent) = parent_opt {
-            let Some(n) = self.nodes.get(parent) else {
-                break;
-            };
-            if let NodeKind::Split { orientation, first, second, .. } = n.kind {
-                if orientation == direction.orientation() {
-                    let is_first = child == first;
+            if let Some(NodeKind::Split { orientation, .. }) = self.kind.get(parent) {
+                if *orientation == direction.orientation() {
+                    let first = parent.first_child(&self.tree.map);
+                    let second = first.and_then(|f| f.next_sibling(&self.tree.map));
+                    let is_first = Some(child) == first;
                     let can_move = match direction {
-                        Direction::Left | Direction::Up => !is_first, // must be second child to move toward first
-                        Direction::Right | Direction::Down => is_first, // must be first child to move toward second
+                        Direction::Left | Direction::Up => !is_first,
+                        Direction::Right | Direction::Down => is_first,
                     };
                     if can_move {
                         let target_subtree = match direction {
                             Direction::Left | Direction::Up => first,
                             Direction::Right | Direction::Down => second,
                         };
+                        let target_subtree = if let Some(t) = target_subtree { t } else { return None };
                         let leaf = self.descend_to_edge_leaf(target_subtree, direction);
                         return Some(leaf);
                     }
                 }
             }
             child = parent;
-            parent_opt = self.nodes.get(child).and_then(|n| n.parent);
+            parent_opt = child.parent(&self.tree.map);
         }
         None
     }
 
     fn insert_window_at_selection(&mut self, state: &mut LayoutState, wid: WindowId) {
         let sel = state.selection;
-        match &mut self.nodes[sel].kind {
-            NodeKind::Leaf { window, fullscreen } => {
+        match self.kind.get_mut(sel) {
+            Some(NodeKind::Leaf { window, fullscreen }) => {
                 if window.is_none() {
                     *window = Some(wid);
                     *fullscreen = false;
@@ -201,91 +186,66 @@ impl BspLayoutSystem {
                     let left = self.make_leaf(existing);
                     let right = self.make_leaf(Some(wid));
                     self.window_to_node.insert(wid, right);
-                    if let Some(w) = existing {
-                        self.window_to_node.insert(w, left);
-                    }
-                    self.nodes[sel].kind = NodeKind::Split {
-                        orientation: Orientation::Horizontal,
-                        ratio: 0.5,
-                        first: left,
-                        second: right,
-                    };
-                    self.nodes[left].parent = Some(sel);
-                    self.nodes[right].parent = Some(sel);
+                    if let Some(w) = existing { self.window_to_node.insert(w, left); }
+                    self.kind.insert(sel, NodeKind::Split { orientation: Orientation::Horizontal, ratio: 0.5 });
+                    left.detach(&mut self.tree).push_back(sel);
+                    right.detach(&mut self.tree).push_back(sel);
                     state.selection = right;
                 }
             }
-            NodeKind::Split { .. } => {
+            Some(NodeKind::Split { .. }) => {
                 let leaf = self.descend_to_leaf(sel);
                 state.selection = leaf;
                 self.insert_window_at_selection(state, wid);
             }
+            None => {}
         }
     }
 
     fn remove_window_internal(&mut self, layout: crate::layout_engine::LayoutId, wid: WindowId) {
         if let Some(&node_id) = self.window_to_node.get(&wid) {
             if let Some(state) = self.layouts.get(layout).copied() {
-                if !self.belongs_to_layout(state, node_id) {
-                    return;
-                }
+                if !self.belongs_to_layout(state, node_id) { return; }
             }
-
-            match &mut self.nodes[node_id].kind {
-                NodeKind::Leaf { window, .. } => {
-                    *window = None;
-                }
-                NodeKind::Split { .. } => {}
-            }
+            if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(node_id) { *window = None; }
             self.window_to_node.remove(&wid);
             let fallback = self.cleanup_after_removal(node_id);
 
             let sel_snapshot = self.layouts.get(layout).map(|s| s.selection);
-            let needs_reset = sel_snapshot.and_then(|sel| self.nodes.get(sel)).is_none();
-            let new_sel = if needs_reset {
-                self.descend_to_leaf(fallback)
-            } else {
-                self.descend_to_leaf(sel_snapshot.unwrap())
-            };
-            if let Some(state) = self.layouts.get_mut(layout) {
-                state.selection = new_sel;
-            }
+            let needs_reset = sel_snapshot.and_then(|sel| self.kind.get(sel)).is_none();
+            let new_sel = if needs_reset { self.descend_to_leaf(fallback) } else { self.descend_to_leaf(sel_snapshot.unwrap()) };
+            if let Some(state) = self.layouts.get_mut(layout) { state.selection = new_sel; }
         }
     }
 
     fn calculate_layout_recursive(
         &self,
-        node: BspNodeId,
+        node: NodeId,
         rect: CGRect,
         gaps: &crate::common::config::GapSettings,
         out: &mut Vec<(WindowId, CGRect)>,
     ) {
-        match &self.nodes[node].kind {
+        match &self.kind[node] {
             NodeKind::Leaf { window, fullscreen } => {
                 if let Some(w) = window {
                     let r = if *fullscreen { rect } else { rect };
                     out.push((*w, r));
                 }
             }
-            NodeKind::Split {
-                orientation,
-                ratio,
-                first,
-                second,
-            } => match orientation {
+            NodeKind::Split { orientation, ratio } => match orientation {
                 Orientation::Horizontal => {
                     let gap = gaps.inner.horizontal;
                     let total = rect.size.width;
                     let first_w = (total - gap) as f32 * *ratio;
                     let second_w = (total - gap) - f64::from(first_w);
-                    let r1 =
-                        CGRect::new(rect.origin, CGSize::new(first_w as f64, rect.size.height));
+                    let r1 = CGRect::new(rect.origin, CGSize::new(first_w as f64, rect.size.height));
                     let r2 = CGRect::new(
                         CGPoint::new(rect.origin.x + first_w as f64 + gap, rect.origin.y),
                         CGSize::new(second_w.max(0.0), rect.size.height),
                     );
-                    self.calculate_layout_recursive(*first, r1, gaps, out);
-                    self.calculate_layout_recursive(*second, r2, gaps, out);
+                    let mut it = node.children(&self.tree.map);
+                    if let Some(first) = it.next() { self.calculate_layout_recursive(first, r1, gaps, out); }
+                    if let Some(second) = it.next() { self.calculate_layout_recursive(second, r2, gaps, out); }
                 }
                 Orientation::Vertical => {
                     let gap = gaps.inner.vertical;
@@ -297,29 +257,22 @@ impl BspLayoutSystem {
                         CGPoint::new(rect.origin.x, rect.origin.y + first_h as f64 + gap),
                         CGSize::new(rect.size.width, second_h.max(0.0)),
                     );
-                    self.calculate_layout_recursive(*first, r1, gaps, out);
-                    self.calculate_layout_recursive(*second, r2, gaps, out);
+                    let mut it = node.children(&self.tree.map);
+                    if let Some(first) = it.next() { self.calculate_layout_recursive(first, r1, gaps, out); }
+                    if let Some(second) = it.next() { self.calculate_layout_recursive(second, r2, gaps, out); }
                 }
             },
         }
     }
 
     fn apply_outer_gaps(screen: CGRect, gaps: &crate::common::config::GapSettings) -> CGRect {
-        let x = screen.origin.x + gaps.outer.left;
-        let y = screen.origin.y + gaps.outer.top;
-        let w = (screen.size.width - gaps.outer.left - gaps.outer.right).max(0.0);
-        let h = (screen.size.height - gaps.outer.top - gaps.outer.bottom).max(0.0);
-        CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))
+        compute_tiling_area(screen, gaps)
     }
 
     fn selection_window(&self, state: &LayoutState) -> Option<WindowId> {
-        if let Some(node) = self.nodes.get(state.selection) {
-            match &node.kind {
-                NodeKind::Leaf { window, .. } => *window,
-                _ => None,
-            }
-        } else {
-            None
+        match self.kind.get(state.selection) {
+            Some(NodeKind::Leaf { window, .. }) => *window,
+            _ => None,
         }
     }
 }
@@ -340,45 +293,35 @@ impl LayoutSystem for BspLayoutSystem {
             self.collect_windows_under(state.root, &mut windows);
         }
         let new_layout = self.create_layout();
-        for w in windows {
-            self.add_window_after_selection(new_layout, w);
-        }
+        for w in windows { self.add_window_after_selection(new_layout, w); }
         new_layout
     }
 
     fn remove_layout(&mut self, layout: Self::LayoutId) {
         if let Some(state) = self.layouts.remove(layout) {
-            // Remove windows mappings
             let mut windows = Vec::new();
             self.collect_windows_under(state.root, &mut windows);
-            for w in windows {
-                self.window_to_node.remove(&w);
-            }
+            for w in windows { self.window_to_node.remove(&w); }
+            let ids: Vec<_> = state.root.traverse_preorder(&self.tree.map).collect();
+            for id in ids { self.kind.remove(id); }
+            state.root.remove_root(&mut self.tree);
         }
     }
 
     fn draw_tree(&self, layout: Self::LayoutId) -> String {
-        fn write_node(this: &BspLayoutSystem, node: BspNodeId, out: &mut String, indent: usize) {
-            for _ in 0..indent {
-                out.push_str("  ");
-            }
-            let Some(n) = this.nodes.get(node) else {
-                return;
-            };
-            match &n.kind {
-                NodeKind::Leaf { window, .. } => {
+        fn write_node(this: &BspLayoutSystem, node: NodeId, out: &mut String, indent: usize) {
+            for _ in 0..indent { out.push_str("  "); }
+            match this.kind.get(node) {
+                Some(NodeKind::Leaf { window, .. }) => {
                     out.push_str(&format!("Leaf {:?}\n", window));
                 }
-                NodeKind::Split {
-                    orientation,
-                    ratio,
-                    first,
-                    second,
-                } => {
+                Some(NodeKind::Split { orientation, ratio }) => {
                     out.push_str(&format!("Split {:?} {:.2}\n", orientation, ratio));
-                    write_node(this, *first, out, indent + 1);
-                    write_node(this, *second, out, indent + 1);
+                    let mut it = node.children(&this.tree.map);
+                    if let Some(first) = it.next() { write_node(this, first, out, indent + 1); }
+                    if let Some(second) = it.next() { write_node(this, second, out, indent + 1); }
                 }
+                None => {}
             }
         }
         if let Some(state) = self.layouts.get(layout).copied() {
@@ -423,7 +366,7 @@ impl LayoutSystem for BspLayoutSystem {
     fn visible_windows_under_selection(&self, layout: Self::LayoutId) -> Vec<WindowId> {
         let mut out = Vec::new();
         if let Some(state) = self.layouts.get(layout).copied() {
-            if self.nodes.get(state.selection).is_some() {
+            if self.kind.get(state.selection).is_some() {
                 let leaf = self.descend_to_leaf(state.selection);
                 self.collect_windows_under(leaf, &mut out);
             }
@@ -433,15 +376,11 @@ impl LayoutSystem for BspLayoutSystem {
 
     fn ascend_selection(&mut self, layout: Self::LayoutId) -> bool {
         if let Some(sel) = self.layouts.get(layout).map(|s| s.selection) {
-            if self.nodes.get(sel).is_none() {
-                return false;
-            }
-            let parent_opt = self.nodes[sel].parent;
+            if self.kind.get(sel).is_none() { return false; }
+            let parent_opt = sel.parent(&self.tree.map);
             if let Some(parent) = parent_opt {
                 let new_sel = self.descend_to_leaf(parent);
-                if let Some(state) = self.layouts.get_mut(layout) {
-                    state.selection = new_sel;
-                }
+                if let Some(state) = self.layouts.get_mut(layout) { state.selection = new_sel; }
                 return true;
             }
         }
@@ -453,9 +392,7 @@ impl LayoutSystem for BspLayoutSystem {
         if let Some(sel) = sel_snapshot {
             let new_sel = self.descend_to_leaf(sel);
             if new_sel != sel {
-                if let Some(state) = self.layouts.get_mut(layout) {
-                    state.selection = new_sel;
-                }
+                if let Some(state) = self.layouts.get_mut(layout) { state.selection = new_sel; }
                 return true;
             }
         }
@@ -468,24 +405,13 @@ impl LayoutSystem for BspLayoutSystem {
         direction: Direction,
     ) -> (Option<WindowId>, Vec<WindowId>) {
         let raise_windows = self.visible_windows_in_layout(layout);
-        if raise_windows.is_empty() {
-            return (None, vec![]);
-        }
+        if raise_windows.is_empty() { return (None, vec![]); }
         let sel_snapshot = self.layouts.get(layout).map(|s| s.selection);
-        let Some(current_sel) = sel_snapshot else {
-            return (None, vec![]);
-        };
+        let Some(current_sel) = sel_snapshot else { return (None, vec![]); };
         let current_leaf = self.descend_to_leaf(current_sel);
-        let Some(next_leaf) = self.find_neighbor_leaf(current_leaf, direction) else {
-            return (None, vec![]);
-        };
-        if let Some(state) = self.layouts.get_mut(layout) {
-            state.selection = next_leaf;
-        }
-        let focus = match &self.nodes[next_leaf].kind {
-            NodeKind::Leaf { window, .. } => *window,
-            _ => None,
-        };
+        let Some(next_leaf) = self.find_neighbor_leaf(current_leaf, direction) else { return (None, vec![]); };
+        if let Some(state) = self.layouts.get_mut(layout) { state.selection = next_leaf; }
+        let focus = match &self.kind[next_leaf] { NodeKind::Leaf { window, .. } => *window, _ => None };
         (focus, raise_windows)
     }
 
@@ -493,50 +419,39 @@ impl LayoutSystem for BspLayoutSystem {
         if let Some(state_sel) = self.layouts.get(layout).copied() {
             let mut tmp = state_sel;
             self.insert_window_at_selection(&mut tmp, wid);
-            if let Some(state_mut) = self.layouts.get_mut(layout) {
-                *state_mut = tmp;
-            }
+            if let Some(state_mut) = self.layouts.get_mut(layout) { *state_mut = tmp; }
         }
     }
 
     fn remove_window(&mut self, wid: WindowId) {
         if let Some(&node_id) = self.window_to_node.get(&wid) {
-            if self.nodes.get(node_id).is_none() {
+            if self.kind.get(node_id).is_none() {
                 self.window_to_node.remove(&wid);
                 return;
             }
             let root = self.find_layout_root(node_id);
-            let layout = self
-                .layouts
-                .iter()
-                .find_map(|(lid, st)| if st.root == root { Some(lid) } else { None });
-            if let Some(l) = layout {
-                self.remove_window_internal(l, wid);
-            } else {
-                self.window_to_node.remove(&wid);
-            }
+            let layout = self.layouts.iter().find_map(|(id, s)| if s.root == root { Some(id) } else { None });
+            if let Some(l) = layout { self.remove_window_internal(l, wid); }
         }
     }
 
     fn remove_windows_for_app(&mut self, pid: pid_t) {
-        let windows: Vec<_> =
-            self.window_to_node.keys().copied().filter(|w| w.pid == pid).collect();
-        for w in windows {
-            self.remove_window(w);
-        }
+        let windows: Vec<_> = self
+            .window_to_node
+            .keys()
+            .copied()
+            .filter(|w| w.pid == pid)
+            .collect();
+        for w in windows { self.remove_window(w); }
     }
 
     fn set_windows_for_app(&mut self, layout: Self::LayoutId, pid: pid_t, desired: Vec<WindowId>) {
         if let Some(state) = self.layouts.get(layout).copied() {
             let mut under = Vec::new();
             self.collect_windows_under(state.root, &mut under);
-            for w in under.into_iter().filter(|w| w.pid == pid) {
-                self.remove_window_internal(layout, w);
-            }
+            for w in under.into_iter().filter(|w| w.pid == pid) { self.remove_window_internal(layout, w); }
         }
-        for w in desired {
-            self.add_window_after_selection(layout, w);
-        }
+        for w in desired { self.add_window_after_selection(layout, w); }
     }
 
     fn has_windows_for_app(&self, layout: Self::LayoutId, pid: pid_t) -> bool {
@@ -544,33 +459,23 @@ impl LayoutSystem for BspLayoutSystem {
             let mut under = Vec::new();
             self.collect_windows_under(state.root, &mut under);
             under.into_iter().any(|w| w.pid == pid)
-        } else {
-            false
-        }
+        } else { false }
     }
 
     fn contains_window(&self, layout: Self::LayoutId, wid: WindowId) -> bool {
         if let Some(&node) = self.window_to_node.get(&wid) {
-            if let Some(state) = self.layouts.get(layout).copied() {
-                return self.belongs_to_layout(state, node);
-            }
+            if let Some(state) = self.layouts.get(layout).copied() { return self.belongs_to_layout(state, node); }
         }
         false
     }
 
     fn select_window(&mut self, layout: Self::LayoutId, wid: WindowId) -> bool {
         if let Some(&node) = self.window_to_node.get(&wid) {
-            if self.nodes.get(node).is_none() {
-                self.window_to_node.remove(&wid);
-                return false;
-            }
+            if self.kind.get(node).is_none() { self.window_to_node.remove(&wid); return false; }
             if let Some(state) = self.layouts.get(layout).copied() {
                 let belongs = self.belongs_to_layout(state, node);
                 if let Some(state_mut) = self.layouts.get_mut(layout) {
-                    if belongs {
-                        state_mut.selection = node;
-                        return true;
-                    }
+                    if belongs { state_mut.selection = node; return true; }
                 }
             }
         }
@@ -587,15 +492,10 @@ impl LayoutSystem for BspLayoutSystem {
     ) {
         if let Some(&node) = self.window_to_node.get(&wid) {
             if let Some(state) = self.layouts.get(layout).copied() {
-                if !self.belongs_to_layout(state, node) {
-                    return;
-                }
-                if let NodeKind::Leaf { window: _, fullscreen } = &mut self.nodes[node].kind {
-                    if new_frame == screen {
-                        *fullscreen = true;
-                    } else if old_frame == screen {
-                        *fullscreen = false;
-                    }
+                if !self.belongs_to_layout(state, node) { return; }
+                if let Some(NodeKind::Leaf { window: _, fullscreen }) = self.kind.get_mut(node) {
+                    if new_frame == screen { *fullscreen = true; }
+                    else if old_frame == screen { *fullscreen = false; }
                 }
             }
         }
@@ -603,40 +503,18 @@ impl LayoutSystem for BspLayoutSystem {
 
     fn move_selection(&mut self, layout: Self::LayoutId, direction: Direction) -> bool {
         let sel_snapshot = self.layouts.get(layout).map(|s| s.selection);
-        let Some(sel) = sel_snapshot else {
-            return false;
-        };
+        let Some(sel) = sel_snapshot else { return false; };
         let sel_leaf = self.descend_to_leaf(sel);
-        let Some(neighbor_leaf) = self.find_neighbor_leaf(sel_leaf, direction) else {
-            return false;
-        };
+        let Some(neighbor_leaf) = self.find_neighbor_leaf(sel_leaf, direction) else { return false; };
         let (mut a_window, mut b_window) = (None, None);
-        if let NodeKind::Leaf { window, .. } = &mut self.nodes[sel_leaf].kind {
-            a_window = *window;
-        }
-        if let NodeKind::Leaf { window, .. } = &mut self.nodes[neighbor_leaf].kind {
-            b_window = *window;
-        }
-        if a_window.is_none() && b_window.is_none() {
-            return false;
-        }
-        // Swap mapping
-        if let NodeKind::Leaf { window, .. } = &mut self.nodes[sel_leaf].kind {
-            *window = b_window;
-        }
-        if let NodeKind::Leaf { window, .. } = &mut self.nodes[neighbor_leaf].kind {
-            *window = a_window;
-        }
-        if let Some(w) = a_window {
-            self.window_to_node.insert(w, neighbor_leaf);
-        }
-        if let Some(w) = b_window {
-            self.window_to_node.insert(w, sel_leaf);
-        }
-        // Keep selection on destination leaf
-        if let Some(state) = self.layouts.get_mut(layout) {
-            state.selection = neighbor_leaf;
-        }
+        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(sel_leaf) { a_window = *window; }
+        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(neighbor_leaf) { b_window = *window; }
+        if a_window.is_none() && b_window.is_none() { return false; }
+        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(sel_leaf) { *window = b_window; }
+        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(neighbor_leaf) { *window = a_window; }
+        if let Some(w) = a_window { self.window_to_node.insert(w, neighbor_leaf); }
+        if let Some(w) = b_window { self.window_to_node.insert(w, sel_leaf); }
+        if let Some(state) = self.layouts.get_mut(layout) { state.selection = neighbor_leaf; }
         true
     }
 
@@ -658,33 +536,20 @@ impl LayoutSystem for BspLayoutSystem {
             LayoutKind::Vertical => Orientation::Vertical,
             _ => return,
         };
-        let state = if let Some(s) = self.layouts.get(layout).copied() {
-            s
-        } else {
-            return;
-        };
+        let state = if let Some(s) = self.layouts.get(layout).copied() { s } else { return };
 
         let target = self.descend_to_leaf(state.selection);
-        match self.nodes[target].kind.clone() {
-            NodeKind::Leaf { window, .. } => {
+        match self.kind.get(target).cloned() {
+            Some(NodeKind::Leaf { window, .. }) => {
                 let left = self.make_leaf(window);
                 let right = self.make_leaf(None);
-                if let Some(w) = window {
-                    self.window_to_node.insert(w, left);
-                }
-                self.nodes[target].kind = NodeKind::Split {
-                    orientation,
-                    ratio: 0.5,
-                    first: left,
-                    second: right,
-                };
-                self.nodes[left].parent = Some(target);
-                self.nodes[right].parent = Some(target);
-                if let Some(st) = self.layouts.get_mut(layout) {
-                    st.selection = right;
-                }
+                if let Some(w) = window { self.window_to_node.insert(w, left); }
+                self.kind.insert(target, NodeKind::Split { orientation, ratio: 0.5 });
+                left.detach(&mut self.tree).push_back(target);
+                right.detach(&mut self.tree).push_back(target);
+                if let Some(st) = self.layouts.get_mut(layout) { st.selection = right; }
             }
-            NodeKind::Split { .. } => {}
+            _ => {}
         }
     }
 
@@ -692,7 +557,7 @@ impl LayoutSystem for BspLayoutSystem {
         let sel_snapshot = self.layouts.get(layout).map(|s| s.selection);
         if let Some(sel) = sel_snapshot {
             let sel_leaf = self.descend_to_leaf(sel);
-            if let NodeKind::Leaf { window: Some(w), fullscreen } = &mut self.nodes[sel_leaf].kind {
+            if let Some(NodeKind::Leaf { window: Some(w), fullscreen }) = self.kind.get_mut(sel_leaf) {
                 *fullscreen = !*fullscreen;
                 return vec![*w];
             }
@@ -712,25 +577,14 @@ impl LayoutSystem for BspLayoutSystem {
 
     fn resize_selection_by(&mut self, layout: Self::LayoutId, amount: f64) {
         let sel_snapshot = self.layouts.get(layout).map(|s| s.selection);
-        let Some(mut node) = sel_snapshot else {
-            return;
-        };
+        let Some(mut node) = sel_snapshot else { return; };
 
-        while let Some(parent) = self.nodes[node].parent {
-            if let NodeKind::Split {
-                orientation: _,
-                ratio,
-                first,
-                second: _,
-            } = &mut self.nodes[parent].kind
-            {
-                let is_first = node == *first;
+        while let Some(parent) = node.parent(&self.tree.map) {
+            if let Some(NodeKind::Split { ratio, .. }) = self.kind.get_mut(parent) {
+                let is_first = Some(node) == parent.first_child(&self.tree.map);
                 let delta = (amount as f32) * 0.5;
-                if is_first {
-                    *ratio = (*ratio - delta).clamp(0.05, 0.95);
-                } else {
-                    *ratio = (*ratio + delta).clamp(0.05, 0.95);
-                }
+                if is_first { *ratio = (*ratio - delta).clamp(0.05, 0.95); }
+                else { *ratio = (*ratio + delta).clamp(0.05, 0.95); }
                 break;
             }
             node = parent;
@@ -741,13 +595,14 @@ impl LayoutSystem for BspLayoutSystem {
         if let Some(state) = self.layouts.get(layout).copied() {
             let mut stack = vec![state.root];
             while let Some(n) = stack.pop() {
-                match &mut self.nodes[n].kind {
-                    NodeKind::Split { ratio, first, second, .. } => {
+                match self.kind.get_mut(n) {
+                    Some(NodeKind::Split { ratio, .. }) => {
                         *ratio = (*ratio).clamp(0.05, 0.95);
-                        stack.push(*first);
-                        stack.push(*second);
+                        let mut it = n.children(&self.tree.map);
+                        if let Some(first) = it.next() { stack.push(first); }
+                        if let Some(second) = it.next() { stack.push(second); }
                     }
-                    NodeKind::Leaf { .. } => {}
+                    _ => {}
                 }
             }
         }

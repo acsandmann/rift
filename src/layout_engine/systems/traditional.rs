@@ -2,17 +2,13 @@ use objc2_core_foundation::CGRect;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-mod layout;
-mod stack;
-mod window;
-use layout::*;
-use window::*;
-
 use super::LayoutSystem;
 use crate::actor::app::{WindowId, pid_t};
+use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{Direction, LayoutId, LayoutKind};
 use crate::model::selection::*;
 use crate::model::tree::{self, NodeId, NodeMap, OwnedNode, Tree};
+use crate::sys::geometry::Round;
 
 #[derive(Serialize, Deserialize)]
 pub struct TraditionalLayoutSystem {
@@ -97,17 +93,24 @@ impl LayoutSystem for TraditionalLayoutSystem {
         stack_line_horiz: crate::common::config::HorizontalPlacement,
         stack_line_vert: crate::common::config::VerticalPlacement,
     ) -> Vec<(WindowId, CGRect)> {
-        self.tree.data.layout.get_sizes_with_gaps(
+        let mut sizes = vec![];
+        let tiling_area = compute_tiling_area(screen, gaps);
+
+        self.tree.data.layout.apply_with_gaps(
             &self.tree.map,
             &self.tree.data.window,
             self.root(layout),
+            tiling_area,
             screen,
+            &mut sizes,
             stack_offset,
             gaps,
             stack_line_thickness,
             stack_line_horiz,
             stack_line_vert,
-        )
+        );
+
+        sizes
     }
 
     fn selected_window(&self, layout: Self::LayoutId) -> Option<WindowId> {
@@ -346,34 +349,13 @@ impl TraditionalLayoutSystem {
         stack_line_horiz: crate::common::config::HorizontalPlacement,
         stack_line_vert: crate::common::config::VerticalPlacement,
     ) -> Vec<crate::layout_engine::engine::GroupContainerInfo> {
-        use objc2_core_foundation::{CGPoint, CGSize};
-
+        use self::StackLayoutResult;
         use crate::layout_engine::LayoutKind::*;
-        use crate::layout_engine::systems::traditional::stack::StackLayoutResult;
-        use crate::sys::geometry::Round;
 
         let mut out = Vec::new();
         let map = &self.tree.map;
 
-        let tiling_area = if gaps.outer.top == 0.0
-            && gaps.outer.left == 0.0
-            && gaps.outer.bottom == 0.0
-            && gaps.outer.right == 0.0
-        {
-            screen
-        } else {
-            CGRect {
-                origin: CGPoint {
-                    x: screen.origin.x + gaps.outer.left,
-                    y: screen.origin.y + gaps.outer.top,
-                },
-                size: CGSize {
-                    width: (screen.size.width - gaps.outer.left - gaps.outer.right).max(0.0),
-                    height: (screen.size.height - gaps.outer.top - gaps.outer.bottom).max(0.0),
-                },
-            }
-            .round()
-        };
+        let tiling_area = compute_tiling_area(screen, gaps);
 
         let mut node = self.root(layout);
         let mut rect = tiling_area;
@@ -402,67 +384,13 @@ impl TraditionalLayoutSystem {
                 let mut container_rect = rect;
                 let reserve = stack_line_thickness.max(0.0);
                 let is_horizontal = matches!(kind, HorizontalStack);
-                if reserve > 0.0 {
-                    if is_horizontal {
-                        match stack_line_horiz {
-                            crate::common::config::HorizontalPlacement::Top => {
-                                let new_h = (container_rect.size.height - reserve).max(0.0);
-                                container_rect = CGRect {
-                                    origin: CGPoint {
-                                        x: container_rect.origin.x,
-                                        y: container_rect.origin.y + reserve,
-                                    },
-                                    size: CGSize {
-                                        width: container_rect.size.width,
-                                        height: new_h,
-                                    },
-                                };
-                            }
-                            crate::common::config::HorizontalPlacement::Bottom => {
-                                let new_h = (container_rect.size.height - reserve).max(0.0);
-                                container_rect = CGRect {
-                                    origin: CGPoint {
-                                        x: container_rect.origin.x,
-                                        y: container_rect.origin.y,
-                                    },
-                                    size: CGSize {
-                                        width: container_rect.size.width,
-                                        height: new_h,
-                                    },
-                                };
-                            }
-                        }
-                    } else {
-                        match stack_line_vert {
-                            crate::common::config::VerticalPlacement::Right => {
-                                let new_w = (container_rect.size.width - reserve).max(0.0);
-                                container_rect = CGRect {
-                                    origin: CGPoint {
-                                        x: container_rect.origin.x,
-                                        y: container_rect.origin.y,
-                                    },
-                                    size: CGSize {
-                                        width: new_w,
-                                        height: container_rect.size.height,
-                                    },
-                                };
-                            }
-                            crate::common::config::VerticalPlacement::Left => {
-                                let new_w = (container_rect.size.width - reserve).max(0.0);
-                                container_rect = CGRect {
-                                    origin: CGPoint {
-                                        x: container_rect.origin.x + reserve,
-                                        y: container_rect.origin.y,
-                                    },
-                                    size: CGSize {
-                                        width: new_w,
-                                        height: container_rect.size.height,
-                                    },
-                                };
-                            }
-                        }
-                    }
-                }
+                container_rect = adjust_stack_container_rect(
+                    container_rect,
+                    is_horizontal,
+                    reserve,
+                    stack_line_horiz,
+                    stack_line_vert,
+                );
 
                 let layout_res = StackLayoutResult::new(
                     container_rect,
@@ -1145,10 +1073,599 @@ impl tree::Observer for Components {
     }
 }
 
+// Inlined from traditional/window.rs (was specific to this layout)
+#[derive(Default, Serialize, Deserialize)]
+struct Window {
+    windows: slotmap::SecondaryMap<NodeId, WindowId>,
+    window_nodes: crate::common::collections::BTreeMap<WindowId, WindowNodeInfoVec>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WindowNodeInfo {
+    layout: LayoutId,
+    node: NodeId,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct WindowNodeInfoVec(Vec<WindowNodeInfo>);
+
+impl Window {
+    fn at(&self, node: NodeId) -> Option<WindowId> { self.windows.get(node).copied() }
+
+    fn node_for(&self, layout: LayoutId, wid: WindowId) -> Option<NodeId> {
+        self.window_nodes
+            .get(&wid)
+            .into_iter()
+            .flat_map(|nodes| nodes.0.iter().filter(|info| info.layout == layout))
+            .next()
+            .map(|info| info.node)
+    }
+
+    fn set_window(&mut self, layout: LayoutId, node: NodeId, wid: WindowId) {
+        let existing = self.windows.insert(node, wid);
+        assert!(
+            existing.is_none(),
+            "Attempted to overwrite window for node {node:?} from {existing:?} to {wid:?}"
+        );
+        self.window_nodes
+            .entry(wid)
+            .or_default()
+            .0
+            .push(WindowNodeInfo { layout, node });
+    }
+
+    fn take_nodes_for(&mut self, wid: WindowId) -> impl Iterator<Item = (LayoutId, NodeId)> {
+        self.window_nodes
+            .remove(&wid)
+            .unwrap_or_default()
+            .0
+            .into_iter()
+            .map(|info| (info.layout, info.node))
+    }
+
+    fn take_nodes_for_app(
+        &mut self,
+        pid: pid_t,
+    ) -> impl Iterator<Item = (WindowId, LayoutId, NodeId)> {
+        use crate::common::collections::BTreeExt;
+        let removed = self.window_nodes.remove_all_for_pid(pid);
+        removed.into_iter().flat_map(|(wid, infos)| {
+            infos.0.into_iter().map(move |info| (wid, info.layout, info.node))
+        })
+    }
+
+    fn handle_event(&mut self, map: &NodeMap, event: TreeEvent) {
+        match event {
+            TreeEvent::AddedToForest(_) => (),
+            TreeEvent::AddedToParent(node) => debug_assert!(
+                self.windows.get(node.parent(map).unwrap()).is_none(),
+                "Window nodes are not allowed to have children: {:?}/{:?}",
+                node.parent(map).unwrap(),
+                node
+            ),
+            TreeEvent::Copied { src, dest, dest_layout } => {
+                if let Some(&wid) = self.windows.get(src) {
+                    self.set_window(dest_layout, dest, wid);
+                }
+            }
+            TreeEvent::RemovingFromParent(_) => (),
+            TreeEvent::RemovedFromForest(node) => {
+                if let Some(wid) = self.windows.remove(node) {
+                    if let Some(window_nodes) = self.window_nodes.get_mut(&wid) {
+                        window_nodes.0.retain(|info| info.node != node);
+                        if window_nodes.0.is_empty() {
+                            self.window_nodes.remove(&wid);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Inlined from traditional/stack.rs (was specific to this layout)
+struct StackLayoutResult {
+    container_rect: CGRect,
+    _window_count: usize,
+    stack_offset: f64,
+    is_horizontal: bool,
+    window_width: f64,
+    window_height: f64,
+}
+
+impl StackLayoutResult {
+    fn new(
+        container_rect: CGRect,
+        window_count: usize,
+        stack_offset: f64,
+        is_horizontal: bool,
+    ) -> Self {
+        let total_offset_space = if window_count > 0 {
+            (window_count - 1) as f64 * stack_offset
+        } else {
+            0.0
+        };
+        let (window_width, window_height) = if is_horizontal {
+            (
+                (container_rect.size.width - total_offset_space).max(100.0),
+                container_rect.size.height.max(100.0),
+            )
+        } else {
+            (
+                container_rect.size.width.max(100.0),
+                (container_rect.size.height - total_offset_space).max(100.0),
+            )
+        };
+        Self {
+            container_rect,
+            _window_count: window_count,
+            stack_offset,
+            is_horizontal,
+            window_width,
+            window_height,
+        }
+    }
+
+    fn get_frame_for_index(&self, index: usize) -> CGRect {
+        use objc2_core_foundation::{CGPoint, CGSize};
+        let offset_amount = index as f64 * self.stack_offset;
+        let (x_offset, y_offset) = if self.is_horizontal {
+            (offset_amount, 0.0)
+        } else {
+            (0.0, offset_amount)
+        };
+        CGRect {
+            origin: CGPoint {
+                x: self.container_rect.origin.x + x_offset,
+                y: self.container_rect.origin.y + y_offset,
+            },
+            size: CGSize {
+                width: self.window_width,
+                height: self.window_height,
+            },
+        }
+        .round()
+    }
+
+    fn get_focused_frame_for_index(&self, index: usize, _focused_idx: usize) -> CGRect {
+        use objc2_core_foundation::{CGPoint, CGSize};
+        const FOCUS_SIZE_INCREASE: f64 = 10.0;
+        const FOCUS_OFFSET_DECREASE: f64 = 5.0;
+        let offset_amount = index as f64 * self.stack_offset;
+        let (mut origin_x, mut origin_y) = if self.is_horizontal {
+            (
+                self.container_rect.origin.x + offset_amount - FOCUS_OFFSET_DECREASE,
+                self.container_rect.origin.y - FOCUS_OFFSET_DECREASE,
+            )
+        } else {
+            (
+                self.container_rect.origin.x - FOCUS_OFFSET_DECREASE,
+                self.container_rect.origin.y + offset_amount - FOCUS_OFFSET_DECREASE,
+            )
+        };
+        if self.is_horizontal {
+            if index == 0 {
+                origin_x = self.container_rect.origin.x;
+            }
+            let max_x = self.container_rect.origin.x + self.container_rect.size.width
+                - (self.window_width + FOCUS_SIZE_INCREASE);
+            origin_x = origin_x.min(max_x);
+        }
+        if !self.is_horizontal {
+            if index == 0 {
+                origin_y = self.container_rect.origin.y;
+            }
+            let max_y = self.container_rect.origin.y + self.container_rect.size.height
+                - (self.window_height + FOCUS_SIZE_INCREASE);
+            origin_y = origin_y.min(max_y);
+        }
+        let screen_x = self.container_rect.origin.x;
+        let screen_y = self.container_rect.origin.y;
+        let screen_width = self.container_rect.size.width;
+        let screen_height = self.container_rect.size.height;
+        let width = (self.window_width + FOCUS_SIZE_INCREASE).min(screen_width);
+        let height = (self.window_height + FOCUS_SIZE_INCREASE).min(screen_height);
+        let x = origin_x.clamp(screen_x, screen_x + screen_width - width);
+        let y = origin_y.clamp(screen_y, screen_y + screen_height - height);
+        CGRect {
+            origin: CGPoint { x, y },
+            size: CGSize { width, height },
+        }
+        .round()
+    }
+}
+
+// Inlined from traditional/layout.rs (was specific to this layout)
+#[derive(Default, Serialize, Deserialize)]
+struct Layout {
+    info: slotmap::SecondaryMap<NodeId, LayoutInfo>,
+}
+
+#[allow(unused)]
+#[derive(Default, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct LayoutInfo {
+    size: f32,
+    total: f32,
+    kind: LayoutKind,
+    last_ungrouped_kind: LayoutKind,
+    #[serde(default)]
+    is_fullscreen: bool,
+}
+
+impl Layout {
+    fn handle_event(&mut self, map: &NodeMap, event: TreeEvent) {
+        match event {
+            TreeEvent::AddedToForest(node) => {
+                self.info.insert(node, LayoutInfo::default());
+            }
+            TreeEvent::AddedToParent(node) => {
+                let parent = node.parent(map).unwrap();
+                self.info[node].size = 1.0;
+                self.info[parent].total += 1.0;
+            }
+            TreeEvent::Copied { src, dest, .. } => {
+                self.info.insert(dest, self.info[src].clone());
+            }
+            TreeEvent::RemovingFromParent(node) => {
+                self.info[node.parent(map).unwrap()].total -= self.info[node].size;
+            }
+            TreeEvent::RemovedFromForest(node) => {
+                self.info.remove(node);
+            }
+        }
+    }
+
+    fn assume_size_of(&mut self, new: NodeId, old: NodeId, map: &NodeMap) {
+        assert_eq!(new.parent(map), old.parent(map));
+        let parent = new.parent(map).unwrap();
+        self.info[parent].total -= self.info[new].size;
+        self.info[new].size = core::mem::replace(&mut self.info[old].size, 0.0);
+    }
+
+    fn set_kind(&mut self, node: NodeId, kind: LayoutKind) {
+        self.info[node].kind = kind;
+        if !kind.is_group() {
+            self.info[node].last_ungrouped_kind = kind;
+        }
+    }
+
+    fn kind(&self, node: NodeId) -> LayoutKind { self.info[node].kind }
+
+    fn proportion(&self, map: &NodeMap, node: NodeId) -> Option<f64> {
+        let Some(parent) = node.parent(map) else { return None };
+        Some(f64::from(self.info[node].size) / f64::from(self.info[parent].total))
+    }
+
+    fn take_share(&mut self, map: &NodeMap, node: NodeId, from: NodeId, share: f32) {
+        assert_eq!(node.parent(map), from.parent(map));
+        let share = share.min(self.info[from].size);
+        let share = share.max(-self.info[node].size);
+        self.info[from].size -= share;
+        self.info[node].size += share;
+    }
+
+    fn set_fullscreen(&mut self, node: NodeId, is_fullscreen: bool) {
+        self.info[node].is_fullscreen = is_fullscreen;
+    }
+
+    fn toggle_fullscreen(&mut self, node: NodeId) -> bool {
+        self.info[node].is_fullscreen = !self.info[node].is_fullscreen;
+        self.info[node].is_fullscreen
+    }
+
+    fn debug(&self, node: NodeId, is_container: bool) -> String {
+        let info = &self.info[node];
+        if is_container {
+            format!("{:?} [size {} total={}]", info.kind, info.size, info.total)
+        } else {
+            format!("[size {}]", info.size)
+        }
+    }
+
+    fn is_focused_in_subtree(&self, map: &NodeMap, window: &Window, node: NodeId) -> bool {
+        if window.at(node).is_some() {
+            if let Some(parent) = node.parent(map) {
+                return parent.first_child(map) == Some(node);
+            }
+        }
+        for child in node.children(map) {
+            if self.is_focused_in_subtree(map, window, child) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn apply_with_gaps(
+        &self,
+        map: &NodeMap,
+        window: &Window,
+        node: NodeId,
+        rect: CGRect,
+        screen: CGRect,
+        sizes: &mut Vec<(WindowId, CGRect)>,
+        stack_offset: f64,
+        gaps: &crate::common::config::GapSettings,
+        stack_line_thickness: f64,
+        stack_line_horiz: crate::common::config::HorizontalPlacement,
+        stack_line_vert: crate::common::config::VerticalPlacement,
+    ) {
+        let info = &self.info[node];
+        let rect = if info.is_fullscreen { screen } else { rect };
+        if let Some(wid) = window.at(node) {
+            debug_assert!(
+                node.children(map).next().is_none(),
+                "non-leaf node with window id"
+            );
+            sizes.push((wid, rect));
+            return;
+        }
+        use LayoutKind::*;
+        match info.kind {
+            HorizontalStack | VerticalStack => {
+                let children: Vec<_> = node.children(map).collect();
+                if children.is_empty() {
+                    return;
+                }
+                let is_horizontal = matches!(info.kind, HorizontalStack);
+                let reserve = stack_line_thickness.max(0.0);
+                let container_rect = adjust_stack_container_rect(
+                    rect,
+                    is_horizontal,
+                    reserve,
+                    stack_line_horiz,
+                    stack_line_vert,
+                );
+                let layout = StackLayoutResult::new(
+                    container_rect,
+                    children.len(),
+                    stack_offset,
+                    is_horizontal,
+                );
+                let focused_idx = children
+                    .iter()
+                    .position(|&c| self.is_focused_in_subtree(map, window, c))
+                    .unwrap_or(0);
+                for (idx, &child) in children.iter().enumerate() {
+                    let frame = if idx == focused_idx {
+                        layout.get_focused_frame_for_index(idx, focused_idx)
+                    } else {
+                        layout.get_frame_for_index(idx)
+                    };
+                    self.apply_with_gaps(
+                        map,
+                        window,
+                        child,
+                        frame,
+                        screen,
+                        sizes,
+                        stack_offset,
+                        gaps,
+                        stack_line_thickness,
+                        stack_line_horiz,
+                        stack_line_vert,
+                    );
+                }
+            }
+            Horizontal => self.layout_axis(
+                map,
+                window,
+                node,
+                rect,
+                screen,
+                sizes,
+                stack_offset,
+                gaps,
+                true,
+                stack_line_thickness,
+                stack_line_horiz,
+                stack_line_vert,
+            ),
+            Vertical => self.layout_axis(
+                map,
+                window,
+                node,
+                rect,
+                screen,
+                sizes,
+                stack_offset,
+                gaps,
+                false,
+                stack_line_thickness,
+                stack_line_horiz,
+                stack_line_vert,
+            ),
+        }
+    }
+
+    fn layout_axis(
+        &self,
+        map: &NodeMap,
+        window: &Window,
+        node: NodeId,
+        rect: CGRect,
+        screen: CGRect,
+        sizes: &mut Vec<(WindowId, CGRect)>,
+        stack_offset: f64,
+        gaps: &crate::common::config::GapSettings,
+        horizontal: bool,
+        stack_line_thickness: f64,
+        stack_line_horiz: crate::common::config::HorizontalPlacement,
+        stack_line_vert: crate::common::config::VerticalPlacement,
+    ) {
+        use objc2_core_foundation::{CGPoint, CGSize};
+        let children: Vec<_> = node.children(map).collect();
+        if children.is_empty() {
+            return;
+        }
+        let min_size = 0.05;
+        let expected_total = children.len() as f32;
+        let mut needs_normalization = false;
+        let mut actual_total = 0.0;
+        for &child in &children {
+            let sz = self.info[child].size;
+            actual_total += sz;
+            if sz < min_size {
+                needs_normalization = true;
+            }
+        }
+        if (actual_total - expected_total).abs() > 0.01 || needs_normalization {
+            let share = 1.0;
+            unsafe {
+                let info = &mut *(&self.info as *const _
+                    as *mut slotmap::SecondaryMap<NodeId, LayoutInfo>);
+                for &child in &children {
+                    info[child].size = share;
+                }
+                info[node].total = children.len() as f32;
+            }
+        }
+        debug_assert!({
+            let sum_children: f32 = children.iter().map(|c| self.info[*c].size).sum();
+            (sum_children - self.info[node].total).abs() < 0.01
+        });
+        let total = self.info[node].total;
+        let inner_gap = if horizontal {
+            gaps.inner.horizontal
+        } else {
+            gaps.inner.vertical
+        };
+        let axis_len = if horizontal {
+            rect.size.width
+        } else {
+            rect.size.height
+        };
+        let total_gap = (children.len().saturating_sub(1)) as f64 * inner_gap;
+        let usable_axis = if inner_gap == 0.0 {
+            axis_len
+        } else {
+            (axis_len - total_gap).max(0.0)
+        };
+        let mut offset = if horizontal {
+            rect.origin.x
+        } else {
+            rect.origin.y
+        };
+        for (i, &child) in children.iter().enumerate() {
+            let ratio = f64::from(self.info[child].size) / f64::from(total);
+            let seg_len = usable_axis * ratio;
+            let child_rect = if horizontal {
+                CGRect {
+                    origin: CGPoint { x: offset, y: rect.origin.y },
+                    size: CGSize {
+                        width: seg_len,
+                        height: rect.size.height,
+                    },
+                }
+            } else {
+                CGRect {
+                    origin: CGPoint { x: rect.origin.x, y: offset },
+                    size: CGSize {
+                        width: rect.size.width,
+                        height: seg_len,
+                    },
+                }
+            }
+            .round();
+            self.apply_with_gaps(
+                map,
+                window,
+                child,
+                child_rect,
+                screen,
+                sizes,
+                stack_offset,
+                gaps,
+                stack_line_thickness,
+                stack_line_horiz,
+                stack_line_vert,
+            );
+            offset += seg_len;
+            if i < children.len() - 1 {
+                offset += inner_gap;
+            }
+        }
+    }
+}
+
 impl Components {
     fn dispatch_event(&mut self, map: &NodeMap, event: TreeEvent) {
         self.selection.handle_event(map, event);
         self.layout.handle_event(map, event);
         self.window.handle_event(map, event);
     }
+}
+
+fn adjust_stack_container_rect(
+    mut container_rect: CGRect,
+    is_horizontal: bool,
+    reserve: f64,
+    stack_line_horiz: crate::common::config::HorizontalPlacement,
+    stack_line_vert: crate::common::config::VerticalPlacement,
+) -> CGRect {
+    use objc2_core_foundation::{CGPoint, CGSize};
+    if reserve <= 0.0 {
+        return container_rect;
+    }
+    if is_horizontal {
+        match stack_line_horiz {
+            crate::common::config::HorizontalPlacement::Top => {
+                let new_h = (container_rect.size.height - reserve).max(0.0);
+                container_rect = CGRect {
+                    origin: CGPoint {
+                        x: container_rect.origin.x,
+                        y: container_rect.origin.y + reserve,
+                    },
+                    size: CGSize {
+                        width: container_rect.size.width,
+                        height: new_h,
+                    },
+                };
+            }
+            crate::common::config::HorizontalPlacement::Bottom => {
+                let new_h = (container_rect.size.height - reserve).max(0.0);
+                container_rect = CGRect {
+                    origin: CGPoint {
+                        x: container_rect.origin.x,
+                        y: container_rect.origin.y,
+                    },
+                    size: CGSize {
+                        width: container_rect.size.width,
+                        height: new_h,
+                    },
+                };
+            }
+        }
+    } else {
+        match stack_line_vert {
+            crate::common::config::VerticalPlacement::Right => {
+                let new_w = (container_rect.size.width - reserve).max(0.0);
+                container_rect = CGRect {
+                    origin: CGPoint {
+                        x: container_rect.origin.x,
+                        y: container_rect.origin.y,
+                    },
+                    size: CGSize {
+                        width: new_w,
+                        height: container_rect.size.height,
+                    },
+                };
+            }
+            crate::common::config::VerticalPlacement::Left => {
+                let new_w = (container_rect.size.width - reserve).max(0.0);
+                container_rect = CGRect {
+                    origin: CGPoint {
+                        x: container_rect.origin.x + reserve,
+                        y: container_rect.origin.y,
+                    },
+                    size: CGSize {
+                        width: new_w,
+                        height: container_rect.size.height,
+                    },
+                };
+            }
+        }
+    }
+    container_rect
 }
