@@ -1,6 +1,7 @@
 use std::ffi::c_void;
 use std::ptr;
 use std::sync::Arc;
+
 use parking_lot::Mutex;
 
 pub type CVReturn = i32;
@@ -129,9 +130,7 @@ impl DisplayLink {
     /// Get the display's refresh rate in Hz (frames per second).
     /// Returns None if the refresh rate hasn't been determined yet.
     /// You may need to start the DisplayLink briefly to get this information.
-    pub fn refresh_rate(&self) -> Option<f64> {
-        *self.refresh_rate.lock()
-    }
+    pub fn refresh_rate(&self) -> Option<f64> { *self.refresh_rate.lock() }
 
     /// Get the display's refresh rate, starting the DisplayLink briefly if needed.
     /// This is a convenience method that will start the DisplayLink for a short time

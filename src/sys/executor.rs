@@ -6,10 +6,10 @@ use std::mem;
 use std::pin::Pin;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
-use parking_lot::Mutex;
 use std::task::{Context, Poll, Wake};
 
 use core_foundation::runloop::CFRunLoop;
+use parking_lot::Mutex;
 
 use super::run_loop::WakeupHandle;
 

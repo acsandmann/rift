@@ -1,9 +1,9 @@
 // TODO: this cannot be the best way to do this
 
 use std::path::PathBuf;
-use parking_lot::Mutex;
 
 use once_cell::sync::Lazy;
+use parking_lot::Mutex;
 
 use crate::common::collections::HashMap;
 use crate::sys::app::pid_t;

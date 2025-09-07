@@ -7,9 +7,9 @@
 // https://github.com/NUIKit/CGSInternal/blob/c4f6f559d624dc1cfc2bf24c8c19dbf653317fcf/CGSEvent.h#L21
 
 use std::ffi::c_void;
-use parking_lot::Mutex;
 
 use once_cell::sync::Lazy;
+use parking_lot::Mutex;
 use tracing::{debug, trace};
 
 use super::skylight::{

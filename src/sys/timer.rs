@@ -89,7 +89,6 @@ use std::ffi::c_void;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
-use parking_lot::Mutex;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
@@ -97,6 +96,7 @@ use objc2_core_foundation::{
     CFAbsoluteTime, CFAbsoluteTimeGetCurrent, CFRetained, CFRunLoop, CFRunLoopTimer,
     CFRunLoopTimerContext, CFTimeInterval, kCFAllocatorDefault, kCFRunLoopCommonModes,
 };
+use parking_lot::Mutex;
 use tokio_stream::Stream;
 
 /// A timer that can be awaited in async code.

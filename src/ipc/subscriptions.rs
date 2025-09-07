@@ -1,12 +1,12 @@
 use std::ffi::{CString, c_void};
 use std::os::raw::c_char;
 use std::sync::Arc;
-use parking_lot::{Mutex, RwLock};
 
 use core_foundation::date::CFAbsoluteTimeGetCurrent;
 use core_foundation::runloop::{
     CFRunLoop, CFRunLoopTimer, CFRunLoopTimerContext, CFRunLoopTimerRef, kCFRunLoopDefaultMode,
 };
+use parking_lot::{Mutex, RwLock};
 use serde_json::Value;
 use tracing::{debug, error, info, warn};
 
@@ -95,15 +95,15 @@ impl ServerState {
 
     pub fn list_cli_subscriptions(&self) -> Value {
         let guard = self.cli_subscriptions.lock();
-            let mut subscription_list: Vec<Value> = Vec::new();
-            for (event, subs) in guard.iter() {
-                for s in subs {
-                    subscription_list.push(serde_json::json!({
-                        "event": event,
-                        "command": s.command,
-                        "args": s.args,
-                    }));
-                }
+        let mut subscription_list: Vec<Value> = Vec::new();
+        for (event, subs) in guard.iter() {
+            for s in subs {
+                subscription_list.push(serde_json::json!({
+                    "event": event,
+                    "command": s.command,
+                    "args": s.args,
+                }));
+            }
         }
         serde_json::json!({
             "cli_subscriptions": subscription_list,
