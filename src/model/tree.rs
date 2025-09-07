@@ -207,11 +207,12 @@ impl NodeId {
     #[track_caller]
     pub fn is_empty(self, map: &NodeMap) -> bool { map[self].first_child.is_none() }
 
-    /// Removes this node and its subtree from the forest if it is a root.
-    /// Panics if called on a non-root node.
     #[track_caller]
     pub fn remove_root<O: Observer>(self, tree: &mut Tree<O>) {
-        assert!(self.parent(&tree.map).is_none(), "remove_root called on non-root node");
+        assert!(
+            self.parent(&tree.map).is_none(),
+            "remove_root called on non-root node"
+        );
         tree.map.map.remove(self).unwrap().delete_recursive(tree, self);
     }
 }
