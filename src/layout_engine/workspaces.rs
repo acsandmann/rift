@@ -44,7 +44,7 @@ impl WorkspaceLayouts {
         space: SpaceId,
         size: CGSize,
         workspaces: impl IntoIterator<Item = crate::model::VirtualWorkspaceId>,
-        tree: &mut impl LayoutSystem<LayoutId = LayoutId>,
+        tree: &mut impl LayoutSystem,
     ) {
         let size = Size::from(size);
         for workspace_id in workspaces {

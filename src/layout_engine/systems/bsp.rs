@@ -3,9 +3,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
-use crate::layout_engine::systems::LayoutSystemCore;
+use crate::layout_engine::systems::LayoutSystem;
 use crate::layout_engine::utils::compute_tiling_area;
-use crate::layout_engine::{Direction, LayoutKind, Orientation};
+use crate::layout_engine::{Direction, LayoutId, LayoutKind, Orientation};
 use crate::model::selection::*;
 use crate::model::tree::{NodeId, NodeMap, Tree};
 
@@ -389,17 +389,15 @@ impl Components {
     }
 }
 
-impl LayoutSystemCore for BspLayoutSystem {
-    type LayoutId = crate::layout_engine::LayoutId;
-
-    fn create_layout(&mut self) -> Self::LayoutId {
+impl LayoutSystem for BspLayoutSystem {
+    fn create_layout(&mut self) -> LayoutId {
         let leaf = self.make_leaf(None);
         let state = LayoutState { root: leaf };
         self.layouts.insert(state)
     }
 
     /// shallow
-    fn clone_layout(&mut self, layout: Self::LayoutId) -> Self::LayoutId {
+    fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
         let mut windows = Vec::new();
         if let Some(state) = self.layouts.get(layout).copied() {
             self.collect_windows_under(state.root, &mut windows);
@@ -411,7 +409,7 @@ impl LayoutSystemCore for BspLayoutSystem {
         new_layout
     }
 
-    fn remove_layout(&mut self, layout: Self::LayoutId) {
+    fn remove_layout(&mut self, layout: LayoutId) {
         if let Some(state) = self.layouts.remove(layout) {
             let mut windows = Vec::new();
             self.collect_windows_under(state.root, &mut windows);
@@ -426,7 +424,7 @@ impl LayoutSystemCore for BspLayoutSystem {
         }
     }
 
-    fn draw_tree(&self, layout: Self::LayoutId) -> String {
+    fn draw_tree(&self, layout: LayoutId) -> String {
         fn write_node(this: &BspLayoutSystem, node: NodeId, out: &mut String, indent: usize) {
             for _ in 0..indent {
                 out.push_str("  ");
@@ -459,7 +457,7 @@ impl LayoutSystemCore for BspLayoutSystem {
 
     fn calculate_layout(
         &self,
-        layout: Self::LayoutId,
+        layout: LayoutId,
         screen: CGRect,
         _stack_offset: f64,
         gaps: &crate::common::config::GapSettings,
@@ -475,11 +473,11 @@ impl LayoutSystemCore for BspLayoutSystem {
         out
     }
 
-    fn selected_window(&self, layout: Self::LayoutId) -> Option<WindowId> {
+    fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
         self.layouts.get(layout).and_then(|s| self.selection_window(s))
     }
 
-    fn visible_windows_in_layout(&self, layout: Self::LayoutId) -> Vec<WindowId> {
+    fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
         let mut out = Vec::new();
         if let Some(state) = self.layouts.get(layout).copied() {
             self.collect_windows_under(state.root, &mut out);
@@ -487,7 +485,7 @@ impl LayoutSystemCore for BspLayoutSystem {
         out
     }
 
-    fn visible_windows_under_selection(&self, layout: Self::LayoutId) -> Vec<WindowId> {
+    fn visible_windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId> {
         let mut out = Vec::new();
         if let Some(sel) = self.selection_of_layout(layout) {
             if self.kind.get(sel).is_some() {
@@ -499,7 +497,7 @@ impl LayoutSystemCore for BspLayoutSystem {
         out
     }
 
-    fn ascend_selection(&mut self, layout: Self::LayoutId) -> bool {
+    fn ascend_selection(&mut self, layout: LayoutId) -> bool {
         if let Some(sel) = self.selection_of_layout(layout) {
             if self.kind.get(sel).is_none() {
                 return false;
@@ -514,7 +512,7 @@ impl LayoutSystemCore for BspLayoutSystem {
         false
     }
 
-    fn descend_selection(&mut self, layout: Self::LayoutId) -> bool {
+    fn descend_selection(&mut self, layout: LayoutId) -> bool {
         if let Some(sel) = self.selection_of_layout(layout) {
             let new_sel = self.descend_to_leaf(sel);
             if new_sel != sel {
@@ -527,7 +525,7 @@ impl LayoutSystemCore for BspLayoutSystem {
 
     fn move_focus(
         &mut self,
-        layout: Self::LayoutId,
+        layout: LayoutId,
         direction: Direction,
     ) -> (Option<WindowId>, Vec<WindowId>) {
         let raise_windows = self.visible_windows_in_layout(layout);
@@ -550,7 +548,7 @@ impl LayoutSystemCore for BspLayoutSystem {
         (focus, raise_windows)
     }
 
-    fn add_window_after_selection(&mut self, layout: Self::LayoutId, wid: WindowId) {
+    fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId) {
         if self.layouts.get(layout).is_some() {
             self.insert_window_at_selection(layout, wid);
         }
@@ -581,7 +579,7 @@ impl LayoutSystemCore for BspLayoutSystem {
         }
     }
 
-    fn set_windows_for_app(&mut self, layout: Self::LayoutId, pid: pid_t, desired: Vec<WindowId>) {
+    fn set_windows_for_app(&mut self, layout: LayoutId, pid: pid_t, desired: Vec<WindowId>) {
         if let Some(state) = self.layouts.get(layout).copied() {
             let mut under = Vec::new();
             self.collect_windows_under(state.root, &mut under);
@@ -594,7 +592,7 @@ impl LayoutSystemCore for BspLayoutSystem {
         }
     }
 
-    fn has_windows_for_app(&self, layout: Self::LayoutId, pid: pid_t) -> bool {
+    fn has_windows_for_app(&self, layout: LayoutId, pid: pid_t) -> bool {
         if let Some(state) = self.layouts.get(layout).copied() {
             let mut under = Vec::new();
             self.collect_windows_under(state.root, &mut under);
@@ -604,7 +602,7 @@ impl LayoutSystemCore for BspLayoutSystem {
         }
     }
 
-    fn contains_window(&self, layout: Self::LayoutId, wid: WindowId) -> bool {
+    fn contains_window(&self, layout: LayoutId, wid: WindowId) -> bool {
         if let Some(&node) = self.window_to_node.get(&wid) {
             if let Some(state) = self.layouts.get(layout).copied() {
                 return self.belongs_to_layout(state, node);
@@ -613,7 +611,7 @@ impl LayoutSystemCore for BspLayoutSystem {
         false
     }
 
-    fn select_window(&mut self, layout: Self::LayoutId, wid: WindowId) -> bool {
+    fn select_window(&mut self, layout: LayoutId, wid: WindowId) -> bool {
         if let Some(&node) = self.window_to_node.get(&wid) {
             if self.kind.get(node).is_none() {
                 self.window_to_node.remove(&wid);
@@ -632,7 +630,7 @@ impl LayoutSystemCore for BspLayoutSystem {
 
     fn on_window_resized(
         &mut self,
-        layout: Self::LayoutId,
+        layout: LayoutId,
         wid: WindowId,
         old_frame: CGRect,
         new_frame: CGRect,
@@ -654,7 +652,7 @@ impl LayoutSystemCore for BspLayoutSystem {
         }
     }
 
-    fn move_selection(&mut self, layout: Self::LayoutId, direction: Direction) -> bool {
+    fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool {
         let sel_snapshot = self.selection_of_layout(layout);
         let Some(sel) = sel_snapshot else {
             return false;
@@ -691,8 +689,8 @@ impl LayoutSystemCore for BspLayoutSystem {
 
     fn move_selection_to_layout_after_selection(
         &mut self,
-        from_layout: Self::LayoutId,
-        to_layout: Self::LayoutId,
+        from_layout: LayoutId,
+        to_layout: LayoutId,
     ) {
         let sel = self.selected_window(from_layout);
         if let Some(w) = sel {
@@ -701,7 +699,7 @@ impl LayoutSystemCore for BspLayoutSystem {
         }
     }
 
-    fn split_selection(&mut self, layout: Self::LayoutId, kind: LayoutKind) {
+    fn split_selection(&mut self, layout: LayoutId, kind: LayoutKind) {
         let orientation = match kind {
             LayoutKind::Horizontal => Orientation::Horizontal,
             LayoutKind::Vertical => Orientation::Vertical,
@@ -731,7 +729,7 @@ impl LayoutSystemCore for BspLayoutSystem {
         }
     }
 
-    fn toggle_fullscreen_of_selection(&mut self, layout: Self::LayoutId) -> Vec<WindowId> {
+    fn toggle_fullscreen_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
         if let Some(sel) = self.selection_of_layout(layout) {
             let sel_leaf = self.descend_to_leaf(sel);
             if let Some(NodeKind::Leaf { window: Some(w), fullscreen }) =
@@ -744,17 +742,17 @@ impl LayoutSystemCore for BspLayoutSystem {
         vec![]
     }
 
-    fn join_selection_with_direction(&mut self, _layout: Self::LayoutId, _direction: Direction) {}
+    fn join_selection_with_direction(&mut self, _layout: LayoutId, _direction: Direction) {}
 
-    fn apply_stacking_to_parent_of_selection(&mut self, _layout: Self::LayoutId) -> Vec<WindowId> {
+    fn apply_stacking_to_parent_of_selection(&mut self, _layout: LayoutId) -> Vec<WindowId> {
         vec![]
     }
 
-    fn unstack_parent_of_selection(&mut self, _layout: Self::LayoutId) -> Vec<WindowId> { vec![] }
+    fn unstack_parent_of_selection(&mut self, _layout: LayoutId) -> Vec<WindowId> { vec![] }
 
-    fn unjoin_selection(&mut self, _layout: Self::LayoutId) {}
+    fn unjoin_selection(&mut self, _layout: LayoutId) {}
 
-    fn resize_selection_by(&mut self, layout: Self::LayoutId, amount: f64) {
+    fn resize_selection_by(&mut self, layout: LayoutId, amount: f64) {
         let sel_snapshot = self.selection_of_layout(layout);
         let Some(mut node) = sel_snapshot else {
             return;
@@ -775,7 +773,7 @@ impl LayoutSystemCore for BspLayoutSystem {
         }
     }
 
-    fn rebalance(&mut self, layout: Self::LayoutId) {
+    fn rebalance(&mut self, layout: LayoutId) {
         if let Some(state) = self.layouts.get(layout).copied() {
             let mut stack = vec![state.root];
             while let Some(n) = stack.pop() {

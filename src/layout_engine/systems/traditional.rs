@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::actor::app::{WindowId, pid_t};
-use crate::layout_engine::systems::LayoutSystemCore;
+use crate::layout_engine::systems::LayoutSystem;
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{Direction, LayoutId, LayoutKind};
 use crate::model::selection::*;
@@ -51,15 +51,13 @@ impl Drop for TraditionalLayoutSystem {
     }
 }
 
-impl LayoutSystemCore for TraditionalLayoutSystem {
-    type LayoutId = crate::layout_engine::LayoutId;
-
-    fn create_layout(&mut self) -> Self::LayoutId {
+impl LayoutSystem for TraditionalLayoutSystem {
+    fn create_layout(&mut self) -> LayoutId {
         let root = OwnedNode::new_root_in(&mut self.tree, "layout_root");
         self.layout_roots.insert(root)
     }
 
-    fn clone_layout(&mut self, layout: Self::LayoutId) -> Self::LayoutId {
+    fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
         let source_root = self.layout_roots[layout].id();
         let cloned = source_root.deep_copy(&mut self.tree).make_root("layout_root");
         let cloned_root = cloned.id();
@@ -77,15 +75,15 @@ impl LayoutSystemCore for TraditionalLayoutSystem {
         dest_layout
     }
 
-    fn remove_layout(&mut self, layout: Self::LayoutId) {
+    fn remove_layout(&mut self, layout: LayoutId) {
         self.layout_roots.remove(layout).unwrap().remove(&mut self.tree)
     }
 
-    fn draw_tree(&self, layout: Self::LayoutId) -> String { self.draw_tree_internal(layout) }
+    fn draw_tree(&self, layout: LayoutId) -> String { self.draw_tree_internal(layout) }
 
     fn calculate_layout(
         &self,
-        layout: Self::LayoutId,
+        layout: LayoutId,
         screen: CGRect,
         stack_offset: f64,
         gaps: &crate::common::config::GapSettings,
@@ -113,22 +111,22 @@ impl LayoutSystemCore for TraditionalLayoutSystem {
         sizes
     }
 
-    fn selected_window(&self, layout: Self::LayoutId) -> Option<WindowId> {
+    fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
         let selection = self.selection(layout);
         self.tree.data.window.at(selection)
     }
 
-    fn visible_windows_in_layout(&self, layout: Self::LayoutId) -> Vec<WindowId> {
+    fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
         let root = self.root(layout);
         self.visible_windows_under(root)
     }
 
-    fn visible_windows_under_selection(&self, layout: Self::LayoutId) -> Vec<WindowId> {
+    fn visible_windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId> {
         let selection = self.selection(layout);
         self.visible_windows_under(selection)
     }
 
-    fn ascend_selection(&mut self, layout: Self::LayoutId) -> bool {
+    fn ascend_selection(&mut self, layout: LayoutId) -> bool {
         if let Some(parent) = self.selection(layout).parent(self.map()) {
             self.select(parent);
             return true;
@@ -136,7 +134,7 @@ impl LayoutSystemCore for TraditionalLayoutSystem {
         false
     }
 
-    fn descend_selection(&mut self, layout: Self::LayoutId) -> bool {
+    fn descend_selection(&mut self, layout: LayoutId) -> bool {
         if let Some(child) =
             self.tree.data.selection.last_selection(self.map(), self.selection(layout))
         {
@@ -148,7 +146,7 @@ impl LayoutSystemCore for TraditionalLayoutSystem {
 
     fn move_focus(
         &mut self,
-        layout: Self::LayoutId,
+        layout: LayoutId,
         direction: Direction,
     ) -> (Option<WindowId>, Vec<WindowId>) {
         let selection = self.selection(layout);
@@ -166,7 +164,7 @@ impl LayoutSystemCore for TraditionalLayoutSystem {
         }
     }
 
-    fn add_window_after_selection(&mut self, layout: Self::LayoutId, wid: WindowId) {
+    fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId) {
         let selection = self.selection(layout);
         let node = self.add_window_after_internal(layout, selection, wid);
         self.select_internal(node);
@@ -176,19 +174,19 @@ impl LayoutSystemCore for TraditionalLayoutSystem {
 
     fn remove_windows_for_app(&mut self, pid: pid_t) { self.remove_windows_for_app_impl(pid) }
 
-    fn set_windows_for_app(&mut self, layout: Self::LayoutId, pid: pid_t, desired: Vec<WindowId>) {
+    fn set_windows_for_app(&mut self, layout: LayoutId, pid: pid_t, desired: Vec<WindowId>) {
         self.set_windows_for_app_impl(layout, pid, desired)
     }
 
-    fn has_windows_for_app(&self, layout: Self::LayoutId, pid: pid_t) -> bool {
+    fn has_windows_for_app(&self, layout: LayoutId, pid: pid_t) -> bool {
         self.has_windows_for_app_impl(layout, pid)
     }
 
-    fn contains_window(&self, layout: Self::LayoutId, wid: WindowId) -> bool {
+    fn contains_window(&self, layout: LayoutId, wid: WindowId) -> bool {
         self.window_node(layout, wid).is_some()
     }
 
-    fn select_window(&mut self, layout: Self::LayoutId, wid: WindowId) -> bool {
+    fn select_window(&mut self, layout: LayoutId, wid: WindowId) -> bool {
         if let Some(node) = self.window_node(layout, wid) {
             self.select(node);
             true
@@ -199,7 +197,7 @@ impl LayoutSystemCore for TraditionalLayoutSystem {
 
     fn on_window_resized(
         &mut self,
-        layout: Self::LayoutId,
+        layout: LayoutId,
         wid: WindowId,
         old_frame: CGRect,
         new_frame: CGRect,
@@ -216,27 +214,27 @@ impl LayoutSystemCore for TraditionalLayoutSystem {
         }
     }
 
-    fn move_selection(&mut self, layout: Self::LayoutId, direction: Direction) -> bool {
+    fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool {
         let selection = self.selection(layout);
         self.move_node(layout, selection, direction)
     }
 
     fn move_selection_to_layout_after_selection(
         &mut self,
-        from_layout: Self::LayoutId,
-        to_layout: Self::LayoutId,
+        from_layout: LayoutId,
+        to_layout: LayoutId,
     ) {
         let from_sel = self.selection(from_layout);
         let to_sel = self.selection(to_layout);
         self.move_node_after_internal(to_sel, from_sel);
     }
 
-    fn split_selection(&mut self, layout: Self::LayoutId, kind: LayoutKind) {
+    fn split_selection(&mut self, layout: LayoutId, kind: LayoutKind) {
         let selection = self.selection(layout);
         self.nest_in_container_internal(layout, selection, kind);
     }
 
-    fn toggle_fullscreen_of_selection(&mut self, layout: Self::LayoutId) -> Vec<WindowId> {
+    fn toggle_fullscreen_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
         let node = self.selection(layout);
         if self.toggle_fullscreen_internal(node) {
             self.visible_windows_under_internal(node)
@@ -245,7 +243,7 @@ impl LayoutSystemCore for TraditionalLayoutSystem {
         }
     }
 
-    fn join_selection_with_direction(&mut self, layout: Self::LayoutId, direction: Direction) {
+    fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) {
         let selection = self.selection(layout);
         if let Some(target) = self.traverse_internal(selection, direction) {
             let common_parent =
@@ -256,7 +254,7 @@ impl LayoutSystemCore for TraditionalLayoutSystem {
         }
     }
 
-    fn apply_stacking_to_parent_of_selection(&mut self, layout: Self::LayoutId) -> Vec<WindowId> {
+    fn apply_stacking_to_parent_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
         let selection = self.selection(layout);
         if let Some(parent) = selection.parent(self.map()) {
             let current_layout = self.layout(parent);
@@ -273,7 +271,7 @@ impl LayoutSystemCore for TraditionalLayoutSystem {
         }
     }
 
-    fn unstack_parent_of_selection(&mut self, layout: Self::LayoutId) -> Vec<WindowId> {
+    fn unstack_parent_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
         let selection = self.selection(layout);
         if let Some(parent) = selection.parent(self.map()) {
             match self.layout(parent) {
@@ -292,7 +290,7 @@ impl LayoutSystemCore for TraditionalLayoutSystem {
         }
     }
 
-    fn unjoin_selection(&mut self, layout: Self::LayoutId) {
+    fn unjoin_selection(&mut self, layout: LayoutId) {
         let selection = self.selection(layout);
         if let Some(parent) = selection.parent(self.map()) {
             let children: Vec<_> = parent.children(self.map()).collect();
@@ -302,7 +300,7 @@ impl LayoutSystemCore for TraditionalLayoutSystem {
         }
     }
 
-    fn resize_selection_by(&mut self, layout: Self::LayoutId, amount: f64) {
+    fn resize_selection_by(&mut self, layout: LayoutId, amount: f64) {
         let selection = self.selection(layout);
         if let Some(_focused_window) = self.window_at_internal(selection) {
             let candidates = selection
@@ -332,7 +330,7 @@ impl LayoutSystemCore for TraditionalLayoutSystem {
         }
     }
 
-    fn rebalance(&mut self, layout: Self::LayoutId) {
+    fn rebalance(&mut self, layout: LayoutId) {
         let root = self.root(layout);
         self.rebalance_node(root)
     }
@@ -341,7 +339,7 @@ impl LayoutSystemCore for TraditionalLayoutSystem {
 impl TraditionalLayoutSystem {
     pub(crate) fn collect_group_containers_in_selection_path(
         &self,
-        layout: <TraditionalLayoutSystem as LayoutSystemCore>::LayoutId,
+        layout: LayoutId,
         screen: CGRect,
         stack_offset: f64,
         gaps: &crate::common::config::GapSettings,

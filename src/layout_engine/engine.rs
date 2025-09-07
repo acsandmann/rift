@@ -11,7 +11,7 @@ use crate::actor::app::{AppInfo, WindowId, pid_t};
 use crate::actor::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::common::collections::{BTreeSet, HashMap};
 use crate::common::config::LayoutSettings;
-use crate::layout_engine::systems::LayoutSystemCore;
+use crate::layout_engine::LayoutSystem;
 use crate::model::VirtualWorkspaceManager;
 use crate::sys::screen::SpaceId;
 
