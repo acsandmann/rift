@@ -1,9 +1,9 @@
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use serde::{Deserialize, Serialize};
 
-use super::LayoutSystem;
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
+use crate::layout_engine::systems::LayoutSystemCore;
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{Direction, LayoutKind, Orientation};
 use crate::model::selection::*;
@@ -389,7 +389,7 @@ impl Components {
     }
 }
 
-impl LayoutSystem for BspLayoutSystem {
+impl LayoutSystemCore for BspLayoutSystem {
     type LayoutId = crate::layout_engine::LayoutId;
 
     fn create_layout(&mut self) -> Self::LayoutId {
@@ -489,14 +489,13 @@ impl LayoutSystem for BspLayoutSystem {
 
     fn visible_windows_under_selection(&self, layout: Self::LayoutId) -> Vec<WindowId> {
         let mut out = Vec::new();
-        if let Some(state) = self.layouts.get(layout).copied() {
-            if let Some(sel) = self.selection_of_layout(layout) {
-                if self.kind.get(sel).is_some() {
-                    let leaf = self.descend_to_leaf(sel);
-                    self.collect_windows_under(leaf, &mut out);
-                }
+        if let Some(sel) = self.selection_of_layout(layout) {
+            if self.kind.get(sel).is_some() {
+                let leaf = self.descend_to_leaf(sel);
+                self.collect_windows_under(leaf, &mut out);
             }
         }
+
         out
     }
 

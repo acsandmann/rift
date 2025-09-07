@@ -1,5 +1,6 @@
-use enum_dispatch::enum_dispatch;
+use enum_delegate;
 use objc2_core_foundation::CGRect;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use super::{Direction, LayoutKind};
@@ -7,14 +8,9 @@ use crate::actor::app::{WindowId, pid_t};
 
 slotmap::new_key_type! { pub struct LayoutId; }
 
-#[enum_dispatch]
-pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
-    type LayoutId: Copy
-        + Eq
-        + std::hash::Hash
-        + Serialize
-        + for<'de> Deserialize<'de>
-        + core::fmt::Debug;
+#[enum_delegate::register]
+pub trait LayoutSystemCore {
+    type LayoutId: Copy + Eq + std::hash::Hash + core::fmt::Debug;
 
     fn create_layout(&mut self) -> Self::LayoutId;
     fn clone_layout(&mut self, layout: Self::LayoutId) -> Self::LayoutId;
@@ -77,6 +73,9 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     fn rebalance(&mut self, layout: Self::LayoutId);
 }
 
+pub trait LayoutSystem: LayoutSystemCore + Serialize + DeserializeOwned {}
+impl<T> LayoutSystem for T where T: LayoutSystemCore + Serialize + DeserializeOwned {}
+
 mod traditional;
 pub use traditional::TraditionalLayoutSystem;
 mod bsp;
@@ -84,7 +83,7 @@ pub use bsp::BspLayoutSystem;
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-#[enum_dispatch(LayoutSystem)]
+#[enum_delegate::implement(LayoutSystemCore)]
 pub enum LayoutSystemKind {
     Traditional(TraditionalLayoutSystem),
     Bsp(BspLayoutSystem),

@@ -2,8 +2,8 @@ use objc2_core_foundation::CGRect;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use super::LayoutSystem;
 use crate::actor::app::{WindowId, pid_t};
+use crate::layout_engine::systems::LayoutSystemCore;
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{Direction, LayoutId, LayoutKind};
 use crate::model::selection::*;
@@ -51,7 +51,7 @@ impl Drop for TraditionalLayoutSystem {
     }
 }
 
-impl LayoutSystem for TraditionalLayoutSystem {
+impl LayoutSystemCore for TraditionalLayoutSystem {
     type LayoutId = crate::layout_engine::LayoutId;
 
     fn create_layout(&mut self) -> Self::LayoutId {
@@ -341,7 +341,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
 impl TraditionalLayoutSystem {
     pub(crate) fn collect_group_containers_in_selection_path(
         &self,
-        layout: <TraditionalLayoutSystem as LayoutSystem>::LayoutId,
+        layout: <TraditionalLayoutSystem as LayoutSystemCore>::LayoutId,
         screen: CGRect,
         stack_offset: f64,
         gaps: &crate::common::config::GapSettings,

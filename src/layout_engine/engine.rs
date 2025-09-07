@@ -6,13 +6,12 @@ use objc2_core_foundation::{CGRect, CGSize};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
-use super::{
-    Direction, FloatingManager, LayoutId, LayoutSystem, LayoutSystemKind, WorkspaceLayouts,
-};
+use super::{Direction, FloatingManager, LayoutId, LayoutSystemKind, WorkspaceLayouts};
 use crate::actor::app::{AppInfo, WindowId, pid_t};
 use crate::actor::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::common::collections::{BTreeSet, HashMap};
 use crate::common::config::LayoutSettings;
+use crate::layout_engine::systems::LayoutSystemCore;
 use crate::model::VirtualWorkspaceManager;
 use crate::sys::screen::SpaceId;
 
