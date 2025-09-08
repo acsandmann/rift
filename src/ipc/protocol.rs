@@ -50,4 +50,5 @@ pub enum RiftResponse {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum RiftCommand {
     Reactor(crate::actor::reactor::Command),
+    Config(crate::common::config::ConfigCommand),
 }

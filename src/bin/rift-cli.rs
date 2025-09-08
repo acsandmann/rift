@@ -382,7 +382,7 @@ fn build_execute_request(execute: ExecuteCommands) -> Result<RiftRequest, String
     };
 
     let maybe_config_json = match &rift_command {
-        RiftCommand::Reactor(reactor::Command::Config(cfg_cmd)) => {
+        RiftCommand::Config(cfg_cmd) => {
             match serde_json::to_string(cfg_cmd) {
                 Ok(s) => Some(s),
                 Err(_) => None,
@@ -556,7 +556,7 @@ fn map_config_command(cmd: ConfigCommands) -> Result<RiftCommand, String> {
         ConfigCommands::Reload => ConfigCommand::ReloadConfig,
     };
 
-    Ok(RiftCommand::Reactor(reactor::Command::Config(cfg_cmd)))
+    Ok(RiftCommand::Config(cfg_cmd))
 }
 
 fn handle_success_response(request: &RiftRequest, data: serde_json::Value) -> Result<(), String> {

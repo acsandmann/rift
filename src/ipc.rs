@@ -11,6 +11,7 @@ pub mod subscriptions;
 
 pub use protocol::{RiftCommand, RiftRequest, RiftResponse};
 
+use crate::actor::config as config_actor;
 use crate::actor::reactor::{self, Event};
 use crate::ipc::subscriptions::SharedServerState;
 use crate::model::server::WorkspaceQueryResponse;
@@ -19,7 +20,10 @@ use crate::sys::mach::{mach_msg_header_t, mach_send_request, mach_server_run, se
 
 type ClientPort = u32;
 
-pub fn run_mach_server(reactor_tx: reactor::Sender) -> SharedServerState {
+pub fn run_mach_server(
+    reactor_tx: reactor::Sender,
+    config_tx: config_actor::Sender,
+) -> SharedServerState {
     info!("Spawning background Mach server thread and returning SharedServerState");
 
     let shared_state: SharedServerState = std::sync::Arc::new(parking_lot::RwLock::new(
@@ -31,7 +35,7 @@ pub fn run_mach_server(reactor_tx: reactor::Sender) -> SharedServerState {
         let s = thread_state.write();
         s.set_runloop(Some(CFRunLoop::get_current()));
 
-        let handler = MachHandler::new(reactor_tx, thread_state.clone());
+        let handler = MachHandler::new(reactor_tx, config_tx, thread_state.clone());
         unsafe {
             mach_server_run(Box::into_raw(Box::new(handler)) as *mut _, handle_mach_request_c);
         }
@@ -83,12 +87,21 @@ impl RiftMachClient {
 
 struct MachHandler {
     reactor_tx: reactor::Sender,
+    config_tx: config_actor::Sender,
     server_state: SharedServerState,
 }
 
 impl MachHandler {
-    fn new(reactor_tx: reactor::Sender, server_state: SharedServerState) -> Self {
-        Self { reactor_tx, server_state }
+    fn new(
+        reactor_tx: reactor::Sender,
+        config_tx: config_actor::Sender,
+        server_state: SharedServerState,
+    ) -> Self {
+        Self {
+            reactor_tx,
+            config_tx,
+            server_state,
+        }
     }
 
     fn perform_query<T>(
@@ -103,6 +116,26 @@ impl MachHandler {
 
         if let Err(e) = self.reactor_tx.try_send(event) {
             return Err(format!("Failed to send query: {}", e));
+        }
+
+        match block_on(cont_fut, Duration::from_secs(5)) {
+            Ok(res) => Ok(res),
+            Err(e) => Err(format!("Failed to get response: {}", e)),
+        }
+    }
+
+    fn perform_config_query<T>(
+        &self,
+        make_event: impl FnOnce(r#continue::Sender<T>) -> config_actor::Event,
+    ) -> Result<T, String>
+    where
+        T: Send + 'static,
+    {
+        let (cont_tx, cont_fut) = continuation::<T>();
+        let event = make_event(cont_tx);
+
+        if let Err(e) = self.config_tx.try_send(event) {
+            return Err(format!("Failed to send config query: {}", e));
         }
 
         match block_on(cont_fut, Duration::from_secs(5)) {
@@ -250,46 +283,43 @@ impl MachHandler {
                 }
             },
 
-            RiftRequest::GetConfig => match self.perform_query(|tx| Event::QueryConfig(tx)) {
-                Ok(config) => RiftResponse::Success { data: config },
-                Err(e) => {
-                    error!("{}", e);
-                    RiftResponse::Error {
-                        error: serde_json::json!({ "message": "Failed to get config response", "details": format!("{}", e) }),
+            RiftRequest::GetConfig => {
+                match self.perform_config_query(|tx| config_actor::Event::QueryConfig(tx)) {
+                    Ok(config) => RiftResponse::Success { data: config },
+                    Err(e) => {
+                        error!("{}", e);
+                        RiftResponse::Error {
+                            error: serde_json::json!({ "message": "Failed to get config response", "details": format!("{}", e) }),
+                        }
                     }
                 }
-            },
+            }
 
             RiftRequest::ExecuteCommand { command, args } => {
                 match serde_json::from_str::<RiftCommand>(&command) {
-                    Ok(RiftCommand::Reactor(reactor_command)) => {
+                    Ok(RiftCommand::Config(_)) => {
                         if args.len() >= 2 && args[0] == "__apply_config__" {
                             match serde_json::from_str::<crate::common::config::ConfigCommand>(
                                 &args[1],
                             ) {
-                                Ok(cfg_cmd) => {
-                                    match self.perform_query(|tx| Event::ApplyConfig {
-                                        cmd: cfg_cmd,
-                                        response: tx,
-                                    }) {
-                                        Ok(apply_result) => match apply_result {
-                                            Ok(()) => RiftResponse::Success {
-                                                data: serde_json::json!(
-                                                    "Config applied successfully"
-                                                ),
-                                            },
-                                            Err(msg) => RiftResponse::Error {
-                                                error: serde_json::json!({ "message": msg }),
-                                            },
+                                Ok(cfg_cmd) => match self.perform_config_query(|tx| {
+                                    config_actor::Event::ApplyConfig { cmd: cfg_cmd, response: tx }
+                                }) {
+                                    Ok(apply_result) => match apply_result {
+                                        Ok(()) => RiftResponse::Success {
+                                            data: serde_json::json!("Config applied successfully"),
                                         },
-                                        Err(e) => {
-                                            error!("{}", e);
-                                            RiftResponse::Error {
-                                                error: serde_json::json!({ "message": format!("Failed to apply config: {}", e) }),
-                                            }
+                                        Err(msg) => RiftResponse::Error {
+                                            error: serde_json::json!({ "message": msg }),
+                                        },
+                                    },
+                                    Err(e) => {
+                                        error!("{}", e);
+                                        RiftResponse::Error {
+                                            error: serde_json::json!({ "message": format!("Failed to apply config: {}", e) }),
                                         }
                                     }
-                                }
+                                },
                                 Err(e) => {
                                     error!("Failed to parse config command from args: {}", e);
                                     RiftResponse::Error {
@@ -298,18 +328,23 @@ impl MachHandler {
                                 }
                             }
                         } else {
-                            let event = Event::Command(reactor_command);
-
-                            if let Err(e) = self.reactor_tx.try_send(event) {
-                                error!("Failed to send command to reactor: {}", e);
-                                return RiftResponse::Error {
-                                    error: serde_json::json!({ "message": "Failed to execute command", "details": format!("{}", e) }),
-                                };
-                            }
-
                             RiftResponse::Success {
-                                data: serde_json::json!("Command executed successfully"),
+                                data: serde_json::json!("No-op config command"),
                             }
+                        }
+                    }
+                    Ok(RiftCommand::Reactor(reactor_command)) => {
+                        let event = Event::Command(reactor_command);
+
+                        if let Err(e) = self.reactor_tx.try_send(event) {
+                            error!("Failed to send command to reactor: {}", e);
+                            return RiftResponse::Error {
+                                error: serde_json::json!({ "message": "Failed to execute command", "details": format!("{}", e) }),
+                            };
+                        }
+
+                        RiftResponse::Success {
+                            data: serde_json::json!("Command executed successfully"),
                         }
                     }
                     Err(e) => {

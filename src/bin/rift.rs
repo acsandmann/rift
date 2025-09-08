@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use objc2::MainThreadMarker;
+use rift_wm::actor::config::ConfigActor;
 use rift_wm::actor::menu_bar::Menu;
 use rift_wm::actor::mouse::Mouse;
 use rift_wm::actor::notification_center::NotificationCenter;
@@ -115,6 +116,8 @@ fn main() {
         stack_line_tx.clone(),
     );
 
+    let config_tx = ConfigActor::spawn(config.clone(), events_tx.clone());
+
     let (_, wnd_rx) = rift_wm::actor::channel();
     let wn_actor = window_notify_actor::WindowNotify::new(events_tx.clone(), wnd_rx, &[
         CGSEventType::WindowDestroyed,
@@ -123,7 +126,7 @@ fn main() {
     ]);
 
     let events_tx_mach = events_tx.clone();
-    let server_state = ipc::run_mach_server(events_tx_mach);
+    let server_state = ipc::run_mach_server(events_tx_mach, config_tx.clone());
 
     let mach_bridge_rx = broadcast_rx;
 
