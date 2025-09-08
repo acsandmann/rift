@@ -1,8 +1,7 @@
-use std::collections::HashSet;
-
 use tracing::{debug, trace};
 
 use super::reactor::{self, Event};
+use crate::common::collections::HashSet;
 use crate::sys::skylight::CGSEventType;
 use crate::sys::window_notify::{self};
 use crate::sys::window_server::WindowServerId;
@@ -33,7 +32,7 @@ impl WindowNotify {
         Self {
             events_tx,
             requests_rx: Some(requests_rx),
-            subscribed: HashSet::new(),
+            subscribed: HashSet::default(),
             initial_events: initial_events.into_iter().copied().collect(),
         }
     }

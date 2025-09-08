@@ -1,7 +1,9 @@
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Duration;
 
 use objc2::MainThreadMarker;
+use rustc_hash::FxHasher;
 use tracing::instrument;
 
 use crate::actor;
@@ -26,6 +28,7 @@ pub struct Menu {
     config: Arc<Config>,
     rx: Receiver,
     icon: Option<MenuIcon>,
+    last_signature: Option<u64>,
 }
 
 pub type Sender = actor::Sender<Event>;
@@ -37,6 +40,7 @@ impl Menu {
             icon: config.settings.ui.menu_bar.enabled.then(|| MenuIcon::new(mtm)),
             config,
             rx,
+            last_signature: None,
         }
     }
 
@@ -93,6 +97,20 @@ impl Menu {
             active_workspace,
             windows,
         } = event;
+
+        let mut hasher = FxHasher::default();
+        active_space.get().hash(&mut hasher);
+        if let Some(ws) = active_workspace {
+            ws.hash(&mut hasher);
+        }
+        for w in windows.iter() {
+            w.id.hash(&mut hasher);
+        }
+        let sig = hasher.finish();
+        if self.last_signature == Some(sig) {
+            return;
+        }
+        self.last_signature = Some(sig);
 
         let show_all = self.config.settings.ui.menu_bar.show_empty;
         icon.update(active_space, workspaces, active_workspace, windows, show_all);

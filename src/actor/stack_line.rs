@@ -1,3 +1,4 @@
+use std::collections::hash_map::Entry;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -29,10 +30,6 @@ pub enum Event {
         space_id: SpaceId,
         groups: Vec<GroupInfo>,
     },
-    GroupSelectionChanged {
-        node_id: NodeId,
-        selected_index: usize,
-    },
     ScreenParametersChanged(CoordinateConverter),
 }
 
@@ -44,6 +41,7 @@ pub struct StackLine {
     #[allow(dead_code)]
     reactor_tx: reactor::Sender,
     coordinate_converter: CoordinateConverter,
+    group_sigs_by_space: HashMap<SpaceId, Vec<GroupSig>>,
 }
 
 pub type Sender = actor::Sender<Event>;
@@ -64,6 +62,7 @@ impl StackLine {
             indicators: HashMap::default(),
             reactor_tx,
             coordinate_converter,
+            group_sigs_by_space: HashMap::default(),
         }
     }
 
@@ -86,9 +85,6 @@ impl StackLine {
             Event::GroupsUpdated { space_id, groups } => {
                 self.handle_groups_updated(space_id, groups);
             }
-            Event::GroupSelectionChanged { node_id, selected_index } => {
-                self.handle_selection_changed(node_id, selected_index);
-            }
             Event::ScreenParametersChanged(converter) => {
                 self.handle_screen_parameters_changed(converter);
             }
@@ -96,6 +92,20 @@ impl StackLine {
     }
 
     fn handle_groups_updated(&mut self, _space_id: SpaceId, groups: Vec<GroupInfo>) {
+        let sigs: Vec<GroupSig> = groups.iter().map(GroupSig::from_group_info).collect();
+
+        match self.group_sigs_by_space.entry(_space_id) {
+            Entry::Occupied(mut prev) => {
+                if prev.get() == &sigs {
+                    return;
+                }
+                let _ = prev.insert(sigs);
+            }
+            Entry::Vacant(v) => {
+                let _ = v.insert(sigs);
+            }
+        };
+
         let group_nodes: std::collections::HashSet<NodeId> =
             groups.iter().map(|g| g.node_id).collect();
         self.indicators.retain(|&node_id, indicator| {
@@ -110,15 +120,6 @@ impl StackLine {
 
         for group in groups {
             self.update_or_create_indicator(group);
-        }
-    }
-
-    fn handle_selection_changed(&mut self, node_id: NodeId, selected_index: usize) {
-        if let Some(indicator) = self.indicators.get_mut(&node_id) {
-            if let Some(mut group_data) = indicator.group_data() {
-                group_data.selected_index = selected_index;
-                indicator.update(group_data);
-            }
         }
     }
 
@@ -255,6 +256,34 @@ impl StackLine {
 
     fn indicator_config(&self) -> IndicatorConfig {
         IndicatorConfig::from(&self.config.settings.ui.stack_line)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct GroupSig {
+    node_id: NodeId,
+    kind: LayoutKind,
+    x_q2: i64,
+    y_q2: i64,
+    w_q2: i64,
+    h_q2: i64,
+    total: usize,
+    selected_index: usize,
+}
+
+impl GroupSig {
+    fn from_group_info(g: &GroupInfo) -> GroupSig {
+        let quant = |v: f64| -> i64 { (v * 2.0).round() as i64 };
+        GroupSig {
+            node_id: g.node_id,
+            kind: g.container_kind,
+            x_q2: quant(g.frame.origin.x),
+            y_q2: quant(g.frame.origin.y),
+            w_q2: quant(g.frame.size.width),
+            h_q2: quant(g.frame.size.height),
+            total: g.total_count,
+            selected_index: g.selected_index,
+        }
     }
 }
 

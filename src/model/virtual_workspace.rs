@@ -1,5 +1,3 @@
-use std::collections::{HashMap, HashSet};
-
 use accessibility_sys::pid_t;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use regex::Regex;
@@ -9,6 +7,7 @@ use slotmap::{SlotMap, new_key_type};
 use tracing::{error, warn};
 
 use crate::actor::app::WindowId;
+use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{AppWorkspaceRule, VirtualWorkspaceSettings, WorkspaceSelector};
 use crate::common::log::trace_misc;
 use crate::layout_engine::Direction;
@@ -41,7 +40,7 @@ impl VirtualWorkspace {
         Self {
             name,
             space,
-            windows: HashSet::new(),
+            windows: HashSet::default(),
             last_focused: None,
         }
     }
@@ -113,10 +112,10 @@ impl VirtualWorkspaceManager {
     pub fn new_with_config(config: &VirtualWorkspaceSettings) -> Self {
         Self {
             workspaces: SlotMap::default(),
-            workspaces_by_space: HashMap::new(),
-            active_workspace_per_space: HashMap::new(),
-            window_to_workspace: HashMap::new(),
-            floating_positions: HashMap::new(),
+            workspaces_by_space: HashMap::default(),
+            active_workspace_per_space: HashMap::default(),
+            window_to_workspace: HashMap::default(),
+            floating_positions: HashMap::default(),
             workspace_counter: 1,
             app_rules: config.app_rules.clone(),
             max_workspaces: 32,
@@ -852,8 +851,7 @@ impl VirtualWorkspaceManager {
             return Some(matches[0].1);
         }
 
-        use std::collections::HashMap;
-        let mut groups: HashMap<&str, Vec<&(usize, &AppWorkspaceRule, usize)>> = HashMap::new();
+        let mut groups: HashMap<&str, Vec<&(usize, &AppWorkspaceRule, usize)>> = HashMap::default();
         for entry in &matches {
             if let Some(ref app_id) = entry.1.app_id {
                 if !app_id.is_empty() {
@@ -901,7 +899,7 @@ impl VirtualWorkspaceManager {
             total_workspaces: self.workspaces.len(),
             total_windows: self.window_to_workspace.len(),
             active_spaces: self.active_workspace_per_space.len(),
-            workspace_window_counts: HashMap::new(),
+            workspace_window_counts: HashMap::default(),
         };
 
         for (workspace_id, workspace) in &self.workspaces {

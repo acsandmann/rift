@@ -3,10 +3,10 @@ use std::str::FromStr;
 
 use anyhow::bail;
 use livesplit_hotkey::Hotkey;
-use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::collections::HashMap;
 use crate::actor::wm_controller::WmCommand;
 
 const MAX_WORKSPACES: usize = 32;
@@ -288,13 +288,13 @@ impl VirtualWorkspaceSettings {
 #[serde(deny_unknown_fields)]
 struct ConfigFile {
     settings: Settings,
-    keys: FxHashMap<String, WmCommand>,
+    keys: HashMap<String, WmCommand>,
     #[serde(default)]
     virtual_workspaces: VirtualWorkspaceSettings,
     /// Modifier combinations that can be reused in key bindings
     /// e.g., "comb1" = "Alt + Shift" allows using "comb1 + C" in keys
     #[serde(default)]
-    modifier_combinations: FxHashMap<String, String>,
+    modifier_combinations: HashMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -757,7 +757,7 @@ impl Config {
                 })
                 .collect(),
             virtual_workspaces: self.virtual_workspaces.clone(),
-            modifier_combinations: FxHashMap::default(),
+            modifier_combinations: HashMap::default(),
         };
 
         let toml_string = toml::to_string_pretty(&config_file)?;
@@ -843,7 +843,7 @@ impl Config {
         out
     }
 
-    fn expand_modifier_combinations(key: &str, combinations: &FxHashMap<String, String>) -> String {
+    fn expand_modifier_combinations(key: &str, combinations: &HashMap<String, String>) -> String {
         if let Some(plus_pos) = key.find(" + ") {
             let potential_combo = &key[..plus_pos];
             if let Some(combo_value) = combinations.get(potential_combo) {
@@ -913,7 +913,7 @@ mod tests {
 
     #[test]
     fn test_expand_modifier_combinations() {
-        let mut combinations = FxHashMap::default();
+        let mut combinations = HashMap::default();
         combinations.insert("comb1".to_string(), "Alt + Shift".to_string());
         combinations.insert("leader".to_string(), "Ctrl + Alt".to_string());
 
@@ -937,7 +937,7 @@ mod tests {
             "unknown + X"
         );
 
-        let empty_combinations = FxHashMap::default();
+        let empty_combinations = HashMap::default();
         assert_eq!(
             Config::expand_modifier_combinations("comb1 + C", &empty_combinations),
             "comb1 + C"

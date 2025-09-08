@@ -4,9 +4,9 @@ use tracing::Span;
 
 pub mod app;
 pub mod broadcast;
+pub mod config;
 pub mod menu_bar;
 pub mod mouse;
-pub mod config;
 pub mod notification_center;
 pub mod raise_manager;
 pub mod reactor;

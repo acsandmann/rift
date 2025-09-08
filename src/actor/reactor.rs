@@ -11,8 +11,6 @@ mod replay;
 #[cfg(test)]
 mod testing;
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::{mem, thread};
 
@@ -32,7 +30,7 @@ use crate::actor::{self, menu_bar, stack_line};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
 use crate::common::config::Config;
 use crate::common::log::{self, MetricsCommand};
-use crate::layout_engine::{self as layout, LayoutCommand, LayoutEngine, LayoutEvent, LayoutKind};
+use crate::layout_engine::{self as layout, LayoutCommand, LayoutEngine, LayoutEvent};
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt, Round, SameAs};
@@ -48,7 +46,7 @@ use std::path::PathBuf;
 use crate::model::server::{
     ApplicationData, LayoutStateData, WindowData, WorkspaceData, WorkspaceQueryResponse,
 };
-use crate::model::tree::NodeId;
+// use crate::model::tree::NodeId; // no longer needed here
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
@@ -233,20 +231,6 @@ pub struct Reactor {
     app_rules_recently_applied: std::time::Instant,
     last_auto_workspace_switch: Option<std::time::Instant>,
     last_sls_notification_ids: Vec<u32>,
-    stack_line_selection_cache: HashMap<NodeId, usize>,
-    stack_line_groups_cache: HashMap<SpaceId, Vec<GroupSig>>,
-    menu_update_signature: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct GroupSig {
-    node_id: NodeId,
-    kind: LayoutKind,
-    x_q2: i64,
-    y_q2: i64,
-    w_q2: i64,
-    h_q2: i64,
-    total: usize,
 }
 
 #[derive(Debug)]
@@ -369,9 +353,6 @@ impl Reactor {
             last_auto_workspace_switch: None,
             last_sls_notification_ids: Vec::new(),
             observed_window_server_ids: HashSet::default(),
-            stack_line_selection_cache: HashMap::default(),
-            stack_line_groups_cache: HashMap::default(),
-            menu_update_signature: None,
         }
     }
 
@@ -661,12 +642,6 @@ impl Reactor {
                 info!(?cmd);
                 let visible_spaces =
                     self.screens.iter().flat_map(|screen| screen.space).collect::<Vec<_>>();
-
-                if matches!(cmd, LayoutCommand::StackWindows | LayoutCommand::UnstackWindows) {
-                    for space in visible_spaces.iter().copied() {
-                        self.stack_line_groups_cache.remove(&space);
-                    }
-                }
 
                 let is_workspace_switch = matches!(
                     cmd,
@@ -990,20 +965,6 @@ impl Reactor {
         let workspaces = self.handle_workspace_query().workspaces;
         let active_workspace = self.layout_engine.active_workspace(active_space);
         let windows = self.handle_windows_query(Some(active_space));
-
-        let mut hasher = DefaultHasher::new();
-        active_space.get().hash(&mut hasher);
-        if let Some(ws) = active_workspace {
-            ws.hash(&mut hasher);
-        }
-        for w in windows.iter() {
-            w.id.hash(&mut hasher);
-        }
-        let sig = hasher.finish();
-        if self.menu_update_signature == Some(sig) {
-            return;
-        }
-        self.menu_update_signature = Some(sig);
 
         let _ = menu_tx.send(menu_bar::Event::Update {
             active_space,
@@ -1360,12 +1321,11 @@ impl Reactor {
         }
     }
 
-    fn best_screen_for_window(&self, frame: &CGRect) -> Option<&Screen> {
-        self.screens.iter().max_by_key(|s| s.frame.intersection(frame).area() as i64)
-    }
-
     fn best_space_for_window(&self, frame: &CGRect) -> Option<SpaceId> {
-        self.best_screen_for_window(frame)?.space
+        self.screens
+            .iter()
+            .max_by_key(|s| s.frame.intersection(frame).area() as i64)?
+            .space
     }
 
     fn visible_spaces(&self) -> Vec<SpaceId> {
@@ -1707,7 +1667,6 @@ impl Reactor {
         let screens = self.screens.clone();
         let main_window = self.main_window();
         trace!(?main_window);
-        let mut seen_groups: HashSet<NodeId> = HashSet::default();
         let mut any_frame_changed = false;
         for screen in screens {
             let Some(space) = screen.space else { continue };
@@ -1737,67 +1696,22 @@ impl Reactor {
                             self.config.settings.ui.stack_line.horiz_placement,
                             self.config.settings.ui.stack_line.vert_placement,
                         );
-                    if group_infos.is_empty() {
-                        let prev = self.stack_line_groups_cache.get(&space);
-                        if prev.map(|v| v.is_empty()).unwrap_or(false) == false {
-                            _ = tx.try_send(crate::actor::stack_line::Event::GroupsUpdated {
-                                space_id: space,
-                                groups: Vec::new(),
-                            });
-                            self.stack_line_groups_cache.insert(space, Vec::new());
-                        }
-                    } else {
-                        for g in &group_infos {
-                            let _ = seen_groups.insert(g.node_id);
-                        }
 
-                        let quant = |v: f64| -> i64 { (v * 2.0).round() as i64 };
-                        let sigs: Vec<GroupSig> = group_infos
-                            .iter()
-                            .map(|g| GroupSig {
-                                node_id: g.node_id,
-                                kind: g.container_kind,
-                                x_q2: quant(g.frame.origin.x),
-                                y_q2: quant(g.frame.origin.y),
-                                w_q2: quant(g.frame.size.width),
-                                h_q2: quant(g.frame.size.height),
-                                total: g.total_count,
-                            })
-                            .collect();
-                        let prev =
-                            self.stack_line_groups_cache.get(&space).cloned().unwrap_or_default();
-                        if prev != sigs {
-                            let groups: Vec<crate::actor::stack_line::GroupInfo> = group_infos
-                                .iter()
-                                .map(|g| crate::actor::stack_line::GroupInfo {
-                                    node_id: g.node_id,
-                                    space_id: space,
-                                    container_kind: g.container_kind,
-                                    frame: g.frame,
-                                    total_count: g.total_count,
-                                    selected_index: g.selected_index,
-                                })
-                                .collect();
-                            _ = tx.try_send(crate::actor::stack_line::Event::GroupsUpdated {
-                                space_id: space,
-                                groups,
-                            });
-                            self.stack_line_groups_cache.insert(space, sigs);
-                        }
-
-                        for g in group_infos {
-                            let prev = self.stack_line_selection_cache.get(&g.node_id).copied();
-                            if prev != Some(g.selected_index) {
-                                _ = tx.try_send(
-                                    crate::actor::stack_line::Event::GroupSelectionChanged {
-                                        node_id: g.node_id,
-                                        selected_index: g.selected_index,
-                                    },
-                                );
-                                self.stack_line_selection_cache.insert(g.node_id, g.selected_index);
-                            }
-                        }
-                    }
+                    let groups: Vec<crate::actor::stack_line::GroupInfo> = group_infos
+                        .into_iter()
+                        .map(|g| crate::actor::stack_line::GroupInfo {
+                            node_id: g.node_id,
+                            space_id: space,
+                            container_kind: g.container_kind,
+                            frame: g.frame,
+                            total_count: g.total_count,
+                            selected_index: g.selected_index,
+                        })
+                        .collect();
+                    _ = tx.try_send(crate::actor::stack_line::Event::GroupsUpdated {
+                        space_id: space,
+                        groups,
+                    });
                 }
             }
 
@@ -1956,10 +1870,6 @@ impl Reactor {
                 }
             }
         }
-        if !seen_groups.is_empty() {
-            self.stack_line_selection_cache.retain(|k, _| seen_groups.contains(k));
-        }
-
         self.maybe_send_menu_update();
         any_frame_changed
     }
