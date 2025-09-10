@@ -30,7 +30,7 @@ use crate::actor::{self, menu_bar, stack_line};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
 use crate::common::config::Config;
 use crate::common::log::{self, MetricsCommand};
-use crate::layout_engine::{self as layout, LayoutCommand, LayoutEngine, LayoutEvent};
+use crate::layout_engine::{self as layout, Direction, LayoutCommand, LayoutEngine, LayoutEvent};
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt, Round, SameAs};
@@ -203,6 +203,7 @@ pub enum ReactorCommand {
     Debug,
     Serialize,
     SaveAndExit,
+    SwitchSpace(Direction),
 }
 
 use crate::actor::raise_manager::RaiseManager;
@@ -891,6 +892,9 @@ impl Reactor {
                     }
                 }
             }
+            Event::Command(Command::Reactor(ReactorCommand::SwitchSpace(dir))) => unsafe {
+                crate::sys::window_server::switch_space(dir)
+            },
 
             Event::QueryWorkspaces(response_tx) => {
                 let response = self.handle_workspace_query();

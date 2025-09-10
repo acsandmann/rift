@@ -1,4 +1,5 @@
 use std::ffi::c_int;
+use std::time::Duration;
 
 use accessibility::AXUIElement;
 use accessibility_sys::{kAXErrorSuccess, pid_t};
@@ -23,6 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use super::geometry::{CGRectDef, ToICrate};
 use super::screen::CoordinateConverter;
+use crate::layout_engine::Direction;
 use crate::sys::process::ProcessSerialNumber;
 use crate::sys::skylight::*;
 
@@ -282,4 +284,73 @@ pub fn allow_hide_mouse() -> Result<(), CGError> {
     };
 
     if err == 0 { Ok(()) } else { Err(err) }
+}
+
+// fast space switching with no animations
+// credit: https://gist.github.com/amaanq/6991c7054b6c9816fafa9e29814b1509
+#[allow(unsafe_op_in_unsafe_fn)]
+pub unsafe fn switch_space(direction: Direction) {
+    let magnitude = match direction {
+        Direction::Left => -2.25,
+        Direction::Right => 2.25,
+        _ => return,
+    };
+    let gesture = 200.0 * magnitude;
+
+    let event1a = CGEventCreate(std::ptr::null_mut());
+
+    CGEventSetIntegerValueField(event1a, 0x37, 29);
+    CGEventSetIntegerValueField(event1a, 0x29, 33231);
+
+    let event1b = CGEventCreate(std::ptr::null_mut());
+    CGEventSetIntegerValueField(event1b, 0x37, 30);
+    CGEventSetIntegerValueField(event1b, 0x6E, 23);
+    CGEventSetIntegerValueField(event1b, 0x84, 1);
+    CGEventSetIntegerValueField(event1b, 0x86, 1);
+    CGEventSetDoubleValueField(event1b, 0x7C, magnitude);
+
+    let magnitude_bits = (magnitude as f32).to_bits() as i64;
+    CGEventSetIntegerValueField(event1b, 0x87, magnitude_bits);
+
+    CGEventSetIntegerValueField(event1b, 0x7B, 1);
+    CGEventSetIntegerValueField(event1b, 0xA5, 1);
+    CGEventSetDoubleValueField(event1b, 0x77, 1.401298464324817e-45);
+    CGEventSetDoubleValueField(event1b, 0x8B, 1.401298464324817e-45);
+    CGEventSetIntegerValueField(event1b, 0x29, 33231);
+    CGEventSetIntegerValueField(event1b, 0x88, 0);
+
+    CGEventPost(CGEventTapLocation::HID, event1b); // kCGHIDEventTap = 1
+    CGEventPost(CGEventTapLocation::HID, event1a);
+
+    CFRelease(event1a);
+    CFRelease(event1b);
+
+    crate::sys::timer::Timer::sleep(Duration::from_millis(15)); //(0x3A98); // 15ms
+
+    let event2a = CGEventCreate(std::ptr::null_mut());
+    CGEventSetIntegerValueField(event2a, 0x37, 29);
+    CGEventSetIntegerValueField(event2a, 0x29, 33231);
+
+    let event2b = CGEventCreate(std::ptr::null_mut());
+    CGEventSetIntegerValueField(event2b, 0x37, 30);
+    CGEventSetIntegerValueField(event2b, 0x6E, 23);
+    CGEventSetIntegerValueField(event2b, 0x84, 4);
+    CGEventSetIntegerValueField(event2b, 0x86, 4);
+    CGEventSetDoubleValueField(event2b, 0x7C, magnitude);
+    CGEventSetIntegerValueField(event2b, 0x87, magnitude_bits);
+    CGEventSetIntegerValueField(event2b, 0x7B, 1);
+    CGEventSetIntegerValueField(event2b, 0xA5, 1);
+    CGEventSetDoubleValueField(event2b, 0x77, 1.401298464324817e-45);
+    CGEventSetDoubleValueField(event2b, 0x8B, 1.401298464324817e-45);
+    CGEventSetIntegerValueField(event2b, 0x29, 33231);
+    CGEventSetIntegerValueField(event2b, 0x88, 0);
+
+    CGEventSetDoubleValueField(event2b, 0x81, gesture);
+    CGEventSetDoubleValueField(event2b, 0x82, gesture);
+
+    CGEventPost(CGEventTapLocation::HID, event2b);
+    CGEventPost(CGEventTapLocation::HID, event2a);
+
+    CFRelease(event2a);
+    CFRelease(event2b);
 }

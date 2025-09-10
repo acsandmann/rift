@@ -22,6 +22,14 @@ pub static G_CONNECTION: Lazy<cid_t> = Lazy::new(|| unsafe { SLSMainConnectionID
 #[allow(non_camel_case_types)]
 pub type cid_t = i32;
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub enum CGEventTapLocation {
+    HID,
+    Session,
+    AnnotatedSession,
+}
+
 #[repr(u32)]
 #[derive(Hash, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CGSEventType {
@@ -95,6 +103,11 @@ bitflags! {
 
 unsafe extern "C" {
     pub fn _AXUIElementGetWindow(elem: AXUIElementRef, wid: *mut CGWindowID) -> AXError;
+
+    pub fn CGEventCreate(source: *mut c_void) -> *const c_void;
+    pub fn CGEventSetIntegerValueField(event: *const c_void, field: u32, value: i64);
+    pub fn CGEventSetDoubleValueField(event: *const c_void, field: u32, value: f64);
+    pub fn CGEventPost(tapLocation: CGEventTapLocation, event: *const c_void);
 
     pub fn CGSGetWindowBounds(cid: cid_t, wid: u32, frame: *mut CGRect) -> i32;
     pub fn CGSMainConnectionID() -> cid_t;
