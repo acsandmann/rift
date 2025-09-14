@@ -9,6 +9,7 @@ use rift_wm::actor::mouse::Mouse;
 use rift_wm::actor::notification_center::NotificationCenter;
 use rift_wm::actor::reactor::{self, Reactor};
 use rift_wm::actor::stack_line::StackLine;
+use rift_wm::actor::swipe::Swipe;
 use rift_wm::actor::window_notify as window_notify_actor;
 use rift_wm::actor::wm_controller::{self, WmController};
 use rift_wm::common::config::{Config, config_file, restore_file};
@@ -176,15 +177,30 @@ fn main() {
         by default this is bound to Alt+Z but can be changed in the config file."
     );
 
+    let (_swipe_tx, swipe_rx) = rift_wm::actor::channel();
+    let swipe = Swipe::new(config.clone(), wm_controller_sender.clone(), swipe_rx);
+
     Executor::run(async move {
-        join!(
-            wm_controller.run(),
-            notification_center.watch_for_notifications(),
-            mouse.run(),
-            menu.run(),
-            stack_line.run(),
-            wn_actor.run(),
-        );
+        if let Some(swipe) = swipe {
+            join!(
+                wm_controller.run(),
+                notification_center.watch_for_notifications(),
+                mouse.run(),
+                menu.run(),
+                stack_line.run(),
+                wn_actor.run(),
+                swipe.run(),
+            );
+        } else {
+            join!(
+                wm_controller.run(),
+                notification_center.watch_for_notifications(),
+                mouse.run(),
+                menu.run(),
+                stack_line.run(),
+                wn_actor.run(),
+            );
+        }
     });
 }
 

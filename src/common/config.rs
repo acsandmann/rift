@@ -332,6 +332,9 @@ pub struct Settings {
     pub layout: LayoutSettings,
     #[serde(default)]
     pub ui: UiSettings,
+    /// Trackpad gesture settings
+    #[serde(default)]
+    pub gestures: GestureSettings,
     /// Commands to run on startup (e.g., for subscribing to events)
     #[serde(default)]
     pub run_on_start: Vec<String>,
@@ -371,6 +374,50 @@ pub enum AnimationEasing {
 pub struct UiSettings {
     pub menu_bar: MenuBarSettings,
     pub stack_line: StackLineSettings,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct GestureSettings {
+    /// Enable horizontal swipes to switch virtual workspaces
+    #[serde(default = "no")]
+    pub enabled: bool,
+    /// Invert horizontal direction (swap next/prev)
+    #[serde(default)]
+    pub invert_horizontal_swipe: bool,
+    /// Maximum absolute Y delta allowed for the gesture to count as horizontal
+    #[serde(default = "default_swipe_vertical_tolerance")]
+    pub swipe_vertical_tolerance: f64,
+    /// If true, attempt to skip empty workspaces on swipe (if supported)
+    #[serde(default)]
+    pub skip_empty: bool,
+    /// Number of fingers required for swipe (default = 3)
+    #[serde(default = "default_swipe_fingers")]
+    pub fingers: usize,
+    /// Normalized horizontal distance (0..1) required to fire a swipe
+    #[serde(default = "default_distance_pct")]
+    pub distance_pct: f64,
+    /// Enable haptic feedback when a swipe commits
+    #[serde(default = "yes")]
+    pub haptics_enabled: bool,
+    /// Haptic feedback pattern (generic | alignment | level_change)
+    #[serde(default)]
+    pub haptic_pattern: HapticPattern,
+}
+
+impl Default for GestureSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            invert_horizontal_swipe: false,
+            swipe_vertical_tolerance: default_swipe_vertical_tolerance(),
+            skip_empty: true,
+            fingers: default_swipe_fingers(),
+            distance_pct: default_distance_pct(),
+            haptics_enabled: true,
+            haptic_pattern: HapticPattern::LevelChange,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
@@ -521,6 +568,13 @@ impl Settings {
 
         issues.extend(self.layout.validate());
 
+        if self.gestures.swipe_vertical_tolerance < 0.0 {
+            issues.push(format!(
+                "gestures.swipe_vertical_tolerance must be non-negative, got {}",
+                self.gestures.swipe_vertical_tolerance
+            ));
+        }
+
         issues
     }
 
@@ -538,6 +592,11 @@ impl Settings {
         }
 
         fixes += self.layout.auto_fix_values();
+
+        if self.gestures.swipe_vertical_tolerance < 0.0 {
+            self.gestures.swipe_vertical_tolerance = default_swipe_vertical_tolerance();
+            fixes += 1;
+        }
 
         fixes
     }
@@ -734,6 +793,21 @@ fn default_workspace_names() -> Vec<String> {
         "Communication".to_string(),
         "Utilities".to_string(),
     ]
+}
+
+// Interpreted as normalized fraction when <= 1.0. If > 1.0 and <= 100.0,
+// it is treated as a percentage (e.g. 40.0 -> 0.40).
+fn default_swipe_vertical_tolerance() -> f64 { 0.4 }
+fn default_swipe_fingers() -> usize { 3 }
+fn default_distance_pct() -> f64 { 0.08 }
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HapticPattern {
+    Generic,
+    Alignment,
+    #[default]
+    LevelChange,
 }
 
 impl Config {

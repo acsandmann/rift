@@ -124,6 +124,7 @@ fn get_frame(a: CGRect, b: CGRect, t: f64) -> CGRect {
     }
 }
 
+// https://notes.yvt.jp/Graphics/Easing-Functions/
 fn ease(t: f64) -> f64 {
     if t < 0.5 {
         (1.0 - f64::sqrt(1.0 - f64::powi(2.0 * t, 2))) / 2.0

@@ -20,3 +20,5 @@ pub mod skylight;
 pub mod timer;
 pub mod window_notify;
 pub mod window_server;
+pub mod haptics;
+pub mod event_tap;

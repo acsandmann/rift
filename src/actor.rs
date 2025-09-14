@@ -8,6 +8,7 @@ pub mod config;
 pub mod menu_bar;
 pub mod mouse;
 pub mod notification_center;
+pub mod swipe;
 pub mod raise_manager;
 pub mod reactor;
 pub mod stack_line;
