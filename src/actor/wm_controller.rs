@@ -42,6 +42,7 @@ pub enum WmEvent {
         CoordinateConverter,
         Vec<Option<SpaceId>>,
     ),
+    SystemWoke,
     PowerStateChanged(bool),
     Command(WmCommand),
 }
@@ -144,6 +145,7 @@ impl WmController {
         use self::WmCommand::*;
         use self::WmEvent::*;
         match event {
+            SystemWoke => self.events_tx.send(Event::SystemWoke),
             AppEventsRegistered => {
                 _ = self.mouse_tx.send(mouse::Request::SetEventProcessing(false));
 

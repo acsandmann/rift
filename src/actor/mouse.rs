@@ -213,6 +213,15 @@ unsafe extern "C-unwind" fn mouse_callback(
     user_info: *mut std::ffi::c_void,
 ) -> *mut OcgEvent {
     let ctx = unsafe { &*(user_info as *const CallbackCtx) };
+    // kCGEventTapDisabledByTimeout (-2) and kCGEventTapDisabledByUserInput (-1).
+    let ety = event_type.0 as i64;
+    if ety == -1 || ety == -2 {
+        if let Some(tap) = ctx.this.tap.borrow().as_ref() {
+            tap.set_enabled(true);
+        }
+        return event_ref.as_ptr();
+    }
+
     let event = unsafe { event_ref.as_ref() };
     ctx.this.on_event(event_type, event, ctx.mtm);
     event_ref.as_ptr()

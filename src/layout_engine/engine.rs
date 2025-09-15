@@ -951,6 +951,22 @@ impl LayoutEngine {
                             focus_window = windows_in_workspace.first().copied();
                         }
 
+                        if let Some(wid) = focus_window {
+                            self.focused_window = Some(wid);
+                            self.virtual_workspace_manager.set_last_focused_window(
+                                space,
+                                next_workspace,
+                                Some(wid),
+                            );
+                            if !self.floating.is_floating(wid) {
+                                if let Some(layout) =
+                                    self.workspace_layouts.active(space, next_workspace)
+                                {
+                                    let _ = self.tree.select_window(layout, wid);
+                                }
+                            }
+                        }
+
                         return EventResponse {
                             focus_window,
                             raise_windows: vec![],
@@ -985,6 +1001,22 @@ impl LayoutEngine {
                             focus_window = windows_in_workspace.first().copied();
                         }
 
+                        if let Some(wid) = focus_window {
+                            self.focused_window = Some(wid);
+                            self.virtual_workspace_manager.set_last_focused_window(
+                                space,
+                                prev_workspace,
+                                Some(wid),
+                            );
+                            if !self.floating.is_floating(wid) {
+                                if let Some(layout) =
+                                    self.workspace_layouts.active(space, prev_workspace)
+                                {
+                                    let _ = self.tree.select_window(layout, wid);
+                                }
+                            }
+                        }
+
                         return EventResponse {
                             focus_window,
                             raise_windows: vec![],
@@ -1011,6 +1043,21 @@ impl LayoutEngine {
                         let windows_in_workspace =
                             self.virtual_workspace_manager.windows_in_active_workspace(space);
                         focus_window = windows_in_workspace.first().copied();
+                    }
+
+                    if let Some(wid) = focus_window {
+                        self.focused_window = Some(wid);
+                        self.virtual_workspace_manager.set_last_focused_window(
+                            space,
+                            workspace_id,
+                            Some(wid),
+                        );
+                        if !self.floating.is_floating(wid) {
+                            if let Some(layout) = self.workspace_layouts.active(space, workspace_id)
+                            {
+                                let _ = self.tree.select_window(layout, wid);
+                            }
+                        }
                     }
 
                     return EventResponse {
@@ -1150,6 +1197,22 @@ impl LayoutEngine {
                         let windows_in_workspace =
                             self.virtual_workspace_manager.windows_in_active_workspace(space);
                         focus_window = windows_in_workspace.first().copied();
+                    }
+
+                    if let Some(wid) = focus_window {
+                        self.focused_window = Some(wid);
+                        self.virtual_workspace_manager.set_last_focused_window(
+                            space,
+                            last_workspace,
+                            Some(wid),
+                        );
+                        if !self.floating.is_floating(wid) {
+                            if let Some(layout) =
+                                self.workspace_layouts.active(space, last_workspace)
+                            {
+                                let _ = self.tree.select_window(layout, wid);
+                            }
+                        }
                     }
 
                     return EventResponse {

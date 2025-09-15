@@ -79,7 +79,12 @@ impl LayoutSystem for TraditionalLayoutSystem {
         self.layout_roots.remove(layout).unwrap().remove(&mut self.tree)
     }
 
-    fn draw_tree(&self, layout: LayoutId) -> String { self.draw_tree_internal(layout) }
+    fn draw_tree(&self, layout: LayoutId) -> String {
+        let tree = self.get_ascii_tree(self.root(layout));
+        let mut out = String::new();
+        ascii_tree::write_tree(&mut out, &tree).unwrap();
+        out
+    }
 
     fn calculate_layout(
         &self,
@@ -118,12 +123,12 @@ impl LayoutSystem for TraditionalLayoutSystem {
 
     fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
         let root = self.root(layout);
-        self.visible_windows_under(root)
+        self.visible_windows_under_internal(root)
     }
 
     fn visible_windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId> {
         let selection = self.selection(layout);
-        self.visible_windows_under(selection)
+        self.visible_windows_under_internal(selection)
     }
 
     fn ascend_selection(&mut self, layout: LayoutId) -> bool {
@@ -156,8 +161,18 @@ impl LayoutSystem for TraditionalLayoutSystem {
                 .data
                 .window
                 .at(new_node)
-                .or_else(|| self.visible_windows_under(new_node).into_iter().next());
-            let raise_windows = self.select_returning_surfaced_windows_internal(new_node);
+                .or_else(|| self.visible_windows_under_internal(new_node).first().copied());
+            let map = &self.tree.map;
+            let mut highest_revealed = new_node;
+            for (node, parent) in new_node.ancestors_with_parent(map) {
+                let Some(parent) = parent else { break };
+                if self.tree.data.selection.select_locally(map, node) {
+                    if self.layout(parent).is_group() {
+                        highest_revealed = node;
+                    }
+                }
+            }
+            let raise_windows = self.visible_windows_under_internal(highest_revealed);
             (focus_window, raise_windows)
         } else {
             (None, vec![])
@@ -166,28 +181,80 @@ impl LayoutSystem for TraditionalLayoutSystem {
 
     fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId) {
         let selection = self.selection(layout);
-        let node = self.add_window_after_internal(layout, selection, wid);
-        self.select_internal(node);
+        let node = if selection.parent(self.map()).is_none() {
+            self.add_window_under(layout, selection, wid)
+        } else {
+            let node = self.tree.mk_node().insert_after(selection);
+            self.tree.data.window.set_window(layout, node, wid);
+            node
+        };
+        self.select(node);
     }
 
-    fn remove_window(&mut self, wid: WindowId) { self.remove_window_impl(wid) }
+    fn remove_window(&mut self, wid: WindowId) {
+        let nodes: Vec<_> =
+            self.tree.data.window.take_nodes_for(wid).map(|(_, node)| node).collect();
+        for node in nodes {
+            node.detach(&mut self.tree).remove();
+        }
+    }
 
-    fn remove_windows_for_app(&mut self, pid: pid_t) { self.remove_windows_for_app_impl(pid) }
+    fn remove_windows_for_app(&mut self, pid: pid_t) {
+        let nodes: Vec<_> =
+            self.tree.data.window.take_nodes_for_app(pid).map(|(_, _, node)| node).collect();
+        for node in nodes {
+            node.detach(&mut self.tree).remove();
+        }
+    }
 
-    fn set_windows_for_app(&mut self, layout: LayoutId, pid: pid_t, desired: Vec<WindowId>) {
-        self.set_windows_for_app_impl(layout, pid, desired)
+    fn set_windows_for_app(&mut self, layout: LayoutId, pid: pid_t, mut desired: Vec<WindowId>) {
+        let root = self.root(layout);
+        let mut current = root
+            .traverse_postorder(self.map())
+            .filter_map(|node| self.window_at(node).map(|wid| (wid, node)))
+            .filter(|(wid, _)| wid.pid == pid)
+            .collect::<Vec<_>>();
+        desired.sort_unstable();
+        current.sort_unstable();
+        debug_assert!(desired.iter().all(|wid| wid.pid == pid));
+        let mut desired = desired.into_iter().peekable();
+        let mut current = current.into_iter().peekable();
+        loop {
+            match (desired.peek(), current.peek()) {
+                (Some(des), Some((cur, _))) if des == cur => {
+                    desired.next();
+                    current.next();
+                }
+                (Some(des), None) => {
+                    self.add_window_under(layout, root, *des);
+                    desired.next();
+                }
+                (Some(des), Some((cur, _))) if des < cur => {
+                    self.add_window_under(layout, root, *des);
+                    desired.next();
+                }
+                (_, Some((_, node))) => {
+                    node.detach(&mut self.tree).remove();
+                    current.next();
+                }
+                (None, None) => break,
+            }
+        }
     }
 
     fn has_windows_for_app(&self, layout: LayoutId, pid: pid_t) -> bool {
-        self.has_windows_for_app_impl(layout, pid)
+        self.root(layout)
+            .traverse_postorder(self.map())
+            .filter_map(|node| self.window_at(node))
+            .any(|wid| wid.pid == pid)
     }
 
     fn contains_window(&self, layout: LayoutId, wid: WindowId) -> bool {
-        self.window_node(layout, wid).is_some()
+        self.tree.data.window.node_for(layout, wid).is_some()
     }
 
     fn select_window(&mut self, layout: LayoutId, wid: WindowId) -> bool {
-        if let Some(node) = self.window_node(layout, wid) {
+        if let Some(node) = self.tree.data.window.node_for(layout, wid) {
             self.select(node);
             true
         } else {
@@ -203,11 +270,11 @@ impl LayoutSystem for TraditionalLayoutSystem {
         new_frame: CGRect,
         screen: CGRect,
     ) {
-        if let Some(node) = self.window_node(layout, wid) {
+        if let Some(node) = self.tree.data.window.node_for(layout, wid) {
             if new_frame == screen {
-                self.set_fullscreen(node, true);
+                self.tree.data.layout.set_fullscreen(node, true);
             } else if old_frame == screen {
-                self.set_fullscreen(node, false);
+                self.tree.data.layout.set_fullscreen(node, false);
             } else {
                 self.set_frame_from_resize(node, old_frame, new_frame, screen);
             }
@@ -226,7 +293,24 @@ impl LayoutSystem for TraditionalLayoutSystem {
     ) {
         let from_sel = self.selection(from_layout);
         let to_sel = self.selection(to_layout);
-        self.move_node_after_internal(to_sel, from_sel);
+
+        let map = &self.tree.map;
+        let Some(old_parent) = from_sel.parent(map) else { return };
+        let is_selection =
+            self.tree.data.selection.local_selection(map, old_parent) == Some(from_sel);
+        if to_sel.parent(self.map()).is_none() {
+            from_sel.detach(&mut self.tree).push_back(to_sel);
+        } else {
+            from_sel.detach(&mut self.tree).insert_after(to_sel);
+        }
+        if is_selection {
+            for node in from_sel.ancestors(&self.tree.map) {
+                if node == old_parent {
+                    break;
+                }
+                self.tree.data.selection.select_locally(&self.tree.map, node);
+            }
+        }
     }
 
     fn split_selection(&mut self, layout: LayoutId, kind: LayoutKind) {
@@ -236,7 +320,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
 
     fn toggle_fullscreen_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
         let node = self.selection(layout);
-        if self.toggle_fullscreen_internal(node) {
+        if self.tree.data.layout.toggle_fullscreen(node) {
             self.visible_windows_under_internal(node)
         } else {
             vec![]
@@ -250,44 +334,41 @@ impl LayoutSystem for TraditionalLayoutSystem {
                 self.find_or_create_common_parent_internal(layout, selection, target);
             let container_layout = LayoutKind::from(direction.orientation());
             self.set_layout(common_parent, container_layout);
-            self.select_internal(common_parent);
+            self.select(common_parent);
         }
     }
 
     fn apply_stacking_to_parent_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
         let selection = self.selection(layout);
         if let Some(parent) = selection.parent(self.map()) {
-            let current_layout = self.layout(parent);
-            let new_layout = match current_layout {
-                LayoutKind::Horizontal => LayoutKind::HorizontalStack,
-                LayoutKind::Vertical => LayoutKind::VerticalStack,
-                LayoutKind::HorizontalStack => LayoutKind::VerticalStack,
-                LayoutKind::VerticalStack => LayoutKind::HorizontalStack,
+            let new_layout = match self.layout(parent) {
+                LayoutKind::Horizontal => Some(LayoutKind::HorizontalStack),
+                LayoutKind::Vertical => Some(LayoutKind::VerticalStack),
+                LayoutKind::HorizontalStack => Some(LayoutKind::VerticalStack),
+                LayoutKind::VerticalStack => Some(LayoutKind::HorizontalStack),
             };
-            self.set_layout(parent, new_layout);
-            self.visible_windows_under_internal(parent)
-        } else {
-            vec![]
+            if let Some(nl) = new_layout {
+                self.set_layout(parent, nl);
+                return self.visible_windows_under_internal(parent);
+            }
         }
+        vec![]
     }
 
     fn unstack_parent_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
         let selection = self.selection(layout);
         if let Some(parent) = selection.parent(self.map()) {
-            match self.layout(parent) {
-                LayoutKind::HorizontalStack => {
-                    self.set_layout(parent, LayoutKind::Horizontal);
-                    self.visible_windows_under_internal(parent)
-                }
-                LayoutKind::VerticalStack => {
-                    self.set_layout(parent, LayoutKind::Vertical);
-                    self.visible_windows_under_internal(parent)
-                }
-                _ => vec![],
+            let new_layout = match self.layout(parent) {
+                LayoutKind::HorizontalStack => Some(LayoutKind::Horizontal),
+                LayoutKind::VerticalStack => Some(LayoutKind::Vertical),
+                _ => None,
+            };
+            if let Some(nl) = new_layout {
+                self.set_layout(parent, nl);
+                return self.visible_windows_under_internal(parent);
             }
-        } else {
-            vec![]
         }
+        vec![]
     }
 
     fn unjoin_selection(&mut self, layout: LayoutId) {
@@ -302,7 +383,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
 
     fn resize_selection_by(&mut self, layout: LayoutId, amount: f64) {
         let selection = self.selection(layout);
-        if let Some(_focused_window) = self.window_at_internal(selection) {
+        if let Some(_focused_window) = self.window_at(selection) {
             let candidates = selection
                 .ancestors(self.map())
                 .filter(|&node| {
@@ -420,13 +501,6 @@ impl TraditionalLayoutSystem {
 }
 
 impl TraditionalLayoutSystem {
-    fn draw_tree_internal(&self, layout: LayoutId) -> String {
-        let tree = self.get_ascii_tree(self.root(layout));
-        let mut out = String::new();
-        ascii_tree::write_tree(&mut out, &tree).unwrap();
-        out
-    }
-
     fn get_ascii_tree(&self, node: NodeId) -> ascii_tree::Tree {
         let status = match node.parent(&self.tree.map) {
             None => "",
@@ -458,112 +532,7 @@ impl TraditionalLayoutSystem {
         node
     }
 
-    fn add_window_after_internal(
-        &mut self,
-        layout: LayoutId,
-        sibling: NodeId,
-        wid: WindowId,
-    ) -> NodeId {
-        if sibling.parent(self.map()).is_none() {
-            return self.add_window_under(layout, sibling, wid);
-        }
-        let node = self.tree.mk_node().insert_after(sibling);
-        self.tree.data.window.set_window(layout, node, wid);
-        node
-    }
-
-    fn move_node_after_internal(&mut self, sibling: NodeId, moving_node: NodeId) {
-        let map = &self.tree.map;
-        let Some(old_parent) = moving_node.parent(map) else {
-            return;
-        };
-        let is_selection =
-            self.tree.data.selection.local_selection(map, old_parent) == Some(moving_node);
-        if sibling.parent(self.map()).is_none() {
-            moving_node.detach(&mut self.tree).push_back(sibling);
-        } else {
-            moving_node.detach(&mut self.tree).insert_after(sibling);
-        }
-        if is_selection {
-            for node in moving_node.ancestors(&self.tree.map) {
-                if node == old_parent {
-                    break;
-                }
-                self.tree.data.selection.select_locally(&self.tree.map, node);
-            }
-        }
-    }
-
-    fn remove_window_impl(&mut self, wid: WindowId) {
-        let nodes: Vec<_> =
-            self.tree.data.window.take_nodes_for(wid).map(|(_, node)| node).collect();
-        for node in nodes {
-            node.detach(&mut self.tree).remove();
-        }
-    }
-
-    fn remove_windows_for_app_impl(&mut self, pid: pid_t) {
-        let nodes: Vec<_> =
-            self.tree.data.window.take_nodes_for_app(pid).map(|(_, _, node)| node).collect();
-        for node in nodes {
-            node.detach(&mut self.tree).remove();
-        }
-    }
-
-    fn set_windows_for_app_impl(
-        &mut self,
-        layout: LayoutId,
-        app: pid_t,
-        mut desired: Vec<WindowId>,
-    ) {
-        let root = self.root(layout);
-        let mut current = root
-            .traverse_postorder(self.map())
-            .filter_map(|node| self.window_at(node).map(|wid| (wid, node)))
-            .filter(|(wid, _)| wid.pid == app)
-            .collect::<Vec<_>>();
-        desired.sort_unstable();
-        current.sort_unstable();
-        debug_assert!(desired.iter().all(|wid| wid.pid == app));
-        let mut desired = desired.into_iter().peekable();
-        let mut current = current.into_iter().peekable();
-        loop {
-            match (desired.peek(), current.peek()) {
-                (Some(des), Some((cur, _))) if des == cur => {
-                    desired.next();
-                    current.next();
-                }
-                (Some(des), None) => {
-                    self.add_window_under(layout, root, *des);
-                    desired.next();
-                }
-                (Some(des), Some((cur, _))) if des < cur => {
-                    self.add_window_under(layout, root, *des);
-                    desired.next();
-                }
-                (_, Some((_, node))) => {
-                    node.detach(&mut self.tree).remove();
-                    current.next();
-                }
-                (None, None) => break,
-            }
-        }
-    }
-
-    fn window_node(&self, layout: LayoutId, wid: WindowId) -> Option<NodeId> {
-        self.tree.data.window.node_for(layout, wid)
-    }
-
     fn window_at(&self, node: NodeId) -> Option<WindowId> { self.tree.data.window.at(node) }
-
-    fn window_at_internal(&self, node: NodeId) -> Option<WindowId> { self.window_at(node) }
-
-    fn has_windows_for_app_impl(&self, layout: LayoutId, pid: pid_t) -> bool {
-        self.root(layout)
-            .traverse_postorder(self.map())
-            .filter_map(|node| self.window_at(node))
-            .any(|wid| wid.pid == pid)
-    }
 
     fn rebalance_node(&mut self, node: NodeId) {
         let map = &self.tree.map;
@@ -584,24 +553,8 @@ impl TraditionalLayoutSystem {
         }
     }
 
-    fn add_container(&mut self, parent: NodeId, kind: LayoutKind) -> NodeId {
-        let node = self.tree.mk_node().push_back(parent);
-        self.tree.data.layout.set_kind(node, kind);
-        node
-    }
-
     fn select(&mut self, selection: NodeId) {
         self.tree.data.selection.select(&self.tree.map, selection)
-    }
-
-    fn select_internal(&mut self, node: NodeId) { self.select(node) }
-
-    fn set_fullscreen(&mut self, node: NodeId, is_fullscreen: bool) {
-        self.tree.data.layout.set_fullscreen(node, is_fullscreen)
-    }
-
-    fn toggle_fullscreen_internal(&mut self, node: NodeId) -> bool {
-        self.tree.data.layout.toggle_fullscreen(node)
     }
 
     fn traverse_internal(&self, from: NodeId, direction: Direction) -> Option<NodeId> {
@@ -654,7 +607,7 @@ impl TraditionalLayoutSystem {
                     .data
                     .selection
                     .local_selection(map, current)
-                    .or_else(|| children.first().copied()),
+                    .or(children.first().copied()),
                 (LayoutKind::Vertical, Direction::Up) => children.first().copied(),
                 (LayoutKind::Vertical, Direction::Down) => children.last().copied(),
                 (LayoutKind::Vertical, Direction::Left | Direction::Right) => self
@@ -662,13 +615,13 @@ impl TraditionalLayoutSystem {
                     .data
                     .selection
                     .local_selection(map, current)
-                    .or_else(|| children.first().copied()),
+                    .or(children.first().copied()),
                 _ if layout_kind.is_stacked() => self
                     .tree
                     .data
                     .selection
                     .local_selection(map, current)
-                    .or_else(|| children.first().copied()),
+                    .or(children.first().copied()),
                 _ => None,
             };
             match next_child {
@@ -676,20 +629,6 @@ impl TraditionalLayoutSystem {
                 None => return Some(current),
             }
         }
-    }
-
-    fn select_returning_surfaced_windows_internal(&mut self, selection: NodeId) -> Vec<WindowId> {
-        let map = &self.tree.map;
-        let mut highest_revealed = selection;
-        for (node, parent) in selection.ancestors_with_parent(map) {
-            let Some(parent) = parent else { break };
-            if self.tree.data.selection.select_locally(map, node) {
-                if self.layout(parent).is_group() {
-                    highest_revealed = node;
-                }
-            }
-        }
-        self.visible_windows_under_internal(highest_revealed)
     }
 
     fn visible_windows_under_internal(&self, node: NodeId) -> Vec<WindowId> {
@@ -706,10 +645,6 @@ impl TraditionalLayoutSystem {
         windows
     }
 
-    fn visible_windows_under(&self, node: NodeId) -> Vec<WindowId> {
-        self.visible_windows_under_internal(node)
-    }
-
     fn move_over(&self, from: NodeId, direction: Direction) -> Option<NodeId> {
         let Some(parent) = from.parent(&self.tree.map) else {
             return None;
@@ -721,30 +656,17 @@ impl TraditionalLayoutSystem {
             }
         } else {
             let parent_layout = self.tree.data.layout.kind(parent);
+            if !parent_layout.is_stacked() {
+                return None;
+            }
             let siblings: Vec<_> = parent.children(&self.tree.map).collect();
             let current_position = siblings.iter().position(|&s| s == from)?;
-            match (parent_layout, direction) {
-                (LayoutKind::Vertical, Direction::Left)
-                | (LayoutKind::Vertical, Direction::Right)
-                | (LayoutKind::Horizontal, Direction::Up)
-                | (LayoutKind::Horizontal, Direction::Down) => None,
-                _ if parent_layout.is_stacked() => match direction {
-                    Direction::Left | Direction::Up => {
-                        if current_position > 0 {
-                            Some(siblings[current_position - 1])
-                        } else {
-                            None
-                        }
-                    }
-                    Direction::Right | Direction::Down => {
-                        if current_position < siblings.len() - 1 {
-                            Some(siblings[current_position + 1])
-                        } else {
-                            None
-                        }
-                    }
-                },
-                _ => None,
+            match direction {
+                Direction::Left | Direction::Up => {
+                    (current_position > 0).then_some(siblings[current_position - 1])
+                }
+                Direction::Right | Direction::Down => (current_position < siblings.len() - 1)
+                    .then_some(siblings[current_position + 1]),
             }
         }
     }
@@ -851,7 +773,7 @@ impl TraditionalLayoutSystem {
             !self.tree.data.layout.kind(parent).is_group()
                 && self.move_over(node, direction).is_some()
         };
-        let Some(resizing_node) = node.ancestors(&self.tree.map).filter(can_resize).next() else {
+        let Some(resizing_node) = node.ancestors(&self.tree.map).find(can_resize) else {
             return false;
         };
         let sibling = self.move_over(resizing_node, direction).unwrap();
@@ -883,10 +805,6 @@ impl TraditionalLayoutSystem {
         true
     }
 
-    fn resize(&mut self, node: NodeId, screen_ratio: f64, direction: Direction) -> bool {
-        self.resize_internal(node, screen_ratio, direction)
-    }
-
     fn set_frame_from_resize(
         &mut self,
         node: NodeId,
@@ -898,7 +816,29 @@ impl TraditionalLayoutSystem {
             let mut count = 0;
             let mut first_direction: Option<Direction> = None;
             let mut good = true;
-            let mut check_and_resize = |direction: Direction, delta, whole| {
+            let deltas = [
+                (
+                    Direction::Left,
+                    old_frame.min().x - new_frame.min().x,
+                    screen.size.width,
+                ),
+                (
+                    Direction::Right,
+                    new_frame.max().x - old_frame.max().x,
+                    screen.size.width,
+                ),
+                (
+                    Direction::Up,
+                    old_frame.min().y - new_frame.min().y,
+                    screen.size.height,
+                ),
+                (
+                    Direction::Down,
+                    new_frame.max().y - old_frame.max().y,
+                    screen.size.height,
+                ),
+            ];
+            for (direction, delta, whole) in deltas {
                 if delta != 0.0 {
                     count += 1;
                     if count > 2 {
@@ -912,30 +852,10 @@ impl TraditionalLayoutSystem {
                         first_direction = Some(direction);
                     }
                     if resize {
-                        self.resize(node, f64::from(delta) / f64::from(whole), direction);
+                        self.resize_internal(node, f64::from(delta) / f64::from(whole), direction);
                     }
                 }
-            };
-            check_and_resize(
-                Direction::Left,
-                old_frame.min().x - new_frame.min().x,
-                screen.size.width,
-            );
-            check_and_resize(
-                Direction::Right,
-                new_frame.max().x - old_frame.max().x,
-                screen.size.width,
-            );
-            check_and_resize(
-                Direction::Up,
-                old_frame.min().y - new_frame.min().y,
-                screen.size.height,
-            );
-            check_and_resize(
-                Direction::Down,
-                new_frame.max().y - old_frame.max().y,
-                screen.size.height,
-            );
+            }
             good
         };
         if !check_or_resize(false) {
@@ -1004,7 +924,11 @@ impl TraditionalLayoutSystem {
         let ancestors2: Vec<_> = node2.ancestors(self.map()).collect();
         for &ancestor in &ancestors1 {
             if ancestors2.contains(&ancestor) {
-                let container = self.add_container(ancestor, LayoutKind::Horizontal);
+                let container = {
+                    let node = self.tree.mk_node().push_back(ancestor);
+                    self.tree.data.layout.set_kind(node, LayoutKind::Horizontal);
+                    node
+                };
                 node1.detach(&mut self.tree).push_back(container);
                 node2.detach(&mut self.tree).push_back(container);
                 return container;
@@ -1071,7 +995,6 @@ impl tree::Observer for Components {
     }
 }
 
-// Inlined from traditional/window.rs (was specific to this layout)
 #[derive(Default, Serialize, Deserialize)]
 struct Window {
     windows: slotmap::SecondaryMap<NodeId, WindowId>,
@@ -1091,12 +1014,9 @@ impl Window {
     fn at(&self, node: NodeId) -> Option<WindowId> { self.windows.get(node).copied() }
 
     fn node_for(&self, layout: LayoutId, wid: WindowId) -> Option<NodeId> {
-        self.window_nodes
-            .get(&wid)
-            .into_iter()
-            .flat_map(|nodes| nodes.0.iter().filter(|info| info.layout == layout))
-            .next()
-            .map(|info| info.node)
+        self.window_nodes.get(&wid).and_then(|nodes| {
+            nodes.0.iter().find(|info| info.layout == layout).map(|info| info.node)
+        })
     }
 
     fn set_window(&mut self, layout: LayoutId, node: NodeId, wid: WindowId) {
@@ -1161,10 +1081,8 @@ impl Window {
     }
 }
 
-// Inlined from traditional/stack.rs (was specific to this layout)
 struct StackLayoutResult {
     container_rect: CGRect,
-    _window_count: usize,
     stack_offset: f64,
     is_horizontal: bool,
     window_width: f64,
@@ -1196,7 +1114,6 @@ impl StackLayoutResult {
         };
         Self {
             container_rect,
-            _window_count: window_count,
             stack_offset,
             is_horizontal,
             window_width,
@@ -1273,7 +1190,6 @@ impl StackLayoutResult {
     }
 }
 
-// Inlined from traditional/layout.rs (was specific to this layout)
 #[derive(Default, Serialize, Deserialize)]
 struct Layout {
     info: slotmap::SecondaryMap<NodeId, LayoutInfo>,
@@ -1303,7 +1219,7 @@ impl Layout {
                 self.info[parent].total += 1.0;
             }
             TreeEvent::Copied { src, dest, .. } => {
-                self.info.insert(dest, self.info[src].clone());
+                self.info.insert(dest, self.info[src]);
             }
             TreeEvent::RemovingFromParent(node) => {
                 self.info[node.parent(map).unwrap()].total -= self.info[node].size;
@@ -1602,68 +1518,21 @@ fn adjust_stack_container_rect(
     stack_line_horiz: crate::common::config::HorizontalPlacement,
     stack_line_vert: crate::common::config::VerticalPlacement,
 ) -> CGRect {
-    use objc2_core_foundation::{CGPoint, CGSize};
     if reserve <= 0.0 {
         return container_rect;
     }
     if is_horizontal {
-        match stack_line_horiz {
-            crate::common::config::HorizontalPlacement::Top => {
-                let new_h = (container_rect.size.height - reserve).max(0.0);
-                container_rect = CGRect {
-                    origin: CGPoint {
-                        x: container_rect.origin.x,
-                        y: container_rect.origin.y + reserve,
-                    },
-                    size: CGSize {
-                        width: container_rect.size.width,
-                        height: new_h,
-                    },
-                };
-            }
-            crate::common::config::HorizontalPlacement::Bottom => {
-                let new_h = (container_rect.size.height - reserve).max(0.0);
-                container_rect = CGRect {
-                    origin: CGPoint {
-                        x: container_rect.origin.x,
-                        y: container_rect.origin.y,
-                    },
-                    size: CGSize {
-                        width: container_rect.size.width,
-                        height: new_h,
-                    },
-                };
-            }
+        let new_h = (container_rect.size.height - reserve).max(0.0);
+        if matches!(stack_line_horiz, crate::common::config::HorizontalPlacement::Top) {
+            container_rect.origin.y += reserve;
         }
+        container_rect.size.height = new_h;
     } else {
-        match stack_line_vert {
-            crate::common::config::VerticalPlacement::Right => {
-                let new_w = (container_rect.size.width - reserve).max(0.0);
-                container_rect = CGRect {
-                    origin: CGPoint {
-                        x: container_rect.origin.x,
-                        y: container_rect.origin.y,
-                    },
-                    size: CGSize {
-                        width: new_w,
-                        height: container_rect.size.height,
-                    },
-                };
-            }
-            crate::common::config::VerticalPlacement::Left => {
-                let new_w = (container_rect.size.width - reserve).max(0.0);
-                container_rect = CGRect {
-                    origin: CGPoint {
-                        x: container_rect.origin.x + reserve,
-                        y: container_rect.origin.y,
-                    },
-                    size: CGSize {
-                        width: new_w,
-                        height: container_rect.size.height,
-                    },
-                };
-            }
+        let new_w = (container_rect.size.width - reserve).max(0.0);
+        if matches!(stack_line_vert, crate::common::config::VerticalPlacement::Left) {
+            container_rect.origin.x += reserve;
         }
+        container_rect.size.width = new_w;
     }
     container_rect
 }

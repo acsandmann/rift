@@ -151,11 +151,20 @@ struct CallbackCtx {
 
 unsafe extern "C-unwind" fn gesture_callback(
     _proxy: ocg::CGEventTapProxy,
-    _type: ocg::CGEventType,
+    event_type: ocg::CGEventType,
     event_ref: core::ptr::NonNull<ocg::CGEvent>,
     user_info: *mut c_void,
 ) -> *mut ocg::CGEvent {
     let ctx = unsafe { &*(user_info as *const CallbackCtx) };
+
+    let ety = event_type.0 as i64;
+    if ety == -1 || ety == -2 {
+        if let Some(tap) = ctx.swipe.tap.borrow().as_ref() {
+            tap.set_enabled(true);
+        }
+        return event_ref.as_ptr();
+    }
+
     let cg_event: &CGEvent = unsafe { event_ref.as_ref() };
     if let Some(nsevent) = unsafe { NSEvent::eventWithCGEvent(cg_event) } {
         handle_gesture(&ctx.swipe, &ctx.state, &nsevent);
@@ -227,11 +236,11 @@ fn handle_gesture(swipe: &Swipe, state: &RefCell<SwipeState>, nsevent: &NSEvent)
             let vertical = dy.abs();
 
             if horizontal >= swipe.cfg.distance_pct && vertical <= swipe.cfg.vertical_tolerance {
-                let mut dir_right = dx > 0.0;
+                let mut dir_left = dx < 0.0;
                 if swipe.cfg.invert_horizontal {
-                    dir_right = !dir_right;
+                    dir_left = !dir_left;
                 }
-                let cmd = if dir_right {
+                let cmd = if dir_left {
                     LC::NextWorkspace(swipe.cfg.skip_empty_workspaces)
                 } else {
                     LC::PrevWorkspace(swipe.cfg.skip_empty_workspaces)

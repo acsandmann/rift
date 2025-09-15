@@ -116,6 +116,7 @@ impl WindowNotify {
                                 CGSEventType::ServerWindowDidCreate => events_tx.send(
                                     Event::WindowServerAppeared(WindowServerId::new(window_id)),
                                 ),
+                                // TODO: handle WindowCreated and confirm when it is triggered
                                 CGSEventType::WindowCreated
                                 | CGSEventType::WindowMoved
                                 | CGSEventType::WindowResized => {}

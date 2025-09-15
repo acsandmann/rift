@@ -60,6 +60,16 @@ define_class! {
             self.handle_app_event(notif);
         }
 
+        #[unsafe(method(recvWakeEvent:))]
+        fn recv_wake_event(&self, notif: &NSNotification) {
+            trace!("{notif:#?}");
+
+            self.send_current_space();
+            self.send_screen_parameters();
+
+            self.send_event(WmEvent::SystemWoke);
+        }
+
         #[unsafe(method(recvPowerEvent:))]
         fn recv_power_event(&self, notif: &NSNotification) {
             trace!("{notif:#?}");
@@ -211,6 +221,12 @@ impl NotificationCenter {
             register_unsafe(
                 sel!(recvScreenChangedEvent:),
                 NSWorkspaceActiveSpaceDidChangeNotification,
+                workspace_center,
+                workspace,
+            );
+            register_unsafe(
+                sel!(recvWakeEvent:),
+                NSWorkspaceDidWakeNotification,
                 workspace_center,
                 workspace,
             );

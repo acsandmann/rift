@@ -123,6 +123,7 @@ fn main() {
     let wn_actor = window_notify_actor::WindowNotify::new(events_tx.clone(), wnd_rx, &[
         CGSEventType::WindowDestroyed,
         CGSEventType::ServerWindowDidCreate,
+        CGSEventType::WindowCreated,
         CGSEventType::ServerWindowDidTerminate,
     ]);
 

@@ -133,6 +133,8 @@ pub enum Event {
     /// The mouse cursor moved over a new window. Only sent if focus-follows-
     /// mouse is enabled.
     MouseMovedOverWindow(WindowServerId),
+    /// System woke from sleep; used to re-subscribe SLS notifications.
+    SystemWoke,
 
     /// A raise request completed. Used by the raise manager to track when
     /// all raise requests in a sequence have finished.
@@ -631,6 +633,11 @@ impl Reactor {
                     self.raise_window(wid, Quiet::No, None);
                 }
             }
+            Event::SystemWoke => {
+                let ids: Vec<u32> = self.window_ids.keys().map(|wsid| wsid.as_u32()).collect();
+                crate::sys::window_notify::update_window_notifications(&ids);
+                self.last_sls_notification_ids = ids;
+            }
             Event::RaiseCompleted { window_id, sequence_id } => {
                 let msg = raise_manager::Event::RaiseCompleted { window_id, sequence_id };
                 _ = self.raise_manager_tx.send(msg);
@@ -942,12 +949,11 @@ impl Reactor {
         }
 
         if should_update_notifications {
-            use crate::sys::window_notify;
             let mut ids: Vec<u32> = self.window_ids.keys().map(|wsid| wsid.as_u32()).collect();
             ids.sort_unstable();
 
             if ids != self.last_sls_notification_ids {
-                window_notify::update_window_notifications(&ids);
+                crate::sys::window_notify::update_window_notifications(&ids);
 
                 self.last_sls_notification_ids = ids;
             }
