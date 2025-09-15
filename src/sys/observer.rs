@@ -8,12 +8,14 @@ use accessibility::AXUIElement;
 use accessibility_sys::{
     AXError, AXObserverAddNotification, AXObserverCreate, AXObserverGetRunLoopSource,
     AXObserverGetTypeID, AXObserverRef, AXObserverRemoveNotification, AXUIElementRef,
-    kAXErrorSuccess, pid_t,
+    kAXErrorCannotComplete, kAXErrorSuccess, pid_t,
 };
 use core_foundation::base::TCFType;
 use core_foundation::runloop::{CFRunLoopAddSource, CFRunLoopGetCurrent, kCFRunLoopCommonModes};
 use core_foundation::string::{CFString, CFStringRef};
 use core_foundation::{declare_TCFType, impl_TCFType};
+use dispatchr::queue;
+use dispatchr::time::Time;
 
 declare_TCFType!(AXObserver, AXObserverRef);
 impl_TCFType!(AXObserver, AXObserverRef, AXObserverGetTypeID);
@@ -103,20 +105,74 @@ impl Drop for Observer {
     }
 }
 
+unsafe extern "C" {
+    fn dispatch_after_f(
+        when: Time,
+        queue: *const queue::Unmanaged,
+        context: *mut c_void,
+        work: extern "C" fn(*mut c_void),
+    );
+}
+
+struct AddNotifRetryCtx {
+    observer: AXObserver,
+    elem: AXUIElement,
+    notification: &'static str,
+    callback: *mut c_void,
+}
+
+extern "C" fn add_notif_retry(ctx: *mut c_void) {
+    if ctx.is_null() {
+        return;
+    }
+    let ctx = unsafe { Box::from_raw(ctx as *mut AddNotifRetryCtx) };
+    let _ = unsafe {
+        AXObserverAddNotification(
+            ctx.observer.as_concrete_TypeRef(),
+            ctx.elem.as_concrete_TypeRef(),
+            CFString::from_static_string(ctx.notification).as_concrete_TypeRef(),
+            ctx.callback,
+        )
+    };
+}
+
 impl Observer {
     pub fn add_notification(
         &self,
         elem: &AXUIElement,
         notification: &'static str,
     ) -> Result<(), accessibility::Error> {
-        make_result(unsafe {
+        let first = unsafe {
             AXObserverAddNotification(
                 self.observer.as_concrete_TypeRef(),
                 elem.as_concrete_TypeRef(),
                 CFString::from_static_string(notification).as_concrete_TypeRef(),
                 self.callback as *mut c_void,
             )
-        })
+        };
+        if make_result(first).is_ok() {
+            return Ok(());
+        }
+        if first == kAXErrorCannotComplete {
+            unsafe {
+                let retained_observer =
+                    AXObserver::wrap_under_get_rule(self.observer.as_concrete_TypeRef()).clone();
+                let ctx = Box::new(AddNotifRetryCtx {
+                    observer: retained_observer,
+                    elem: elem.clone(),
+                    notification,
+                    callback: self.callback as *mut c_void,
+                });
+                dispatch_after_f(
+                    Time::NOW.new_after(10_000_000),
+                    queue::main(),
+                    Box::into_raw(ctx) as *mut c_void,
+                    add_notif_retry,
+                );
+            }
+            return Ok(());
+        }
+        make_result(first)
     }
 
     pub fn remove_notification(
