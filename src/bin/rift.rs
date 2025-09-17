@@ -5,6 +5,7 @@ use clap::Parser;
 use objc2::MainThreadMarker;
 use rift_wm::actor::config::ConfigActor;
 use rift_wm::actor::menu_bar::Menu;
+use rift_wm::actor::mission_control::MissionControlActor;
 use rift_wm::actor::mouse::Mouse;
 use rift_wm::actor::notification_center::NotificationCenter;
 use rift_wm::actor::reactor::{self, Reactor};
@@ -122,8 +123,8 @@ fn main() {
     let (_, wnd_rx) = rift_wm::actor::channel();
     let wn_actor = window_notify_actor::WindowNotify::new(events_tx.clone(), wnd_rx, &[
         CGSEventType::WindowDestroyed,
-        CGSEventType::ServerWindowDidCreate,
-        CGSEventType::WindowCreated,
+        //CGSEventType::ServerWindowDidCreate,
+        //CGSEventType::WindowCreated,
         CGSEventType::ServerWindowDidTerminate,
     ]);
 
@@ -154,11 +155,13 @@ fn main() {
         restore_file: restore_file(),
         config: config.clone(),
     };
+    let (mc_tx, mc_rx) = rift_wm::actor::channel();
     let (wm_controller, wm_controller_sender) = WmController::new(
         wm_config,
         events_tx.clone(),
         mouse_tx.clone(),
         stack_line_tx.clone(),
+        mc_tx.clone(),
     );
     let notification_center = NotificationCenter::new(wm_controller_sender.clone());
 
@@ -168,9 +171,11 @@ fn main() {
         config.clone(),
         stack_line_rx,
         mtm,
-        events_tx,
+        events_tx.clone(),
         CoordinateConverter::default(),
     );
+
+    let mission_control = MissionControlActor::new(config.clone(), mc_rx, events_tx.clone(), mtm);
 
     println!(
         "NOTICE: by default rift starts in a deactivated state.
@@ -191,6 +196,7 @@ fn main() {
                 stack_line.run(),
                 wn_actor.run(),
                 swipe.run(),
+                mission_control.run(),
             );
         } else {
             join!(
@@ -200,6 +206,7 @@ fn main() {
                 menu.run(),
                 stack_line.run(),
                 wn_actor.run(),
+                mission_control.run(),
             );
         }
     });

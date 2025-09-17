@@ -12,7 +12,7 @@ use crate::actor::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::common::collections::{BTreeSet, HashMap};
 use crate::common::config::LayoutSettings;
 use crate::layout_engine::LayoutSystem;
-use crate::model::VirtualWorkspaceManager;
+use crate::model::{VirtualWorkspaceId, VirtualWorkspaceManager};
 use crate::sys::screen::SpaceId;
 
 #[derive(Debug, Clone)]
@@ -108,6 +108,50 @@ impl LayoutEngine {
             .into_iter()
             .filter(|wid| self.is_window_in_active_workspace(space, *wid))
             .collect()
+    }
+
+    fn refocus_workspace(
+        &mut self,
+        space: SpaceId,
+        workspace_id: VirtualWorkspaceId,
+    ) -> EventResponse {
+        let mut focus_window =
+            self.virtual_workspace_manager.last_focused_window(space, workspace_id);
+
+        if focus_window.is_none() {
+            if let Some(layout) = self.workspace_layouts.active(space, workspace_id) {
+                let selected = self.tree.selected_window(layout);
+                let visible = self.tree.visible_windows_in_layout(layout);
+                focus_window = selected.or_else(|| visible.first().copied());
+            }
+        }
+
+        if focus_window.is_none() {
+            let floating_windows = self.active_floating_windows_in_workspace(space);
+            let floating_focus =
+                self.floating.last_focus().filter(|wid| floating_windows.contains(wid));
+            focus_window = floating_focus.or_else(|| floating_windows.first().copied());
+        }
+
+        if let Some(wid) = focus_window {
+            self.focused_window = Some(wid);
+            self.virtual_workspace_manager
+                .set_last_focused_window(space, workspace_id, Some(wid));
+            if self.floating.is_floating(wid) {
+                self.floating.set_last_focus(Some(wid));
+            } else if let Some(layout) = self.workspace_layouts.active(space, workspace_id) {
+                let _ = self.tree.select_window(layout, wid);
+            }
+        } else {
+            self.focused_window = None;
+            self.virtual_workspace_manager
+                .set_last_focused_window(space, workspace_id, None);
+        }
+
+        EventResponse {
+            focus_window,
+            raise_windows: vec![],
+        }
     }
 
     #[allow(dead_code)]
@@ -941,36 +985,7 @@ impl LayoutEngine {
                         self.broadcast_workspace_changed(space);
                         self.broadcast_windows_changed(space);
 
-                        let mut focus_window = self
-                            .virtual_workspace_manager
-                            .last_focused_window(space, next_workspace);
-
-                        if focus_window.is_none() {
-                            let windows_in_workspace =
-                                self.virtual_workspace_manager.windows_in_active_workspace(space);
-                            focus_window = windows_in_workspace.first().copied();
-                        }
-
-                        if let Some(wid) = focus_window {
-                            self.focused_window = Some(wid);
-                            self.virtual_workspace_manager.set_last_focused_window(
-                                space,
-                                next_workspace,
-                                Some(wid),
-                            );
-                            if !self.floating.is_floating(wid) {
-                                if let Some(layout) =
-                                    self.workspace_layouts.active(space, next_workspace)
-                                {
-                                    let _ = self.tree.select_window(layout, wid);
-                                }
-                            }
-                        }
-
-                        return EventResponse {
-                            focus_window,
-                            raise_windows: vec![],
-                        };
+                        return self.refocus_workspace(space, next_workspace);
                     }
                 }
                 EventResponse::default()
@@ -991,36 +1006,7 @@ impl LayoutEngine {
                         self.broadcast_workspace_changed(space);
                         self.broadcast_windows_changed(space);
 
-                        let mut focus_window = self
-                            .virtual_workspace_manager
-                            .last_focused_window(space, prev_workspace);
-
-                        if focus_window.is_none() {
-                            let windows_in_workspace =
-                                self.virtual_workspace_manager.windows_in_active_workspace(space);
-                            focus_window = windows_in_workspace.first().copied();
-                        }
-
-                        if let Some(wid) = focus_window {
-                            self.focused_window = Some(wid);
-                            self.virtual_workspace_manager.set_last_focused_window(
-                                space,
-                                prev_workspace,
-                                Some(wid),
-                            );
-                            if !self.floating.is_floating(wid) {
-                                if let Some(layout) =
-                                    self.workspace_layouts.active(space, prev_workspace)
-                                {
-                                    let _ = self.tree.select_window(layout, wid);
-                                }
-                            }
-                        }
-
-                        return EventResponse {
-                            focus_window,
-                            raise_windows: vec![],
-                        };
+                        return self.refocus_workspace(space, prev_workspace);
                     }
                 }
                 EventResponse::default()
@@ -1036,34 +1022,7 @@ impl LayoutEngine {
                     self.broadcast_workspace_changed(space);
                     self.broadcast_windows_changed(space);
 
-                    let mut focus_window =
-                        self.virtual_workspace_manager.last_focused_window(space, workspace_id);
-
-                    if focus_window.is_none() {
-                        let windows_in_workspace =
-                            self.virtual_workspace_manager.windows_in_active_workspace(space);
-                        focus_window = windows_in_workspace.first().copied();
-                    }
-
-                    if let Some(wid) = focus_window {
-                        self.focused_window = Some(wid);
-                        self.virtual_workspace_manager.set_last_focused_window(
-                            space,
-                            workspace_id,
-                            Some(wid),
-                        );
-                        if !self.floating.is_floating(wid) {
-                            if let Some(layout) = self.workspace_layouts.active(space, workspace_id)
-                            {
-                                let _ = self.tree.select_window(layout, wid);
-                            }
-                        }
-                    }
-
-                    return EventResponse {
-                        focus_window,
-                        raise_windows: vec![],
-                    };
+                    return self.refocus_workspace(space, workspace_id);
                 }
                 EventResponse::default()
             }
@@ -1190,35 +1149,7 @@ impl LayoutEngine {
                     self.broadcast_workspace_changed(space);
                     self.broadcast_windows_changed(space);
 
-                    let mut focus_window =
-                        self.virtual_workspace_manager.last_focused_window(space, last_workspace);
-
-                    if focus_window.is_none() {
-                        let windows_in_workspace =
-                            self.virtual_workspace_manager.windows_in_active_workspace(space);
-                        focus_window = windows_in_workspace.first().copied();
-                    }
-
-                    if let Some(wid) = focus_window {
-                        self.focused_window = Some(wid);
-                        self.virtual_workspace_manager.set_last_focused_window(
-                            space,
-                            last_workspace,
-                            Some(wid),
-                        );
-                        if !self.floating.is_floating(wid) {
-                            if let Some(layout) =
-                                self.workspace_layouts.active(space, last_workspace)
-                            {
-                                let _ = self.tree.select_window(layout, wid);
-                            }
-                        }
-                    }
-
-                    return EventResponse {
-                        focus_window,
-                        raise_windows: vec![],
-                    };
+                    return self.refocus_workspace(space, last_workspace);
                 }
                 EventResponse::default()
             }

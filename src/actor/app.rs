@@ -816,6 +816,12 @@ impl State {
             info.is_standard = false;
         }
 
+        if let Some(wsid) = info.sys_id {
+            info.is_root = window_server::window_parent(wsid).is_none();
+        } else {
+            info.is_root = true;
+        }
+
         if !register_notifs(&elem, self) {
             return None;
         }

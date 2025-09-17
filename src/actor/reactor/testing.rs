@@ -68,6 +68,7 @@ pub fn make_window(idx: usize) -> WindowInfo {
         path: None,
         ax_role: None,
         ax_subrole: None,
+        is_root: true,
     }
 }
 

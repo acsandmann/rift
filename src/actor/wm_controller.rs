@@ -20,7 +20,7 @@ pub type Sender = actor::Sender<WmEvent>;
 type Receiver = actor::Receiver<WmEvent>;
 
 use crate::actor::app::AppInfo;
-use crate::actor::{self, mouse, reactor};
+use crate::actor::{self, mission_control, mouse, reactor};
 use crate::common::collections::HashSet;
 use crate::sys::event::HotkeyManager;
 use crate::sys::screen::{CoordinateConverter, NSScreenExt, ScreenId, SpaceId};
@@ -66,6 +66,9 @@ pub enum WmCmd {
     MoveWindowToWorkspace(WorkspaceSelector),
     CreateWorkspace,
     SwitchToLastWorkspace,
+
+    ShowMissionControlAll,
+    ShowMissionControlCurrent,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +89,7 @@ pub struct WmController {
     events_tx: reactor::Sender,
     mouse_tx: mouse::Sender,
     stack_line_tx: Option<crate::actor::stack_line::Sender>,
+    mission_control_tx: Option<crate::actor::mission_control::Sender>,
     receiver: Receiver,
     sender: Sender,
     starting_space: Option<SpaceId>,
@@ -106,6 +110,7 @@ impl WmController {
         events_tx: reactor::Sender,
         mouse_tx: mouse::Sender,
         stack_line_tx: crate::actor::stack_line::Sender,
+        mission_control_tx: crate::actor::mission_control::Sender,
     ) -> (Self, actor::Sender<WmEvent>) {
         let (sender, receiver) = actor::channel();
         let this = Self {
@@ -113,6 +118,7 @@ impl WmController {
             events_tx,
             mouse_tx,
             stack_line_tx: Some(stack_line_tx),
+            mission_control_tx: Some(mission_control_tx),
             receiver,
             sender: sender.clone(),
             starting_space: None,
@@ -324,6 +330,16 @@ impl WmController {
                 self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
                     layout::LayoutCommand::SwitchToLastWorkspace,
                 )));
+            }
+            Command(Wm(ShowMissionControlAll)) => {
+                if let Some(tx) = &self.mission_control_tx {
+                    let _ = tx.try_send(mission_control::Event::ShowAll);
+                }
+            }
+            Command(Wm(ShowMissionControlCurrent)) => {
+                if let Some(tx) = &self.mission_control_tx {
+                    let _ = tx.try_send(mission_control::Event::ShowCurrent);
+                }
             }
             Command(Wm(Exec(cmd))) => {
                 self.exec_cmd(cmd);

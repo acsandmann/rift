@@ -28,7 +28,7 @@ impl CliExecutor for DefaultCliExecutor {
                 space_id,
             } => {
                 env_vars.insert("RIFT_EVENT_TYPE".to_string(), "workspace_changed".to_string());
-                env_vars.insert("RIFT_WORKSPACE_ID".to_string(), format!("{:?}", workspace_id));
+                env_vars.insert("RIFT_WORKSPACE_ID".to_string(), workspace_id.to_string());
                 env_vars.insert("RIFT_WORKSPACE_NAME".to_string(), workspace_name.clone());
                 env_vars.insert("RIFT_SPACE_ID".to_string(), space_id.to_string());
             }
@@ -38,7 +38,7 @@ impl CliExecutor for DefaultCliExecutor {
                 windows,
             } => {
                 env_vars.insert("RIFT_EVENT_TYPE".to_string(), "windows_changed".to_string());
-                env_vars.insert("RIFT_WORKSPACE_ID".to_string(), format!("{:?}", workspace_id));
+                env_vars.insert("RIFT_WORKSPACE_ID".to_string(), workspace_id.to_string());
                 env_vars.insert("RIFT_WORKSPACE_NAME".to_string(), workspace_name.clone());
                 env_vars.insert("RIFT_WINDOW_COUNT".to_string(), windows.len().to_string());
                 env_vars.insert("RIFT_WINDOWS".to_string(), windows.join(","));

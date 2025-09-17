@@ -172,4 +172,20 @@ unsafe extern "C" {
     pub fn SLSWindowIteratorGetTags(iterator: CFTypeRef) -> u64;
     pub fn SLSWindowIteratorGetAttributes(iterator: CFTypeRef) -> u64;
     pub fn SLSWindowIteratorGetLevel(iterator: CFTypeRef) -> c_int;
+    pub fn SLSWindowIteratorGetCount(iterator: CFTypeRef) -> c_int;
+
+    pub fn SLSCopySpacesForWindows(cid: c_int, selector: u32, windows: CFArrayRef) -> CFArrayRef;
+
+    pub fn SLSGetConnectionIDForPSN(
+        cid: c_int,
+        psn: *const ProcessSerialNumber,
+        out_cid: *mut c_int,
+    ) -> c_int;
+
+    pub fn SLSHWCaptureWindowList(
+        cid: c_int,
+        window_list: *const u32,
+        window_count: c_int,
+        options: u32,
+    ) -> CFArrayRef;
 }

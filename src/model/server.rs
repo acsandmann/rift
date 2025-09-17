@@ -13,6 +13,7 @@ pub struct WorkspaceQueryResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceData {
     pub id: String,
+    pub index: usize,
     pub name: String,
     pub is_active: bool,
     pub window_count: usize,
@@ -29,6 +30,7 @@ pub struct WindowData {
     pub is_floating: bool,
     pub is_focused: bool,
     pub bundle_id: Option<String>,
+    pub window_server_id: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -36,7 +36,7 @@ use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt, Round, SameAs};
 use crate::sys::power;
 use crate::sys::screen::{SpaceId, get_active_space_number};
-use crate::sys::window_server::{WindowServerId, WindowServerInfo};
+use crate::sys::window_server::{self, WindowServerId, WindowServerInfo};
 
 pub type Sender = actor::Sender<Event>;
 type Receiver = actor::Receiver<Event>;
@@ -206,6 +206,7 @@ pub enum ReactorCommand {
     Serialize,
     SaveAndExit,
     SwitchSpace(Direction),
+    FocusWindow(WindowId),
 }
 
 use crate::actor::raise_manager::RaiseManager;
@@ -264,6 +265,7 @@ struct WindowState {
     /// words, we only accept reads when we know they come after the last write.
     frame_monotonic: CGRect,
     is_ax_standard: bool,
+    is_ax_root: bool,
     last_sent_txid: TransactionId,
     window_server_id: Option<WindowServerId>,
     #[allow(unused)]
@@ -288,6 +290,7 @@ impl From<WindowInfo> for WindowState {
             title: info.title,
             frame_monotonic: info.frame,
             is_ax_standard: info.is_standard,
+            is_ax_root: info.is_root,
             last_sent_txid: TransactionId::default(),
             window_server_id: info.sys_id,
             bundle_id: info.bundle_id,
@@ -472,29 +475,7 @@ impl Reactor {
 
                 if let Some(space) = self.best_space_for_window(&frame) {
                     if self.window_is_standard(wid) {
-                        let mut should_add = true;
-                        if let Some(candidate_wsid) =
-                            self.windows.get(&wid).and_then(|w| w.window_server_id)
-                        {
-                            let space_ids: Vec<u64> = self.visible_space_ids_u64();
-                            if !space_ids.is_empty() {
-                                let order =
-                                    crate::sys::window_server::space_window_list_for_connection(
-                                        &space_ids, 0, false,
-                                    );
-                                let candidate_u32 = candidate_wsid.as_u32();
-                                if !order.into_iter().any(|id| id == candidate_u32) {
-                                    debug!(
-                                        "wsid {:?} for window {:?} not found in list of verified windows",
-                                        candidate_wsid, wid
-                                    );
-                                    should_add = false;
-                                }
-                            }
-                        }
-                        if should_add {
-                            self.send_layout_event(LayoutEvent::WindowAdded(space, wid));
-                        }
+                        self.send_layout_event(LayoutEvent::WindowAdded(space, wid));
                     }
                 }
                 if mouse_state == MouseState::Down {
@@ -815,8 +796,14 @@ impl Reactor {
                             })
                             .collect();
 
+                        let id_str = workspace_id.to_string();
+                        let digits: String =
+                            id_str.chars().filter(|c| c.is_ascii_digit()).collect();
+                        let id_num = digits.parse::<u64>().unwrap_or(0);
+
                         ws_json.push(serde_json::json!({
-                            "id": format!("{:?}", workspace_id),
+                            "id": id_str,
+                            "id_num": id_num,
                             "name": workspace_name,
                             "is_active": is_active,
                             "windows": windows_json,
@@ -847,7 +834,7 @@ impl Reactor {
                     mapping.push(serde_json::json!({
                         "space": space_num,
                         "window": window_json,
-                        "workspace": format!("{:?}", workspace_id)
+                        "workspace": workspace_id.to_string()
                     }));
                 }
 
@@ -902,6 +889,24 @@ impl Reactor {
             Event::Command(Command::Reactor(ReactorCommand::SwitchSpace(dir))) => unsafe {
                 crate::sys::window_server::switch_space(dir)
             },
+            Event::Command(Command::Reactor(ReactorCommand::FocusWindow(wid))) => {
+                if !self.windows.contains_key(&wid) {
+                    return;
+                }
+                let spaces = self.visible_spaces();
+                self.send_layout_event(LayoutEvent::WindowFocused(spaces, wid));
+
+                let mut app_handles: HashMap<i32, AppThreadHandle> = HashMap::default();
+                if let Some(app) = self.apps.get(&wid.pid) {
+                    app_handles.insert(wid.pid, app.handle.clone());
+                }
+                let request = raise_manager::Event::RaiseRequest(RaiseRequest {
+                    raise_windows: Vec::new(),
+                    focus_window: Some((wid, None)),
+                    app_handles,
+                });
+                let _ = self.raise_manager_tx.try_send(request);
+            }
 
             Event::QueryWorkspaces(response_tx) => {
                 let response = self.handle_workspace_query();
@@ -996,9 +1001,9 @@ impl Reactor {
                 Vec::new()
             };
 
-        for (workspace_id, workspace_name) in workspace_list {
+        for (index, (workspace_id, workspace_name)) in workspace_list.iter().enumerate() {
             let is_active = if let Some(space) = space_id {
-                self.layout_engine.active_workspace(space) == Some(workspace_id)
+                self.layout_engine.active_workspace(space) == Some(*workspace_id)
             } else {
                 false
             };
@@ -1010,7 +1015,7 @@ impl Reactor {
                     } else {
                         self.layout_engine
                             .virtual_workspace_manager()
-                            .workspace_info(space, workspace_id)
+                            .workspace_info(space, *workspace_id)
                             .map(|ws| ws.windows().collect())
                             .unwrap_or_default()
                     }
@@ -1030,7 +1035,7 @@ impl Reactor {
                     if let Some(frame) = screen_frame {
                         self.layout_engine.calculate_layout_for_workspace(
                             space,
-                            workspace_id,
+                            *workspace_id,
                             frame,
                             self.config.settings.ui.stack_line.thickness(),
                             self.config.settings.ui.stack_line.horiz_placement,
@@ -1067,6 +1072,7 @@ impl Reactor {
                 is_active,
                 window_count: windows.len(),
                 windows,
+                index,
             });
         }
 
@@ -1179,6 +1185,7 @@ impl Reactor {
             is_floating: self.layout_engine.is_window_floating(window_id),
             is_focused: self.main_window() == Some(window_id),
             bundle_id: preferred_name,
+            window_server_id: window_state.window_server_id.map(|wsid| wsid.as_u32()),
         })
     }
 
@@ -1365,8 +1372,11 @@ impl Reactor {
                     return false;
                 }
             }
+            if window_server::window_is_sticky(id) {
+                return false;
+            }
         }
-        window.is_ax_standard
+        window.is_ax_standard && window.is_ax_root
     }
 
     fn send_layout_event(&mut self, event: LayoutEvent) {

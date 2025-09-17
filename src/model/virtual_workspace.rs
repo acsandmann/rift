@@ -18,6 +18,18 @@ new_key_type! {
     pub struct VirtualWorkspaceId;
 }
 
+impl std::fmt::Display for VirtualWorkspaceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let dbg = format!("{:?}", self);
+        let digits: String = dbg.chars().filter(|c| c.is_ascii_digit()).collect();
+        if let Ok(n) = digits.parse::<u64>() {
+            write!(f, "{:08}", n)
+        } else {
+            write!(f, "{}", dbg)
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceError {
     NoWorkspacesAvailable,
@@ -220,22 +232,16 @@ impl VirtualWorkspaceManager {
 
         let require_non_empty = skip_empty == Some(true);
 
-        let mut with_names: Vec<(VirtualWorkspaceId, &str)> = ids
-            .iter()
+        ids.iter()
             .copied()
-            .filter_map(|id| {
-                self.workspaces.get(id).and_then(|ws| {
-                    if require_non_empty && ws.windows.is_empty() {
-                        None
-                    } else {
-                        Some((id, ws.name.as_str()))
-                    }
-                })
+            .filter(|id| {
+                if let Some(ws) = self.workspaces.get(*id) {
+                    !(require_non_empty && ws.windows.is_empty())
+                } else {
+                    false
+                }
             })
-            .collect();
-
-        with_names.sort_by(|a, b| a.1.cmp(b.1));
-        with_names.into_iter().map(|(id, _)| id).collect()
+            .collect()
     }
 
     fn step_workspace(
@@ -245,35 +251,39 @@ impl VirtualWorkspaceManager {
         skip_empty: Option<bool>,
         dir: Direction,
     ) -> Option<VirtualWorkspaceId> {
-        let filtered = self.filtered_workspace_ids(space, skip_empty);
-        if filtered.is_empty() {
+        let base_ids: Vec<VirtualWorkspaceId> = if skip_empty == Some(true) {
+            self.filtered_workspace_ids(space, Some(true))
+        } else {
+            self.workspaces_by_space.get(&space).cloned().unwrap_or_default()
+        };
+
+        if base_ids.is_empty() {
             return None;
         }
 
-        if let Some(pos) = filtered.iter().position(|&id| id == current) {
-            let i = dir.step(pos, filtered.len());
-            return Some(filtered[i]);
+        if let Some(pos) = base_ids.iter().position(|&id| id == current) {
+            let i = dir.step(pos, base_ids.len());
+            return Some(base_ids[i]);
         }
 
-        let all_ids = self.filtered_workspace_ids(space, Some(false));
-        let len = all_ids.len();
-        if len == 0 {
+        let fallback_ids = self.filtered_workspace_ids(space, Some(false));
+        if fallback_ids.is_empty() {
             return None;
         }
-        let start = all_ids.iter().position(|&id| id == current)?;
+        let start = fallback_ids.iter().position(|&id| id == current)?;
         let require_non_empty = skip_empty == Some(true);
 
-        let mut i = dir.step(start, len);
+        let mut i = dir.step(start, fallback_ids.len());
         if !require_non_empty {
-            return Some(all_ids[i]);
+            return Some(fallback_ids[i]);
         }
 
-        for _ in 0..len {
-            let id = all_ids[i];
+        for _ in 0..fallback_ids.len() {
+            let id = fallback_ids[i];
             if self.workspaces.get(id).map_or(false, |ws| !ws.windows.is_empty()) {
                 return Some(id);
             }
-            i = dir.step(i, len);
+            i = dir.step(i, fallback_ids.len());
         }
         None
     }
@@ -570,11 +580,11 @@ impl VirtualWorkspaceManager {
     pub fn list_workspaces(&mut self, space: SpaceId) -> Vec<(VirtualWorkspaceId, String)> {
         self.ensure_space_initialized(space);
         let ids = self.workspaces_by_space.get(&space).cloned().unwrap_or_default();
-        let mut workspaces: Vec<_> = ids
+        let workspaces: Vec<_> = ids
             .into_iter()
             .filter_map(|id| self.workspaces.get(id).map(|ws| (id, ws.name.clone())))
             .collect();
-        workspaces.sort_by(|a, b| a.1.cmp(&b.1));
+        //workspaces.sort_by(|a, b| a.1.cmp(&b.1));
         workspaces
     }
 

@@ -67,6 +67,8 @@ impl From<&NSRunningApplication> for AppInfo {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct WindowInfo {
     pub is_standard: bool,
+    #[serde(default)]
+    pub is_root: bool,
     pub title: String,
     #[serde(with = "CGRectDef")]
     pub frame: CGRect,
@@ -112,6 +114,7 @@ impl TryFrom<&AXUIElement> for WindowInfo {
 
         Ok(WindowInfo {
             is_standard,
+            is_root: true,
             title: element.title().map(|t| t.to_string()).unwrap_or_default(),
             frame: frame.to_icrate(),
             sys_id: id,
