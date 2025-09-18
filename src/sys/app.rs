@@ -3,7 +3,7 @@ use std::path::PathBuf;
 pub use nix::libc::pid_t;
 use objc2::rc::Retained;
 use objc2::{class, msg_send};
-use objc2_app_kit::{NSRunningApplication, NSWorkspace};
+use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication, NSWorkspace};
 use objc2_core_foundation::CGRect;
 use objc2_foundation::NSString;
 use serde::{Deserialize, Serialize};
@@ -24,6 +24,9 @@ pub fn running_apps(bundle: Option<String>) -> impl Iterator<Item = (pid_t, AppI
                 if !bundle_id.contains(filter) {
                     return None;
                 }
+            }
+            if app.activationPolicy() != NSApplicationActivationPolicy::Regular {
+                return None;
             }
             Some((app.pid(), AppInfo::from(&*app)))
         })
