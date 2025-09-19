@@ -14,10 +14,11 @@ use accessibility::{AXAttribute, AXUIElement, AXUIElementActions, AXUIElementAtt
 use accessibility_sys::{
     kAXApplicationActivatedNotification, kAXApplicationDeactivatedNotification,
     kAXErrorCannotComplete, kAXErrorFailure, kAXErrorInvalidUIElement,
-    kAXMainWindowChangedNotification, kAXStandardWindowSubrole, kAXTitleChangedNotification,
-    kAXUIElementDestroyedNotification, kAXWindowCreatedNotification,
-    kAXWindowDeminiaturizedNotification, kAXWindowMiniaturizedNotification,
-    kAXWindowMovedNotification, kAXWindowResizedNotification, kAXWindowRole,
+    kAXMainWindowChangedNotification, kAXMenuClosedNotification, kAXMenuOpenedNotification,
+    kAXStandardWindowSubrole, kAXTitleChangedNotification, kAXUIElementDestroyedNotification,
+    kAXWindowCreatedNotification, kAXWindowDeminiaturizedNotification,
+    kAXWindowMiniaturizedNotification, kAXWindowMovedNotification, kAXWindowResizedNotification,
+    kAXWindowRole,
 };
 use r#continue::continuation;
 use core_foundation::runloop::CFRunLoop;
@@ -247,6 +248,8 @@ const APP_NOTIFICATIONS: &[&str] = &[
     kAXApplicationDeactivatedNotification,
     kAXMainWindowChangedNotification,
     kAXWindowCreatedNotification,
+    kAXMenuOpenedNotification,
+    kAXMenuClosedNotification,
 ];
 
 const WINDOW_NOTIFICATIONS: &[&str] = &[
@@ -570,6 +573,8 @@ impl State {
                     event::get_mouse_state(),
                 ));
             }
+            kAXMenuOpenedNotification => self.send_event(Event::MenuOpened),
+            kAXMenuClosedNotification => self.send_event(Event::MenuClosed),
             kAXUIElementDestroyedNotification => {
                 let Some((&wid, _)) = self.windows.iter().find(|(_, w)| w.elem == elem) else {
                     return;
@@ -803,6 +808,17 @@ impl State {
         let Ok(mut info) = WindowInfo::try_from(&elem) else {
             return None;
         };
+
+        if info.ax_role.as_deref() == Some("AXPopover")
+            || info.ax_subrole.as_deref() == Some("AXUnknown")
+        {
+            trace!(
+                role = ?info.ax_role,
+                subrole = ?info.ax_subrole,
+                "Ignoring non-standard AX window"
+            );
+            return None;
+        }
 
         // TODO: improve this heuristic using ideas from AeroSpace(maybe implement a similar testing architecture based on ax dumps)
         if (self.bundle_id.as_deref() == Some("com.googlecode.iterm2")

@@ -35,6 +35,9 @@ animation_easing = "ease_in_out_cubic"
 focus_follows_mouse = true
 mouse_follows_focus = false
 mouse_hides_on_focus = true
+# focus_follows_mouse_disable_hotkey temporarily suspends focus-follows-mouse while held
+# e.g. "Fn"; omit or set to null to keep focus-follows-mouse always active
+#focus_follows_mouse_disable_hotkey = "Fn"
 
 # Prevent certain apps from stealing focus/causing workspace switches
 # Provide bundle identifiers (e.g., "com.apple.Spotlight")

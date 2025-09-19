@@ -323,6 +323,9 @@ pub struct Settings {
     pub mouse_hides_on_focus: bool,
     #[serde(default = "yes")]
     pub focus_follows_mouse: bool,
+    /// Hotkey that disables focus-follows-mouse while held.
+    #[serde(default)]
+    pub focus_follows_mouse_disable_hotkey: Option<Hotkey>,
     /// Apps that should not trigger automatic workspace switching when activated.
     /// List of bundle identifiers (e.g., "com.apple.Spotlight") that often
     /// inappropriately steal focus and shouldn't cause workspace switches.

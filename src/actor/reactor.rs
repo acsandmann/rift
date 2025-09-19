@@ -120,6 +120,8 @@ pub enum Event {
         Requested,
         Option<MouseState>,
     ),
+    MenuOpened,
+    MenuClosed,
 
     /// Left mouse button was released.
     ///
@@ -235,6 +237,7 @@ pub struct Reactor {
     app_rules_recently_applied: std::time::Instant,
     last_auto_workspace_switch: Option<std::time::Instant>,
     last_sls_notification_ids: Vec<u32>,
+    menu_open_depth: usize,
 }
 
 #[derive(Debug)]
@@ -359,6 +362,7 @@ impl Reactor {
             last_auto_workspace_switch: None,
             last_sls_notification_ids: Vec::new(),
             observed_window_server_ids: HashSet::default(),
+            menu_open_depth: 0,
         }
     }
 
@@ -607,6 +611,24 @@ impl Reactor {
             }
             Event::MouseUp => {
                 self.in_drag = false;
+            }
+            Event::MenuOpened => {
+                debug!("menu opened");
+                if self.menu_open_depth == 0 {
+                    self.set_focus_follows_mouse_enabled(false);
+                }
+                self.menu_open_depth = self.menu_open_depth.saturating_add(1);
+            }
+            Event::MenuClosed => {
+                if self.menu_open_depth == 0 {
+                    debug!("menu closed with zero depth");
+                } else {
+                    self.menu_open_depth -= 1;
+                    if self.menu_open_depth == 0 {
+                        debug!("menus closed; re-enabling focus_follows_mouse");
+                        self.set_focus_follows_mouse_enabled(true);
+                    }
+                }
             }
             Event::MouseMovedOverWindow(wsid) => {
                 let Some(&wid) = self.window_ids.get(&wsid) else { return };
@@ -1388,13 +1410,20 @@ impl Reactor {
     }
 
     // Returns true if the window should be raised on mouse over considering
-    // active workspace membership and occlusion of floating windows above it.
+    // active workspace membership and potential occlusion of other windows above it.
     fn should_raise_on_mouse_over(&self, wid: WindowId) -> bool {
         let Some(window) = self.windows.get(&wid) else {
             return false;
         };
 
-        let Some(space) = self.best_space_for_window(&window.frame_monotonic) else {
+        let candidate_frame = window.frame_monotonic;
+
+        if self.menu_open_depth > 0 {
+            trace!(?wid, "Skipping autoraise while menu open");
+            return false;
+        }
+
+        let Some(space) = self.best_space_for_window(&candidate_frame) else {
             return false;
         };
 
@@ -1411,11 +1440,6 @@ impl Reactor {
             return true;
         }
 
-        let Some(candidate_layer) = self.window_server_info.get(&candidate_wsid).map(|i| i.layer)
-        else {
-            return true;
-        };
-
         let order =
             crate::sys::window_server::space_window_list_for_connection(&space_ids, 0, false);
         let candidate_u32 = candidate_wsid.as_u32();
@@ -1429,23 +1453,11 @@ impl Reactor {
             let Some(&above_wid) = self.window_ids.get(&above_wsid) else {
                 continue;
             };
-            if !self.layout_engine.is_window_floating(above_wid) {
-                continue;
-            }
-
-            let Some(above_layer) = self.window_server_info.get(&above_wsid).map(|i| i.layer)
-            else {
-                continue;
-            };
-            if above_layer != candidate_layer {
-                continue;
-            }
 
             let Some(above_state) = self.windows.get(&above_wid) else {
                 continue;
             };
             let above_frame = above_state.frame_monotonic;
-            let candidate_frame = window.frame_monotonic;
             if candidate_frame.intersection(&above_frame).same_as(above_frame) {
                 return false;
             }
@@ -1656,6 +1668,12 @@ impl Reactor {
             focus_window: Some((wid, warp)),
             app_handles,
         }));
+    }
+
+    fn set_focus_follows_mouse_enabled(&self, enabled: bool) {
+        if let Some(mouse_tx) = self.mouse_tx.as_ref() {
+            mouse_tx.send(mouse::Request::SetFocusFollowsMouseEnabled(enabled));
+        }
     }
 
     fn main_window(&self) -> Option<WindowId> { self.main_window_tracker.main_window() }
