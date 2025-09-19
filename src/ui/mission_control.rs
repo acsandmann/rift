@@ -37,7 +37,10 @@ pub enum MissionControlMode {
 #[derive(Debug, Clone)]
 pub enum MissionControlAction {
     SwitchToWorkspace(usize),
-    FocusWindow(WindowId),
+    FocusWindow {
+        window_id: WindowId,
+        window_server_id: Option<WindowServerId>,
+    },
     Dismiss,
 }
 
@@ -152,6 +155,9 @@ const WINDOW_TILE_MIN_SIZE: f64 = 2.0;
 const WINDOW_TILE_SCALE_FACTOR: f64 = 0.75;
 const WINDOW_TILE_MAX_SCALE: f64 = 1.0;
 const WORKSPACE_TILE_SPACING: f64 = 20.0;
+const CURRENT_WS_TILE_SPACING: f64 = 48.0;
+const CURRENT_WS_TILE_PADDING: f64 = 16.0;
+const CURRENT_WS_TILE_SCALE_FACTOR: f64 = 0.9;
 
 struct WorkspaceGrid {
     bounds: NSRect,
@@ -200,6 +206,12 @@ struct WindowLayoutMetrics {
     min_x: f64,
     min_y: f64,
     disp_h: f64,
+}
+
+#[derive(Clone, Copy)]
+enum WindowLayoutKind {
+    PreserveOriginal,
+    Exploded,
 }
 
 impl WindowLayoutMetrics {
@@ -269,6 +281,7 @@ objc2::define_class!(
                         content_bounds,
                         &images,
                         state.selected_window(),
+                        WindowLayoutKind::Exploded,
                     );
                 }
             }
@@ -304,13 +317,25 @@ objc2::define_class!(
                 }
                 MissionControlMode::CurrentWorkspace(windows) => {
                     if let Some((order_idx, win)) =
-                        Self::window_at_point(&windows, p, content_bounds)
+                        Self::window_at_point(
+                            &windows,
+                            p,
+                            content_bounds,
+                            WindowLayoutKind::Exploded,
+                        )
                     {
                         if let Some(mut state) = self.ivars().try_borrow_mut().ok() {
                             state.set_selection(Selection::Window(order_idx));
                         }
                         unsafe { self.setNeedsDisplay(true) };
-                        cb(MissionControlAction::FocusWindow(win));
+                        let window_server_id = windows
+                            .get(order_idx)
+                            .and_then(|w| w.window_server_id)
+                            .map(WindowServerId::new);
+                        cb(MissionControlAction::FocusWindow {
+                            window_id: win,
+                            window_server_id,
+                        });
                         true
                     } else {
                         false
@@ -321,6 +346,47 @@ objc2::define_class!(
             if !handled {
                 cb(MissionControlAction::Dismiss);
             }
+        }
+
+        #[unsafe(method(mouseMoved:))]
+        fn mouse_moved(&self, event: &NSEvent) {
+            let point = unsafe { self.convertPoint_fromView(event.locationInWindow(), None) };
+            let content_bounds = Self::content_bounds(self.bounds());
+
+            let mut state = match self.ivars().try_borrow_mut() {
+                Ok(state) => state,
+                Err(_) => return,
+            };
+
+            let mode = match state.mode().cloned() {
+                Some(mode) => mode,
+                None => return,
+            };
+
+            let new_selection = match mode {
+                MissionControlMode::AllWorkspaces(workspaces) => Self::workspace_index_at_point(
+                    &workspaces,
+                    point,
+                    content_bounds,
+                )
+                .map(|(order_idx, _)| Selection::Workspace(order_idx)),
+                MissionControlMode::CurrentWorkspace(windows) => Self::window_at_point(
+                    &windows,
+                    point,
+                    content_bounds,
+                    WindowLayoutKind::Exploded,
+                )
+                .map(|(order_idx, _)| Selection::Window(order_idx)),
+            };
+
+            let Some(selection) = new_selection else { return };
+            if state.selection() == Some(selection) {
+                return;
+            }
+
+            state.set_selection(selection);
+            drop(state);
+            unsafe { self.setNeedsDisplay(true) };
         }
 
         #[unsafe(method(keyDown:))]
@@ -402,14 +468,16 @@ impl MissionControlView {
         windows: &[WindowData],
         point: NSPoint,
         bounds: NSRect,
+        layout: WindowLayoutKind,
     ) -> Option<(usize, WindowId)> {
         if !Self::rect_contains_point(bounds, point) {
             return None;
         }
-        let layout = Self::compute_window_layout(windows, bounds)?;
+        let rects = Self::compute_window_rects(windows, bounds, layout)?;
 
-        for (idx, window) in windows.iter().enumerate().rev() {
-            let rect = layout.rect_for(window);
+        for idx in (0..windows.len()).rev() {
+            let window = &windows[idx];
+            let rect = rects[idx];
             if Self::rect_contains_point(rect, point) {
                 return Some((idx, window.id));
             }
@@ -460,6 +528,87 @@ impl MissionControlView {
             min_y,
             disp_h,
         })
+    }
+
+    fn compute_exploded_layout(windows: &[WindowData], bounds: NSRect) -> Option<Vec<NSRect>> {
+        if windows.is_empty() {
+            return None;
+        }
+
+        let columns = Self::exploded_column_count(windows.len(), bounds);
+        let rows = ((windows.len() + columns - 1) / columns).max(1);
+        let spacing = CURRENT_WS_TILE_SPACING;
+
+        let total_spacing_x = spacing * ((columns + 1) as f64);
+        let total_spacing_y = spacing * ((rows + 1) as f64);
+
+        let available_width = (bounds.size.width - total_spacing_x).max(1.0);
+        let available_height = (bounds.size.height - total_spacing_y).max(1.0);
+        let cell_width = available_width / columns as f64;
+        let cell_height = available_height / rows as f64;
+
+        let mut rects = Vec::with_capacity(windows.len());
+
+        for (idx, window) in windows.iter().enumerate() {
+            let row = idx / columns;
+            let col = idx % columns;
+
+            let cell_origin_x = bounds.origin.x + spacing + (cell_width + spacing) * (col as f64);
+            let cell_origin_y = bounds.origin.y + spacing + (cell_height + spacing) * (row as f64);
+
+            let inner_width =
+                (cell_width - 2.0 * CURRENT_WS_TILE_PADDING).max(WINDOW_TILE_MIN_SIZE);
+            let inner_height =
+                (cell_height - 2.0 * CURRENT_WS_TILE_PADDING).max(WINDOW_TILE_MIN_SIZE);
+
+            let original_width = window.frame.size.width.max(1.0);
+            let original_height = window.frame.size.height.max(1.0);
+
+            let mut scale = (inner_width / original_width)
+                .min(inner_height / original_height)
+                .min(WINDOW_TILE_MAX_SCALE);
+            if scale > 0.5 {
+                scale *= CURRENT_WS_TILE_SCALE_FACTOR;
+            }
+            let scaled_width = (original_width * scale).max(WINDOW_TILE_MIN_SIZE);
+            let scaled_height = (original_height * scale).max(WINDOW_TILE_MIN_SIZE);
+
+            let origin_x = cell_origin_x + (cell_width - scaled_width) / 2.0;
+            let origin_y = cell_origin_y + (cell_height - scaled_height) / 2.0;
+
+            rects.push(NSRect::new(
+                NSPoint::new(origin_x, origin_y),
+                NSSize::new(scaled_width, scaled_height),
+            ));
+        }
+
+        Some(rects)
+    }
+
+    fn exploded_column_count(count: usize, bounds: NSRect) -> usize {
+        if count <= 1 {
+            return count.max(1);
+        }
+
+        let width = bounds.size.width.max(1.0);
+        let height = bounds.size.height.max(1.0);
+        let aspect = (width / height).clamp(0.5, 2.0);
+        let estimate = ((count as f64) * aspect).sqrt().ceil() as usize;
+        estimate.clamp(1, count)
+    }
+
+    fn compute_window_rects(
+        windows: &[WindowData],
+        bounds: NSRect,
+        kind: WindowLayoutKind,
+    ) -> Option<Vec<NSRect>> {
+        match kind {
+            WindowLayoutKind::PreserveOriginal => {
+                let layout = Self::compute_window_layout(windows, bounds)?;
+                Some(windows.iter().map(|w| layout.rect_for(w)).collect())
+            }
+            WindowLayoutKind::Exploded => Self::compute_exploded_layout(windows, bounds),
+        }
     }
 
     fn navigate_workspaces(
@@ -642,13 +791,25 @@ impl MissionControlView {
                 Some(Selection::Workspace(idx)),
             ) => {
                 let visible = Self::visible_workspaces(&workspaces);
+                if visible.is_empty() {
+                    return;
+                }
+                let idx = idx.min(visible.len().saturating_sub(1));
                 if let Some((original_idx, _)) = visible.get(idx) {
                     cb(MissionControlAction::SwitchToWorkspace(*original_idx));
                 }
             }
             (Some(MissionControlMode::CurrentWorkspace(windows)), Some(Selection::Window(idx))) => {
+                if windows.is_empty() {
+                    return;
+                }
+                let idx = idx.min(windows.len().saturating_sub(1));
                 if let Some(window) = windows.get(idx) {
-                    cb(MissionControlAction::FocusWindow(window.id));
+                    let window_server_id = window.window_server_id.map(WindowServerId::new);
+                    cb(MissionControlAction::FocusWindow {
+                        window_id: window.id,
+                        window_server_id,
+                    });
                 }
             }
             _ => {}
@@ -686,7 +847,13 @@ impl MissionControlView {
                 bg.fill();
             }
 
-            self.draw_windows_tile(&ws.windows, rect, cache, None);
+            self.draw_windows_tile(
+                &ws.windows,
+                rect,
+                cache,
+                None,
+                WindowLayoutKind::PreserveOriginal,
+            );
 
             unsafe {
                 let name = objc2_foundation::NSString::from_str(&ws.name);
@@ -716,14 +883,16 @@ impl MissionControlView {
         tile: NSRect,
         cache: &HashMap<WindowId, CapturedWindowImage>,
         selected: Option<usize>,
+        layout: WindowLayoutKind,
     ) {
-        let Some(layout) = Self::compute_window_layout(windows, tile) else {
+        let Some(rects) = Self::compute_window_rects(windows, tile, layout) else {
             return;
         };
 
         let selected_idx = selected.map(|s| s.min(windows.len().saturating_sub(1)));
-        for (idx, window) in windows.iter().enumerate().rev() {
-            let rect = layout.rect_for(window);
+        for idx in (0..windows.len()).rev() {
+            let window = &windows[idx];
+            let rect = rects[idx];
             let is_selected = selected_idx.map_or(false, |s| s == idx);
             Self::draw_window_outline(rect, is_selected);
             if let Some(captured) = cache.get(&window.id) {
@@ -868,6 +1037,7 @@ impl MissionControlOverlay {
             let window: Retained<NSWindow> = window_sub.into_super();
             window.setOpaque(false);
             window.setIgnoresMouseEvents(false);
+            window.setAcceptsMouseMovedEvents(true);
             window.setLevel(crate::actor::mouse::NSPopUpMenuWindowLevel);
             let clear = NSColor::clearColor();
             window.setBackgroundColor(Some(&clear));

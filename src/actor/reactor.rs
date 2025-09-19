@@ -208,7 +208,11 @@ pub enum ReactorCommand {
     Serialize,
     SaveAndExit,
     SwitchSpace(Direction),
-    FocusWindow(WindowId),
+    FocusWindow {
+        window_id: WindowId,
+        window_server_id: Option<WindowServerId>,
+    },
+    SetMissionControlActive(bool),
 }
 
 use crate::actor::raise_manager::RaiseManager;
@@ -238,6 +242,7 @@ pub struct Reactor {
     last_auto_workspace_switch: Option<std::time::Instant>,
     last_sls_notification_ids: Vec<u32>,
     menu_open_depth: usize,
+    mission_control_active: bool,
 }
 
 #[derive(Debug)]
@@ -363,6 +368,7 @@ impl Reactor {
             last_sls_notification_ids: Vec::new(),
             observed_window_server_ids: HashSet::default(),
             menu_open_depth: 0,
+            mission_control_active: false,
         }
     }
 
@@ -614,20 +620,15 @@ impl Reactor {
             }
             Event::MenuOpened => {
                 debug!("menu opened");
-                if self.menu_open_depth == 0 {
-                    self.set_focus_follows_mouse_enabled(false);
-                }
                 self.menu_open_depth = self.menu_open_depth.saturating_add(1);
+                self.update_focus_follows_mouse_state();
             }
             Event::MenuClosed => {
                 if self.menu_open_depth == 0 {
                     debug!("menu closed with zero depth");
                 } else {
                     self.menu_open_depth -= 1;
-                    if self.menu_open_depth == 0 {
-                        debug!("menus closed; re-enabling focus_follows_mouse");
-                        self.set_focus_follows_mouse_enabled(true);
-                    }
+                    self.update_focus_follows_mouse_state();
                 }
             }
             Event::MouseMovedOverWindow(wsid) => {
@@ -911,23 +912,30 @@ impl Reactor {
             Event::Command(Command::Reactor(ReactorCommand::SwitchSpace(dir))) => unsafe {
                 crate::sys::window_server::switch_space(dir)
             },
-            Event::Command(Command::Reactor(ReactorCommand::FocusWindow(wid))) => {
-                if !self.windows.contains_key(&wid) {
-                    return;
-                }
-                let spaces = self.visible_spaces();
-                self.send_layout_event(LayoutEvent::WindowFocused(spaces, wid));
+            Event::Command(Command::Reactor(ReactorCommand::FocusWindow {
+                window_id: wid,
+                window_server_id,
+            })) => {
+                if self.windows.contains_key(&wid) {
+                    let spaces = self.visible_spaces();
+                    self.send_layout_event(LayoutEvent::WindowFocused(spaces, wid));
 
-                let mut app_handles: HashMap<i32, AppThreadHandle> = HashMap::default();
-                if let Some(app) = self.apps.get(&wid.pid) {
-                    app_handles.insert(wid.pid, app.handle.clone());
+                    let mut app_handles: HashMap<i32, AppThreadHandle> = HashMap::default();
+                    if let Some(app) = self.apps.get(&wid.pid) {
+                        app_handles.insert(wid.pid, app.handle.clone());
+                    }
+                    let request = raise_manager::Event::RaiseRequest(RaiseRequest {
+                        raise_windows: Vec::new(),
+                        focus_window: Some((wid, None)),
+                        app_handles,
+                    });
+                    let _ = self.raise_manager_tx.try_send(request);
+                } else if let Some(wsid) = window_server_id {
+                    let _ = window_server::make_key_window(wid.pid, wsid);
                 }
-                let request = raise_manager::Event::RaiseRequest(RaiseRequest {
-                    raise_windows: Vec::new(),
-                    focus_window: Some((wid, None)),
-                    app_handles,
-                });
-                let _ = self.raise_manager_tx.try_send(request);
+            }
+            Event::Command(Command::Reactor(ReactorCommand::SetMissionControlActive(active))) => {
+                self.set_mission_control_active(active);
             }
 
             Event::QueryWorkspaces(response_tx) => {
@@ -1674,6 +1682,19 @@ impl Reactor {
         if let Some(mouse_tx) = self.mouse_tx.as_ref() {
             mouse_tx.send(mouse::Request::SetFocusFollowsMouseEnabled(enabled));
         }
+    }
+
+    fn update_focus_follows_mouse_state(&self) {
+        let should_enable = self.menu_open_depth == 0 && !self.mission_control_active;
+        self.set_focus_follows_mouse_enabled(should_enable);
+    }
+
+    fn set_mission_control_active(&mut self, active: bool) {
+        if self.mission_control_active == active {
+            return;
+        }
+        self.mission_control_active = active;
+        self.update_focus_follows_mouse_state();
     }
 
     fn main_window(&self) -> Option<WindowId> { self.main_window_tracker.main_window() }

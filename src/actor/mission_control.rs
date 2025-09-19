@@ -29,6 +29,7 @@ pub struct MissionControlActor {
     reactor_tx: reactor::Sender,
     overlay: Option<MissionControlOverlay>,
     mtm: MainThreadMarker,
+    mission_control_active: bool,
 }
 
 impl MissionControlActor {
@@ -44,6 +45,7 @@ impl MissionControlActor {
             reactor_tx,
             overlay: None,
             mtm,
+            mission_control_active: false,
         }
     }
 
@@ -76,6 +78,7 @@ impl MissionControlActor {
         if let Some(overlay) = self.overlay.take() {
             overlay.hide();
         }
+        self.set_mission_control_active(false);
     }
 
     fn handle_overlay_action(&mut self, action: MissionControlAction) {
@@ -90,13 +93,24 @@ impl MissionControlActor {
                     )));
                 self.dispose_overlay();
             }
-            MissionControlAction::FocusWindow(window_id) => {
-                let _ = self.reactor_tx.try_send(reactor::Event::Command(
-                    reactor::Command::Reactor(reactor::ReactorCommand::FocusWindow(window_id)),
-                ));
+            MissionControlAction::FocusWindow { window_id, window_server_id } => {
+                let _ =
+                    self.reactor_tx.try_send(reactor::Event::Command(reactor::Command::Reactor(
+                        reactor::ReactorCommand::FocusWindow { window_id, window_server_id },
+                    )));
                 self.dispose_overlay();
             }
         }
+    }
+
+    fn set_mission_control_active(&mut self, active: bool) {
+        if self.mission_control_active == active {
+            return;
+        }
+        self.mission_control_active = active;
+        let _ = self.reactor_tx.try_send(reactor::Event::Command(reactor::Command::Reactor(
+            reactor::ReactorCommand::SetMissionControlActive(active),
+        )));
     }
 
     #[instrument(skip(self))]
@@ -113,6 +127,7 @@ impl MissionControlActor {
         let _ = self.reactor_tx.try_send(reactor::Event::QueryWorkspaces(tx));
         match block_on(fut, std::time::Duration::from_secs_f32(0.75)) {
             Ok(resp) => {
+                self.set_mission_control_active(true);
                 let overlay = self.ensure_overlay();
                 overlay.update(MissionControlMode::AllWorkspaces(resp.workspaces));
             }
@@ -135,6 +150,7 @@ impl MissionControlActor {
             }
         };
 
+        self.set_mission_control_active(true);
         let overlay = self.ensure_overlay();
         overlay.update(MissionControlMode::CurrentWorkspace(windows));
     }
