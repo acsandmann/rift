@@ -20,6 +20,14 @@ use crate::actor::app::WindowId;
 use crate::model::server::{WindowData, WorkspaceData};
 use crate::sys::window_server::{CapturedWindowImage, WindowServerId, capture_window_image};
 
+unsafe extern "C" {
+    fn CGContextSaveGState(c: cg_sys::CGContextRef);
+    fn CGContextRestoreGState(c: cg_sys::CGContextRef);
+    fn CGContextTranslateCTM(c: cg_sys::CGContextRef, tx: f64, ty: f64);
+    fn CGContextScaleCTM(c: cg_sys::CGContextRef, sx: f64, sy: f64);
+    fn CGContextDrawImage(c: cg_sys::CGContextRef, rect: cgt::CGRect, image: cg_sys::CGImageRef);
+}
+
 #[derive(Debug, Clone)]
 pub enum MissionControlMode {
     AllWorkspaces(Vec<WorkspaceData>),
@@ -143,6 +151,47 @@ const WINDOW_TILE_GAP: f64 = 1.0;
 const WINDOW_TILE_MIN_SIZE: f64 = 2.0;
 const WINDOW_TILE_SCALE_FACTOR: f64 = 0.75;
 const WINDOW_TILE_MAX_SCALE: f64 = 1.0;
+const WORKSPACE_TILE_SPACING: f64 = 20.0;
+
+struct WorkspaceGrid {
+    bounds: NSRect,
+    rows: usize,
+    tile_size: NSSize,
+}
+
+impl WorkspaceGrid {
+    fn new(tile_count: usize, bounds: NSRect) -> Option<Self> {
+        if tile_count == 0 {
+            return None;
+        }
+        let cols = workspace_column_count(tile_count);
+        let rows = if tile_count > cols { 2 } else { 1 };
+        let spacing = WORKSPACE_TILE_SPACING;
+        let tile_w = (bounds.size.width - spacing * ((cols + 1) as f64)) / (cols as f64);
+        let tile_h = (bounds.size.height - spacing * ((rows + 1) as f64)) / (rows as f64);
+        Some(Self {
+            bounds,
+            rows,
+            tile_size: NSSize::new(tile_w, tile_h),
+        })
+    }
+
+    fn position_for(&self, order_idx: usize) -> (usize, usize) {
+        if self.rows == 1 {
+            (0, order_idx)
+        } else {
+            (order_idx % self.rows, order_idx / self.rows)
+        }
+    }
+
+    fn rect_for(&self, order_idx: usize) -> NSRect {
+        let (row, col) = self.position_for(order_idx);
+        let spacing = WORKSPACE_TILE_SPACING;
+        let x = self.bounds.origin.x + spacing + (self.tile_size.width + spacing) * (col as f64);
+        let y = self.bounds.origin.y + spacing + (self.tile_size.height + spacing) * (row as f64);
+        NSRect::new(NSPoint::new(x, y), self.tile_size)
+    }
+}
 
 struct WindowLayoutMetrics {
     scale: f64,
@@ -204,7 +253,8 @@ objc2::define_class!(
             let content_bounds = Self::content_bounds(self.bounds());
             match mode {
                 MissionControlMode::AllWorkspaces(workspaces) => {
-                    let images = Self::collect_images_for_workspaces(workspaces);
+                    let images =
+                        Self::collect_images(workspaces.iter().flat_map(|ws| ws.windows.iter()));
                     self.draw_workspaces(
                         workspaces,
                         content_bounds,
@@ -213,7 +263,7 @@ objc2::define_class!(
                     );
                 }
                 MissionControlMode::CurrentWorkspace(windows) => {
-                    let images = Self::collect_images_for_windows(windows);
+                    let images = Self::collect_images(windows.iter());
                     self.draw_windows_tile(
                         windows,
                         content_bounds,
@@ -338,24 +388,9 @@ impl MissionControlView {
             return None;
         }
         let visible = Self::visible_workspaces(workspaces);
-        if visible.is_empty() {
-            return None;
-        }
-        let cols = workspace_column_count(visible.len());
-        let rows = if visible.len() > cols { 2 } else { 1 };
-        let spacing = 20.0;
-        let tile_w = (bounds.size.width - spacing * ((cols + 1) as f64)) / (cols as f64);
-        let tile_h = (bounds.size.height - spacing * ((rows + 1) as f64)) / (rows as f64);
-
+        let grid = WorkspaceGrid::new(visible.len(), bounds)?;
         for (order_idx, (original_idx, _)) in visible.iter().enumerate() {
-            let (r, c) = if rows == 2 {
-                (order_idx % rows, order_idx / rows)
-            } else {
-                (0, order_idx)
-            };
-            let x = bounds.origin.x + spacing + (tile_w + spacing) * (c as f64);
-            let y = bounds.origin.y + spacing + (tile_h + spacing) * (r as f64);
-            let rect = NSRect::new(NSPoint::new(x, y), NSSize::new(tile_w, tile_h));
+            let rect = grid.rect_for(order_idx);
             if Self::rect_contains_point(rect, point) {
                 return Some((order_idx, *original_idx));
             }
@@ -636,25 +671,12 @@ impl MissionControlView {
         selected: Option<usize>,
     ) {
         let visible = Self::visible_workspaces(workspaces);
-        if visible.is_empty() {
+        let Some(grid) = WorkspaceGrid::new(visible.len(), bounds) else {
             return;
-        }
-        let cols = workspace_column_count(visible.len());
-        let rows = if visible.len() > cols { 2 } else { 1 };
-        let spacing = 20.0;
-        let tile_w = (bounds.size.width - spacing * ((cols + 1) as f64)) / (cols as f64);
-        let tile_h = (bounds.size.height - spacing * ((rows + 1) as f64)) / (rows as f64);
-
+        };
         for (order_idx, (original_idx, _)) in visible.iter().enumerate() {
             let ws = &workspaces[*original_idx];
-            let (r, c) = if rows == 2 {
-                (order_idx % rows, order_idx / rows)
-            } else {
-                (0, order_idx)
-            };
-            let x = bounds.origin.x + spacing + (tile_w + spacing) * (c as f64);
-            let y = bounds.origin.y + spacing + (tile_h + spacing) * (r as f64);
-            let rect = NSRect::new(NSPoint::new(x, y), NSSize::new(tile_w, tile_h));
+            let rect = grid.rect_for(order_idx);
 
             unsafe {
                 let bg = objc2_app_kit::NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
@@ -699,95 +721,68 @@ impl MissionControlView {
             return;
         };
 
+        let selected_idx = selected.map(|s| s.min(windows.len().saturating_sub(1)));
         for (idx, window) in windows.iter().enumerate().rev() {
             let rect = layout.rect_for(window);
-
-            unsafe {
-                let path = objc2_app_kit::NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
-                    rect, 4.0, 4.0,
-                );
-                NSColor::colorWithCalibratedWhite_alpha(1.0, 0.15).setFill();
-                path.fill();
-                let is_selected = selected
-                    .map(|s| s.min(windows.len().saturating_sub(1)))
-                    .map_or(false, |s| s == idx);
-                if is_selected {
-                    NSColor::colorWithCalibratedRed_green_blue_alpha(0.2, 0.45, 1.0, 0.85)
-                        .setStroke();
-                    path.setLineWidth(2.0);
-                } else {
-                    NSColor::colorWithCalibratedWhite_alpha(0.0, 0.65).setStroke();
-                    path.setLineWidth(1.0);
-                }
-                path.stroke();
-            }
-
+            let is_selected = selected_idx.map_or(false, |s| s == idx);
+            Self::draw_window_outline(rect, is_selected);
             if let Some(captured) = cache.get(&window.id) {
-                let cgimg = captured.as_ptr() as cg_sys::CGImageRef;
-                if let Some(ctx) = unsafe { NSGraphicsContext::currentContext() } {
-                    unsafe {
-                        let port: *mut c_void = msg_send![&*ctx, graphicsPort];
-                        let cgctx: cg_sys::CGContextRef = port as cg_sys::CGContextRef;
-
-                        unsafe extern "C" {
-                            fn CGContextSaveGState(c: cg_sys::CGContextRef);
-                            fn CGContextRestoreGState(c: cg_sys::CGContextRef);
-                            fn CGContextTranslateCTM(c: cg_sys::CGContextRef, tx: f64, ty: f64);
-                            fn CGContextScaleCTM(c: cg_sys::CGContextRef, sx: f64, sy: f64);
-                            fn CGContextDrawImage(
-                                c: cg_sys::CGContextRef,
-                                rect: cgt::CGRect,
-                                image: cg_sys::CGImageRef,
-                            );
-                        }
-
-                        CGContextSaveGState(cgctx);
-                        // Flip vertically within the destination rect so the image draws right side up
-                        CGContextTranslateCTM(
-                            cgctx,
-                            rect.origin.x,
-                            rect.origin.y + rect.size.height,
-                        );
-                        CGContextScaleCTM(cgctx, 1.0, -1.0);
-
-                        let image_rect = cgt::CGRect {
-                            origin: cgt::CGPoint { x: 0.0, y: 0.0 },
-                            size: cgt::CGSize {
-                                width: rect.size.width,
-                                height: rect.size.height,
-                            },
-                        };
-                        CGContextDrawImage(cgctx, image_rect, cgimg);
-                        CGContextRestoreGState(cgctx);
-                    }
-                }
+                Self::draw_window_snapshot(rect, captured);
             }
         }
     }
 
-    fn collect_images_for_workspaces(
-        workspaces: &[WorkspaceData],
-    ) -> HashMap<WindowId, CapturedWindowImage> {
-        let mut requests = Vec::new();
-        for ws in workspaces {
-            for window in &ws.windows {
-                if let Some(wsid) = window.window_server_id {
-                    requests.push((window.id, WindowServerId::new(wsid)));
-                }
+    fn draw_window_outline(rect: NSRect, is_selected: bool) {
+        unsafe {
+            let path = objc2_app_kit::NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+                rect, 4.0, 4.0,
+            );
+            NSColor::colorWithCalibratedWhite_alpha(1.0, 0.15).setFill();
+            path.fill();
+            if is_selected {
+                NSColor::colorWithCalibratedRed_green_blue_alpha(0.2, 0.45, 1.0, 0.85).setStroke();
+                path.setLineWidth(2.0);
+            } else {
+                NSColor::colorWithCalibratedWhite_alpha(0.0, 0.65).setStroke();
+                path.setLineWidth(1.0);
             }
+            path.stroke();
         }
-        Self::collect_images_from_requests(requests)
     }
 
-    fn collect_images_for_windows(
-        windows: &[WindowData],
-    ) -> HashMap<WindowId, CapturedWindowImage> {
-        let mut requests = Vec::new();
-        for window in windows {
-            if let Some(wsid) = window.window_server_id {
-                requests.push((window.id, WindowServerId::new(wsid)));
+    fn draw_window_snapshot(rect: NSRect, captured: &CapturedWindowImage) {
+        let cgimg = captured.as_ptr() as cg_sys::CGImageRef;
+        if let Some(ctx) = unsafe { NSGraphicsContext::currentContext() } {
+            unsafe {
+                let port: *mut c_void = msg_send![&*ctx, graphicsPort];
+                let cgctx: cg_sys::CGContextRef = port as cg_sys::CGContextRef;
+
+                CGContextSaveGState(cgctx);
+                // Flip vertically within the destination rect so the image draws right side up.
+                CGContextTranslateCTM(cgctx, rect.origin.x, rect.origin.y + rect.size.height);
+                CGContextScaleCTM(cgctx, 1.0, -1.0);
+
+                let image_rect = cgt::CGRect {
+                    origin: cgt::CGPoint { x: 0.0, y: 0.0 },
+                    size: cgt::CGSize {
+                        width: rect.size.width,
+                        height: rect.size.height,
+                    },
+                };
+                CGContextDrawImage(cgctx, image_rect, cgimg);
+                CGContextRestoreGState(cgctx);
             }
         }
+    }
+
+    fn collect_images<'a, I>(windows: I) -> HashMap<WindowId, CapturedWindowImage>
+    where I: IntoIterator<Item = &'a WindowData> {
+        let requests: Vec<_> = windows
+            .into_iter()
+            .filter_map(|window| {
+                window.window_server_id.map(|wsid| (window.id, WindowServerId::new(wsid)))
+            })
+            .collect();
         Self::collect_images_from_requests(requests)
     }
 
