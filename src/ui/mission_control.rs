@@ -37,14 +37,104 @@ pub enum MissionControlAction {
 pub struct MissionControlState {
     mode: Option<MissionControlMode>,
     on_action: Option<Rc<dyn Fn(MissionControlAction)>>,
+    selection: Option<Selection>,
 }
 
 impl MissionControlState {
-    fn set_mode(&mut self, mode: MissionControlMode) { self.mode = Some(mode); }
+    fn set_mode(&mut self, mode: MissionControlMode) {
+        self.mode = Some(mode);
+        self.selection = None;
+        self.ensure_selection();
+    }
 
     fn mode(&self) -> Option<&MissionControlMode> { self.mode.as_ref() }
 
-    fn reset(&mut self) { self.mode = None; }
+    fn reset(&mut self) {
+        self.mode = None;
+        self.selection = None;
+    }
+
+    fn selection(&self) -> Option<Selection> { self.selection }
+
+    fn set_selection(&mut self, selection: Selection) {
+        let is_valid = match (selection, self.mode.as_ref()) {
+            (Selection::Workspace(_), Some(MissionControlMode::AllWorkspaces(_)))
+            | (Selection::Window(_), Some(MissionControlMode::CurrentWorkspace(_))) => true,
+            _ => false,
+        };
+        if is_valid {
+            self.selection = Some(selection);
+        }
+    }
+
+    fn ensure_selection(&mut self) {
+        if self.selection.is_some() {
+            return;
+        }
+        match self.mode.as_ref() {
+            Some(MissionControlMode::AllWorkspaces(workspaces)) => {
+                let mut visible_idx = 0usize;
+                let mut desired = None;
+                for ws in workspaces {
+                    if !ws.windows.is_empty() || ws.is_active {
+                        if desired.is_none() && ws.is_active {
+                            desired = Some(Selection::Workspace(visible_idx));
+                        }
+                        visible_idx += 1;
+                    }
+                }
+                if let Some(sel) = desired {
+                    self.selection = Some(sel);
+                } else if visible_idx > 0 {
+                    self.selection = Some(Selection::Workspace(0));
+                }
+            }
+            Some(MissionControlMode::CurrentWorkspace(windows)) => {
+                if let Some((idx, _)) = windows.iter().enumerate().find(|(_, win)| win.is_focused) {
+                    self.selection = Some(Selection::Window(idx));
+                } else if !windows.is_empty() {
+                    self.selection = Some(Selection::Window(0));
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn selected_workspace(&self) -> Option<usize> {
+        match self.selection {
+            Some(Selection::Workspace(idx)) => Some(idx),
+            _ => None,
+        }
+    }
+
+    fn selected_window(&self) -> Option<usize> {
+        match self.selection {
+            Some(Selection::Window(idx)) => Some(idx),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Selection {
+    Workspace(usize),
+    Window(usize),
+}
+
+#[derive(Clone, Copy)]
+enum NavDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+fn workspace_column_count(count: usize) -> usize {
+    if count == 0 {
+        1
+    } else {
+        ((count + 1) / 2).max(1)
+    }
 }
 
 const MISSION_CONTROL_MARGIN: f64 = 48.0;
@@ -115,11 +205,21 @@ objc2::define_class!(
             match mode {
                 MissionControlMode::AllWorkspaces(workspaces) => {
                     let images = Self::collect_images_for_workspaces(workspaces);
-                    self.draw_workspaces(workspaces, content_bounds, &images);
+                    self.draw_workspaces(
+                        workspaces,
+                        content_bounds,
+                        &images,
+                        state.selected_workspace(),
+                    );
                 }
                 MissionControlMode::CurrentWorkspace(windows) => {
                     let images = Self::collect_images_for_windows(windows);
-                    self.draw_windows_tile(windows, content_bounds, &images);
+                    self.draw_windows_tile(
+                        windows,
+                        content_bounds,
+                        &images,
+                        state.selected_window(),
+                    );
                 }
             }
         }
@@ -139,15 +239,27 @@ objc2::define_class!(
 
             let handled = match mode {
                 MissionControlMode::AllWorkspaces(workspaces) => {
-                    if let Some(idx) = Self::workspace_index_at_point(&workspaces, p, content_bounds) {
-                        cb(MissionControlAction::SwitchToWorkspace(idx));
+                    if let Some((order_idx, target_idx)) =
+                        Self::workspace_index_at_point(&workspaces, p, content_bounds)
+                    {
+                        if let Some(mut state) = self.ivars().try_borrow_mut().ok() {
+                            state.set_selection(Selection::Workspace(order_idx));
+                        }
+                        unsafe { self.setNeedsDisplay(true) };
+                        cb(MissionControlAction::SwitchToWorkspace(target_idx));
                         true
                     } else {
                         false
                     }
                 }
                 MissionControlMode::CurrentWorkspace(windows) => {
-                    if let Some(win) = Self::window_at_point(&windows, p, content_bounds) {
+                    if let Some((order_idx, win)) =
+                        Self::window_at_point(&windows, p, content_bounds)
+                    {
+                        if let Some(mut state) = self.ivars().try_borrow_mut().ok() {
+                            state.set_selection(Selection::Window(order_idx));
+                        }
+                        unsafe { self.setNeedsDisplay(true) };
                         cb(MissionControlAction::FocusWindow(win));
                         true
                     } else {
@@ -168,6 +280,23 @@ objc2::define_class!(
                 if let Some(cb) = self.ivars().borrow().on_action.clone() {
                     cb(MissionControlAction::Dismiss);
                 }
+                return;
+            }
+
+            let handled = match code {
+                123 => self.adjust_selection(NavDirection::Left),
+                124 => self.adjust_selection(NavDirection::Right),
+                125 => self.adjust_selection(NavDirection::Down),
+                126 => self.adjust_selection(NavDirection::Up),
+                36 | 76 => {
+                    self.activate_selection_action();
+                    true
+                }
+                _ => false,
+            };
+
+            if handled {
+                unsafe { self.setNeedsDisplay(true) };
             }
         }
 
@@ -204,7 +333,7 @@ impl MissionControlView {
         workspaces: &[WorkspaceData],
         point: NSPoint,
         bounds: NSRect,
-    ) -> Option<usize> {
+    ) -> Option<(usize, usize)> {
         if !Self::rect_contains_point(bounds, point) {
             return None;
         }
@@ -212,38 +341,42 @@ impl MissionControlView {
         if visible.is_empty() {
             return None;
         }
-        let cols = (visible.len() as f64 / 2.0).ceil().max(1.0) as usize;
+        let cols = workspace_column_count(visible.len());
         let rows = if visible.len() > cols { 2 } else { 1 };
         let spacing = 20.0;
         let tile_w = (bounds.size.width - spacing * ((cols + 1) as f64)) / (cols as f64);
         let tile_h = (bounds.size.height - spacing * ((rows + 1) as f64)) / (rows as f64);
 
-        for (i, (original_idx, _)) in visible.iter().enumerate() {
+        for (order_idx, (original_idx, _)) in visible.iter().enumerate() {
             let (r, c) = if rows == 2 {
-                (i % rows, i / rows)
+                (order_idx % rows, order_idx / rows)
             } else {
-                (0, i)
+                (0, order_idx)
             };
             let x = bounds.origin.x + spacing + (tile_w + spacing) * (c as f64);
             let y = bounds.origin.y + spacing + (tile_h + spacing) * (r as f64);
             let rect = NSRect::new(NSPoint::new(x, y), NSSize::new(tile_w, tile_h));
             if Self::rect_contains_point(rect, point) {
-                return Some(*original_idx);
+                return Some((order_idx, *original_idx));
             }
         }
         None
     }
 
-    fn window_at_point(windows: &[WindowData], point: NSPoint, bounds: NSRect) -> Option<WindowId> {
+    fn window_at_point(
+        windows: &[WindowData],
+        point: NSPoint,
+        bounds: NSRect,
+    ) -> Option<(usize, WindowId)> {
         if !Self::rect_contains_point(bounds, point) {
             return None;
         }
         let layout = Self::compute_window_layout(windows, bounds)?;
 
-        for window in windows.iter().rev() {
+        for (idx, window) in windows.iter().enumerate().rev() {
             let rect = layout.rect_for(window);
             if Self::rect_contains_point(rect, point) {
-                return Some(window.id);
+                return Some((idx, window.id));
             }
         }
         None
@@ -294,6 +427,199 @@ impl MissionControlView {
         })
     }
 
+    fn navigate_workspaces(
+        visible: &[(usize, &WorkspaceData)],
+        current: usize,
+        direction: NavDirection,
+    ) -> Option<usize> {
+        if visible.is_empty() {
+            return None;
+        }
+        let len = visible.len();
+        let mut idx = current.min(len.saturating_sub(1));
+        let cols = workspace_column_count(len);
+        let rows = if len > cols { 2 } else { 1 };
+
+        if rows == 1 {
+            match direction {
+                NavDirection::Left | NavDirection::Up => {
+                    idx = (idx + len - 1) % len;
+                }
+                NavDirection::Right | NavDirection::Down => {
+                    idx = (idx + 1) % len;
+                }
+            }
+            return Some(idx);
+        }
+
+        let row = idx % rows;
+        let col = idx / rows;
+
+        match direction {
+            NavDirection::Left | NavDirection::Right => {
+                let delta: isize = if matches!(direction, NavDirection::Right) {
+                    1
+                } else {
+                    -1
+                };
+                let cols_isize = cols as isize;
+                let mut new_col = col as isize;
+                for _ in 0..cols {
+                    new_col = (new_col + delta + cols_isize) % cols_isize;
+                    let candidate = new_col as usize * rows + row;
+                    if candidate < len {
+                        return Some(candidate);
+                    }
+                }
+                Some(idx)
+            }
+            NavDirection::Up => {
+                if row == 1 {
+                    Some(col * rows)
+                } else {
+                    let candidate = col * rows + 1;
+                    if candidate < len {
+                        Some(candidate)
+                    } else {
+                        Self::nearest_bottom_index(len, rows, col).or(Some(idx))
+                    }
+                }
+            }
+            NavDirection::Down => {
+                if row == 0 {
+                    let candidate = col * rows + 1;
+                    if candidate < len {
+                        Some(candidate)
+                    } else {
+                        Self::nearest_bottom_index(len, rows, col).or(Some(idx))
+                    }
+                } else {
+                    Some(col * rows)
+                }
+            }
+        }
+    }
+
+    fn navigate_windows(count: usize, current: usize, direction: NavDirection) -> Option<usize> {
+        if count == 0 {
+            return None;
+        }
+        let len = count;
+        let mut idx = current.min(len.saturating_sub(1));
+        match direction {
+            NavDirection::Left | NavDirection::Up => {
+                idx = (idx + len - 1) % len;
+            }
+            NavDirection::Right | NavDirection::Down => {
+                idx = (idx + 1) % len;
+            }
+        }
+        Some(idx)
+    }
+
+    fn nearest_bottom_index(len: usize, rows: usize, target_col: usize) -> Option<usize> {
+        if rows < 2 {
+            return None;
+        }
+
+        let mut best: Option<(usize, usize)> = None;
+        for idx in 0..len {
+            if idx % rows == 1 {
+                let col = idx / rows;
+                let delta = target_col.abs_diff(col);
+                match best {
+                    Some((best_delta, _)) if delta >= best_delta => continue,
+                    _ => best = Some((delta, idx)),
+                }
+            }
+        }
+        best.map(|(_, idx)| idx)
+    }
+
+    fn adjust_selection(&self, direction: NavDirection) -> bool {
+        let mut state = match self.ivars().try_borrow_mut() {
+            Ok(state) => state,
+            Err(_) => return false,
+        };
+        let mode = match state.mode().cloned() {
+            Some(mode) => mode,
+            None => return false,
+        };
+        state.ensure_selection();
+        let current = state.selection();
+
+        let new_selection = match (mode, current) {
+            (MissionControlMode::AllWorkspaces(workspaces), Some(Selection::Workspace(idx))) => {
+                let visible = Self::visible_workspaces(&workspaces);
+                if visible.is_empty() {
+                    None
+                } else {
+                    let idx = idx.min(visible.len().saturating_sub(1));
+                    Self::navigate_workspaces(&visible, idx, direction).map(Selection::Workspace)
+                }
+            }
+            (MissionControlMode::CurrentWorkspace(windows), Some(Selection::Window(idx))) => {
+                if windows.is_empty() {
+                    None
+                } else {
+                    let idx = idx.min(windows.len().saturating_sub(1));
+                    Self::navigate_windows(windows.len(), idx, direction).map(Selection::Window)
+                }
+            }
+            (MissionControlMode::AllWorkspaces(workspaces), None) => {
+                if Self::visible_workspaces(&workspaces).is_empty() {
+                    None
+                } else {
+                    Some(Selection::Workspace(0))
+                }
+            }
+            (MissionControlMode::CurrentWorkspace(windows), None) => {
+                if windows.is_empty() {
+                    None
+                } else {
+                    Some(Selection::Window(0))
+                }
+            }
+            _ => None,
+        };
+
+        if let Some(selection) = new_selection {
+            if state.selection() != Some(selection) {
+                state.set_selection(selection);
+                return true;
+            }
+        }
+        false
+    }
+
+    fn activate_selection_action(&self) {
+        let (mode, selection, handler) = {
+            let mut state = self.ivars().borrow_mut();
+            state.ensure_selection();
+            (state.mode().cloned(), state.selection(), state.on_action.clone())
+        };
+
+        let Some(cb) = handler else { return };
+
+        match (mode, selection) {
+            (
+                Some(MissionControlMode::AllWorkspaces(workspaces)),
+                Some(Selection::Workspace(idx)),
+            ) => {
+                let visible = Self::visible_workspaces(&workspaces);
+                if let Some((original_idx, _)) = visible.get(idx) {
+                    cb(MissionControlAction::SwitchToWorkspace(*original_idx));
+                }
+            }
+            (Some(MissionControlMode::CurrentWorkspace(windows)), Some(Selection::Window(idx))) => {
+                if let Some(window) = windows.get(idx) {
+                    cb(MissionControlAction::FocusWindow(window.id));
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn visible_workspaces<'a>(workspaces: &'a [WorkspaceData]) -> Vec<(usize, &'a WorkspaceData)> {
         workspaces
             .iter()
@@ -307,23 +633,24 @@ impl MissionControlView {
         workspaces: &[WorkspaceData],
         bounds: NSRect,
         cache: &HashMap<WindowId, CapturedWindowImage>,
+        selected: Option<usize>,
     ) {
         let visible = Self::visible_workspaces(workspaces);
         if visible.is_empty() {
             return;
         }
-        let cols = (visible.len() as f64 / 2.0).ceil().max(1.0) as usize;
+        let cols = workspace_column_count(visible.len());
         let rows = if visible.len() > cols { 2 } else { 1 };
         let spacing = 20.0;
         let tile_w = (bounds.size.width - spacing * ((cols + 1) as f64)) / (cols as f64);
         let tile_h = (bounds.size.height - spacing * ((rows + 1) as f64)) / (rows as f64);
 
-        for (i, (original_idx, _)) in visible.iter().enumerate() {
+        for (order_idx, (original_idx, _)) in visible.iter().enumerate() {
             let ws = &workspaces[*original_idx];
             let (r, c) = if rows == 2 {
-                (i % rows, i / rows)
+                (order_idx % rows, order_idx / rows)
             } else {
-                (0, i)
+                (0, order_idx)
             };
             let x = bounds.origin.x + spacing + (tile_w + spacing) * (c as f64);
             let y = bounds.origin.y + spacing + (tile_h + spacing) * (r as f64);
@@ -337,7 +664,7 @@ impl MissionControlView {
                 bg.fill();
             }
 
-            self.draw_windows_tile(&ws.windows, rect, cache);
+            self.draw_windows_tile(&ws.windows, rect, cache, None);
 
             unsafe {
                 let name = objc2_foundation::NSString::from_str(&ws.name);
@@ -348,16 +675,15 @@ impl MissionControlView {
                 let border = objc2_app_kit::NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
                     rect, 6.0, 6.0,
                 );
-                if ws.is_active {
+                let is_selected = Some(order_idx) == selected;
+                let stroke_color = if is_selected {
                     NSColor::colorWithCalibratedRed_green_blue_alpha(0.2, 0.45, 1.0, 0.85)
-                        .setStroke();
-                    border.setLineWidth(3.0);
-                    border.stroke();
                 } else {
-                    NSColor::colorWithCalibratedWhite_alpha(1.0, 0.12).setStroke();
-                    border.setLineWidth(1.0);
-                    border.stroke();
-                }
+                    NSColor::colorWithCalibratedWhite_alpha(1.0, 0.12)
+                };
+                stroke_color.setStroke();
+                border.setLineWidth(if is_selected { 3.0 } else { 1.0 });
+                border.stroke();
             }
         }
     }
@@ -367,12 +693,13 @@ impl MissionControlView {
         windows: &[WindowData],
         tile: NSRect,
         cache: &HashMap<WindowId, CapturedWindowImage>,
+        selected: Option<usize>,
     ) {
         let Some(layout) = Self::compute_window_layout(windows, tile) else {
             return;
         };
 
-        for window in windows.iter().rev() {
+        for (idx, window) in windows.iter().enumerate().rev() {
             let rect = layout.rect_for(window);
 
             unsafe {
@@ -381,8 +708,17 @@ impl MissionControlView {
                 );
                 NSColor::colorWithCalibratedWhite_alpha(1.0, 0.15).setFill();
                 path.fill();
-                NSColor::colorWithCalibratedWhite_alpha(0.0, 0.65).setStroke();
-                path.setLineWidth(1.0);
+                let is_selected = selected
+                    .map(|s| s.min(windows.len().saturating_sub(1)))
+                    .map_or(false, |s| s == idx);
+                if is_selected {
+                    NSColor::colorWithCalibratedRed_green_blue_alpha(0.2, 0.45, 1.0, 0.85)
+                        .setStroke();
+                    path.setLineWidth(2.0);
+                } else {
+                    NSColor::colorWithCalibratedWhite_alpha(0.0, 0.65).setStroke();
+                    path.setLineWidth(1.0);
+                }
                 path.stroke();
             }
 

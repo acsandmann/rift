@@ -17,6 +17,7 @@ use crate::ui::mission_control::{MissionControlAction, MissionControlMode, Missi
 pub enum Event {
     ShowAll,
     ShowCurrent,
+    Dismiss,
 }
 
 pub type Sender = actor::Sender<Event>;
@@ -103,6 +104,7 @@ impl MissionControlActor {
         match event {
             Event::ShowAll => self.show_all_workspaces(),
             Event::ShowCurrent => self.show_current_workspace(),
+            Event::Dismiss => self.dispose_overlay(),
         }
     }
 

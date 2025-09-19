@@ -19,38 +19,50 @@ thread_local! {
 
 pub struct Executor;
 
+pub struct Session;
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        HANDLE.with(|handle| {
+            handle.0.borrow_mut().main_task.take();
+        });
+    }
+}
+
 impl Executor {
-    pub fn run(task: impl Future<Output = ()>) {
+    pub fn start(task: impl Future<Output = ()>) -> Session {
         let task: Pin<Box<dyn Future<Output = ()> + '_>> = Box::pin(task);
         // Extend the lifetime.
         // Safety: We only poll the task within this function, then it is dropped.
         let task: Pin<Box<dyn Future<Output = ()> + 'static>> = unsafe { mem::transmute(task) };
 
         HANDLE.with(move |handle| {
-            // Ensure we drop the main task, even on unwind.
-            struct Guard;
-            impl Drop for Guard {
-                fn drop(&mut self) {
-                    HANDLE.with(|handle| {
-                        handle.0.borrow_mut().main_task.take();
-                    })
-                }
+            if handle.0.borrow().main_task.is_some() {
+                panic!("executor main task already running");
             }
-            let _guard = Guard;
-
             {
                 let mut state = handle.0.borrow_mut();
                 state.main_task.replace(task);
                 state.wakeup.wake_by_ref();
             }
+        });
 
+        Session
+    }
+
+    pub fn run(task: impl Future<Output = ()>) {
+        let session = Self::start(task);
+
+        HANDLE.with(|handle| {
             while handle.0.borrow().main_task.is_some() {
                 // Run the loop until it is stopped by process_tasks below.
                 // We do this in a loop just in case there were "spurious"
                 // stops by some other code.
                 CFRunLoop::run_current();
             }
-        })
+        });
+
+        drop(session);
     }
 }
 

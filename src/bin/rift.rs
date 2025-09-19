@@ -74,6 +74,7 @@ fn main() {
         unsafe {
             let _: () = objc2::msg_send![&*app, finishLaunching];
         }
+        unsafe { NSApplication::load() };
     }
 
     ensure_accessibility_permission();
@@ -186,7 +187,7 @@ fn main() {
     let (_swipe_tx, swipe_rx) = rift_wm::actor::channel();
     let swipe = Swipe::new(config.clone(), wm_controller_sender.clone(), swipe_rx);
 
-    Executor::run(async move {
+    let _executor_session = Executor::start(async move {
         if let Some(swipe) = swipe {
             join!(
                 wm_controller.run(),
@@ -210,6 +211,11 @@ fn main() {
             );
         }
     });
+
+    let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
+    unsafe {
+        let _: () = objc2::msg_send![&*app, run];
+    }
 }
 
 #[cfg(panic = "unwind")]

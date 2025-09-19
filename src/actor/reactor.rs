@@ -662,7 +662,7 @@ impl Reactor {
                         | LayoutCommand::SwitchToLastWorkspace
                 );
                 if is_workspace_switch {
-                    if let Some(space) = self.main_window_space() {
+                    if let Some(space) = self.workspace_command_space() {
                         self.store_current_floating_positions(space);
                     }
                     self.workspace_switch_generation =
@@ -677,7 +677,7 @@ impl Reactor {
                     | LayoutCommand::MoveWindowToWorkspace(_)
                     | LayoutCommand::CreateWorkspace
                     | LayoutCommand::SwitchToLastWorkspace => {
-                        if let Some(space) = self.main_window_space() {
+                        if let Some(space) = self.workspace_command_space() {
                             self.layout_engine.handle_virtual_workspace_command(space, &cmd)
                         } else {
                             layout::EventResponse::default()
@@ -1681,6 +1681,11 @@ impl Reactor {
     fn main_window_space(&self) -> Option<SpaceId> {
         // TODO: Optimize this with a cache or something.
         self.best_space_for_window(&self.windows.get(&self.main_window()?)?.frame_monotonic)
+    }
+
+    fn workspace_command_space(&self) -> Option<SpaceId> {
+        self.main_window_space()
+            .or_else(|| self.screens.iter().find_map(|screen| screen.space))
     }
 
     fn store_current_floating_positions(&mut self, space: SpaceId) {

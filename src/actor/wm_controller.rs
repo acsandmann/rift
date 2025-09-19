@@ -266,11 +266,13 @@ impl WmController {
                 }
             }
             Command(Wm(NextWorkspace)) => {
+                self.dismiss_mission_control();
                 self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
                     layout::LayoutCommand::NextWorkspace(None),
                 )));
             }
             Command(Wm(PrevWorkspace)) => {
+                self.dismiss_mission_control();
                 self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
                     layout::LayoutCommand::PrevWorkspace(None),
                 )));
@@ -288,6 +290,7 @@ impl WmController {
                 };
 
                 if let Some(workspace_index) = maybe_index {
+                    self.dismiss_mission_control();
                     self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
                         layout::LayoutCommand::SwitchToWorkspace(workspace_index),
                     )));
@@ -327,6 +330,7 @@ impl WmController {
                 )));
             }
             Command(Wm(SwitchToLastWorkspace)) => {
+                self.dismiss_mission_control();
                 self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
                     layout::LayoutCommand::SwitchToLastWorkspace,
                 )));
@@ -347,6 +351,12 @@ impl WmController {
             Command(ReactorCommand(cmd)) => {
                 self.events_tx.send(reactor::Event::Command(cmd));
             }
+        }
+    }
+
+    fn dismiss_mission_control(&self) {
+        if let Some(tx) = &self.mission_control_tx {
+            let _ = tx.try_send(mission_control::Event::Dismiss);
         }
     }
 
