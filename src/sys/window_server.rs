@@ -301,6 +301,7 @@ pub fn space_window_list_for_connection(
     windows
 }
 
+#[derive(Clone)]
 pub struct CapturedWindowImage(CFRetained<CGImage>);
 
 impl CapturedWindowImage {
@@ -316,7 +317,7 @@ pub fn capture_window_image(id: WindowServerId) -> Option<CapturedWindowImage> {
     if images_ref.is_null() {
         return None;
     }
-    let images_cf: CFArray<CFTypeRef> = unsafe { CFArray::wrap_under_get_rule(images_ref) };
+    let images_cf: CFArray<CFTypeRef> = unsafe { CFArray::wrap_under_create_rule(images_ref) };
     let item: CFTypeRef = *images_cf.get(0)?;
     let cg_ptr = NonNull::new(item as *mut CGImage)?;
     let retained = unsafe { CFRetained::retain(cg_ptr) };

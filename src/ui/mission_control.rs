@@ -1,12 +1,11 @@
 use core::ffi::c_void;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::thread;
 
 use core_graphics::sys as cg_sys;
 use core_graphics_types::geometry as cgt;
-use objc2::rc::Retained;
+use objc2::rc::{Retained, autoreleasepool};
 use objc2::{DeclaredClass, MainThreadOnly, msg_send};
 use objc2_app_kit::{
     NSApplication, NSBackingStoreType, NSColor, NSEvent, NSGraphicsContext, NSView,
@@ -26,6 +25,8 @@ unsafe extern "C" {
     fn CGContextTranslateCTM(c: cg_sys::CGContextRef, tx: f64, ty: f64);
     fn CGContextScaleCTM(c: cg_sys::CGContextRef, sx: f64, sy: f64);
     fn CGContextDrawImage(c: cg_sys::CGContextRef, rect: cgt::CGRect, image: cg_sys::CGImageRef);
+    fn CGContextFlush(c: cg_sys::CGContextRef);
+    fn malloc_zone_pressure_relief(zone: *mut c_void, goal: usize) -> usize;
 }
 
 #[derive(Debug, Clone)]
@@ -49,12 +50,14 @@ pub struct MissionControlState {
     mode: Option<MissionControlMode>,
     on_action: Option<Rc<dyn Fn(MissionControlAction)>>,
     selection: Option<Selection>,
+    preview_cache: HashMap<WindowId, CapturedWindowImage>,
 }
 
 impl MissionControlState {
     fn set_mode(&mut self, mode: MissionControlMode) {
         self.mode = Some(mode);
         self.selection = None;
+        self.prune_preview_cache();
         self.ensure_selection();
     }
 
@@ -63,6 +66,7 @@ impl MissionControlState {
     fn reset(&mut self) {
         self.mode = None;
         self.selection = None;
+        self.preview_cache.clear();
     }
 
     fn selection(&self) -> Option<Selection> { self.selection }
@@ -123,6 +127,32 @@ impl MissionControlState {
             Some(Selection::Window(idx)) => Some(idx),
             _ => None,
         }
+    }
+
+    fn prune_preview_cache(&mut self) {
+        if self.preview_cache.is_empty() {
+            return;
+        }
+
+        let mut valid: HashSet<WindowId> = HashSet::new();
+        if let Some(mode) = self.mode.as_ref() {
+            match mode {
+                MissionControlMode::AllWorkspaces(workspaces) => {
+                    for ws in workspaces {
+                        for window in &ws.windows {
+                            valid.insert(window.id);
+                        }
+                    }
+                }
+                MissionControlMode::CurrentWorkspace(windows) => {
+                    for window in windows {
+                        valid.insert(window.id);
+                    }
+                }
+            }
+        }
+
+        self.preview_cache.retain(|window_id, _| valid.contains(window_id));
     }
 }
 
@@ -254,8 +284,13 @@ objc2::define_class!(
 
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty: NSRect) {
-            let state = self.ivars().borrow();
-            let Some(mode) = state.mode() else { return };
+            let state_cell = self.ivars();
+            let (mode, selected_workspace, selected_window) = {
+                let mut state = state_cell.borrow_mut();
+                let Some(mode) = state.mode().cloned() else { return };
+                state.ensure_selection();
+                (mode, state.selected_workspace(), state.selected_window())
+            };
 
             unsafe {
                 NSColor::colorWithCalibratedWhite_alpha(0.0, 0.25).setFill();
@@ -265,85 +300,80 @@ objc2::define_class!(
             let content_bounds = Self::content_bounds(self.bounds());
             match mode {
                 MissionControlMode::AllWorkspaces(workspaces) => {
-                    let images =
-                        Self::collect_images(workspaces.iter().flat_map(|ws| ws.windows.iter()));
-                    self.draw_workspaces(
-                        workspaces,
-                        content_bounds,
-                        &images,
-                        state.selected_workspace(),
-                    );
+                    self.draw_workspaces(&state_cell, &workspaces, content_bounds, selected_workspace);
                 }
                 MissionControlMode::CurrentWorkspace(windows) => {
-                    let images = Self::collect_images(windows.iter());
                     self.draw_windows_tile(
-                        windows,
+                        &state_cell,
+                        &windows,
                         content_bounds,
-                        &images,
-                        state.selected_window(),
+                        selected_window,
                         WindowLayoutKind::Exploded,
                     );
                 }
             }
+
+            Self::pressure_relief();
         }
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
             let p = unsafe { self.convertPoint_fromView(event.locationInWindow(), None) };
-            let state = self.ivars().borrow();
-            let mode = state.mode().cloned();
-            let handler = state.on_action.clone();
-            drop(state);
-
-            let Some(mode) = mode else { return };
-            let Some(cb) = handler else { return };
+            let mut state = match self.ivars().try_borrow_mut() {
+                Ok(state) => state,
+                Err(_) => return,
+            };
+            let Some(cb) = state.on_action.clone() else { return };
 
             let content_bounds = Self::content_bounds(self.bounds());
-
-            let handled = match mode {
-                MissionControlMode::AllWorkspaces(workspaces) => {
+            let (next_selection, action) = match state.mode() {
+                Some(MissionControlMode::AllWorkspaces(workspaces)) => {
                     if let Some((order_idx, target_idx)) =
-                        Self::workspace_index_at_point(&workspaces, p, content_bounds)
+                        Self::workspace_index_at_point(workspaces, p, content_bounds)
                     {
-                        if let Some(mut state) = self.ivars().try_borrow_mut().ok() {
-                            state.set_selection(Selection::Workspace(order_idx));
-                        }
-                        unsafe { self.setNeedsDisplay(true) };
-                        cb(MissionControlAction::SwitchToWorkspace(target_idx));
-                        true
+                        (
+                            Some(Selection::Workspace(order_idx)),
+                            Some(MissionControlAction::SwitchToWorkspace(target_idx)),
+                        )
                     } else {
-                        false
+                        (None, None)
                     }
                 }
-                MissionControlMode::CurrentWorkspace(windows) => {
-                    if let Some((order_idx, win)) =
-                        Self::window_at_point(
-                            &windows,
-                            p,
-                            content_bounds,
-                            WindowLayoutKind::Exploded,
-                        )
-                    {
-                        if let Some(mut state) = self.ivars().try_borrow_mut().ok() {
-                            state.set_selection(Selection::Window(order_idx));
-                        }
-                        unsafe { self.setNeedsDisplay(true) };
+                Some(MissionControlMode::CurrentWorkspace(windows)) => {
+                    if let Some((order_idx, window_id)) = Self::window_at_point(
+                        windows,
+                        p,
+                        content_bounds,
+                        WindowLayoutKind::Exploded,
+                    ) {
                         let window_server_id = windows
                             .get(order_idx)
                             .and_then(|w| w.window_server_id)
                             .map(WindowServerId::new);
-                        cb(MissionControlAction::FocusWindow {
-                            window_id: win,
-                            window_server_id,
-                        });
-                        true
+                        (
+                            Some(Selection::Window(order_idx)),
+                            Some(MissionControlAction::FocusWindow {
+                                window_id,
+                                window_server_id,
+                            }),
+                        )
                     } else {
-                        false
+                        (None, None)
                     }
                 }
+                None => (None, None),
             };
 
-            if !handled {
+            if let Some(selection) = next_selection {
+                state.set_selection(selection);
+                unsafe { self.setNeedsDisplay(true) };
+            }
+
+            drop(state);
+
+            if let Some(action) = action {
+                cb(action);
+            } else {
                 cb(MissionControlAction::Dismiss);
             }
         }
@@ -358,20 +388,20 @@ objc2::define_class!(
                 Err(_) => return,
             };
 
-            let mode = match state.mode().cloned() {
+            let mode = match state.mode() {
                 Some(mode) => mode,
                 None => return,
             };
 
             let new_selection = match mode {
                 MissionControlMode::AllWorkspaces(workspaces) => Self::workspace_index_at_point(
-                    &workspaces,
+                    workspaces,
                     point,
                     content_bounds,
                 )
                 .map(|(order_idx, _)| Selection::Workspace(order_idx)),
                 MissionControlMode::CurrentWorkspace(windows) => Self::window_at_point(
-                    &windows,
+                    windows,
                     point,
                     content_bounds,
                     WindowLayoutKind::Exploded,
@@ -725,16 +755,15 @@ impl MissionControlView {
             Ok(state) => state,
             Err(_) => return false,
         };
-        let mode = match state.mode().cloned() {
-            Some(mode) => mode,
-            None => return false,
-        };
         state.ensure_selection();
         let current = state.selection();
 
-        let new_selection = match (mode, current) {
-            (MissionControlMode::AllWorkspaces(workspaces), Some(Selection::Workspace(idx))) => {
-                let visible = Self::visible_workspaces(&workspaces);
+        let new_selection = match (state.mode(), current) {
+            (
+                Some(MissionControlMode::AllWorkspaces(workspaces)),
+                Some(Selection::Workspace(idx)),
+            ) => {
+                let visible = Self::visible_workspaces(workspaces);
                 if visible.is_empty() {
                     None
                 } else {
@@ -742,7 +771,7 @@ impl MissionControlView {
                     Self::navigate_workspaces(&visible, idx, direction).map(Selection::Workspace)
                 }
             }
-            (MissionControlMode::CurrentWorkspace(windows), Some(Selection::Window(idx))) => {
+            (Some(MissionControlMode::CurrentWorkspace(windows)), Some(Selection::Window(idx))) => {
                 if windows.is_empty() {
                     None
                 } else {
@@ -750,14 +779,14 @@ impl MissionControlView {
                     Self::navigate_windows(windows.len(), idx, direction).map(Selection::Window)
                 }
             }
-            (MissionControlMode::AllWorkspaces(workspaces), None) => {
-                if Self::visible_workspaces(&workspaces).is_empty() {
+            (Some(MissionControlMode::AllWorkspaces(workspaces)), None) => {
+                if Self::visible_workspaces(workspaces).is_empty() {
                     None
                 } else {
                     Some(Selection::Workspace(0))
                 }
             }
-            (MissionControlMode::CurrentWorkspace(windows), None) => {
+            (Some(MissionControlMode::CurrentWorkspace(windows)), None) => {
                 if windows.is_empty() {
                     None
                 } else {
@@ -777,42 +806,53 @@ impl MissionControlView {
     }
 
     fn activate_selection_action(&self) {
-        let (mode, selection, handler) = {
+        let (handler, action) = {
             let mut state = self.ivars().borrow_mut();
             state.ensure_selection();
-            (state.mode().cloned(), state.selection(), state.on_action.clone())
+            let handler = state.on_action.clone();
+            let mode = state.mode();
+            let selection = state.selection();
+
+            let action = match (mode, selection) {
+                (
+                    Some(MissionControlMode::AllWorkspaces(workspaces)),
+                    Some(Selection::Workspace(idx)),
+                ) => {
+                    let visible = Self::visible_workspaces(workspaces);
+                    if visible.is_empty() {
+                        None
+                    } else {
+                        let idx = idx.min(visible.len().saturating_sub(1));
+                        visible.get(idx).map(|(original_idx, _)| {
+                            MissionControlAction::SwitchToWorkspace(*original_idx)
+                        })
+                    }
+                }
+                (
+                    Some(MissionControlMode::CurrentWorkspace(windows)),
+                    Some(Selection::Window(idx)),
+                ) => {
+                    if windows.is_empty() {
+                        None
+                    } else {
+                        let idx = idx.min(windows.len().saturating_sub(1));
+                        windows.get(idx).map(|window| {
+                            let window_server_id = window.window_server_id.map(WindowServerId::new);
+                            MissionControlAction::FocusWindow {
+                                window_id: window.id,
+                                window_server_id,
+                            }
+                        })
+                    }
+                }
+                _ => None,
+            };
+            (handler, action)
         };
 
         let Some(cb) = handler else { return };
-
-        match (mode, selection) {
-            (
-                Some(MissionControlMode::AllWorkspaces(workspaces)),
-                Some(Selection::Workspace(idx)),
-            ) => {
-                let visible = Self::visible_workspaces(&workspaces);
-                if visible.is_empty() {
-                    return;
-                }
-                let idx = idx.min(visible.len().saturating_sub(1));
-                if let Some((original_idx, _)) = visible.get(idx) {
-                    cb(MissionControlAction::SwitchToWorkspace(*original_idx));
-                }
-            }
-            (Some(MissionControlMode::CurrentWorkspace(windows)), Some(Selection::Window(idx))) => {
-                if windows.is_empty() {
-                    return;
-                }
-                let idx = idx.min(windows.len().saturating_sub(1));
-                if let Some(window) = windows.get(idx) {
-                    let window_server_id = window.window_server_id.map(WindowServerId::new);
-                    cb(MissionControlAction::FocusWindow {
-                        window_id: window.id,
-                        window_server_id,
-                    });
-                }
-            }
-            _ => {}
+        if let Some(action) = action {
+            cb(action);
         }
     }
 
@@ -826,9 +866,9 @@ impl MissionControlView {
 
     fn draw_workspaces(
         &self,
+        state: &RefCell<MissionControlState>,
         workspaces: &[WorkspaceData],
         bounds: NSRect,
-        cache: &HashMap<WindowId, CapturedWindowImage>,
         selected: Option<usize>,
     ) {
         let visible = Self::visible_workspaces(workspaces);
@@ -836,52 +876,56 @@ impl MissionControlView {
             return;
         };
         for (order_idx, (original_idx, _)) in visible.iter().enumerate() {
-            let ws = &workspaces[*original_idx];
-            let rect = grid.rect_for(order_idx);
+            autoreleasepool(|_| {
+                let ws = &workspaces[*original_idx];
+                let rect = grid.rect_for(order_idx);
 
-            unsafe {
-                let bg = objc2_app_kit::NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
-                    rect, 6.0, 6.0,
+                unsafe {
+                    let bg = objc2_app_kit::NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+                        rect, 6.0, 6.0,
+                    );
+                    NSColor::colorWithCalibratedWhite_alpha(1.0, 0.03).setFill();
+                    bg.fill();
+                }
+
+                self.draw_windows_tile(
+                    state,
+                    &ws.windows,
+                    rect,
+                    None,
+                    WindowLayoutKind::PreserveOriginal,
                 );
-                NSColor::colorWithCalibratedWhite_alpha(1.0, 0.03).setFill();
-                bg.fill();
-            }
 
-            self.draw_windows_tile(
-                &ws.windows,
-                rect,
-                cache,
-                None,
-                WindowLayoutKind::PreserveOriginal,
-            );
+                unsafe {
+                    let name = objc2_foundation::NSString::from_str(&ws.name);
+                    let label_point = NSPoint::new(rect.origin.x + 6.0, rect.origin.y + 6.0);
+                    let nil_attrs: *const objc2::runtime::AnyObject = core::ptr::null();
+                    let _: () =
+                        msg_send![&*name, drawAtPoint: label_point, withAttributes: nil_attrs];
 
-            unsafe {
-                let name = objc2_foundation::NSString::from_str(&ws.name);
-                let label_point = NSPoint::new(rect.origin.x + 6.0, rect.origin.y + 6.0);
-                let nil_attrs: *const objc2::runtime::AnyObject = core::ptr::null();
-                let _: () = msg_send![&*name, drawAtPoint: label_point, withAttributes: nil_attrs];
-
-                let border = objc2_app_kit::NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
-                    rect, 6.0, 6.0,
-                );
-                let is_selected = Some(order_idx) == selected;
-                let stroke_color = if is_selected {
-                    NSColor::colorWithCalibratedRed_green_blue_alpha(0.2, 0.45, 1.0, 0.85)
-                } else {
-                    NSColor::colorWithCalibratedWhite_alpha(1.0, 0.12)
-                };
-                stroke_color.setStroke();
-                border.setLineWidth(if is_selected { 3.0 } else { 1.0 });
-                border.stroke();
-            }
+                    let border =
+                        objc2_app_kit::NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+                            rect, 6.0, 6.0,
+                        );
+                    let is_selected = Some(order_idx) == selected;
+                    let stroke_color = if is_selected {
+                        NSColor::colorWithCalibratedRed_green_blue_alpha(0.2, 0.45, 1.0, 0.85)
+                    } else {
+                        NSColor::colorWithCalibratedWhite_alpha(1.0, 0.12)
+                    };
+                    stroke_color.setStroke();
+                    border.setLineWidth(if is_selected { 3.0 } else { 1.0 });
+                    border.stroke();
+                }
+            });
         }
     }
 
     fn draw_windows_tile(
         &self,
+        state: &RefCell<MissionControlState>,
         windows: &[WindowData],
         tile: NSRect,
-        cache: &HashMap<WindowId, CapturedWindowImage>,
         selected: Option<usize>,
         layout: WindowLayoutKind,
     ) {
@@ -891,13 +935,48 @@ impl MissionControlView {
 
         let selected_idx = selected.map(|s| s.min(windows.len().saturating_sub(1)));
         for idx in (0..windows.len()).rev() {
-            let window = &windows[idx];
-            let rect = rects[idx];
-            let is_selected = selected_idx.map_or(false, |s| s == idx);
-            Self::draw_window_outline(rect, is_selected);
-            if let Some(captured) = cache.get(&window.id) {
-                Self::draw_window_snapshot(rect, captured);
-            }
+            autoreleasepool(|_| {
+                let window = &windows[idx];
+                let rect = rects[idx];
+                let is_selected = selected_idx.map_or(false, |s| s == idx);
+                Self::draw_window_outline(rect, is_selected);
+                if let Some(captured) = Self::get_or_capture_preview(state, window) {
+                    Self::draw_window_snapshot(rect, &captured);
+                    drop(captured);
+                }
+            });
+        }
+    }
+
+    fn get_or_capture_preview(
+        state: &RefCell<MissionControlState>,
+        window: &WindowData,
+    ) -> Option<CapturedWindowImage> {
+        if let Some(image) = {
+            let state_ref = state.borrow();
+            state_ref.preview_cache.get(&window.id).cloned()
+        } {
+            return Some(image);
+        }
+
+        let captured = Self::capture_window_preview(window)?;
+        {
+            let mut state_mut = state.borrow_mut();
+            state_mut.preview_cache.entry(window.id).or_insert_with(|| captured.clone());
+        }
+        Some(captured)
+    }
+
+    fn capture_window_preview(window: &WindowData) -> Option<CapturedWindowImage> {
+        let wsid = window.window_server_id?;
+        capture_window_image(WindowServerId::new(wsid))
+    }
+
+    fn pressure_relief() {
+        unsafe {
+            // Hint to the allocator that now-unused capture buffers can be
+            // returned to the OS, keeping the Mission Control footprint low.
+            malloc_zone_pressure_relief(core::ptr::null_mut(), 0);
         }
     }
 
@@ -940,55 +1019,9 @@ impl MissionControlView {
                 };
                 CGContextDrawImage(cgctx, image_rect, cgimg);
                 CGContextRestoreGState(cgctx);
+                CGContextFlush(cgctx);
             }
         }
-    }
-
-    fn collect_images<'a, I>(windows: I) -> HashMap<WindowId, CapturedWindowImage>
-    where I: IntoIterator<Item = &'a WindowData> {
-        let requests: Vec<_> = windows
-            .into_iter()
-            .filter_map(|window| {
-                window.window_server_id.map(|wsid| (window.id, WindowServerId::new(wsid)))
-            })
-            .collect();
-        Self::collect_images_from_requests(requests)
-    }
-
-    fn collect_images_from_requests(
-        requests: Vec<(WindowId, WindowServerId)>,
-    ) -> HashMap<WindowId, CapturedWindowImage> {
-        if requests.is_empty() {
-            return HashMap::new();
-        }
-
-        if requests.len() == 1 {
-            let (window_id, wsid) = requests.into_iter().next().unwrap();
-            if let Some(image) = capture_window_image(wsid) {
-                let mut images = HashMap::with_capacity(1);
-                images.insert(window_id, image);
-                return images;
-            }
-            return HashMap::new();
-        }
-
-        let mut images = HashMap::with_capacity(requests.len());
-        thread::scope(|scope| {
-            let mut handles = Vec::with_capacity(requests.len());
-            for (window_id, wsid) in requests.into_iter() {
-                handles.push((window_id, scope.spawn(move || capture_window_image(wsid))));
-            }
-
-            for (window_id, handle) in handles {
-                match handle.join() {
-                    Ok(Some(image)) => {
-                        images.insert(window_id, image);
-                    }
-                    _ => {}
-                }
-            }
-        });
-        images
     }
 }
 
@@ -1078,6 +1111,7 @@ impl MissionControlOverlay {
             let _: () = objc2::msg_send![&*self.window, orderOut: std::ptr::null::<objc2::runtime::AnyObject>()];
         }
         self.key_tap.borrow_mut().take();
+        MissionControlView::pressure_relief();
     }
 
     fn emit_action(&self, action: MissionControlAction) {
