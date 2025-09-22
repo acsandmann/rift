@@ -11,7 +11,8 @@ use core_foundation::base::CFTypeRef;
 use core_foundation::string::CFStringRef;
 use core_graphics::base::CGError;
 use core_graphics::display::{CFArrayRef, CGWindowID};
-use objc2_core_foundation::{CGPoint, CGRect};
+use objc2_core_foundation::{CFArray, CGPoint, CGRect};
+use objc2_core_graphics::CGImage;
 use objc2_foundation::NSArray;
 use once_cell::sync::Lazy;
 
@@ -187,5 +188,5 @@ unsafe extern "C" {
         window_list: *const u32,
         window_count: c_int,
         options: u32,
-    ) -> CFArrayRef;
+    ) -> *mut CFArray<CGImage>;
 }

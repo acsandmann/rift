@@ -17,7 +17,7 @@ use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
 
 use crate::actor::app::WindowId;
 use crate::model::server::{WindowData, WorkspaceData};
-use crate::sys::window_server::{CapturedWindowImage, WindowServerId, capture_window_image};
+use crate::sys::window_server::{CapturedWindowImage, WindowServerId};
 
 unsafe extern "C" {
     fn CGContextSaveGState(c: cg_sys::CGContextRef);
@@ -25,8 +25,6 @@ unsafe extern "C" {
     fn CGContextTranslateCTM(c: cg_sys::CGContextRef, tx: f64, ty: f64);
     fn CGContextScaleCTM(c: cg_sys::CGContextRef, sx: f64, sy: f64);
     fn CGContextDrawImage(c: cg_sys::CGContextRef, rect: cgt::CGRect, image: cg_sys::CGImageRef);
-    fn CGContextFlush(c: cg_sys::CGContextRef);
-    fn malloc_zone_pressure_relief(zone: *mut c_void, goal: usize) -> usize;
 }
 
 #[derive(Debug, Clone)]
@@ -63,11 +61,7 @@ impl MissionControlState {
 
     fn mode(&self) -> Option<&MissionControlMode> { self.mode.as_ref() }
 
-    fn reset(&mut self) {
-        self.mode = None;
-        self.selection = None;
-        self.preview_cache.clear();
-    }
+    fn reset(&mut self) { *self = Self::default(); }
 
     fn selection(&self) -> Option<Selection> { self.selection }
 
@@ -312,8 +306,6 @@ objc2::define_class!(
                     );
                 }
             }
-
-            Self::pressure_relief();
         }
 
         #[unsafe(method(mouseDown:))]
@@ -968,16 +960,9 @@ impl MissionControlView {
     }
 
     fn capture_window_preview(window: &WindowData) -> Option<CapturedWindowImage> {
-        let wsid = window.window_server_id?;
-        capture_window_image(WindowServerId::new(wsid))
-    }
+        let id = WindowServerId::new(window.window_server_id?);
 
-    fn pressure_relief() {
-        unsafe {
-            // Hint to the allocator that now-unused capture buffers can be
-            // returned to the OS, keeping the Mission Control footprint low.
-            malloc_zone_pressure_relief(core::ptr::null_mut(), 0);
-        }
+        crate::sys::window_server::capture_window_image(id)
     }
 
     fn draw_window_outline(rect: NSRect, is_selected: bool) {
@@ -1019,7 +1004,6 @@ impl MissionControlView {
                 };
                 CGContextDrawImage(cgctx, image_rect, cgimg);
                 CGContextRestoreGState(cgctx);
-                CGContextFlush(cgctx);
             }
         }
     }
@@ -1041,6 +1025,7 @@ objc2::define_class!(
 pub struct MissionControlOverlay {
     window: Retained<NSWindow>,
     view: Retained<MissionControlView>,
+    blur_view: Retained<NSVisualEffectView>,
     mtm: MainThreadMarker,
     key_tap: RefCell<Option<crate::sys::event_tap::EventTap>>,
 }
@@ -1052,12 +1037,12 @@ impl MissionControlOverlay {
             let view: Retained<_> = msg_send![super(view), initWithFrame: frame];
             view.setWantsLayer(true);
 
-            let blur: Retained<NSVisualEffectView> = Retained::from(
+            let blur_view: Retained<NSVisualEffectView> = Retained::from(
                 NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), frame),
             );
-            blur.setMaterial(NSVisualEffectMaterial::HUDWindow);
-            blur.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
-            blur.setState(NSVisualEffectState::Active);
+            blur_view.setMaterial(NSVisualEffectMaterial::HUDWindow);
+            blur_view.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+            blur_view.setState(NSVisualEffectState::Active);
 
             let raw = MissionControlWindow::alloc(mtm);
             let window_sub: Retained<MissionControlWindow> = msg_send![
@@ -1075,7 +1060,7 @@ impl MissionControlOverlay {
             let clear = NSColor::clearColor();
             window.setBackgroundColor(Some(&clear));
             if let Some(content) = window.contentView() {
-                content.addSubview(&blur);
+                content.addSubview(&blur_view);
                 content.addSubview(&view);
             }
             let _: () = objc2::msg_send![&*window, makeKeyAndOrderFront: std::ptr::null::<objc2::runtime::AnyObject>()];
@@ -1084,6 +1069,7 @@ impl MissionControlOverlay {
             Self {
                 window,
                 view,
+                blur_view,
                 mtm,
                 key_tap: RefCell::new(None),
             }
@@ -1107,11 +1093,19 @@ impl MissionControlOverlay {
 
     pub fn hide(&self) {
         self.view.ivars().borrow_mut().reset();
-        unsafe {
-            let _: () = objc2::msg_send![&*self.window, orderOut: std::ptr::null::<objc2::runtime::AnyObject>()];
-        }
+
         self.key_tap.borrow_mut().take();
-        MissionControlView::pressure_relief();
+        self.view.ivars().borrow_mut().on_action = None;
+
+        unsafe {
+            self.window.makeFirstResponder(None);
+
+            self.blur_view.setState(NSVisualEffectState::Inactive);
+            self.window.setContentView(None);
+
+            let _: () = objc2::msg_send![&*self.window, orderOut: std::ptr::null::<objc2::runtime::AnyObject>()];
+            let _: () = objc2::msg_send![objc2::class!(CATransaction), flush];
+        }
     }
 
     fn emit_action(&self, action: MissionControlAction) {

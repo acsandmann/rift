@@ -1,4 +1,4 @@
-use std::ffi::c_int;
+use std::ffi::{c_int, c_void};
 use std::ptr::NonNull;
 use std::time::Duration;
 
@@ -10,7 +10,7 @@ use core_foundation::boolean::CFBoolean;
 use core_foundation::dictionary::CFDictionary;
 use core_foundation::number::CFNumber;
 use core_foundation::string::{CFString, CFStringRef};
-use core_graphics::base::CGError;
+use core_graphics::base::{CGError, kCGBitmapByteOrder32Little, kCGImageAlphaPremultipliedFirst};
 use core_graphics::display::{
     CGWindowID, CGWindowListCopyWindowInfo, kCGNullWindowID, kCGWindowListOptionOnScreenOnly,
 };
@@ -18,8 +18,8 @@ use core_graphics::window::{
     CGWindowListCreateDescriptionFromArray, kCGWindowBounds, kCGWindowLayer,
     kCGWindowListExcludeDesktopElements, kCGWindowNumber, kCGWindowOwnerPID,
 };
-use objc2_core_foundation::{CFRetained, CGPoint, CGRect};
-use objc2_core_graphics::CGImage;
+use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
+use objc2_core_graphics::{CGBitmapInfo, CGColorSpace, CGContext, CGImage, CGInterpolationQuality};
 use objc2_foundation::MainThreadMarker;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -309,19 +309,88 @@ impl CapturedWindowImage {
     pub fn as_ptr(&self) -> *mut CGImage { CFRetained::as_ptr(&self.0).as_ptr() }
 }
 
-pub fn capture_window_image(id: WindowServerId) -> Option<CapturedWindowImage> {
+/*pub fn capture_window_image(id: WindowServerId) -> Option<CapturedWindowImage> {
     let wid = id.as_u32();
     let images_ref = unsafe {
-        SLSHWCaptureWindowList(*G_CONNECTION, &wid as *const u32, 1, (1 << 11) | (1 << 9))
+        SLSHWCaptureWindowList(
+            *G_CONNECTION,
+            &wid as *const u32,
+            1,
+            (1 << 11) | (1 << 9) | (1 << 19),
+        )
     };
+
     if images_ref.is_null() {
         return None;
     }
-    let images_cf: CFArray<CFTypeRef> = unsafe { CFArray::wrap_under_create_rule(images_ref) };
-    let item: CFTypeRef = *images_cf.get(0)?;
-    let cg_ptr = NonNull::new(item as *mut CGImage)?;
-    let retained = unsafe { CFRetained::retain(cg_ptr) };
-    Some(CapturedWindowImage(retained))
+
+    let images = unsafe { CFRetained::from_raw(NonNull::new_unchecked(images_ref)) };
+
+    images.get(0).map(|img| CapturedWindowImage(img.retain()))
+}*/
+
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    pub fn CGBitmapContextCreate(
+        data: *mut c_void,
+        width: usize,
+        height: usize,
+        bits_per_component: usize,
+        bytes_per_row: usize,
+        space: *mut CGColorSpace,
+        bitmap_info: CGBitmapInfo,
+    ) -> *mut CGContext;
+
+    pub fn CGBitmapContextCreateImage(c: *mut CGContext) -> *mut CGImage;
+}
+
+pub fn copy_image(src: &CGImage) -> Option<CapturedWindowImage> {
+    unsafe {
+        let w = CGImage::width(Some(src)) as usize;
+        let h = CGImage::height(Some(src)) as usize;
+
+        let cs = CGColorSpace::new_device_rgb()?;
+
+        let bi = (kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little) as u32;
+        let ctx = CFRetained::from_raw(NonNull::new_unchecked(CGBitmapContextCreate(
+            std::ptr::null_mut(),
+            w,
+            h,
+            8,
+            0,
+            CFRetained::as_ptr(&cs).as_ptr(),
+            CGBitmapInfo(bi),
+        )));
+
+        CGContext::set_interpolation_quality(Some(ctx.as_ref()), CGInterpolationQuality::High);
+        let dst = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(w as f64, h as f64));
+        CGContext::draw_image(Some(ctx.as_ref()), dst, Some(src));
+
+        let out = CGBitmapContextCreateImage(CFRetained::as_ptr(&ctx).as_ptr());
+
+        NonNull::new(out as *mut CGImage).map(|p| CapturedWindowImage(CFRetained::from_raw(p)))
+    }
+}
+
+pub fn capture_window_image(id: WindowServerId) -> Option<CapturedWindowImage> {
+    unsafe {
+        let imgs_ref = SLSHWCaptureWindowList(
+            *G_CONNECTION,
+            &id.as_u32() as *const u32,
+            1,
+            (1 << 11) | (1 << 9) | (1 << 19),
+        );
+        if imgs_ref.is_null() {
+            return None;
+        }
+
+        let imgs = CFRetained::from_raw(NonNull::new_unchecked(imgs_ref));
+        if let Some(img) = imgs.get(0) {
+            return copy_image(img.as_ref());
+        }
+
+        None
+    }
 }
 
 // credit: https://github.com/Hammerspoon/hammerspoon/issues/370#issuecomment-545545468
