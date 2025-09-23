@@ -61,7 +61,13 @@ impl MissionControlState {
 
     fn mode(&self) -> Option<&MissionControlMode> { self.mode.as_ref() }
 
-    fn reset(&mut self) { *self = Self::default(); }
+    fn purge(&mut self) {
+        self.mode = None;
+        self.selection = None;
+        self.on_action = None;
+        self.preview_cache.clear();
+        self.preview_cache.shrink_to_fit();
+    }
 
     fn selection(&self) -> Option<Selection> { self.selection }
 
@@ -974,7 +980,7 @@ impl MissionControlView {
             path.fill();
             if is_selected {
                 NSColor::colorWithCalibratedRed_green_blue_alpha(0.2, 0.45, 1.0, 0.85).setStroke();
-                path.setLineWidth(2.0);
+                path.setLineWidth(4.0);
             } else {
                 NSColor::colorWithCalibratedWhite_alpha(0.0, 0.65).setStroke();
                 path.setLineWidth(1.0);
@@ -1092,20 +1098,23 @@ impl MissionControlOverlay {
     }
 
     pub fn hide(&self) {
-        self.view.ivars().borrow_mut().reset();
+        {
+            let mut s = self.view.ivars().borrow_mut();
+            s.purge();
+        }
 
         self.key_tap.borrow_mut().take();
         self.view.ivars().borrow_mut().on_action = None;
 
         unsafe {
             self.window.makeFirstResponder(None);
-
             self.blur_view.setState(NSVisualEffectState::Inactive);
             self.window.setContentView(None);
-
             let _: () = objc2::msg_send![&*self.window, orderOut: std::ptr::null::<objc2::runtime::AnyObject>()];
             let _: () = objc2::msg_send![objc2::class!(CATransaction), flush];
         }
+
+        objc2::rc::autoreleasepool(|_| {});
     }
 
     fn emit_action(&self, action: MissionControlAction) {
