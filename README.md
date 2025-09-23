@@ -1,6 +1,6 @@
 # rift
 
-rift is a tiling window for macos. it is inspired by i3/sway/hyprland and aerospace's virtual workspace system.
+rift is a tiling window manager for macos inspired by i3 / sway with a virtual workspace system that takes away the pain points of native macos spaces. it has smooth animations, an extensive featureset, and does **not** require disabling of SIP for *any* functionality.
 
 ![demo](assets/demo.gif)
 
@@ -11,7 +11,7 @@ rift is a tiling window for macos. it is inspired by i3/sway/hyprland and aerosp
 - ipc layer that allows easily creation of custom integrations (like sketchybar or more dynamic configs)
 - multiple layout systems:
 	* tiling layout system(like i3/sway)
-	* binary space partioning system(like bspwm)
+	* binary space partitioning system(like bspwm)
 - menubar integration that shows the state of play ![menubar](assets/menubar.png)
 - does **NOT** require disabling of SIP
 - allows "displays have separate spaces" to be enabled without any issues (most/all wms ask for it to be disabled). this allows you to have a full screen app on one display whilst using the other display normally.
