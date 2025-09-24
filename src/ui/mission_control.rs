@@ -3,18 +3,17 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Instant;
 
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::{DeclaredClass, MainThreadOnly, msg_send};
 use objc2_app_kit::{
-    NSApplication, NSBackingStoreType, NSColor, NSEvent, NSGraphicsContext, NSView,
-    NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
-    NSWindow, NSWindowStyleMask,
+    NSApplication, NSBackingStoreType, NSColor, NSEvent, NSView, NSVisualEffectBlendingMode,
+    NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use objc2_core_graphics::CGContext;
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
-use objc2_quartz_core::CATransaction;
+use objc2_quartz_core::{CALayer, CATransaction};
 use parking_lot::Mutex;
 
 use crate::actor::app::WindowId;
@@ -42,6 +41,7 @@ pub struct MissionControlState {
     on_action: Option<Rc<dyn Fn(MissionControlAction)>>,
     selection: Option<Selection>,
     preview_cache: Arc<Mutex<HashMap<WindowId, CapturedWindowImage>>>,
+    preview_layers: HashMap<WindowId, Retained<CALayer>>,
 }
 
 impl Default for MissionControlState {
@@ -51,6 +51,7 @@ impl Default for MissionControlState {
             on_action: None,
             selection: None,
             preview_cache: Arc::new(Mutex::new(HashMap::new())),
+            preview_layers: HashMap::new(),
         }
     }
 }
@@ -72,6 +73,10 @@ impl MissionControlState {
         let mut cache = self.preview_cache.lock();
         cache.clear();
         cache.shrink_to_fit();
+
+        for (_id, layer) in self.preview_layers.drain() {
+            layer.removeFromSuperlayer();
+        }
     }
 
     fn selection(&self) -> Option<Selection> { self.selection }
@@ -160,6 +165,19 @@ impl MissionControlState {
         }
 
         cache.retain(|window_id, _| valid.contains(window_id));
+
+        let mut remove_keys = Vec::new();
+        for (&wid, layer) in self.preview_layers.iter() {
+            if !valid.contains(&wid) {
+                unsafe {
+                    layer.removeFromSuperlayer();
+                }
+                remove_keys.push(wid);
+            }
+        }
+        for k in remove_keys {
+            self.preview_layers.remove(&k);
+        }
     }
 }
 
@@ -291,10 +309,14 @@ objc2::define_class!(
 
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty: NSRect) {
+            let start = Instant::now();
             let state_cell = self.ivars();
             let (mode, selected_workspace, selected_window) = {
                 let mut state = state_cell.borrow_mut();
-                let Some(mode) = state.mode().cloned() else { return };
+                let Some(mode) = state.mode().cloned() else {
+                    eprintln!("draw_rect: no mode, took {:?}", start.elapsed());
+                    return
+                };
                 state.ensure_selection();
                 (mode, state.selected_workspace(), state.selected_window())
             };
@@ -307,9 +329,12 @@ objc2::define_class!(
             let content_bounds = Self::content_bounds(self.bounds());
             match mode {
                 MissionControlMode::AllWorkspaces(workspaces) => {
+                    let branch_start = Instant::now();
                     self.draw_workspaces(&state_cell, &workspaces, content_bounds, selected_workspace);
+                    eprintln!("draw_rect: draw_workspaces took {:?}", branch_start.elapsed());
                 }
                 MissionControlMode::CurrentWorkspace(windows) => {
+                    let branch_start = Instant::now();
                     self.draw_windows_tile(
                         &state_cell,
                         &windows,
@@ -317,8 +342,10 @@ objc2::define_class!(
                         selected_window,
                         WindowLayoutKind::Exploded,
                     );
+                    eprintln!("draw_rect: draw_windows_tile took {:?}", branch_start.elapsed());
                 }
             }
+            eprintln!("draw_rect: total took {:?}", start.elapsed());
         }
 
         #[unsafe(method(mouseDown:))]
@@ -939,14 +966,44 @@ impl MissionControlView {
         };
 
         let selected_idx = selected.map(|s| s.min(windows.len().saturating_sub(1)));
+
+        let parent_layer = match unsafe { self.layer() } {
+            Some(l) => l,
+            None => return,
+        };
+
         for idx in (0..windows.len()).rev() {
             autoreleasepool(|_| {
                 let window = &windows[idx];
                 let rect = rects[idx];
                 let is_selected = selected_idx.map_or(false, |s| s == idx);
                 Self::draw_window_outline(rect, is_selected);
+
                 if let Some(captured) = Self::get_or_capture_preview(state, window) {
-                    Self::draw_window_snapshot(rect, &captured);
+                    let mut s = state.borrow_mut();
+                    let layer = s.preview_layers.entry(window.id).or_insert_with(|| {
+                        let lay = CALayer::layer();
+                        parent_layer.addSublayer(&lay);
+                        lay
+                    });
+
+                    layer.setFrame(CGRect::new(
+                        CGPoint::new(rect.origin.x, rect.origin.y),
+                        CGSize::new(rect.size.width, rect.size.height),
+                    ));
+                    layer.setMasksToBounds(true);
+                    layer.setCornerRadius(4.0);
+                    if selected_idx.map_or(false, |si| si == idx) {
+                        layer.setZPosition(1.0);
+                    } else {
+                        layer.setZPosition(0.0);
+                    }
+
+                    unsafe {
+                        let img_ptr = captured.as_ptr() as *mut objc2::runtime::AnyObject;
+                        let _: () = msg_send![&*layer, setContents: img_ptr];
+                    }
+
                     drop(captured);
                 }
             });
@@ -957,22 +1014,61 @@ impl MissionControlView {
         state: &RefCell<MissionControlState>,
         window: &WindowData,
     ) -> Option<CapturedWindowImage> {
-        let state_ref = state.borrow_mut();
+        let total_start = Instant::now();
+
+        let mut state_ref = state.borrow_mut();
         let mut cache = state_ref.preview_cache.lock();
 
         if let Some(image) = cache.get(&window.id).cloned() {
+            eprintln!(
+                "get_or_capture_preview: cache hit for {:?} took {:?}",
+                window.id,
+                total_start.elapsed()
+            );
             return Some(image);
         }
 
+        drop(cache);
+        drop(state_ref);
+
+        let capture_start = Instant::now();
         let captured = Self::capture_window_preview(window)?;
+        eprintln!(
+            "get_or_capture_preview: capture for {:?} took {:?}",
+            window.id,
+            capture_start.elapsed()
+        );
+
+        let mut state_ref = state.borrow_mut();
+        let mut cache = state_ref.preview_cache.lock();
         cache.entry(window.id).or_insert_with(|| captured.clone());
+
+        eprintln!(
+            "get_or_capture_preview: total for {:?} took {:?}",
+            window.id,
+            total_start.elapsed()
+        );
         Some(captured)
     }
 
     fn capture_window_preview(window: &WindowData) -> Option<CapturedWindowImage> {
-        let id = WindowServerId::new(window.window_server_id?);
-
-        crate::sys::window_server::capture_window_image(id)
+        let id_opt = window.window_server_id?;
+        let id = WindowServerId::new(id_opt);
+        let start = Instant::now();
+        let res = crate::sys::window_server::capture_window_image(id);
+        match &res {
+            Some(_) => eprintln!(
+                "capture_window_preview: captured for window {:?} took {:?}",
+                window.id,
+                start.elapsed()
+            ),
+            None => eprintln!(
+                "capture_window_preview: capture failed for window {:?} took {:?}",
+                window.id,
+                start.elapsed()
+            ),
+        }
+        res
     }
 
     fn draw_window_outline(rect: NSRect, is_selected: bool) {
@@ -990,33 +1086,6 @@ impl MissionControlView {
                 path.setLineWidth(1.0);
             }
             path.stroke();
-        }
-    }
-
-    fn draw_window_snapshot(rect: NSRect, captured: &CapturedWindowImage) {
-        if let Some(ctx) = unsafe { NSGraphicsContext::currentContext() } {
-            unsafe {
-                let cgctx = ctx.CGContext();
-
-                CGContext::save_g_state(Some(&*cgctx));
-                // Flip vertically within the destination rect so the image draws right side up.
-                CGContext::translate_ctm(
-                    Some(&*cgctx),
-                    rect.origin.x,
-                    rect.origin.y + rect.size.height,
-                );
-                CGContext::scale_ctm(Some(&*cgctx), 1.0, -1.0);
-
-                let image_rect = CGRect {
-                    origin: CGPoint { x: 0.0, y: 0.0 },
-                    size: CGSize {
-                        width: rect.size.width,
-                        height: rect.size.height,
-                    },
-                };
-                CGContext::draw_image(Some(&*cgctx), image_rect, Some(captured.cg_image()));
-                CGContext::restore_g_state(Some(&*cgctx));
-            }
         }
     }
 
@@ -1055,16 +1124,32 @@ impl MissionControlView {
                     Some(id) => id,
                     None => continue,
                 };
-                let mut cache = preview_cache.lock();
 
-                if cache.contains_key(&win.id) {
-                    continue;
+                // fast-path if already cached
+                {
+                    let mut cache = preview_cache.lock();
+                    if cache.contains_key(&win.id) {
+                        continue;
+                    }
                 }
 
+                let start = Instant::now();
                 if let Some(img) =
                     crate::sys::window_server::capture_window_image(WindowServerId::new(wsid))
                 {
+                    let mut cache = preview_cache.lock();
                     cache.entry(win.id).or_insert_with(|| img.clone());
+                    eprintln!(
+                        "prewarm_previews: captured preview for {:?} in {:?}",
+                        win.id,
+                        start.elapsed()
+                    );
+                } else {
+                    eprintln!(
+                        "prewarm_previews: failed to capture preview for {:?} in {:?}",
+                        win.id,
+                        start.elapsed()
+                    );
                 }
             }
         });

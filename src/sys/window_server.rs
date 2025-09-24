@@ -389,7 +389,9 @@ pub fn capture_window_image(id: WindowServerId) -> Option<CapturedWindowImage> {
 
         let imgs = CFRetained::from_raw(NonNull::new_unchecked(imgs_ref));
         if let Some(img) = imgs.get(0) {
-            return copy_image(img.as_ref());
+            let i = img.clone();
+            drop(imgs);
+            return Some(CapturedWindowImage(i));
         }
 
         None
