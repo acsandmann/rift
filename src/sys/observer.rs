@@ -17,6 +17,8 @@ use core_foundation::{declare_TCFType, impl_TCFType};
 use dispatchr::queue;
 use dispatchr::time::Time;
 
+use crate::sys::dispatch::DispatchExt;
+
 declare_TCFType!(AXObserver, AXObserverRef);
 impl_TCFType!(AXObserver, AXObserverRef, AXObserverGetTypeID);
 
@@ -105,15 +107,6 @@ impl Drop for Observer {
     }
 }
 
-unsafe extern "C" {
-    fn dispatch_after_f(
-        when: Time,
-        queue: *const queue::Unmanaged,
-        context: *mut c_void,
-        work: extern "C" fn(*mut c_void),
-    );
-}
-
 struct AddNotifRetryCtx {
     observer: AXObserver,
     elem: AXUIElement,
@@ -163,9 +156,8 @@ impl Observer {
                     notification,
                     callback: self.callback as *mut c_void,
                 });
-                dispatch_after_f(
+                queue::main().after_f(
                     Time::NOW.new_after(10_000_000),
-                    queue::main(),
                     Box::into_raw(ctx) as *mut c_void,
                     add_notif_retry,
                 );

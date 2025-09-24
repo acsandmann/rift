@@ -2,6 +2,7 @@ use core::ffi::c_void;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::{DeclaredClass, MainThreadOnly, msg_send};
@@ -14,6 +15,7 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::CGContext;
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
 use objc2_quartz_core::CATransaction;
+use parking_lot::Mutex;
 
 use crate::actor::app::WindowId;
 use crate::model::server::{WindowData, WorkspaceData};
@@ -35,12 +37,22 @@ pub enum MissionControlAction {
     Dismiss,
 }
 
-#[derive(Default)]
 pub struct MissionControlState {
     mode: Option<MissionControlMode>,
     on_action: Option<Rc<dyn Fn(MissionControlAction)>>,
     selection: Option<Selection>,
-    preview_cache: HashMap<WindowId, CapturedWindowImage>,
+    preview_cache: Arc<Mutex<HashMap<WindowId, CapturedWindowImage>>>,
+}
+
+impl Default for MissionControlState {
+    fn default() -> Self {
+        Self {
+            mode: None,
+            on_action: None,
+            selection: None,
+            preview_cache: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
 }
 
 impl MissionControlState {
@@ -57,8 +69,9 @@ impl MissionControlState {
         self.mode = None;
         self.selection = None;
         self.on_action = None;
-        self.preview_cache.clear();
-        self.preview_cache.shrink_to_fit();
+        let mut cache = self.preview_cache.lock();
+        cache.clear();
+        cache.shrink_to_fit();
     }
 
     fn selection(&self) -> Option<Selection> { self.selection }
@@ -122,7 +135,9 @@ impl MissionControlState {
     }
 
     fn prune_preview_cache(&mut self) {
-        if self.preview_cache.is_empty() {
+        let mut cache = self.preview_cache.lock();
+
+        if cache.is_empty() {
             return;
         }
 
@@ -144,7 +159,7 @@ impl MissionControlState {
             }
         }
 
-        self.preview_cache.retain(|window_id, _| valid.contains(window_id));
+        cache.retain(|window_id, _| valid.contains(window_id));
     }
 }
 
@@ -942,18 +957,15 @@ impl MissionControlView {
         state: &RefCell<MissionControlState>,
         window: &WindowData,
     ) -> Option<CapturedWindowImage> {
-        if let Some(image) = {
-            let state_ref = state.borrow();
-            state_ref.preview_cache.get(&window.id).cloned()
-        } {
+        let state_ref = state.borrow_mut();
+        let mut cache = state_ref.preview_cache.lock();
+
+        if let Some(image) = cache.get(&window.id).cloned() {
             return Some(image);
         }
 
         let captured = Self::capture_window_preview(window)?;
-        {
-            let mut state_mut = state.borrow_mut();
-            state_mut.preview_cache.entry(window.id).or_insert_with(|| captured.clone());
-        }
+        cache.entry(window.id).or_insert_with(|| captured.clone());
         Some(captured)
     }
 
@@ -1006,6 +1018,56 @@ impl MissionControlView {
                 CGContext::restore_g_state(Some(&*cgctx));
             }
         }
+    }
+
+    fn prewarm_previews(&self) {
+        let state_cell = self.ivars();
+
+        let windows: Vec<WindowData> = {
+            let state_ref = state_cell.borrow();
+            match state_ref.mode() {
+                Some(MissionControlMode::AllWorkspaces(workspaces)) => {
+                    let mut all = Vec::new();
+                    for ws in workspaces {
+                        for w in &ws.windows {
+                            all.push(w.clone());
+                        }
+                    }
+                    all
+                }
+                Some(MissionControlMode::CurrentWorkspace(wins)) => wins.clone(),
+                None => Vec::new(),
+            }
+        };
+
+        if windows.is_empty() {
+            return;
+        }
+
+        let preview_cache = {
+            let state_ref = state_cell.borrow();
+            state_ref.preview_cache.clone()
+        };
+
+        std::thread::spawn(move || {
+            for win in windows.into_iter() {
+                let wsid = match win.window_server_id {
+                    Some(id) => id,
+                    None => continue,
+                };
+                let mut cache = preview_cache.lock();
+
+                if cache.contains_key(&win.id) {
+                    continue;
+                }
+
+                if let Some(img) =
+                    crate::sys::window_server::capture_window_image(WindowServerId::new(wsid))
+                {
+                    cache.entry(win.id).or_insert_with(|| img.clone());
+                }
+            }
+        });
     }
 }
 
@@ -1065,7 +1127,6 @@ impl MissionControlOverlay {
                 content.addSubview(&blur_view);
                 content.addSubview(&view);
             }
-            window.makeKeyAndOrderFront(Some(&view));
 
             Self {
                 window,
@@ -1084,6 +1145,7 @@ impl MissionControlOverlay {
     pub fn update(&self, mode: MissionControlMode) {
         unsafe { self.blur_view.setState(NSVisualEffectState::Active) };
         self.view.ivars().borrow_mut().set_mode(mode);
+        self.view.prewarm_previews();
         self.window.makeKeyAndOrderFront(Some(&self.view));
         unsafe { self.view.setNeedsDisplay(true) };
         let app = NSApplication::sharedApplication(self.mtm);

@@ -1,11 +1,32 @@
+use std::ffi::c_void;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
+use dispatchr::queue::Unmanaged;
 use dispatchr::semaphore::Managed;
 use dispatchr::time::Time;
 use futures_task::{ArcWake, waker};
+
+unsafe extern "C" {
+    pub fn dispatch_after_f(
+        when: Time,
+        queue: *const Unmanaged,
+        context: *mut c_void,
+        work: extern "C" fn(*mut c_void),
+    );
+}
+
+pub trait DispatchExt {
+    fn after_f(&self, when: Time, context: *mut c_void, work: extern "C" fn(*mut c_void));
+}
+
+impl DispatchExt for Unmanaged {
+    fn after_f(&self, when: Time, context: *mut c_void, work: extern "C" fn(*mut c_void)) {
+        unsafe { dispatch_after_f(when, self, context, work) }
+    }
+}
 
 pub fn block_on<T: 'static>(
     mut fut: r#continue::Future<T>,
