@@ -1,5 +1,4 @@
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
 use std::time::Duration;
 
 use objc2::MainThreadMarker;
@@ -25,7 +24,7 @@ pub enum Event {
 }
 
 pub struct Menu {
-    config: Arc<Config>,
+    config: Config,
     rx: Receiver,
     icon: Option<MenuIcon>,
     last_signature: Option<u64>,
@@ -35,7 +34,7 @@ pub type Sender = actor::Sender<Event>;
 pub type Receiver = actor::Receiver<Event>;
 
 impl Menu {
-    pub fn new(config: Arc<Config>, rx: Receiver, mtm: MainThreadMarker) -> Self {
+    pub fn new(config: Config, rx: Receiver, mtm: MainThreadMarker) -> Self {
         Self {
             icon: config.settings.ui.menu_bar.enabled.then(|| MenuIcon::new(mtm)),
             config,

@@ -304,6 +304,9 @@ pub struct Config {
     pub virtual_workspaces: VirtualWorkspaceSettings,
 }
 
+unsafe impl Send for Config {}
+unsafe impl Sync for Config {}
+
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {

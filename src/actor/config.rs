@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info};
 
@@ -22,12 +20,12 @@ pub enum Event {
 }
 
 pub struct ConfigActor {
-    config: Arc<Config>,
+    config: Config,
     reactor_tx: reactor::Sender,
 }
 
 impl ConfigActor {
-    pub fn spawn(config: Arc<Config>, reactor_tx: reactor::Sender) -> Sender {
+    pub fn spawn(config: Config, reactor_tx: reactor::Sender) -> Sender {
         let (tx, rx) = actor::channel();
         std::thread::Builder::new()
             .name("config".to_string())
@@ -55,7 +53,7 @@ impl ConfigActor {
     }
 
     fn handle_config_query(&self) -> serde_json::Value {
-        serde_json::to_value(&*self.config).unwrap_or_else(|e| {
+        serde_json::to_value(&self.config).unwrap_or_else(|e| {
             error!("Failed to serialize config: {}", e);
             serde_json::json!({ "error": format!("Failed to serialize config: {}", e) })
         })
@@ -64,7 +62,7 @@ impl ConfigActor {
     fn handle_config_command(&mut self, cmd: ConfigCommand) -> Result<(), String> {
         debug!("Applying config command: {:?}", cmd);
 
-        let mut new_config = (*self.config).clone();
+        let mut new_config = self.config.clone();
         let mut config_changed = false;
         let mut errors: Vec<String> = Vec::new();
 
@@ -224,7 +222,7 @@ impl ConfigActor {
             },
 
             ConfigCommand::GetConfig => {
-                let config_json = serde_json::to_string_pretty(&*self.config)
+                let config_json = serde_json::to_string_pretty(&self.config)
                     .unwrap_or_else(|e| format!("Error serializing config: {}", e));
                 info!("Current config:\n{}", config_json);
                 return Ok(());
@@ -263,7 +261,7 @@ impl ConfigActor {
                 }
             }
 
-            self.config = Arc::new(new_config);
+            self.config = new_config;
 
             self.reactor_tx.send(reactor::Event::ConfigUpdated(self.config.clone()));
         }
@@ -282,7 +280,7 @@ impl ConfigActor {
 
         if config_path.exists() {
             let new_config = crate::common::config::Config::read(&config_path)?;
-            self.config = Arc::new(new_config);
+            self.config = new_config;
             Ok(())
         } else {
             Err("Config file not found".into())

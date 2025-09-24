@@ -1,7 +1,6 @@
 use std::cell::RefCell;
 use std::mem::replace;
 use std::rc::Rc;
-use std::sync::Arc;
 
 use objc2_app_kit::NSEvent;
 use objc2_core_foundation::{CGPoint, CGRect};
@@ -33,7 +32,7 @@ pub enum Request {
 }
 
 pub struct Mouse {
-    config: Arc<Config>,
+    config: Config,
     events_tx: reactor::Sender,
     requests_rx: Option<Receiver>,
     state: RefCell<State>,
@@ -84,7 +83,7 @@ unsafe fn drop_mouse_ctx(ptr: *mut std::ffi::c_void) {
 }
 
 impl Mouse {
-    pub fn new(config: Arc<Config>, events_tx: reactor::Sender, requests_rx: Receiver) -> Self {
+    pub fn new(config: Config, events_tx: reactor::Sender, requests_rx: Receiver) -> Self {
         let disable_hotkey = config.settings.focus_follows_mouse_disable_hotkey;
         Mouse {
             config,

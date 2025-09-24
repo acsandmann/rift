@@ -1,7 +1,6 @@
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::rc::Rc;
-use std::sync::Arc;
 
 use objc2_app_kit::{NSEvent, NSEventType, NSTouchPhase};
 use objc2_core_graphics::{self as ocg, CGEvent, CGEventMask};
@@ -57,7 +56,7 @@ pub struct Swipe {
 
 impl Swipe {
     pub fn new(
-        config: Arc<Config>,
+        config: Config,
         wm_sender: wm_controller::Sender,
         requests_rx: Receiver,
     ) -> Option<Self> {

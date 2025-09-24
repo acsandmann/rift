@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use clap::Parser;
 use objc2::MainThreadMarker;
@@ -86,7 +85,6 @@ fn main() {
     };
     config.settings.animate &= !opt.no_animate;
     config.settings.default_disable |= opt.default_disable;
-    let config = Arc::new(config);
 
     if opt.validate {
         LayoutEngine::load(restore_file()).unwrap();

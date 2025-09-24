@@ -1,5 +1,4 @@
 use std::rc::Rc;
-use std::sync::Arc;
 
 use r#continue::continuation;
 use objc2_app_kit::NSScreen;
@@ -24,7 +23,7 @@ pub type Sender = actor::Sender<Event>;
 pub type Receiver = actor::Receiver<Event>;
 
 pub struct MissionControlActor {
-    _config: Arc<Config>,
+    _config: Config,
     rx: Receiver,
     reactor_tx: reactor::Sender,
     overlay: Option<MissionControlOverlay>,
@@ -34,7 +33,7 @@ pub struct MissionControlActor {
 
 impl MissionControlActor {
     pub fn new(
-        config: Arc<Config>,
+        config: Config,
         rx: Receiver,
         reactor_tx: reactor::Sender,
         mtm: MainThreadMarker,

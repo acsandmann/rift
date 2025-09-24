@@ -1,6 +1,5 @@
 use std::collections::hash_map::Entry;
 use std::rc::Rc;
-use std::sync::Arc;
 
 use objc2::MainThreadMarker;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
@@ -34,7 +33,7 @@ pub enum Event {
 }
 
 pub struct StackLine {
-    config: Arc<Config>,
+    config: Config,
     rx: Receiver,
     mtm: MainThreadMarker,
     indicators: HashMap<NodeId, GroupIndicatorNSView>,
@@ -49,7 +48,7 @@ pub type Receiver = actor::Receiver<Event>;
 
 impl StackLine {
     pub fn new(
-        config: Arc<Config>,
+        config: Config,
         rx: Receiver,
         mtm: MainThreadMarker,
         reactor_tx: reactor::Sender,

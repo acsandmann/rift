@@ -4,7 +4,6 @@
 
 use std::borrow::Cow;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use accessibility_sys::pid_t;
 use objc2_app_kit::NSScreen;
@@ -81,7 +80,7 @@ pub enum ExecCmd {
 pub struct Config {
     pub one_space: bool,
     pub restore_file: PathBuf,
-    pub config: Arc<crate::common::config::Config>,
+    pub config: crate::common::config::Config,
 }
 
 pub struct WmController {

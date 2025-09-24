@@ -3,8 +3,6 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use core_graphics::sys as cg_sys;
-use core_graphics_types::geometry as cgt;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::{DeclaredClass, MainThreadOnly, msg_send};
 use objc2_app_kit::{
@@ -12,20 +10,14 @@ use objc2_app_kit::{
     NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
     NSWindow, NSWindowStyleMask,
 };
-use objc2_core_foundation::CGRect;
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_core_graphics::CGContext;
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
+use objc2_quartz_core::CATransaction;
 
 use crate::actor::app::WindowId;
 use crate::model::server::{WindowData, WorkspaceData};
 use crate::sys::window_server::{CapturedWindowImage, WindowServerId};
-
-unsafe extern "C" {
-    fn CGContextSaveGState(c: cg_sys::CGContextRef);
-    fn CGContextRestoreGState(c: cg_sys::CGContextRef);
-    fn CGContextTranslateCTM(c: cg_sys::CGContextRef, tx: f64, ty: f64);
-    fn CGContextScaleCTM(c: cg_sys::CGContextRef, sx: f64, sy: f64);
-    fn CGContextDrawImage(c: cg_sys::CGContextRef, rect: cgt::CGRect, image: cg_sys::CGImageRef);
-}
 
 #[derive(Debug, Clone)]
 pub enum MissionControlMode {
@@ -990,26 +982,28 @@ impl MissionControlView {
     }
 
     fn draw_window_snapshot(rect: NSRect, captured: &CapturedWindowImage) {
-        let cgimg = captured.as_ptr() as cg_sys::CGImageRef;
         if let Some(ctx) = unsafe { NSGraphicsContext::currentContext() } {
             unsafe {
-                let port: *mut c_void = msg_send![&*ctx, graphicsPort];
-                let cgctx: cg_sys::CGContextRef = port as cg_sys::CGContextRef;
+                let cgctx = ctx.CGContext();
 
-                CGContextSaveGState(cgctx);
+                CGContext::save_g_state(Some(&*cgctx));
                 // Flip vertically within the destination rect so the image draws right side up.
-                CGContextTranslateCTM(cgctx, rect.origin.x, rect.origin.y + rect.size.height);
-                CGContextScaleCTM(cgctx, 1.0, -1.0);
+                CGContext::translate_ctm(
+                    Some(&*cgctx),
+                    rect.origin.x,
+                    rect.origin.y + rect.size.height,
+                );
+                CGContext::scale_ctm(Some(&*cgctx), 1.0, -1.0);
 
-                let image_rect = cgt::CGRect {
-                    origin: cgt::CGPoint { x: 0.0, y: 0.0 },
-                    size: cgt::CGSize {
+                let image_rect = CGRect {
+                    origin: CGPoint { x: 0.0, y: 0.0 },
+                    size: CGSize {
                         width: rect.size.width,
                         height: rect.size.height,
                     },
                 };
-                CGContextDrawImage(cgctx, image_rect, cgimg);
-                CGContextRestoreGState(cgctx);
+                CGContext::draw_image(Some(&*cgctx), image_rect, Some(captured.cg_image()));
+                CGContext::restore_g_state(Some(&*cgctx));
             }
         }
     }
@@ -1042,6 +1036,8 @@ impl MissionControlOverlay {
             let view = MissionControlView::alloc(mtm).set_ivars(RefCell::default());
             let view: Retained<_> = msg_send![super(view), initWithFrame: frame];
             view.setWantsLayer(true);
+            view.setCanDrawSubviewsIntoLayer(true);
+            view.setCanDrawConcurrently(true);
 
             let blur_view: Retained<NSVisualEffectView> = Retained::from(
                 NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), frame),
@@ -1069,8 +1065,7 @@ impl MissionControlOverlay {
                 content.addSubview(&blur_view);
                 content.addSubview(&view);
             }
-            let _: () = objc2::msg_send![&*window, makeKeyAndOrderFront: std::ptr::null::<objc2::runtime::AnyObject>()];
-            window.makeFirstResponder(Some(&view));
+            window.makeKeyAndOrderFront(Some(&view));
 
             Self {
                 window,
@@ -1087,9 +1082,9 @@ impl MissionControlOverlay {
     }
 
     pub fn update(&self, mode: MissionControlMode) {
+        unsafe { self.blur_view.setState(NSVisualEffectState::Active) };
         self.view.ivars().borrow_mut().set_mode(mode);
-        self.window.makeFirstResponder(Some(&self.view));
-        self.window.makeKeyAndOrderFront(None);
+        self.window.makeKeyAndOrderFront(Some(&self.view));
         unsafe { self.view.setNeedsDisplay(true) };
         let app = NSApplication::sharedApplication(self.mtm);
         #[allow(deprecated)]
@@ -1107,11 +1102,10 @@ impl MissionControlOverlay {
         self.view.ivars().borrow_mut().on_action = None;
 
         unsafe {
-            self.window.makeFirstResponder(None);
+            self.window.makeKeyAndOrderFront(None);
             self.blur_view.setState(NSVisualEffectState::Inactive);
-            self.window.setContentView(None);
-            let _: () = objc2::msg_send![&*self.window, orderOut: std::ptr::null::<objc2::runtime::AnyObject>()];
-            let _: () = objc2::msg_send![objc2::class!(CATransaction), flush];
+            self.window.orderOut(None);
+            CATransaction::flush();
         }
 
         objc2::rc::autoreleasepool(|_| {});

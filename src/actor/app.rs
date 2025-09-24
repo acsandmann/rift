@@ -225,7 +225,6 @@ pub fn spawn_app_thread(pid: pid_t, info: AppInfo, events_tx: reactor::Sender) {
 struct State {
     pid: pid_t,
     bundle_id: Option<String>,
-    #[expect(dead_code, reason = "unused for now")]
     running_app: Retained<NSRunningApplication>,
     app: AXUIElement,
     observer: Observer,
@@ -309,33 +308,21 @@ impl State {
                     match this.handle_request(&mut request) {
                         Ok(should_terminate) if should_terminate => break,
                         Ok(_) => (),
-                        Err(err) => match err {
-                            accessibility::Error::Ax(ax_err)
-                                if matches!(
-                                    ax_err,
-                                    kAXErrorCannotComplete
-                                        | kAXErrorInvalidUIElement
-                                        | kAXErrorFailure
-                                ) =>
-                            {
-                                debug!(?this.bundle_id, ?this.pid, ?request,
-                                            "AX operation failed: {ax_err}");
-
-                                match &request {
-                                    Request::SetWindowFrame(wid, ..)
-                                    | Request::SetWindowPos(wid, ..)
-                                    | Request::BeginWindowAnimation(wid)
-                                    | Request::EndWindowAnimation(wid) => {
-                                        this.send_event(Event::WindowDestroyed(*wid));
-                                        continue;
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            _ => {
-                                error!(?this.bundle_id, ?this.pid, ?request, "Error handling request: {err}")
-                            }
-                        },
+                        #[allow(non_upper_case_globals)]
+                        Err(accessibility::Error::Ax(kAXErrorCannotComplete))
+                        // SAFETY: NSRunningApplication is thread-safe.
+                        if unsafe { this.running_app.isTerminated() } =>
+                        {
+                            // The app does not appear to be running anymore.
+                            // Normally this would be noticed by notification_center,
+                            // but the notification doesn't always happen.
+                            warn!(?this.bundle_id, ?this.pid, "Application terminated without notification");
+                            this.send_event(Event::ApplicationThreadTerminated(this.pid));
+                            break;
+                        }
+                        Err(err) => {
+                            warn!(?this.bundle_id, ?this.pid, ?request, "Error handling request: {err}");
+                        }
                     }
                 }
                 Incoming::Notification((_, (elem, notif))) => {

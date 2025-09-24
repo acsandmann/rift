@@ -1,5 +1,4 @@
 use std::io::Write;
-use std::sync::Arc;
 
 use accessibility_sys::pid_t;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
@@ -22,7 +21,7 @@ impl Reactor {
         config.settings.animate = false;
         let record = Record::new_for_test(tempfile::NamedTempFile::new().unwrap());
         let (broadcast_tx, _) = actor::channel();
-        Reactor::new(Arc::new(config), layout, record, broadcast_tx)
+        Reactor::new(config, layout, record, broadcast_tx)
     }
 
     pub fn handle_events(&mut self, events: Vec<Event>) {

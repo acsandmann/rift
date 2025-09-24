@@ -307,6 +307,9 @@ pub struct CapturedWindowImage(CFRetained<CGImage>);
 impl CapturedWindowImage {
     #[inline]
     pub fn as_ptr(&self) -> *mut CGImage { CFRetained::as_ptr(&self.0).as_ptr() }
+
+    #[inline]
+    pub fn cg_image(&self) -> &CGImage { self.0.as_ref() }
 }
 
 /*pub fn capture_window_image(id: WindowServerId) -> Option<CapturedWindowImage> {

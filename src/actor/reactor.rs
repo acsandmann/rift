@@ -11,7 +11,6 @@ mod replay;
 #[cfg(test)]
 mod testing;
 
-use std::sync::Arc;
 use std::{mem, thread};
 
 use animation::Animation;
@@ -180,7 +179,7 @@ pub enum Event {
     QueryMetrics(r#continue::Sender<serde_json::Value>),
 
     #[serde(skip)]
-    ConfigUpdated(Arc<Config>),
+    ConfigUpdated(Config),
 
     /// Apply app rules to existing windows when a space is activated
     ApplyAppRulesToExistingWindows {
@@ -218,7 +217,7 @@ pub enum ReactorCommand {
 use crate::actor::raise_manager::RaiseManager;
 
 pub struct Reactor {
-    config: Arc<Config>,
+    config: Config,
     apps: HashMap<pid_t, AppState>,
     layout_engine: LayoutEngine,
     windows: HashMap<WindowId, WindowState>,
@@ -311,7 +310,7 @@ impl From<WindowInfo> for WindowState {
 
 impl Reactor {
     pub fn spawn(
-        config: Arc<Config>,
+        config: Config,
         layout_engine: LayoutEngine,
         record: Record,
         mouse_tx: mouse::Sender,
@@ -335,7 +334,7 @@ impl Reactor {
     }
 
     pub fn new(
-        config: Arc<Config>,
+        config: Config,
         layout_engine: LayoutEngine,
         mut record: Record,
         broadcast_tx: BroadcastSender,
@@ -454,8 +453,15 @@ impl Reactor {
                 }
             }
             Event::ApplicationThreadTerminated(pid) => {
+                // The app actor thread has terminated; remove the stored handle
+                // so we don't try to communicate with a dead thread. Do NOT
+                // perform per-app window bookkeeping here (e.g. sending
+                // LayoutEvent::AppClosed) — a thread exit may be transient and
+                // should not cause the layout engine to drop windows for the
+                // application. Full application termination (Event::ApplicationTerminated)
+                // is responsible for informing other subsystems when windows
+                // should be removed.
                 self.apps.remove(&pid);
-                self.send_layout_event(LayoutEvent::AppClosed(pid));
             }
             Event::ApplicationActivated(..)
             | Event::ApplicationDeactivated(..)
