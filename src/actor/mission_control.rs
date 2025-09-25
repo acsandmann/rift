@@ -117,8 +117,20 @@ impl MissionControlActor {
     #[instrument(skip(self))]
     fn handle_event(&mut self, event: Event) {
         match event {
-            Event::ShowAll => self.show_all_workspaces(),
-            Event::ShowCurrent => self.show_current_workspace(),
+            Event::ShowAll => {
+                if self.mission_control_active {
+                    self.dispose_overlay();
+                } else {
+                    self.show_all_workspaces();
+                }
+            }
+            Event::ShowCurrent => {
+                if self.mission_control_active {
+                    self.dispose_overlay();
+                } else {
+                    self.show_current_workspace();
+                }
+            }
             Event::Dismiss => self.dispose_overlay(),
         }
     }

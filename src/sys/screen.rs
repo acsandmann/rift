@@ -17,8 +17,8 @@ use tracing::{debug, warn};
 
 use super::skylight::{
     CGSCopyBestManagedDisplayForRect, CGSCopyManagedDisplaySpaces, CGSCopyManagedDisplays,
-    CGSCopySpaces, CGSGetActiveSpace, CGSMainConnectionID, CGSManagedDisplayGetCurrentSpace,
-    CGSSpaceMask,
+    CGSCopySpaces, CGSGetActiveSpace, CGSManagedDisplayGetCurrentSpace, CGSSpaceMask,
+    SLSMainConnectionID,
 };
 use crate::sys::geometry::ToICrate;
 
@@ -105,7 +105,7 @@ impl<S: System> ScreenCache<S> {
             .iter()
             .map(|screen| unsafe {
                 CGSManagedDisplayGetCurrentSpace(
-                    CGSMainConnectionID(),
+                    SLSMainConnectionID(),
                     screen.as_concrete_TypeRef(),
                 )
             })
@@ -200,7 +200,7 @@ impl System for Actual {
     fn uuid_for_rect(&self, rect: CGRect) -> CFString {
         unsafe {
             CFString::wrap_under_create_rule(CGSCopyBestManagedDisplayForRect(
-                CGSMainConnectionID(),
+                SLSMainConnectionID(),
                 rect,
             ))
         }
@@ -249,7 +249,7 @@ impl NSScreenExt for NSScreen {
 }
 
 pub fn get_active_space_number() -> Option<SpaceId> {
-    let active_id = unsafe { CGSGetActiveSpace(CGSMainConnectionID()) };
+    let active_id = unsafe { CGSGetActiveSpace(SLSMainConnectionID()) };
     if active_id == 0 {
         None
     } else {
@@ -263,30 +263,30 @@ pub mod diagnostic {
     use super::*;
 
     pub fn cur_space() -> SpaceId {
-        SpaceId(NonZeroU64::new(unsafe { CGSGetActiveSpace(CGSMainConnectionID()) }).unwrap())
+        SpaceId(NonZeroU64::new(unsafe { CGSGetActiveSpace(SLSMainConnectionID()) }).unwrap())
     }
 
     pub fn visible_spaces() -> CFArray<SpaceId> {
         unsafe {
-            let arr = CGSCopySpaces(CGSMainConnectionID(), CGSSpaceMask::ALL_VISIBLE_SPACES);
+            let arr = CGSCopySpaces(SLSMainConnectionID(), CGSSpaceMask::ALL_VISIBLE_SPACES);
             CFArray::wrap_under_create_rule(arr)
         }
     }
 
     pub fn all_spaces() -> CFArray<SpaceId> {
         unsafe {
-            let arr = CGSCopySpaces(CGSMainConnectionID(), CGSSpaceMask::ALL_SPACES);
+            let arr = CGSCopySpaces(SLSMainConnectionID(), CGSSpaceMask::ALL_SPACES);
             CFArray::wrap_under_create_rule(arr)
         }
     }
 
     pub fn managed_displays() -> CFArray {
-        unsafe { CFArray::wrap_under_create_rule(CGSCopyManagedDisplays(CGSMainConnectionID())) }
+        unsafe { CFArray::wrap_under_create_rule(CGSCopyManagedDisplays(SLSMainConnectionID())) }
     }
 
     pub fn managed_display_spaces() -> Retained<NSArray> {
         unsafe {
-            Retained::from_raw(CGSCopyManagedDisplaySpaces(CGSMainConnectionID()))
+            Retained::from_raw(CGSCopyManagedDisplaySpaces(SLSMainConnectionID()))
                 .expect("CGSCopyManagedDisplaySpaces returned null")
         }
     }

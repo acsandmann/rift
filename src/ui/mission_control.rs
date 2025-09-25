@@ -1,10 +1,8 @@
-// TODO: get rid of jerky loading of window previews, switch to more CA- backed things
 use core::ffi::c_void;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
-use std::time::Instant;
 
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::{DeclaredClass, MainThreadOnly, msg_send};
@@ -14,16 +12,14 @@ use objc2_app_kit::{
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
-use objc2_quartz_core::{CALayer, CATransaction};
-use parking_lot::Mutex;
+use objc2_quartz_core::{CALayer, CATextLayer, CATransaction};
+use parking_lot::RwLock;
 
 use crate::actor::app::WindowId;
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::Config;
 use crate::model::server::{WindowData, WorkspaceData};
 use crate::sys::window_server::{CapturedWindowImage, WindowServerId};
-
-const MC_DEBUG: bool = option_env!("RIFT_MC_DEBUG").is_some();
 
 #[derive(Debug, Clone)]
 struct CaptureTask {
@@ -53,8 +49,11 @@ pub struct MissionControlState {
     mode: Option<MissionControlMode>,
     on_action: Option<Rc<dyn Fn(MissionControlAction)>>,
     selection: Option<Selection>,
-    preview_cache: Arc<Mutex<HashMap<WindowId, CapturedWindowImage>>>,
+    preview_cache: Arc<RwLock<HashMap<WindowId, CapturedWindowImage>>>,
     preview_layers: HashMap<WindowId, Retained<CALayer>>,
+    workspace_layers: HashMap<String, Retained<CALayer>>,
+    workspace_label_layers: HashMap<String, Retained<CATextLayer>>,
+    ready_previews: HashSet<WindowId>,
     capture_tx: Option<mpsc::Sender<CaptureTask>>,
     cancel_flag: Arc<AtomicBool>,
 }
@@ -65,8 +64,11 @@ impl Default for MissionControlState {
             mode: None,
             on_action: None,
             selection: None,
-            preview_cache: Arc::new(Mutex::new(HashMap::default())),
+            preview_cache: Arc::new(RwLock::new(HashMap::default())),
             preview_layers: HashMap::default(),
+            workspace_layers: HashMap::default(),
+            workspace_label_layers: HashMap::default(),
+            ready_previews: HashSet::default(),
             capture_tx: None,
             cancel_flag: Arc::new(AtomicBool::new(false)),
         }
@@ -79,6 +81,7 @@ impl MissionControlState {
         self.selection = None;
         self.cancel_flag.store(true, Ordering::SeqCst);
         self.capture_tx = None;
+        self.ready_previews.clear();
         self.prune_preview_cache();
         self.ensure_selection();
     }
@@ -93,11 +96,18 @@ impl MissionControlState {
         self.cancel_flag.store(true, Ordering::SeqCst);
         self.capture_tx = None;
 
-        let mut cache = self.preview_cache.lock();
+        let mut cache = self.preview_cache.write();
         cache.clear();
         cache.shrink_to_fit();
+        self.ready_previews.clear();
 
         for (_id, layer) in self.preview_layers.drain() {
+            layer.removeFromSuperlayer();
+        }
+        for (_id, layer) in self.workspace_layers.drain() {
+            layer.removeFromSuperlayer();
+        }
+        for (_id, layer) in self.workspace_label_layers.drain() {
             layer.removeFromSuperlayer();
         }
     }
@@ -163,7 +173,7 @@ impl MissionControlState {
     }
 
     fn prune_preview_cache(&mut self) {
-        let mut cache = self.preview_cache.lock();
+        let mut cache = self.preview_cache.write();
 
         if cache.is_empty() {
             return;
@@ -199,6 +209,8 @@ impl MissionControlState {
         for k in remove_keys {
             self.preview_layers.remove(&k);
         }
+
+        self.ready_previews.retain(|wid| valid.contains(wid));
     }
 }
 
@@ -330,19 +342,56 @@ objc2::define_class!(
 
         #[unsafe(method(refreshPreviews))]
         fn refresh_previews(&self) {
-            unsafe { self.setNeedsDisplay(true) };
+            let state_cell = self.ivars();
+
+            let (layers, cache_arc) = {
+                let st = match state_cell.try_borrow() {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                let pairs: Vec<(WindowId, Retained<CALayer>)> = st
+                    .preview_layers
+                    .iter()
+                    .map(|(wid, layer)| (*wid, layer.clone()))
+                    .collect();
+                (pairs, st.preview_cache.clone())
+            };
+
+            let mut ready_ids: Vec<WindowId> = Vec::new();
+
+            CATransaction::begin();
+            CATransaction::setDisableActions(true);
+
+            {
+                let cache = cache_arc.read();
+                for (wid, layer) in layers.iter() {
+                    if let Some(img) = cache.get(wid) {
+                        unsafe {
+                            let img_ptr = img.as_ptr() as *mut objc2::runtime::AnyObject;
+                            let _: () = msg_send![&**layer, setContents: img_ptr];
+                        }
+                        ready_ids.push(*wid);
+                    }
+                }
+            }
+
+            CATransaction::commit();
+
+            if !ready_ids.is_empty() {
+                if let Ok(mut st) = state_cell.try_borrow_mut() {
+                    for wid in ready_ids {
+                        st.ready_previews.insert(wid);
+                    }
+                }
+            }
         }
 
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty: NSRect) {
-            let start = if MC_DEBUG { Some(Instant::now()) } else { None };
             let state_cell = self.ivars();
             let (mode, selected_workspace, selected_window) = {
                 let mut state = state_cell.borrow_mut();
                 let Some(mode) = state.mode().cloned() else {
-                    if MC_DEBUG {
-                        eprintln!("draw_rect: no mode, took {:?}", start.as_ref().unwrap().elapsed());
-                    }
                     return
                 };
                 state.ensure_selection();
@@ -357,14 +406,9 @@ objc2::define_class!(
             let content_bounds = Self::content_bounds(self.bounds());
             match mode {
                 MissionControlMode::AllWorkspaces(workspaces) => {
-                    let branch_start = if MC_DEBUG { Some(Instant::now()) } else { None };
                     self.draw_workspaces(&state_cell, &workspaces, content_bounds, selected_workspace);
-                    if MC_DEBUG {
-                        eprintln!("draw_rect: draw_workspaces took {:?}", branch_start.as_ref().unwrap().elapsed());
-                    }
                 }
                 MissionControlMode::CurrentWorkspace(windows) => {
-                    let branch_start = if MC_DEBUG { Some(Instant::now()) } else { None };
                     self.draw_windows_tile(
                         &state_cell,
                         &windows,
@@ -372,13 +416,7 @@ objc2::define_class!(
                         selected_window,
                         WindowLayoutKind::Exploded,
                     );
-                    if MC_DEBUG {
-                        eprintln!("draw_rect: draw_windows_tile took {:?}", branch_start.as_ref().unwrap().elapsed());
-                    }
                 }
-            }
-            if MC_DEBUG {
-                eprintln!("draw_rect: total took {:?}", start.as_ref().unwrap().elapsed());
             }
         }
 
@@ -941,19 +979,62 @@ impl MissionControlView {
         let Some(grid) = WorkspaceGrid::new(visible.len(), bounds) else {
             return;
         };
+        let parent_layer = match unsafe { self.layer() } {
+            Some(l) => l,
+            None => return,
+        };
+        let mut visible_ids: HashSet<String> = HashSet::default();
+        visible_ids.reserve(visible.len());
         for (order_idx, (original_idx, _)) in visible.iter().enumerate() {
             autoreleasepool(|_| {
                 let ws = &workspaces[*original_idx];
                 let rect = grid.rect_for(order_idx);
-
+                visible_ids.insert(ws.id.clone());
+                let mut st = state.borrow_mut();
+                let ws_layer = st
+                    .workspace_layers
+                    .entry(ws.id.clone())
+                    .or_insert_with(|| {
+                        let lay = CALayer::layer();
+                        parent_layer.addSublayer(&lay);
+                        lay
+                    })
+                    .clone();
+                let label_layer = st
+                    .workspace_label_layers
+                    .entry(ws.id.clone())
+                    .or_insert_with(|| {
+                        let tl = unsafe { CATextLayer::layer() };
+                        parent_layer.addSublayer(&tl);
+                        tl
+                    })
+                    .clone();
+                drop(st);
+                CATransaction::begin();
+                CATransaction::setDisableActions(true);
+                ws_layer.setFrame(CGRect::new(
+                    CGPoint::new(rect.origin.x, rect.origin.y),
+                    CGSize::new(rect.size.width, rect.size.height),
+                ));
+                ws_layer.setCornerRadius(6.0);
                 unsafe {
-                    let bg = objc2_app_kit::NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
-                        rect, 6.0, 6.0,
-                    );
-                    NSColor::colorWithCalibratedWhite_alpha(1.0, 0.03).setFill();
-                    bg.fill();
+                    let bg = NSColor::colorWithCalibratedWhite_alpha(1.0, 0.03);
+                    ws_layer.setBackgroundColor(Some(&bg.CGColor()));
                 }
-
+                let is_selected = Some(order_idx) == selected;
+                unsafe {
+                    if is_selected {
+                        let sel =
+                            NSColor::colorWithCalibratedRed_green_blue_alpha(0.2, 0.45, 1.0, 0.85);
+                        ws_layer.setBorderColor(Some(&sel.CGColor()));
+                        ws_layer.setBorderWidth(3.0);
+                    } else {
+                        let stroke = NSColor::colorWithCalibratedWhite_alpha(1.0, 0.12);
+                        ws_layer.setBorderColor(Some(&stroke.CGColor()));
+                        ws_layer.setBorderWidth(1.0);
+                    }
+                }
+                ws_layer.setZPosition(-1.0);
                 self.draw_windows_tile(
                     state,
                     &ws.windows,
@@ -961,29 +1042,47 @@ impl MissionControlView {
                     None,
                     WindowLayoutKind::PreserveOriginal,
                 );
-
+                let label_height = 18.0;
+                let label_frame = CGRect::new(
+                    CGPoint::new(rect.origin.x + 6.0, rect.origin.y + 6.0),
+                    CGSize::new((rect.size.width - 12.0).max(10.0), label_height),
+                );
+                label_layer.setFrame(label_frame);
+                label_layer.setContentsScale(2.0);
+                label_layer.setMasksToBounds(false);
                 unsafe {
-                    let name = objc2_foundation::NSString::from_str(&ws.name);
-                    let label_point = NSPoint::new(rect.origin.x + 6.0, rect.origin.y + 6.0);
-                    let nil_attrs: *const objc2::runtime::AnyObject = core::ptr::null();
-                    let _: () =
-                        msg_send![&*name, drawAtPoint: label_point, withAttributes: nil_attrs];
-
-                    let border =
-                        objc2_app_kit::NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
-                            rect, 6.0, 6.0,
-                        );
-                    let is_selected = Some(order_idx) == selected;
-                    let stroke_color = if is_selected {
-                        NSColor::colorWithCalibratedRed_green_blue_alpha(0.2, 0.45, 1.0, 0.85)
-                    } else {
-                        NSColor::colorWithCalibratedWhite_alpha(1.0, 0.12)
-                    };
-                    stroke_color.setStroke();
-                    border.setLineWidth(if is_selected { 3.0 } else { 1.0 });
-                    border.stroke();
+                    let name_ns = objc2_foundation::NSString::from_str(&ws.name);
+                    label_layer.setString(Some(&*name_ns));
+                    label_layer.setFontSize(12.0);
+                    let fg = NSColor::labelColor();
+                    label_layer.setForegroundColor(Some(&fg.CGColor()));
                 }
+                label_layer.setZPosition(2.0);
+                CATransaction::commit();
             });
+        }
+        {
+            let mut st = state.borrow_mut();
+            let mut to_remove_bg = Vec::new();
+            for (k, layer) in st.workspace_layers.iter() {
+                if !visible_ids.contains(k) {
+                    layer.removeFromSuperlayer();
+                    to_remove_bg.push(k.clone());
+                }
+            }
+            for k in to_remove_bg {
+                st.workspace_layers.remove(&k);
+            }
+            let mut to_remove_lbl = Vec::new();
+            for (k, layer) in st.workspace_label_layers.iter() {
+                if !visible_ids.contains(k) {
+                    layer.removeFromSuperlayer();
+                    to_remove_lbl.push(k.clone());
+                }
+            }
+            for k in to_remove_lbl {
+                st.workspace_label_layers.remove(&k);
+            }
         }
     }
 
@@ -1013,13 +1112,6 @@ impl MissionControlView {
                 let is_selected = selected_idx.map_or(false, |s| s == idx);
                 Self::draw_window_outline(rect, is_selected);
 
-                // Cache-only fetch on draw path
-                let captured = {
-                    let s = state.borrow();
-                    let cache = s.preview_cache.lock();
-                    cache.get(&window.id).cloned()
-                };
-
                 let mut s = state.borrow_mut();
                 let layer = s.preview_layers.entry(window.id).or_insert_with(|| {
                     let lay = CALayer::layer();
@@ -1037,26 +1129,25 @@ impl MissionControlView {
                 layer.setMasksToBounds(true);
                 layer.setCornerRadius(4.0);
                 if selected_idx.map_or(false, |si| si == idx) {
+                    unsafe {
+                        let sel =
+                            NSColor::colorWithCalibratedRed_green_blue_alpha(0.2, 0.45, 1.0, 0.85);
+                        layer.setBorderColor(Some(&sel.CGColor()));
+                        layer.setBorderWidth(0.4);
+                    }
                     layer.setZPosition(1.0);
                 } else {
+                    unsafe {
+                        let stroke = NSColor::colorWithCalibratedWhite_alpha(0.0, 0.65);
+                        layer.setBorderColor(Some(&stroke.CGColor()));
+                        layer.setBorderWidth(0.4);
+                    }
                     layer.setZPosition(0.0);
-                }
-
-                let had_image = captured.is_some();
-
-                match captured.as_ref() {
-                    Some(img) => unsafe {
-                        let img_ptr = img.as_ptr() as *mut objc2::runtime::AnyObject;
-                        let _: () = msg_send![&*layer, setContents: img_ptr];
-                    },
-                    None => unsafe {
-                        let nil: *mut objc2::runtime::AnyObject = core::ptr::null_mut();
-                        let _: () = msg_send![&*layer, setContents: nil];
-                    },
                 }
 
                 CATransaction::commit();
 
+                let had_image = s.ready_previews.contains(&window.id);
                 drop(s);
 
                 if !had_image {
@@ -1071,23 +1162,7 @@ impl MissionControlView {
         }
     }
 
-    fn draw_window_outline(rect: NSRect, is_selected: bool) {
-        unsafe {
-            let path = objc2_app_kit::NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
-                rect, 4.0, 4.0,
-            );
-            NSColor::colorWithCalibratedWhite_alpha(1.0, 0.15).setFill();
-            path.fill();
-            if is_selected {
-                NSColor::colorWithCalibratedRed_green_blue_alpha(0.2, 0.45, 1.0, 0.85).setStroke();
-                path.setLineWidth(4.0);
-            } else {
-                NSColor::colorWithCalibratedWhite_alpha(0.0, 0.65).setStroke();
-                path.setLineWidth(1.0);
-            }
-            path.stroke();
-        }
-    }
+    fn draw_window_outline(_rect: NSRect, _is_selected: bool) {}
 
     fn schedule_capture(
         state: &RefCell<MissionControlState>,
@@ -1097,6 +1172,9 @@ impl MissionControlView {
     ) {
         let Some(wsid) = window.window_server_id else { return };
         let st = state.borrow_mut();
+        if st.ready_previews.contains(&window.id) {
+            return;
+        }
         if let Some(tx) = st.capture_tx.clone() {
             let _ = tx.send(CaptureTask {
                 window_id: window.id,
@@ -1110,32 +1188,55 @@ impl MissionControlView {
     fn prewarm_previews(&self) {
         let state_cell = self.ivars();
 
-        let mut windows: Vec<WindowData> = {
+        let tasks: Vec<(i64, CaptureTask)> = {
+            let mut pending = Vec::new();
             let state_ref = state_cell.borrow();
+
+            let mut push_window = |window: &WindowData| {
+                let Some(wsid) = window.window_server_id else { return };
+
+                let src_w = window.frame.size.width.max(1.0);
+                let src_h = window.frame.size.height.max(1.0);
+                let max_edge = 480.0f64;
+                let (tw, th) = if src_w >= src_h {
+                    let r = (max_edge / src_w).min(1.0);
+                    ((src_w * r) as usize, (src_h * r) as usize)
+                } else {
+                    let r = (max_edge / src_h).min(1.0);
+                    ((src_w * r) as usize, (src_h * r) as usize)
+                };
+
+                let area = (src_w * src_h) as i64;
+                pending.push((area, CaptureTask {
+                    window_id: window.id,
+                    window_server_id: wsid,
+                    target_w: tw.max(1),
+                    target_h: th.max(1),
+                }));
+            };
+
             match state_ref.mode() {
                 Some(MissionControlMode::AllWorkspaces(workspaces)) => {
-                    let mut all = Vec::new();
                     for ws in workspaces {
-                        for w in &ws.windows {
-                            all.push(w.clone());
+                        for window in &ws.windows {
+                            push_window(window);
                         }
                     }
-                    all
                 }
-                Some(MissionControlMode::CurrentWorkspace(wins)) => wins.clone(),
-                None => Vec::new(),
+                Some(MissionControlMode::CurrentWorkspace(wins)) => {
+                    for window in wins {
+                        push_window(window);
+                    }
+                }
+                None => {}
             }
+
+            pending
         };
 
-        if windows.is_empty() {
+        if tasks.is_empty() {
             return;
         }
-
-        windows.sort_by(|a, b| {
-            let aa = (a.frame.size.width * a.frame.size.height) as i64;
-            let bb = (b.frame.size.width * b.frame.size.height) as i64;
-            bb.cmp(&aa)
-        });
 
         let (in_tx, in_rx) = mpsc::channel::<CaptureTask>();
         let (preview_cache, cancel_flag) = {
@@ -1165,7 +1266,7 @@ impl MissionControlView {
                                 task.target_w,
                                 task.target_h,
                             ) {
-                                let mut cache_lock = cache.lock();
+                                let mut cache_lock = cache.write();
                                 cache_lock.entry(task.window_id).or_insert_with(|| img.clone());
                                 unsafe {
                                     let view_ptr = view_ptr_bits as *mut objc2::runtime::AnyObject;
@@ -1185,9 +1286,10 @@ impl MissionControlView {
             worker_senders.push(tx);
         }
 
+        let dispatch_cancel = cancel_flag.clone();
         std::thread::spawn(move || {
             let mut idx = 0usize;
-            while !cancel_flag.load(Ordering::Relaxed) {
+            while !dispatch_cancel.load(Ordering::Relaxed) {
                 match in_rx.recv() {
                     Ok(task) => {
                         let i = idx % worker_senders.len();
@@ -1199,35 +1301,31 @@ impl MissionControlView {
             }
         });
 
-        for win in windows.into_iter() {
-            let Some(wsid) = win.window_server_id else { continue };
+        let prewarm_cancel = cancel_flag;
+        let prewarm_cache = preview_cache;
+        let prewarm_sender = in_tx.clone();
+        std::thread::spawn(move || {
+            let mut tasks = tasks;
+            tasks.sort_by(|a, b| b.0.cmp(&a.0));
 
-            let src_w = win.frame.size.width.max(1.0);
-            let src_h = win.frame.size.height.max(1.0);
-            let max_edge = 480.0f64;
-            let (tw, th) = if src_w >= src_h {
-                let r = (max_edge / src_w).min(1.0);
-                ((src_w * r) as usize, (src_h * r) as usize)
-            } else {
-                let r = (max_edge / src_h).min(1.0);
-                ((src_w * r) as usize, (src_h * r) as usize)
-            };
+            for (_, task) in tasks.into_iter() {
+                if prewarm_cancel.load(Ordering::Relaxed) {
+                    break;
+                }
 
-            let skip = {
-                let cache = preview_cache.lock();
-                cache.contains_key(&win.id)
-            };
-            if skip {
-                continue;
+                let skip = {
+                    let cache = prewarm_cache.read();
+                    cache.contains_key(&task.window_id)
+                };
+                if skip {
+                    continue;
+                }
+
+                if prewarm_sender.send(task).is_err() {
+                    break;
+                }
             }
-
-            let _ = in_tx.send(CaptureTask {
-                window_id: win.id,
-                window_server_id: wsid,
-                target_w: tw.max(1),
-                target_h: th.max(1),
-            });
-        }
+        });
     }
 }
 

@@ -430,7 +430,7 @@ pub fn make_key_window(pid: pid_t, wsid: WindowServerId) -> Result<(), ()> {
 }
 
 pub fn allow_hide_mouse() -> Result<(), CGError> {
-    let cid = unsafe { CGSMainConnectionID() };
+    let cid = unsafe { SLSMainConnectionID() };
     let property = CFString::from_static_string("SetsCursorInBackground");
 
     let err = unsafe {

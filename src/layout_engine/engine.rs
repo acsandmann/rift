@@ -1015,6 +1015,10 @@ impl LayoutEngine {
                 let workspaces = self.virtual_workspace_manager_mut().list_workspaces(space);
                 if let Some((workspace_id, _)) = workspaces.get(*workspace_index) {
                     let workspace_id = *workspace_id;
+                    if self.virtual_workspace_manager.active_workspace(space) == Some(workspace_id)
+                    {
+                        return EventResponse::default();
+                    }
                     self.virtual_workspace_manager.set_active_workspace(space, workspace_id);
 
                     self.update_active_floating_windows(space);

@@ -111,7 +111,6 @@ unsafe extern "C" {
     pub fn CGEventPost(tapLocation: CGEventTapLocation, event: *const c_void);
 
     pub fn CGSGetWindowBounds(cid: cid_t, wid: u32, frame: *mut CGRect) -> i32;
-    pub fn CGSMainConnectionID() -> cid_t;
     pub fn CGSSetConnectionProperty(
         cid: cid_t,
         target_cid: cid_t,

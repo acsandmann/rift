@@ -2,7 +2,7 @@
 
 rift is a tiling window manager for macos inspired by i3 / sway with a virtual workspace system that takes away the pain points of native macos spaces. it has smooth animations, an extensive featureset, and does **not** require disabling of SIP for *any* functionality.
 
-![demo](assets/demo.gif)
+<img align="right" width="40%" src="assets/demo.gif" alt="Demo">
 
 ### features
 - smooth animations

@@ -119,7 +119,7 @@ fn main() {
 
     let config_tx = ConfigActor::spawn(config.clone(), events_tx.clone());
 
-    let (_, wnd_rx) = rift_wm::actor::channel();
+    let (_wnd_tx, wnd_rx) = rift_wm::actor::channel();
     let wn_actor = window_notify_actor::WindowNotify::new(events_tx.clone(), wnd_rx, &[
         CGSEventType::WindowDestroyed,
         //CGSEventType::ServerWindowDidCreate,

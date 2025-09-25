@@ -514,10 +514,8 @@ impl Reactor {
             Event::WindowServerDestroyed(wsid) => {
                 if let Some(wid) = self.window_ids.get(&wsid).copied() {
                     self.handle_event(Event::WindowDestroyed(wid));
-                    #[allow(unused_assignments)]
-                    window_was_destroyed = true;
                 } else {
-                    debug!(
+                    warn!(
                         ?wsid,
                         "Received WindowServerDestroyed for unknown window - ignoring"
                     );
@@ -528,7 +526,7 @@ impl Reactor {
                 if self.window_server_info.contains_key(&wsid)
                     || self.observed_window_server_ids.contains(&wsid)
                 {
-                    debug!(
+                    warn!(
                         ?wsid,
                         "Received WindowServerAppeared for known window - ignoring"
                     );
