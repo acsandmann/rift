@@ -1128,12 +1128,13 @@ impl MissionControlView {
                 ));
                 layer.setMasksToBounds(true);
                 layer.setCornerRadius(4.0);
+                layer.setContentsScale(2.0);
                 if selected_idx.map_or(false, |si| si == idx) {
                     unsafe {
                         let sel =
                             NSColor::colorWithCalibratedRed_green_blue_alpha(0.2, 0.45, 1.0, 0.85);
                         layer.setBorderColor(Some(&sel.CGColor()));
-                        layer.setBorderWidth(0.4);
+                        layer.setBorderWidth(3.0);
                     }
                     layer.setZPosition(1.0);
                 } else {
@@ -1154,8 +1155,8 @@ impl MissionControlView {
                     Self::schedule_capture(
                         state,
                         window,
-                        rect.size.width.max(1.0) as usize,
-                        rect.size.height.max(1.0) as usize,
+                        (rect.size.width * 1.5).max(2.0) as usize,
+                        (rect.size.height * 1.5).max(2.0) as usize,
                     );
                 }
             });
@@ -1197,7 +1198,7 @@ impl MissionControlView {
 
                 let src_w = window.frame.size.width.max(1.0);
                 let src_h = window.frame.size.height.max(1.0);
-                let max_edge = 480.0f64;
+                let max_edge = 600.0f64; // balance between sharpness & performance
                 let (tw, th) = if src_w >= src_h {
                     let r = (max_edge / src_w).min(1.0);
                     ((src_w * r) as usize, (src_h * r) as usize)
