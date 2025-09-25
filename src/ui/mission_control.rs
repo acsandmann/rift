@@ -1,8 +1,9 @@
+// TODO: get rid of jerky loading of window previews, switch to more CA- backed things
 use core::ffi::c_void;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
 use objc2::rc::{Retained, autoreleasepool};
@@ -17,8 +18,20 @@ use objc2_quartz_core::{CALayer, CATransaction};
 use parking_lot::Mutex;
 
 use crate::actor::app::WindowId;
+use crate::common::collections::{HashMap, HashSet};
+use crate::common::config::Config;
 use crate::model::server::{WindowData, WorkspaceData};
 use crate::sys::window_server::{CapturedWindowImage, WindowServerId};
+
+const MC_DEBUG: bool = option_env!("RIFT_MC_DEBUG").is_some();
+
+#[derive(Debug, Clone)]
+struct CaptureTask {
+    window_id: WindowId,
+    window_server_id: u32,
+    target_w: usize,
+    target_h: usize,
+}
 
 #[derive(Debug, Clone)]
 pub enum MissionControlMode {
@@ -42,6 +55,8 @@ pub struct MissionControlState {
     selection: Option<Selection>,
     preview_cache: Arc<Mutex<HashMap<WindowId, CapturedWindowImage>>>,
     preview_layers: HashMap<WindowId, Retained<CALayer>>,
+    capture_tx: Option<mpsc::Sender<CaptureTask>>,
+    cancel_flag: Arc<AtomicBool>,
 }
 
 impl Default for MissionControlState {
@@ -50,8 +65,10 @@ impl Default for MissionControlState {
             mode: None,
             on_action: None,
             selection: None,
-            preview_cache: Arc::new(Mutex::new(HashMap::new())),
-            preview_layers: HashMap::new(),
+            preview_cache: Arc::new(Mutex::new(HashMap::default())),
+            preview_layers: HashMap::default(),
+            capture_tx: None,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -60,6 +77,8 @@ impl MissionControlState {
     fn set_mode(&mut self, mode: MissionControlMode) {
         self.mode = Some(mode);
         self.selection = None;
+        self.cancel_flag.store(true, Ordering::SeqCst);
+        self.capture_tx = None;
         self.prune_preview_cache();
         self.ensure_selection();
     }
@@ -70,6 +89,10 @@ impl MissionControlState {
         self.mode = None;
         self.selection = None;
         self.on_action = None;
+
+        self.cancel_flag.store(true, Ordering::SeqCst);
+        self.capture_tx = None;
+
         let mut cache = self.preview_cache.lock();
         cache.clear();
         cache.shrink_to_fit();
@@ -146,7 +169,7 @@ impl MissionControlState {
             return;
         }
 
-        let mut valid: HashSet<WindowId> = HashSet::new();
+        let mut valid: HashSet<WindowId> = HashSet::default();
         if let Some(mode) = self.mode.as_ref() {
             match mode {
                 MissionControlMode::AllWorkspaces(workspaces) => {
@@ -169,9 +192,7 @@ impl MissionControlState {
         let mut remove_keys = Vec::new();
         for (&wid, layer) in self.preview_layers.iter() {
             if !valid.contains(&wid) {
-                unsafe {
-                    layer.removeFromSuperlayer();
-                }
+                layer.removeFromSuperlayer();
                 remove_keys.push(wid);
             }
         }
@@ -307,14 +328,21 @@ objc2::define_class!(
         #[unsafe(method(acceptsFirstResponder))]
         fn accepts_first_responder(&self) -> bool { true }
 
+        #[unsafe(method(refreshPreviews))]
+        fn refresh_previews(&self) {
+            unsafe { self.setNeedsDisplay(true) };
+        }
+
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty: NSRect) {
-            let start = Instant::now();
+            let start = if MC_DEBUG { Some(Instant::now()) } else { None };
             let state_cell = self.ivars();
             let (mode, selected_workspace, selected_window) = {
                 let mut state = state_cell.borrow_mut();
                 let Some(mode) = state.mode().cloned() else {
-                    eprintln!("draw_rect: no mode, took {:?}", start.elapsed());
+                    if MC_DEBUG {
+                        eprintln!("draw_rect: no mode, took {:?}", start.as_ref().unwrap().elapsed());
+                    }
                     return
                 };
                 state.ensure_selection();
@@ -329,12 +357,14 @@ objc2::define_class!(
             let content_bounds = Self::content_bounds(self.bounds());
             match mode {
                 MissionControlMode::AllWorkspaces(workspaces) => {
-                    let branch_start = Instant::now();
+                    let branch_start = if MC_DEBUG { Some(Instant::now()) } else { None };
                     self.draw_workspaces(&state_cell, &workspaces, content_bounds, selected_workspace);
-                    eprintln!("draw_rect: draw_workspaces took {:?}", branch_start.elapsed());
+                    if MC_DEBUG {
+                        eprintln!("draw_rect: draw_workspaces took {:?}", branch_start.as_ref().unwrap().elapsed());
+                    }
                 }
                 MissionControlMode::CurrentWorkspace(windows) => {
-                    let branch_start = Instant::now();
+                    let branch_start = if MC_DEBUG { Some(Instant::now()) } else { None };
                     self.draw_windows_tile(
                         &state_cell,
                         &windows,
@@ -342,10 +372,14 @@ objc2::define_class!(
                         selected_window,
                         WindowLayoutKind::Exploded,
                     );
-                    eprintln!("draw_rect: draw_windows_tile took {:?}", branch_start.elapsed());
+                    if MC_DEBUG {
+                        eprintln!("draw_rect: draw_windows_tile took {:?}", branch_start.as_ref().unwrap().elapsed());
+                    }
                 }
             }
-            eprintln!("draw_rect: total took {:?}", start.elapsed());
+            if MC_DEBUG {
+                eprintln!("draw_rect: total took {:?}", start.as_ref().unwrap().elapsed());
+            }
         }
 
         #[unsafe(method(mouseDown:))]
@@ -979,96 +1013,62 @@ impl MissionControlView {
                 let is_selected = selected_idx.map_or(false, |s| s == idx);
                 Self::draw_window_outline(rect, is_selected);
 
-                if let Some(captured) = Self::get_or_capture_preview(state, window) {
-                    let mut s = state.borrow_mut();
-                    let layer = s.preview_layers.entry(window.id).or_insert_with(|| {
-                        let lay = CALayer::layer();
-                        parent_layer.addSublayer(&lay);
-                        lay
-                    });
+                // Cache-only fetch on draw path
+                let captured = {
+                    let s = state.borrow();
+                    let cache = s.preview_cache.lock();
+                    cache.get(&window.id).cloned()
+                };
 
-                    layer.setFrame(CGRect::new(
-                        CGPoint::new(rect.origin.x, rect.origin.y),
-                        CGSize::new(rect.size.width, rect.size.height),
-                    ));
-                    layer.setMasksToBounds(true);
-                    layer.setCornerRadius(4.0);
-                    if selected_idx.map_or(false, |si| si == idx) {
-                        layer.setZPosition(1.0);
-                    } else {
-                        layer.setZPosition(0.0);
-                    }
+                let mut s = state.borrow_mut();
+                let layer = s.preview_layers.entry(window.id).or_insert_with(|| {
+                    let lay = CALayer::layer();
+                    parent_layer.addSublayer(&lay);
+                    lay
+                });
 
-                    unsafe {
-                        let img_ptr = captured.as_ptr() as *mut objc2::runtime::AnyObject;
+                CATransaction::begin();
+                CATransaction::setDisableActions(true);
+
+                layer.setFrame(CGRect::new(
+                    CGPoint::new(rect.origin.x, rect.origin.y),
+                    CGSize::new(rect.size.width, rect.size.height),
+                ));
+                layer.setMasksToBounds(true);
+                layer.setCornerRadius(4.0);
+                if selected_idx.map_or(false, |si| si == idx) {
+                    layer.setZPosition(1.0);
+                } else {
+                    layer.setZPosition(0.0);
+                }
+
+                let had_image = captured.is_some();
+
+                match captured.as_ref() {
+                    Some(img) => unsafe {
+                        let img_ptr = img.as_ptr() as *mut objc2::runtime::AnyObject;
                         let _: () = msg_send![&*layer, setContents: img_ptr];
-                    }
+                    },
+                    None => unsafe {
+                        let nil: *mut objc2::runtime::AnyObject = core::ptr::null_mut();
+                        let _: () = msg_send![&*layer, setContents: nil];
+                    },
+                }
 
-                    drop(captured);
+                CATransaction::commit();
+
+                drop(s);
+
+                if !had_image {
+                    Self::schedule_capture(
+                        state,
+                        window,
+                        rect.size.width.max(1.0) as usize,
+                        rect.size.height.max(1.0) as usize,
+                    );
                 }
             });
         }
-    }
-
-    fn get_or_capture_preview(
-        state: &RefCell<MissionControlState>,
-        window: &WindowData,
-    ) -> Option<CapturedWindowImage> {
-        let total_start = Instant::now();
-
-        let mut state_ref = state.borrow_mut();
-        let mut cache = state_ref.preview_cache.lock();
-
-        if let Some(image) = cache.get(&window.id).cloned() {
-            eprintln!(
-                "get_or_capture_preview: cache hit for {:?} took {:?}",
-                window.id,
-                total_start.elapsed()
-            );
-            return Some(image);
-        }
-
-        drop(cache);
-        drop(state_ref);
-
-        let capture_start = Instant::now();
-        let captured = Self::capture_window_preview(window)?;
-        eprintln!(
-            "get_or_capture_preview: capture for {:?} took {:?}",
-            window.id,
-            capture_start.elapsed()
-        );
-
-        let mut state_ref = state.borrow_mut();
-        let mut cache = state_ref.preview_cache.lock();
-        cache.entry(window.id).or_insert_with(|| captured.clone());
-
-        eprintln!(
-            "get_or_capture_preview: total for {:?} took {:?}",
-            window.id,
-            total_start.elapsed()
-        );
-        Some(captured)
-    }
-
-    fn capture_window_preview(window: &WindowData) -> Option<CapturedWindowImage> {
-        let id_opt = window.window_server_id?;
-        let id = WindowServerId::new(id_opt);
-        let start = Instant::now();
-        let res = crate::sys::window_server::capture_window_image(id);
-        match &res {
-            Some(_) => eprintln!(
-                "capture_window_preview: captured for window {:?} took {:?}",
-                window.id,
-                start.elapsed()
-            ),
-            None => eprintln!(
-                "capture_window_preview: capture failed for window {:?} took {:?}",
-                window.id,
-                start.elapsed()
-            ),
-        }
-        res
     }
 
     fn draw_window_outline(rect: NSRect, is_selected: bool) {
@@ -1089,10 +1089,28 @@ impl MissionControlView {
         }
     }
 
+    fn schedule_capture(
+        state: &RefCell<MissionControlState>,
+        window: &WindowData,
+        target_w: usize,
+        target_h: usize,
+    ) {
+        let Some(wsid) = window.window_server_id else { return };
+        let st = state.borrow_mut();
+        if let Some(tx) = st.capture_tx.clone() {
+            let _ = tx.send(CaptureTask {
+                window_id: window.id,
+                window_server_id: wsid,
+                target_w,
+                target_h,
+            });
+        }
+    }
+
     fn prewarm_previews(&self) {
         let state_cell = self.ivars();
 
-        let windows: Vec<WindowData> = {
+        let mut windows: Vec<WindowData> = {
             let state_ref = state_cell.borrow();
             match state_ref.mode() {
                 Some(MissionControlMode::AllWorkspaces(workspaces)) => {
@@ -1113,46 +1131,103 @@ impl MissionControlView {
             return;
         }
 
-        let preview_cache = {
-            let state_ref = state_cell.borrow();
-            state_ref.preview_cache.clone()
+        windows.sort_by(|a, b| {
+            let aa = (a.frame.size.width * a.frame.size.height) as i64;
+            let bb = (b.frame.size.width * b.frame.size.height) as i64;
+            bb.cmp(&aa)
+        });
+
+        let (in_tx, in_rx) = mpsc::channel::<CaptureTask>();
+        let (preview_cache, cancel_flag) = {
+            let mut st = state_cell.borrow_mut();
+            st.cancel_flag.store(true, Ordering::SeqCst);
+            st.capture_tx = Some(in_tx.clone());
+            st.cancel_flag = Arc::new(AtomicBool::new(false));
+            (st.preview_cache.clone(), st.cancel_flag.clone())
         };
 
-        std::thread::spawn(move || {
-            for win in windows.into_iter() {
-                let wsid = match win.window_server_id {
-                    Some(id) => id,
-                    None => continue,
-                };
-
-                // fast-path if already cached
-                {
-                    let mut cache = preview_cache.lock();
-                    if cache.contains_key(&win.id) {
-                        continue;
+        let view_ptr_bits = self as *const _ as usize;
+        let worker_count = 3usize;
+        let mut worker_senders = Vec::with_capacity(worker_count);
+        for _ in 0..worker_count {
+            let (tx, rx) = mpsc::channel::<CaptureTask>();
+            let cache = preview_cache.clone();
+            let cancel = cancel_flag.clone();
+            std::thread::spawn(move || {
+                while !cancel.load(Ordering::Relaxed) {
+                    match rx.recv() {
+                        Ok(task) => {
+                            if cancel.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            if let Some(img) = crate::sys::window_server::capture_window_image(
+                                WindowServerId::new(task.window_server_id),
+                                task.target_w,
+                                task.target_h,
+                            ) {
+                                let mut cache_lock = cache.lock();
+                                cache_lock.entry(task.window_id).or_insert_with(|| img.clone());
+                                unsafe {
+                                    let view_ptr = view_ptr_bits as *mut objc2::runtime::AnyObject;
+                                    let _: () = msg_send![
+                                        view_ptr,
+                                        performSelectorOnMainThread: objc2::sel!(refreshPreviews),
+                                        withObject: core::ptr::null_mut::<objc2::runtime::AnyObject>(),
+                                        waitUntilDone: false
+                                    ];
+                                }
+                            }
+                        }
+                        Err(_) => break,
                     }
                 }
+            });
+            worker_senders.push(tx);
+        }
 
-                let start = Instant::now();
-                if let Some(img) =
-                    crate::sys::window_server::capture_window_image(WindowServerId::new(wsid))
-                {
-                    let mut cache = preview_cache.lock();
-                    cache.entry(win.id).or_insert_with(|| img.clone());
-                    eprintln!(
-                        "prewarm_previews: captured preview for {:?} in {:?}",
-                        win.id,
-                        start.elapsed()
-                    );
-                } else {
-                    eprintln!(
-                        "prewarm_previews: failed to capture preview for {:?} in {:?}",
-                        win.id,
-                        start.elapsed()
-                    );
+        std::thread::spawn(move || {
+            let mut idx = 0usize;
+            while !cancel_flag.load(Ordering::Relaxed) {
+                match in_rx.recv() {
+                    Ok(task) => {
+                        let i = idx % worker_senders.len();
+                        let _ = worker_senders[i].send(task);
+                        idx = idx.wrapping_add(1);
+                    }
+                    Err(_) => break,
                 }
             }
         });
+
+        for win in windows.into_iter() {
+            let Some(wsid) = win.window_server_id else { continue };
+
+            let src_w = win.frame.size.width.max(1.0);
+            let src_h = win.frame.size.height.max(1.0);
+            let max_edge = 480.0f64;
+            let (tw, th) = if src_w >= src_h {
+                let r = (max_edge / src_w).min(1.0);
+                ((src_w * r) as usize, (src_h * r) as usize)
+            } else {
+                let r = (max_edge / src_h).min(1.0);
+                ((src_w * r) as usize, (src_h * r) as usize)
+            };
+
+            let skip = {
+                let cache = preview_cache.lock();
+                cache.contains_key(&win.id)
+            };
+            if skip {
+                continue;
+            }
+
+            let _ = in_tx.send(CaptureTask {
+                window_id: win.id,
+                window_server_id: wsid,
+                target_w: tw.max(1),
+                target_h: th.max(1),
+            });
+        }
     }
 }
 
@@ -1175,10 +1250,12 @@ pub struct MissionControlOverlay {
     blur_view: Retained<NSVisualEffectView>,
     mtm: MainThreadMarker,
     key_tap: RefCell<Option<crate::sys::event_tap::EventTap>>,
+    fade_enabled: bool,
+    fade_duration_ms: f64,
 }
 
 impl MissionControlOverlay {
-    pub fn new(mtm: MainThreadMarker, frame: CGRect) -> Self {
+    pub fn new(config: Config, mtm: MainThreadMarker, frame: CGRect) -> Self {
         unsafe {
             let view = MissionControlView::alloc(mtm).set_ivars(RefCell::default());
             let view: Retained<_> = msg_send![super(view), initWithFrame: frame];
@@ -1219,6 +1296,8 @@ impl MissionControlOverlay {
                 blur_view,
                 mtm,
                 key_tap: RefCell::new(None),
+                fade_enabled: config.settings.ui.mission_control.fade_enabled,
+                fade_duration_ms: config.settings.ui.mission_control.fade_duration_ms,
             }
         }
     }
@@ -1227,11 +1306,36 @@ impl MissionControlOverlay {
         self.view.ivars().borrow_mut().on_action = Some(f);
     }
 
+    pub fn set_fade_enabled(&mut self, enabled: bool) { self.fade_enabled = enabled; }
+
+    pub fn set_fade_duration_ms(&mut self, ms: f64) { self.fade_duration_ms = ms.max(0.0); }
+
     pub fn update(&self, mode: MissionControlMode) {
         unsafe { self.blur_view.setState(NSVisualEffectState::Active) };
         self.view.ivars().borrow_mut().set_mode(mode);
         self.view.prewarm_previews();
-        self.window.makeKeyAndOrderFront(Some(&self.view));
+
+        if self.fade_enabled {
+            unsafe {
+                self.window.setAlphaValue(0.0);
+            }
+            self.window.makeKeyAndOrderFront(Some(&self.view));
+            unsafe {
+                let duration = self.fade_duration_ms / 1000.0;
+
+                let ns_anim_cls = objc2::class!(NSAnimationContext);
+                let _: () = msg_send![ns_anim_cls, beginGrouping];
+                let current_ctx: *mut objc2::runtime::AnyObject =
+                    msg_send![ns_anim_cls, currentContext];
+                let _: () = msg_send![current_ctx, setDuration: duration];
+                let animator: *mut objc2::runtime::AnyObject = msg_send![&*self.window, animator];
+                let _: () = msg_send![animator, setAlphaValue: 1.0];
+                let _: () = msg_send![ns_anim_cls, endGrouping];
+            }
+        } else {
+            self.window.makeKeyAndOrderFront(Some(&self.view));
+        }
+
         unsafe { self.view.setNeedsDisplay(true) };
         let app = NSApplication::sharedApplication(self.mtm);
         #[allow(deprecated)]
@@ -1248,11 +1352,37 @@ impl MissionControlOverlay {
         self.key_tap.borrow_mut().take();
         self.view.ivars().borrow_mut().on_action = None;
 
-        unsafe {
-            self.window.makeKeyAndOrderFront(None);
-            self.blur_view.setState(NSVisualEffectState::Inactive);
-            self.window.orderOut(None);
-            CATransaction::flush();
+        if self.fade_enabled {
+            let dur = self.fade_duration_ms;
+            unsafe {
+                let duration = dur / 1000.0;
+                let ns_anim_cls = objc2::class!(NSAnimationContext);
+                let _: () = msg_send![ns_anim_cls, beginGrouping];
+                let current_ctx: *mut objc2::runtime::AnyObject =
+                    msg_send![ns_anim_cls, currentContext];
+                let _: () = msg_send![current_ctx, setDuration: duration];
+                let animator: *mut objc2::runtime::AnyObject = msg_send![&*self.window, animator];
+                let _: () = msg_send![animator, setAlphaValue: 0.0];
+                let _: () = msg_send![ns_anim_cls, endGrouping];
+            }
+
+            unsafe {
+                self.blur_view.setState(NSVisualEffectState::Inactive);
+            }
+
+            unsafe {
+                let nil: *mut objc2::runtime::AnyObject = core::ptr::null_mut();
+                let delay = dur / 1000.0;
+                let _: () = msg_send![&*self.window, performSelector: objc2::sel!(orderOut:), withObject: nil, afterDelay: delay];
+                CATransaction::flush();
+            }
+        } else {
+            unsafe {
+                self.window.makeKeyAndOrderFront(None);
+                self.blur_view.setState(NSVisualEffectState::Inactive);
+                self.window.orderOut(None);
+                CATransaction::flush();
+            }
         }
 
         objc2::rc::autoreleasepool(|_| {});

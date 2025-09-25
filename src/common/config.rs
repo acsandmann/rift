@@ -346,7 +346,7 @@ pub struct Settings {
     pub run_on_start: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default, Copy)]
 #[serde(rename_all = "snake_case")]
 pub enum AnimationEasing {
     #[default]
@@ -378,8 +378,12 @@ pub enum AnimationEasing {
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct UiSettings {
+    #[serde(default)]
     pub menu_bar: MenuBarSettings,
+    #[serde(default)]
     pub stack_line: StackLineSettings,
+    #[serde(default)]
+    pub mission_control: MissionControlSettings,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
@@ -447,6 +451,19 @@ pub struct StackLineSettings {
     #[serde(default)]
     pub vert_placement: VerticalPlacement,
 }
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct MissionControlSettings {
+    #[serde(default = "no")]
+    pub enabled: bool,
+    #[serde(default = "no")]
+    pub fade_enabled: bool,
+    #[serde(default = "default_mission_control_fade_duration_ms")]
+    pub fade_duration_ms: f64,
+}
+
+fn default_mission_control_fade_duration_ms() -> f64 { 180.0 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
 #[serde(rename_all = "snake_case")]

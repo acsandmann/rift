@@ -312,26 +312,6 @@ impl CapturedWindowImage {
     pub fn cg_image(&self) -> &CGImage { self.0.as_ref() }
 }
 
-/*pub fn capture_window_image(id: WindowServerId) -> Option<CapturedWindowImage> {
-    let wid = id.as_u32();
-    let images_ref = unsafe {
-        SLSHWCaptureWindowList(
-            *G_CONNECTION,
-            &wid as *const u32,
-            1,
-            (1 << 11) | (1 << 9) | (1 << 19),
-        )
-    };
-
-    if images_ref.is_null() {
-        return None;
-    }
-
-    let images = unsafe { CFRetained::from_raw(NonNull::new_unchecked(images_ref)) };
-
-    images.get(0).map(|img| CapturedWindowImage(img.retain()))
-}*/
-
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
     pub fn CGBitmapContextCreate(
@@ -347,35 +327,7 @@ unsafe extern "C" {
     pub fn CGBitmapContextCreateImage(c: *mut CGContext) -> *mut CGImage;
 }
 
-pub fn copy_image(src: &CGImage) -> Option<CapturedWindowImage> {
-    unsafe {
-        let w = CGImage::width(Some(src)) as usize;
-        let h = CGImage::height(Some(src)) as usize;
-
-        let cs = CGColorSpace::new_device_rgb()?;
-
-        let bi = (kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little) as u32;
-        let ctx = CFRetained::from_raw(NonNull::new_unchecked(CGBitmapContextCreate(
-            std::ptr::null_mut(),
-            w,
-            h,
-            8,
-            0,
-            CFRetained::as_ptr(&cs).as_ptr(),
-            CGBitmapInfo(bi),
-        )));
-
-        CGContext::set_interpolation_quality(Some(ctx.as_ref()), CGInterpolationQuality::High);
-        let dst = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(w as f64, h as f64));
-        CGContext::draw_image(Some(ctx.as_ref()), dst, Some(src));
-
-        let out = CGBitmapContextCreateImage(CFRetained::as_ptr(&ctx).as_ptr());
-
-        NonNull::new(out as *mut CGImage).map(|p| CapturedWindowImage(CFRetained::from_raw(p)))
-    }
-}
-
-pub fn capture_window_image(id: WindowServerId) -> Option<CapturedWindowImage> {
+fn capture_window(id: WindowServerId) -> Option<CapturedWindowImage> {
     unsafe {
         let imgs_ref = SLSHWCaptureWindowList(
             *G_CONNECTION,
@@ -395,6 +347,59 @@ pub fn capture_window_image(id: WindowServerId) -> Option<CapturedWindowImage> {
         }
 
         None
+    }
+}
+
+pub fn capture_window_image(
+    id: WindowServerId,
+    target_w: usize,
+    target_h: usize,
+) -> Option<CapturedWindowImage> {
+    let img = capture_window(id)?;
+    resize_cgimage_fit(img.cg_image(), target_w, target_h)
+}
+
+pub fn resize_cgimage_fit(
+    src: &CGImage,
+    target_w: usize,
+    target_h: usize,
+) -> Option<CapturedWindowImage> {
+    unsafe {
+        let src_w = CGImage::width(Some(src)) as f64;
+        let src_h = CGImage::height(Some(src)) as f64;
+        if src_w <= 0.0 || src_h <= 0.0 {
+            return None;
+        }
+
+        let mut max_w = target_w.max(1) as f64;
+        let mut max_h = target_h.max(1) as f64;
+        max_w = max_w.min(src_w);
+        max_h = max_h.min(src_h);
+
+        let scale = (max_w / src_w).min(max_h / src_h);
+        let dst_w = (src_w * scale).round().max(1.0) as usize;
+        let dst_h = (src_h * scale).round().max(1.0) as usize;
+
+        let cs = CGColorSpace::new_device_rgb()?;
+        let bi = (kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little) as u32;
+
+        let ctx = CFRetained::from_raw(NonNull::new_unchecked(CGBitmapContextCreate(
+            std::ptr::null_mut(),
+            dst_w,
+            dst_h,
+            8,
+            0,
+            CFRetained::as_ptr(&cs).as_ptr(),
+            CGBitmapInfo(bi),
+        )));
+
+        CGContext::set_interpolation_quality(Some(ctx.as_ref()), CGInterpolationQuality::Medium);
+
+        let dst = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(dst_w as f64, dst_h as f64));
+        CGContext::draw_image(Some(ctx.as_ref()), dst, Some(src));
+
+        let out = CGBitmapContextCreateImage(CFRetained::as_ptr(&ctx).as_ptr());
+        NonNull::new(out as *mut CGImage).map(|p| CapturedWindowImage(CFRetained::from_raw(p)))
     }
 }
 

@@ -23,7 +23,7 @@ pub type Sender = actor::Sender<Event>;
 pub type Receiver = actor::Receiver<Event>;
 
 pub struct MissionControlActor {
-    _config: Config,
+    config: Config,
     rx: Receiver,
     reactor_tx: reactor::Sender,
     overlay: Option<MissionControlOverlay>,
@@ -39,7 +39,7 @@ impl MissionControlActor {
         mtm: MainThreadMarker,
     ) -> Self {
         Self {
-            _config: config,
+            config,
             rx,
             reactor_tx,
             overlay: None,
@@ -49,9 +49,11 @@ impl MissionControlActor {
     }
 
     pub async fn run(mut self) {
-        while let Some((span, event)) = self.rx.recv().await {
-            let _guard = span.enter();
-            self.handle_event(event);
+        if self.config.settings.ui.mission_control.enabled {
+            while let Some((span, event)) = self.rx.recv().await {
+                let _guard = span.enter();
+                self.handle_event(event);
+            }
         }
     }
 
@@ -62,7 +64,7 @@ impl MissionControlActor {
             } else {
                 CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1280.0, 800.0))
             };
-            let overlay = MissionControlOverlay::new(self.mtm, frame);
+            let overlay = MissionControlOverlay::new(self.config.clone(), self.mtm, frame);
             let self_ptr: *mut MissionControlActor = self as *mut _;
             overlay.set_action_handler(Rc::new(move |action| unsafe {
                 let this: &mut MissionControlActor = &mut *self_ptr;
