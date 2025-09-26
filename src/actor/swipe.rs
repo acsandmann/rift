@@ -176,7 +176,6 @@ fn handle_gesture(swipe: &Swipe, state: &RefCell<SwipeState>, nsevent: &NSEvent)
     let touches = unsafe { nsevent.allTouches() };
     let mut sum_x = 0.0f64;
     let mut sum_y = 0.0f64;
-    let mut any_ended = false;
     let mut touch_count = 0usize;
     let mut active_count = 0usize;
     let mut too_many_touches = false;
@@ -194,8 +193,6 @@ fn handle_gesture(swipe: &Swipe, state: &RefCell<SwipeState>, nsevent: &NSEvent)
         }
 
         let ended = phase.contains(NSTouchPhase::Ended) || phase.contains(NSTouchPhase::Cancelled);
-        any_ended |= ended;
-
         if !ended {
             let pos = unsafe { t.normalizedPosition() };
             sum_x += pos.x as f64;
@@ -255,7 +252,7 @@ fn handle_gesture(swipe: &Swipe, state: &RefCell<SwipeState>, nsevent: &NSEvent)
             }
         }
         GesturePhase::Committed => {
-            if any_ended {
+            if active_count == 0 {
                 st.reset();
             }
         }

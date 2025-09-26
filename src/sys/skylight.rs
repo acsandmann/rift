@@ -3,7 +3,6 @@
 // https://github.com/koekeishiya/yabai/blob/d55a647913ab72d8d8b348bee2d3e59e52ce4a5d/src/misc/extern.h.
 
 use std::ffi::{c_int, c_uint, c_void};
-use std::fmt::Display;
 
 use accessibility_sys::{AXError, AXUIElementRef};
 use bitflags::bitflags;
@@ -34,13 +33,13 @@ pub enum CGEventTapLocation {
 #[repr(u32)]
 #[derive(Hash, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CGSEventType {
-    WindowDestroyed = 804,
     WindowMoved = 806,
     WindowResized = 807,
-    WindowCreated = 811, // this seems to behave more like a focus changed (also window_id increments)
-    ServerWindowDidCreate = 1000,
-    ServerWindowDidTerminate = 1003,
-    // All = 0xFFFF_FFFF,
+    //WindowDidCreated = 811, // this seems to behave more like a focus changed (also window_id increments)
+    WindowCreated = 1325,
+    WindowDestroyed = 1326, // seems to be sent when a window is closed by the app itself
+    MissionControlEntered = 1204,
+    All = 0xFFFF_FFFF,
 }
 
 impl From<CGSEventType> for u32 {
@@ -52,26 +51,26 @@ impl std::convert::TryFrom<u32> for CGSEventType {
 
     fn try_from(v: u32) -> Result<Self, Self::Error> {
         match v {
-            804 => Ok(CGSEventType::WindowDestroyed),
             806 => Ok(CGSEventType::WindowMoved),
             807 => Ok(CGSEventType::WindowResized),
-            811 => Ok(CGSEventType::WindowCreated),
-            1000 => Ok(CGSEventType::ServerWindowDidCreate),
-            1003 => Ok(CGSEventType::ServerWindowDidTerminate),
+            1325 => Ok(CGSEventType::WindowCreated),
+            1326 => Ok(CGSEventType::WindowDestroyed),
+            1204 => Ok(CGSEventType::MissionControlEntered),
+            0xFFFF_FFFF => Ok(CGSEventType::All),
             other => Err(other),
         }
     }
 }
 
-impl Display for CGSEventType {
+impl std::fmt::Display for CGSEventType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CGSEventType::WindowDestroyed => write!(f, "WindowDestroyed"),
             CGSEventType::WindowMoved => write!(f, "WindowMoved"),
             CGSEventType::WindowResized => write!(f, "WindowResized"),
             CGSEventType::WindowCreated => write!(f, "WindowCreated"),
-            CGSEventType::ServerWindowDidCreate => write!(f, "ServerWindowDidCreate"),
-            CGSEventType::ServerWindowDidTerminate => write!(f, "ServerWindowDidTerminate"),
+            CGSEventType::MissionControlEntered => write!(f, "MissionControlEntered"),
+            _ => write!(f, "Unknown"),
         }
     }
 }
@@ -145,6 +144,11 @@ unsafe extern "C" {
     ) -> i32;
     pub fn SLSRegisterConnectionNotifyProc(
         cid: cid_t,
+        callback: extern "C" fn(CGSEventType, *mut c_void, usize, *mut c_void, cid_t),
+        event: CGSEventType,
+        data: *mut c_void,
+    ) -> i32;
+    pub fn SLSRegisterNotifyProc(
         callback: extern "C" fn(CGSEventType, *mut c_void, usize, *mut c_void, cid_t),
         event: CGSEventType,
         data: *mut c_void,

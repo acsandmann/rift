@@ -490,7 +490,9 @@ impl Reactor {
                 }
 
                 if let Some(space) = self.best_space_for_window(&frame) {
-                    if self.window_is_standard(wid) {
+                    if self.window_is_standard(wid)
+                    // && crate::sys::window_server::app_window_suitable(wid.into())
+                    {
                         self.send_layout_event(LayoutEvent::WindowAdded(space, wid));
                     }
                 }
@@ -515,7 +517,7 @@ impl Reactor {
                 if let Some(wid) = self.window_ids.get(&wsid).copied() {
                     self.handle_event(Event::WindowDestroyed(wid));
                 } else {
-                    warn!(
+                    debug!(
                         ?wsid,
                         "Received WindowServerDestroyed for unknown window - ignoring"
                     );
@@ -526,7 +528,7 @@ impl Reactor {
                 if self.window_server_info.contains_key(&wsid)
                     || self.observed_window_server_ids.contains(&wsid)
                 {
-                    warn!(
+                    debug!(
                         ?wsid,
                         "Received WindowServerAppeared for known window - ignoring"
                     );

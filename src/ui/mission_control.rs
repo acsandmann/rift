@@ -1,9 +1,10 @@
 use core::ffi::c_void;
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use crossbeam_channel::{Sender, unbounded};
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::{DeclaredClass, MainThreadOnly, msg_send};
 use objc2_app_kit::{
@@ -13,7 +14,8 @@ use objc2_app_kit::{
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
 use objc2_quartz_core::{CALayer, CATextLayer, CATransaction};
-use parking_lot::RwLock;
+use once_cell::sync::Lazy;
+use parking_lot::{Mutex, RwLock};
 
 use crate::actor::app::WindowId;
 use crate::common::collections::{HashMap, HashSet};
@@ -28,6 +30,72 @@ struct CaptureTask {
     target_w: usize,
     target_h: usize,
 }
+
+struct CaptureJob {
+    task: CaptureTask,
+    cache: Arc<RwLock<HashMap<WindowId, CapturedWindowImage>>>,
+    generation: u64,
+    view_ptr_bits: usize,
+}
+
+struct CapturePool {
+    sender: Sender<CaptureJob>,
+}
+
+static CURRENT_GENERATION: AtomicU64 = AtomicU64::new(1);
+static IN_FLIGHT: Lazy<Mutex<HashSet<(u64, WindowId)>>> =
+    Lazy::new(|| Mutex::new(HashSet::default()));
+
+static CAPTURE_POOL: Lazy<CapturePool> = Lazy::new(|| {
+    use std::thread;
+    let (tx, rx) = unbounded::<CaptureJob>();
+
+    let worker_count = 3usize;
+    for _ in 0..worker_count {
+        let rx = rx.clone();
+        thread::spawn(move || {
+            while let Ok(job) = rx.recv() {
+                if job.generation != CURRENT_GENERATION.load(Ordering::Acquire) {
+                    if let Some(mut set) = IN_FLIGHT.try_lock() {
+                        set.remove(&(job.generation, job.task.window_id));
+                    } else {
+                        // best-effort; skip if contended
+                    }
+                    continue;
+                }
+
+                if let Some(img) = crate::sys::window_server::capture_window_image(
+                    WindowServerId::new(job.task.window_server_id),
+                    job.task.target_w,
+                    job.task.target_h,
+                ) {
+                    {
+                        let mut cache_lock = job.cache.write();
+                        cache_lock.entry(job.task.window_id).or_insert_with(|| img.clone());
+                    }
+                    if let Some(mut set) = IN_FLIGHT.try_lock() {
+                        set.remove(&(job.generation, job.task.window_id));
+                    }
+                    unsafe {
+                        let view_ptr = job.view_ptr_bits as *mut objc2::runtime::AnyObject;
+                        let _: () = msg_send![
+                            view_ptr,
+                            performSelectorOnMainThread: objc2::sel!(refreshPreviews),
+                            withObject: core::ptr::null_mut::<objc2::runtime::AnyObject>(),
+                            waitUntilDone: false
+                        ];
+                    }
+                } else {
+                    if let Some(mut set) = IN_FLIGHT.try_lock() {
+                        set.remove(&(job.generation, job.task.window_id));
+                    }
+                }
+            }
+        });
+    }
+
+    CapturePool { sender: tx }
+});
 
 #[derive(Debug, Clone)]
 pub enum MissionControlMode {
@@ -54,8 +122,6 @@ pub struct MissionControlState {
     workspace_layers: HashMap<String, Retained<CALayer>>,
     workspace_label_layers: HashMap<String, Retained<CATextLayer>>,
     ready_previews: HashSet<WindowId>,
-    capture_tx: Option<mpsc::Sender<CaptureTask>>,
-    cancel_flag: Arc<AtomicBool>,
 }
 
 impl Default for MissionControlState {
@@ -69,8 +135,6 @@ impl Default for MissionControlState {
             workspace_layers: HashMap::default(),
             workspace_label_layers: HashMap::default(),
             ready_previews: HashSet::default(),
-            capture_tx: None,
-            cancel_flag: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -79,8 +143,7 @@ impl MissionControlState {
     fn set_mode(&mut self, mode: MissionControlMode) {
         self.mode = Some(mode);
         self.selection = None;
-        self.cancel_flag.store(true, Ordering::SeqCst);
-        self.capture_tx = None;
+        let _new_gen = CURRENT_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
         self.ready_previews.clear();
         self.prune_preview_cache();
         self.ensure_selection();
@@ -93,8 +156,7 @@ impl MissionControlState {
         self.selection = None;
         self.on_action = None;
 
-        self.cancel_flag.store(true, Ordering::SeqCst);
-        self.capture_tx = None;
+        let _new_gen = CURRENT_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
 
         let mut cache = self.preview_cache.write();
         cache.clear();
@@ -627,16 +689,29 @@ impl MissionControlView {
             return None;
         }
 
-        let min_x = windows.iter().map(|w| w.frame.origin.x).fold(f64::INFINITY, f64::min);
-        let min_y = windows.iter().map(|w| w.frame.origin.y).fold(f64::INFINITY, f64::min);
-        let max_x = windows
-            .iter()
-            .map(|w| w.frame.origin.x + w.frame.size.width)
-            .fold(f64::NEG_INFINITY, f64::max);
-        let max_y = windows
-            .iter()
-            .map(|w| w.frame.origin.y + w.frame.size.height)
-            .fold(f64::NEG_INFINITY, f64::max);
+        let mut min_x = f64::INFINITY;
+        let mut min_y = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        let mut max_y = f64::NEG_INFINITY;
+
+        for w in windows {
+            let x0 = w.frame.origin.x;
+            let y0 = w.frame.origin.y;
+            let x1 = x0 + w.frame.size.width;
+            let y1 = y0 + w.frame.size.height;
+            if x0 < min_x {
+                min_x = x0;
+            }
+            if y0 < min_y {
+                min_y = y0;
+            }
+            if x1 > max_x {
+                max_x = x1;
+            }
+            if y1 > max_y {
+                max_y = y1;
+            }
+        }
 
         let disp_w = (max_x - min_x).max(1.0);
         let disp_h = (max_y - min_y).max(1.0);
@@ -646,11 +721,8 @@ impl MissionControlView {
         let cw = (bounds.size.width - 2.0 * WINDOW_TILE_INSET).max(1.0);
         let ch = (bounds.size.height - 2.0 * WINDOW_TILE_INSET).max(1.0);
 
-        let scale_x = cw / disp_w;
-        let scale_y = ch / disp_h;
-        let base_scale = scale_x.min(scale_y).min(WINDOW_TILE_MAX_SCALE);
-        let scale = base_scale * WINDOW_TILE_SCALE_FACTOR;
-
+        let scale =
+            (cw / disp_w).min(ch / disp_h).min(WINDOW_TILE_MAX_SCALE) * WINDOW_TILE_SCALE_FACTOR;
         let x_offset = cx + (cw - disp_w * scale) / 2.0;
         let y_offset = cy + (ch - disp_h * scale) / 2.0;
 
@@ -1152,12 +1224,18 @@ impl MissionControlView {
                 drop(s);
 
                 if !had_image {
-                    Self::schedule_capture(
-                        state,
-                        window,
-                        (rect.size.width * 1.5).max(2.0) as usize,
-                        (rect.size.height * 1.5).max(2.0) as usize,
-                    );
+                    let (tw, th) = if matches!(layout, WindowLayoutKind::Exploded) {
+                        (
+                            window.frame.size.width.max(1.0) as usize,
+                            window.frame.size.height.max(1.0) as usize,
+                        )
+                    } else {
+                        (
+                            (rect.size.width * 1.5).max(2.0) as usize,
+                            (rect.size.height * 1.5).max(2.0) as usize,
+                        )
+                    };
+                    self.schedule_capture(state, window, tw, th);
                 }
             });
         }
@@ -1166,24 +1244,42 @@ impl MissionControlView {
     fn draw_window_outline(_rect: NSRect, _is_selected: bool) {}
 
     fn schedule_capture(
+        &self,
         state: &RefCell<MissionControlState>,
         window: &WindowData,
         target_w: usize,
         target_h: usize,
     ) {
         let Some(wsid) = window.window_server_id else { return };
-        let st = state.borrow_mut();
+        let st = state.borrow();
         if st.ready_previews.contains(&window.id) {
             return;
         }
-        if let Some(tx) = st.capture_tx.clone() {
-            let _ = tx.send(CaptureTask {
+        {
+            let cache = st.preview_cache.read();
+            if cache.contains_key(&window.id) {
+                return;
+            }
+        }
+        let generation = CURRENT_GENERATION.load(Ordering::Acquire);
+        {
+            let mut set = IN_FLIGHT.lock();
+            if !set.insert((generation, window.id)) {
+                return;
+            }
+        }
+        let job = CaptureJob {
+            task: CaptureTask {
                 window_id: window.id,
                 window_server_id: wsid,
                 target_w,
                 target_h,
-            });
-        }
+            },
+            cache: st.preview_cache.clone(),
+            generation,
+            view_ptr_bits: self as *const _ as usize,
+        };
+        let _ = CAPTURE_POOL.sender.send(job);
     }
 
     fn prewarm_previews(&self) {
@@ -1192,19 +1288,26 @@ impl MissionControlView {
         let tasks: Vec<(i64, CaptureTask)> = {
             let mut pending = Vec::new();
             let state_ref = state_cell.borrow();
+            let full_res =
+                matches!(state_ref.mode(), Some(MissionControlMode::CurrentWorkspace(_)));
 
             let mut push_window = |window: &WindowData| {
                 let Some(wsid) = window.window_server_id else { return };
 
                 let src_w = window.frame.size.width.max(1.0);
                 let src_h = window.frame.size.height.max(1.0);
-                let max_edge = 600.0f64; // balance between sharpness & performance
-                let (tw, th) = if src_w >= src_h {
-                    let r = (max_edge / src_w).min(1.0);
-                    ((src_w * r) as usize, (src_h * r) as usize)
+
+                let (tw, th) = if full_res {
+                    (src_w as usize, src_h as usize)
                 } else {
-                    let r = (max_edge / src_h).min(1.0);
-                    ((src_w * r) as usize, (src_h * r) as usize)
+                    let max_edge = 600.0f64; // balance between sharpness & performance
+                    if src_w >= src_h {
+                        let r = (max_edge / src_w).min(1.0);
+                        ((src_w * r) as usize, (src_h * r) as usize)
+                    } else {
+                        let r = (max_edge / src_h).min(1.0);
+                        ((src_w * r) as usize, (src_h * r) as usize)
+                    }
                 };
 
                 let area = (src_w * src_h) as i64;
@@ -1239,90 +1342,38 @@ impl MissionControlView {
             return;
         }
 
-        let (in_tx, in_rx) = mpsc::channel::<CaptureTask>();
-        let (preview_cache, cancel_flag) = {
-            let mut st = state_cell.borrow_mut();
-            st.cancel_flag.store(true, Ordering::SeqCst);
-            st.capture_tx = Some(in_tx.clone());
-            st.cancel_flag = Arc::new(AtomicBool::new(false));
-            (st.preview_cache.clone(), st.cancel_flag.clone())
+        let generation = CURRENT_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+
+        let (preview_cache, view_ptr_bits) = {
+            let st = state_cell.borrow();
+            (st.preview_cache.clone(), self as *const _ as usize)
         };
 
-        let view_ptr_bits = self as *const _ as usize;
-        let worker_count = 3usize;
-        let mut worker_senders = Vec::with_capacity(worker_count);
-        for _ in 0..worker_count {
-            let (tx, rx) = mpsc::channel::<CaptureTask>();
-            let cache = preview_cache.clone();
-            let cancel = cancel_flag.clone();
-            std::thread::spawn(move || {
-                while !cancel.load(Ordering::Relaxed) {
-                    match rx.recv() {
-                        Ok(task) => {
-                            if cancel.load(Ordering::Relaxed) {
-                                break;
-                            }
-                            if let Some(img) = crate::sys::window_server::capture_window_image(
-                                WindowServerId::new(task.window_server_id),
-                                task.target_w,
-                                task.target_h,
-                            ) {
-                                let mut cache_lock = cache.write();
-                                cache_lock.entry(task.window_id).or_insert_with(|| img.clone());
-                                unsafe {
-                                    let view_ptr = view_ptr_bits as *mut objc2::runtime::AnyObject;
-                                    let _: () = msg_send![
-                                        view_ptr,
-                                        performSelectorOnMainThread: objc2::sel!(refreshPreviews),
-                                        withObject: core::ptr::null_mut::<objc2::runtime::AnyObject>(),
-                                        waitUntilDone: false
-                                    ];
-                                }
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-            });
-            worker_senders.push(tx);
-        }
-
-        let dispatch_cancel = cancel_flag.clone();
-        std::thread::spawn(move || {
-            let mut idx = 0usize;
-            while !dispatch_cancel.load(Ordering::Relaxed) {
-                match in_rx.recv() {
-                    Ok(task) => {
-                        let i = idx % worker_senders.len();
-                        let _ = worker_senders[i].send(task);
-                        idx = idx.wrapping_add(1);
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-
-        let prewarm_cancel = cancel_flag;
-        let prewarm_cache = preview_cache;
-        let prewarm_sender = in_tx.clone();
         std::thread::spawn(move || {
             let mut tasks = tasks;
-            tasks.sort_by(|a, b| b.0.cmp(&a.0));
+            tasks.sort_by(|a, b| a.0.cmp(&b.0));
 
             for (_, task) in tasks.into_iter() {
-                if prewarm_cancel.load(Ordering::Relaxed) {
-                    break;
+                {
+                    let cache = preview_cache.read();
+                    if cache.contains_key(&task.window_id) {
+                        continue;
+                    }
+                }
+                {
+                    let mut set = IN_FLIGHT.lock();
+                    if !set.insert((generation, task.window_id)) {
+                        continue;
+                    }
                 }
 
-                let skip = {
-                    let cache = prewarm_cache.read();
-                    cache.contains_key(&task.window_id)
+                let job = CaptureJob {
+                    task,
+                    cache: preview_cache.clone(),
+                    generation,
+                    view_ptr_bits,
                 };
-                if skip {
-                    continue;
-                }
-
-                if prewarm_sender.send(task).is_err() {
+                if CAPTURE_POOL.sender.send(job).is_err() {
                     break;
                 }
             }
@@ -1351,6 +1402,7 @@ pub struct MissionControlOverlay {
     key_tap: RefCell<Option<crate::sys::event_tap::EventTap>>,
     fade_enabled: bool,
     fade_duration_ms: f64,
+    has_shown: RefCell<bool>,
 }
 
 impl MissionControlOverlay {
@@ -1397,6 +1449,7 @@ impl MissionControlOverlay {
                 key_tap: RefCell::new(None),
                 fade_enabled: config.settings.ui.mission_control.fade_enabled,
                 fade_duration_ms: config.settings.ui.mission_control.fade_duration_ms,
+                has_shown: RefCell::new(false),
             }
         }
     }
@@ -1414,7 +1467,19 @@ impl MissionControlOverlay {
         self.view.ivars().borrow_mut().set_mode(mode);
         self.view.prewarm_previews();
 
-        if self.fade_enabled {
+        let should_fade = if self.fade_enabled {
+            let mut first = self.has_shown.borrow_mut();
+            if !*first {
+                *first = true;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if should_fade {
             unsafe {
                 self.window.setAlphaValue(0.0);
             }
@@ -1432,7 +1497,11 @@ impl MissionControlOverlay {
                 let _: () = msg_send![ns_anim_cls, endGrouping];
             }
         } else {
+            // Either fade disabled or we've already shown once; show instantly.
             self.window.makeKeyAndOrderFront(Some(&self.view));
+            unsafe {
+                self.window.setAlphaValue(1.0);
+            }
         }
 
         unsafe { self.view.setNeedsDisplay(true) };
@@ -1484,6 +1553,7 @@ impl MissionControlOverlay {
             }
         }
 
+        *self.has_shown.borrow_mut() = false;
         objc2::rc::autoreleasepool(|_| {});
     }
 

@@ -13,18 +13,20 @@ use parking_lot::Mutex;
 use tracing::{debug, trace};
 
 use super::skylight::{
-    SLSMainConnectionID, SLSRegisterConnectionNotifyProc, SLSRequestNotificationsForWindows, cid_t,
+    CGSEventType, SLSMainConnectionID, SLSRegisterConnectionNotifyProc,
+    SLSRequestNotificationsForWindows, cid_t,
 };
 use crate::actor;
 use crate::common::collections::HashMap;
-use crate::sys::skylight::CGSEventType;
 
 type Wid = u32;
+type Sid = u64;
 
 #[derive(Debug, Clone)]
 pub struct EventData {
     pub event_type: CGSEventType,
     pub window_id: Option<Wid>,
+    pub space_id: Option<Sid>,
 }
 
 static EVENT_CHANNELS: Lazy<
@@ -99,13 +101,41 @@ extern "C" fn connection_callback(
     _context: *mut c_void,
     _cid: cid_t,
 ) {
-    let event_data = EventData {
-        event_type: event,
-        window_id: if !data.is_null() {
-            Some(unsafe { *(data as *const u32) })
+    let event_data: EventData = unsafe {
+        if data.is_null() {
+            EventData {
+                event_type: event,
+                window_id: None,
+                space_id: None,
+            }
         } else {
-            None
-        },
+            match event {
+                CGSEventType::WindowDestroyed | CGSEventType::WindowCreated => {
+                    let sid = std::ptr::read_unaligned(data as *const u64);
+                    let wid = std::ptr::read_unaligned(
+                        (data as *const u8).add(std::mem::size_of::<u64>()) as *const u32,
+                    );
+                    EventData {
+                        event_type: event,
+                        window_id: Some(wid),
+                        space_id: Some(sid),
+                    }
+                }
+                CGSEventType::MissionControlEntered => EventData {
+                    event_type: event,
+                    window_id: None,
+                    space_id: None,
+                },
+                _ => {
+                    let wid = std::ptr::read_unaligned(data as *const u32);
+                    EventData {
+                        event_type: event,
+                        window_id: Some(wid),
+                        space_id: None,
+                    }
+                }
+            }
+        }
     };
 
     debug!("received: {:?}", event_data);

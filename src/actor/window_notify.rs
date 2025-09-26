@@ -1,4 +1,4 @@
-use tracing::{debug, trace};
+use tracing::debug;
 
 use super::reactor::{self, Event};
 use crate::common::collections::HashSet;
@@ -109,20 +109,14 @@ impl WindowNotify {
                     Some(evt) => {
                         if let Some(window_id) = evt.1.window_id {
                             match event {
-                                CGSEventType::ServerWindowDidTerminate
-                                | CGSEventType::WindowDestroyed => events_tx.send(
+                                CGSEventType::WindowDestroyed => events_tx.send(
                                     Event::WindowServerDestroyed(WindowServerId::new(window_id)),
                                 ),
-                                CGSEventType::ServerWindowDidCreate => events_tx.send(
+                                CGSEventType::WindowCreated => events_tx.send(
                                     Event::WindowServerAppeared(WindowServerId::new(window_id)),
                                 ),
-                                // TODO: handle WindowCreated and confirm when it is triggered
-                                CGSEventType::WindowCreated
-                                | CGSEventType::WindowMoved
-                                | CGSEventType::WindowResized => {}
+                                _ => {}
                             }
-                        } else {
-                            trace!("event had no window id: {:?}", evt);
                         }
                     }
                     None => break,

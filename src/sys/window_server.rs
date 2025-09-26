@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 
 use super::geometry::{CGRectDef, ToICrate};
 use super::screen::CoordinateConverter;
+use crate::actor::app::WindowId;
 use crate::layout_engine::Direction;
 use crate::sys::process::ProcessSerialNumber;
 use crate::sys::skylight::*;
@@ -59,6 +60,10 @@ impl TryFrom<&AXUIElement> for WindowServerId {
         }
         Ok(Self(id))
     }
+}
+
+impl From<WindowId> for WindowServerId {
+    fn from(id: WindowId) -> Self { Self(id.idx.into()) }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -222,6 +227,20 @@ pub fn get_window_at_point(
     (window_id != 0).then(|| WindowServerId(window_id))
 }
 
+fn iterator_window_suitable(iterator: CFTypeRef) -> bool {
+    let tags = unsafe { SLSWindowIteratorGetTags(iterator) };
+    let attributes = unsafe { SLSWindowIteratorGetAttributes(iterator) };
+    let parent_wid = unsafe { SLSWindowIteratorGetParentID(iterator) };
+
+    if parent_wid == 0
+        && ((attributes & 0x2) != 0 || (tags & 0x0400_0000_0000_0000) != 0)
+        && ((tags & 0x1) != 0 || ((tags & 0x2) != 0 && (tags & 0x8000_0000) != 0))
+    {
+        return true;
+    }
+    false
+}
+
 // credit to yabai
 pub fn space_window_list_for_connection(
     spaces: &[u64],
@@ -299,6 +318,29 @@ pub fn space_window_list_for_connection(
 
     windows.shrink_to_fit();
     windows
+}
+
+pub fn app_window_suitable(id: WindowServerId) -> bool {
+    let cf_windows = CFArray::from_CFTypes(&[CFNumber::from(id.as_u32() as i64)]);
+    let query =
+        unsafe { SLSWindowQueryWindows(*G_CONNECTION, cf_windows.as_concrete_TypeRef(), 0x0) };
+    if query.is_null() {
+        return false;
+    }
+
+    let mut suitable = false;
+    let iterator = unsafe { SLSWindowQueryResultCopyWindows(query) };
+    if !iterator.is_null() {
+        let count = unsafe { SLSWindowIteratorGetCount(iterator) };
+        if count > 0 && unsafe { SLSWindowIteratorAdvance(iterator) } {
+            if iterator_window_suitable(iterator) {
+                suitable = true;
+            }
+        }
+        unsafe { CFRelease(iterator) };
+    }
+    unsafe { CFRelease(query) };
+    suitable
 }
 
 #[derive(Clone)]

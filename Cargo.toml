@@ -72,6 +72,9 @@ objc2-core-foundation = { version = "0.3.1", default-features = false, features 
 objc2-core-graphics = { version = "0.3.1", default-features = false, features = [
     "CGEvent",
     "CGEventTypes",
+    "CGError",
+    "CGWindow",
+    "CGDirectDisplay",
     "objc2"
 ] }
 objc2-foundation = { version = "0.3.1", default-features = false, features = [
@@ -107,6 +110,8 @@ futures-task = "0.3.31"
 regex = "1.11.0"
 smallvec = "1.15.1"
 enum_dispatch = "0.3.13"
+crossbeam = "0.8.4"
+crossbeam-channel = "0.5"
 
 [dev-dependencies]
 pretty_assertions = "1.4.0"
