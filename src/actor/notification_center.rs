@@ -60,25 +60,17 @@ define_class! {
             self.handle_app_event(notif);
         }
 
-        #[unsafe(method(recvSessionActivatedEvent:))]
-        fn recv_session_activated_event(&self, notif: &NSNotification) {
-            trace!("{notif:#?}");
-            self.handle_session_activated_event(notif);
-        }
-
-        #[unsafe(method(recvSessionDeactivatedEvent:))]
-        fn recv_session_deactivated_event(&self, notif: &NSNotification) {
-            trace!("{notif:#?}");
-            self.handle_session_deactivated_event(notif);
-        }
-
         #[unsafe(method(recvWakeEvent:))]
         fn recv_wake_event(&self, notif: &NSNotification) {
             trace!("{notif:#?}");
-
-            self.send_current_space();
-            self.send_screen_parameters();
-
+            // On wake, macOS may briefly report zero displays which would
+            // cause us to clear screen state and lose track of windows.
+            // Avoid pushing an immediate screen/space update here; instead,
+            // rely on the subsequent system notifications
+            // (NSApplicationDidChangeScreenParametersNotification and
+            // NSWorkspaceActiveSpaceDidChangeNotification) to deliver the
+            // real, stable configuration. We still notify the system-woke
+            // event so subsystems can re-subscribe OS callbacks.
             self.send_event(WmEvent::SystemWoke);
         }
 
@@ -132,6 +124,13 @@ impl NotificationCenterInner {
         let mut screen_cache = self.ivars().screen_cache.borrow_mut();
         let (frames, ids, converter) = screen_cache.update_screen_config();
         let spaces = screen_cache.get_screen_spaces();
+
+        // If the system reports no screens (common immediately after wake),
+        // ignore this transient state to avoid clearing WM screen state.
+        if frames.is_empty() {
+            trace!("Screen parameters empty after update; suppressing transient update");
+            return;
+        }
 
         let mut last_state = self.ivars().last_screen_state.borrow_mut();
         let is_unchanged = match &*last_state {
@@ -196,16 +195,6 @@ impl NotificationCenterInner {
         assert!(app.class() == NSRunningApplication::class());
         let app: Retained<NSRunningApplication> = unsafe { mem::transmute(app) };
         Some(app)
-    }
-
-    fn handle_session_activated_event(&self, _notif: &NSNotification) {
-        self.send_event(WmEvent::SessionActivated);
-        self.send_current_space();
-    }
-
-    fn handle_session_deactivated_event(&self, _notif: &NSNotification) {
-        self.send_event(WmEvent::SessionDeactivated);
-        self.send_current_space();
     }
 }
 

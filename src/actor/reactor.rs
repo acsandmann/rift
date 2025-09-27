@@ -576,12 +576,38 @@ impl Reactor {
             }
             Event::ScreenParametersChanged(frames, spaces, ws_info) => {
                 info!("screen parameters changed");
-                self.screens = frames
-                    .into_iter()
-                    .zip(spaces)
-                    .map(|(frame, space)| Screen { frame, space })
-                    .collect();
-                self.expose_all_spaces();
+                if frames.is_empty() {
+                    if spaces.is_empty() {
+                        if !self.screens.is_empty() {
+                            self.screens.clear();
+                            self.expose_all_spaces();
+                        }
+                    } else if spaces.len() == self.screens.len() {
+                        for (space, screen) in spaces.into_iter().zip(&mut self.screens) {
+                            screen.space = space;
+                        }
+                        self.expose_all_spaces();
+                    } else {
+                        warn!(
+                            "Ignoring empty screen update: we have {} screens, but {} spaces",
+                            self.screens.len(),
+                            spaces.len()
+                        );
+                    }
+                } else if frames.len() != spaces.len() {
+                    warn!(
+                        "Ignoring screen update: got {} frames but {} spaces",
+                        frames.len(),
+                        spaces.len()
+                    );
+                } else {
+                    self.screens = frames
+                        .into_iter()
+                        .zip(spaces.into_iter())
+                        .map(|(frame, space)| Screen { frame, space })
+                        .collect();
+                    self.expose_all_spaces();
+                }
                 self.update_complete_window_server_info(ws_info);
                 // FIXME: Update visible windows if space changed
             }
@@ -2050,6 +2076,36 @@ pub mod tests {
             full_screen,
             apps.windows.get(&WindowId::new(1, 1)).expect("Window was not resized").frame,
         );
+    }
+
+    #[test]
+    fn it_clears_screen_state_when_no_displays_are_reported() {
+        let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+            &crate::common::config::VirtualWorkspaceSettings::default(),
+            &crate::common::config::LayoutSettings::default(),
+            None,
+        ));
+        let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+
+        reactor.handle_event(Event::ScreenParametersChanged(
+            vec![screen],
+            vec![Some(SpaceId::new(1))],
+            vec![],
+        ));
+        assert_eq!(1, reactor.screens.len());
+
+        reactor.handle_event(Event::ScreenParametersChanged(vec![], vec![], vec![]));
+        assert!(reactor.screens.is_empty());
+
+        reactor.handle_event(Event::SpaceChanged(vec![], vec![]));
+        assert!(reactor.screens.is_empty());
+
+        reactor.handle_event(Event::ScreenParametersChanged(
+            vec![screen],
+            vec![Some(SpaceId::new(1))],
+            vec![],
+        ));
+        assert_eq!(1, reactor.screens.len());
     }
 
     #[test]

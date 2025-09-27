@@ -61,6 +61,10 @@ impl<S: System> ScreenCache<S> {
         let mut cg_screens = self.system.cg_screens().unwrap();
         debug!("cg_screens={cg_screens:?}");
         if cg_screens.is_empty() {
+            // When no screens are reported, make sure we clear the cached UUIDs so
+            // subsequent space queries don't pretend the previous screens still
+            // exist.
+            self.uuids.clear();
             return (vec![], vec![], CoordinateConverter::default());
         };
 
@@ -294,6 +298,9 @@ pub mod diagnostic {
 
 #[cfg(test)]
 mod test {
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+
     use core_foundation::string::CFString;
     use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 
@@ -313,9 +320,45 @@ mod test {
         fn uuid_for_rect(&self, _rect: CGRect) -> CFString { CFString::new("stub") }
     }
 
+    struct SequenceSystem {
+        cg_screens: RefCell<VecDeque<Vec<CGScreenInfo>>>,
+        ns_screens: RefCell<VecDeque<Vec<NSScreenInfo>>>,
+        uuids: RefCell<VecDeque<CFString>>,
+    }
+
+    impl SequenceSystem {
+        fn new(
+            cg_screens: Vec<Vec<CGScreenInfo>>,
+            ns_screens: Vec<Vec<NSScreenInfo>>,
+            uuids: Vec<CFString>,
+        ) -> Self {
+            Self {
+                cg_screens: RefCell::new(VecDeque::from(cg_screens)),
+                ns_screens: RefCell::new(VecDeque::from(ns_screens)),
+                uuids: RefCell::new(VecDeque::from(uuids)),
+            }
+        }
+    }
+
+    impl System for SequenceSystem {
+        fn cg_screens(&self) -> Result<Vec<CGScreenInfo>, core_graphics_types::base::CGError> {
+            Ok(self.cg_screens.borrow_mut().pop_front().unwrap_or_default())
+        }
+
+        fn ns_screens(&self) -> Vec<NSScreenInfo> {
+            self.ns_screens.borrow_mut().pop_front().unwrap_or_default()
+        }
+
+        fn uuid_for_rect(&self, _rect: CGRect) -> CFString {
+            self.uuids
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or_else(|| CFString::from_static_string("missing-uuid"))
+        }
+    }
+
     #[test]
     fn it_calculates_the_visible_frame() {
-        println!("test");
         let stub = Stub {
             cg_screens: vec![
                 CGScreenInfo {
@@ -354,5 +397,37 @@ mod test {
             ],
             sc.update_screen_config().0
         );
+    }
+
+    #[test]
+    fn clears_cached_screen_identifiers_when_display_list_is_empty() {
+        let bounds = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1440.0, 900.0));
+        let visible_frame = CGRect::new(CGPoint::new(0.0, 22.0), CGSize::new(1440.0, 878.0));
+
+        let system = SequenceSystem::new(
+            vec![vec![CGScreenInfo { cg_id: ScreenId(1), bounds }], vec![]],
+            vec![
+                vec![NSScreenInfo {
+                    cg_id: ScreenId(1),
+                    frame: bounds,
+                    visible_frame,
+                }],
+                vec![],
+            ],
+            vec![CFString::from_static_string("uuid-1")],
+        );
+
+        let mut cache = ScreenCache::new_with(system);
+
+        let (frames, ids, _) = cache.update_screen_config();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(ids.len(), 1);
+        assert_eq!(cache.uuids.len(), 1);
+
+        let (frames, ids, converter) = cache.update_screen_config();
+        assert!(frames.is_empty());
+        assert!(ids.is_empty());
+        assert!(cache.uuids.is_empty());
+        assert!(converter.convert_point(CGPoint::new(0.0, 0.0)).is_none());
     }
 }
