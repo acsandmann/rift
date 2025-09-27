@@ -60,6 +60,18 @@ define_class! {
             self.handle_app_event(notif);
         }
 
+        #[unsafe(method(recvSessionActivatedEvent:))]
+        fn recv_session_activated_event(&self, notif: &NSNotification) {
+            trace!("{notif:#?}");
+            self.handle_session_activated_event(notif);
+        }
+
+        #[unsafe(method(recvSessionDeactivatedEvent:))]
+        fn recv_session_deactivated_event(&self, notif: &NSNotification) {
+            trace!("{notif:#?}");
+            self.handle_session_deactivated_event(notif);
+        }
+
         #[unsafe(method(recvWakeEvent:))]
         fn recv_wake_event(&self, notif: &NSNotification) {
             trace!("{notif:#?}");
@@ -185,6 +197,16 @@ impl NotificationCenterInner {
         let app: Retained<NSRunningApplication> = unsafe { mem::transmute(app) };
         Some(app)
     }
+
+    fn handle_session_activated_event(&self, _notif: &NSNotification) {
+        self.send_event(WmEvent::SessionActivated);
+        self.send_current_space();
+    }
+
+    fn handle_session_deactivated_event(&self, _notif: &NSNotification) {
+        self.send_event(WmEvent::SessionDeactivated);
+        self.send_current_space();
+    }
 }
 
 pub struct NotificationCenter {
@@ -251,6 +273,18 @@ impl NotificationCenter {
             register_unsafe(
                 sel!(recvAppEvent:),
                 NSWorkspaceDidTerminateApplicationNotification,
+                workspace_center,
+                workspace,
+            );
+            register_unsafe(
+                sel!(recvSessionActivatedEvent:),
+                NSWorkspaceSessionDidBecomeActiveNotification,
+                workspace_center,
+                workspace,
+            );
+            register_unsafe(
+                sel!(recvSessionDeactivatedEvent:),
+                NSWorkspaceSessionDidResignActiveNotification,
                 workspace_center,
                 workspace,
             );

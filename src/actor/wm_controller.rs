@@ -41,6 +41,8 @@ pub enum WmEvent {
         CoordinateConverter,
         Vec<Option<SpaceId>>,
     ),
+    SessionActivated,
+    SessionDeactivated,
     SystemWoke,
     PowerStateChanged(bool),
     Command(WmCommand),
@@ -150,6 +152,8 @@ impl WmController {
         use self::WmCommand::*;
         use self::WmEvent::*;
         match event {
+            SessionActivated => self.on_session_activated(),
+            SessionDeactivated => self.on_session_deactivated(),
             SystemWoke => self.events_tx.send(Event::SystemWoke),
             AppEventsRegistered => {
                 _ = self.mouse_tx.send(mouse::Request::SetEventProcessing(false));
@@ -419,6 +423,32 @@ impl WmController {
     fn unregister_hotkeys(&mut self) {
         debug!("unregister_hotkeys");
         self.hotkeys = None;
+    }
+
+    fn on_session_deactivated(&mut self) {
+        if self.login_window_active {
+            return;
+        }
+
+        info!("Session deactivated; disabling WM");
+        self.login_window_active = true;
+        self.events_tx.send(reactor::Event::SpaceChanged(
+            self.active_spaces(),
+            self.get_windows(),
+        ));
+    }
+
+    fn on_session_activated(&mut self) {
+        if !self.login_window_active {
+            return;
+        }
+
+        info!("Session activated; re-enabling WM");
+        self.login_window_active = false;
+        self.events_tx.send(reactor::Event::SpaceChanged(
+            self.active_spaces(),
+            self.get_windows(),
+        ));
     }
 
     fn get_windows(&self) -> Vec<WindowServerInfo> {
