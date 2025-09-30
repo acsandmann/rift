@@ -51,7 +51,9 @@ pub enum ConfigCommand {
 
 pub fn data_dir() -> PathBuf { dirs::home_dir().unwrap().join(".rift") }
 pub fn restore_file() -> PathBuf { data_dir().join("layout.ron") }
-pub fn config_file() -> PathBuf { dirs::home_dir().unwrap().join(".rift.toml") }
+pub fn config_file() -> PathBuf {
+    dirs::home_dir().unwrap().join(".config").join("rift").join("config.toml")
+}
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]

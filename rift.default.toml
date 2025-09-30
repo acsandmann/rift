@@ -1,5 +1,5 @@
 # rift config
-# Copy this file to ~/.rift.toml or $HOME/.rift.toml
+# Copy this file to ~/.config/rift/config.toml or $HOME~/.config/rift/config.toml
 
 [settings]
 # Animations
