@@ -39,7 +39,7 @@ impl ConfigWatcher {
                 let _ = tx.send(res);
             },
             NotifyConfig::default()
-                .with_poll_interval(Duration::from_secs(2))
+                .with_poll_interval(Duration::from_secs(1))
                 .with_compare_contents(true),
         )?;
 
@@ -47,25 +47,12 @@ impl ConfigWatcher {
 
         info!("watching {:?}", self.file);
 
-        let mut last_trigger: Option<Instant> = None;
-
         loop {
             match rx.recv().await {
                 Some(Ok(event)) => {
                     if self.is_relevant(&event) {
-                        let now = Instant::now();
-                        let should_fire = match last_trigger {
-                            None => true,
-                            Some(t) => now.duration_since(t) >= Duration::from_secs(5),
-                        };
-
-                        if should_fire {
-                            debug!("change detected: {:?}", event.kind);
-                            last_trigger = Some(now);
-                            self.request_reload();
-                        } else {
-                            debug!("debounced {:?}", event.kind);
-                        }
+                        debug!("change detected: {:?}", event.kind);
+                        self.request_reload();
                     } else {
                         debug!("ignoring unrelated event: {:?}", event.kind);
                     }
