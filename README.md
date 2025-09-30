@@ -23,6 +23,8 @@
 - does **NOT** require disabling of SIP
 - allows "displays have separate spaces" to be enabled without any issues (most/all wms ask for it to be disabled). this allows you to have a full screen app on one display whilst using the other display normally.
 - switch to next/previous workspace with trackpad gestures (3 fingered swipes, or any amount of fingers)
+- config hot-reloading
+
 
 ### motivation
 aerospace worked well for me but there were a few things i missed like animations, the ability to have a full screen window on one display whilst working on the other, and more. i also disagreed with the approach of not using the private api's as the os tends to actually rely on these apis far more than the public ones so they *generally* are much more reliable and performant (and in some cases necessary due to holes in the public apis).
