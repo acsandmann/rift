@@ -23,6 +23,15 @@ impl Direction {
             Direction::Up | Direction::Down => Orientation::Vertical,
         }
     }
+
+    pub fn opposite(self) -> Direction {
+        match self {
+            Direction::Left => Direction::Right,
+            Direction::Right => Direction::Left,
+            Direction::Up => Direction::Down,
+            Direction::Down => Direction::Up,
+        }
+    }
 }
 
 impl From<String> for Direction {

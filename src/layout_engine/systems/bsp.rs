@@ -18,6 +18,7 @@ enum NodeKind {
     Leaf {
         window: Option<WindowId>,
         fullscreen: bool,
+        preselected: Option<Direction>,
     },
 }
 
@@ -35,7 +36,143 @@ pub struct BspLayoutSystem {
 }
 
 impl BspLayoutSystem {
-    pub fn new() -> Self { Self::default() }
+    fn find_neighbor_leaf(&self, from_leaf: NodeId, direction: Direction) -> Option<NodeId> {
+        let mut current = from_leaf;
+
+        while let Some(parent) = current.parent(&self.tree.map) {
+            if let Some(NodeKind::Split { orientation, .. }) = self.kind.get(parent) {
+                if *orientation == direction.orientation() {
+                    let children: Vec<_> = parent.children(&self.tree.map).collect();
+                    if children.len() == 2 {
+                        let is_first = children[0] == current;
+                        let target_child = match direction {
+                            Direction::Left | Direction::Up => {
+                                if !is_first {
+                                    Some(children[0])
+                                } else {
+                                    None
+                                }
+                            }
+                            Direction::Right | Direction::Down => {
+                                if is_first {
+                                    Some(children[1])
+                                } else {
+                                    None
+                                }
+                            }
+                        };
+
+                        if let Some(target) = target_child {
+                            return Some(self.find_closest_leaf_in_direction(target, direction));
+                        }
+                    }
+                }
+            }
+            current = parent;
+        }
+
+        None
+    }
+
+    fn find_closest_leaf_in_direction(&self, root: NodeId, direction: Direction) -> NodeId {
+        match self.kind.get(root) {
+            Some(NodeKind::Leaf { .. }) => root,
+            Some(NodeKind::Split { orientation, .. }) => {
+                let children: Vec<_> = root.children(&self.tree.map).collect();
+                if children.is_empty() {
+                    return root;
+                }
+
+                let target_child = if *orientation == direction.orientation() {
+                    match direction {
+                        Direction::Left | Direction::Up => children.last().copied(),
+                        Direction::Right | Direction::Down => children.first().copied(),
+                    }
+                } else {
+                    children.first().copied()
+                };
+
+                if let Some(child) = target_child {
+                    self.find_closest_leaf_in_direction(child, direction)
+                } else {
+                    root
+                }
+            }
+            None => root,
+        }
+    }
+
+    fn equalize_tree(&mut self, layout: LayoutId) {
+        if let Some(state) = self.layouts.get(layout).copied() {
+            self.equalize_node_recursive(state.root);
+        }
+    }
+
+    fn equalize_node_recursive(&mut self, node: NodeId) {
+        match self.kind.get_mut(node) {
+            Some(NodeKind::Split { ratio, .. }) => {
+                *ratio = 0.5;
+                let children: Vec<_> = node.children(&self.tree.map).collect();
+                for child in children {
+                    self.equalize_node_recursive(child);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn smart_insert_window(&mut self, layout: LayoutId, window: WindowId) -> bool {
+        if let Some(sel) = self.selection_of_layout(layout) {
+            let leaf = self.descend_to_leaf(sel);
+
+            if let Some(NodeKind::Leaf {
+                preselected: Some(direction), ..
+            }) = self.kind.get(leaf).cloned()
+            {
+                self.split_leaf_in_direction(leaf, direction, window);
+
+                if let Some(NodeKind::Leaf { preselected, .. }) = self.kind.get_mut(leaf) {
+                    *preselected = None;
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    fn split_leaf_in_direction(
+        &mut self,
+        leaf: NodeId,
+        direction: Direction,
+        new_window: WindowId,
+    ) {
+        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get(leaf).cloned() {
+            let orientation = direction.orientation();
+
+            let left = self.make_leaf(window);
+            let right = self.make_leaf(Some(new_window));
+
+            if let Some(w) = window {
+                self.window_to_node.insert(w, left);
+            }
+            self.window_to_node.insert(new_window, right);
+
+            self.kind.insert(leaf, NodeKind::Split { orientation, ratio: 0.5 });
+
+            match direction {
+                Direction::Left | Direction::Up => {
+                    right.detach(&mut self.tree).push_back(leaf);
+                    left.detach(&mut self.tree).push_back(leaf);
+                }
+                Direction::Right | Direction::Down => {
+                    left.detach(&mut self.tree).push_back(leaf);
+                    right.detach(&mut self.tree).push_back(leaf);
+                }
+            }
+
+            self.tree.data.selection.select(&self.tree.map, right);
+        }
+    }
 }
 
 impl Default for BspLayoutSystem {
@@ -52,7 +189,11 @@ impl Default for BspLayoutSystem {
 impl BspLayoutSystem {
     fn make_leaf(&mut self, window: Option<WindowId>) -> NodeId {
         let id = self.tree.mk_node().into_id();
-        self.kind.insert(id, NodeKind::Leaf { window, fullscreen: false });
+        self.kind.insert(id, NodeKind::Leaf {
+            window,
+            fullscreen: false,
+            preselected: None,
+        });
         if let Some(w) = window {
             self.window_to_node.insert(w, id);
         }
@@ -146,65 +287,6 @@ impl BspLayoutSystem {
         parent_id
     }
 
-    fn descend_to_edge_leaf(&self, mut node: NodeId, direction: Direction) -> NodeId {
-        loop {
-            match self.kind.get(node) {
-                Some(NodeKind::Leaf { .. }) => return node,
-                Some(NodeKind::Split { orientation, .. }) => {
-                    let first = node.first_child(&self.tree.map);
-                    let second = first.and_then(|f| f.next_sibling(&self.tree.map));
-                    let go_second = match (orientation, direction) {
-                        (Orientation::Horizontal, Direction::Left) => true,
-                        (Orientation::Horizontal, Direction::Right) => false,
-                        (Orientation::Vertical, Direction::Up) => true,
-                        (Orientation::Vertical, Direction::Down) => false,
-                        _ => false,
-                    };
-                    node = if go_second {
-                        second.unwrap_or(node)
-                    } else {
-                        first.unwrap_or(node)
-                    };
-                }
-                None => return node,
-            }
-        }
-    }
-
-    fn find_neighbor_leaf(&self, from_leaf: NodeId, direction: Direction) -> Option<NodeId> {
-        let mut child = from_leaf;
-        let mut parent_opt = child.parent(&self.tree.map);
-        while let Some(parent) = parent_opt {
-            if let Some(NodeKind::Split { orientation, .. }) = self.kind.get(parent) {
-                if *orientation == direction.orientation() {
-                    let first = parent.first_child(&self.tree.map);
-                    let second = first.and_then(|f| f.next_sibling(&self.tree.map));
-                    let is_first = Some(child) == first;
-                    let can_move = match direction {
-                        Direction::Left | Direction::Up => !is_first,
-                        Direction::Right | Direction::Down => is_first,
-                    };
-                    if can_move {
-                        let target_subtree = match direction {
-                            Direction::Left | Direction::Up => first,
-                            Direction::Right | Direction::Down => second,
-                        };
-                        let target_subtree = if let Some(t) = target_subtree {
-                            t
-                        } else {
-                            return None;
-                        };
-                        let leaf = self.descend_to_edge_leaf(target_subtree, direction);
-                        return Some(leaf);
-                    }
-                }
-            }
-            child = parent;
-            parent_opt = child.parent(&self.tree.map);
-        }
-        None
-    }
-
     fn selection_of_layout(&self, layout: crate::layout_engine::LayoutId) -> Option<NodeId> {
         self.layouts
             .get(layout)
@@ -221,7 +303,7 @@ impl BspLayoutSystem {
         };
         let sel = self.tree.data.selection.current_selection(state.root);
         match self.kind.get_mut(sel) {
-            Some(NodeKind::Leaf { window, fullscreen }) => {
+            Some(NodeKind::Leaf { window, fullscreen, .. }) => {
                 if window.is_none() {
                     *window = Some(wid);
                     *fullscreen = false;
@@ -287,7 +369,7 @@ impl BspLayoutSystem {
         out: &mut Vec<(WindowId, CGRect)>,
     ) {
         match &self.kind[node] {
-            NodeKind::Leaf { window, fullscreen } => {
+            NodeKind::Leaf { window, fullscreen, .. } => {
                 if let Some(w) = window {
                     let r = if *fullscreen { rect } else { rect };
                     out.push((*w, r));
@@ -550,7 +632,11 @@ impl LayoutSystem for BspLayoutSystem {
 
     fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId) {
         if self.layouts.get(layout).is_some() {
-            self.insert_window_at_selection(layout, wid);
+            // Try smart insertion first (with preselection support)
+            if !self.smart_insert_window(layout, wid) {
+                // Fall back to default insertion
+                self.insert_window_at_selection(layout, wid);
+            }
         }
     }
 
@@ -641,7 +727,8 @@ impl LayoutSystem for BspLayoutSystem {
                 if !self.belongs_to_layout(state, node) {
                     return;
                 }
-                if let Some(NodeKind::Leaf { window: _, fullscreen }) = self.kind.get_mut(node) {
+                if let Some(NodeKind::Leaf { window: _, fullscreen, .. }) = self.kind.get_mut(node)
+                {
                     if new_frame == screen {
                         *fullscreen = true;
                     } else if old_frame == screen {
@@ -732,8 +819,9 @@ impl LayoutSystem for BspLayoutSystem {
     fn toggle_fullscreen_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
         if let Some(sel) = self.selection_of_layout(layout) {
             let sel_leaf = self.descend_to_leaf(sel);
-            if let Some(NodeKind::Leaf { window: Some(w), fullscreen }) =
-                self.kind.get_mut(sel_leaf)
+            if let Some(NodeKind::Leaf {
+                window: Some(w), fullscreen, ..
+            }) = self.kind.get_mut(sel_leaf)
             {
                 *fullscreen = !*fullscreen;
                 return vec![*w];
@@ -742,7 +830,43 @@ impl LayoutSystem for BspLayoutSystem {
         vec![]
     }
 
-    fn join_selection_with_direction(&mut self, _layout: LayoutId, _direction: Direction) {}
+    fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) {
+        let Some(sel) = self.selection_of_layout(layout) else {
+            return;
+        };
+        let sel_leaf = self.descend_to_leaf(sel);
+
+        let Some(neighbor) = self.find_neighbor_leaf(sel_leaf, direction) else {
+            return;
+        };
+
+        let mut current = sel_leaf;
+        while let Some(parent) = current.parent(&self.tree.map) {
+            let children: Vec<_> = parent.children(&self.tree.map).collect();
+            if children.contains(&neighbor) {
+                if let Some(grandparent) = parent.parent(&self.tree.map) {
+                    let mut windows = Vec::new();
+                    self.collect_windows_under(parent, &mut windows);
+
+                    let _ = parent.detach(&mut self.tree);
+                    self.kind.remove(parent);
+
+                    if let Some(first_window) = windows.first() {
+                        let new_leaf = self.make_leaf(Some(*first_window));
+                        new_leaf.detach(&mut self.tree).push_back(grandparent);
+
+                        for window in windows {
+                            self.window_to_node.insert(window, new_leaf);
+                        }
+
+                        self.tree.data.selection.select(&self.tree.map, new_leaf);
+                    }
+                }
+                break;
+            }
+            current = parent;
+        }
+    }
 
     fn apply_stacking_to_parent_of_selection(&mut self, _layout: LayoutId) -> Vec<WindowId> {
         vec![]
@@ -773,24 +897,5 @@ impl LayoutSystem for BspLayoutSystem {
         }
     }
 
-    fn rebalance(&mut self, layout: LayoutId) {
-        if let Some(state) = self.layouts.get(layout).copied() {
-            let mut stack = vec![state.root];
-            while let Some(n) = stack.pop() {
-                match self.kind.get_mut(n) {
-                    Some(NodeKind::Split { ratio, .. }) => {
-                        *ratio = (*ratio).clamp(0.05, 0.95);
-                        let mut it = n.children(&self.tree.map);
-                        if let Some(first) = it.next() {
-                            stack.push(first);
-                        }
-                        if let Some(second) = it.next() {
-                            stack.push(second);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
+    fn rebalance(&mut self, layout: LayoutId) { self.equalize_tree(layout); }
 }

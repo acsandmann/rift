@@ -20,7 +20,7 @@ type Receiver = actor::Receiver<WmEvent>;
 
 use crate::actor::app::AppInfo;
 use crate::actor::{self, mission_control, mouse, reactor};
-use crate::common::collections::HashSet;
+use crate::common::collections::{HashMap, HashSet};
 use crate::sys::event::HotkeyManager;
 use crate::sys::screen::{CoordinateConverter, NSScreenExt, ScreenId, SpaceId};
 use crate::sys::window_server::WindowServerInfo;
@@ -96,6 +96,7 @@ pub struct WmController {
     cur_screen_id: Vec<ScreenId>,
     disabled_spaces: HashSet<SpaceId>,
     enabled_spaces: HashSet<SpaceId>,
+    last_known_space_by_screen: HashMap<ScreenId, SpaceId>,
     login_window_pid: Option<pid_t>,
     login_window_active: bool,
     hotkeys: Option<HotkeyManager>,
@@ -125,6 +126,7 @@ impl WmController {
             cur_screen_id: Vec::new(),
             disabled_spaces: HashSet::default(),
             enabled_spaces: HashSet::default(),
+            last_known_space_by_screen: HashMap::default(),
             login_window_pid: None,
             login_window_active: false,
             hotkeys: None,
@@ -374,6 +376,24 @@ impl WmController {
 
     fn handle_space_changed(&mut self, spaces: Vec<Option<SpaceId>>) {
         self.cur_space = spaces;
+
+        // Preserve activation state when macOS assigns a new SpaceId to the same screen
+        // (common during display reconfiguration) by migrating the stored state.
+        let screen_space_pairs: Vec<(ScreenId, Option<SpaceId>)> =
+            self.cur_screen_id.iter().copied().zip(self.cur_space.iter().copied()).collect();
+        for (screen_id, space_opt) in screen_space_pairs {
+            if let Some(new_space) = space_opt {
+                if let Some(previous_space) =
+                    self.last_known_space_by_screen.get(&screen_id).copied()
+                {
+                    if previous_space != new_space {
+                        self.transfer_space_activation(previous_space, new_space);
+                    }
+                }
+                self.last_known_space_by_screen.insert(screen_id, new_space);
+            }
+        }
+
         let Some(&Some(space)) = self.cur_space.first() else {
             return;
         };
@@ -386,6 +406,20 @@ impl WmController {
             } else {
                 self.unregister_hotkeys();
             }
+        }
+    }
+
+    fn transfer_space_activation(&mut self, old_space: SpaceId, new_space: SpaceId) {
+        if self.config.config.settings.default_disable {
+            if self.enabled_spaces.remove(&old_space) {
+                self.enabled_spaces.insert(new_space);
+            }
+        } else if self.disabled_spaces.remove(&old_space) {
+            self.disabled_spaces.insert(new_space);
+        }
+
+        if self.starting_space == Some(old_space) {
+            self.starting_space = Some(new_space);
         }
     }
 

@@ -5,7 +5,7 @@ use tracing::warn;
 use crate::actor::app::{WindowId, pid_t};
 use crate::layout_engine::systems::LayoutSystem;
 use crate::layout_engine::utils::compute_tiling_area;
-use crate::layout_engine::{Direction, LayoutId, LayoutKind};
+use crate::layout_engine::{Direction, LayoutId, LayoutKind, Orientation};
 use crate::model::selection::*;
 use crate::model::tree::{self, NodeId, NodeMap, OwnedNode, Tree};
 use crate::sys::geometry::Round;
@@ -26,7 +26,83 @@ impl Default for TraditionalLayoutSystem {
 }
 
 impl TraditionalLayoutSystem {
-    pub fn new() -> Self { Self::default() }
+    fn find_best_focus_target(&self, node: NodeId) -> Option<WindowId> {
+        if let Some(wid) = self.tree.data.window.at(node) {
+            return Some(wid);
+        }
+
+        let children: Vec<_> = node.children(self.map()).collect();
+        if children.is_empty() {
+            return None;
+        }
+
+        if let Some(selected) = self.tree.data.selection.local_selection(self.map(), node) {
+            if let Some(wid) = self.find_best_focus_target(selected) {
+                return Some(wid);
+            }
+        }
+
+        for &child in &children {
+            if let Some(wid) = self.find_best_focus_target(child) {
+                return Some(wid);
+            }
+        }
+
+        None
+    }
+
+    fn smart_window_insertion(
+        &mut self,
+        layout: LayoutId,
+        selection: NodeId,
+        wid: WindowId,
+    ) -> NodeId {
+        let parent = selection.parent(self.map());
+
+        if let Some(parent) = parent {
+            let parent_layout = self.layout(parent);
+            let sibling_count = parent.children(self.map()).count();
+
+            if sibling_count >= 4 && !parent_layout.is_group() {
+                let sub_container =
+                    self.nest_in_container_internal(layout, selection, parent_layout);
+                let node = self.tree.mk_node().push_back(sub_container);
+                self.tree.data.window.set_window(layout, node, wid);
+                return node;
+            }
+        }
+
+        let node = self.tree.mk_node().insert_after(selection);
+        self.tree.data.window.set_window(layout, node, wid);
+        node
+    }
+
+    fn find_or_create_smart_common_parent(
+        &mut self,
+        layout: LayoutId,
+        node1: NodeId,
+        node2: NodeId,
+        direction: Direction,
+    ) -> NodeId {
+        let parent1 = node1.parent(self.map());
+        let parent2 = node2.parent(self.map());
+
+        if let (Some(p1), Some(p2)) = (parent1, parent2) {
+            if p1 == p2 {
+                let parent_layout = self.layout(p1);
+                let sibling_count = p1.children(self.map()).count();
+
+                if parent_layout.orientation() == direction.orientation()
+                    && !parent_layout.is_group()
+                    && sibling_count == 2
+                {
+                    return p1;
+                }
+            }
+        }
+
+        self.find_or_create_common_parent_internal(layout, node1, node2)
+    }
 
     fn root(&self, layout: LayoutId) -> NodeId { self.layout_roots[layout].id() }
 
@@ -40,6 +116,172 @@ impl TraditionalLayoutSystem {
 
     fn set_layout(&mut self, node: NodeId, kind: LayoutKind) {
         self.tree.data.layout.set_kind(node, kind);
+    }
+
+    fn find_natural_join_target(&self, from: NodeId, direction: Direction) -> Option<NodeId> {
+        if let Some(sibling) = self.find_direct_sibling_target(from, direction) {
+            return Some(sibling);
+        }
+
+        if let Some(stack_neighbor) = self.find_stack_neighbor_target(from, direction) {
+            return Some(stack_neighbor);
+        }
+
+        if let Some(traversed) = self.traverse_internal(from, direction) {
+            if self.tree.data.window.at(traversed).is_some() {
+                return Some(traversed);
+            }
+
+            if let Some(target_child) =
+                self.find_best_container_child_for_joining(traversed, direction)
+            {
+                return Some(target_child);
+            }
+
+            return Some(traversed);
+        }
+
+        self.find_hierarchical_join_target(from, direction)
+    }
+
+    fn find_stack_neighbor_target(&self, from: NodeId, direction: Direction) -> Option<NodeId> {
+        let parent = from.parent(self.map())?;
+        let parent_layout = self.layout(parent);
+
+        if !parent_layout.is_stacked() {
+            return None;
+        }
+
+        let children: Vec<_> = parent.children(self.map()).collect();
+        let current_idx = children.iter().position(|&c| c == from)?;
+
+        match direction {
+            Direction::Right | Direction::Down => children.get(current_idx + 1).copied(),
+            Direction::Left | Direction::Up => {
+                if current_idx > 0 {
+                    children.get(current_idx - 1).copied()
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn find_direct_sibling_target(&self, from: NodeId, direction: Direction) -> Option<NodeId> {
+        let _parent = from.parent(self.map())?;
+
+        match direction {
+            Direction::Right | Direction::Down => from.next_sibling(self.map()),
+            Direction::Left | Direction::Up => from.prev_sibling(self.map()),
+        }
+    }
+
+    fn find_best_container_child_for_joining(
+        &self,
+        container: NodeId,
+        direction: Direction,
+    ) -> Option<NodeId> {
+        let children: Vec<_> = container.children(self.map()).collect();
+        if children.is_empty() {
+            return None;
+        }
+
+        let container_layout = self.layout(container);
+
+        if container_layout.orientation() == direction.orientation() {
+            return match direction {
+                Direction::Left | Direction::Up => children.first().copied(),
+                Direction::Right | Direction::Down => children.last().copied(),
+            };
+        }
+
+        if let Some(selected) = self.tree.data.selection.local_selection(self.map(), container) {
+            return Some(selected);
+        }
+
+        children.first().copied()
+    }
+
+    fn find_hierarchical_join_target(&self, from: NodeId, direction: Direction) -> Option<NodeId> {
+        for ancestor in from.ancestors(self.map()).skip(1) {
+            if let Some(target) = self.find_direct_sibling_target(ancestor, direction) {
+                return self.find_best_container_child_for_joining(target, direction.opposite());
+            }
+        }
+        None
+    }
+
+    fn perform_natural_join(
+        &mut self,
+        layout: LayoutId,
+        selection: NodeId,
+        target: NodeId,
+        direction: Direction,
+    ) {
+        let selection_parent = selection.parent(self.map());
+        let target_parent = target.parent(self.map());
+
+        match (selection_parent, target_parent) {
+            (Some(sp), Some(tp)) if sp == tp => {
+                if self.layout(sp).is_stacked() {
+                    let new_layout = match direction.orientation() {
+                        Orientation::Horizontal => LayoutKind::Horizontal,
+                        Orientation::Vertical => LayoutKind::Vertical,
+                    };
+                    self.set_layout(sp, new_layout);
+                    self.select(sp);
+                    return;
+                }
+
+                let common_parent =
+                    self.find_or_create_smart_common_parent(layout, selection, target, direction);
+                let container_layout = LayoutKind::from(direction.orientation());
+                self.set_layout(common_parent, container_layout);
+                self.select(common_parent);
+            }
+
+            (Some(sp), Some(tp)) if self.are_containers_mergeable(sp, tp, direction) => {
+                self.merge_compatible_containers(layout, sp, tp, direction);
+            }
+
+            _ => {
+                let common_parent =
+                    self.find_or_create_smart_common_parent(layout, selection, target, direction);
+                let container_layout = LayoutKind::from(direction.orientation());
+                self.set_layout(common_parent, container_layout);
+                self.select(common_parent);
+            }
+        }
+    }
+
+    fn are_containers_mergeable(
+        &self,
+        container1: NodeId,
+        container2: NodeId,
+        direction: Direction,
+    ) -> bool {
+        let layout1 = self.layout(container1);
+        let layout2 = self.layout(container2);
+
+        layout1.orientation() == direction.orientation()
+            && layout2.orientation() == direction.orientation()
+            && !layout1.is_group()
+            && !layout2.is_group()
+    }
+
+    fn merge_compatible_containers(
+        &mut self,
+        layout: LayoutId,
+        container1: NodeId,
+        container2: NodeId,
+        direction: Direction,
+    ) {
+        // TODO: Implement intelligent container merging
+        let common_parent =
+            self.find_or_create_smart_common_parent(layout, container1, container2, direction);
+        let container_layout = LayoutKind::from(direction.orientation());
+        self.set_layout(common_parent, container_layout);
+        self.select(common_parent);
     }
 }
 
@@ -156,14 +398,10 @@ impl LayoutSystem for TraditionalLayoutSystem {
     ) -> (Option<WindowId>, Vec<WindowId>) {
         let selection = self.selection(layout);
         if let Some(new_node) = self.traverse_internal(selection, direction) {
-            let focus_window = self
-                .tree
-                .data
-                .window
-                .at(new_node)
-                .or_else(|| self.visible_windows_under_internal(new_node).first().copied());
+            let focus_window = self.find_best_focus_target(new_node);
             let map = &self.tree.map;
             let mut highest_revealed = new_node;
+
             for (node, parent) in new_node.ancestors_with_parent(map) {
                 let Some(parent) = parent else { break };
                 if self.tree.data.selection.select_locally(map, node) {
@@ -184,8 +422,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
         let node = if selection.parent(self.map()).is_none() {
             self.add_window_under(layout, selection, wid)
         } else {
-            let node = self.tree.mk_node().insert_after(selection);
-            self.tree.data.window.set_window(layout, node, wid);
+            let node = self.smart_window_insertion(layout, selection, wid);
             node
         };
         self.select(node);
@@ -329,45 +566,74 @@ impl LayoutSystem for TraditionalLayoutSystem {
 
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) {
         let selection = self.selection(layout);
-        if let Some(target) = self.traverse_internal(selection, direction) {
-            let common_parent =
-                self.find_or_create_common_parent_internal(layout, selection, target);
-            let container_layout = LayoutKind::from(direction.orientation());
-            self.set_layout(common_parent, container_layout);
-            self.select(common_parent);
+
+        if let Some(target) = self.find_natural_join_target(selection, direction) {
+            self.perform_natural_join(layout, selection, target, direction);
         }
     }
 
     fn apply_stacking_to_parent_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
         let selection = self.selection(layout);
-        if let Some(parent) = selection.parent(self.map()) {
-            let new_layout = match self.layout(parent) {
-                LayoutKind::Horizontal => Some(LayoutKind::HorizontalStack),
-                LayoutKind::Vertical => Some(LayoutKind::VerticalStack),
-                LayoutKind::HorizontalStack => Some(LayoutKind::VerticalStack),
-                LayoutKind::VerticalStack => Some(LayoutKind::HorizontalStack),
-            };
-            if let Some(nl) = new_layout {
-                self.set_layout(parent, nl);
-                return self.visible_windows_under_internal(parent);
+
+        let target_container = if self.tree.data.window.at(selection).is_some() {
+            selection.parent(self.map())
+        } else {
+            Some(selection)
+        };
+
+        if let Some(container) = target_container {
+            let current_layout = self.layout(container);
+
+            if !current_layout.is_group() {
+                let new_layout = match current_layout {
+                    LayoutKind::Horizontal => Some(LayoutKind::HorizontalStack),
+                    LayoutKind::Vertical => Some(LayoutKind::VerticalStack),
+                    LayoutKind::HorizontalStack => Some(LayoutKind::VerticalStack),
+                    LayoutKind::VerticalStack => Some(LayoutKind::HorizontalStack),
+                };
+
+                if let Some(nl) = new_layout {
+                    self.set_layout(container, nl);
+                    return self.visible_windows_under_internal(container);
+                }
             }
         }
+
         vec![]
     }
 
     fn unstack_parent_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
         let selection = self.selection(layout);
-        if let Some(parent) = selection.parent(self.map()) {
-            let new_layout = match self.layout(parent) {
+
+        let target_container = if self.tree.data.window.at(selection).is_some() {
+            let map = self.map();
+            selection
+                .ancestors(map)
+                .skip(1)
+                .find(|&ancestor| self.layout(ancestor).is_stacked())
+        } else {
+            let selection_layout = self.layout(selection);
+            if selection_layout.is_stacked() {
+                Some(selection)
+            } else {
+                let map = self.map();
+                selection.children(map).find(|&child| self.layout(child).is_stacked())
+            }
+        };
+
+        if let Some(container) = target_container {
+            let new_layout = match self.layout(container) {
                 LayoutKind::HorizontalStack => Some(LayoutKind::Horizontal),
                 LayoutKind::VerticalStack => Some(LayoutKind::Vertical),
                 _ => None,
             };
+
             if let Some(nl) = new_layout {
-                self.set_layout(parent, nl);
-                return self.visible_windows_under_internal(parent);
+                self.set_layout(container, nl);
+                return self.visible_windows_under_internal(container);
             }
         }
+
         vec![]
     }
 

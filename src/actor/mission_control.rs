@@ -50,6 +50,8 @@ impl MissionControlActor {
 
     pub async fn run(mut self) {
         if self.config.settings.ui.mission_control.enabled {
+            let _ = self.ensure_overlay();
+
             while let Some((span, event)) = self.rx.recv().await {
                 let _guard = span.enter();
                 self.handle_event(event);
@@ -136,11 +138,16 @@ impl MissionControlActor {
     }
 
     fn show_all_workspaces(&mut self) {
+        self.set_mission_control_active(true);
+        {
+            let overlay = self.ensure_overlay();
+            overlay.update(MissionControlMode::AllWorkspaces(Vec::new()));
+        }
+
         let (tx, fut) = continuation::<WorkspaceQueryResponse>();
         let _ = self.reactor_tx.try_send(reactor::Event::QueryWorkspaces(tx));
         match block_on(fut, std::time::Duration::from_secs_f32(0.75)) {
             Ok(resp) => {
-                self.set_mission_control_active(true);
                 let overlay = self.ensure_overlay();
                 overlay.update(MissionControlMode::AllWorkspaces(resp.workspaces));
             }
@@ -149,6 +156,12 @@ impl MissionControlActor {
     }
 
     fn show_current_workspace(&mut self) {
+        self.set_mission_control_active(true);
+        {
+            let overlay = self.ensure_overlay();
+            overlay.update(MissionControlMode::CurrentWorkspace(Vec::new()));
+        }
+
         let active_space = crate::sys::screen::get_active_space_number();
         let (tx, fut) = continuation::<Vec<WindowData>>();
         let _ = self.reactor_tx.try_send(reactor::Event::QueryWindows {
@@ -163,7 +176,6 @@ impl MissionControlActor {
             }
         };
 
-        self.set_mission_control_active(true);
         let overlay = self.ensure_overlay();
         overlay.update(MissionControlMode::CurrentWorkspace(windows));
     }

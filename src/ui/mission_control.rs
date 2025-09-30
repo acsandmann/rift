@@ -50,7 +50,7 @@ static CAPTURE_POOL: Lazy<CapturePool> = Lazy::new(|| {
     use std::thread;
     let (tx, rx) = unbounded::<CaptureJob>();
 
-    let worker_count = 3usize;
+    let worker_count = 2usize;
     for _ in 0..worker_count {
         let rx = rx.clone();
         thread::spawn(move || {
@@ -71,7 +71,7 @@ static CAPTURE_POOL: Lazy<CapturePool> = Lazy::new(|| {
                 ) {
                     {
                         let mut cache_lock = job.cache.write();
-                        cache_lock.entry(job.task.window_id).or_insert_with(|| img.clone());
+                        cache_lock.entry(job.task.window_id).or_insert(img);
                     }
                     if let Some(mut set) = IN_FLIGHT.try_lock() {
                         set.remove(&(job.generation, job.task.window_id));
