@@ -234,10 +234,11 @@ impl ConfigActor {
                 }
                 Err(e) => return Err(format!("Failed to save config: {}", e)),
             },
-            ConfigCommand::ReloadConfig => match self.reload_config_from_file() {
-                Ok(()) => {
+            ConfigCommand::ReloadConfig => match self.load_config_from_file() {
+                Ok(cfg) => {
                     info!("Config reloaded successfully");
                     config_changed = true;
+                    new_config = cfg;
                 }
                 Err(e) => return Err(format!("Failed to reload config: {}", e)),
             },
@@ -275,13 +276,14 @@ impl ConfigActor {
         Ok(())
     }
 
-    fn reload_config_from_file(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    fn load_config_from_file(
+        &mut self,
+    ) -> Result<crate::common::config::Config, Box<dyn std::error::Error>> {
         let config_path = crate::common::config::config_file();
 
         if config_path.exists() {
             let new_config = crate::common::config::Config::read(&config_path)?;
-            self.config = new_config;
-            Ok(())
+            Ok(new_config)
         } else {
             Err("Config file not found".into())
         }
