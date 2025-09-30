@@ -1979,89 +1979,91 @@ impl Reactor {
                         }
                     }
                 }
-            } else if let Some(active_ws) = self.layout_engine.active_workspace(space) {
-                let mut anim = Animation::new(
-                    self.config.settings.animation_fps,
-                    self.config.settings.animation_duration,
-                    self.config.settings.animation_easing.clone(),
-                );
-                let mut animated_count = 0;
+            } else {
+                if let Some(active_ws) = self.layout_engine.active_workspace(space) {
+                    let mut anim = Animation::new(
+                        self.config.settings.animation_fps,
+                        self.config.settings.animation_duration,
+                        self.config.settings.animation_easing.clone(),
+                    );
+                    let mut animated_count = 0;
 
-                for &(wid, target_frame) in &layout {
-                    let target_frame = target_frame.round();
-                    let Some(window) = self.windows.get_mut(&wid) else {
-                        debug!(?wid, "Skipping - window no longer exists");
-                        continue;
-                    };
-                    let current_frame = window.frame_monotonic;
-                    if target_frame.same_as(current_frame) {
-                        continue;
-                    }
-                    let Some(app_state) = &self.apps.get(&wid.pid) else {
-                        debug!(?wid, "Skipping for window - app no longer exists");
-                        continue;
-                    };
-                    let txid = window.next_txid();
-
-                    let is_active = self
-                        .layout_engine
-                        .virtual_workspace_manager()
-                        .workspace_for_window(space, wid)
-                        .map_or(false, |ws| ws == active_ws);
-
-                    if is_active {
-                        trace!(?wid, ?current_frame, ?target_frame, "Animating visible window");
-                        /*let pid = wid.pid;
-                        let heavy = match (&window.bundle_id, &window.bundle_path) {
-                            (Some(bundle_id), Some(bundle_path)) => {
-                                is_heavy(pid, bundle_id, bundle_path)
-                            }
-                            _ => false,
+                    for &(wid, target_frame) in &layout {
+                        let target_frame = target_frame.round();
+                        let Some(window) = self.windows.get_mut(&wid) else {
+                            debug!(?wid, "Skipping - window no longer exists");
+                            continue;
                         };
-                        anim.add_window(
-                            handle,
-                            wid,
-                            current_frame,
-                            target_frame,
-                            screen.frame,
-                            txid,
-                            heavy,
-                        );*/
-                        anim.add_window(
-                            &app_state.handle,
-                            wid,
-                            current_frame,
-                            target_frame,
-                            false,
-                            txid,
-                        );
-                        animated_count += 1;
-                    } else {
-                        trace!(
-                            ?wid,
-                            ?current_frame,
-                            ?target_frame,
-                            "Direct positioning hidden window"
-                        );
-                        if let Err(e) = app_state.handle.send(Request::SetWindowFrame(
-                            wid,
-                            target_frame,
-                            txid,
-                            true,
-                        )) {
-                            debug!(?wid, ?e, "Failed to send frame request for hidden window");
+                        let current_frame = window.frame_monotonic;
+                        if target_frame.same_as(current_frame) {
                             continue;
                         }
-                    }
-                    window.frame_monotonic = target_frame;
-                }
+                        let Some(app_state) = &self.apps.get(&wid.pid) else {
+                            debug!(?wid, "Skipping for window - app no longer exists");
+                            continue;
+                        };
+                        let txid = window.next_txid();
 
-                if animated_count > 0 {
-                    let low_power = power::is_low_power_mode_enabled();
-                    if is_resize || !self.config.settings.animate || low_power {
-                        anim.skip_to_end();
-                    } else {
-                        anim.run();
+                        let is_active = self
+                            .layout_engine
+                            .virtual_workspace_manager()
+                            .workspace_for_window(space, wid)
+                            .map_or(false, |ws| ws == active_ws);
+
+                        if is_active {
+                            trace!(?wid, ?current_frame, ?target_frame, "Animating visible window");
+                            /*let pid = wid.pid;
+                            let heavy = match (&window.bundle_id, &window.bundle_path) {
+                                (Some(bundle_id), Some(bundle_path)) => {
+                                    is_heavy(pid, bundle_id, bundle_path)
+                                }
+                                _ => false,
+                            };
+                            anim.add_window(
+                                handle,
+                                wid,
+                                current_frame,
+                                target_frame,
+                                screen.frame,
+                                txid,
+                                heavy,
+                            );*/
+                            anim.add_window(
+                                &app_state.handle,
+                                wid,
+                                current_frame,
+                                target_frame,
+                                false,
+                                txid,
+                            );
+                            animated_count += 1;
+                        } else {
+                            trace!(
+                                ?wid,
+                                ?current_frame,
+                                ?target_frame,
+                                "Direct positioning hidden window"
+                            );
+                            if let Err(e) = app_state.handle.send(Request::SetWindowFrame(
+                                wid,
+                                target_frame,
+                                txid,
+                                true,
+                            )) {
+                                debug!(?wid, ?e, "Failed to send frame request for hidden window");
+                                continue;
+                            }
+                        }
+                        window.frame_monotonic = target_frame;
+                    }
+
+                    if animated_count > 0 {
+                        let low_power = power::is_low_power_mode_enabled();
+                        if is_resize || !self.config.settings.animate || low_power {
+                            anim.skip_to_end();
+                        } else {
+                            anim.run();
+                        }
                     }
                 }
             }
