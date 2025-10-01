@@ -14,11 +14,11 @@ use accessibility::{AXAttribute, AXUIElement, AXUIElementActions, AXUIElementAtt
 use accessibility_sys::{
     kAXApplicationActivatedNotification, kAXApplicationDeactivatedNotification,
     kAXErrorCannotComplete, kAXErrorFailure, kAXErrorInvalidUIElement,
-    kAXMainWindowChangedNotification, kAXMenuClosedNotification, kAXMenuOpenedNotification,
-    kAXStandardWindowSubrole, kAXTitleChangedNotification, kAXUIElementDestroyedNotification,
-    kAXWindowCreatedNotification, kAXWindowDeminiaturizedNotification,
-    kAXWindowMiniaturizedNotification, kAXWindowMovedNotification, kAXWindowResizedNotification,
-    kAXWindowRole,
+    kAXErrorNotificationAlreadyRegistered, kAXMainWindowChangedNotification,
+    kAXMenuClosedNotification, kAXMenuOpenedNotification, kAXStandardWindowSubrole,
+    kAXTitleChangedNotification, kAXUIElementDestroyedNotification, kAXWindowCreatedNotification,
+    kAXWindowDeminiaturizedNotification, kAXWindowMiniaturizedNotification,
+    kAXWindowMovedNotification, kAXWindowResizedNotification, kAXWindowRole,
 };
 use r#continue::continuation;
 use core_foundation::runloop::CFRunLoop;
@@ -703,9 +703,18 @@ impl State {
                     Some(event::get_mouse_state()),
                 ));
             }
-            // do we care about miniturized/deminiaturized?
-            kAXWindowMiniaturizedNotification => {}
-            kAXWindowDeminiaturizedNotification => {}
+            kAXWindowMiniaturizedNotification => {
+                let Ok(wid) = self.id(&elem) else {
+                    return;
+                };
+                self.send_event(Event::WindowMinimized(wid));
+            }
+            kAXWindowDeminiaturizedNotification => {
+                let Ok(wid) = self.id(&elem) else {
+                    return;
+                };
+                self.send_event(Event::WindowDeminiaturized(wid));
+            }
             // TODO: track titles and send them to sketchybar since people seem to care about that
             kAXTitleChangedNotification => {}
             _ => {
@@ -912,6 +921,21 @@ impl State {
             return None;
         };
 
+        let bundle_is_widget = info.bundle_id.as_deref().map_or(false, |id| {
+            let id_lower = id.to_ascii_lowercase();
+            id_lower.ends_with(".widget") || id_lower.contains(".widget.")
+        });
+
+        let path_is_extension = info.path.as_ref().and_then(|p| p.to_str()).map_or(false, |path| {
+            let lower = path.to_ascii_lowercase();
+            lower.contains(".appex/") || lower.ends_with(".appex")
+        });
+
+        if bundle_is_widget || path_is_extension {
+            trace!(bundle_id = ?info.bundle_id, path = ?info.path, "Ignoring widget/app-extension window");
+            return None;
+        }
+
         if info.ax_role.as_deref() == Some("AXPopover")
             || info.ax_subrole.as_deref() == Some("AXUnknown")
         {
@@ -941,26 +965,36 @@ impl State {
             info.is_root = true;
         }
 
-        if !register_notifs(&elem, self) {
-            return None;
-        }
-        let idx = WindowServerId::try_from(&elem)
-            .or_else(|e| {
-                info!("Could not get window server id for {elem:?}: {e}");
-                Err(e)
+        let idx = info
+            .sys_id
+            .map(|sid| NonZeroU32::new(sid.as_u32()).expect("Window server id was 0"))
+            .or_else(|| {
+                WindowServerId::try_from(&elem)
+                    .or_else(|e| {
+                        info!("Could not get window server id for {elem:?}: {e}");
+                        Err(e)
+                    })
+                    .ok()
+                    .map(|id| NonZeroU32::new(id.as_u32()).expect("Window server id was 0"))
             })
-            .ok()
-            .map(|id| NonZeroU32::new(id.as_u32()).expect("Window server id was 0"))
             .unwrap_or_else(|| {
                 self.last_window_idx += 1;
                 NonZeroU32::new(self.last_window_idx).unwrap()
             });
         let wid = WindowId { pid: self.pid, idx };
+        if self.windows.contains_key(&wid) {
+            trace!(?wid, "Window already registered; skipping duplicate");
+            return None;
+        }
+
+        if !register_notifs(&elem, self) {
+            return None;
+        }
         let old = self.windows.insert(wid, WindowState {
             elem,
             last_seen_txid: TransactionId::default(),
         });
-        assert!(old.is_none(), "Duplicate window id {wid:?}");
+        debug_assert!(old.is_none(), "Duplicate window id {wid:?}");
         return Some((info, wid));
 
         fn register_notifs(win: &AXUIElement, state: &State) -> bool {
@@ -971,8 +1005,15 @@ impl State {
             for notif in WINDOW_NOTIFICATIONS {
                 let res = state.observer.add_notification(win, notif);
                 if let Err(err) = res {
-                    trace!("Watching failed with error {err:?} on window {win:#?}");
-                    return false;
+                    let is_already_registered = matches!(
+                        err,
+                        accessibility::Error::Ax(code)
+                            if code == kAXErrorNotificationAlreadyRegistered
+                    );
+                    if !is_already_registered {
+                        trace!("Watching failed with error {err:?} on window {win:#?}");
+                        return false;
+                    }
                 }
             }
             true

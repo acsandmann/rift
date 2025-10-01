@@ -475,6 +475,18 @@ impl WmController {
                     .into_iter()
                     .collect();
 
+            if allowed_window_ids.is_empty() {
+                // SLS can briefly report no windows for a space while displays reconfigure;
+                // avoid dropping state by falling back to the unfiltered visible list.
+                if !all_windows.is_empty() {
+                    tracing::trace!(
+                        ?space_ids,
+                        "space window list empty during screen update; using unfiltered set"
+                    );
+                }
+                return all_windows;
+            }
+
             all_windows
                 .into_iter()
                 .filter(|info| allowed_window_ids.contains(&info.id.as_u32()))

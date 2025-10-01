@@ -133,6 +133,12 @@ pub fn window_is_sticky(id: WindowServerId) -> bool {
     spaces_cf.len() > 1
 }
 
+pub fn window_is_ordered_in(id: WindowServerId) -> bool {
+    let mut ordered: u8 = 0;
+    let result = unsafe { SLSWindowIsOrderedIn(*G_CONNECTION, id.as_u32(), &mut ordered) };
+    result == 0 && ordered != 0
+}
+
 pub fn get_visible_windows_raw() -> CFArray<CFDictionary<CFString, CFType>> {
     unsafe {
         // TODO: cgwindowlistcopywindowinfo does not appear to order windows properly

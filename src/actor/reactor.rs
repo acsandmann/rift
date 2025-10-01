@@ -112,6 +112,8 @@ pub enum Event {
     WindowServerDestroyed(crate::sys::window_server::WindowServerId),
     #[serde(skip)]
     WindowServerAppeared(crate::sys::window_server::WindowServerId),
+    WindowMinimized(WindowId),
+    WindowDeminiaturized(WindowId),
     WindowFrameChanged(
         WindowId,
         #[serde(with = "CGRectDef")] CGRect,
@@ -273,6 +275,7 @@ struct WindowState {
     frame_monotonic: CGRect,
     is_ax_standard: bool,
     is_ax_root: bool,
+    is_minimized: bool,
     last_sent_txid: TransactionId,
     window_server_id: Option<WindowServerId>,
     #[allow(unused)]
@@ -298,6 +301,7 @@ impl From<WindowInfo> for WindowState {
             frame_monotonic: info.frame,
             is_ax_standard: info.is_standard,
             is_ax_root: info.is_root,
+            is_minimized: info.is_minimized,
             last_sent_txid: TransactionId::default(),
             window_server_id: info.sys_id,
             bundle_id: info.bundle_id,
@@ -535,6 +539,44 @@ impl Reactor {
                     return;
                 }
                 self.observed_window_server_ids.insert(wsid);
+            }
+            Event::WindowMinimized(wid) => {
+                if let Some(window) = self.windows.get_mut(&wid) {
+                    if window.is_minimized {
+                        return;
+                    }
+                    window.is_minimized = true;
+                    if let Some(ws_id) = window.window_server_id {
+                        self.visible_windows.remove(&ws_id);
+                    }
+                    self.send_layout_event(LayoutEvent::WindowRemoved(wid));
+                } else {
+                    debug!(?wid, "Received WindowMinimized for unknown window - ignoring");
+                }
+            }
+            Event::WindowDeminiaturized(wid) => {
+                let frame = match self.windows.get_mut(&wid) {
+                    Some(window) => {
+                        if !window.is_minimized {
+                            return;
+                        }
+                        window.is_minimized = false;
+                        window.frame_monotonic
+                    }
+                    None => {
+                        debug!(
+                            ?wid,
+                            "Received WindowDeminiaturized for unknown window - ignoring"
+                        );
+                        return;
+                    }
+                };
+
+                if self.window_is_standard(wid) {
+                    if let Some(space) = self.best_space_for_window(&frame) {
+                        self.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+                    }
+                }
             }
             Event::WindowFrameChanged(wid, new_frame, last_seen, requested, mouse_state) => {
                 if let Some(window) = self.windows.get_mut(&wid) {
@@ -1236,6 +1278,9 @@ impl Reactor {
 
     fn create_window_data(&self, window_id: WindowId) -> Option<WindowData> {
         let window_state = self.windows.get(&window_id)?;
+        if window_state.is_minimized {
+            return None;
+        }
         let app = self.apps.get(&window_id.pid)?;
 
         let preferred_name = app.info.localized_name.clone().or_else(|| app.info.bundle_id.clone());
@@ -1292,12 +1337,64 @@ impl Reactor {
         &mut self,
         pid: pid_t,
         new: Vec<(WindowId, WindowInfo)>,
-        _known_visible: Vec<WindowId>,
+        known_visible: Vec<WindowId>,
         app_info: Option<AppInfo>,
     ) {
         // If app_info wasn't provided, try to look it up from our running app state so
         // we can apply workspace rules immediately on first discovery.
         let app_info = app_info.or_else(|| self.apps.get(&pid).map(|app| app.info.clone()));
+
+        const MIN_REAL_WINDOW_DIMENSION: f64 = 2.0;
+
+        let known_visible_set: HashSet<WindowId> = known_visible.into_iter().collect();
+
+        let stale_windows: Vec<WindowId> = self
+            .windows
+            .iter()
+            .filter_map(|(&wid, state)| {
+                if wid.pid != pid || known_visible_set.contains(&wid) {
+                    return None;
+                }
+
+                if state.is_minimized {
+                    return None;
+                }
+
+                let Some(ws_id) = state.window_server_id else {
+                    return Some(wid);
+                };
+
+                let server_info = self
+                    .window_server_info
+                    .get(&ws_id)
+                    .cloned()
+                    .or_else(|| window_server::get_window(ws_id));
+
+                let info = match server_info {
+                    Some(info) => info,
+                    None => return Some(wid),
+                };
+
+                let width = info.frame.size.width.abs();
+                let height = info.frame.size.height.abs();
+
+                let unsuitable = !window_server::app_window_suitable(ws_id);
+                let invalid_layer = info.layer != 0;
+                let too_small =
+                    width < MIN_REAL_WINDOW_DIMENSION || height < MIN_REAL_WINDOW_DIMENSION;
+                let ordered_in = window_server::window_is_ordered_in(ws_id);
+
+                if unsuitable || invalid_layer || too_small || !ordered_in {
+                    Some(wid)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for wid in stale_windows {
+            self.handle_event(Event::WindowDestroyed(wid));
+        }
 
         let time_since_app_rules = self.app_rules_recently_applied.elapsed();
         let app_rules_recently_applied = time_since_app_rules.as_secs() < 1;
@@ -1428,6 +1525,10 @@ impl Reactor {
         let Some(window) = self.windows.get(&id) else {
             return false;
         };
+        if window.is_minimized {
+            return false;
+        }
+
         if let Some(id) = window.window_server_id {
             if let Some(info) = self.window_server_info.get(&id) {
                 if info.layer != 0 {

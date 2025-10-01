@@ -69,6 +69,8 @@ pub struct WindowInfo {
     pub is_standard: bool,
     #[serde(default)]
     pub is_root: bool,
+    #[serde(default)]
+    pub is_minimized: bool,
     pub title: String,
     #[serde(with = "CGRectDef")]
     pub frame: CGRect,
@@ -92,6 +94,7 @@ impl TryFrom<&AXUIElement> for WindowInfo {
         let ax_subrole = element.subrole().ok().map(|s| s.to_string());
 
         let id = WindowServerId::try_from(element).ok();
+        let is_minimized = element.minimized().map(|b| bool::from(b)).unwrap_or_default();
 
         let (bundle_id, path) = if !is_standard {
             (None, None)
@@ -115,6 +118,7 @@ impl TryFrom<&AXUIElement> for WindowInfo {
         Ok(WindowInfo {
             is_standard,
             is_root: true,
+            is_minimized,
             title: element.title().map(|t| t.to_string()).unwrap_or_default(),
             frame: frame.to_icrate(),
             sys_id: id,

@@ -584,18 +584,16 @@ impl LayoutSystem for TraditionalLayoutSystem {
         if let Some(container) = target_container {
             let current_layout = self.layout(container);
 
-            if !current_layout.is_group() {
-                let new_layout = match current_layout {
-                    LayoutKind::Horizontal => Some(LayoutKind::HorizontalStack),
-                    LayoutKind::Vertical => Some(LayoutKind::VerticalStack),
-                    LayoutKind::HorizontalStack => Some(LayoutKind::VerticalStack),
-                    LayoutKind::VerticalStack => Some(LayoutKind::HorizontalStack),
-                };
+            let new_layout = match current_layout {
+                LayoutKind::Horizontal => Some(LayoutKind::HorizontalStack),
+                LayoutKind::Vertical => Some(LayoutKind::VerticalStack),
+                LayoutKind::HorizontalStack => Some(LayoutKind::VerticalStack),
+                LayoutKind::VerticalStack => Some(LayoutKind::HorizontalStack),
+            };
 
-                if let Some(nl) = new_layout {
-                    self.set_layout(container, nl);
-                    return self.visible_windows_under_internal(container);
-                }
+            if let Some(nl) = new_layout {
+                self.set_layout(container, nl);
+                return self.visible_windows_under_internal(container);
             }
         }
 
@@ -929,7 +927,11 @@ impl TraditionalLayoutSystem {
             let current_position = siblings.iter().position(|&s| s == from)?;
             match direction {
                 Direction::Left | Direction::Up => {
-                    (current_position > 0).then_some(siblings[current_position - 1])
+                    if current_position > 0 {
+                        Some(siblings[current_position - 1])
+                    } else {
+                        None
+                    }
                 }
                 Direction::Right | Direction::Down => (current_position < siblings.len() - 1)
                     .then_some(siblings[current_position + 1]),

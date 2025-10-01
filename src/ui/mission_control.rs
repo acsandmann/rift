@@ -2,26 +2,46 @@ use core::ffi::c_void;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
+use core_foundation::attributed_string::CFAttributedString;
+use core_foundation::base::{CFRelease, TCFType};
+use core_foundation::string::CFString;
 use crossbeam_channel::{Sender, unbounded};
+use dispatchr::queue;
+use dispatchr::time::Time;
+use objc2::msg_send;
 use objc2::rc::{Retained, autoreleasepool};
-use objc2::{DeclaredClass, MainThreadOnly, msg_send};
-use objc2_app_kit::{
-    NSApplication, NSBackingStoreType, NSColor, NSEvent, NSView, NSVisualEffectBlendingMode,
-    NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowStyleMask,
-};
+use objc2::runtime::AnyObject;
+use objc2_app_kit::{NSApplication, NSColor};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
+use objc2_core_graphics::{
+    CGColor, CGContext, CGEvent, CGEventField, CGEventTapOptions, CGEventTapProxy, CGEventType,
+};
+use objc2_foundation::MainThreadMarker;
 use objc2_quartz_core::{CALayer, CATextLayer, CATransaction};
 use once_cell::sync::Lazy;
 use parking_lot::{Mutex, RwLock};
 
 use crate::actor::app::WindowId;
-use crate::common::collections::{HashMap, HashSet};
+use crate::common::collections::{HashMap, HashSet, hash_map};
 use crate::common::config::Config;
 use crate::model::server::{WindowData, WorkspaceData};
+use crate::sys::cgs_window::CgsWindow;
+use crate::sys::dispatch::DispatchExt;
+use crate::sys::display_link::DisplayLink;
+use crate::sys::skylight::{G_CONNECTION, SLWindowContextCreate};
 use crate::sys::window_server::{CapturedWindowImage, WindowServerId};
+
+unsafe extern "C" {
+    fn CGContextFlush(ctx: *mut CGContext);
+    fn CGContextClearRect(ctx: *mut CGContext, rect: CGRect);
+    fn CGContextSaveGState(ctx: *mut CGContext);
+    fn CGContextRestoreGState(ctx: *mut CGContext);
+    fn CGContextTranslateCTM(ctx: *mut CGContext, tx: f64, ty: f64);
+    fn CGContextScaleCTM(ctx: *mut CGContext, sx: f64, sy: f64);
+}
 
 #[derive(Debug, Clone)]
 struct CaptureTask {
@@ -35,7 +55,7 @@ struct CaptureJob {
     task: CaptureTask,
     cache: Arc<RwLock<HashMap<WindowId, CapturedWindowImage>>>,
     generation: u64,
-    view_ptr_bits: usize,
+    overlay_ptr_bits: usize,
 }
 
 struct CapturePool {
@@ -76,15 +96,7 @@ static CAPTURE_POOL: Lazy<CapturePool> = Lazy::new(|| {
                     if let Some(mut set) = IN_FLIGHT.try_lock() {
                         set.remove(&(job.generation, job.task.window_id));
                     }
-                    unsafe {
-                        let view_ptr = job.view_ptr_bits as *mut objc2::runtime::AnyObject;
-                        let _: () = msg_send![
-                            view_ptr,
-                            performSelectorOnMainThread: objc2::sel!(refreshPreviews),
-                            withObject: core::ptr::null_mut::<objc2::runtime::AnyObject>(),
-                            waitUntilDone: false
-                        ];
-                    }
+                    schedule_overlay_refresh(job.overlay_ptr_bits);
                 } else {
                     if let Some(mut set) = IN_FLIGHT.try_lock() {
                         set.remove(&(job.generation, job.task.window_id));
@@ -96,6 +108,39 @@ static CAPTURE_POOL: Lazy<CapturePool> = Lazy::new(|| {
 
     CapturePool { sender: tx }
 });
+
+extern "C" fn overlay_refresh_callback(ctx: *mut c_void) {
+    if ctx.is_null() {
+        return;
+    }
+    unsafe {
+        let overlay = &*(ctx as *const MissionControlOverlay);
+        overlay.refresh_previews();
+    }
+}
+
+fn schedule_overlay_refresh(ptr_bits: usize) {
+    if ptr_bits == 0 {
+        return;
+    }
+    let ctx = ptr_bits as *mut c_void;
+    queue::main().after_f(Time::NOW, ctx, overlay_refresh_callback);
+}
+
+static WORKSPACE_BACKGROUND_COLOR: Lazy<Retained<CGColor>> =
+    Lazy::new(|| unsafe { CGColor::new_generic_gray(1.0, 0.03).into() });
+
+static SELECTED_BORDER_COLOR: Lazy<Retained<CGColor>> =
+    Lazy::new(|| unsafe { CGColor::new_generic_rgb(0.2, 0.45, 1.0, 0.85).into() });
+
+static WORKSPACE_BORDER_COLOR: Lazy<Retained<CGColor>> =
+    Lazy::new(|| unsafe { CGColor::new_generic_gray(1.0, 0.12).into() });
+
+static WINDOW_BORDER_COLOR: Lazy<Retained<CGColor>> =
+    Lazy::new(|| unsafe { CGColor::new_generic_gray(0.0, 0.65).into() });
+
+static OVERLAY_BACKGROUND_COLOR: Lazy<Retained<CGColor>> =
+    Lazy::new(|| unsafe { CGColor::new_generic_gray(0.0, 0.25).into() });
 
 #[derive(Debug, Clone)]
 pub enum MissionControlMode {
@@ -113,15 +158,73 @@ pub enum MissionControlAction {
     Dismiss,
 }
 
+struct WorkspaceLabelText {
+    text: String,
+    attributed: CFAttributedString,
+}
+
+impl WorkspaceLabelText {
+    fn new(text: &str) -> Self {
+        let cf_string = CFString::new(text);
+        let attributed = CFAttributedString::new(&cf_string);
+        Self {
+            text: text.to_owned(),
+            attributed,
+        }
+    }
+
+    fn update(&mut self, text: &str) -> bool {
+        if self.text == text {
+            return false;
+        }
+
+        self.text.clear();
+        self.text.push_str(text);
+        let cf_string = CFString::new(text);
+        self.attributed = CFAttributedString::new(&cf_string);
+        true
+    }
+
+    unsafe fn apply_to(&self, layer: &CATextLayer) {
+        let raw = self.attributed.as_CFTypeRef() as *const AnyObject;
+        unsafe {
+            layer.setString(Some(&*raw));
+        }
+    }
+}
+
+#[derive(Default)]
+struct PreviewLayerStyle {
+    is_selected: Option<bool>,
+}
+
+impl PreviewLayerStyle {
+    fn update_selected(&mut self, selected: bool) -> bool {
+        if self.is_selected == Some(selected) {
+            false
+        } else {
+            self.is_selected = Some(selected);
+            true
+        }
+    }
+}
+
 pub struct MissionControlState {
     mode: Option<MissionControlMode>,
     on_action: Option<Rc<dyn Fn(MissionControlAction)>>,
     selection: Option<Selection>,
     preview_cache: Arc<RwLock<HashMap<WindowId, CapturedWindowImage>>>,
     preview_layers: HashMap<WindowId, Retained<CALayer>>,
+    preview_layer_styles: HashMap<WindowId, PreviewLayerStyle>,
     workspace_layers: HashMap<String, Retained<CALayer>>,
     workspace_label_layers: HashMap<String, Retained<CATextLayer>>,
+    workspace_label_strings: HashMap<String, WorkspaceLabelText>,
     ready_previews: HashSet<WindowId>,
+    render_root: Option<Retained<CALayer>>,
+    render_window_id: Option<u32>,
+    render_size: Option<CGSize>,
+    // This lets us avoid visible pop-in and reveal once a threshold is met.
+    suppress_live_present: bool,
 }
 
 impl Default for MissionControlState {
@@ -132,9 +235,15 @@ impl Default for MissionControlState {
             selection: None,
             preview_cache: Arc::new(RwLock::new(HashMap::default())),
             preview_layers: HashMap::default(),
+            preview_layer_styles: HashMap::default(),
             workspace_layers: HashMap::default(),
             workspace_label_layers: HashMap::default(),
+            workspace_label_strings: HashMap::default(),
             ready_previews: HashSet::default(),
+            render_root: None,
+            render_window_id: None,
+            render_size: None,
+            suppress_live_present: false,
         }
     }
 }
@@ -166,12 +275,18 @@ impl MissionControlState {
         for (_id, layer) in self.preview_layers.drain() {
             layer.removeFromSuperlayer();
         }
+        self.preview_layer_styles.clear();
         for (_id, layer) in self.workspace_layers.drain() {
             layer.removeFromSuperlayer();
         }
         for (_id, layer) in self.workspace_label_layers.drain() {
             layer.removeFromSuperlayer();
         }
+        self.workspace_label_strings.clear();
+
+        self.render_root = None;
+        self.render_window_id = None;
+        self.render_size = None;
     }
 
     fn selection(&self) -> Option<Selection> { self.selection }
@@ -270,6 +385,7 @@ impl MissionControlState {
         }
         for k in remove_keys {
             self.preview_layers.remove(&k);
+            self.preview_layer_styles.remove(&k);
         }
 
         self.ready_previews.retain(|wid| valid.contains(wid));
@@ -310,13 +426,13 @@ const CURRENT_WS_TILE_PADDING: f64 = 16.0;
 const CURRENT_WS_TILE_SCALE_FACTOR: f64 = 0.9;
 
 struct WorkspaceGrid {
-    bounds: NSRect,
+    bounds: CGRect,
     rows: usize,
-    tile_size: NSSize,
+    tile_size: CGSize,
 }
 
 impl WorkspaceGrid {
-    fn new(tile_count: usize, bounds: NSRect) -> Option<Self> {
+    fn new(tile_count: usize, bounds: CGRect) -> Option<Self> {
         if tile_count == 0 {
             return None;
         }
@@ -328,7 +444,7 @@ impl WorkspaceGrid {
         Some(Self {
             bounds,
             rows,
-            tile_size: NSSize::new(tile_w, tile_h),
+            tile_size: CGSize::new(tile_w, tile_h),
         })
     }
 
@@ -340,12 +456,12 @@ impl WorkspaceGrid {
         }
     }
 
-    fn rect_for(&self, order_idx: usize) -> NSRect {
+    fn rect_for(&self, order_idx: usize) -> CGRect {
         let (row, col) = self.position_for(order_idx);
         let spacing = WORKSPACE_TILE_SPACING;
         let x = self.bounds.origin.x + spacing + (self.tile_size.width + spacing) * (col as f64);
         let y = self.bounds.origin.y + spacing + (self.tile_size.height + spacing) * (row as f64);
-        NSRect::new(NSPoint::new(x, y), self.tile_size)
+        CGRect::new(CGPoint::new(x, y), self.tile_size)
     }
 }
 
@@ -365,7 +481,7 @@ enum WindowLayoutKind {
 }
 
 impl WindowLayoutMetrics {
-    fn rect_for(&self, window: &WindowData) -> NSRect {
+    fn rect_for(&self, window: &WindowData) -> CGRect {
         let wx = window.frame.origin.x - self.min_x;
         let wy_top = window.frame.origin.y - self.min_y + window.frame.size.height;
         let wy = self.disp_h - wy_top;
@@ -386,265 +502,34 @@ impl WindowLayoutMetrics {
             rh -= WINDOW_TILE_GAP;
         }
 
-        NSRect::new(NSPoint::new(rx, ry), NSSize::new(rw, rh))
+        CGRect::new(CGPoint::new(rx, ry), CGSize::new(rw, rh))
     }
 }
 
-objc2::define_class!(
-    #[unsafe(super(NSView))]
-    #[ivars = RefCell<MissionControlState>]
-    pub struct MissionControlView;
-
-    impl MissionControlView {
-        #[unsafe(method(isFlipped))]
-        fn is_flipped(&self) -> bool { true }
-
-        #[unsafe(method(acceptsFirstResponder))]
-        fn accepts_first_responder(&self) -> bool { true }
-
-        #[unsafe(method(refreshPreviews))]
-        fn refresh_previews(&self) {
-            let state_cell = self.ivars();
-
-            let (layers, cache_arc) = {
-                let st = match state_cell.try_borrow() {
-                    Ok(s) => s,
-                    Err(_) => return,
-                };
-                let pairs: Vec<(WindowId, Retained<CALayer>)> = st
-                    .preview_layers
-                    .iter()
-                    .map(|(wid, layer)| (*wid, layer.clone()))
-                    .collect();
-                (pairs, st.preview_cache.clone())
-            };
-
-            let mut ready_ids: Vec<WindowId> = Vec::new();
-
-            CATransaction::begin();
-            CATransaction::setDisableActions(true);
-
-            {
-                let cache = cache_arc.read();
-                for (wid, layer) in layers.iter() {
-                    if let Some(img) = cache.get(wid) {
-                        unsafe {
-                            let img_ptr = img.as_ptr() as *mut objc2::runtime::AnyObject;
-                            let _: () = msg_send![&**layer, setContents: img_ptr];
-                        }
-                        ready_ids.push(*wid);
-                    }
-                }
-            }
-
-            CATransaction::commit();
-
-            if !ready_ids.is_empty() {
-                if let Ok(mut st) = state_cell.try_borrow_mut() {
-                    for wid in ready_ids {
-                        st.ready_previews.insert(wid);
-                    }
-                }
-            }
-        }
-
-        #[unsafe(method(drawRect:))]
-        fn draw_rect(&self, _dirty: NSRect) {
-            let state_cell = self.ivars();
-            let (mode, selected_workspace, selected_window) = {
-                let mut state = state_cell.borrow_mut();
-                let Some(mode) = state.mode().cloned() else {
-                    return
-                };
-                state.ensure_selection();
-                (mode, state.selected_workspace(), state.selected_window())
-            };
-
-            unsafe {
-                NSColor::colorWithCalibratedWhite_alpha(0.0, 0.25).setFill();
-                objc2_app_kit::NSBezierPath::fillRect(self.bounds());
-            }
-
-            let content_bounds = Self::content_bounds(self.bounds());
-            match mode {
-                MissionControlMode::AllWorkspaces(workspaces) => {
-                    self.draw_workspaces(&state_cell, &workspaces, content_bounds, selected_workspace);
-                }
-                MissionControlMode::CurrentWorkspace(windows) => {
-                    self.draw_windows_tile(
-                        &state_cell,
-                        &windows,
-                        content_bounds,
-                        selected_window,
-                        WindowLayoutKind::Exploded,
-                    );
-                }
-            }
-        }
-
-        #[unsafe(method(mouseDown:))]
-        fn mouse_down(&self, event: &NSEvent) {
-            let p = unsafe { self.convertPoint_fromView(event.locationInWindow(), None) };
-            let mut state = match self.ivars().try_borrow_mut() {
-                Ok(state) => state,
-                Err(_) => return,
-            };
-            let Some(cb) = state.on_action.clone() else { return };
-
-            let content_bounds = Self::content_bounds(self.bounds());
-            let (next_selection, action) = match state.mode() {
-                Some(MissionControlMode::AllWorkspaces(workspaces)) => {
-                    if let Some((order_idx, target_idx)) =
-                        Self::workspace_index_at_point(workspaces, p, content_bounds)
-                    {
-                        (
-                            Some(Selection::Workspace(order_idx)),
-                            Some(MissionControlAction::SwitchToWorkspace(target_idx)),
-                        )
-                    } else {
-                        (None, None)
-                    }
-                }
-                Some(MissionControlMode::CurrentWorkspace(windows)) => {
-                    if let Some((order_idx, window_id)) = Self::window_at_point(
-                        windows,
-                        p,
-                        content_bounds,
-                        WindowLayoutKind::Exploded,
-                    ) {
-                        let window_server_id = windows
-                            .get(order_idx)
-                            .and_then(|w| w.window_server_id)
-                            .map(WindowServerId::new);
-                        (
-                            Some(Selection::Window(order_idx)),
-                            Some(MissionControlAction::FocusWindow {
-                                window_id,
-                                window_server_id,
-                            }),
-                        )
-                    } else {
-                        (None, None)
-                    }
-                }
-                None => (None, None),
-            };
-
-            if let Some(selection) = next_selection {
-                state.set_selection(selection);
-                unsafe { self.setNeedsDisplay(true) };
-            }
-
-            drop(state);
-
-            if let Some(action) = action {
-                cb(action);
-            } else {
-                cb(MissionControlAction::Dismiss);
-            }
-        }
-
-        #[unsafe(method(mouseMoved:))]
-        fn mouse_moved(&self, event: &NSEvent) {
-            let point = unsafe { self.convertPoint_fromView(event.locationInWindow(), None) };
-            let content_bounds = Self::content_bounds(self.bounds());
-
-            let mut state = match self.ivars().try_borrow_mut() {
-                Ok(state) => state,
-                Err(_) => return,
-            };
-
-            let mode = match state.mode() {
-                Some(mode) => mode,
-                None => return,
-            };
-
-            let new_selection = match mode {
-                MissionControlMode::AllWorkspaces(workspaces) => Self::workspace_index_at_point(
-                    workspaces,
-                    point,
-                    content_bounds,
-                )
-                .map(|(order_idx, _)| Selection::Workspace(order_idx)),
-                MissionControlMode::CurrentWorkspace(windows) => Self::window_at_point(
-                    windows,
-                    point,
-                    content_bounds,
-                    WindowLayoutKind::Exploded,
-                )
-                .map(|(order_idx, _)| Selection::Window(order_idx)),
-            };
-
-            let Some(selection) = new_selection else { return };
-            if state.selection() == Some(selection) {
-                return;
-            }
-
-            state.set_selection(selection);
-            drop(state);
-            unsafe { self.setNeedsDisplay(true) };
-        }
-
-        #[unsafe(method(keyDown:))]
-        fn key_down(&self, event: &NSEvent) {
-            let code: u16 = unsafe { msg_send![event, keyCode] };
-            if code == 53 {
-                if let Some(cb) = self.ivars().borrow().on_action.clone() {
-                    cb(MissionControlAction::Dismiss);
-                }
-                return;
-            }
-
-            let handled = match code {
-                123 => self.adjust_selection(NavDirection::Left),
-                124 => self.adjust_selection(NavDirection::Right),
-                125 => self.adjust_selection(NavDirection::Down),
-                126 => self.adjust_selection(NavDirection::Up),
-                36 | 76 => {
-                    self.activate_selection_action();
-                    true
-                }
-                _ => false,
-            };
-
-            if handled {
-                unsafe { self.setNeedsDisplay(true) };
-            }
-        }
-
-        #[unsafe(method(cancelOperation:))]
-        fn cancel_operation(&self, _sender: *mut objc2::runtime::AnyObject) {
-            if let Some(cb) = self.ivars().borrow().on_action.clone() {
-                cb(MissionControlAction::Dismiss);
-            }
-        }
-    }
-);
-
-impl MissionControlView {
-    fn rect_contains_point(rect: NSRect, point: NSPoint) -> bool {
+impl MissionControlOverlay {
+    fn rect_contains_point(rect: CGRect, point: CGPoint) -> bool {
         point.x >= rect.origin.x
             && point.x <= rect.origin.x + rect.size.width
             && point.y >= rect.origin.y
             && point.y <= rect.origin.y + rect.size.height
     }
 
-    fn content_bounds(bounds: NSRect) -> NSRect {
+    fn content_bounds(bounds: CGRect) -> CGRect {
         let width = (bounds.size.width - 2.0 * MISSION_CONTROL_MARGIN).max(0.0);
         let height = (bounds.size.height - 2.0 * MISSION_CONTROL_MARGIN).max(0.0);
-        NSRect::new(
-            NSPoint::new(
+        CGRect::new(
+            CGPoint::new(
                 bounds.origin.x + MISSION_CONTROL_MARGIN,
                 bounds.origin.y + MISSION_CONTROL_MARGIN,
             ),
-            NSSize::new(width, height),
+            CGSize::new(width, height),
         )
     }
 
     fn workspace_index_at_point(
         workspaces: &[WorkspaceData],
-        point: NSPoint,
-        bounds: NSRect,
+        point: CGPoint,
+        bounds: CGRect,
     ) -> Option<(usize, usize)> {
         if !Self::rect_contains_point(bounds, point) {
             return None;
@@ -662,8 +547,8 @@ impl MissionControlView {
 
     fn window_at_point(
         windows: &[WindowData],
-        point: NSPoint,
-        bounds: NSRect,
+        point: CGPoint,
+        bounds: CGRect,
         layout: WindowLayoutKind,
     ) -> Option<(usize, WindowId)> {
         if !Self::rect_contains_point(bounds, point) {
@@ -683,7 +568,7 @@ impl MissionControlView {
 
     fn compute_window_layout(
         windows: &[WindowData],
-        bounds: NSRect,
+        bounds: CGRect,
     ) -> Option<WindowLayoutMetrics> {
         if windows.is_empty() {
             return None;
@@ -736,7 +621,7 @@ impl MissionControlView {
         })
     }
 
-    fn compute_exploded_layout(windows: &[WindowData], bounds: NSRect) -> Option<Vec<NSRect>> {
+    fn compute_exploded_layout(windows: &[WindowData], bounds: CGRect) -> Option<Vec<CGRect>> {
         if windows.is_empty() {
             return None;
         }
@@ -782,16 +667,16 @@ impl MissionControlView {
             let origin_x = cell_origin_x + (cell_width - scaled_width) / 2.0;
             let origin_y = cell_origin_y + (cell_height - scaled_height) / 2.0;
 
-            rects.push(NSRect::new(
-                NSPoint::new(origin_x, origin_y),
-                NSSize::new(scaled_width, scaled_height),
+            rects.push(CGRect::new(
+                CGPoint::new(origin_x, origin_y),
+                CGSize::new(scaled_width, scaled_height),
             ));
         }
 
         Some(rects)
     }
 
-    fn exploded_column_count(count: usize, bounds: NSRect) -> usize {
+    fn exploded_column_count(count: usize, bounds: CGRect) -> usize {
         if count <= 1 {
             return count.max(1);
         }
@@ -805,9 +690,9 @@ impl MissionControlView {
 
     fn compute_window_rects(
         windows: &[WindowData],
-        bounds: NSRect,
+        bounds: CGRect,
         kind: WindowLayoutKind,
-    ) -> Option<Vec<NSRect>> {
+    ) -> Option<Vec<CGRect>> {
         match kind {
             WindowLayoutKind::PreserveOriginal => {
                 let layout = Self::compute_window_layout(windows, bounds)?;
@@ -927,7 +812,7 @@ impl MissionControlView {
     }
 
     fn adjust_selection(&self, direction: NavDirection) -> bool {
-        let mut state = match self.ivars().try_borrow_mut() {
+        let mut state = match self.state.try_borrow_mut() {
             Ok(state) => state,
             Err(_) => return false,
         };
@@ -983,7 +868,7 @@ impl MissionControlView {
 
     fn activate_selection_action(&self) {
         let (handler, action) = {
-            let mut state = self.ivars().borrow_mut();
+            let mut state = self.state.borrow_mut();
             state.ensure_selection();
             let handler = state.on_action.clone();
             let mode = state.mode();
@@ -1043,72 +928,84 @@ impl MissionControlView {
     fn draw_workspaces(
         &self,
         state: &RefCell<MissionControlState>,
+        parent_layer: &CALayer,
         workspaces: &[WorkspaceData],
-        bounds: NSRect,
+        bounds: CGRect,
         selected: Option<usize>,
     ) {
         let visible = Self::visible_workspaces(workspaces);
         let Some(grid) = WorkspaceGrid::new(visible.len(), bounds) else {
             return;
         };
-        let parent_layer = match unsafe { self.layer() } {
-            Some(l) => l,
-            None => return,
-        };
+        let parent_layer = parent_layer;
         let mut visible_ids: HashSet<String> = HashSet::default();
         visible_ids.reserve(visible.len());
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
         for (order_idx, (original_idx, _)) in visible.iter().enumerate() {
             autoreleasepool(|_| {
                 let ws = &workspaces[*original_idx];
                 let rect = grid.rect_for(order_idx);
                 visible_ids.insert(ws.id.clone());
-                let mut st = state.borrow_mut();
-                let ws_layer = st
-                    .workspace_layers
-                    .entry(ws.id.clone())
-                    .or_insert_with(|| {
-                        let lay = CALayer::layer();
-                        parent_layer.addSublayer(&lay);
-                        lay
-                    })
-                    .clone();
-                let label_layer = st
-                    .workspace_label_layers
-                    .entry(ws.id.clone())
-                    .or_insert_with(|| {
-                        let tl = unsafe { CATextLayer::layer() };
-                        parent_layer.addSublayer(&tl);
-                        tl
-                    })
-                    .clone();
-                drop(st);
-                CATransaction::begin();
-                CATransaction::setDisableActions(true);
-                ws_layer.setFrame(CGRect::new(
-                    CGPoint::new(rect.origin.x, rect.origin.y),
-                    CGSize::new(rect.size.width, rect.size.height),
-                ));
+                let (ws_layer, label_layer) = {
+                    let mut st = state.borrow_mut();
+                    let ws_layer = st
+                        .workspace_layers
+                        .entry(ws.id.clone())
+                        .or_insert_with(|| {
+                            let lay = CALayer::layer();
+                            parent_layer.addSublayer(&lay);
+                            lay
+                        })
+                        .clone();
+                    let label_layer = st
+                        .workspace_label_layers
+                        .entry(ws.id.clone())
+                        .or_insert_with(|| {
+                            let tl = unsafe { CATextLayer::layer() };
+                            parent_layer.addSublayer(&tl);
+                            tl
+                        })
+                        .clone();
+                    match st.workspace_label_strings.entry(ws.id.clone()) {
+                        hash_map::Entry::Occupied(mut occ) => {
+                            if occ.get_mut().update(&ws.name) {
+                                unsafe {
+                                    occ.get().apply_to(&label_layer);
+                                }
+                            }
+                        }
+                        hash_map::Entry::Vacant(vac) => {
+                            let cache = WorkspaceLabelText::new(&ws.name);
+                            unsafe {
+                                cache.apply_to(&label_layer);
+                            }
+                            vac.insert(cache);
+                        }
+                    }
+                    (ws_layer, label_layer)
+                };
+                ws_layer.setFrame(rect);
                 ws_layer.setCornerRadius(6.0);
                 unsafe {
-                    let bg = NSColor::colorWithCalibratedWhite_alpha(1.0, 0.03);
-                    ws_layer.setBackgroundColor(Some(&bg.CGColor()));
+                    ws_layer.setBackgroundColor(Some(&**WORKSPACE_BACKGROUND_COLOR));
                 }
                 let is_selected = Some(order_idx) == selected;
-                unsafe {
-                    if is_selected {
-                        let sel =
-                            NSColor::colorWithCalibratedRed_green_blue_alpha(0.2, 0.45, 1.0, 0.85);
-                        ws_layer.setBorderColor(Some(&sel.CGColor()));
-                        ws_layer.setBorderWidth(3.0);
-                    } else {
-                        let stroke = NSColor::colorWithCalibratedWhite_alpha(1.0, 0.12);
-                        ws_layer.setBorderColor(Some(&stroke.CGColor()));
-                        ws_layer.setBorderWidth(1.0);
+                if is_selected {
+                    unsafe {
+                        ws_layer.setBorderColor(Some(&**SELECTED_BORDER_COLOR));
                     }
+                    ws_layer.setBorderWidth(3.0);
+                } else {
+                    unsafe {
+                        ws_layer.setBorderColor(Some(&**WORKSPACE_BORDER_COLOR));
+                    }
+                    ws_layer.setBorderWidth(1.0);
                 }
                 ws_layer.setZPosition(-1.0);
                 self.draw_windows_tile(
                     state,
+                    parent_layer,
                     &ws.windows,
                     rect,
                     None,
@@ -1123,46 +1020,43 @@ impl MissionControlView {
                 label_layer.setContentsScale(2.0);
                 label_layer.setMasksToBounds(false);
                 unsafe {
-                    let name_ns = objc2_foundation::NSString::from_str(&ws.name);
-                    label_layer.setString(Some(&*name_ns));
                     label_layer.setFontSize(12.0);
                     let fg = NSColor::labelColor();
                     label_layer.setForegroundColor(Some(&fg.CGColor()));
                 }
                 label_layer.setZPosition(2.0);
-                CATransaction::commit();
             });
         }
+        CATransaction::commit();
         {
             let mut st = state.borrow_mut();
-            let mut to_remove_bg = Vec::new();
-            for (k, layer) in st.workspace_layers.iter() {
-                if !visible_ids.contains(k) {
+            let visible_ids = &visible_ids;
+            st.workspace_layers.retain(|id, layer| {
+                if visible_ids.contains(id) {
+                    true
+                } else {
                     layer.removeFromSuperlayer();
-                    to_remove_bg.push(k.clone());
+                    false
                 }
-            }
-            for k in to_remove_bg {
-                st.workspace_layers.remove(&k);
-            }
-            let mut to_remove_lbl = Vec::new();
-            for (k, layer) in st.workspace_label_layers.iter() {
-                if !visible_ids.contains(k) {
+            });
+            st.workspace_label_layers.retain(|id, layer| {
+                if visible_ids.contains(id) {
+                    true
+                } else {
                     layer.removeFromSuperlayer();
-                    to_remove_lbl.push(k.clone());
+                    false
                 }
-            }
-            for k in to_remove_lbl {
-                st.workspace_label_layers.remove(&k);
-            }
+            });
+            st.workspace_label_strings.retain(|id, _| visible_ids.contains(id));
         }
     }
 
     fn draw_windows_tile(
         &self,
         state: &RefCell<MissionControlState>,
+        parent_layer: &CALayer,
         windows: &[WindowData],
-        tile: NSRect,
+        tile: CGRect,
         selected: Option<usize>,
         layout: WindowLayoutKind,
     ) {
@@ -1172,10 +1066,10 @@ impl MissionControlView {
 
         let selected_idx = selected.map(|s| s.min(windows.len().saturating_sub(1)));
 
-        let parent_layer = match unsafe { self.layer() } {
-            Some(l) => l,
-            None => return,
-        };
+        let parent_layer = parent_layer;
+
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
 
         for idx in (0..windows.len()).rev() {
             autoreleasepool(|_| {
@@ -1184,44 +1078,46 @@ impl MissionControlView {
                 let is_selected = selected_idx.map_or(false, |s| s == idx);
                 Self::draw_window_outline(rect, is_selected);
 
-                let mut s = state.borrow_mut();
-                let layer = s.preview_layers.entry(window.id).or_insert_with(|| {
-                    let lay = CALayer::layer();
-                    parent_layer.addSublayer(&lay);
-                    lay
-                });
+                let (layer, style_changed) = {
+                    let mut s = state.borrow_mut();
+                    let layer = s
+                        .preview_layers
+                        .entry(window.id)
+                        .or_insert_with(|| {
+                            let lay = CALayer::layer();
+                            parent_layer.addSublayer(&lay);
+                            lay
+                        })
+                        .clone();
+                    let style_changed = s
+                        .preview_layer_styles
+                        .entry(window.id)
+                        .or_insert_with(Default::default)
+                        .update_selected(is_selected);
+                    (layer, style_changed)
+                };
 
-                CATransaction::begin();
-                CATransaction::setDisableActions(true);
-
-                layer.setFrame(CGRect::new(
-                    CGPoint::new(rect.origin.x, rect.origin.y),
-                    CGSize::new(rect.size.width, rect.size.height),
-                ));
+                layer.setFrame(rect);
                 layer.setMasksToBounds(true);
                 layer.setCornerRadius(4.0);
                 layer.setContentsScale(2.0);
-                if selected_idx.map_or(false, |si| si == idx) {
-                    unsafe {
-                        let sel =
-                            NSColor::colorWithCalibratedRed_green_blue_alpha(0.2, 0.45, 1.0, 0.85);
-                        layer.setBorderColor(Some(&sel.CGColor()));
+                if style_changed {
+                    if is_selected {
+                        unsafe {
+                            layer.setBorderColor(Some(&**SELECTED_BORDER_COLOR));
+                        }
                         layer.setBorderWidth(3.0);
-                    }
-                    layer.setZPosition(1.0);
-                } else {
-                    unsafe {
-                        let stroke = NSColor::colorWithCalibratedWhite_alpha(0.0, 0.65);
-                        layer.setBorderColor(Some(&stroke.CGColor()));
+                        layer.setZPosition(1.0);
+                    } else {
+                        unsafe {
+                            layer.setBorderColor(Some(&**WINDOW_BORDER_COLOR));
+                        }
                         layer.setBorderWidth(0.4);
+                        layer.setZPosition(0.0);
                     }
-                    layer.setZPosition(0.0);
                 }
 
-                CATransaction::commit();
-
-                let had_image = s.ready_previews.contains(&window.id);
-                drop(s);
+                let had_image = { state.borrow().ready_previews.contains(&window.id) };
 
                 if !had_image {
                     let (tw, th) = if matches!(layout, WindowLayoutKind::Exploded) {
@@ -1239,9 +1135,11 @@ impl MissionControlView {
                 }
             });
         }
+
+        CATransaction::commit();
     }
 
-    fn draw_window_outline(_rect: NSRect, _is_selected: bool) {}
+    fn draw_window_outline(_rect: CGRect, _is_selected: bool) {}
 
     fn schedule_capture(
         &self,
@@ -1277,15 +1175,15 @@ impl MissionControlView {
             },
             cache: st.preview_cache.clone(),
             generation,
-            view_ptr_bits: self as *const _ as usize,
+            overlay_ptr_bits: self as *const _ as usize,
         };
         let _ = CAPTURE_POOL.sender.send(job);
     }
 
     fn prewarm_previews(&self) {
-        let state_cell = self.ivars();
+        let state_cell = &self.state;
 
-        let tasks: Vec<(i64, CaptureTask)> = {
+        let mut tasks: Vec<(i64, CaptureTask)> = {
             let mut pending = Vec::new();
             let state_ref = state_cell.borrow();
             let full_res =
@@ -1344,118 +1242,181 @@ impl MissionControlView {
 
         let generation = CURRENT_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
 
-        let (preview_cache, view_ptr_bits) = {
+        let (preview_cache, overlay_ptr_bits) = {
             let st = state_cell.borrow();
             (st.preview_cache.clone(), self as *const _ as usize)
         };
 
-        std::thread::spawn(move || {
-            let mut tasks = tasks;
-            tasks.sort_by(|a, b| a.0.cmp(&b.0));
+        tasks.sort_by(|a, b| a.0.cmp(&b.0));
 
-            for (_, task) in tasks.into_iter() {
-                {
-                    let cache = preview_cache.read();
-                    if cache.contains_key(&task.window_id) {
-                        continue;
-                    }
-                }
-                {
-                    let mut set = IN_FLIGHT.lock();
-                    if !set.insert((generation, task.window_id)) {
-                        continue;
-                    }
-                }
-
-                let job = CaptureJob {
-                    task,
-                    cache: preview_cache.clone(),
-                    generation,
-                    view_ptr_bits,
-                };
-                if CAPTURE_POOL.sender.send(job).is_err() {
-                    break;
+        for (_, task) in tasks.into_iter() {
+            {
+                let cache = preview_cache.read();
+                if cache.contains_key(&task.window_id) {
+                    continue;
                 }
             }
-        });
+            {
+                let mut set = IN_FLIGHT.lock();
+                if !set.insert((generation, task.window_id)) {
+                    continue;
+                }
+            }
+
+            let job = CaptureJob {
+                task,
+                cache: preview_cache.clone(),
+                generation,
+                overlay_ptr_bits,
+            };
+            if CAPTURE_POOL.sender.send(job).is_err() {
+                break;
+            }
+        }
+    }
+
+    fn refresh_previews(&self) {
+        let state_cell = &self.state;
+
+        let (layers, cache_arc) = {
+            let st = match state_cell.try_borrow() {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            let pairs: Vec<(WindowId, Retained<CALayer>)> =
+                st.preview_layers.iter().map(|(wid, layer)| (*wid, layer.clone())).collect();
+            (pairs, st.preview_cache.clone())
+        };
+
+        let mut ready_ids: Vec<WindowId> = Vec::new();
+
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+
+        {
+            let cache = cache_arc.read();
+            for (wid, layer) in layers.iter() {
+                if let Some(img) = cache.get(wid) {
+                    unsafe {
+                        let img_ptr = img.as_ptr() as *mut objc2::runtime::AnyObject;
+                        let _: () = msg_send![&**layer, setContents: img_ptr];
+                    }
+                    ready_ids.push(*wid);
+                }
+            }
+        }
+
+        CATransaction::commit();
+
+        if !ready_ids.is_empty() {
+            if let Ok(mut st) = state_cell.try_borrow_mut() {
+                for wid in ready_ids.iter().copied() {
+                    st.ready_previews.insert(wid);
+                }
+                if !st.suppress_live_present {
+                    if let (Some(root), Some(wid), Some(size)) =
+                        (st.render_root.clone(), st.render_window_id, st.render_size)
+                    {
+                        unsafe {
+                            let ctx: *mut CGContext =
+                                SLWindowContextCreate(*G_CONNECTION, wid, core::ptr::null());
+                            if !ctx.is_null() {
+                                let clear = CGRect::new(CGPoint::new(0.0, 0.0), size);
+                                CGContextClearRect(ctx, clear);
+                                CGContextSaveGState(ctx);
+                                CGContextTranslateCTM(ctx, 0.0, size.height);
+                                CGContextScaleCTM(ctx, 1.0, -1.0);
+                                root.renderInContext(&*ctx);
+                                CGContextRestoreGState(ctx);
+                                CGContextFlush(ctx);
+                                CFRelease(ctx as *const c_void);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn draw_contents_into_layer(&self, bounds: CGRect, parent_layer: &CALayer) {
+        let state_cell = &self.state;
+        let (mode, selected_workspace, selected_window) = {
+            let mut state = state_cell.borrow_mut();
+            let Some(mode) = state.mode().cloned() else {
+                return;
+            };
+            state.ensure_selection();
+            (mode, state.selected_workspace(), state.selected_window())
+        };
+
+        unsafe {
+            parent_layer.setBackgroundColor(Some(&**OVERLAY_BACKGROUND_COLOR));
+        }
+
+        let content_bounds = Self::content_bounds(bounds);
+        match mode {
+            MissionControlMode::AllWorkspaces(workspaces) => {
+                self.draw_workspaces(
+                    &state_cell,
+                    parent_layer,
+                    &workspaces,
+                    content_bounds,
+                    selected_workspace,
+                );
+            }
+            MissionControlMode::CurrentWorkspace(windows) => {
+                self.draw_windows_tile(
+                    &state_cell,
+                    parent_layer,
+                    &windows,
+                    content_bounds,
+                    selected_window,
+                    WindowLayoutKind::Exploded,
+                );
+            }
+        }
     }
 }
 
-objc2::define_class!(
-    #[unsafe(super(NSWindow))]
-    pub struct MissionControlWindow;
-
-    impl MissionControlWindow {
-        #[unsafe(method(canBecomeKeyWindow))]
-        fn can_become_key_window(&self) -> bool { true }
-
-        #[unsafe(method(canBecomeMainWindow))]
-        fn can_become_main_window(&self) -> bool { true }
-    }
-);
-
 pub struct MissionControlOverlay {
-    window: Retained<NSWindow>,
-    view: Retained<MissionControlView>,
-    blur_view: Retained<NSVisualEffectView>,
+    cgs_window: CgsWindow,
+    root_layer: Retained<CALayer>,
+    frame: CGRect,
     mtm: MainThreadMarker,
     key_tap: RefCell<Option<crate::sys::event_tap::EventTap>>,
     fade_enabled: bool,
     fade_duration_ms: f64,
     has_shown: RefCell<bool>,
+    state: RefCell<MissionControlState>,
 }
 
 impl MissionControlOverlay {
     pub fn new(config: Config, mtm: MainThreadMarker, frame: CGRect) -> Self {
-        unsafe {
-            let view = MissionControlView::alloc(mtm).set_ivars(RefCell::default());
-            let view: Retained<_> = msg_send![super(view), initWithFrame: frame];
-            view.setWantsLayer(true);
-            view.setCanDrawSubviewsIntoLayer(true);
-            view.setCanDrawConcurrently(true);
+        let root_layer = CALayer::layer();
+        root_layer.setGeometryFlipped(true);
+        root_layer.setFrame(frame);
 
-            let blur_view: Retained<NSVisualEffectView> = Retained::from(
-                NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), frame),
-            );
-            blur_view.setMaterial(NSVisualEffectMaterial::HUDWindow);
-            blur_view.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
-            blur_view.setState(NSVisualEffectState::Active);
+        let cgs_window = CgsWindow::new(frame).expect("failed to create CGS window");
+        let _ = cgs_window.set_opacity(false);
+        let _ = cgs_window.set_alpha(1.0);
+        let _ = cgs_window.set_level(crate::actor::mouse::NSPopUpMenuWindowLevel as i32);
+        let _ = cgs_window.set_blur(36, 2);
 
-            let raw = MissionControlWindow::alloc(mtm);
-            let window_sub: Retained<MissionControlWindow> = msg_send![
-                raw,
-                initWithContentRect: frame,
-                styleMask: NSWindowStyleMask::Borderless,
-                backing: NSBackingStoreType::Buffered,
-                defer: false
-            ];
-            let window: Retained<NSWindow> = window_sub.into_super();
-            window.setOpaque(false);
-            window.setIgnoresMouseEvents(false);
-            window.setAcceptsMouseMovedEvents(true);
-            window.setLevel(crate::actor::mouse::NSPopUpMenuWindowLevel);
-            let clear = NSColor::clearColor();
-            window.setBackgroundColor(Some(&clear));
-            if let Some(content) = window.contentView() {
-                content.addSubview(&blur_view);
-                content.addSubview(&view);
-            }
-
-            Self {
-                window,
-                view,
-                blur_view,
-                mtm,
-                key_tap: RefCell::new(None),
-                fade_enabled: config.settings.ui.mission_control.fade_enabled,
-                fade_duration_ms: config.settings.ui.mission_control.fade_duration_ms,
-                has_shown: RefCell::new(false),
-            }
+        Self {
+            cgs_window,
+            root_layer,
+            frame,
+            mtm,
+            key_tap: RefCell::new(None),
+            fade_enabled: config.settings.ui.mission_control.fade_enabled,
+            fade_duration_ms: config.settings.ui.mission_control.fade_duration_ms,
+            has_shown: RefCell::new(false),
+            state: RefCell::new(MissionControlState::default()),
         }
     }
 
     pub fn set_action_handler(&self, f: Rc<dyn Fn(MissionControlAction)>) {
-        self.view.ivars().borrow_mut().on_action = Some(f);
+        self.state.borrow_mut().on_action = Some(f);
     }
 
     pub fn set_fade_enabled(&mut self, enabled: bool) { self.fade_enabled = enabled; }
@@ -1463,104 +1424,318 @@ impl MissionControlOverlay {
     pub fn set_fade_duration_ms(&mut self, ms: f64) { self.fade_duration_ms = ms.max(0.0); }
 
     pub fn update(&self, mode: MissionControlMode) {
-        unsafe { self.blur_view.setState(NSVisualEffectState::Active) };
-        self.view.ivars().borrow_mut().set_mode(mode);
-        self.view.prewarm_previews();
+        {
+            let mut st = self.state.borrow_mut();
+            st.set_mode(mode.clone());
 
-        let should_fade = if self.fade_enabled {
-            let mut first = self.has_shown.borrow_mut();
-            if !*first {
-                *first = true;
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        };
+            st.render_root = Some(self.root_layer.clone());
+            st.render_window_id = Some(self.cgs_window.id());
+            st.render_size = Some(self.frame.size);
 
-        if should_fade {
-            unsafe {
-                self.window.setAlphaValue(0.0);
-            }
-            self.window.makeKeyAndOrderFront(Some(&self.view));
-            unsafe {
-                let duration = self.fade_duration_ms / 1000.0;
-
-                let ns_anim_cls = objc2::class!(NSAnimationContext);
-                let _: () = msg_send![ns_anim_cls, beginGrouping];
-                let current_ctx: *mut objc2::runtime::AnyObject =
-                    msg_send![ns_anim_cls, currentContext];
-                let _: () = msg_send![current_ctx, setDuration: duration];
-                let animator: *mut objc2::runtime::AnyObject = msg_send![&*self.window, animator];
-                let _: () = msg_send![animator, setAlphaValue: 1.0];
-                let _: () = msg_send![ns_anim_cls, endGrouping];
-            }
-        } else {
-            // Either fade disabled or we've already shown once; show instantly.
-            self.window.makeKeyAndOrderFront(Some(&self.view));
-            unsafe {
-                self.window.setAlphaValue(1.0);
-            }
+            st.suppress_live_present = true;
         }
+        self.prewarm_previews();
 
-        unsafe { self.view.setNeedsDisplay(true) };
+        if self.fade_enabled && !*self.has_shown.borrow() {
+            let _ = self.cgs_window.set_alpha(0.0);
+        } else {
+            let _ = self.cgs_window.set_alpha(1.0);
+        }
+        let _ = self.cgs_window.order_above(None);
+
         let app = NSApplication::sharedApplication(self.mtm);
         #[allow(deprecated)]
         let _ = app.activateIgnoringOtherApps(true);
         self.ensure_key_tap();
+
+        let deadline = match &mode {
+            MissionControlMode::AllWorkspaces(_) => 110u64,
+            MissionControlMode::CurrentWorkspace(_) => 160u64,
+        };
+        let start = Instant::now();
+        loop {
+            let (ready, total) = {
+                let st = self.state.borrow();
+                let total = match st.mode() {
+                    Some(MissionControlMode::AllWorkspaces(wss)) => {
+                        wss.iter().map(|ws| ws.windows.len()).sum::<usize>()
+                    }
+                    Some(MissionControlMode::CurrentWorkspace(wins)) => wins.len(),
+                    None => 0,
+                };
+                (st.ready_previews.len(), total)
+            };
+            if total == 0 {
+                break;
+            }
+            if ready >= total || start.elapsed() >= Duration::from_millis(deadline) {
+                break;
+            }
+            crate::sys::timer::Timer::sleep(Duration::from_millis(8));
+        }
+
+        {
+            let mut st = self.state.borrow_mut();
+            st.suppress_live_present = false;
+        }
+        self.draw_and_present();
+
+        if self.fade_enabled && !*self.has_shown.borrow() {
+            self.fade_in();
+        }
+        *self.has_shown.borrow_mut() = true;
     }
 
     pub fn hide(&self) {
+        if self.fade_enabled && *self.has_shown.borrow() {
+            self.fade_out();
+        }
+
         {
-            let mut s = self.view.ivars().borrow_mut();
+            let mut s = self.state.borrow_mut();
             s.purge();
         }
 
         self.key_tap.borrow_mut().take();
-        self.view.ivars().borrow_mut().on_action = None;
+        self.state.borrow_mut().on_action = None;
 
-        if self.fade_enabled {
-            let dur = self.fade_duration_ms;
-            unsafe {
-                let duration = dur / 1000.0;
-                let ns_anim_cls = objc2::class!(NSAnimationContext);
-                let _: () = msg_send![ns_anim_cls, beginGrouping];
-                let current_ctx: *mut objc2::runtime::AnyObject =
-                    msg_send![ns_anim_cls, currentContext];
-                let _: () = msg_send![current_ctx, setDuration: duration];
-                let animator: *mut objc2::runtime::AnyObject = msg_send![&*self.window, animator];
-                let _: () = msg_send![animator, setAlphaValue: 0.0];
-                let _: () = msg_send![ns_anim_cls, endGrouping];
-            }
-
-            unsafe {
-                self.blur_view.setState(NSVisualEffectState::Inactive);
-            }
-
-            unsafe {
-                let nil: *mut objc2::runtime::AnyObject = core::ptr::null_mut();
-                let delay = dur / 1000.0;
-                let _: () = msg_send![&*self.window, performSelector: objc2::sel!(orderOut:), withObject: nil, afterDelay: delay];
-                CATransaction::flush();
-            }
-        } else {
-            unsafe {
-                self.window.makeKeyAndOrderFront(None);
-                self.blur_view.setState(NSVisualEffectState::Inactive);
-                self.window.orderOut(None);
-                CATransaction::flush();
-            }
-        }
+        let _ = self.cgs_window.order_out();
+        let _ = self.cgs_window.set_alpha(1.0);
+        CATransaction::flush();
 
         *self.has_shown.borrow_mut() = false;
         objc2::rc::autoreleasepool(|_| {});
     }
 
+    fn fade_in(&self) {
+        let duration_ms = self.fade_duration_ms.max(0.0);
+        if duration_ms <= 0.0 {
+            let _ = self.cgs_window.set_alpha(1.0);
+            return;
+        }
+
+        let running = Arc::new(AtomicBool::new(true));
+        let running_cb = running.clone();
+        let start = Instant::now();
+        let total = std::time::Duration::from_secs_f64(duration_ms / 1000.0);
+        let conn = *crate::sys::skylight::G_CONNECTION;
+        let wid = self.cgs_window.id();
+
+        let link = DisplayLink::new(move || {
+            let elapsed = start.elapsed();
+            let done = elapsed >= total;
+            let t = if done {
+                1.0f32
+            } else {
+                (elapsed.as_secs_f32() / total.as_secs_f32()).clamp(0.0, 1.0)
+            };
+            unsafe {
+                // TODO: use method from cgs_window but rn it is buggy
+                let _ = crate::sys::skylight::SLSSetWindowAlpha(conn, wid, t);
+            }
+            if done {
+                running_cb.store(false, Ordering::Release);
+                false
+            } else {
+                true
+            }
+        });
+
+        if let Ok(link) = link {
+            link.start();
+            while running.load(Ordering::Acquire) {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            let _ = self.cgs_window.set_alpha(1.0);
+        } else {
+            let _ = self.cgs_window.set_alpha(1.0);
+        }
+    }
+
+    fn fade_out(&self) {
+        let duration_ms = self.fade_duration_ms.max(0.0);
+        if duration_ms <= 0.0 {
+            let _ = self.cgs_window.set_alpha(0.0);
+            return;
+        }
+
+        let running = Arc::new(AtomicBool::new(true));
+        let running_cb = running.clone();
+        let start = Instant::now();
+        let total = std::time::Duration::from_secs_f64(duration_ms / 1000.0);
+        let conn = *crate::sys::skylight::G_CONNECTION;
+        let wid = self.cgs_window.id();
+
+        let link = DisplayLink::new(move || {
+            let elapsed = start.elapsed();
+            let done = elapsed >= total;
+            let t = if done {
+                0.0f32
+            } else {
+                let p = (elapsed.as_secs_f32() / total.as_secs_f32()).clamp(0.0, 1.0);
+                1.0f32 - p
+            };
+            unsafe {
+                let _ = crate::sys::skylight::SLSSetWindowAlpha(conn, wid, t);
+            }
+            if done {
+                running_cb.store(false, Ordering::Release);
+                false
+            } else {
+                true
+            }
+        });
+
+        if let Ok(link) = link {
+            link.start();
+            while running.load(Ordering::Acquire) {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            let _ = self.cgs_window.set_alpha(0.0);
+        } else {
+            let _ = self.cgs_window.set_alpha(0.0);
+        }
+    }
+
+    fn draw_and_present(&self) {
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        self.root_layer.setFrame(self.frame);
+        self.root_layer.setGeometryFlipped(true);
+        self.draw_contents_into_layer(self.frame, &self.root_layer);
+        CATransaction::commit();
+
+        let ctx: *mut CGContext = unsafe {
+            SLWindowContextCreate(*G_CONNECTION, self.cgs_window.id(), core::ptr::null())
+        };
+        if !ctx.is_null() {
+            unsafe {
+                let clear = CGRect::new(CGPoint::new(0.0, 0.0), self.frame.size);
+                CGContextClearRect(ctx, clear);
+                CGContextSaveGState(ctx);
+                CGContextTranslateCTM(ctx, 0.0, self.frame.size.height);
+                CGContextScaleCTM(ctx, 1.0, -1.0);
+                self.root_layer.renderInContext(&*ctx);
+                CGContextRestoreGState(ctx);
+                CGContextFlush(ctx);
+                CFRelease(ctx as *const c_void);
+            }
+        }
+    }
+
     fn emit_action(&self, action: MissionControlAction) {
-        let handler = self.view.ivars().borrow().on_action.clone();
+        let handler = self.state.borrow().on_action.clone();
         if let Some(cb) = handler {
             cb(action);
+        }
+    }
+
+    fn handle_keycode(&self, keycode: u16) {
+        match keycode {
+            53 => self.emit_action(MissionControlAction::Dismiss),
+            123 => {
+                if self.adjust_selection(NavDirection::Left) {
+                    self.draw_and_present();
+                }
+            }
+            124 => {
+                if self.adjust_selection(NavDirection::Right) {
+                    self.draw_and_present();
+                }
+            }
+            125 => {
+                if self.adjust_selection(NavDirection::Down) {
+                    self.draw_and_present();
+                }
+            }
+            126 => {
+                if self.adjust_selection(NavDirection::Up) {
+                    self.draw_and_present();
+                }
+            }
+            36 | 76 => self.activate_selection_action(),
+            _ => {}
+        }
+    }
+
+    fn handle_click_global(&self, g_pt: CGPoint) {
+        let lx = g_pt.x - self.frame.origin.x;
+        let ly = g_pt.y - self.frame.origin.y;
+        let pt = CGPoint::new(lx, ly);
+
+        let mut state = match self.state.try_borrow_mut() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let mode = match state.mode() {
+            Some(m) => m,
+            None => return,
+        };
+        let content_bounds = Self::content_bounds(CGRect::new(
+            CGPoint::new(0.0, 0.0),
+            CGSize::new(self.frame.size.width, self.frame.size.height),
+        ));
+
+        let new_sel = match mode {
+            MissionControlMode::AllWorkspaces(workspaces) => {
+                Self::workspace_index_at_point(workspaces, pt, content_bounds)
+                    .map(|(order_idx, _)| Selection::Workspace(order_idx))
+            }
+            MissionControlMode::CurrentWorkspace(windows) => {
+                Self::window_at_point(windows, pt, content_bounds, WindowLayoutKind::Exploded)
+                    .map(|(order_idx, _)| Selection::Window(order_idx))
+            }
+        };
+
+        match new_sel {
+            Some(sel) => {
+                state.set_selection(sel);
+                drop(state);
+                self.draw_and_present();
+                self.activate_selection_action();
+            }
+            None => {
+                drop(state);
+                self.emit_action(MissionControlAction::Dismiss);
+            }
+        }
+    }
+
+    fn handle_move_global(&self, g_pt: CGPoint) {
+        let lx = g_pt.x - self.frame.origin.x;
+        let ly = g_pt.y - self.frame.origin.y;
+        let pt = CGPoint::new(lx, ly);
+
+        let mut state = match self.state.try_borrow_mut() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let mode = match state.mode() {
+            Some(m) => m,
+            None => return,
+        };
+        let content_bounds = Self::content_bounds(CGRect::new(
+            CGPoint::new(0.0, 0.0),
+            CGSize::new(self.frame.size.width, self.frame.size.height),
+        ));
+
+        let new_sel = match mode {
+            MissionControlMode::AllWorkspaces(workspaces) => {
+                Self::workspace_index_at_point(workspaces, pt, content_bounds)
+                    .map(|(order_idx, _)| Selection::Workspace(order_idx))
+            }
+            MissionControlMode::CurrentWorkspace(windows) => {
+                Self::window_at_point(windows, pt, content_bounds, WindowLayoutKind::Exploded)
+                    .map(|(order_idx, _)| Selection::Window(order_idx))
+            }
+        };
+
+        if let Some(sel) = new_sel {
+            if state.selection() != Some(sel) {
+                state.set_selection(sel);
+                drop(state);
+                self.draw_and_present();
+            }
         }
     }
 
@@ -1568,11 +1743,12 @@ impl MissionControlOverlay {
         if self.key_tap.borrow().is_some() {
             return;
         }
-        use objc2_core_graphics as ocg;
-        let mask = 1u64 << ocg::CGEventType::KeyDown.0 as u64;
 
         #[repr(C)]
-        struct KeyCtx(*const MissionControlOverlay);
+        struct KeyCtx {
+            overlay: *const MissionControlOverlay,
+            consumes: bool,
+        }
 
         unsafe fn drop_ctx(ptr: *mut c_void) {
             unsafe {
@@ -1581,43 +1757,97 @@ impl MissionControlOverlay {
         }
 
         unsafe extern "C-unwind" fn key_callback(
-            _proxy: ocg::CGEventTapProxy,
-            _etype: ocg::CGEventType,
-            event: core::ptr::NonNull<ocg::CGEvent>,
+            _proxy: CGEventTapProxy,
+            etype: CGEventType,
+            event: core::ptr::NonNull<CGEvent>,
             user_info: *mut c_void,
-        ) -> *mut ocg::CGEvent {
-            use objc2_core_graphics::{CGEvent, CGEventField};
-            let keycode = unsafe {
-                CGEvent::integer_value_field(
-                    Some(event.as_ref()),
-                    CGEventField::KeyboardEventKeycode,
-                ) as u16
-            };
-            if keycode == 53 {
-                let ctx = unsafe { &*(user_info as *const KeyCtx) };
-                if let Some(overlay) = unsafe { ctx.0.as_ref() } {
-                    overlay.emit_action(MissionControlAction::Dismiss);
+        ) -> *mut CGEvent {
+            let ctx = unsafe { &*(user_info as *const KeyCtx) };
+            let mut handled = false;
+            if let Some(overlay) = unsafe { ctx.overlay.as_ref() } {
+                match etype {
+                    CGEventType::KeyDown => {
+                        let keycode = unsafe {
+                            CGEvent::integer_value_field(
+                                Some(event.as_ref()),
+                                CGEventField::KeyboardEventKeycode,
+                            ) as u16
+                        };
+                        overlay.handle_keycode(keycode);
+                        handled = true;
+                    }
+                    CGEventType::LeftMouseDown => {
+                        let loc = unsafe { CGEvent::location(Some(event.as_ref())) };
+                        overlay.handle_click_global(loc);
+                        handled = true;
+                    }
+                    CGEventType::LeftMouseUp => {
+                        handled = true;
+                    }
+                    CGEventType::MouseMoved => {
+                        let loc = unsafe { CGEvent::location(Some(event.as_ref())) };
+                        overlay.handle_move_global(loc);
+                        handled = true;
+                    }
+                    _ => {}
                 }
             }
-            event.as_ptr()
+            if handled && ctx.consumes {
+                core::ptr::null_mut()
+            } else {
+                event.as_ptr()
+            }
         }
 
-        let ctx = Box::new(KeyCtx(self as *const _));
-        let ctx_ptr = Box::into_raw(ctx) as *mut c_void;
+        let mask = (1u64 << CGEventType::KeyDown.0 as u64)
+            | (1u64 << CGEventType::LeftMouseDown.0 as u64)
+            | (1u64 << CGEventType::LeftMouseUp.0 as u64)
+            | (1u64 << CGEventType::MouseMoved.0 as u64);
+
+        let overlay_ptr = self as *const _;
 
         let tap = unsafe {
-            crate::sys::event_tap::EventTap::new_listen_only(
+            let ctx_ptr = Box::into_raw(Box::new(KeyCtx {
+                overlay: overlay_ptr,
+                consumes: true,
+            })) as *mut c_void;
+            match crate::sys::event_tap::EventTap::new_with_options(
+                CGEventTapOptions::Default,
                 mask,
                 Some(key_callback),
                 ctx_ptr,
                 Some(drop_ctx),
-            )
+            ) {
+                Some(tap) => Some(tap),
+                None => {
+                    drop_ctx(ctx_ptr);
+                    let ctx_ptr = Box::into_raw(Box::new(KeyCtx {
+                        overlay: overlay_ptr,
+                        consumes: false,
+                    })) as *mut c_void;
+                    match crate::sys::event_tap::EventTap::new_listen_only(
+                        mask,
+                        Some(key_callback),
+                        ctx_ptr,
+                        Some(drop_ctx),
+                    ) {
+                        Some(tap) => {
+                            println!(
+                                "Falling back to listen-only event tap; Mission Control overlay input will pass through"
+                            );
+                            Some(tap)
+                        }
+                        None => {
+                            drop_ctx(ctx_ptr);
+                            None
+                        }
+                    }
+                }
+            }
         };
 
         if let Some(t) = tap {
             self.key_tap.borrow_mut().replace(t);
-        } else {
-            unsafe { drop_ctx(ctx_ptr) };
         }
     }
 }

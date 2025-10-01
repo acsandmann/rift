@@ -20,7 +20,7 @@ use rift_wm::layout_engine::LayoutEngine;
 use rift_wm::sys::accessibility::ensure_accessibility_permission;
 use rift_wm::sys::executor::Executor;
 use rift_wm::sys::screen::CoordinateConverter;
-use rift_wm::sys::skylight::CGSEventType;
+use rift_wm::sys::skylight::{CGSEventType, KnownCGSEvent};
 use tokio::join;
 
 #[derive(Parser)]
@@ -121,8 +121,8 @@ fn main() {
 
     let (_wnd_tx, wnd_rx) = rift_wm::actor::channel();
     let wn_actor = window_notify_actor::WindowNotify::new(events_tx.clone(), wnd_rx, &[
-        CGSEventType::WindowDestroyed,
-        CGSEventType::WindowCreated,
+        CGSEventType::Known(KnownCGSEvent::WindowDestroyed),
+        CGSEventType::Known(KnownCGSEvent::WindowCreated),
     ]);
 
     let events_tx_mach = events_tx.clone();

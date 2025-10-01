@@ -4,12 +4,10 @@ use std::rc::Rc;
 
 use objc2_app_kit::NSEvent;
 use objc2_core_foundation::{CGPoint, CGRect};
-use objc2_core_graphics as ocg;
-use objc2_foundation::{MainThreadMarker, NSInteger};
-use ocg::{
-    CGEvent as OcgEvent, CGEventField as OcgEventField, CGEventFlags as OcgEventFlags,
-    CGEventMask as OcgEventMask, CGEventType as OcgEventType,
+use objc2_core_graphics::{
+    CGEvent, CGEventField, CGEventFlags, CGEventMask, CGEventTapProxy, CGEventType,
 };
+use objc2_foundation::{MainThreadMarker, NSInteger};
 use tracing::{debug, error, trace, warn};
 
 use super::reactor::{self, Event};
@@ -50,7 +48,7 @@ struct State {
     focus_follows_mouse_enabled: bool,
     disable_hotkey_active: bool,
     pressed_keys: HashSet<KeyCode>,
-    current_flags: OcgEventFlags,
+    current_flags: CGEventFlags,
 }
 
 impl Default for State {
@@ -65,7 +63,7 @@ impl Default for State {
             focus_follows_mouse_enabled: true,
             disable_hotkey_active: false,
             pressed_keys: HashSet::default(),
-            current_flags: OcgEventFlags::empty(),
+            current_flags: CGEventFlags::empty(),
         }
     }
 }
@@ -100,24 +98,24 @@ impl Mouse {
 
         let this = Rc::new(self);
 
-        let mask: OcgEventMask = {
+        let mask: CGEventMask = {
             let mut m = 0u64;
             for ty in [
-                OcgEventType::LeftMouseDown,
-                OcgEventType::LeftMouseUp,
-                OcgEventType::RightMouseDown,
-                OcgEventType::RightMouseUp,
-                OcgEventType::MouseMoved,
-                OcgEventType::LeftMouseDragged,
-                OcgEventType::RightMouseDragged,
+                CGEventType::LeftMouseDown,
+                CGEventType::LeftMouseUp,
+                CGEventType::RightMouseDown,
+                CGEventType::RightMouseUp,
+                CGEventType::MouseMoved,
+                CGEventType::LeftMouseDragged,
+                CGEventType::RightMouseDragged,
             ] {
                 m |= 1u64 << (ty.0 as u64);
             }
             if this.disable_hotkey.is_some() {
                 for ty in [
-                    OcgEventType::KeyDown,
-                    OcgEventType::KeyUp,
-                    OcgEventType::FlagsChanged,
+                    CGEventType::KeyDown,
+                    CGEventType::KeyUp,
+                    CGEventType::FlagsChanged,
                 ] {
                     m |= 1u64 << (ty.0 as u64);
                 }
@@ -201,17 +199,12 @@ impl Mouse {
         }
     }
 
-    fn on_event(
-        self: &Rc<Self>,
-        event_type: OcgEventType,
-        event: &OcgEvent,
-        mtm: MainThreadMarker,
-    ) {
+    fn on_event(self: &Rc<Self>, event_type: CGEventType, event: &CGEvent, mtm: MainThreadMarker) {
         let mut state = self.state.borrow_mut();
 
         if matches!(
             event_type,
-            OcgEventType::KeyDown | OcgEventType::KeyUp | OcgEventType::FlagsChanged
+            CGEventType::KeyDown | CGEventType::KeyUp | CGEventType::FlagsChanged
         ) {
             self.handle_keyboard_event(event_type, event, &mut state);
             return;
@@ -230,10 +223,10 @@ impl Mouse {
             state.hidden = false;
         }
         match event_type {
-            OcgEventType::LeftMouseUp => {
+            CGEventType::LeftMouseUp => {
                 _ = self.events_tx.send(Event::MouseUp);
             }
-            OcgEventType::MouseMoved
+            CGEventType::MouseMoved
                 if self.config.settings.focus_follows_mouse
                     && state.focus_follows_mouse_enabled
                     && !state.disable_hotkey_active =>
@@ -248,7 +241,7 @@ impl Mouse {
         }
     }
 
-    fn handle_keyboard_event(&self, event_type: OcgEventType, event: &OcgEvent, state: &mut State) {
+    fn handle_keyboard_event(&self, event_type: CGEventType, event: &CGEvent, state: &mut State) {
         let Some(target) = self.disable_hotkey else {
             return;
         };
@@ -257,14 +250,14 @@ impl Mouse {
 
         if let Some(key_code) = key_code_from_event(event) {
             match event_type {
-                OcgEventType::KeyDown => state.note_key_down(key_code),
-                OcgEventType::KeyUp => state.note_key_up(key_code),
-                OcgEventType::FlagsChanged => state.note_flags_changed(key_code),
+                CGEventType::KeyDown => state.note_key_down(key_code),
+                CGEventType::KeyUp => state.note_key_up(key_code),
+                CGEventType::FlagsChanged => state.note_flags_changed(key_code),
                 _ => {}
             }
         }
 
-        let flags = unsafe { OcgEvent::flags(Some(event)) };
+        let flags = unsafe { CGEvent::flags(Some(event)) };
         state.current_flags = flags;
         state.disable_hotkey_active = state.compute_disable_hotkey_active(target);
 
@@ -279,11 +272,11 @@ impl Mouse {
 }
 
 unsafe extern "C-unwind" fn mouse_callback(
-    _proxy: ocg::CGEventTapProxy,
-    event_type: OcgEventType,
-    event_ref: core::ptr::NonNull<OcgEvent>,
+    _proxy: CGEventTapProxy,
+    event_type: CGEventType,
+    event_ref: core::ptr::NonNull<CGEvent>,
     user_info: *mut std::ffi::c_void,
-) -> *mut OcgEvent {
+) -> *mut CGEvent {
     let ctx = unsafe { &*(user_info as *const CallbackCtx) };
     // kCGEventTapDisabledByTimeout (-2) and kCGEventTapDisabledByUserInput (-1).
     let ety = event_type.0 as i64;
@@ -376,41 +369,41 @@ impl State {
     }
 }
 
-fn modifiers_from_flags(flags: OcgEventFlags) -> Modifiers {
+fn modifiers_from_flags(flags: CGEventFlags) -> Modifiers {
     let mut mods = Modifiers::empty();
-    if flags.contains(OcgEventFlags::MaskControl) {
+    if flags.contains(CGEventFlags::MaskControl) {
         mods.insert(Modifiers::CONTROL);
     }
-    if flags.contains(OcgEventFlags::MaskAlternate) {
+    if flags.contains(CGEventFlags::MaskAlternate) {
         mods.insert(Modifiers::ALT);
     }
-    if flags.contains(OcgEventFlags::MaskCommand) {
+    if flags.contains(CGEventFlags::MaskCommand) {
         mods.insert(Modifiers::META);
     }
-    if flags.contains(OcgEventFlags::MaskShift) {
+    if flags.contains(CGEventFlags::MaskShift) {
         mods.insert(Modifiers::SHIFT);
     }
     mods
 }
 
-fn modifier_flag_for_key(key_code: KeyCode) -> Option<OcgEventFlags> {
+fn modifier_flag_for_key(key_code: KeyCode) -> Option<CGEventFlags> {
     match key_code {
-        KeyCode::ShiftLeft | KeyCode::ShiftRight => Some(OcgEventFlags::MaskShift),
-        KeyCode::ControlLeft | KeyCode::ControlRight => Some(OcgEventFlags::MaskControl),
-        KeyCode::AltLeft | KeyCode::AltRight => Some(OcgEventFlags::MaskAlternate),
-        KeyCode::MetaLeft | KeyCode::MetaRight => Some(OcgEventFlags::MaskCommand),
-        KeyCode::CapsLock => Some(OcgEventFlags::MaskAlphaShift),
-        KeyCode::Fn => Some(OcgEventFlags::MaskSecondaryFn),
-        KeyCode::NumLock => Some(OcgEventFlags::MaskNumericPad),
+        KeyCode::ShiftLeft | KeyCode::ShiftRight => Some(CGEventFlags::MaskShift),
+        KeyCode::ControlLeft | KeyCode::ControlRight => Some(CGEventFlags::MaskControl),
+        KeyCode::AltLeft | KeyCode::AltRight => Some(CGEventFlags::MaskAlternate),
+        KeyCode::MetaLeft | KeyCode::MetaRight => Some(CGEventFlags::MaskCommand),
+        KeyCode::CapsLock => Some(CGEventFlags::MaskAlphaShift),
+        KeyCode::Fn => Some(CGEventFlags::MaskSecondaryFn),
+        KeyCode::NumLock => Some(CGEventFlags::MaskNumericPad),
         _ => None,
     }
 }
 
 fn is_modifier_key(key_code: KeyCode) -> bool { modifier_flag_for_key(key_code).is_some() }
 
-fn key_code_from_event(event: &OcgEvent) -> Option<KeyCode> {
+fn key_code_from_event(event: &CGEvent) -> Option<KeyCode> {
     let raw =
-        unsafe { OcgEvent::integer_value_field(Some(event), OcgEventField::KeyboardEventKeycode) };
+        unsafe { CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode) };
     if raw < 0 {
         return None;
     }

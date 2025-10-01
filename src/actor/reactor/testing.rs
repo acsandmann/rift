@@ -56,6 +56,8 @@ impl Drop for Reactor {
 pub fn make_window(idx: usize) -> WindowInfo {
     WindowInfo {
         is_standard: true,
+        is_root: true,
+        is_minimized: false,
         title: format!("Window{idx}"),
         frame: CGRect::new(
             CGPoint::new(100.0 * f64::from(idx as u32), 100.0),
@@ -67,7 +69,6 @@ pub fn make_window(idx: usize) -> WindowInfo {
         path: None,
         ax_role: None,
         ax_subrole: None,
-        is_root: true,
     }
 }
 

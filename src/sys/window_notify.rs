@@ -17,7 +17,8 @@ use super::skylight::{
     SLSRequestNotificationsForWindows, cid_t,
 };
 use crate::actor;
-use crate::common::collections::HashMap;
+use crate::common::collections::{HashMap, HashSet};
+use crate::sys::skylight::KnownCGSEvent;
 
 type Wid = u32;
 type Sid = u64;
@@ -35,36 +36,40 @@ static EVENT_CHANNELS: Lazy<
 
 static G_CONNECTION: Lazy<cid_t> = Lazy::new(|| unsafe { SLSMainConnectionID() });
 
-static REGISTERED_EVENTS: Lazy<Mutex<crate::common::collections::HashSet<CGSEventType>>> =
-    Lazy::new(|| Mutex::new(crate::common::collections::HashSet::default()));
+static REGISTERED_EVENTS: Lazy<Mutex<HashSet<CGSEventType>>> =
+    Lazy::new(|| Mutex::new(HashSet::default()));
 
 pub fn init(event: CGSEventType) -> i32 {
-    let event = event.into();
-    let mut registered = REGISTERED_EVENTS.lock();
-    if registered.contains(&event) {
-        debug!("Event {} already registered, skipping", event);
-        return 1;
-    }
+    {
+        let mut registered = REGISTERED_EVENTS.lock();
+        if registered.contains(&event) {
+            debug!("Event {} already registered, skipping", event);
+            return 1;
+        }
 
-    let mut channels = EVENT_CHANNELS.lock();
-    if !channels.contains_key(&event) {
-        let (tx, rx) = actor::channel::<EventData>();
-        channels.insert(event, (tx, Some(rx)));
-    }
+        {
+            let mut channels = EVENT_CHANNELS.lock();
+            if !channels.contains_key(&event) {
+                let (tx, rx) = actor::channel::<EventData>();
+                channels.insert(event, (tx, Some(rx)));
+            }
+        }
 
-    unsafe {
-        let res = SLSRegisterConnectionNotifyProc(
-            *G_CONNECTION,
-            connection_callback,
-            event,
-            std::ptr::null_mut(),
-        );
-        debug!("registered {} callback, res={}", event, res);
+        let raw: u32 = event.into();
+        let res = unsafe {
+            SLSRegisterConnectionNotifyProc(
+                *G_CONNECTION,
+                connection_callback,
+                raw,
+                std::ptr::null_mut(),
+            )
+        };
+        debug!("registered {} (raw={}) callback, res={}", event, raw, res);
 
         if res == 0 {
             registered.insert(event);
         } else {
-            debug!("Failed to register event {}, res={}", event, res);
+            debug!("Failed to register event {} (raw={}), res={}", event, raw, res);
         }
         return res;
     }
@@ -95,41 +100,45 @@ pub fn update_window_notifications(window_ids: &[u32]) {
 }
 
 extern "C" fn connection_callback(
-    event: CGSEventType,
+    event_raw: u32,
     data: *mut c_void,
     _len: usize,
     _context: *mut c_void,
     _cid: cid_t,
 ) {
+    let kind = CGSEventType::from(event_raw);
+
     let event_data: EventData = unsafe {
         if data.is_null() {
             EventData {
-                event_type: event,
+                event_type: kind,
                 window_id: None,
                 space_id: None,
             }
         } else {
-            match event {
-                CGSEventType::WindowDestroyed | CGSEventType::WindowCreated => {
+            match kind {
+                CGSEventType::Known(KnownCGSEvent::WindowDestroyed)
+                | CGSEventType::Known(KnownCGSEvent::WindowCreated) => {
                     let sid = std::ptr::read_unaligned(data as *const u64);
                     let wid = std::ptr::read_unaligned(
                         (data as *const u8).add(std::mem::size_of::<u64>()) as *const u32,
                     );
                     EventData {
-                        event_type: event,
+                        event_type: kind,
                         window_id: Some(wid),
                         space_id: Some(sid),
                     }
                 }
-                CGSEventType::MissionControlEntered => EventData {
-                    event_type: event,
+                CGSEventType::Known(KnownCGSEvent::MissionControlEntered) => EventData {
+                    event_type: kind,
                     window_id: None,
                     space_id: None,
                 },
                 _ => {
+                    // TODO: this isnt really safe
                     let wid = std::ptr::read_unaligned(data as *const u32);
                     EventData {
-                        event_type: event,
+                        event_type: kind,
                         window_id: Some(wid),
                         space_id: None,
                     }
@@ -138,19 +147,16 @@ extern "C" fn connection_callback(
         }
     };
 
-    debug!("received: {:?}", event_data);
+    trace!("received raw event: {:?}", event_data);
 
     let channels = EVENT_CHANNELS.lock();
-    if let Some((sender, _)) = channels.get(&event) {
+    if let Some((sender, _)) = channels.get(&kind) {
         if let Err(e) = sender.try_send(event_data.clone()) {
-            debug!("Failed to send event {}: {}", event, e);
+            debug!("Failed to send event {}: {}", kind, e);
         } else {
-            trace!(
-                "Sent event {} (callback event {}): {:?}",
-                event, event, event_data
-            );
+            trace!("Dispatched event {}: {:?}", kind, event_data);
         }
     } else {
-        trace!("No channel registered for event {}.", event);
+        trace!("No channel registered for event {}.", kind);
     }
 }

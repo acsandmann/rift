@@ -108,6 +108,12 @@ vert_placement = "left"
 # how thick the line indicator will be (in px)
 thickness = 3.0
 
+[settings.ui.mission_control]
+enabled = false
+fade_enabled = false
+# native macos mission control fade is about 180ms
+fade_duration_ms = 180.0
+
 # Trackpad gestures
 [settings.gestures]
 # Enable horizontal swipes to switch virtual workspaces

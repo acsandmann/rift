@@ -2,8 +2,8 @@ use tracing::debug;
 
 use super::reactor::{self, Event};
 use crate::common::collections::HashSet;
-use crate::sys::skylight::CGSEventType;
-use crate::sys::window_notify::{self};
+use crate::sys::skylight::{CGSEventType, KnownCGSEvent};
+use crate::sys::window_notify;
 use crate::sys::window_server::WindowServerId;
 
 #[derive(Debug)]
@@ -33,7 +33,7 @@ impl WindowNotify {
             events_tx,
             requests_rx: Some(requests_rx),
             subscribed: HashSet::default(),
-            initial_events: initial_events.into_iter().copied().collect(),
+            initial_events: initial_events.iter().copied().collect(),
         }
     }
 
@@ -56,16 +56,15 @@ impl WindowNotify {
         }
 
         while let Some((span, request)) = requests_rx.recv().await {
-            let _ = span.enter();
+            let _g = span.enter();
             if let Request::Stop = request {
                 debug!("received Stop request");
                 break;
             }
-
             self.handle_request(request);
         }
 
-        debug!("exiting run loop");
+        debug!("WindowNotify actor exiting");
     }
 
     fn handle_request(&mut self, request: Request) {
@@ -75,7 +74,6 @@ impl WindowNotify {
                     debug!("already subscribed to event {}", event);
                     return;
                 }
-
                 match Self::subscribe(event, self.events_tx.clone()) {
                     Ok(()) => {
                         self.subscribed.insert(event);
@@ -86,11 +84,9 @@ impl WindowNotify {
                     }
                 }
             }
-
             Request::UpdateWindowNotifications(window_ids) => {
                 window_notify::update_window_notifications(&window_ids);
             }
-
             Request::Stop => {}
         }
     }
@@ -106,15 +102,18 @@ impl WindowNotify {
         std::thread::spawn(move || {
             loop {
                 match rx.blocking_recv() {
-                    Some(evt) => {
-                        if let Some(window_id) = evt.1.window_id {
+                    Some((_span, evt)) => {
+                        if let Some(window_id) = evt.window_id {
                             match event {
-                                CGSEventType::WindowDestroyed => events_tx.send(
-                                    Event::WindowServerDestroyed(WindowServerId::new(window_id)),
-                                ),
-                                CGSEventType::WindowCreated => events_tx.send(
-                                    Event::WindowServerAppeared(WindowServerId::new(window_id)),
-                                ),
+                                CGSEventType::Known(KnownCGSEvent::WindowDestroyed) => events_tx
+                                    .send(Event::WindowServerDestroyed(WindowServerId::new(
+                                        window_id,
+                                    ))),
+
+                                CGSEventType::Known(KnownCGSEvent::WindowCreated) => events_tx
+                                    .send(Event::WindowServerAppeared(WindowServerId::new(
+                                        window_id,
+                                    ))),
                                 _ => {}
                             }
                         }

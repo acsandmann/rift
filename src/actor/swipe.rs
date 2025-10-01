@@ -3,7 +3,7 @@ use std::ffi::c_void;
 use std::rc::Rc;
 
 use objc2_app_kit::{NSEvent, NSEventType, NSTouchPhase};
-use objc2_core_graphics::{self as ocg, CGEvent, CGEventMask};
+use objc2_core_graphics::{CGEvent, CGEventMask, CGEventTapProxy, CGEventType};
 use tracing::trace;
 
 use crate::actor;
@@ -149,11 +149,11 @@ struct CallbackCtx {
 }
 
 unsafe extern "C-unwind" fn gesture_callback(
-    _proxy: ocg::CGEventTapProxy,
-    event_type: ocg::CGEventType,
-    event_ref: core::ptr::NonNull<ocg::CGEvent>,
+    _proxy: CGEventTapProxy,
+    event_type: CGEventType,
+    event_ref: core::ptr::NonNull<CGEvent>,
     user_info: *mut c_void,
-) -> *mut ocg::CGEvent {
+) -> *mut CGEvent {
     let ctx = unsafe { &*(user_info as *const CallbackCtx) };
 
     let ety = event_type.0 as i64;
