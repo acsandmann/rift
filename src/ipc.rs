@@ -285,7 +285,15 @@ impl MachHandler {
 
             RiftRequest::GetConfig => {
                 match self.perform_config_query(|tx| config_actor::Event::QueryConfig(tx)) {
-                    Ok(config) => RiftResponse::Success { data: config },
+                    Ok(config) => match serde_json::to_value(&config) {
+                        Ok(value) => RiftResponse::Success { data: value },
+                        Err(e) => {
+                            error!("Failed to serialize config: {}", e);
+                            RiftResponse::Error {
+                                error: serde_json::json!({ "message": "Failed to serialize config", "details": format!("{}", e) }),
+                            }
+                        }
+                    },
                     Err(e) => {
                         error!("{}", e);
                         RiftResponse::Error {

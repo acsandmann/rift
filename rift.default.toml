@@ -65,6 +65,11 @@ auto_focus_blacklist = []
 
 run_on_start = []
 
+# Hot Reloading
+# - If true, rift will watch the config file for changes and reload automatically.
+# - If false, your config changes will only apply when restarting rift.
+hot_reload = true
+
 [settings.layout]
 # Layout system
 # - mode: "traditional" (i3/sway-like containers) or "bsp" (binary space partitioning)

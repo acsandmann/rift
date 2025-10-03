@@ -346,6 +346,10 @@ pub struct Settings {
     /// Commands to run on startup (e.g., for subscribing to events)
     #[serde(default)]
     pub run_on_start: Vec<String>,
+
+    /// Enable hot-reloading of the config file when it changes
+    #[serde(default = "yes")]
+    pub hot_reload: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default, Copy)]

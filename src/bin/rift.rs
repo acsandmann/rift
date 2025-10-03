@@ -120,7 +120,7 @@ fn main() {
 
     let config_tx = ConfigActor::spawn(config.clone(), events_tx.clone());
 
-    ConfigWatcher::spawn(config_tx.clone());
+    ConfigWatcher::spawn(config_tx.clone(), config.clone());
 
     let (_wnd_tx, wnd_rx) = rift_wm::actor::channel();
     let wn_actor = window_notify_actor::WindowNotify::new(events_tx.clone(), wnd_rx, &[
