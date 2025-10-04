@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 use crate::actor::{self, reactor};
 use crate::common::config::{Config, ConfigCommand};
@@ -10,7 +10,7 @@ pub type Receiver = actor::Receiver<Event>;
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Event {
     #[serde(skip)]
-    QueryConfig(r#continue::Sender<serde_json::Value>),
+    QueryConfig(r#continue::Sender<Config>),
     #[serde(skip)]
     ApplyConfig {
         cmd: ConfigCommand,
@@ -52,12 +52,7 @@ impl ConfigActor {
         }
     }
 
-    fn handle_config_query(&self) -> serde_json::Value {
-        serde_json::to_value(&self.config).unwrap_or_else(|e| {
-            error!("Failed to serialize config: {}", e);
-            serde_json::json!({ "error": format!("Failed to serialize config: {}", e) })
-        })
-    }
+    fn handle_config_query(&self) -> Config { self.config.clone() }
 
     fn handle_config_command(&mut self, cmd: ConfigCommand) -> Result<(), String> {
         debug!("Applying config command: {:?}", cmd);
@@ -234,10 +229,11 @@ impl ConfigActor {
                 }
                 Err(e) => return Err(format!("Failed to save config: {}", e)),
             },
-            ConfigCommand::ReloadConfig => match self.reload_config_from_file() {
-                Ok(()) => {
+            ConfigCommand::ReloadConfig => match self.load_config_from_file() {
+                Ok(cfg) => {
                     info!("Config reloaded successfully");
                     config_changed = true;
+                    new_config = cfg;
                 }
                 Err(e) => return Err(format!("Failed to reload config: {}", e)),
             },
@@ -275,13 +271,14 @@ impl ConfigActor {
         Ok(())
     }
 
-    fn reload_config_from_file(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    fn load_config_from_file(
+        &mut self,
+    ) -> Result<crate::common::config::Config, Box<dyn std::error::Error>> {
         let config_path = crate::common::config::config_file();
 
         if config_path.exists() {
             let new_config = crate::common::config::Config::read(&config_path)?;
-            self.config = new_config;
-            Ok(())
+            Ok(new_config)
         } else {
             Err("Config file not found".into())
         }

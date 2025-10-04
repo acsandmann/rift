@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use objc2::MainThreadMarker;
 use rift_wm::actor::config::ConfigActor;
+use rift_wm::actor::config_watcher::ConfigWatcher;
 use rift_wm::actor::menu_bar::Menu;
 use rift_wm::actor::mission_control::MissionControlActor;
 use rift_wm::actor::mouse::Mouse;
@@ -118,6 +119,8 @@ fn main() {
     );
 
     let config_tx = ConfigActor::spawn(config.clone(), events_tx.clone());
+
+    ConfigWatcher::spawn(config_tx.clone(), config.clone());
 
     let (_wnd_tx, wnd_rx) = rift_wm::actor::channel();
     let wn_actor = window_notify_actor::WindowNotify::new(events_tx.clone(), wnd_rx, &[

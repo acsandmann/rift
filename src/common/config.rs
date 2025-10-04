@@ -51,7 +51,9 @@ pub enum ConfigCommand {
 
 pub fn data_dir() -> PathBuf { dirs::home_dir().unwrap().join(".rift") }
 pub fn restore_file() -> PathBuf { data_dir().join("layout.ron") }
-pub fn config_file() -> PathBuf { dirs::home_dir().unwrap().join(".rift.toml") }
+pub fn config_file() -> PathBuf {
+    dirs::home_dir().unwrap().join(".config").join("rift").join("config.toml")
+}
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
@@ -344,6 +346,10 @@ pub struct Settings {
     /// Commands to run on startup (e.g., for subscribing to events)
     #[serde(default)]
     pub run_on_start: Vec<String>,
+
+    /// Enable hot-reloading of the config file when it changes
+    #[serde(default = "yes")]
+    pub hot_reload: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default, Copy)]

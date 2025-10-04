@@ -1,5 +1,5 @@
 # rift config
-# Copy this file to ~/.rift.toml or $HOME/.rift.toml
+# Copy this file to ~/.config/rift/config.toml or $HOME~/.config/rift/config.toml
 
 [settings]
 # Animations
@@ -64,6 +64,11 @@ auto_focus_blacklist = []
 # ]
 
 run_on_start = []
+
+# Hot Reloading
+# - If true, rift will watch the config file for changes and reload automatically.
+# - If false, your config changes will only apply when restarting rift.
+hot_reload = true
 
 [settings.layout]
 # Layout system

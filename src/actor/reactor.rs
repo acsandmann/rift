@@ -771,6 +771,7 @@ impl Reactor {
             Event::Command(Command::Metrics(cmd)) => log::handle_command(cmd),
             Event::ConfigUpdated(new_cfg) => {
                 self.config = new_cfg;
+                self.layout_engine.set_layout_settings(&self.config.settings.layout);
                 let _ = self.update_layout(false, true);
             }
             Event::Command(Command::Reactor(ReactorCommand::Debug)) => {

@@ -98,6 +98,10 @@ pub struct LayoutEngine {
 }
 
 impl LayoutEngine {
+    pub fn set_layout_settings(&mut self, settings: &LayoutSettings) {
+        self.layout_settings = settings.clone();
+    }
+
     fn active_floating_windows_flat(&self, space: SpaceId) -> Vec<WindowId> {
         self.floating.active_flat(space)
     }
