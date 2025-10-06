@@ -21,11 +21,10 @@ use accessibility_sys::{
     kAXWindowMovedNotification, kAXWindowResizedNotification, kAXWindowRole,
 };
 use r#continue::continuation;
-use core_foundation::runloop::CFRunLoop;
 use core_foundation::string::CFString;
 use objc2::rc::Retained;
 use objc2_app_kit::NSRunningApplication;
-use objc2_core_foundation::{CGPoint, CGRect};
+use objc2_core_foundation::{CFRunLoop, CGPoint, CGRect};
 use serde::{Deserialize, Serialize};
 use tokio::{join, select};
 use tokio_stream::StreamExt;
@@ -311,7 +310,7 @@ impl State {
                         #[allow(non_upper_case_globals)]
                         Err(accessibility::Error::Ax(kAXErrorCannotComplete))
                         // SAFETY: NSRunningApplication is thread-safe.
-                        if unsafe { this.running_app.isTerminated() } =>
+                        if this.running_app.isTerminated() =>
                         {
                             // The app does not appear to be running anymore.
                             // Normally this would be noticed by notification_center,
@@ -395,7 +394,7 @@ impl State {
     fn handle_request(&mut self, request: &mut Request) -> Result<bool, accessibility::Error> {
         match request {
             Request::Terminate => {
-                CFRunLoop::get_current().stop();
+                CFRunLoop::current().unwrap().stop();
                 self.send_event(Event::ApplicationThreadTerminated(self.pid));
                 return Ok(true);
             }
@@ -1114,7 +1113,7 @@ fn app_thread_main(pid: pid_t, info: AppInfo, events_tx: reactor::Sender) {
         return;
     };
 
-    let bundle_id = unsafe { running_app.bundleIdentifier() };
+    let bundle_id = running_app.bundleIdentifier();
 
     let Ok(process_info) = ProcessInfo::for_pid(pid) else {
         info!(?pid, ?bundle_id, "Could not get ProcessInfo; exiting app thread");

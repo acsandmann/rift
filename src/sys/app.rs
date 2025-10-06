@@ -14,7 +14,8 @@ use super::geometry::{CGRectDef, ToICrate};
 use super::window_server::WindowServerId;
 
 pub fn running_apps(bundle: Option<String>) -> impl Iterator<Item = (pid_t, AppInfo)> {
-    unsafe { NSWorkspace::sharedWorkspace().runningApplications() }
+    NSWorkspace::sharedWorkspace()
+        .runningApplications()
         .into_iter()
         .flat_map(move |app| {
             let bundle_id = app.bundle_id()?.to_string();
@@ -44,9 +45,9 @@ impl NSRunningApplicationExt for NSRunningApplication {
 
     fn pid(&self) -> pid_t { unsafe { msg_send![self, processIdentifier] } }
 
-    fn bundle_id(&self) -> Option<Retained<NSString>> { unsafe { self.bundleIdentifier() } }
+    fn bundle_id(&self) -> Option<Retained<NSString>> { self.bundleIdentifier() }
 
-    fn localized_name(&self) -> Option<Retained<NSString>> { unsafe { self.localizedName() } }
+    fn localized_name(&self) -> Option<Retained<NSString>> { self.localizedName() }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -103,8 +104,8 @@ impl TryFrom<&AXUIElement> for WindowInfo {
                 .and_then(|window_info| {
                     NSRunningApplication::with_process_id(window_info.pid).map(|app| {
                         let bundle_id = app.bundle_id().as_deref().map(|b| b.to_string());
-                        let path = unsafe { app.bundleURL() }.as_ref().and_then(|url| {
-                            let abs_str = unsafe { url.absoluteString() };
+                        let path = app.bundleURL().as_ref().and_then(|url| {
+                            let abs_str = url.absoluteString();
                             abs_str.as_deref().map(|s| PathBuf::from(s.to_string()))
                         });
                         (bundle_id, path)

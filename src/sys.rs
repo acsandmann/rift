@@ -1,5 +1,7 @@
 //! Utilities for interfacing with OS-specific APIs.
 
+use objc2_core_graphics::CGError;
+
 pub mod accessibility;
 pub mod app;
 pub mod axuielement;
@@ -23,3 +25,12 @@ pub mod skylight;
 pub mod timer;
 pub mod window_notify;
 pub mod window_server;
+
+#[inline(always)]
+pub fn cg_ok(err: CGError) -> Result<(), CGError> {
+    if err == CGError::Success {
+        Ok(())
+    } else {
+        Err(err)
+    }
+}

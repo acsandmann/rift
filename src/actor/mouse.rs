@@ -2,12 +2,11 @@ use std::cell::RefCell;
 use std::mem::replace;
 use std::rc::Rc;
 
-use objc2_app_kit::NSEvent;
+use objc2_app_kit::{NSEvent, NSMainMenuWindowLevel, NSPopUpMenuWindowLevel, NSWindowLevel};
 use objc2_core_foundation::{CGPoint, CGRect};
 use objc2_core_graphics::{
     CGEvent, CGEventField, CGEventFlags, CGEventMask, CGEventTapProxy, CGEventType,
 };
-use objc2_foundation::{MainThreadMarker, NSInteger};
 use tracing::{debug, error, trace, warn};
 
 use super::reactor::{self, Event};
@@ -18,7 +17,7 @@ use crate::common::log::trace_misc;
 use crate::sys::event::{self, Hotkey, KeyCode, Modifiers};
 use crate::sys::geometry::CGRectExt;
 use crate::sys::screen::CoordinateConverter;
-use crate::sys::window_server::{self, WindowServerId, get_window};
+use crate::sys::window_server::{self, WindowServerId, window_level};
 
 #[derive(Debug)]
 pub enum Request {
@@ -73,7 +72,6 @@ pub type Receiver = actor::Receiver<Request>;
 
 struct CallbackCtx {
     this: Rc<Mouse>,
-    mtm: MainThreadMarker,
 }
 
 unsafe fn drop_mouse_ctx(ptr: *mut std::ffi::c_void) {
@@ -123,10 +121,7 @@ impl Mouse {
             m
         };
 
-        let ctx = Box::new(CallbackCtx {
-            this: Rc::clone(&this),
-            mtm: MainThreadMarker::new().unwrap(),
-        });
+        let ctx = Box::new(CallbackCtx { this: Rc::clone(&this) });
         let ctx_ptr = Box::into_raw(ctx) as *mut std::ffi::c_void;
 
         let tap = unsafe {
@@ -199,7 +194,7 @@ impl Mouse {
         }
     }
 
-    fn on_event(self: &Rc<Self>, event_type: CGEventType, event: &CGEvent, mtm: MainThreadMarker) {
+    fn on_event(self: &Rc<Self>, event_type: CGEventType, event: &CGEvent) {
         let mut state = self.state.borrow_mut();
 
         if matches!(
@@ -231,9 +226,10 @@ impl Mouse {
                     && state.focus_follows_mouse_enabled
                     && !state.disable_hotkey_active =>
             {
-                let loc = unsafe { NSEvent::mouseLocation() };
+                let loc = NSEvent::mouseLocation();
                 trace!("Mouse moved {loc:?}");
-                if let Some(wsid) = state.track_mouse_move(loc, mtm) {
+                if let Some(wsid) = state.track_mouse_move(loc) {
+                    debug!("Focusing window {wsid:?} under mouse");
                     _ = self.events_tx.send(Event::MouseMovedOverWindow(wsid));
                 }
             }
@@ -257,7 +253,7 @@ impl Mouse {
             }
         }
 
-        let flags = unsafe { CGEvent::flags(Some(event)) };
+        let flags = CGEvent::flags(Some(event));
         state.current_flags = flags;
         state.disable_hotkey_active = state.compute_disable_hotkey_active(target);
 
@@ -288,7 +284,7 @@ unsafe extern "C-unwind" fn mouse_callback(
     }
 
     let event = unsafe { event_ref.as_ref() };
-    ctx.this.on_event(event_type, event, ctx.mtm);
+    ctx.this.on_event(event_type, event);
     event_ref.as_ptr()
 }
 
@@ -322,10 +318,9 @@ impl State {
         }
     }
 
-    fn track_mouse_move(&mut self, loc: CGPoint, mtm: MainThreadMarker) -> Option<WindowServerId> {
-        let new_window = trace_misc("get_window_at_point", || {
-            window_server::get_window_at_point(loc, self.converter, mtm)
-        });
+    fn track_mouse_move(&mut self, loc: CGPoint) -> Option<WindowServerId> {
+        let new_window =
+            trace_misc("get_window_at_point", || window_server::get_window_at_point(loc));
         if self.above_window == new_window {
             return None;
         }
@@ -350,9 +345,13 @@ impl State {
         }
 
         let old_window = replace(&mut self.above_window, new_window);
+
+        /*let new_window_level = new_window
+        .and_then(|id| trace_misc("get_window", || get_window(id)))
+        .map(|info| info.layer as NSWindowLevel)
+        .unwrap_or(NSWindowLevel::MIN);*/
         let new_window_level = new_window
-            .and_then(|id| trace_misc("get_window", || get_window(id)))
-            .map(|info| info.layer as NSWindowLevel)
+            .and_then(|id| trace_misc("window_level", || window_level(id.into())))
             .unwrap_or(NSWindowLevel::MIN);
         let old_window_level = replace(&mut self.above_window_level, new_window_level);
         debug!(?old_window, ?old_window_level, ?new_window, ?new_window_level);
@@ -402,8 +401,7 @@ fn modifier_flag_for_key(key_code: KeyCode) -> Option<CGEventFlags> {
 fn is_modifier_key(key_code: KeyCode) -> bool { modifier_flag_for_key(key_code).is_some() }
 
 fn key_code_from_event(event: &CGEvent) -> Option<KeyCode> {
-    let raw =
-        unsafe { CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode) };
+    let raw = CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode);
     if raw < 0 {
         return None;
     }
@@ -540,10 +538,3 @@ fn cg_keycode_to_keycode(code: u16) -> Option<KeyCode> {
 
     Some(key)
 }
-
-/// https://developer.apple.com/documentation/appkit/nswindowlevel?language=objc
-pub type NSWindowLevel = NSInteger;
-#[allow(non_upper_case_globals)]
-pub const NSMainMenuWindowLevel: NSWindowLevel = 24;
-#[allow(non_upper_case_globals)]
-pub const NSPopUpMenuWindowLevel: NSWindowLevel = 101;

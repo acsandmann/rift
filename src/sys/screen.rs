@@ -1,16 +1,13 @@
 use std::f64;
 use std::mem::MaybeUninit;
 use std::num::NonZeroU64;
+use std::ptr::NonNull;
 
-use core_foundation::array::CFArray;
-use core_foundation::base::TCFType;
-use core_foundation::string::CFString;
-use core_graphics::display::{CGDisplayBounds, CGGetActiveDisplayList};
-use core_graphics_types::base::{CGError, kCGErrorSuccess};
 use objc2::rc::Retained;
 use objc2::{ClassType, msg_send};
 use objc2_app_kit::NSScreen;
-use objc2_core_foundation::{CGPoint, CGRect};
+use objc2_core_foundation::{CFRetained, CFString, CGPoint, CGRect};
+use objc2_core_graphics::{CGDisplayBounds, CGError, CGGetActiveDisplayList};
 use objc2_foundation::{MainThreadMarker, NSArray, NSNumber, ns_string};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
@@ -20,7 +17,6 @@ use super::skylight::{
     CGSCopySpaces, CGSGetActiveSpace, CGSManagedDisplayGetCurrentSpace, CGSSpaceMask,
     SLSMainConnectionID,
 };
-use crate::sys::geometry::ToICrate;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[repr(transparent)]
@@ -38,7 +34,7 @@ impl ToString for SpaceId {
 
 pub struct ScreenCache<S: System = Actual> {
     system: S,
-    uuids: Vec<CFString>,
+    uuids: Vec<CFRetained<CFString>>,
 }
 
 impl ScreenCache<Actual> {
@@ -110,7 +106,7 @@ impl<S: System> ScreenCache<S> {
             .map(|screen| unsafe {
                 CGSManagedDisplayGetCurrentSpace(
                     SLSMainConnectionID(),
-                    screen.as_concrete_TypeRef(),
+                    CFRetained::<objc2_core_foundation::CFString>::as_ptr(&screen).as_ptr(),
                 )
             })
             .map(|id| Some(SpaceId(NonZeroU64::new(id)?)))
@@ -154,7 +150,7 @@ impl CoordinateConverter {
 #[allow(private_interfaces)]
 pub trait System {
     fn cg_screens(&self) -> Result<Vec<CGScreenInfo>, CGError>;
-    fn uuid_for_rect(&self, rect: CGRect) -> CFString;
+    fn uuid_for_rect(&self, rect: CGRect) -> CFRetained<CFString>;
     fn ns_screens(&self) -> Vec<NSScreenInfo>;
 }
 
@@ -187,7 +183,7 @@ impl System for Actual {
                 ids.as_mut_ptr() as *mut CGDirectDisplayID,
                 &mut count,
             );
-            if err != kCGErrorSuccess {
+            if err != CGError::Success {
                 return Err(err);
             }
             std::slice::from_raw_parts(ids.as_ptr() as *const u32, count as usize)
@@ -196,17 +192,17 @@ impl System for Actual {
             .iter()
             .map(|&cg_id| CGScreenInfo {
                 cg_id: ScreenId(cg_id),
-                bounds: unsafe { CGDisplayBounds(cg_id).to_icrate() },
+                bounds: CGDisplayBounds(cg_id),
             })
             .collect())
     }
 
-    fn uuid_for_rect(&self, rect: CGRect) -> CFString {
+    fn uuid_for_rect(&self, rect: CGRect) -> CFRetained<CFString> {
         unsafe {
-            CFString::wrap_under_create_rule(CGSCopyBestManagedDisplayForRect(
+            CFRetained::from_raw(NonNull::new_unchecked(CGSCopyBestManagedDisplayForRect(
                 SLSMainConnectionID(),
                 rect,
-            ))
+            )))
         }
     }
 
@@ -243,7 +239,7 @@ impl NSScreenExt for NSScreen {
             val => {
                 warn!(
                     "Could not get NSScreenNumber for screen with name {:?}: {:?}",
-                    unsafe { self.localizedName() },
+                    self.localizedName(),
                     val,
                 );
                 Err(())
@@ -264,28 +260,34 @@ pub fn get_active_space_number() -> Option<SpaceId> {
 /// Utilities for querying the current system configuration. For diagnostic purposes only.
 #[allow(dead_code)]
 pub mod diagnostic {
+    use objc2_core_foundation::CFArray;
+
     use super::*;
 
     pub fn cur_space() -> SpaceId {
         SpaceId(NonZeroU64::new(unsafe { CGSGetActiveSpace(SLSMainConnectionID()) }).unwrap())
     }
 
-    pub fn visible_spaces() -> CFArray<SpaceId> {
+    pub fn visible_spaces() -> CFRetained<CFArray<SpaceId>> {
         unsafe {
             let arr = CGSCopySpaces(SLSMainConnectionID(), CGSSpaceMask::ALL_VISIBLE_SPACES);
-            CFArray::wrap_under_create_rule(arr)
+            CFRetained::from_raw(NonNull::new_unchecked(arr))
         }
     }
 
-    pub fn all_spaces() -> CFArray<SpaceId> {
+    pub fn all_spaces() -> CFRetained<CFArray<SpaceId>> {
         unsafe {
             let arr = CGSCopySpaces(SLSMainConnectionID(), CGSSpaceMask::ALL_SPACES);
-            CFArray::wrap_under_create_rule(arr)
+            CFRetained::from_raw(NonNull::new_unchecked(arr))
         }
     }
 
-    pub fn managed_displays() -> CFArray {
-        unsafe { CFArray::wrap_under_create_rule(CGSCopyManagedDisplays(SLSMainConnectionID())) }
+    pub fn managed_displays() -> CFRetained<CFArray> {
+        unsafe {
+            CFRetained::from_raw(NonNull::new_unchecked(CGSCopyManagedDisplays(
+                SLSMainConnectionID(),
+            )))
+        }
     }
 
     pub fn managed_display_spaces() -> Retained<NSArray> {
@@ -301,8 +303,8 @@ mod test {
     use std::cell::RefCell;
     use std::collections::VecDeque;
 
-    use core_foundation::string::CFString;
-    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+    use objc2_core_foundation::{CFRetained, CFString, CGPoint, CGRect, CGSize};
+    use objc2_core_graphics::CGError;
 
     use super::{CGScreenInfo, NSScreenInfo, ScreenCache, ScreenId, System};
 
@@ -311,26 +313,26 @@ mod test {
         ns_screens: Vec<NSScreenInfo>,
     }
     impl System for Stub {
-        fn cg_screens(&self) -> Result<Vec<CGScreenInfo>, core_graphics_types::base::CGError> {
-            Ok(self.cg_screens.clone())
-        }
+        fn cg_screens(&self) -> Result<Vec<CGScreenInfo>, CGError> { Ok(self.cg_screens.clone()) }
 
         fn ns_screens(&self) -> Vec<NSScreenInfo> { self.ns_screens.clone() }
 
-        fn uuid_for_rect(&self, _rect: CGRect) -> CFString { CFString::new("stub") }
+        fn uuid_for_rect(&self, _rect: CGRect) -> CFRetained<CFString> {
+            CFString::from_str("stub")
+        }
     }
 
     struct SequenceSystem {
         cg_screens: RefCell<VecDeque<Vec<CGScreenInfo>>>,
         ns_screens: RefCell<VecDeque<Vec<NSScreenInfo>>>,
-        uuids: RefCell<VecDeque<CFString>>,
+        uuids: RefCell<VecDeque<CFRetained<CFString>>>,
     }
 
     impl SequenceSystem {
         fn new(
             cg_screens: Vec<Vec<CGScreenInfo>>,
             ns_screens: Vec<Vec<NSScreenInfo>>,
-            uuids: Vec<CFString>,
+            uuids: Vec<CFRetained<CFString>>,
         ) -> Self {
             Self {
                 cg_screens: RefCell::new(VecDeque::from(cg_screens)),
@@ -341,7 +343,7 @@ mod test {
     }
 
     impl System for SequenceSystem {
-        fn cg_screens(&self) -> Result<Vec<CGScreenInfo>, core_graphics_types::base::CGError> {
+        fn cg_screens(&self) -> Result<Vec<CGScreenInfo>, CGError> {
             Ok(self.cg_screens.borrow_mut().pop_front().unwrap_or_default())
         }
 
@@ -349,11 +351,11 @@ mod test {
             self.ns_screens.borrow_mut().pop_front().unwrap_or_default()
         }
 
-        fn uuid_for_rect(&self, _rect: CGRect) -> CFString {
+        fn uuid_for_rect(&self, _rect: CGRect) -> CFRetained<CFString> {
             self.uuids
                 .borrow_mut()
                 .pop_front()
-                .unwrap_or_else(|| CFString::from_static_string("missing-uuid"))
+                .unwrap_or_else(|| CFString::from_str("missing-uuid"))
         }
     }
 
@@ -414,7 +416,7 @@ mod test {
                 }],
                 vec![],
             ],
-            vec![CFString::from_static_string("uuid-1")],
+            vec![CFString::from_str("uuid-1")],
         );
 
         let mut cache = ScreenCache::new_with(system);

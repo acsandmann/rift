@@ -4,30 +4,24 @@ use std::time::Duration;
 
 use accessibility::AXUIElement;
 use accessibility_sys::{kAXErrorSuccess, pid_t};
-use core_foundation::array::CFArray;
-use core_foundation::base::{CFRelease, CFType, CFTypeRef, ItemRef, TCFType};
-use core_foundation::boolean::CFBoolean;
-use core_foundation::dictionary::CFDictionary;
-use core_foundation::number::CFNumber;
-use core_foundation::string::{CFString, CFStringRef};
-use core_graphics::base::{CGError, kCGBitmapByteOrder32Little, kCGImageAlphaPremultipliedFirst};
-use core_graphics::display::{
-    CGWindowID, CGWindowListCopyWindowInfo, kCGNullWindowID, kCGWindowListOptionOnScreenOnly,
+use core_foundation::base::TCFType;
+use objc2_app_kit::NSWindowLevel;
+use objc2_core_foundation::{
+    CFArray, CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType, CGPoint, CGRect,
+    CGSize, Type, kCFBooleanTrue,
 };
-use core_graphics::window::{
-    CGWindowListCreateDescriptionFromArray, kCGWindowBounds, kCGWindowLayer,
-    kCGWindowListExcludeDesktopElements, kCGWindowNumber, kCGWindowOwnerPID,
+use objc2_core_graphics::{
+    CGBitmapInfo, CGColorSpace, CGContext, CGError, CGImage, CGInterpolationQuality, CGWindowID,
+    CGWindowListCopyWindowInfo, CGWindowListOption, kCGNullWindowID, kCGWindowBounds,
+    kCGWindowLayer, kCGWindowNumber, kCGWindowOwnerPID,
 };
-use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
-use objc2_core_graphics::{CGBitmapInfo, CGColorSpace, CGContext, CGImage, CGInterpolationQuality};
-use objc2_foundation::MainThreadMarker;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 
-use super::geometry::{CGRectDef, ToICrate};
-use super::screen::CoordinateConverter;
+use super::geometry::CGRectDef;
 use crate::actor::app::WindowId;
 use crate::layout_engine::Direction;
+use crate::sys::cg_ok;
 use crate::sys::process::ProcessSerialNumber;
 use crate::sys::skylight::*;
 
@@ -66,7 +60,73 @@ impl From<WindowId> for WindowServerId {
     fn from(id: WindowId) -> Self { Self(id.idx.into()) }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[inline]
+fn cf_array_from_ids(ids: &[WindowServerId]) -> CFRetained<CFArray<CFNumber>> {
+    let nums: Vec<CFRetained<CFNumber>> =
+        ids.iter().map(|w| CFNumber::new_i64(w.as_u32() as i64)).collect();
+    CFArray::from_retained_objects(&nums)
+}
+
+struct WindowQuery {
+    query: *mut CFType,
+    iter: *mut CFType,
+}
+
+impl WindowQuery {
+    /// expected_count is a hint; keep whatever you used at call sites (0, 1, ids.len()).
+    fn new_from_cfarray(cf_numbers: *mut CFArray<CFNumber>, expected_count: c_int) -> Option<Self> {
+        let query = unsafe { SLSWindowQueryWindows(*G_CONNECTION, cf_numbers, expected_count) };
+        if query.is_null() {
+            return None;
+        }
+        let iter = unsafe { SLSWindowQueryResultCopyWindows(query) };
+        if iter.is_null() {
+            unsafe { CFRelease(query) };
+            return None;
+        }
+        Some(Self { query, iter })
+    }
+
+    #[inline]
+    fn count(&self) -> i32 { unsafe { SLSWindowIteratorGetCount(self.iter) } }
+
+    #[inline]
+    fn advance(&self) -> bool { unsafe { SLSWindowIteratorAdvance(self.iter) } }
+
+    #[inline]
+    fn window_id(&self) -> u32 { unsafe { SLSWindowIteratorGetWindowID(self.iter) } }
+
+    #[inline]
+    fn level(&self) -> i32 { unsafe { SLSWindowIteratorGetLevel(self.iter) } }
+
+    #[inline]
+    fn pid(&self) -> i32 { unsafe { SLSWindowIteratorGetPID(self.iter) } }
+
+    #[inline]
+    fn parent_id(&self) -> u32 { unsafe { SLSWindowIteratorGetParentID(self.iter) } }
+
+    #[inline]
+    fn bounds(&self) -> CGRect { unsafe { SLSWindowIteratorGetBounds(self.iter) } }
+
+    #[inline]
+    #[allow(dead_code)]
+    fn tags(&self) -> u64 { unsafe { SLSWindowIteratorGetTags(self.iter) } }
+
+    #[inline]
+    #[allow(dead_code)]
+    fn attributes(&self) -> u64 { unsafe { SLSWindowIteratorGetAttributes(self.iter) } }
+}
+
+impl Drop for WindowQuery {
+    fn drop(&mut self) {
+        unsafe {
+            CFRelease(self.iter);
+            CFRelease(self.query);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Copy)]
 #[allow(unused)]
 pub struct WindowServerInfo {
     pub id: WindowServerId,
@@ -91,66 +151,63 @@ pub fn connection_id_for_pid(pid: pid_t) -> Option<i32> {
 }
 
 pub fn window_parent(id: WindowServerId) -> Option<WindowServerId> {
-    let cf_windows = CFArray::from_CFTypes(&[CFNumber::from(id.as_u32() as i64)]);
-    let query =
-        unsafe { SLSWindowQueryWindows(*G_CONNECTION, cf_windows.as_concrete_TypeRef(), 1) };
-    if query.is_null() {
-        return None;
+    let cf_windows = cf_array_from_ids(&[id]);
+    let query = WindowQuery::new_from_cfarray(
+        CFRetained::<CFArray<CFNumber>>::as_ptr(&cf_windows).as_ptr(),
+        1,
+    )?;
+    if query.count() == 1 && query.advance() {
+        let p = query.parent_id();
+        (p != 0).then(|| WindowServerId::new(p))
+    } else {
+        None
     }
-
-    let iterator = unsafe { SLSWindowQueryResultCopyWindows(query) };
-    if iterator.is_null() {
-        unsafe { CFRelease(query) };
-        return None;
-    }
-
-    let count = unsafe { SLSWindowIteratorGetCount(iterator) };
-    let mut parent = None;
-
-    if count == 1 && unsafe { SLSWindowIteratorAdvance(iterator) } {
-        let parent_id = unsafe { SLSWindowIteratorGetParentID(iterator) };
-        if parent_id != 0 {
-            parent = Some(WindowServerId::new(parent_id));
-        }
-    }
-
-    unsafe {
-        CFRelease(iterator);
-        CFRelease(query);
-    }
-
-    parent
 }
 
 pub fn window_is_sticky(id: WindowServerId) -> bool {
-    let cf_windows = CFArray::from_CFTypes(&[CFNumber::from(id.as_u32() as i64)]);
-    let space_list_ref =
-        unsafe { SLSCopySpacesForWindows(*G_CONNECTION, 0x7, cf_windows.as_concrete_TypeRef()) };
+    let cf_windows = cf_array_from_ids(&[id]);
+    let space_list_ref = unsafe {
+        SLSCopySpacesForWindows(
+            *G_CONNECTION,
+            0x7,
+            CFRetained::<CFArray<CFNumber>>::as_ptr(&cf_windows).as_ptr(),
+        )
+    };
     if space_list_ref.is_null() {
         return false;
     }
-    let spaces_cf: CFArray<CFNumber> = unsafe { CFArray::wrap_under_get_rule(space_list_ref) };
+    let spaces_cf: CFRetained<CFArray<CFNumber>> =
+        unsafe { CFRetained::retain(NonNull::new_unchecked(space_list_ref)) };
     spaces_cf.len() > 1
 }
 
 pub fn window_is_ordered_in(id: WindowServerId) -> bool {
     let mut ordered: u8 = 0;
-    let result = unsafe { SLSWindowIsOrderedIn(*G_CONNECTION, id.as_u32(), &mut ordered) };
-    result == 0 && ordered != 0
+    if let Ok(_) = cg_ok(unsafe { SLSWindowIsOrderedIn(*G_CONNECTION, id.as_u32(), &mut ordered) })
+    {
+        return ordered != 0;
+    }
+
+    false
 }
 
-pub fn get_visible_windows_raw() -> CFArray<CFDictionary<CFString, CFType>> {
+fn get_visible_windows_raw<T: Type>() -> CFRetained<CFArray<T>> {
     unsafe {
         // TODO: cgwindowlistcopywindowinfo does not appear to order windows properly
-        CFArray::wrap_under_get_rule(CGWindowListCopyWindowInfo(
-            kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+        // SAFETY: this will almost always return (pre objc2 was not a result and just a cfarray)
+        if let Some(windows) = CGWindowListCopyWindowInfo(
+            CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements,
             kCGNullWindowID,
-        ))
+        ) {
+            CFRetained::cast_unchecked(windows)
+        } else {
+            CFArray::empty()
+        }
     }
 }
 
 fn make_info(
-    win: ItemRef<CFDictionary<CFString, CFType>>,
+    win: CFRetained<CFDictionary<CFString, CFType>>,
     layer_filter: Option<i32>,
 ) -> Option<WindowServerInfo> {
     let layer = get_num(&win, unsafe { kCGWindowLayer })?.try_into().ok()?;
@@ -160,52 +217,65 @@ fn make_info(
 
     let id = get_num(&win, unsafe { kCGWindowNumber })?;
     let pid = get_num(&win, unsafe { kCGWindowOwnerPID })?;
-    let dict: CFDictionary = win.find(unsafe { kCGWindowBounds })?.downcast()?;
-    let cg_frame = core_graphics_types::geometry::CGRect::from_dict_representation(&dict)?;
+    if let Ok(dict) = win.get(unsafe { kCGWindowBounds })?.downcast::<CFDictionary>() {
+        let mut cg_frame = CGRect::default();
+        unsafe {
+            CGRectMakeWithDictionaryRepresentation(
+                CFRetained::<CFDictionary<_, _>>::as_ptr(&dict).as_ptr(),
+                &mut cg_frame,
+            )
+        };
 
-    Some(WindowServerInfo {
-        id: WindowServerId(id.try_into().ok()?),
-        pid: pid.try_into().ok()?,
-        layer,
-        frame: cg_frame.to_icrate(),
-    })
+        return Some(WindowServerInfo {
+            id: WindowServerId(id.try_into().ok()?),
+            pid: pid.try_into().ok()?,
+            layer,
+            frame: cg_frame,
+        });
+    }
+
+    None
 }
 
 pub fn get_windows(ids: &[WindowServerId]) -> Vec<WindowServerInfo> {
     if ids.is_empty() {
         return Vec::new();
     }
-    get_windows_inner(ids).iter().flat_map(|w| make_info(w, None)).collect()
+    let cf_ids = cf_array_from_ids(ids);
+
+    let Some(query) = WindowQuery::new_from_cfarray(
+        CFRetained::<CFArray<CFNumber>>::as_ptr(&cf_ids).as_ptr(),
+        ids.len() as c_int,
+    ) else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::with_capacity(ids.len());
+    while query.advance() {
+        out.push(WindowServerInfo {
+            id: WindowServerId::new(query.window_id()),
+            pid: query.pid() as i32,
+            layer: query.level(),
+            frame: query.bounds(),
+        });
+    }
+    out
 }
 
 pub fn get_window(id: WindowServerId) -> Option<WindowServerInfo> {
-    get_windows_inner(&[id]).iter().next().and_then(|w| make_info(w, None))
+    let mut ws = get_windows(&[id]);
+    (ws.len() == 1).then(|| ws.remove(0))
 }
 
-fn get_windows_inner(ids: &[WindowServerId]) -> CFArray<CFDictionary<CFString, CFType>> {
-    let array = CFArray::from_copyable(ids);
+fn get_num(dict: &CFDictionary<CFString, CFType>, key: &'static CFString) -> Option<i64> {
+    dict.get(key)?.downcast::<CFNumber>().ok()?.as_i64()
+}
+
+pub fn get_window_at_point(mut point: CGPoint) -> Option<WindowServerId> {
     unsafe {
-        CFArray::wrap_under_create_rule(CGWindowListCreateDescriptionFromArray(
-            array.as_concrete_TypeRef(),
-        ))
-    }
-}
+        let mut window_point = CGPoint { x: 0.0, y: 0.0 };
+        let (mut window_id, mut window_cid) = (0u32, 0i32);
 
-fn get_num(dict: &CFDictionary<CFString, CFType>, key: CFStringRef) -> Option<i64> {
-    let item: CFNumber = dict.find(key)?.downcast()?;
-    Some(item.to_i64()?)
-}
-
-pub fn get_window_at_point(
-    mut point: CGPoint,
-    _converter: CoordinateConverter,
-    _mtm: MainThreadMarker,
-) -> Option<WindowServerId> {
-    let mut window_point = CGPoint { x: 0.0, y: 0.0 };
-    let mut window_id: u32 = 0;
-    let mut window_cid: c_int = 0;
-
-    unsafe {
         SLSFindWindowAndOwner(
             *G_CONNECTION,
             0,
@@ -228,23 +298,36 @@ pub fn get_window_at_point(
                 &mut window_cid,
             );
         }
+        (window_id != 0).then(|| WindowServerId(window_id))
     }
-
-    (window_id != 0).then(|| WindowServerId(window_id))
 }
 
-fn iterator_window_suitable(iterator: CFTypeRef) -> bool {
+pub fn window_level(wid: u32) -> Option<NSWindowLevel> {
+    let cf = cf_array_from_ids(&[WindowServerId::new(wid)]);
+
+    let query = WindowQuery::new_from_cfarray(
+        CFRetained::<CFArray<CFNumber>>::as_ptr(&cf).as_ptr(),
+        0x1, // preserve your hint
+    )?;
+    query.advance();
+    Some(query.level() as NSWindowLevel)
+}
+
+fn iterator_window_suitable(iterator: *mut CFType) -> bool {
     let tags = unsafe { SLSWindowIteratorGetTags(iterator) };
     let attributes = unsafe { SLSWindowIteratorGetAttributes(iterator) };
     let parent_wid = unsafe { SLSWindowIteratorGetParentID(iterator) };
 
     if parent_wid == 0
-        && ((attributes & 0x2) != 0 || (tags & 0x0400_0000_0000_0000) != 0)
-        && ((tags & 0x1) != 0 || ((tags & 0x2) != 0 && (tags & 0x8000_0000) != 0))
+        && ((attributes & 0x2) != 0 || (tags & 0x400000000000000) != 0)
+        && (tags & SLSWindowTags::Attached) != 0
+        && (tags & SLSWindowTags::IgnoresCycle) != 0
+        && ((tags & SLSWindowTags::Document) != 0
+            || ((tags & SLSWindowTags::Floating) != 0 && (tags & SLSWindowTags::Modal) != 0))
     {
         return true;
     }
-    false
+    return false;
 }
 
 // credit to yabai
@@ -253,8 +336,9 @@ pub fn space_window_list_for_connection(
     owner: u32,
     include_minimized: bool,
 ) -> Vec<u32> {
-    let cf_numbers: Vec<CFNumber> = spaces.iter().map(|&sid| CFNumber::from(sid as i64)).collect();
-    let cf_space_array = CFArray::from_CFTypes(&cf_numbers);
+    let cf_numbers: Vec<CFRetained<CFNumber>> =
+        spaces.iter().map(|&sid| CFNumber::new_i64(sid as i64)).collect();
+    let cf_space_array = CFArray::from_retained_objects(&cf_numbers);
 
     let mut set_tags: u64 = 0;
     let mut clear_tags: u64 = 0;
@@ -264,7 +348,7 @@ pub fn space_window_list_for_connection(
         SLSCopyWindowsWithOptionsAndTags(
             *G_CONNECTION,
             owner,
-            cf_space_array.as_concrete_TypeRef(),
+            CFRetained::<CFArray<CFNumber>>::as_ptr(&cf_space_array).as_ptr(),
             options,
             &mut set_tags,
             &mut clear_tags,
@@ -275,9 +359,9 @@ pub fn space_window_list_for_connection(
         return Vec::new();
     }
 
-    let list_cf = unsafe { CFArray::<CFTypeRef>::wrap_under_get_rule(window_list_ref) };
-    let expected = list_cf.len() as i32;
+    let expected = (unsafe { &*window_list_ref }).len() as i32;
     if expected == 0 {
+        unsafe { CFRelease(window_list_ref as *mut CFType) };
         return Vec::new();
     }
 
@@ -320,6 +404,7 @@ pub fn space_window_list_for_connection(
     unsafe {
         CFRelease(iterator);
         CFRelease(query);
+        CFRelease(window_list_ref as *mut CFType);
     }
 
     windows.shrink_to_fit();
@@ -327,26 +412,20 @@ pub fn space_window_list_for_connection(
 }
 
 pub fn app_window_suitable(id: WindowServerId) -> bool {
-    let cf_windows = CFArray::from_CFTypes(&[CFNumber::from(id.as_u32() as i64)]);
-    let query =
-        unsafe { SLSWindowQueryWindows(*G_CONNECTION, cf_windows.as_concrete_TypeRef(), 0x0) };
-    if query.is_null() {
-        return false;
-    }
+    let cf = cf_array_from_ids(&[id]);
 
-    let mut suitable = false;
-    let iterator = unsafe { SLSWindowQueryResultCopyWindows(query) };
-    if !iterator.is_null() {
-        let count = unsafe { SLSWindowIteratorGetCount(iterator) };
-        if count > 0 && unsafe { SLSWindowIteratorAdvance(iterator) } {
-            if iterator_window_suitable(iterator) {
-                suitable = true;
-            }
-        }
-        unsafe { CFRelease(iterator) };
+    let Some(query) = WindowQuery::new_from_cfarray(
+        CFRetained::<CFArray<CFNumber>>::as_ptr(&cf).as_ptr(),
+        0x0, // keep your original hint
+    ) else {
+        return false;
+    };
+
+    if query.count() > 0 && query.advance() {
+        iterator_window_suitable(query.iter)
+    } else {
+        false
     }
-    unsafe { CFRelease(query) };
-    suitable
 }
 
 #[derive(Clone)]
@@ -427,8 +506,6 @@ pub fn resize_cgimage_fit(
         let dst_h = (src_h * scale).round().max(1.0) as usize;
 
         let cs = CGColorSpace::new_device_rgb()?;
-        let bi = (kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little) as u32;
-
         let ctx = CFRetained::from_raw(NonNull::new_unchecked(CGBitmapContextCreate(
             std::ptr::null_mut(),
             dst_w,
@@ -436,7 +513,9 @@ pub fn resize_cgimage_fit(
             8,
             0,
             CFRetained::as_ptr(&cs).as_ptr(),
-            CGBitmapInfo(bi),
+            // kCGImageAlphaPremultipliedFirst = 2
+            // kCGBitmapByteOrder32Little = 2 << 12
+            CGBitmapInfo(2u32 | 2 << 12),
         )));
 
         CGContext::set_interpolation_quality(Some(ctx.as_ref()), CGInterpolationQuality::Medium);
@@ -450,7 +529,7 @@ pub fn resize_cgimage_fit(
 }
 
 // credit: https://github.com/Hammerspoon/hammerspoon/issues/370#issuecomment-545545468
-pub fn make_key_window(pid: pid_t, wsid: WindowServerId) -> Result<(), ()> {
+pub fn make_key_window(pid: pid_t, wsid: WindowServerId) -> Result<(), CGError> {
     #[allow(non_upper_case_globals)]
     const kCPSUserGenerated: u32 = 0x200;
 
@@ -465,30 +544,28 @@ pub fn make_key_window(pid: pid_t, wsid: WindowServerId) -> Result<(), ()> {
     event2[0x08] = 0x02;
 
     let psn = ProcessSerialNumber::for_pid(pid)?;
-    let check = |err| if err == 0 { Ok(()) } else { Err(()) };
 
     unsafe {
-        check(_SLPSSetFrontProcessWithOptions(&psn, wsid.0, kCPSUserGenerated))?;
-        check(SLPSPostEventRecordTo(&psn, event1.as_ptr()))?;
-        check(SLPSPostEventRecordTo(&psn, event2.as_ptr()))?;
+        cg_ok(_SLPSSetFrontProcessWithOptions(&psn, wsid.0, kCPSUserGenerated))?;
+        cg_ok(SLPSPostEventRecordTo(&psn, event1.as_ptr()))?;
+        cg_ok(SLPSPostEventRecordTo(&psn, event2.as_ptr()))?;
     }
     Ok(())
 }
 
 pub fn allow_hide_mouse() -> Result<(), CGError> {
     let cid = unsafe { SLSMainConnectionID() };
-    let property = CFString::from_static_string("SetsCursorInBackground");
+    let property = CFString::from_str("SetsCursorInBackground");
+    let value = CFBoolean::retain(unsafe { kCFBooleanTrue.unwrap_unchecked() });
 
-    let err = unsafe {
+    cg_ok(unsafe {
         CGSSetConnectionProperty(
             cid,
             cid,
-            property.as_concrete_TypeRef(),
-            CFBoolean::true_value().as_CFTypeRef(),
+            CFRetained::<CFString>::as_ptr(&property).as_ptr(),
+            CFRetained::<CFBoolean>::as_ptr(&value).as_ptr() as *mut CFType,
         )
-    };
-
-    if err == 0 { Ok(()) } else { Err(err) }
+    })
 }
 
 // fast space switching with no animations

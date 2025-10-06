@@ -74,7 +74,7 @@ fn main() {
         unsafe {
             let _: () = objc2::msg_send![&*app, finishLaunching];
         }
-        unsafe { NSApplication::load() };
+        NSApplication::load();
     }
 
     ensure_accessibility_permission();
@@ -124,8 +124,8 @@ fn main() {
 
     let (_wnd_tx, wnd_rx) = rift_wm::actor::channel();
     let wn_actor = window_notify_actor::WindowNotify::new(events_tx.clone(), wnd_rx, &[
-        CGSEventType::Known(KnownCGSEvent::WindowDestroyed),
-        CGSEventType::Known(KnownCGSEvent::WindowCreated),
+        CGSEventType::Known(KnownCGSEvent::SpaceWindowDestroyed),
+        CGSEventType::Known(KnownCGSEvent::SpaceWindowCreated),
     ]);
 
     let events_tx_mach = events_tx.clone();

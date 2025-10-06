@@ -28,6 +28,8 @@ pub struct EventData {
     pub event_type: CGSEventType,
     pub window_id: Option<Wid>,
     pub space_id: Option<Sid>,
+    pub payload: Option<Vec<u8>>,
+    pub len: usize,
 }
 
 static EVENT_CHANNELS: Lazy<
@@ -102,49 +104,77 @@ pub fn update_window_notifications(window_ids: &[u32]) {
 extern "C" fn connection_callback(
     event_raw: u32,
     data: *mut c_void,
-    _len: usize,
+    len: usize,
     _context: *mut c_void,
     _cid: cid_t,
 ) {
     let kind = CGSEventType::from(event_raw);
 
-    let event_data: EventData = unsafe {
-        if data.is_null() {
-            EventData {
-                event_type: kind,
-                window_id: None,
-                space_id: None,
-            }
+    let payload = unsafe {
+        if data.is_null() || len == 0 {
+            None
         } else {
-            match kind {
-                CGSEventType::Known(KnownCGSEvent::WindowDestroyed)
-                | CGSEventType::Known(KnownCGSEvent::WindowCreated) => {
-                    let sid = std::ptr::read_unaligned(data as *const u64);
-                    let wid = std::ptr::read_unaligned(
-                        (data as *const u8).add(std::mem::size_of::<u64>()) as *const u32,
+            Some(std::slice::from_raw_parts(data as *const u8, len).to_vec())
+        }
+    };
+
+    let mut window_id = None;
+    let mut space_id = None;
+
+    if let Some(bytes) = payload.as_deref() {
+        match kind {
+            CGSEventType::Known(KnownCGSEvent::SpaceWindowDestroyed)
+            | CGSEventType::Known(KnownCGSEvent::SpaceWindowCreated) => {
+                if bytes.len() >= std::mem::size_of::<u64>() + std::mem::size_of::<u32>() {
+                    let mut sid_bytes = [0u8; std::mem::size_of::<u64>()];
+                    sid_bytes.copy_from_slice(&bytes[..std::mem::size_of::<u64>()]);
+                    let sid = u64::from_ne_bytes(sid_bytes);
+
+                    let mut wid_bytes = [0u8; std::mem::size_of::<u32>()];
+                    wid_bytes.copy_from_slice(
+                        &bytes[std::mem::size_of::<u64>()
+                            ..std::mem::size_of::<u64>() + std::mem::size_of::<u32>()],
                     );
-                    EventData {
-                        event_type: kind,
-                        window_id: Some(wid),
-                        space_id: Some(sid),
-                    }
-                }
-                CGSEventType::Known(KnownCGSEvent::MissionControlEntered) => EventData {
-                    event_type: kind,
-                    window_id: None,
-                    space_id: None,
-                },
-                _ => {
-                    // TODO: this isnt really safe
-                    let wid = std::ptr::read_unaligned(data as *const u32);
-                    EventData {
-                        event_type: kind,
-                        window_id: Some(wid),
-                        space_id: None,
-                    }
+                    let wid = u32::from_ne_bytes(wid_bytes);
+
+                    space_id = Some(sid);
+                    window_id = Some(wid);
+                } else {
+                    debug!(
+                        "Skylight event {} payload too short for space/window ids (len={})",
+                        kind, len
+                    );
                 }
             }
+            CGSEventType::Known(KnownCGSEvent::WindowClosed)
+            | CGSEventType::Known(KnownCGSEvent::WindowMoved)
+            | CGSEventType::Known(KnownCGSEvent::WindowResized)
+            | CGSEventType::Known(KnownCGSEvent::WindowReordered)
+            | CGSEventType::Known(KnownCGSEvent::WindowLevelChanged)
+            | CGSEventType::Known(KnownCGSEvent::WindowUnhidden)
+            | CGSEventType::Known(KnownCGSEvent::WindowHidden) => {
+                if bytes.len() >= std::mem::size_of::<u32>() {
+                    let mut wid_bytes = [0u8; std::mem::size_of::<u32>()];
+                    wid_bytes.copy_from_slice(&bytes[..std::mem::size_of::<u32>()]);
+                    let wid = u32::from_ne_bytes(wid_bytes);
+                    window_id = Some(wid);
+                } else {
+                    debug!(
+                        "Skylight event {} payload too short for window id (len={})",
+                        kind, len
+                    );
+                }
+            }
+            _ => {}
         }
+    }
+
+    let event_data = EventData {
+        event_type: kind,
+        window_id,
+        space_id,
+        payload,
+        len,
     };
 
     trace!("received raw event: {:?}", event_data);

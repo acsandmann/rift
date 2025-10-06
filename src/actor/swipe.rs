@@ -156,16 +156,22 @@ unsafe extern "C-unwind" fn gesture_callback(
 ) -> *mut CGEvent {
     let ctx = unsafe { &*(user_info as *const CallbackCtx) };
 
-    let ety = event_type.0 as i64;
-    if ety == -1 || ety == -2 {
+    if matches!(
+        event_type,
+        CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
+    ) {
         if let Some(tap) = ctx.swipe.tap.borrow().as_ref() {
             tap.set_enabled(true);
         }
         return event_ref.as_ptr();
     }
 
+    if event_type.0 != NSEventType::Gesture.0 as u32 {
+        return event_ref.as_ptr();
+    }
+
     let cg_event: &CGEvent = unsafe { event_ref.as_ref() };
-    if let Some(nsevent) = unsafe { NSEvent::eventWithCGEvent(cg_event) } {
+    if let Some(nsevent) = NSEvent::eventWithCGEvent(cg_event) {
         handle_gesture(&ctx.swipe, &ctx.state, &nsevent);
     }
 
@@ -173,7 +179,7 @@ unsafe extern "C-unwind" fn gesture_callback(
 }
 
 fn handle_gesture(swipe: &Swipe, state: &RefCell<SwipeState>, nsevent: &NSEvent) {
-    let touches = unsafe { nsevent.allTouches() };
+    let touches = nsevent.allTouches();
     let mut sum_x = 0.0f64;
     let mut sum_y = 0.0f64;
     let mut touch_count = 0usize;
@@ -181,7 +187,7 @@ fn handle_gesture(swipe: &Swipe, state: &RefCell<SwipeState>, nsevent: &NSEvent)
     let mut too_many_touches = false;
 
     for t in touches.iter() {
-        let phase = unsafe { t.phase() };
+        let phase = t.phase();
         if phase.contains(NSTouchPhase::Stationary) {
             continue;
         }
@@ -194,7 +200,7 @@ fn handle_gesture(swipe: &Swipe, state: &RefCell<SwipeState>, nsevent: &NSEvent)
 
         let ended = phase.contains(NSTouchPhase::Ended) || phase.contains(NSTouchPhase::Cancelled);
         if !ended {
-            let pos = unsafe { t.normalizedPosition() };
+            let pos = t.normalizedPosition();
             sum_x += pos.x as f64;
             sum_y += pos.y as f64;
             active_count += 1;

@@ -1,6 +1,8 @@
-use std::path::{Path, PathBuf};
-use std::thread;
+use std::collections::HashSet;
+use std::os::unix::fs::MetadataExt;
+use std::path::PathBuf;
 use std::time::Duration;
+use std::{fs, thread};
 
 use notify::RecursiveMode;
 use notify_debouncer_mini::{
@@ -13,6 +15,8 @@ use crate::common::config::{self, ConfigCommand};
 
 pub struct ConfigWatcher {
     file: PathBuf,
+    real_file: Option<PathBuf>,
+    real_file_id: Option<(u64, u64)>,
     config_tx: config_actor::Sender,
     enabled: bool,
 }
@@ -22,8 +26,18 @@ impl ConfigWatcher {
         thread::Builder::new()
             .name("config-watcher".to_string())
             .spawn(move || {
+                let file = config::config_file();
+                let real_file = fs::canonicalize(&file).ok();
+
+                let real_file_id = real_file
+                    .as_ref()
+                    .and_then(|p| fs::metadata(p).ok())
+                    .map(|m| (m.dev(), m.ino()));
+
                 let actor = ConfigWatcher {
-                    file: config::config_file(),
+                    file,
+                    real_file,
+                    real_file_id,
                     config_tx,
                     enabled: config.settings.hot_reload,
                 };
@@ -51,10 +65,21 @@ impl ConfigWatcher {
             })?;
 
         let watcher = debouncer.watcher();
-        let dir = self.file.parent().unwrap_or_else(|| Path::new("."));
-        watcher.watch(dir, RecursiveMode::NonRecursive)?;
 
-        info!("watching {:?}", self.file);
+        let mut parents: HashSet<PathBuf> = HashSet::new();
+        if let Some(p) = self.file.parent() {
+            parents.insert(p.to_path_buf());
+        }
+        if let Some(real) = &self.real_file {
+            if let Some(p) = real.parent() {
+                parents.insert(p.to_path_buf());
+            }
+        }
+
+        for dir in parents.iter() {
+            watcher.watch(dir, RecursiveMode::NonRecursive)?;
+            info!("watching {:?}", dir);
+        }
 
         while let Some(event) = rx.recv().await {
             if self.enabled && self.is_relevant(&event) {
@@ -72,8 +97,31 @@ impl ConfigWatcher {
     }
 
     fn is_relevant(&self, event: &DebouncedEvent) -> bool {
-        event.path == self.file
-            || event.path.file_name().is_some_and(|n| Some(n) == self.file.file_name())
+        if event.path == self.file {
+            return true;
+        }
+
+        if let Some(real) = &self.real_file {
+            if event.path == *real {
+                return true;
+            }
+
+            if let Ok(ev_real) = fs::canonicalize(&event.path) {
+                if ev_real == *real {
+                    return true;
+                }
+            }
+
+            if let Ok(meta) = fs::metadata(&event.path) {
+                if let Some((dev, ino)) = self.real_file_id {
+                    if meta.dev() == dev && meta.ino() == ino {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        event.path.file_name().is_some_and(|n| Some(n) == self.file.file_name())
     }
 
     async fn request_reload(&self) -> Result<(), String> {

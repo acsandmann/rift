@@ -11,7 +11,7 @@ use crate::common::config::{Config, HorizontalPlacement, VerticalPlacement};
 use crate::layout_engine::LayoutKind;
 use crate::model::tree::NodeId;
 use crate::sys::screen::{CoordinateConverter, SpaceId};
-use crate::ui::stack_line::{GroupDisplayData, GroupIndicatorNSView, GroupKind, IndicatorConfig};
+use crate::ui::stack_line::{GroupDisplayData, GroupIndicatorWindow, GroupKind, IndicatorConfig};
 
 #[derive(Debug, Clone)]
 pub struct GroupInfo {
@@ -35,8 +35,9 @@ pub enum Event {
 pub struct StackLine {
     config: Config,
     rx: Receiver,
+    #[allow(dead_code)]
     mtm: MainThreadMarker,
-    indicators: HashMap<NodeId, GroupIndicatorNSView>,
+    indicators: HashMap<NodeId, GroupIndicatorWindow>,
     #[allow(dead_code)]
     reactor_tx: reactor::Sender,
     coordinate_converter: CoordinateConverter,
@@ -112,7 +113,9 @@ impl StackLine {
             if group_nodes.contains(&node_id) {
                 true
             } else {
-                indicator.clear();
+                if let Err(err) = indicator.clear() {
+                    tracing::warn!(?err, "failed to clear stack line indicator");
+                }
                 false
             }
         });
@@ -145,74 +148,96 @@ impl StackLine {
             }
         };
 
+        let config = self.indicator_config();
         let group_data = GroupDisplayData {
             group_kind,
             total_count: group.total_count,
             selected_index: group.selected_index,
         };
 
-        let node_id = group.node_id;
-        let needs_creation = !self.indicators.contains_key(&node_id);
-
-        if needs_creation {
-            let mut indicator = GroupIndicatorNSView::new(group.frame, self.mtm);
-            indicator.update(group_data);
-
-            indicator.ensure_host_window(self.mtm);
-
-            let self_ptr: *mut StackLine = self as *mut _;
-            indicator.set_click_callback(Rc::new(move |segment_index| {
-                unsafe {
-                    // safety: `self_ptr` remains valid while the actor lives.
-                    let this: &mut StackLine = &mut *self_ptr;
-                    this.handle_indicator_clicked(node_id, segment_index);
-                }
-            }));
-
-            self.indicators.insert(node_id, indicator);
-        } else {
-            if let Some(existing) = self.indicators.get_mut(&node_id) {
-                existing.update(group_data);
-            }
-        }
-
-        if let Some(indicator) = self.indicators.get(&node_id) {
-            self.position_indicator(indicator, group.frame);
-        }
-    }
-
-    fn position_indicator(&self, indicator: &GroupIndicatorNSView, group_frame: CGRect) {
-        let config = self.indicator_config();
-
-        let Some(group_data) = indicator.group_data() else {
-            tracing::warn!("Cannot position indicator without group data");
+        let Some((cocoa_group_frame, indicator_frame)) =
+            self.compute_indicator_frames(group.frame, group_kind, config)
+        else {
             return;
         };
 
+        let node_id = group.node_id;
+
+        if let Some(indicator) = self.indicators.get_mut(&node_id) {
+            if let Err(err) = indicator.set_frame(indicator_frame) {
+                tracing::warn!(?err, "failed to set stack line indicator frame");
+            }
+            if let Err(err) = indicator.update(config, group_data.clone()) {
+                tracing::warn!(?err, "failed to update stack line indicator");
+            }
+        } else {
+            match GroupIndicatorWindow::new(indicator_frame, config) {
+                Ok(indicator) => {
+                    let indicator =
+                        self.attach_indicator(node_id, indicator, config, group_data.clone());
+                    self.indicators.insert(node_id, indicator);
+                }
+                Err(err) => {
+                    tracing::warn!(?err, "failed to create stack line indicator window");
+                    return;
+                }
+            }
+        }
+
+        tracing::debug!(
+            ?group.frame,
+            ?cocoa_group_frame,
+            ?indicator_frame,
+            "Positioned indicator"
+        );
+    }
+
+    fn attach_indicator(
+        &mut self,
+        node_id: NodeId,
+        indicator: GroupIndicatorWindow,
+        config: IndicatorConfig,
+        group_data: GroupDisplayData,
+    ) -> GroupIndicatorWindow {
+        let self_ptr: *mut StackLine = self as *mut _;
+        indicator.set_click_callback(Rc::new(move |segment_index| {
+            unsafe {
+                // safety: `self_ptr` remains valid while the actor lives.
+                let this: &mut StackLine = &mut *self_ptr;
+                this.handle_indicator_clicked(node_id, segment_index);
+            }
+        }));
+
+        if let Err(err) = indicator.update(config, group_data) {
+            tracing::warn!(?err, "failed to initialize stack line indicator");
+        }
+
+        indicator
+    }
+
+    fn compute_indicator_frames(
+        &self,
+        group_frame: CGRect,
+        group_kind: GroupKind,
+        config: IndicatorConfig,
+    ) -> Option<(CGRect, CGRect)> {
         let cocoa_group_frame = match self.coordinate_converter.convert_rect(group_frame) {
             Some(frame) => frame,
             None => {
                 tracing::warn!("Failed to convert group frame coordinates");
-                return;
+                return None;
             }
         };
 
         let indicator_frame = Self::calculate_indicator_frame(
             cocoa_group_frame,
-            group_data.group_kind,
+            group_kind,
             config.bar_thickness,
             config.horizontal_placement,
             config.vertical_placement,
         );
 
-        indicator.set_frame(indicator_frame);
-
-        tracing::debug!(
-            ?group_frame,
-            ?cocoa_group_frame,
-            ?indicator_frame,
-            "Positioned indicator"
-        );
+        Some((cocoa_group_frame, indicator_frame))
     }
 
     // TODO: We should just pass in the coordinates from the layout calculation.

@@ -1,12 +1,11 @@
 #![allow(non_camel_case_types)]
 use std::ffi::{CStr, c_char, c_void};
 
-use core_foundation::base::{CFRelease, CFTypeRef, TCFType};
-use core_foundation::number::{CFNumberRef, kCFNumberSInt64Type};
-use core_foundation::string::{CFString, CFStringRef};
+use objc2_core_foundation::{CFNumber, CFNumberType, CFRetained, CFString, CFType};
 use once_cell::sync::OnceCell;
 
 use crate::common::config::HapticPattern;
+use crate::sys::skylight::CFRelease;
 
 #[inline]
 fn pattern_index(pattern: HapticPattern) -> i32 {
@@ -24,37 +23,37 @@ type io_registry_entry_t = u32;
 type mach_port_t = u32;
 
 unsafe extern "C" {
-    fn IOServiceMatching(name: *const c_char) -> CFTypeRef;
+    fn IOServiceMatching(name: *const c_char) -> *mut CFType;
     fn IOServiceGetMatchingServices(
         master: mach_port_t,
-        matching: CFTypeRef,
+        matching: *mut CFType,
         iter: *mut io_iterator_t,
     ) -> kern_return_t;
     fn IOIteratorNext(iter: io_iterator_t) -> io_object_t;
     fn IOObjectRelease(obj: io_object_t) -> kern_return_t;
     fn IORegistryEntryCreateCFProperty(
         entry: io_registry_entry_t,
-        key: CFStringRef,
+        key: *mut CFString,
         allocator: *const c_void,
         options: u32,
-    ) -> CFTypeRef;
+    ) -> *mut CFType;
 
-    fn MTActuatorCreateFromDeviceID(device_id: u64) -> CFTypeRef;
-    fn MTActuatorOpen(actuator: CFTypeRef) -> i32; // IOReturn
-    fn MTActuatorIsOpen(actuator: CFTypeRef) -> bool;
-    fn MTActuatorActuate(actuator: CFTypeRef, pattern: i32, unk: i32, f1: f32, f2: f32) -> i32; // IOReturn
+    fn MTActuatorCreateFromDeviceID(device_id: u64) -> *mut CFType;
+    fn MTActuatorOpen(actuator: *mut CFType) -> i32; // IOReturn
+    fn MTActuatorIsOpen(actuator: *mut CFType) -> bool;
+    fn MTActuatorActuate(actuator: *mut CFType, pattern: i32, unk: i32, f1: f32, f2: f32) -> i32; // IOReturn
     //fn MTActuatorClose(actuator: CFTypeRef);
 
-    fn CFGetTypeID(cf: CFTypeRef) -> usize;
+    fn CFGetTypeID(cf: *mut CFType) -> usize;
     fn CFNumberGetTypeID() -> usize;
-    fn CFNumberGetValue(number: CFNumberRef, theType: i32, valuePtr: *mut u64) -> bool;
+    fn CFNumberGetValue(number: *mut CFNumber, theType: i32, valuePtr: *mut u64) -> bool;
 }
 
 #[inline]
 fn k_iomain_port_default() -> mach_port_t { 0 }
 
 struct MtsState {
-    actuators: Vec<CFTypeRef>,
+    actuators: Vec<*mut CFType>,
 }
 
 unsafe impl Send for MtsState {}
@@ -74,8 +73,8 @@ impl MtsState {
             }
         }
 
-        let key = CFString::from_static_string("Multitouch ID");
-        let mut actuators: Vec<CFTypeRef> = Vec::new();
+        let key = CFString::from_str("Multitouch ID");
+        let mut actuators: Vec<*mut CFType> = Vec::new();
 
         unsafe {
             loop {
@@ -86,7 +85,7 @@ impl MtsState {
 
                 let id_ref = IORegistryEntryCreateCFProperty(
                     dev,
-                    key.as_concrete_TypeRef(),
+                    CFRetained::<CFString>::as_ptr(&key).as_ptr(),
                     core_foundation::base::kCFAllocatorDefault,
                     0,
                 );
@@ -94,8 +93,8 @@ impl MtsState {
                 if !id_ref.is_null() && CFGetTypeID(id_ref) == CFNumberGetTypeID() {
                     let mut device_id: u64 = 0;
                     if CFNumberGetValue(
-                        id_ref as CFNumberRef,
-                        kCFNumberSInt64Type as i32,
+                        id_ref as *mut CFNumber,
+                        CFNumberType::SInt64Type.0 as i32,
                         &mut device_id as *mut u64,
                     ) {
                         let act = MTActuatorCreateFromDeviceID(device_id);

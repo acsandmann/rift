@@ -1,10 +1,8 @@
-use std::{fmt, ptr};
+use std::fmt;
+use std::ptr::{self, NonNull};
 
-use core_foundation::base::{CFRelease, CFTypeRef, TCFType};
-use core_foundation::number::CFNumber;
-use core_foundation::string::CFString;
-use core_graphics::base::{CGError, kCGErrorSuccess};
-use objc2_core_foundation::CGRect;
+use objc2_core_foundation::{CFNumber, CFRetained, CFString, CFType, CGRect};
+use objc2_core_graphics::CGError;
 
 use super::skylight::{
     CGRegionCreateEmptyRegion, CGSNewRegionWithRect, G_CONNECTION, SLSClearWindowTags,
@@ -13,43 +11,35 @@ use super::skylight::{
     SLSSetWindowProperty, SLSSetWindowResolution, SLSSetWindowShape, SLSSetWindowSubLevel,
     SLSSetWindowTags, cid_t,
 };
+use crate::sys::cg_ok;
 
 type WindowId = u32;
 const TAG_BITSET_LEN: i32 = 64;
 const DEFAULT_SUBLEVEL: i32 = 0;
 
 #[repr(transparent)]
-struct CFRegion(CFTypeRef);
+struct CFRegion(CFRetained<CFType>);
 
 impl CFRegion {
     fn from_rect(rect: &CGRect) -> Result<Self, CGError> {
-        let mut region: CFTypeRef = ptr::null();
-        let err = unsafe { CGSNewRegionWithRect(rect, &mut region) };
-        if err == kCGErrorSuccess {
-            Ok(Self(region))
-        } else {
-            Err(err)
-        }
+        let mut region: *mut CFType = ptr::null_mut();
+        cg_ok(unsafe { CGSNewRegionWithRect(rect, &mut region) })?;
+        Ok(Self(unsafe {
+            CFRetained::from_raw(NonNull::new_unchecked(region))
+        }))
     }
 
-    /// Empty region (Create-rule; must be released).
-    fn empty() -> Self { Self(unsafe { CGRegionCreateEmptyRegion() }) }
+    fn empty() -> Self {
+        Self(unsafe { CFRetained::from_raw(NonNull::new_unchecked(CGRegionCreateEmptyRegion())) })
+    }
 
     #[inline]
-    fn as_cf(&self) -> CFTypeRef { self.0 }
+    fn as_ptr(&self) -> *mut CFType { CFRetained::<CFType>::as_ptr(&self.0).as_ptr() }
 }
 
 impl Drop for CFRegion {
-    fn drop(&mut self) { unsafe { CFRelease(self.0) } }
-}
-
-#[inline]
-fn cg_ok(err: CGError) -> Result<(), CGError> {
-    if err == kCGErrorSuccess {
-        Ok(())
-    } else {
-        Err(err)
-    }
+    // SAFETY: cfretained should be auto dropping here
+    fn drop(&mut self) {}
 }
 
 #[derive(Debug)]
@@ -70,16 +60,16 @@ impl fmt::Display for CgsWindowError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use CgsWindowError::*;
         match self {
-            Region(e) => write!(f, "CGS region error: {e}"),
-            Window(e) => write!(f, "CGS window create error: {e}"),
-            Resolution(e) => write!(f, "CGS window resolution error: {e}"),
-            Alpha(e) => write!(f, "CGS window alpha/opacity error: {e}"),
-            Blur(e) => write!(f, "CGS window blur error: {e}"),
-            Level(e) => write!(f, "CGS window level/order error: {e}"),
-            Shape(e) => write!(f, "CGS window shape error: {e}"),
-            Tags(e) => write!(f, "CGS window tags error: {e}"),
-            Release(e) => write!(f, "CGS window release error: {e}"),
-            Property(e) => write!(f, "CGS window property error: {e}"),
+            Region(e) => write!(f, "CGS region error: {:?}", e),
+            Window(e) => write!(f, "CGS window create error: {:?}", e),
+            Resolution(e) => write!(f, "CGS window resolution error: {:?}", e),
+            Alpha(e) => write!(f, "CGS window alpha/opacity error: {:?}", e),
+            Blur(e) => write!(f, "CGS window blur error: {:?}", e),
+            Level(e) => write!(f, "CGS window level/order error: {:?}", e),
+            Shape(e) => write!(f, "CGS window shape error: {:?}", e),
+            Tags(e) => write!(f, "CGS window tags error: {:?}", e),
+            Release(e) => write!(f, "CGS window release error: {:?}", e),
+            Property(e) => write!(f, "CGS window property error: {:?}", e),
         }
     }
 }
@@ -107,8 +97,8 @@ impl CgsWindow {
             cg_ok(SLSNewWindowWithOpaqueShapeAndContext(
                 connection,
                 2,
-                frame_region.as_cf(),
-                empty_region.as_cf(),
+                frame_region.as_ptr(),
+                empty_region.as_ptr(),
                 13,
                 &mut tags,
                 0.0,
@@ -119,10 +109,8 @@ impl CgsWindow {
             ))
             .map_err(CgsWindowError::Window)?;
 
-            // doesnt work often but nice if it can
-            if let Err(res_err) = cg_ok(SLSSetWindowResolution(connection, wid, 1.0)) {
-                tracing::warn!(error=?res_err, "SLSSetWindowResolution failed; continuing");
-            }
+            cg_ok(SLSSetWindowResolution(connection, wid, 2.0))
+                .map_err(CgsWindowError::Resolution)?;
 
             Ok(Self {
                 id: wid,
@@ -175,6 +163,7 @@ impl CgsWindow {
         .map_err(CgsWindowError::Blur)
     }
 
+    #[inline]
     pub fn set_level(&self, level: i32) -> Result<(), CgsWindowError> {
         unsafe { cg_ok(SLSSetWindowLevel(self.connection, self.id, level)) }
             .map_err(CgsWindowError::Level)?;
@@ -182,6 +171,7 @@ impl CgsWindow {
             .map_err(CgsWindowError::Level)
     }
 
+    #[inline]
     pub fn set_shape(&self, frame: CGRect) -> Result<(), CgsWindowError> {
         unsafe {
             let region = CFRegion::from_rect(&frame).map_err(CgsWindowError::Region)?;
@@ -190,12 +180,13 @@ impl CgsWindow {
                 self.id,
                 0.0,
                 0.0,
-                region.as_cf(),
+                region.as_ptr(),
             ))
             .map_err(CgsWindowError::Shape)
         }
     }
 
+    #[inline]
     pub fn set_tags(&self, tags: u64) -> Result<(), CgsWindowError> {
         unsafe {
             let mut t = tags;
@@ -209,6 +200,7 @@ impl CgsWindow {
         }
     }
 
+    #[inline]
     pub fn clear_tags(&self, tags: u64) -> Result<(), CgsWindowError> {
         unsafe {
             let mut t = tags;
@@ -222,21 +214,22 @@ impl CgsWindow {
         }
     }
 
+    #[inline]
     pub fn bind_to_context(&self, context_id: u32) -> Result<(), CgsWindowError> {
-        let key = CFString::from_static_string("CAContextID");
-        let value = CFNumber::from(context_id as i32);
+        let key = CFString::from_str("CAContextID");
+        let value = CFNumber::new_i32(context_id as i32);
         unsafe {
             cg_ok(SLSSetWindowProperty(
                 self.connection,
                 self.id,
-                key.as_concrete_TypeRef(),
-                value.as_CFTypeRef(),
+                CFRetained::<CFString>::as_ptr(&key).as_ptr(),
+                CFRetained::<CFNumber>::as_ptr(&value).as_ptr() as *mut CFType,
             ))
             .map_err(CgsWindowError::Property)
         }
     }
 
-    /// Orders this window above `relative` (or above 0 for global top).
+    #[inline]
     pub fn order_above(&self, relative: Option<WindowId>) -> Result<(), CgsWindowError> {
         let rel = relative.unwrap_or(0);
         unsafe {
@@ -250,6 +243,7 @@ impl CgsWindow {
         .map_err(CgsWindowError::Level)
     }
 
+    #[inline]
     pub fn order_out(&self) -> Result<(), CgsWindowError> {
         unsafe {
             cg_ok(SLSOrderWindow(

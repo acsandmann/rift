@@ -94,7 +94,7 @@ impl NotificationCenterInner {
 
     fn handle_screen_changed_event(&self, notif: &NSNotification) {
         use objc2_app_kit::*;
-        let name = unsafe { &*notif.name() };
+        let name = &*notif.name();
         let span = info_span!("notification_center::handle_screen_changed_event", ?name);
         let _s = span.enter();
         if unsafe { NSWorkspaceActiveSpaceDidChangeNotification } == name {
@@ -158,7 +158,7 @@ impl NotificationCenterInner {
             return;
         };
         let pid = app.pid();
-        let name = unsafe { &*notif.name() };
+        let name = &*notif.name();
         let span = info_span!("notification_center::handle_app_event", ?name);
         let _guard = span.enter();
         if unsafe { NSWorkspaceDidLaunchApplicationNotification } == name {
@@ -182,7 +182,7 @@ impl NotificationCenterInner {
         &self,
         notif: &NSNotification,
     ) -> Option<Retained<NSRunningApplication>> {
-        let info = unsafe { notif.userInfo() };
+        let info = notif.userInfo();
         let Some(info) = info else {
             warn!("Got app notification without user info: {notif:?}");
             return None;
@@ -217,9 +217,9 @@ impl NotificationCenter {
                 );
             };
 
-        let workspace = &unsafe { NSWorkspace::sharedWorkspace() };
-        let workspace_center = &unsafe { workspace.notificationCenter() };
-        let default_center = &unsafe { NSNotificationCenter::defaultCenter() };
+        let workspace = &NSWorkspace::sharedWorkspace();
+        let workspace_center = &workspace.notificationCenter();
+        let default_center = &NSNotificationCenter::defaultCenter();
         let shared_app = &NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
         unsafe {
             use objc2_app_kit::*;
@@ -296,11 +296,11 @@ impl NotificationCenter {
     }
 
     pub async fn watch_for_notifications(self) {
-        let workspace = &unsafe { NSWorkspace::sharedWorkspace() };
+        let workspace = &NSWorkspace::sharedWorkspace();
 
         self.inner.send_screen_parameters();
         self.inner.send_event(WmEvent::AppEventsRegistered);
-        if let Some(app) = unsafe { workspace.frontmostApplication() } {
+        if let Some(app) = workspace.frontmostApplication() {
             self.inner.send_event(WmEvent::AppGloballyActivated(app.pid()));
         }
 

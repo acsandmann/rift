@@ -105,12 +105,13 @@ impl WindowNotify {
                     Some((_span, evt)) => {
                         if let Some(window_id) = evt.window_id {
                             match event {
-                                CGSEventType::Known(KnownCGSEvent::WindowDestroyed) => events_tx
-                                    .send(Event::WindowServerDestroyed(WindowServerId::new(
-                                        window_id,
-                                    ))),
+                                CGSEventType::Known(KnownCGSEvent::SpaceWindowDestroyed) => {
+                                    events_tx.send(Event::WindowServerDestroyed(
+                                        WindowServerId::new(window_id),
+                                    ))
+                                }
 
-                                CGSEventType::Known(KnownCGSEvent::WindowCreated) => events_tx
+                                CGSEventType::Known(KnownCGSEvent::SpaceWindowCreated) => events_tx
                                     .send(Event::WindowServerAppeared(WindowServerId::new(
                                         window_id,
                                     ))),

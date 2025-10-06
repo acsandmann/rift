@@ -3,36 +3,69 @@
 // https://github.com/koekeishiya/yabai/blob/d55a647913ab72d8d8b348bee2d3e59e52ce4a5d/src/misc/extern.h.
 
 use std::ffi::{c_int, c_uint, c_void};
-use std::fmt::{self, Display};
+use std::fmt;
+use std::ops::BitAnd;
 
 use accessibility_sys::{AXError, AXUIElementRef};
 use bitflags::bitflags;
-use core_foundation::base::CFTypeRef;
-use core_foundation::string::CFStringRef;
-use core_graphics::base::CGError;
-use core_graphics::display::{CFArrayRef, CGWindowID};
-use objc2_core_foundation::{CFArray, CGPoint, CGRect};
-use objc2_core_graphics::{CGContext, CGImage};
+use num_enum::{IntoPrimitive, TryFromPrimitive};
+use objc2_core_foundation::{CFArray, CFDictionary, CFNumber, CFString, CFType, CGPoint, CGRect};
+use objc2_core_graphics::{CGContext, CGError, CGImage, CGWindowID};
 use objc2_foundation::NSArray;
 use once_cell::sync::Lazy;
 
 use super::process::ProcessSerialNumber;
+use crate::sys::screen::SpaceId;
 
 pub static G_CONNECTION: Lazy<cid_t> = Lazy::new(|| unsafe { SLSMainConnectionID() });
 
 #[allow(non_camel_case_types)]
 pub type cid_t = i32;
 
-use num_enum::{IntoPrimitive, TryFromPrimitive};
+#[repr(u64)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, IntoPrimitive, TryFromPrimitive)]
+pub enum SLSWindowTags {
+    Document = 1 << 0,
+    Floating = 1 << 1,
+    Attached = 1 << 7,
+    Sticky = 1 << 11,
+    IgnoresCycle = 1 << 18,
+    Modal = 1 << 31,
+}
+
+impl BitAnd for SLSWindowTags {
+    type Output = u64;
+
+    fn bitand(self, rhs: Self) -> Self::Output { self as u64 & rhs as u64 }
+}
+
+impl BitAnd<SLSWindowTags> for u64 {
+    type Output = u64;
+
+    fn bitand(self, rhs: SLSWindowTags) -> Self::Output { self & (rhs as u64) }
+}
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, IntoPrimitive, TryFromPrimitive)]
 pub enum KnownCGSEvent {
+    DisplayWillSleep = 102,
+    DisplayDidWake = 103,
+    WindowUpdated = 723,
+    // maybe loginwindow active? kCGSEventNotificationSystemDefined = 724,
+    WindowClosed = 804,
     WindowMoved = 806,
     WindowResized = 807,
-    WindowCreated = 1325,
-    WindowDestroyed = 1326,
+    WindowReordered = 808,
+    WindowLevelChanged = 811,
+    WindowUnhidden = 815,
+    WindowHidden = 816,
     MissionControlEntered = 1204,
+    WindowTitleChanged = 1322,
+    SpaceWindowCreated = 1325,
+    SpaceWindowDestroyed = 1326,
+    SpaceCreated = 1327,
+    SpaceDestroyed = 1328,
+    FrontmostApplicationChanged = 1508,
     All = 0xFFFF_FFFF,
 }
 
@@ -59,15 +92,19 @@ impl From<CGSEventType> for u32 {
     }
 }
 
-impl Display for CGSEventType {
+impl fmt::Display for KnownCGSEvent {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { fmt::Debug::fmt(self, f) }
+}
+
+impl fmt::Display for CGSEventType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CGSEventType::Known(k) => write!(f, "{k:?}"),
+            CGSEventType::Known(k) => write!(f, "{k}"),
             CGSEventType::Unknown(v) => write!(f, "Unknown({v})"),
         }
     }
 }
-
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub enum CGEventTapLocation {
@@ -103,26 +140,34 @@ bitflags! {
 }
 
 unsafe extern "C" {
+    #[allow(clashing_extern_declarations)]
+    pub fn CFRelease(cf: *mut CFType);
+    pub fn CGRectMakeWithDictionaryRepresentation(
+        dict: *mut CFDictionary,
+        rect: *mut CGRect,
+    ) -> bool;
+
     pub fn _AXUIElementGetWindow(elem: AXUIElementRef, wid: *mut CGWindowID) -> AXError;
 
-    pub fn CGEventCreate(source: *mut c_void) -> *const c_void;
-    pub fn CGEventSetIntegerValueField(event: *const c_void, field: u32, value: i64);
-    pub fn CGEventSetDoubleValueField(event: *const c_void, field: u32, value: f64);
-    pub fn CGEventPost(tapLocation: CGEventTapLocation, event: *const c_void);
+    pub fn CGEventCreate(source: *mut CFType) -> *mut CFType;
+    pub fn CGEventSetIntegerValueField(event: *mut CFType, field: u32, value: i64);
+    pub fn CGEventSetDoubleValueField(event: *mut CFType, field: u32, value: f64);
+    pub fn CGEventPost(tapLocation: CGEventTapLocation, event: *mut CFType);
+    pub fn CGWarpMouseCursorPosition(point: CGPoint) -> CGError;
 
     pub fn CGSGetWindowBounds(cid: cid_t, wid: u32, frame: *mut CGRect) -> i32;
     pub fn CGSSetConnectionProperty(
         cid: cid_t,
         target_cid: cid_t,
-        key: CFStringRef,
-        value: CFTypeRef,
+        key: *mut CFString,
+        value: *mut CFType,
     ) -> CGError;
     pub fn CGSGetActiveSpace(cid: c_int) -> u64;
-    pub fn CGSCopySpaces(cid: c_int, mask: CGSSpaceMask) -> CFArrayRef;
-    pub fn CGSCopyManagedDisplays(cid: c_int) -> CFArrayRef;
+    pub fn CGSCopySpaces(cid: c_int, mask: CGSSpaceMask) -> *mut CFArray<SpaceId>;
+    pub fn CGSCopyManagedDisplays(cid: c_int) -> *mut CFArray;
     pub fn CGSCopyManagedDisplaySpaces(cid: c_int) -> *mut NSArray;
-    pub fn CGSManagedDisplayGetCurrentSpace(cid: c_int, uuid: CFStringRef) -> u64;
-    pub fn CGSCopyBestManagedDisplayForRect(cid: c_int, rect: CGRect) -> CFStringRef;
+    pub fn CGSManagedDisplayGetCurrentSpace(cid: c_int, uuid: *mut CFString) -> u64;
+    pub fn CGSCopyBestManagedDisplayForRect(cid: c_int, rect: CGRect) -> *mut CFString;
 
     pub fn SLSMainConnectionID() -> cid_t;
     pub fn SLSDisableUpdate(cid: cid_t) -> i32;
@@ -163,43 +208,55 @@ unsafe extern "C" {
     pub fn SLSCopyWindowsWithOptionsAndTags(
         cid: c_int,
         owner: c_uint,
-        spaces: CFArrayRef,
+        spaces: *mut CFArray<CFNumber>,
         options: c_uint,
         set_tags: *mut u64,
         clear_tags: *mut u64,
-    ) -> CFArrayRef;
+    ) -> *mut CFArray<CFNumber>;
 
-    pub fn SLSWindowQueryWindows(cid: c_int, windows: CFArrayRef, count: c_int) -> CFTypeRef;
-    pub fn SLSWindowQueryResultCopyWindows(query: CFTypeRef) -> CFTypeRef;
+    pub fn SLSWindowQueryWindows(
+        cid: c_int,
+        windows: *mut CFArray<CFNumber>,
+        count: c_int,
+    ) -> *mut CFType;
+    pub fn SLSWindowQueryResultCopyWindows(query: *mut CFType) -> *mut CFType;
+    pub fn SLSGetWindowLevel(cid: cid_t, wid: u32, level: *mut i32) -> CGError;
 
-    pub fn SLSWindowIteratorAdvance(iterator: CFTypeRef) -> bool;
-    pub fn SLSWindowIteratorGetParentID(iterator: CFTypeRef) -> u32;
-    pub fn SLSWindowIteratorGetWindowID(iterator: CFTypeRef) -> u32;
-    pub fn SLSWindowIteratorGetTags(iterator: CFTypeRef) -> u64;
-    pub fn SLSWindowIteratorGetAttributes(iterator: CFTypeRef) -> u64;
-    pub fn SLSWindowIteratorGetLevel(iterator: CFTypeRef) -> c_int;
-    pub fn SLSWindowIteratorGetCount(iterator: CFTypeRef) -> c_int;
+    pub fn SLSWindowIteratorAdvance(iterator: *mut CFType) -> bool;
+    pub fn SLSWindowIteratorGetParentID(iterator: *mut CFType) -> u32;
+    pub fn SLSWindowIteratorGetWindowID(iterator: *mut CFType) -> u32;
+    pub fn SLSWindowIteratorGetTags(iterator: *mut CFType) -> u64;
+    pub fn SLSWindowIteratorGetAttributes(iterator: *mut CFType) -> u64;
+    pub fn SLSWindowIteratorGetLevel(iterator: *mut CFType) -> c_int;
+    pub fn SLSWindowIteratorGetCount(iterator: *mut CFType) -> c_int;
+    pub fn SLSWindowIteratorGetAttachedWindowCount(iterator: *mut CFType) -> c_int;
+    pub fn SLSWindowIteratorGetPID(iterator: *mut CFType) -> c_int;
+    pub fn SLSWindowIteratorGetBounds(iterator: *mut CFType) -> CGRect;
 
-    pub fn SLSCopySpacesForWindows(cid: c_int, selector: u32, windows: CFArrayRef) -> CFArrayRef;
+    pub fn SLSCopySpacesForWindows(
+        cid: cid_t,
+        selector: u32,
+        windows: *mut CFArray<CFNumber>,
+    ) -> *mut CFArray<CFNumber>;
 
     pub fn SLSGetConnectionIDForPSN(
-        cid: c_int,
+        cid: cid_t,
         psn: *const ProcessSerialNumber,
         out_cid: *mut c_int,
     ) -> c_int;
 
     pub fn SLSHWCaptureWindowList(
-        cid: c_int,
+        cid: cid_t,
         window_list: *const u32,
         window_count: c_int,
         options: u32,
     ) -> *mut CFArray<CGImage>;
 
     pub fn SLSNewWindowWithOpaqueShapeAndContext(
-        cid: c_int,
+        cid: cid_t,
         r#type: c_int,
-        region: CFTypeRef,
-        opaque_region: CFTypeRef,
+        region: *mut CFType,
+        opaque_region: *mut CFType,
         options: c_int,
         tags: *mut u64,
         x: f32,
@@ -208,35 +265,44 @@ unsafe extern "C" {
         out_wid: *mut u32,
         context: *mut c_void,
     ) -> CGError;
-    pub fn SLSReleaseWindow(cid: c_int, wid: u32) -> CGError;
-    pub fn SLSSetWindowResolution(cid: c_int, wid: u32, resolution: f32) -> CGError;
-    pub fn SLSSetWindowAlpha(cid: c_int, wid: u32, alpha: f32) -> CGError;
+    pub fn SLSReleaseWindow(cid: cid_t, wid: u32) -> CGError;
+    pub fn SLSSetWindowResolution(cid: cid_t, wid: u32, resolution: f64) -> CGError;
+    pub fn SLSSetWindowAlpha(cid: cid_t, wid: u32, alpha: f32) -> CGError;
     pub fn SLSSetWindowBackgroundBlurRadiusStyle(
-        cid: c_int,
+        cid: cid_t,
         wid: u32,
         radius: c_int,
         style: c_int,
     ) -> CGError;
-    pub fn SLSSetWindowLevel(cid: c_int, wid: u32, level: c_int) -> CGError;
-    pub fn SLSSetWindowSubLevel(cid: c_int, wid: u32, sub_level: c_int) -> CGError;
-    pub fn SLSSetWindowOpacity(cid: c_int, wid: u32, opaque: bool) -> CGError;
+    pub fn SLSSetWindowLevel(cid: cid_t, wid: u32, level: c_int) -> CGError;
+    pub fn SLSSetWindowSubLevel(cid: cid_t, wid: u32, sub_level: c_int) -> CGError;
+    pub fn SLSSetWindowOpacity(cid: cid_t, wid: u32, opaque: bool) -> CGError;
     pub fn SLSSetWindowShape(
-        cid: c_int,
+        cid: cid_t,
         wid: u32,
         x_offset: f32,
         y_offset: f32,
-        shape: CFTypeRef,
+        shape: *mut CFType,
     ) -> CGError;
-    pub fn SLSOrderWindow(cid: c_int, wid: u32, order: c_int, relative_to: u32) -> CGError;
-    pub fn SLSSetWindowTags(cid: c_int, wid: u32, tags: *mut u64, tag_count: c_int) -> CGError;
-    pub fn SLSClearWindowTags(cid: c_int, wid: u32, tags: *mut u64, tag_count: c_int) -> CGError;
-    pub fn CGSNewRegionWithRect(rect: *const CGRect, region: *mut CFTypeRef) -> CGError;
-    pub fn CGRegionCreateEmptyRegion() -> CFTypeRef;
-    pub fn SLWindowContextCreate(cid: c_int, wid: u32, options: CFTypeRef) -> *mut CGContext;
+    pub fn SLSOrderWindow(cid: cid_t, wid: u32, order: c_int, relative_to: u32) -> CGError;
+    pub fn SLSSetWindowTags(cid: cid_t, wid: u32, tags: *mut u64, tag_count: c_int) -> CGError;
+    pub fn SLSClearWindowTags(cid: cid_t, wid: u32, tags: *mut u64, tag_count: c_int) -> CGError;
+    pub fn CGSNewRegionWithRect(rect: *const CGRect, region: *mut *mut CFType) -> CGError;
+    pub fn CGRegionCreateEmptyRegion() -> *mut CFType;
+    pub fn SLWindowContextCreate(cid: cid_t, wid: u32, options: *mut CFType) -> *mut CGContext;
     pub fn SLSSetWindowProperty(
-        cid: c_int,
+        cid: cid_t,
         wid: u32,
-        property: CFStringRef,
-        value: CFTypeRef,
+        property: *mut CFString,
+        value: *mut CFType,
     ) -> CGError;
+    pub fn SLSSetWindowShadowParameters(
+        cid: cid_t,
+        wid: u32,
+        std: f64,
+        density: f64,
+        x_offset: u32,
+        y_offset: u32,
+    ) -> CGError;
+    pub fn SLSFlushWindowContentRegion(cid: cid_t, wid: u32, dirty: *mut c_void) -> CGError;
 }

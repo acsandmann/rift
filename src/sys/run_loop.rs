@@ -1,13 +1,10 @@
 //! Helpers for managing run loops.
 
 use std::ffi::c_void;
-use std::{mem, ptr};
+use std::mem;
 
-use core_foundation::base::TCFType;
-use core_foundation::mach_port::CFIndex;
-use core_foundation::runloop::{
-    CFRunLoop, CFRunLoopSource, CFRunLoopSourceContext, CFRunLoopSourceCreate,
-    CFRunLoopSourceSignal, CFRunLoopWakeUp, kCFRunLoopCommonModes,
+use objc2_core_foundation::{
+    CFIndex, CFRetained, CFRunLoop, CFRunLoopSource, CFRunLoopSourceContext, kCFRunLoopCommonModes,
 };
 
 /// A core foundation run loop source.
@@ -18,7 +15,7 @@ use core_foundation::runloop::{
 /// More information is available in the Apple documentation at
 /// https://developer.apple.com/documentation/corefoundation/cfrunloopsource-rhr.
 #[derive(Clone, PartialEq)]
-pub struct WakeupHandle(CFRunLoopSource, CFRunLoop);
+pub struct WakeupHandle(CFRetained<CFRunLoopSource>, CFRetained<CFRunLoop>);
 
 // SAFETY:
 // - CFRunLoopSource and CFRunLoop are ObjC objects which are allowed to be used
@@ -42,66 +39,55 @@ impl WakeupHandle {
     /// run in relative to other run loop sources, and should normally be set to
     /// 0.
     pub fn for_current_thread<F: Fn() + 'static>(order: CFIndex, handler: F) -> WakeupHandle {
-        let handler = Box::into_raw(Box::new(Handler { ref_count: 0, func: handler }));
+        let handler_ptr = Box::into_raw(Box::new(Handler { ref_count: 0, func: handler }));
 
-        extern "C-unwind" fn perform<F: Fn() + 'static>(info: *const c_void) {
-            // SAFETY: Only one thread may call these functions, and the mutable
-            // reference lives only during the function call. No other code has
-            // access to the handler.
+        // Use the C-unwind ABI and the exact pointer types expected by
+        // CFRunLoopSourceContext.
+        //
+        // The callbacks are unsafe and may be called from C code. Each callback
+        // receives the `info` pointer we stored (a *mut Handler<F>). We cast it
+        // back and operate on it. The retain/release callbacks mutate the
+        // `ref_count` and free the box when it reaches zero.
+        unsafe extern "C-unwind" fn perform<F: Fn() + 'static>(info: *mut c_void) {
+            // SAFETY: `info` was created from a Box<Handler<F>> and is valid.
             let handler = unsafe { &mut *(info as *mut Handler<F>) };
             (handler.func)();
         }
-        extern "C" fn retain<F>(info: *const c_void) -> *const c_void {
-            // SAFETY: As above.
+        unsafe extern "C-unwind" fn retain<F>(info: *const c_void) -> *const c_void {
+            // SAFETY: `info` was created from a Box<Handler<F>> and is valid.
             let handler = unsafe { &mut *(info as *mut Handler<F>) };
             handler.ref_count += 1;
             info
         }
-        extern "C-unwind" fn release<F>(info: *const c_void) {
-            // SAFETY: As above.
+        unsafe extern "C-unwind" fn release<F>(info: *const c_void) {
+            // SAFETY: `info` was created from a Box<Handler<F>> and is valid.
             let handler = unsafe { &mut *(info as *mut Handler<F>) };
             handler.ref_count -= 1;
             if handler.ref_count == 0 {
+                // Recreate the Box to drop it.
                 mem::drop(unsafe { Box::from_raw(info as *mut Handler<F>) });
             }
         }
 
-        // SAFETY: Strip the C-unwind ABI from the function pointer types since
-        // the core-foundation crate hasn't been updated with this ABI yet. This
-        // should be sound as long as we don't call the transmuted function
-        // pointer from Rust.
-        let release = unsafe {
-            mem::transmute::<extern "C-unwind" fn(*const c_void), extern "C" fn(*const c_void)>(
-                release::<F>,
-            )
-        };
-        let perform = unsafe {
-            mem::transmute::<extern "C-unwind" fn(*const c_void), extern "C" fn(*const c_void)>(
-                perform::<F>,
-            )
-        };
-
         let mut context = CFRunLoopSourceContext {
             version: 0,
-            info: handler as *mut c_void,
+            info: handler_ptr as *mut c_void,
             retain: Some(retain::<F>),
-            release: Some(release),
+            release: Some(release::<F>),
             copyDescription: None,
             equal: None,
             hash: None,
             schedule: None,
             cancel: None,
-            perform,
+            perform: Some(perform::<F>),
         };
 
-        let source = unsafe {
-            let source = CFRunLoopSourceCreate(ptr::null(), order, &mut context as *mut _);
-            CFRunLoopSource::wrap_under_create_rule(source)
-        };
-        let run_loop = CFRunLoop::get_current();
-        run_loop.add_source(&source, unsafe { kCFRunLoopCommonModes });
+        let source = unsafe { CFRunLoopSource::new(None, order, &mut context as *mut _) };
 
-        WakeupHandle(source, run_loop)
+        let run_loop = CFRunLoop::current().unwrap();
+        run_loop.add_source(source.as_deref(), unsafe { kCFRunLoopCommonModes });
+
+        WakeupHandle(source.unwrap(), run_loop)
     }
 
     /// Wakes the run loop that owns the target of this handle and schedules its
@@ -109,9 +95,7 @@ impl WakeupHandle {
     ///
     /// Multiple signals may be collapsed into a single call of the handler.
     pub fn wake(&self) {
-        unsafe {
-            CFRunLoopSourceSignal(self.0.as_concrete_TypeRef());
-            CFRunLoopWakeUp(self.1.as_concrete_TypeRef());
-        }
+        self.0.signal();
+        self.1.wake_up();
     }
 }

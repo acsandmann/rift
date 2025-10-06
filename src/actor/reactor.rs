@@ -244,6 +244,7 @@ pub struct Reactor {
     last_sls_notification_ids: Vec<u32>,
     menu_open_depth: usize,
     mission_control_active: bool,
+    suppress_stale_window_cleanup: bool,
 }
 
 #[derive(Debug)]
@@ -372,6 +373,7 @@ impl Reactor {
             observed_window_server_ids: HashSet::default(),
             menu_open_depth: 0,
             mission_control_active: false,
+            suppress_stale_window_cleanup: false,
         }
     }
 
@@ -618,6 +620,8 @@ impl Reactor {
             }
             Event::ScreenParametersChanged(frames, spaces, ws_info) => {
                 info!("screen parameters changed");
+                let spaces_all_none = spaces.iter().all(|space| space.is_none());
+                self.suppress_stale_window_cleanup = spaces_all_none;
                 if frames.is_empty() {
                     if spaces.is_empty() {
                         if !self.screens.is_empty() {
@@ -654,6 +658,8 @@ impl Reactor {
                 // FIXME: Update visible windows if space changed
             }
             Event::SpaceChanged(spaces, ws_info) => {
+                let spaces_all_none = spaces.iter().all(|space| space.is_none());
+                self.suppress_stale_window_cleanup = spaces_all_none;
                 if spaces.len() != self.screens.len() {
                     warn!(
                         "Ignoring space change event: we have {} spaces, but {} screens",
@@ -1349,49 +1355,57 @@ impl Reactor {
 
         let known_visible_set: HashSet<WindowId> = known_visible.into_iter().collect();
 
-        let stale_windows: Vec<WindowId> = self
-            .windows
-            .iter()
-            .filter_map(|(&wid, state)| {
-                if wid.pid != pid || known_visible_set.contains(&wid) {
-                    return None;
-                }
+        let stale_windows: Vec<WindowId> = if self.suppress_stale_window_cleanup {
+            Vec::new()
+        } else {
+            self.windows
+                .iter()
+                .filter_map(|(&wid, state)| {
+                    if wid.pid != pid || known_visible_set.contains(&wid) {
+                        return None;
+                    }
 
-                if state.is_minimized {
-                    return None;
-                }
+                    if state.is_minimized {
+                        return None;
+                    }
 
-                let Some(ws_id) = state.window_server_id else {
-                    return Some(wid);
-                };
+                    let Some(ws_id) = state.window_server_id else {
+                        return Some(wid);
+                    };
 
-                let server_info = self
-                    .window_server_info
-                    .get(&ws_id)
-                    .cloned()
-                    .or_else(|| window_server::get_window(ws_id));
+                    let server_info = self
+                        .window_server_info
+                        .get(&ws_id)
+                        .cloned()
+                        .or_else(|| window_server::get_window(ws_id));
 
-                let info = match server_info {
-                    Some(info) => info,
-                    None => return Some(wid),
-                };
+                    let info = match server_info {
+                        Some(info) => info,
+                        None => return Some(wid),
+                    };
 
-                let width = info.frame.size.width.abs();
-                let height = info.frame.size.height.abs();
+                    let width = info.frame.size.width.abs();
+                    let height = info.frame.size.height.abs();
 
-                let unsuitable = !window_server::app_window_suitable(ws_id);
-                let invalid_layer = info.layer != 0;
-                let too_small =
-                    width < MIN_REAL_WINDOW_DIMENSION || height < MIN_REAL_WINDOW_DIMENSION;
-                let ordered_in = window_server::window_is_ordered_in(ws_id);
+                    let unsuitable = !window_server::app_window_suitable(ws_id);
+                    let invalid_layer = info.layer != 0;
+                    let too_small =
+                        width < MIN_REAL_WINDOW_DIMENSION || height < MIN_REAL_WINDOW_DIMENSION;
+                    let ordered_in = window_server::window_is_ordered_in(ws_id);
+                    let visible_in_snapshot = self.visible_windows.contains(&ws_id);
 
-                if unsuitable || invalid_layer || too_small || !ordered_in {
-                    Some(wid)
-                } else {
-                    None
-                }
-            })
-            .collect();
+                    if unsuitable
+                        || invalid_layer
+                        || too_small
+                        || (!ordered_in && !visible_in_snapshot)
+                    {
+                        Some(wid)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
 
         for wid in stale_windows {
             self.handle_event(Event::WindowDestroyed(wid));

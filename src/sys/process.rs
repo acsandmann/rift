@@ -1,18 +1,19 @@
+use objc2_core_graphics::CGError;
+
 use super::app::pid_t;
+use crate::sys::cg_ok;
 
 pub struct ProcessInfo {
     pub is_xpc: bool,
 }
 
 impl ProcessInfo {
-    pub fn for_pid(pid: pid_t) -> Result<Self, ()> {
+    pub fn for_pid(pid: pid_t) -> Result<Self, CGError> {
         let psn = ProcessSerialNumber::for_pid(pid)?;
 
         let mut info = ProcessInfoRec::default();
         info.processInfoLength = size_of::<ProcessInfoRec>() as _;
-        if unsafe { GetProcessInformation(&psn, &mut info) } != 0 {
-            return Err(());
-        }
+        cg_ok(unsafe { GetProcessInformation(&psn, &mut info) })?;
 
         Ok(Self {
             is_xpc: info.processType.to_be_bytes() == *b"XPC!",
@@ -54,24 +55,19 @@ pub struct ProcessSerialNumber {
 }
 
 impl ProcessSerialNumber {
-    pub(super) fn for_pid(pid: pid_t) -> Result<Self, ()> {
+    pub(super) fn for_pid(pid: pid_t) -> Result<Self, CGError> {
         let mut psn = ProcessSerialNumber::default();
-        if unsafe { GetProcessForPID(pid, &mut psn) } == 0 {
-            Ok(psn)
-        } else {
-            Err(())
-        }
+        cg_ok(unsafe { GetProcessForPID(pid, &mut psn) })?;
+        Ok(psn)
     }
 }
-
-type OSErr = i16;
-type OSStatus = i32;
 
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
     // Deprecated in macOS 10.9.
-    fn GetProcessForPID(pid: pid_t, psn: *mut ProcessSerialNumber) -> OSStatus;
+    fn GetProcessForPID(pid: pid_t, psn: *mut ProcessSerialNumber) -> CGError;
 
     // Deprecated in macOS 10.9.
-    fn GetProcessInformation(psn: *const ProcessSerialNumber, info: *mut ProcessInfoRec) -> OSErr;
+    fn GetProcessInformation(psn: *const ProcessSerialNumber, info: *mut ProcessInfoRec)
+    -> CGError;
 }

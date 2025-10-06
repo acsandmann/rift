@@ -47,7 +47,7 @@ impl EventTap {
         if let Some(rl) = CFRunLoop::current() {
             unsafe { rl.add_source(Some(&source), kCFRunLoopDefaultMode) };
         }
-        unsafe { CGEvent::tap_enable(&port, true) };
+        CGEvent::tap_enable(&port, true);
 
         Some(Self {
             port,
@@ -66,14 +66,12 @@ impl EventTap {
         unsafe { Self::new_with_options(CGTapOpt::ListenOnly, mask, callback, user_info, drop_ctx) }
     }
 
-    pub fn set_enabled(&self, enabled: bool) {
-        unsafe { CGEvent::tap_enable(&self.port, enabled) };
-    }
+    pub fn set_enabled(&self, enabled: bool) { CGEvent::tap_enable(&self.port, enabled); }
 }
 
 impl Drop for EventTap {
     fn drop(&mut self) {
-        unsafe { CGEvent::tap_enable(&self.port, false) };
+        CGEvent::tap_enable(&self.port, false);
         if let Some(rl) = CFRunLoop::current() {
             unsafe { rl.remove_source(Some(&self.source), kCFRunLoopDefaultMode) };
         }

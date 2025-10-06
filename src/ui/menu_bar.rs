@@ -20,7 +20,7 @@ pub struct MenuIcon {
 
 impl MenuIcon {
     pub fn new(mtm: MainThreadMarker) -> Self {
-        let status_item = unsafe {
+        let status_item = {
             let status_bar = NSStatusBar::systemStatusBar();
             let status_item = status_bar.statusItemWithLength(NSVariableStatusItemLength);
 
@@ -222,9 +222,8 @@ impl MenuIcon {
 impl Drop for MenuIcon {
     fn drop(&mut self) {
         debug!("Removing menu bar icon");
-        unsafe {
-            let status_bar = NSStatusBar::systemStatusBar();
-            status_bar.removeStatusItem(&self.status_item);
-        }
+
+        let status_bar = NSStatusBar::systemStatusBar();
+        status_bar.removeStatusItem(&self.status_item);
     }
 }

@@ -1,18 +1,18 @@
-use core_graphics::base::CGError;
-use core_graphics::display::{
-    CGDisplayHideCursor, CGDisplayShowCursor, CGWarpMouseCursorPosition, kCGNullDirectDisplayID,
-};
 use livesplit_hotkey::{ConsumePreference, Hook};
 pub use livesplit_hotkey::{Hotkey, KeyCode, Modifiers};
 use objc2_app_kit::NSEvent;
 use objc2_core_foundation::CGPoint;
+use objc2_core_graphics::{
+    CGDisplayHideCursor, CGDisplayShowCursor, CGError, kCGNullDirectDisplay,
+};
 use serde::{Deserialize, Serialize};
 use tracing::info_span;
 
-use super::geometry::ToCGType;
 use super::screen::CoordinateConverter;
 use crate::actor::reactor::Command;
 use crate::actor::wm_controller::{Sender, WmCommand, WmEvent};
+use crate::sys::cg_ok;
+use crate::sys::skylight::CGWarpMouseCursorPosition;
 
 pub struct HotkeyManager {
     hook: Hook,
@@ -49,7 +49,7 @@ pub enum MouseState {
 }
 
 pub fn get_mouse_state() -> MouseState {
-    let left_button = unsafe { NSEvent::pressedMouseButtons() } & 0x1 != 0;
+    let left_button = NSEvent::pressedMouseButtons() & 0x1 != 0;
     if left_button {
         MouseState::Down
     } else {
@@ -58,20 +58,14 @@ pub fn get_mouse_state() -> MouseState {
 }
 
 pub fn get_mouse_pos(converter: CoordinateConverter) -> Option<CGPoint> {
-    let ns_loc = unsafe { NSEvent::mouseLocation() };
+    let ns_loc = NSEvent::mouseLocation();
     converter.convert_point(ns_loc)
 }
 
 pub fn warp_mouse(point: CGPoint) -> Result<(), CGError> {
-    cg_result(unsafe { CGWarpMouseCursorPosition(point.to_cgtype()) })
+    cg_ok(unsafe { CGWarpMouseCursorPosition(point) })
 }
 
-pub fn hide_mouse() -> Result<(), CGError> {
-    cg_result(unsafe { CGDisplayHideCursor(kCGNullDirectDisplayID) })
-}
+pub fn hide_mouse() -> Result<(), CGError> { cg_ok(CGDisplayHideCursor(kCGNullDirectDisplay)) }
 
-pub fn show_mouse() -> Result<(), CGError> {
-    cg_result(unsafe { CGDisplayShowCursor(kCGNullDirectDisplayID) })
-}
-
-fn cg_result(err: CGError) -> Result<(), CGError> { if err == 0 { Ok(()) } else { Err(err) } }
+pub fn show_mouse() -> Result<(), CGError> { cg_ok(CGDisplayShowCursor(kCGNullDirectDisplay)) }
