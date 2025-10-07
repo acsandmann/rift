@@ -28,7 +28,6 @@ use crate::common::config::Config;
 use crate::model::server::{WindowData, WorkspaceData};
 use crate::sys::cgs_window::CgsWindow;
 use crate::sys::dispatch::DispatchExt;
-use crate::sys::display_link::DisplayLink;
 use crate::sys::skylight::{
     CFRelease, G_CONNECTION, SLSFlushWindowContentRegion, SLWindowContextCreate,
 };
@@ -543,7 +542,6 @@ impl WindowLayoutMetrics {
 
 struct FadeState {
     id: u64,
-    link: DisplayLink,
 }
 
 impl MissionControlOverlay {
@@ -1495,7 +1493,7 @@ impl MissionControlOverlay {
         let _ = cgs_window.set_opacity(false);
         let _ = cgs_window.set_alpha(1.0);
         let _ = cgs_window.set_level(NSPopUpMenuWindowLevel as i32);
-        let _ = cgs_window.set_blur(36, 2);
+        let _ = cgs_window.set_blur(30, None);
 
         Self {
             cgs_window,
@@ -1601,38 +1599,18 @@ impl MissionControlOverlay {
         }
 
         let fade_id = self.fade_counter.fetch_add(1, Ordering::AcqRel) + 1;
-        let start = Instant::now();
-        let total = Duration::from_secs_f64(duration_ms / 1000.0);
-        let conn = *crate::sys::skylight::G_CONNECTION;
-        let wid = self.cgs_window.id();
         let overlay_ptr_bits = self as *const MissionControlOverlay as usize;
 
-        match DisplayLink::new(move || {
-            let elapsed = start.elapsed();
-            let done = elapsed >= total;
-            let t = if done {
-                1.0f32
-            } else {
-                (elapsed.as_secs_f32() / total.as_secs_f32()).clamp(0.0, 1.0)
-            };
-            unsafe {
-                let _ = crate::sys::skylight::SLSSetWindowAlpha(conn, wid, t);
-            }
-            if done {
-                schedule_fade_completion(overlay_ptr_bits, fade_id, 1.0f32);
-                false
-            } else {
-                true
-            }
-        }) {
-            Ok(link) => {
-                link.start();
-                self.fade_state.borrow_mut().replace(FadeState { id: fade_id, link });
-            }
-            Err(_) => {
-                let _ = self.cgs_window.set_alpha(1.0);
-            }
-        }
+        CATransaction::begin();
+        CATransaction::setAnimationDuration(duration_ms / 1000.0);
+        self.root_layer.setOpacity(0.0);
+        self.root_layer.setOpacity(1.0);
+
+        CATransaction::commit();
+
+        schedule_fade_completion(overlay_ptr_bits, fade_id, 1.0f32);
+
+        self.fade_state.borrow_mut().replace(FadeState { id: fade_id });
     }
 
     fn fade_out(&self) -> bool {
@@ -1644,59 +1622,45 @@ impl MissionControlOverlay {
         }
 
         let fade_id = self.fade_counter.fetch_add(1, Ordering::AcqRel) + 1;
-        let start = Instant::now();
-        let total = Duration::from_secs_f64(duration_ms / 1000.0);
-        let conn = *crate::sys::skylight::G_CONNECTION;
-        let wid = self.cgs_window.id();
         let overlay_ptr_bits = self as *const MissionControlOverlay as usize;
 
-        match DisplayLink::new(move || {
-            let elapsed = start.elapsed();
-            let done = elapsed >= total;
-            let t = if done {
-                0.0f32
-            } else {
-                let p = (elapsed.as_secs_f32() / total.as_secs_f32()).clamp(0.0, 1.0);
-                1.0f32 - p
-            };
-            unsafe {
-                let _ = crate::sys::skylight::SLSSetWindowAlpha(conn, wid, t);
-            }
-            if done {
-                schedule_fade_completion(overlay_ptr_bits, fade_id, 0.0f32);
-                false
-            } else {
-                true
-            }
-        }) {
-            Ok(link) => {
-                link.start();
-                self.fade_state.borrow_mut().replace(FadeState { id: fade_id, link });
-                true
-            }
-            Err(_) => {
-                let _ = self.cgs_window.set_alpha(0.0);
-                false
-            }
-        }
+        CATransaction::begin();
+        CATransaction::setAnimationDuration(duration_ms / 1000.0);
+
+        self.root_layer.setOpacity(1.0);
+        self.root_layer.setOpacity(0.0);
+
+        CATransaction::commit();
+
+        schedule_fade_completion(overlay_ptr_bits, fade_id, 0.0f32);
+
+        self.fade_state.borrow_mut().replace(FadeState { id: fade_id });
+        true
     }
 
     fn stop_active_fade(&self) {
-        if let Some(state) = self.fade_state.borrow_mut().take() {
-            state.link.stop();
+        unsafe {
+            let _: () = msg_send![&*self.root_layer, removeAllAnimations];
         }
+        self.fade_state.borrow_mut().take();
     }
 
     fn finish_fade(&self, fade_id: u64, final_alpha: f32) {
-        let mut slot = self.fade_state.borrow_mut();
-        let matches = slot.as_ref().map_or(false, |state| state.id == fade_id);
-        if !matches {
-            return;
+        match self.fade_state.try_borrow_mut() {
+            Ok(mut slot) => {
+                let matches = slot.as_ref().map_or(false, |state| state.id == fade_id);
+                if !matches {
+                    return;
+                }
+                slot.take();
+                drop(slot);
+            }
+            Err(_) => {
+                let overlay_ptr_bits = self as *const MissionControlOverlay as usize;
+                schedule_fade_completion(overlay_ptr_bits, fade_id, final_alpha);
+                return;
+            }
         }
-        if let Some(state) = slot.take() {
-            state.link.stop();
-        }
-        drop(slot);
 
         let _ = self.cgs_window.set_alpha(final_alpha);
 
