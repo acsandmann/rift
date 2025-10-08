@@ -1,3 +1,4 @@
 dev
 target
 rift.toml
+src/bin/dev.rs
