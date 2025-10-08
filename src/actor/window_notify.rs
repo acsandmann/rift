@@ -1,15 +1,77 @@
+use std::num::NonZeroU32;
+use std::sync::Arc;
+
 use tracing::debug;
 
 use super::reactor::{self, Event};
-use crate::common::collections::HashSet;
+use crate::actor::app::WindowId;
+use crate::actor::reactor::Requested;
+use crate::common::collections::{HashMap, HashSet};
+use crate::model::swaparc::SwapArc;
+use crate::model::tx_store::WindowTxStore;
 use crate::sys::skylight::{CGSEventType, KnownCGSEvent};
-use crate::sys::window_notify;
-use crate::sys::window_server::WindowServerId;
+use crate::sys::window_server::{WindowQuery, WindowServerId};
+use crate::sys::{event, window_notify};
+
+#[derive(Default)]
+pub struct Ignored {
+    by_event: HashMap<u32, Arc<HashSet<u32>>>,
+}
+
+impl Ignored {
+    pub fn empty() -> Self { Self { by_event: HashMap::default() } }
+
+    #[inline]
+    pub fn is_ignored(&self, event: CGSEventType, wsid: u32) -> bool {
+        self.by_event.get(&event.into()).map_or(false, |set| set.contains(&wsid))
+    }
+
+    pub fn with_added(&self, event: CGSEventType, wsid: u32) -> Arc<Ignored> {
+        let code = event.into();
+        if self.is_ignored(event, wsid) {
+            return Arc::new(self.clone());
+        }
+        let mut next_map = self.by_event.clone();
+        let mut next_set = next_map.get(&code).map(|s| (**s).clone()).unwrap_or_default();
+        next_set.insert(wsid);
+        next_map.insert(code, Arc::new(next_set));
+        Arc::new(Ignored { by_event: next_map })
+    }
+
+    pub fn with_removed(&self, event: CGSEventType, wsid: u32) -> Arc<Ignored> {
+        let code = event.into();
+        let Some(set_arc) = self.by_event.get(&code) else {
+            return Arc::new(self.clone());
+        };
+        if !set_arc.contains(&wsid) {
+            return Arc::new(self.clone());
+        }
+        let mut next_map = self.by_event.clone();
+        let mut next_set = (**set_arc).clone();
+        next_set.remove(&wsid);
+        if next_set.is_empty() {
+            next_map.remove(&code);
+        } else {
+            next_map.insert(code, Arc::new(next_set));
+        }
+        Arc::new(Ignored { by_event: next_map })
+    }
+}
+
+impl Clone for Ignored {
+    fn clone(&self) -> Self {
+        Self {
+            by_event: self.by_event.clone(),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub enum Request {
     Subscribe(CGSEventType),
     UpdateWindowNotifications(Vec<u32>),
+    IgnoreWindowEvent(CGSEventType, u32),
+    UnignoreWindowEvent(CGSEventType, u32),
     Stop,
 }
 
@@ -21,6 +83,8 @@ pub struct WindowNotify {
     requests_rx: Option<Receiver>,
     subscribed: HashSet<CGSEventType>,
     initial_events: Vec<CGSEventType>,
+    ignored: Arc<SwapArc<Ignored>>,
+    tx_store: Option<WindowTxStore>,
 }
 
 impl WindowNotify {
@@ -28,12 +92,15 @@ impl WindowNotify {
         events_tx: reactor::Sender,
         requests_rx: Receiver,
         initial_events: &[CGSEventType],
+        tx_store: Option<WindowTxStore>,
     ) -> Self {
         Self {
             events_tx,
             requests_rx: Some(requests_rx),
             subscribed: HashSet::default(),
             initial_events: initial_events.iter().copied().collect(),
+            ignored: Arc::new(SwapArc::from_value(Ignored::empty())),
+            tx_store,
         }
     }
 
@@ -44,7 +111,12 @@ impl WindowNotify {
         };
 
         for event in self.initial_events.drain(..) {
-            match Self::subscribe(event, self.events_tx.clone()) {
+            match Self::subscribe(
+                event,
+                self.events_tx.clone(),
+                self.ignored.clone(),
+                self.tx_store.clone(),
+            ) {
                 Ok(()) => {
                     self.subscribed.insert(event);
                     debug!("initial subscription succeeded for event {}", event);
@@ -74,7 +146,12 @@ impl WindowNotify {
                     debug!("already subscribed to event {}", event);
                     return;
                 }
-                match Self::subscribe(event, self.events_tx.clone()) {
+                match Self::subscribe(
+                    event,
+                    self.events_tx.clone(),
+                    self.ignored.clone(),
+                    self.tx_store.clone(),
+                ) {
                     Ok(()) => {
                         self.subscribed.insert(event);
                         debug!("subscribed to event {}", event);
@@ -87,11 +164,28 @@ impl WindowNotify {
             Request::UpdateWindowNotifications(window_ids) => {
                 window_notify::update_window_notifications(&window_ids);
             }
+            Request::IgnoreWindowEvent(event, wsid) => {
+                let cur = self.ignored.load();
+                let next = cur.with_added(event, wsid);
+                self.ignored.store(next);
+                debug!(?event, ?wsid, "Ignoring event for window-server id");
+            }
+            Request::UnignoreWindowEvent(event, wsid) => {
+                let cur = self.ignored.load();
+                let next = cur.with_removed(event, wsid);
+                self.ignored.store(next);
+                debug!(?event, ?wsid, "Stopped ignoring event for window-server id");
+            }
             Request::Stop => {}
         }
     }
 
-    fn subscribe(event: CGSEventType, events_tx: reactor::Sender) -> Result<(), i32> {
+    fn subscribe(
+        event: CGSEventType,
+        events_tx: reactor::Sender,
+        ignored: Arc<SwapArc<Ignored>>,
+        tx_store: Option<WindowTxStore>,
+    ) -> Result<(), i32> {
         let res = window_notify::init(event);
         if res != 0 {
             return Err(res);
@@ -100,26 +194,47 @@ impl WindowNotify {
         let mut rx = window_notify::take_receiver(event);
 
         std::thread::spawn(move || {
-            loop {
-                match rx.blocking_recv() {
-                    Some((_span, evt)) => {
-                        if let Some(window_id) = evt.window_id {
-                            match event {
-                                CGSEventType::Known(KnownCGSEvent::SpaceWindowDestroyed) => {
-                                    events_tx.send(Event::WindowServerDestroyed(
-                                        WindowServerId::new(window_id),
-                                    ))
-                                }
-
-                                CGSEventType::Known(KnownCGSEvent::SpaceWindowCreated) => events_tx
-                                    .send(Event::WindowServerAppeared(WindowServerId::new(
-                                        window_id,
-                                    ))),
-                                _ => {}
-                            }
-                        }
+            while let Some((_span, evt)) = rx.blocking_recv() {
+                if let Some(window_id) = evt.window_id {
+                    if ignored.load().is_ignored(event, window_id) {
+                        continue;
                     }
-                    None => break,
+
+                    match event {
+                        CGSEventType::Known(KnownCGSEvent::SpaceWindowDestroyed) => events_tx
+                            .send(Event::WindowServerDestroyed(WindowServerId::new(window_id))),
+                        CGSEventType::Known(KnownCGSEvent::SpaceWindowCreated) => events_tx
+                            .send(Event::WindowServerAppeared(WindowServerId::new(window_id))),
+                        CGSEventType::Known(KnownCGSEvent::WindowMoved)
+                        | CGSEventType::Known(KnownCGSEvent::WindowResized) => {
+                            let mouse_state = event::get_mouse_state();
+                            let wsid = WindowServerId::new(window_id);
+                            if let Some(query) = WindowQuery::new(&[wsid]) {
+                                if !query.advance() {
+                                    continue;
+                                }
+                                let bounds = query.bounds();
+                                let pid = query.pid();
+                                if let Some(idx) = NonZeroU32::new(window_id) {
+                                    let last_seen = tx_store
+                                        .as_ref()
+                                        .and_then(|store| store.get(&wsid))
+                                        .map(|record| record.txid);
+                                    events_tx.send(Event::WindowFrameChanged(
+                                        WindowId { idx, pid },
+                                        bounds,
+                                        last_seen,
+                                        Requested(false),
+                                        Some(mouse_state),
+                                    ));
+                                }
+                            };
+                        }
+                        CGSEventType::Known(KnownCGSEvent::FrontmostApplicationChanged) => {
+                            println!("{:?} frontmost changed", evt)
+                        }
+                        _ => {}
+                    }
                 }
             }
         });

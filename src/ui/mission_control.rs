@@ -2,8 +2,7 @@ use core::ffi::c_void;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crossbeam_channel::{Sender, unbounded};
 use dispatchr::queue;
@@ -98,7 +97,11 @@ static CAPTURE_POOL: Lazy<CapturePool> = Lazy::new(|| {
                     if let Some(mut set) = IN_FLIGHT.try_lock() {
                         set.remove(&(job.generation, job.task.window_id));
                     }
-                    schedule_overlay_refresh(job.overlay_ptr_bits);
+                    if let Some(overlay) =
+                        unsafe { (job.overlay_ptr_bits as *const MissionControlOverlay).as_ref() }
+                    {
+                        overlay.request_refresh();
+                    }
                 } else {
                     if let Some(mut set) = IN_FLIGHT.try_lock() {
                         set.remove(&(job.generation, job.task.window_id));
@@ -111,22 +114,13 @@ static CAPTURE_POOL: Lazy<CapturePool> = Lazy::new(|| {
     CapturePool { sender: tx }
 });
 
-extern "C" fn overlay_refresh_callback(ctx: *mut c_void) {
+extern "C" fn refresh_coalesced_cb(ctx: *mut c_void) {
     if ctx.is_null() {
         return;
     }
-    unsafe {
-        let overlay = &*(ctx as *const MissionControlOverlay);
-        overlay.refresh_previews();
-    }
-}
-
-fn schedule_overlay_refresh(ptr_bits: usize) {
-    if ptr_bits == 0 {
-        return;
-    }
-    let ctx = ptr_bits as *mut c_void;
-    queue::main().after_f(Time::NOW, ctx, overlay_refresh_callback);
+    let overlay = unsafe { &*(ctx as *const MissionControlOverlay) };
+    overlay.refresh_pending.store(false, Ordering::Release);
+    overlay.refresh_previews();
 }
 
 struct FadeCompletionCtx {
@@ -1324,7 +1318,11 @@ impl MissionControlOverlay {
                     if let Ok(mut st) = state_cell.try_borrow_mut() {
                         st.ready_previews.insert(task.window_id);
                     }
-                    schedule_overlay_refresh(overlay_ptr_bits);
+                    if let Some(overlay) =
+                        unsafe { (overlay_ptr_bits as *const MissionControlOverlay).as_ref() }
+                    {
+                        overlay.request_refresh();
+                    }
                 }
                 None => {
                     let mut set = IN_FLIGHT.lock();
@@ -1481,6 +1479,7 @@ pub struct MissionControlOverlay {
     fade_state: RefCell<Option<FadeState>>,
     fade_counter: AtomicU64,
     pending_hide: RefCell<bool>,
+    refresh_pending: AtomicBool,
 }
 
 impl MissionControlOverlay {
@@ -1508,6 +1507,18 @@ impl MissionControlOverlay {
             fade_state: RefCell::new(None),
             fade_counter: AtomicU64::new(0),
             pending_hide: RefCell::new(false),
+            refresh_pending: AtomicBool::new(false),
+        }
+    }
+
+    fn request_refresh(&self) {
+        if !self.refresh_pending.swap(true, Ordering::AcqRel) {
+            let ptr = self as *const _ as usize;
+            queue::main().after_f(
+                Time::new_after(Time::NOW, 8000000),
+                ptr as *mut c_void,
+                refresh_coalesced_cb,
+            );
         }
     }
 

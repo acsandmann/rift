@@ -76,7 +76,7 @@ pub fn replay(
     let config = ron::de::from_str(&lines.next().expect("Empty restore file")?)?;
     let layout = ron::de::from_str(&lines.next().expect("Expected layout line")?)?;
     let (broadcast_tx, _) = actor::channel();
-    let mut reactor = Reactor::new(config, layout, Record::new(None), broadcast_tx);
+    let mut reactor = Reactor::new(config, layout, Record::new(None), broadcast_tx, None);
     std::thread::spawn(move || {
         while let Some((span, request)) = rx.blocking_recv() {
             let _ = span.enter();

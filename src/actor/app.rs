@@ -252,15 +252,15 @@ const APP_NOTIFICATIONS: &[&str] = &[
 
 const WINDOW_NOTIFICATIONS: &[&str] = &[
     kAXUIElementDestroyedNotification,
-    kAXWindowMovedNotification,
-    kAXWindowResizedNotification,
+    // kAXWindowMovedNotification,
+    // kAXWindowResizedNotification,
     kAXWindowMiniaturizedNotification,
     kAXWindowDeminiaturizedNotification,
     kAXTitleChangedNotification,
 ];
 
-const WINDOW_ANIMATION_NOTIFICATIONS: &[&str] =
-    &[kAXWindowMovedNotification, kAXWindowResizedNotification];
+const WINDOW_ANIMATION_NOTIFICATIONS: &[&str] = &[];
+//&[kAXWindowMovedNotification, kAXWindowResizedNotification];
 
 impl State {
     async fn run(
@@ -466,7 +466,7 @@ impl State {
                 self.send_event(Event::WindowFrameChanged(
                     wid,
                     frame,
-                    txid,
+                    Some(txid),
                     Requested(true),
                     None,
                 ));
@@ -531,7 +531,7 @@ impl State {
                 self.send_event(Event::WindowFrameChanged(
                     wid,
                     frame,
-                    txid,
+                    Some(txid),
                     Requested(true),
                     None,
                 ));
@@ -586,7 +586,7 @@ impl State {
                             self.send_event(Event::WindowFrameChanged(
                                 *wid,
                                 frame,
-                                txid,
+                                Some(txid),
                                 Requested(true),
                                 None,
                             ));
@@ -623,7 +623,7 @@ impl State {
                 self.send_event(Event::WindowFrameChanged(
                     wid,
                     frame,
-                    last_seen_txid,
+                    Some(last_seen_txid),
                     Requested(true),
                     None,
                 ));
@@ -697,7 +697,7 @@ impl State {
                 self.send_event(Event::WindowFrameChanged(
                     wid,
                     frame,
-                    last_seen,
+                    Some(last_seen),
                     Requested(false),
                     Some(event::get_mouse_state()),
                 ));

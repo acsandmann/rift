@@ -18,6 +18,7 @@ use rift_wm::common::log;
 use rift_wm::common::util::execute_startup_commands;
 use rift_wm::ipc;
 use rift_wm::layout_engine::LayoutEngine;
+use rift_wm::model::tx_store::WindowTxStore;
 use rift_wm::sys::accessibility::ensure_accessibility_permission;
 use rift_wm::sys::executor::Executor;
 use rift_wm::sys::screen::CoordinateConverter;
@@ -108,6 +109,8 @@ fn main() {
     let (mouse_tx, mouse_rx) = rift_wm::actor::channel();
     let (menu_tx, menu_rx) = rift_wm::actor::channel();
     let (stack_line_tx, stack_line_rx) = rift_wm::actor::channel();
+    let (wnd_tx, wnd_rx) = rift_wm::actor::channel();
+    let window_tx_store = WindowTxStore::new();
     let events_tx = Reactor::spawn(
         config.clone(),
         layout,
@@ -116,17 +119,24 @@ fn main() {
         broadcast_tx.clone(),
         menu_tx.clone(),
         stack_line_tx.clone(),
+        Some((wnd_tx.clone(), window_tx_store.clone())),
     );
 
     let config_tx = ConfigActor::spawn(config.clone(), events_tx.clone());
 
     ConfigWatcher::spawn(config_tx.clone(), config.clone());
 
-    let (_wnd_tx, wnd_rx) = rift_wm::actor::channel();
-    let wn_actor = window_notify_actor::WindowNotify::new(events_tx.clone(), wnd_rx, &[
-        CGSEventType::Known(KnownCGSEvent::SpaceWindowDestroyed),
-        CGSEventType::Known(KnownCGSEvent::SpaceWindowCreated),
-    ]);
+    let wn_actor = window_notify_actor::WindowNotify::new(
+        events_tx.clone(),
+        wnd_rx,
+        &[
+            CGSEventType::Known(KnownCGSEvent::SpaceWindowDestroyed),
+            CGSEventType::Known(KnownCGSEvent::SpaceWindowCreated),
+            CGSEventType::Known(KnownCGSEvent::WindowMoved),
+            CGSEventType::Known(KnownCGSEvent::WindowResized),
+        ],
+        Some(window_tx_store.clone()),
+    );
 
     let events_tx_mach = events_tx.clone();
     let server_state = ipc::run_mach_server(events_tx_mach, config_tx.clone());

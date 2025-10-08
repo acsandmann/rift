@@ -21,7 +21,7 @@ impl Reactor {
         config.settings.animate = false;
         let record = Record::new_for_test(tempfile::NamedTempFile::new().unwrap());
         let (broadcast_tx, _) = actor::channel();
-        Reactor::new(config, layout, record, broadcast_tx)
+        Reactor::new(config, layout, record, broadcast_tx, None)
     }
 
     pub fn handle_events(&mut self, events: Vec<Event>) {
@@ -200,7 +200,7 @@ impl Apps {
                         events.push(Event::WindowFrameChanged(
                             wid,
                             frame,
-                            txid,
+                            Some(txid),
                             Requested(true),
                             None,
                         ));
@@ -216,7 +216,7 @@ impl Apps {
                             events.push(Event::WindowFrameChanged(
                                 wid,
                                 frame,
-                                txid,
+                                Some(txid),
                                 Requested(true),
                                 None,
                             ));
@@ -232,7 +232,7 @@ impl Apps {
                         events.push(Event::WindowFrameChanged(
                             wid,
                             window.frame,
-                            txid,
+                            Some(txid),
                             Requested(true),
                             None,
                         ));
@@ -247,7 +247,7 @@ impl Apps {
                     events.push(Event::WindowFrameChanged(
                         wid,
                         window.frame,
-                        window.last_seen_txid,
+                        Some(window.last_seen_txid),
                         Requested(true),
                         None,
                     ));

@@ -168,6 +168,8 @@ unsafe extern "C" {
     pub fn CGSCopyManagedDisplaySpaces(cid: c_int) -> *mut NSArray;
     pub fn CGSManagedDisplayGetCurrentSpace(cid: c_int, uuid: *mut CFString) -> u64;
     pub fn CGSCopyBestManagedDisplayForRect(cid: c_int, rect: CGRect) -> *mut CFString;
+    pub fn CGDisplayCreateUUIDFromDisplayID(did: u32) -> *mut CFType;
+    pub fn CFUUIDCreateString(allocator: *mut c_void, uuid: *mut CFType) -> *mut CFString;
 
     pub fn SLSMainConnectionID() -> cid_t;
     pub fn SLSDisableUpdate(cid: cid_t) -> i32;
@@ -177,6 +179,7 @@ unsafe extern "C" {
         wid: u32,
         mode: u32,
     ) -> CGError;
+    pub fn _SLPSGetFrontProcess(psn: *mut ProcessSerialNumber) -> CGError;
     pub fn SLPSPostEventRecordTo(psn: *const ProcessSerialNumber, bytes: *const u8) -> CGError;
     pub fn SLSFindWindowAndOwner(
         cid: c_int,
@@ -188,6 +191,7 @@ unsafe extern "C" {
         wid: *mut u32,
         wcid: *mut c_int,
     ) -> i32;
+    pub fn SLSGetCurrentCursorLocation(cid: cid_t, point: *mut CGPoint) -> CGError;
     pub fn SLSWindowIsOrderedIn(cid: cid_t, wid: u32, ordered: *mut u8) -> CGError;
     pub fn SLSRegisterConnectionNotifyProc(
         cid: cid_t,
@@ -213,6 +217,8 @@ unsafe extern "C" {
         set_tags: *mut u64,
         clear_tags: *mut u64,
     ) -> *mut CFArray<CFNumber>;
+    pub fn SLSManagedDisplayGetCurrentSpace(cid: cid_t, uuid: *mut CFString) -> u64;
+    pub fn SLSCopyActiveMenuBarDisplayIdentifier(cid: cid_t) -> *mut CFString;
 
     pub fn SLSWindowQueryWindows(
         cid: c_int,
@@ -274,6 +280,7 @@ unsafe extern "C" {
         radius: c_int,
         style: c_int,
     ) -> CGError;
+    pub fn SLSSetWindowBackgroundBlurRadius(cid: cid_t, wid: u32, radius: c_int) -> CGError;
     pub fn SLSSetWindowLevel(cid: cid_t, wid: u32, level: c_int) -> CGError;
     pub fn SLSSetWindowSubLevel(cid: cid_t, wid: u32, sub_level: c_int) -> CGError;
     pub fn SLSSetWindowOpacity(cid: cid_t, wid: u32, opaque: bool) -> CGError;

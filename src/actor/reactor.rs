@@ -30,6 +30,7 @@ use crate::common::collections::{BTreeMap, HashMap, HashSet};
 use crate::common::config::Config;
 use crate::common::log::{self, MetricsCommand};
 use crate::layout_engine::{self as layout, Direction, LayoutCommand, LayoutEngine, LayoutEvent};
+use crate::model::tx_store::WindowTxStore;
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt, Round, SameAs};
@@ -117,7 +118,7 @@ pub enum Event {
     WindowFrameChanged(
         WindowId,
         #[serde(with = "CGRectDef")] CGRect,
-        TransactionId,
+        Option<TransactionId>,
         Requested,
         Option<MouseState>,
     ),
@@ -245,6 +246,9 @@ pub struct Reactor {
     menu_open_depth: usize,
     mission_control_active: bool,
     suppress_stale_window_cleanup: bool,
+    pending_refocus_space: Option<SpaceId>,
+    window_notify_tx: Option<crate::actor::window_notify::Sender>,
+    window_tx_store: Option<WindowTxStore>,
 }
 
 #[derive(Debug)]
@@ -322,13 +326,15 @@ impl Reactor {
         broadcast_tx: BroadcastSender,
         menu_tx: menu_bar::Sender,
         stack_line_tx: stack_line::Sender,
+        window_notify: Option<(crate::actor::window_notify::Sender, WindowTxStore)>,
     ) -> Sender {
         let (events_tx, events) = actor::channel();
         let events_tx_clone = events_tx.clone();
         thread::Builder::new()
             .name("reactor".to_string())
             .spawn(move || {
-                let mut reactor = Reactor::new(config, layout_engine, record, broadcast_tx);
+                let mut reactor =
+                    Reactor::new(config, layout_engine, record, broadcast_tx, window_notify);
                 reactor.mouse_tx.replace(mouse_tx);
                 reactor.menu_tx.replace(menu_tx);
                 reactor.stack_line_tx.replace(stack_line_tx);
@@ -343,10 +349,15 @@ impl Reactor {
         layout_engine: LayoutEngine,
         mut record: Record,
         broadcast_tx: BroadcastSender,
+        window_notify: Option<(crate::actor::window_notify::Sender, WindowTxStore)>,
     ) -> Reactor {
         // FIXME: Remove apps that are no longer running from restored state.
         record.start(&config, &layout_engine);
         let (raise_manager_tx, _rx) = actor::channel();
+        let (window_notify_tx, window_tx_store) = match window_notify {
+            Some((tx, store)) => (Some(tx), Some(store)),
+            None => (None, None),
+        };
         Reactor {
             config,
             apps: HashMap::default(),
@@ -355,6 +366,7 @@ impl Reactor {
             window_ids: HashMap::default(),
             window_server_info: HashMap::default(),
             visible_windows: HashSet::default(),
+            observed_window_server_ids: HashSet::default(),
             screens: vec![],
             main_window_tracker: MainWindowTracker::default(),
             in_drag: false,
@@ -370,10 +382,33 @@ impl Reactor {
             app_rules_recently_applied: std::time::Instant::now(),
             last_auto_workspace_switch: None,
             last_sls_notification_ids: Vec::new(),
-            observed_window_server_ids: HashSet::default(),
             menu_open_depth: 0,
             mission_control_active: false,
             suppress_stale_window_cleanup: false,
+            pending_refocus_space: None,
+            window_notify_tx,
+            window_tx_store,
+        }
+    }
+
+    fn store_txid(&self, wsid: Option<WindowServerId>, txid: TransactionId, target: CGRect) {
+        if let (Some(store), Some(id)) = (self.window_tx_store.as_ref(), wsid) {
+            store.insert(id, txid, target);
+        }
+    }
+
+    fn update_txid_entries<I>(&self, entries: I)
+    where I: IntoIterator<Item = (WindowServerId, TransactionId, CGRect)> {
+        if let Some(store) = self.window_tx_store.as_ref() {
+            for (wsid, txid, target) in entries {
+                store.insert(wsid, txid, target);
+            }
+        }
+    }
+
+    fn remove_txid_for_window(&self, wsid: Option<WindowServerId>) {
+        if let (Some(store), Some(id)) = (self.window_tx_store.as_ref(), wsid) {
+            store.remove(&id);
         }
     }
 
@@ -488,7 +523,13 @@ impl Reactor {
                     self.observed_window_server_ids.remove(&wsid);
                 }
                 let frame = window.frame;
-                self.windows.insert(wid, window.into());
+                let window_state: WindowState = window.into();
+                self.store_txid(
+                    window_state.window_server_id,
+                    window_state.last_sent_txid,
+                    window_state.frame_monotonic,
+                );
+                self.windows.insert(wid, window_state);
 
                 if let Some(info) = ws_info {
                     self.observed_window_server_ids.remove(&info.id);
@@ -508,6 +549,7 @@ impl Reactor {
             }
             Event::WindowDestroyed(wid) => {
                 let window_server_id = self.windows.get(&wid).and_then(|w| w.window_server_id);
+                self.remove_txid_for_window(window_server_id);
                 if let Some(ws_id) = window_server_id {
                     self.window_ids.remove(&ws_id);
                     self.window_server_info.remove(&ws_id);
@@ -582,17 +624,62 @@ impl Reactor {
             }
             Event::WindowFrameChanged(wid, new_frame, last_seen, requested, mouse_state) => {
                 if let Some(window) = self.windows.get_mut(&wid) {
-                    if last_seen != window.last_sent_txid {
+                    let triggered_by_rift =
+                        last_seen.is_some_and(|seen| seen == window.last_sent_txid);
+                    if let Some(last_seen) = last_seen
+                        && last_seen != window.last_sent_txid
+                    {
                         // Ignore events that happened before the last time we
                         // changed the size or position of this window. Otherwise
                         // we would update the layout model incorrectly.
-                        debug!(?last_seen, ?window.last_sent_txid, "Ignoring resize");
+                        debug!(?last_seen, ?window.last_sent_txid, "Ignoring frame change");
                         return;
                     }
                     if requested.0 {
                         // TODO: If the size is different from requested, applying a
                         // correction to the model can result in weird feedback
                         // loops, so we ignore these for now.
+                        return;
+                    }
+                    if triggered_by_rift {
+                        if let Some(store) = self.window_tx_store.as_ref()
+                            && let Some(wsid) = window.window_server_id
+                        {
+                            if let Some(record) = store.get(&wsid) {
+                                if new_frame.same_as(record.target) {
+                                    if !window.frame_monotonic.same_as(new_frame) {
+                                        debug!(
+                                            ?wid,
+                                            ?new_frame,
+                                            "Final frame matches Rift request"
+                                        );
+                                        window.frame_monotonic = new_frame;
+                                    }
+                                    store.remove(&wsid);
+                                } else {
+                                    trace!(
+                                        ?wid,
+                                        ?new_frame,
+                                        ?record.target,
+                                        "Skipping intermediate frame from Rift request"
+                                    );
+                                }
+                            } else if !window.frame_monotonic.same_as(new_frame) {
+                                debug!(
+                                    ?wid,
+                                    ?new_frame,
+                                    "Rift frame event missing tx record; updating state"
+                                );
+                                window.frame_monotonic = new_frame;
+                            }
+                        } else if !window.frame_monotonic.same_as(new_frame) {
+                            debug!(
+                                ?wid,
+                                ?new_frame,
+                                "Rift frame event without store; updating state"
+                            );
+                            window.frame_monotonic = new_frame;
+                        }
                         return;
                     }
                     let old_frame = mem::replace(&mut window.frame_monotonic, new_frame);
@@ -1052,9 +1139,6 @@ impl Reactor {
         let mut layout_changed = false;
         if !self.in_drag || window_was_destroyed {
             layout_changed = self.update_layout(is_resize, self.is_workspace_switch);
-        }
-
-        if !self.in_drag || window_was_destroyed {
             self.maybe_send_menu_update();
         }
 
@@ -1355,7 +1439,10 @@ impl Reactor {
 
         let known_visible_set: HashSet<WindowId> = known_visible.into_iter().collect();
 
-        let stale_windows: Vec<WindowId> = if self.suppress_stale_window_cleanup {
+        let skip_stale_cleanup = self.suppress_stale_window_cleanup
+            || (known_visible_set.is_empty() && !self.has_visible_window_server_ids_for_pid(pid));
+
+        let stale_windows: Vec<WindowId> = if skip_stale_cleanup {
             Vec::new()
         } else {
             self.windows
@@ -1370,7 +1457,11 @@ impl Reactor {
                     }
 
                     let Some(ws_id) = state.window_server_id else {
-                        return Some(wid);
+                        trace!(
+                            ?wid,
+                            "Skipping stale cleanup for window without window server id"
+                        );
+                        return None;
                     };
 
                     let server_info = self
@@ -1381,7 +1472,14 @@ impl Reactor {
 
                     let info = match server_info {
                         Some(info) => info,
-                        None => return Some(wid),
+                        None => {
+                            trace!(
+                                ?wid,
+                                ws_id = ?ws_id,
+                                "Skipping stale cleanup for window without server info"
+                            );
+                            return None;
+                        }
                     };
 
                     let width = info.frame.size.width.abs();
@@ -1527,6 +1625,12 @@ impl Reactor {
         self.visible_spaces().into_iter().map(|sid| sid.get()).collect()
     }
 
+    fn has_visible_window_server_ids_for_pid(&self, pid: pid_t) -> bool {
+        self.visible_windows
+            .iter()
+            .any(|wsid| self.window_ids.get(wsid).map_or(false, |wid| wid.pid == pid))
+    }
+
     fn expose_all_spaces(&mut self) {
         let screens = self.screens.clone();
         for screen in screens {
@@ -1558,7 +1662,9 @@ impl Reactor {
     }
 
     fn send_layout_event(&mut self, event: LayoutEvent) {
+        let event_clone = event.clone();
         let response = self.layout_engine.handle_event(event);
+        self.prepare_refocus_after_layout_event(&event_clone);
         self.handle_layout_response(response);
         for space in self.screens.iter().flat_map(|screen| screen.space) {
             self.layout_engine.debug_tree_desc(space, "after event", false);
@@ -1676,6 +1782,14 @@ impl Reactor {
 
         use crate::sys::app::NSRunningApplicationExt;
 
+        if self.active_workspace_switch.is_some() {
+            trace!(
+                "Skipping auto workspace switch for pid {} because a workspace switch is in progress",
+                pid
+            );
+            return;
+        }
+
         let visible_spaces: HashSet<SpaceId> =
             self.screens.iter().filter_map(|s| s.space).collect();
         let app_is_on_visible_workspace = self.windows.iter().any(|(wid, window_state)| {
@@ -1774,7 +1888,43 @@ impl Reactor {
     }
 
     fn handle_layout_response(&mut self, response: layout::EventResponse) {
-        let layout::EventResponse { raise_windows, focus_window } = response;
+        let mut pending_refocus_space = self.pending_refocus_space.take();
+        let layout::EventResponse {
+            raise_windows,
+            mut focus_window,
+        } = response;
+
+        let mut handled_without_raise = false;
+
+        if raise_windows.is_empty() && focus_window.is_none() {
+            if self.is_workspace_switch {
+                if let Some(wid) = self.window_id_under_cursor() {
+                    focus_window = Some(wid);
+                } else if self.focus_untracked_window_under_cursor() {
+                    handled_without_raise = true;
+                }
+            } else if let Some(space) = pending_refocus_space.take() {
+                if let Some(wid) = self.last_focused_window_in_space(space) {
+                    focus_window = Some(wid);
+                } else if let Some(wid) = self.window_id_under_cursor() {
+                    focus_window = Some(wid);
+                } else if self.focus_untracked_window_under_cursor() {
+                    handled_without_raise = true;
+                }
+            }
+        }
+
+        if handled_without_raise && raise_windows.is_empty() && focus_window.is_none() {
+            self.is_workspace_switch = false;
+            return;
+        }
+
+        if let Some(space) = pending_refocus_space {
+            // Preserve the pending refocus request if it was not consumed above.
+            if self.pending_refocus_space.is_none() {
+                self.pending_refocus_space = Some(space);
+            }
+        }
 
         if raise_windows.is_empty() && focus_window.is_none() && !self.is_workspace_switch {
             return;
@@ -1811,6 +1961,77 @@ impl Reactor {
         });
 
         _ = self.raise_manager_tx.send(msg);
+    }
+
+    fn window_id_under_cursor(&self) -> Option<WindowId> {
+        let wsid = window_server::window_under_cursor()?;
+        self.window_ids.get(&wsid).copied()
+    }
+
+    fn focus_untracked_window_under_cursor(&mut self) -> bool {
+        let Some(wsid) = window_server::window_under_cursor() else {
+            return false;
+        };
+        if self.window_ids.contains_key(&wsid) {
+            return false;
+        }
+
+        let window_info = self
+            .window_server_info
+            .get(&wsid)
+            .copied()
+            .or_else(|| window_server::get_window(wsid));
+
+        let Some(info) = window_info else { return false };
+        window_server::make_key_window(info.pid, wsid).is_ok()
+    }
+
+    fn last_focused_window_in_space(&self, space: SpaceId) -> Option<WindowId> {
+        let active_workspace = self.layout_engine.active_workspace(space)?;
+        self.layout_engine
+            .virtual_workspace_manager()
+            .last_focused_window(space, active_workspace)
+            .filter(|wid| self.windows.contains_key(wid))
+    }
+
+    fn request_refocus_if_hidden(&mut self, space: SpaceId, window_id: WindowId) {
+        let Some(active_workspace) = self.layout_engine.active_workspace(space) else {
+            return;
+        };
+        let Some(window_workspace) = self
+            .layout_engine
+            .virtual_workspace_manager()
+            .workspace_for_window(space, window_id)
+        else {
+            return;
+        };
+
+        if window_workspace != active_workspace {
+            self.pending_refocus_space = Some(space);
+        }
+    }
+
+    fn prepare_refocus_after_layout_event(&mut self, event: &LayoutEvent) {
+        match event {
+            LayoutEvent::WindowAdded(space, wid) => {
+                self.request_refocus_if_hidden(*space, *wid);
+            }
+            LayoutEvent::WindowsOnScreenUpdated(space, _, windows, _) => {
+                let Some(active_workspace) = self.layout_engine.active_workspace(*space) else {
+                    return;
+                };
+                let manager = self.layout_engine.virtual_workspace_manager();
+                let hidden_exists = windows.iter().any(|(wid, _, _, _)| {
+                    manager
+                        .workspace_for_window(*space, *wid)
+                        .map_or(false, |workspace_id| workspace_id != active_workspace)
+                });
+                if hidden_exists {
+                    self.pending_refocus_space = Some(*space);
+                }
+            }
+            _ => {}
+        }
     }
 
     #[instrument(skip(self))]
@@ -1963,18 +2184,29 @@ impl Reactor {
 
                     let handle = app_state.handle.clone();
 
-                    let first_wid = frames[0].0;
-                    let txid = if let Some(window) = self.windows.get_mut(&first_wid) {
-                        let tx = window.next_txid();
-                        for (wid, _) in frames.iter().skip(1) {
+                    let (first_wid, first_target) = frames[0];
+                    let mut txid = TransactionId::default();
+                    let mut has_txid = false;
+                    let mut txid_entries: Vec<(WindowServerId, TransactionId, CGRect)> = Vec::new();
+                    if let Some(window) = self.windows.get_mut(&first_wid) {
+                        txid = window.next_txid();
+                        has_txid = true;
+                        if let Some(wsid) = window.window_server_id {
+                            txid_entries.push((wsid, txid, first_target));
+                        }
+                    }
+
+                    if has_txid {
+                        for (wid, frame) in frames.iter().skip(1) {
                             if let Some(w) = self.windows.get_mut(wid) {
-                                w.last_sent_txid = tx;
+                                w.last_sent_txid = txid;
+                                if let Some(wsid) = w.window_server_id {
+                                    txid_entries.push((wsid, txid, *frame));
+                                }
                             }
                         }
-                        tx
-                    } else {
-                        TransactionId::default()
-                    };
+                        self.update_txid_entries(txid_entries);
+                    }
 
                     let frames_to_send = frames.clone();
                     if let Err(e) = handle.send(Request::SetBatchWindowFrame(frames_to_send, txid))
@@ -1987,9 +2219,9 @@ impl Reactor {
                         continue;
                     }
 
-                    for (wid, target_frame) in frames {
-                        if let Some(window) = self.windows.get_mut(&wid) {
-                            window.frame_monotonic = target_frame;
+                    for (wid, target_frame) in &frames {
+                        if let Some(window) = self.windows.get_mut(wid) {
+                            window.frame_monotonic = *target_frame;
                         }
                     }
                 }
@@ -2002,21 +2234,30 @@ impl Reactor {
                     );
                     let mut animated_count = 0;
 
+                    let mut animated_wids_wsids: Vec<u32> = Vec::new();
                     for &(wid, target_frame) in &layout {
                         let target_frame = target_frame.round();
-                        let Some(window) = self.windows.get_mut(&wid) else {
-                            debug!(?wid, "Skipping - window no longer exists");
-                            continue;
-                        };
-                        let current_frame = window.frame_monotonic;
-                        if target_frame.same_as(current_frame) {
-                            continue;
-                        }
+                        let (current_frame, window_server_id, txid) =
+                            match self.windows.get_mut(&wid) {
+                                Some(window) => {
+                                    let current_frame = window.frame_monotonic;
+                                    if target_frame.same_as(current_frame) {
+                                        continue;
+                                    }
+                                    let txid = window.next_txid();
+                                    let wsid = window.window_server_id;
+                                    (current_frame, wsid, txid)
+                                }
+                                None => {
+                                    debug!(?wid, "Skipping - window no longer exists");
+                                    continue;
+                                }
+                            };
+
                         let Some(app_state) = &self.apps.get(&wid.pid) else {
                             debug!(?wid, "Skipping for window - app no longer exists");
                             continue;
                         };
-                        let txid = window.next_txid();
 
                         let is_active = self
                             .layout_engine
@@ -2026,22 +2267,7 @@ impl Reactor {
 
                         if is_active {
                             trace!(?wid, ?current_frame, ?target_frame, "Animating visible window");
-                            /*let pid = wid.pid;
-                            let heavy = match (&window.bundle_id, &window.bundle_path) {
-                                (Some(bundle_id), Some(bundle_path)) => {
-                                    is_heavy(pid, bundle_id, bundle_path)
-                                }
-                                _ => false,
-                            };
-                            anim.add_window(
-                                handle,
-                                wid,
-                                current_frame,
-                                target_frame,
-                                screen.frame,
-                                txid,
-                                heavy,
-                            );*/
+                            animated_wids_wsids.push(wid.idx.into());
                             anim.add_window(
                                 &app_state.handle,
                                 wid,
@@ -2051,6 +2277,9 @@ impl Reactor {
                                 txid,
                             );
                             animated_count += 1;
+                            if let Some(wsid) = window_server_id {
+                                self.update_txid_entries([(wsid, txid, target_frame)]);
+                            }
                         } else {
                             trace!(
                                 ?wid,
@@ -2058,6 +2287,9 @@ impl Reactor {
                                 ?target_frame,
                                 "Direct positioning hidden window"
                             );
+                            if let Some(wsid) = window_server_id {
+                                self.update_txid_entries([(wsid, txid, target_frame)]);
+                            }
                             if let Err(e) = app_state.handle.send(Request::SetWindowFrame(
                                 wid,
                                 target_frame,
@@ -2068,15 +2300,59 @@ impl Reactor {
                                 continue;
                             }
                         }
-                        window.frame_monotonic = target_frame;
+
+                        if let Some(window) = self.windows.get_mut(&wid) {
+                            window.frame_monotonic = target_frame;
+                        }
                     }
 
                     if animated_count > 0 {
+                        if let Some(tx) = &self.window_notify_tx {
+                            for wsid in &animated_wids_wsids {
+                                let _ = tx.send(
+                                    crate::actor::window_notify::Request::IgnoreWindowEvent(
+                                        crate::sys::skylight::CGSEventType::Known(
+                                            crate::sys::skylight::KnownCGSEvent::WindowMoved,
+                                        ),
+                                        *wsid,
+                                    ),
+                                );
+                                let _ = tx.send(
+                                    crate::actor::window_notify::Request::IgnoreWindowEvent(
+                                        crate::sys::skylight::CGSEventType::Known(
+                                            crate::sys::skylight::KnownCGSEvent::WindowResized,
+                                        ),
+                                        *wsid,
+                                    ),
+                                );
+                            }
+                        }
+
                         let low_power = power::is_low_power_mode_enabled();
                         if is_resize || !self.config.settings.animate || low_power {
                             anim.skip_to_end();
                         } else {
                             anim.run();
+                        }
+                        if let Some(tx) = &self.window_notify_tx {
+                            for wsid in &animated_wids_wsids {
+                                let _ = tx.send(
+                                    crate::actor::window_notify::Request::UnignoreWindowEvent(
+                                        crate::sys::skylight::CGSEventType::Known(
+                                            crate::sys::skylight::KnownCGSEvent::WindowMoved,
+                                        ),
+                                        *wsid,
+                                    ),
+                                );
+                                let _ = tx.send(
+                                    crate::actor::window_notify::Request::UnignoreWindowEvent(
+                                        crate::sys::skylight::CGSEventType::Known(
+                                            crate::sys::skylight::KnownCGSEvent::WindowResized,
+                                        ),
+                                        *wsid,
+                                    ),
+                                );
+                            }
                         }
                     }
                 }
@@ -2096,6 +2372,7 @@ pub mod tests {
     use super::*;
     use crate::actor::app::Request;
     use crate::layout_engine::{Direction, LayoutEngine};
+    use crate::sys::app::WindowInfo;
     use crate::sys::window_server::WindowServerId;
 
     #[test]
@@ -2510,6 +2787,80 @@ pub mod tests {
             ),
             modified
         );
+    }
+
+    #[test]
+    fn it_retains_windows_without_server_ids_after_login_visibility_failure() {
+        let mut apps = Apps::new();
+        let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+            &crate::common::config::VirtualWorkspaceSettings::default(),
+            &crate::common::config::LayoutSettings::default(),
+            None,
+        ));
+        let space = SpaceId::new(1);
+        let full_screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+        reactor.handle_event(Event::ScreenParametersChanged(
+            vec![full_screen],
+            vec![Some(space)],
+            vec![],
+        ));
+
+        let window = WindowInfo {
+            is_standard: true,
+            is_root: true,
+            is_minimized: false,
+            title: "NoServerId".to_string(),
+            frame: CGRect::new(CGPoint::new(50., 50.), CGSize::new(400., 400.)),
+            sys_id: None,
+            bundle_id: None,
+            path: None,
+            ax_role: None,
+            ax_subrole: None,
+        };
+
+        reactor.handle_events(apps.make_app_with_opts(
+            1,
+            vec![window],
+            Some(WindowId::new(1, 1)),
+            true,
+            false,
+        ));
+        apps.simulate_until_quiet(&mut reactor);
+
+        reactor.handle_event(Event::SpaceChanged(vec![None], vec![]));
+        reactor.handle_event(Event::SpaceChanged(vec![Some(space)], vec![]));
+
+        loop {
+            let requests = apps.requests();
+            if requests.is_empty() {
+                break;
+            }
+
+            let mut other_requests = Vec::new();
+            for request in requests {
+                match request {
+                    Request::GetVisibleWindows => {
+                        reactor.handle_event(Event::WindowsDiscovered {
+                            pid: 1,
+                            new: vec![],
+                            known_visible: vec![],
+                        });
+                    }
+                    req => other_requests.push(req),
+                }
+            }
+
+            if other_requests.is_empty() {
+                continue;
+            }
+
+            let events = apps.simulate_events_for_requests(other_requests);
+            for event in events {
+                reactor.handle_event(event);
+            }
+        }
+
+        assert!(reactor.windows.contains_key(&WindowId::new(1, 1)));
     }
 
     #[test]

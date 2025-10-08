@@ -61,20 +61,34 @@ impl From<WindowId> for WindowServerId {
 }
 
 #[inline]
-fn cf_array_from_ids(ids: &[WindowServerId]) -> CFRetained<CFArray<CFNumber>> {
+pub fn cf_array_from_ids(ids: &[WindowServerId]) -> CFRetained<CFArray<CFNumber>> {
     let nums: Vec<CFRetained<CFNumber>> =
         ids.iter().map(|w| CFNumber::new_i64(w.as_u32() as i64)).collect();
     CFArray::from_retained_objects(&nums)
 }
 
-struct WindowQuery {
+pub struct WindowQuery {
     query: *mut CFType,
     iter: *mut CFType,
 }
 
 impl WindowQuery {
+    pub fn new(ids: &[WindowServerId]) -> Option<Self> {
+        if ids.is_empty() {
+            return None;
+        }
+        let cf_numbers = cf_array_from_ids(ids);
+        Self::new_from_cfarray(
+            CFRetained::<CFArray<CFNumber>>::as_ptr(&cf_numbers).as_ptr(),
+            ids.len() as c_int,
+        )
+    }
+
     /// expected_count is a hint; keep whatever you used at call sites (0, 1, ids.len()).
-    fn new_from_cfarray(cf_numbers: *mut CFArray<CFNumber>, expected_count: c_int) -> Option<Self> {
+    pub fn new_from_cfarray(
+        cf_numbers: *mut CFArray<CFNumber>,
+        expected_count: c_int,
+    ) -> Option<Self> {
         let query = unsafe { SLSWindowQueryWindows(*G_CONNECTION, cf_numbers, expected_count) };
         if query.is_null() {
             return None;
@@ -88,33 +102,33 @@ impl WindowQuery {
     }
 
     #[inline]
-    fn count(&self) -> i32 { unsafe { SLSWindowIteratorGetCount(self.iter) } }
+    pub fn count(&self) -> i32 { unsafe { SLSWindowIteratorGetCount(self.iter) } }
 
     #[inline]
-    fn advance(&self) -> bool { unsafe { SLSWindowIteratorAdvance(self.iter) } }
+    pub fn advance(&self) -> bool { unsafe { SLSWindowIteratorAdvance(self.iter) } }
 
     #[inline]
-    fn window_id(&self) -> u32 { unsafe { SLSWindowIteratorGetWindowID(self.iter) } }
+    pub fn window_id(&self) -> u32 { unsafe { SLSWindowIteratorGetWindowID(self.iter) } }
 
     #[inline]
-    fn level(&self) -> i32 { unsafe { SLSWindowIteratorGetLevel(self.iter) } }
+    pub fn level(&self) -> i32 { unsafe { SLSWindowIteratorGetLevel(self.iter) } }
 
     #[inline]
-    fn pid(&self) -> i32 { unsafe { SLSWindowIteratorGetPID(self.iter) } }
+    pub fn pid(&self) -> i32 { unsafe { SLSWindowIteratorGetPID(self.iter) } }
 
     #[inline]
-    fn parent_id(&self) -> u32 { unsafe { SLSWindowIteratorGetParentID(self.iter) } }
+    pub fn parent_id(&self) -> u32 { unsafe { SLSWindowIteratorGetParentID(self.iter) } }
 
     #[inline]
-    fn bounds(&self) -> CGRect { unsafe { SLSWindowIteratorGetBounds(self.iter) } }
-
-    #[inline]
-    #[allow(dead_code)]
-    fn tags(&self) -> u64 { unsafe { SLSWindowIteratorGetTags(self.iter) } }
+    pub fn bounds(&self) -> CGRect { unsafe { SLSWindowIteratorGetBounds(self.iter) } }
 
     #[inline]
     #[allow(dead_code)]
-    fn attributes(&self) -> u64 { unsafe { SLSWindowIteratorGetAttributes(self.iter) } }
+    pub fn tags(&self) -> u64 { unsafe { SLSWindowIteratorGetTags(self.iter) } }
+
+    #[inline]
+    #[allow(dead_code)]
+    pub fn attributes(&self) -> u64 { unsafe { SLSWindowIteratorGetAttributes(self.iter) } }
 }
 
 impl Drop for WindowQuery {
@@ -302,6 +316,17 @@ pub fn get_window_at_point(mut point: CGPoint) -> Option<WindowServerId> {
     }
 }
 
+pub fn current_cursor_location() -> Result<CGPoint, CGError> {
+    let mut point = CGPoint::new(0.0, 0.0);
+    cg_ok(unsafe { SLSGetCurrentCursorLocation(*G_CONNECTION, &mut point) })?;
+    Ok(point)
+}
+
+pub fn window_under_cursor() -> Option<WindowServerId> {
+    let point = current_cursor_location().ok()?;
+    get_window_at_point(point)
+}
+
 pub fn window_level(wid: u32) -> Option<NSWindowLevel> {
     let cf = cf_array_from_ids(&[WindowServerId::new(wid)]);
 
@@ -426,6 +451,111 @@ pub fn app_window_suitable(id: WindowServerId) -> bool {
     } else {
         false
     }
+}
+
+pub fn get_front_window(cid: i32) -> u32 {
+    let mut wid: u32 = 0;
+
+    let active_sid: u64 = unsafe { CGSGetActiveSpace(cid) };
+
+    let mut psn = ProcessSerialNumber::default();
+    unsafe { _SLPSGetFrontProcess(&mut psn) };
+
+    let mut target_cid: i32 = 0;
+    unsafe {
+        SLSGetConnectionIDForPSN(cid, &psn, &mut target_cid);
+    }
+
+    let cf_numbers: Vec<CFRetained<CFNumber>> =
+        [active_sid].iter().map(|&sid| CFNumber::new_i64(sid as i64)).collect();
+    let cf_space_array = CFArray::from_retained_objects(&cf_numbers);
+
+    let mut set_tags: u64 = 1;
+    let mut clear_tags: u64 = 0;
+    let window_list_ref = unsafe {
+        SLSCopyWindowsWithOptionsAndTags(
+            cid,
+            target_cid as u32,
+            CFRetained::<CFArray<CFNumber>>::as_ptr(&cf_space_array).as_ptr(),
+            0x2,
+            &mut set_tags,
+            &mut clear_tags,
+        )
+    };
+
+    if window_list_ref.is_null() {
+        return 0;
+    }
+
+    let count = unsafe { (&*window_list_ref).len() as i32 };
+    if count > 0 {
+        let query = unsafe { SLSWindowQueryWindows(cid, window_list_ref, 0x0) };
+        if !query.is_null() {
+            let iterator = unsafe { SLSWindowQueryResultCopyWindows(query) };
+            if !iterator.is_null() && unsafe { SLSWindowIteratorGetCount(iterator) } > 0 {
+                while unsafe { SLSWindowIteratorAdvance(iterator) } {
+                    if iterator_window_suitable(iterator) {
+                        wid = unsafe { SLSWindowIteratorGetWindowID(iterator) };
+                        break;
+                    }
+                }
+            }
+            unsafe {
+                if !iterator.is_null() {
+                    CFRelease(iterator);
+                }
+                CFRelease(query);
+            }
+        }
+    }
+
+    unsafe { CFRelease(window_list_ref as *mut CFType) };
+
+    wid
+}
+
+pub fn window_space_id(cid: i32, wid: u32) -> u64 {
+    let mut sid: u64 = 0;
+
+    let cf_windows = CFArray::from_retained_objects(&[CFNumber::new_i64(wid as i64)]);
+
+    let space_list_ref = unsafe {
+        SLSCopySpacesForWindows(
+            cid,
+            0x7,
+            CFRetained::<CFArray<CFNumber>>::as_ptr(&cf_windows).as_ptr(),
+        )
+    };
+
+    if !space_list_ref.is_null() {
+        let spaces_cf: CFRetained<CFArray<CFNumber>> =
+            unsafe { CFRetained::from_raw(NonNull::new_unchecked(space_list_ref)) };
+        if spaces_cf.len() > 0 {
+            if let Some(id_ref) = spaces_cf.get(0) {
+                let n: &CFNumber = id_ref.as_ref();
+                if let Some(v) = n.as_i64() {
+                    sid = v as u64;
+                }
+            }
+        }
+    }
+
+    if sid != 0 {
+        return sid;
+    }
+
+    let mut frame = CGRect::default();
+    unsafe {
+        CGSGetWindowBounds(cid, wid, &mut frame);
+    }
+    let uuid = unsafe { CGSCopyBestManagedDisplayForRect(cid, frame) };
+    if !uuid.is_null() {
+        let s = unsafe { SLSManagedDisplayGetCurrentSpace(cid, uuid) };
+        unsafe { CFRelease(uuid as *mut CFType) };
+        return s;
+    }
+
+    0
 }
 
 #[derive(Clone)]

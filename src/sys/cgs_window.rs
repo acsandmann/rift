@@ -1,7 +1,7 @@
 use std::fmt;
 use std::ptr::{self, NonNull};
 
-use objc2_core_foundation::{CFNumber, CFRetained, CFString, CFType, CGRect};
+use objc2_core_foundation::{CFNumber, CFRetained, CFString, CFType, CGRect, Type};
 use objc2_core_graphics::CGError;
 
 use super::skylight::{
@@ -12,6 +12,7 @@ use super::skylight::{
     SLSSetWindowTags, cid_t,
 };
 use crate::sys::cg_ok;
+use crate::sys::skylight::SLSSetWindowBackgroundBlurRadius;
 
 type WindowId = u32;
 const TAG_BITSET_LEN: i32 = 64;
@@ -151,14 +152,13 @@ impl CgsWindow {
     }
 
     #[inline]
-    pub fn set_blur(&self, radius: i32, style: i32) -> Result<(), CgsWindowError> {
+    pub fn set_blur(&self, radius: i32, style: Option<i32>) -> Result<(), CgsWindowError> {
         unsafe {
-            cg_ok(SLSSetWindowBackgroundBlurRadiusStyle(
-                self.connection,
-                self.id,
-                radius,
-                style,
-            ))
+            cg_ok(if let Some(style) = style {
+                SLSSetWindowBackgroundBlurRadiusStyle(self.connection, self.id, radius, style)
+            } else {
+                SLSSetWindowBackgroundBlurRadius(self.connection, self.id, radius)
+            })
         }
         .map_err(CgsWindowError::Blur)
     }
@@ -254,6 +254,23 @@ impl CgsWindow {
             ))
         }
         .map_err(CgsWindowError::Level)
+    }
+
+    #[inline]
+    pub fn set_property<T: Type>(
+        &self,
+        key: CFRetained<CFString>,
+        value: CFRetained<T>,
+    ) -> Result<(), CgsWindowError> {
+        unsafe {
+            cg_ok(SLSSetWindowProperty(
+                self.connection,
+                self.id,
+                CFRetained::<CFString>::as_ptr(&key).as_ptr(),
+                CFRetained::<T>::as_ptr(&value).as_ptr() as *mut CFType,
+            ))
+            .map_err(CgsWindowError::Property)
+        }
     }
 }
 
