@@ -2,9 +2,9 @@ use std::ffi::{CString, c_void};
 use std::os::raw::c_char;
 use std::sync::Arc;
 
-use core_foundation::date::CFAbsoluteTimeGetCurrent;
-use core_foundation::runloop::{
-    CFRunLoop, CFRunLoopTimer, CFRunLoopTimerContext, CFRunLoopTimerRef, kCFRunLoopDefaultMode,
+use objc2_core_foundation::{
+    CFAbsoluteTimeGetCurrent, CFRetained, CFRunLoop, CFRunLoopTimer, CFRunLoopTimerContext,
+    kCFRunLoopDefaultMode,
 };
 use parking_lot::{Mutex, RwLock};
 use serde_json::Value;
@@ -22,10 +22,22 @@ pub struct CliSubscription {
     pub args: Vec<String>,
 }
 
+#[derive(Clone)]
+struct RunLoopHandle(CFRetained<CFRunLoop>);
+
+unsafe impl Send for RunLoopHandle {}
+unsafe impl Sync for RunLoopHandle {}
+
+impl RunLoopHandle {
+    fn new(runloop: CFRetained<CFRunLoop>) -> Self { Self(runloop) }
+
+    fn as_ref(&self) -> &CFRunLoop { &self.0 }
+}
+
 pub struct ServerState {
     subscriptions: Mutex<HashMap<ClientPort, Vec<String>>>,
     cli_subscriptions: Mutex<HashMap<String, Vec<CliSubscription>>>,
-    runloop: Mutex<Option<CFRunLoop>>,
+    runloop: Mutex<Option<RunLoopHandle>>,
 }
 
 pub type SharedServerState = Arc<RwLock<ServerState>>;
@@ -39,9 +51,9 @@ impl ServerState {
         }
     }
 
-    pub fn set_runloop(&self, rl: Option<CFRunLoop>) {
+    pub fn set_runloop(&self, rl: Option<CFRetained<CFRunLoop>>) {
         let mut guard = self.runloop.lock();
-        *guard = rl;
+        *guard = rl.map(RunLoopHandle::new);
     }
 
     pub fn subscribe_client(&self, client_port: ClientPort, event: String) {
@@ -142,8 +154,8 @@ impl ServerState {
                     rl_guard.clone()
                 };
 
-                if let Some(ref rl) = maybe_runloop {
-                    schedule_event_send(rl, client_port, event_json.clone());
+                if let Some(runloop) = maybe_runloop.as_ref() {
+                    schedule_event_send(runloop, client_port, event_json.clone());
                 } else {
                     Self::send_event_to_client(client_port, &event_json);
                 }
@@ -202,35 +214,65 @@ struct EventInfo {
     event_json: String,
 }
 
-extern "C" fn perform_send(_timer: CFRunLoopTimerRef, info: *mut c_void) {
-    let info = unsafe { Box::from_raw(info as *mut EventInfo) };
+unsafe extern "C-unwind" fn perform_send(_timer: *mut CFRunLoopTimer, info: *mut c_void) {
+    if info.is_null() {
+        return;
+    }
+
+    let info = unsafe { &*(info as *mut EventInfo) };
     ServerState::send_event_to_client(info.client_port, &info.event_json);
 }
 
-extern "C" fn release_info(info: *const c_void) {
+unsafe extern "C-unwind" fn release_info(info: *const c_void) {
+    if info.is_null() {
+        return;
+    }
+
     unsafe {
         drop(Box::from_raw(info as *mut EventInfo));
     }
 }
 
-fn schedule_event_send(runloop: &CFRunLoop, client_port: ClientPort, event_json: String) {
-    let info = Box::new(EventInfo { client_port, event_json });
+fn schedule_event_send(runloop: &RunLoopHandle, client_port: ClientPort, event_json: String) {
+    let info = Box::new(EventInfo {
+        client_port,
+        event_json: event_json.clone(),
+    });
+    let info_ptr = Box::into_raw(info);
 
     let mut context = CFRunLoopTimerContext {
         version: 0,
-        info: Box::into_raw(info) as *mut _,
+        info: info_ptr.cast(),
         retain: None,
         release: Some(release_info),
         copyDescription: None,
     };
 
-    let timer = CFRunLoopTimer::new(
-        unsafe { CFAbsoluteTimeGetCurrent() },
-        0.0,
-        0,
-        0,
-        perform_send,
-        &mut context,
-    );
-    runloop.add_timer(&timer, unsafe { kCFRunLoopDefaultMode });
+    let timer = unsafe {
+        CFRunLoopTimer::new(
+            None,
+            CFAbsoluteTimeGetCurrent(),
+            0.0,
+            0,
+            0,
+            Some(perform_send),
+            &mut context,
+        )
+    };
+
+    let Some(timer) = timer else {
+        unsafe {
+            drop(Box::from_raw(info_ptr));
+        }
+        ServerState::send_event_to_client(client_port, &event_json);
+        return;
+    };
+
+    let Some(mode) = (unsafe { kCFRunLoopDefaultMode }) else {
+        drop(timer);
+        ServerState::send_event_to_client(client_port, &event_json);
+        return;
+    };
+
+    runloop.as_ref().add_timer(Some(&timer), Some(mode));
 }

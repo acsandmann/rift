@@ -86,7 +86,7 @@ impl MtsState {
                 let id_ref = IORegistryEntryCreateCFProperty(
                     dev,
                     CFRetained::<CFString>::as_ptr(&key).as_ptr(),
-                    core_foundation::base::kCFAllocatorDefault,
+                    std::ptr::null(),
                     0,
                 );
 

@@ -2,7 +2,7 @@ use std::ffi::{CString, c_char};
 use std::time::Duration;
 
 use r#continue::continuation;
-use core_foundation::runloop::CFRunLoop;
+use objc2_core_foundation::CFRunLoop;
 use tracing::{debug, error, info};
 
 pub mod cli_exec;
@@ -33,7 +33,7 @@ pub fn run_mach_server(
     let thread_state = shared_state.clone();
     std::thread::spawn(move || {
         let s = thread_state.write();
-        s.set_runloop(Some(CFRunLoop::get_current()));
+        s.set_runloop(CFRunLoop::current());
 
         let handler = MachHandler::new(reactor_tx, config_tx, thread_state.clone());
         unsafe {

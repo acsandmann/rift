@@ -10,20 +10,10 @@ use std::sync::LazyLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use accessibility::{AXAttribute, AXUIElement, AXUIElementActions, AXUIElementAttributes};
-use accessibility_sys::{
-    kAXApplicationActivatedNotification, kAXApplicationDeactivatedNotification,
-    kAXErrorCannotComplete, kAXErrorFailure, kAXErrorInvalidUIElement,
-    kAXErrorNotificationAlreadyRegistered, kAXMainWindowChangedNotification,
-    kAXMenuClosedNotification, kAXMenuOpenedNotification, kAXStandardWindowSubrole,
-    kAXTitleChangedNotification, kAXUIElementDestroyedNotification, kAXWindowCreatedNotification,
-    kAXWindowDeminiaturizedNotification, kAXWindowMiniaturizedNotification,
-    kAXWindowMovedNotification, kAXWindowResizedNotification, kAXWindowRole,
-};
 use r#continue::continuation;
-use core_foundation::string::CFString;
 use objc2::rc::Retained;
 use objc2_app_kit::NSRunningApplication;
+use objc2_application_services::AXError;
 use objc2_core_foundation::{CFRunLoop, CGPoint, CGRect};
 use serde::{Deserialize, Serialize};
 use tokio::{join, select};
@@ -37,14 +27,29 @@ use crate::actor::reactor::{self, Event, Requested, TransactionId};
 use crate::common::collections::HashMap;
 use crate::sys::app::NSRunningApplicationExt;
 pub use crate::sys::app::{AppInfo, WindowInfo, pid_t};
+use crate::sys::axuielement::{
+    AX_STANDARD_WINDOW_SUBROLE, AX_WINDOW_ROLE, AXUIElement, Error as AxError,
+};
 use crate::sys::enhanced_ui::{with_enhanced_ui_disabled, with_system_enhanced_ui_disabled};
 use crate::sys::event;
 use crate::sys::executor::Executor;
-use crate::sys::geometry::{ToCGType, ToICrate};
 use crate::sys::observer::Observer;
 use crate::sys::process::ProcessInfo;
 use crate::sys::skylight::{G_CONNECTION, SLSDisableUpdate, SLSReenableUpdate};
 use crate::sys::window_server::{self, WindowServerId};
+
+const kAXApplicationActivatedNotification: &str = "AXApplicationActivated";
+const kAXApplicationDeactivatedNotification: &str = "AXApplicationDeactivated";
+const kAXMainWindowChangedNotification: &str = "AXMainWindowChanged";
+const kAXWindowCreatedNotification: &str = "AXWindowCreated";
+const kAXMenuOpenedNotification: &str = "AXMenuOpened";
+const kAXMenuClosedNotification: &str = "AXMenuClosed";
+const kAXUIElementDestroyedNotification: &str = "AXUIElementDestroyed";
+const kAXWindowMovedNotification: &str = "AXWindowMoved";
+const kAXWindowResizedNotification: &str = "AXWindowResized";
+const kAXWindowMiniaturizedNotification: &str = "AXWindowMiniaturized";
+const kAXWindowDeminiaturizedNotification: &str = "AXWindowDeminiaturized";
+const kAXTitleChangedNotification: &str = "AXTitleChanged";
 
 /// An identifier representing a window.
 ///
@@ -308,7 +313,7 @@ impl State {
                         Ok(should_terminate) if should_terminate => break,
                         Ok(_) => (),
                         #[allow(non_upper_case_globals)]
-                        Err(accessibility::Error::Ax(kAXErrorCannotComplete))
+                        Err(AxError::Ax(AXError::CannotComplete))
                         // SAFETY: NSRunningApplication is thread-safe.
                         if this.running_app.isTerminated() =>
                         {
@@ -320,7 +325,7 @@ impl State {
                             break;
                         }
                         Err(err) => {
-                            warn!(?this.bundle_id, ?this.pid, ?request, "Error handling request: {err}");
+                            warn!(?this.bundle_id, ?this.pid, ?request, "Error handling request: {:?}", err);
                         }
                     }
                 }
@@ -375,7 +380,7 @@ impl State {
         let window_server_info = window_server::get_windows(&wsids);
 
         self.main_window = self.app.main_window().ok().and_then(|w| self.id(&w).ok());
-        self.is_frontmost = self.app.frontmost().map(|b| b.into()).unwrap_or(false);
+        self.is_frontmost = self.app.frontmost().unwrap_or(false);
 
         self.events_tx.send(Event::ApplicationLaunched {
             pid: self.pid,
@@ -391,7 +396,7 @@ impl State {
     }
 
     #[instrument(skip_all, fields(app = ?self.app, ?request))]
-    fn handle_request(&mut self, request: &mut Request) -> Result<bool, accessibility::Error> {
+    fn handle_request(&mut self, request: &mut Request) -> Result<bool, AxError> {
         match request {
             Request::Terminate => {
                 CFRunLoop::current().unwrap().stop();
@@ -435,22 +440,25 @@ impl State {
                         window.last_seen_txid = txid;
                         window.elem.clone()
                     }
-                    Err(err) => {
-                        if self.handle_ax_error(wid, &err)
-                            || matches!(err, accessibility::Error::NotFound)
-                        {
+                    Err(err) => match err {
+                        AxError::Ax(code) => {
+                            if self.handle_ax_error(wid, &code) {
+                                return Ok(false);
+                            }
+                            return Err(AxError::Ax(code));
+                        }
+                        AxError::NotFound => {
                             return Ok(false);
                         }
-                        return Err(err);
-                    }
+                    },
                 };
 
                 let position_result = if eui {
                     with_enhanced_ui_disabled(&elem, || {
-                        trace("set_position", &elem, || elem.set_position(pos.to_cgtype()))
+                        trace("set_position", &elem, || elem.set_position(pos))
                     })
                 } else {
-                    trace("set_position", &elem, || elem.set_position(pos.to_cgtype()))
+                    trace("set_position", &elem, || elem.set_position(pos))
                 };
 
                 if self.handle_ax_result(wid, position_result)?.is_none() {
@@ -459,7 +467,7 @@ impl State {
 
                 let frame =
                     match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
-                        Some(frame) => frame.to_icrate(),
+                        Some(frame) => frame,
                         None => return Ok(false),
                     };
 
@@ -477,23 +485,22 @@ impl State {
                         window.last_seen_txid = txid;
                         window.elem.clone()
                     }
-                    Err(err) => {
-                        if self.handle_ax_error(wid, &err)
-                            || matches!(err, accessibility::Error::NotFound)
-                        {
-                            return Ok(false);
+                    Err(err) => match err {
+                        AxError::Ax(code) => {
+                            if self.handle_ax_error(wid, &code) {
+                                return Ok(false);
+                            }
+                            return Err(AxError::Ax(code));
                         }
-                        return Err(err);
-                    }
+                        AxError::NotFound => return Ok(false),
+                    },
                 };
 
                 if eui {
                     let result = with_enhanced_ui_disabled(&elem, || {
-                        trace("set_position", &elem, || {
-                            elem.set_position(desired.origin.to_cgtype())
-                        })?;
-                        trace("set_size", &elem, || elem.set_size(desired.size.to_cgtype()))?;
-                        Ok::<(), accessibility::Error>(())
+                        trace("set_position", &elem, || elem.set_position(desired.origin))?;
+                        trace("set_size", &elem, || elem.set_size(desired.size))?;
+                        Ok::<(), AxError>(())
                     });
                     if self.handle_ax_result(wid, result)?.is_none() {
                         return Ok(false);
@@ -502,9 +509,7 @@ impl State {
                     if self
                         .handle_ax_result(
                             wid,
-                            trace("set_position", &elem, || {
-                                elem.set_position(desired.origin.to_cgtype())
-                            }),
+                            trace("set_position", &elem, || elem.set_position(desired.origin)),
                         )?
                         .is_none()
                     {
@@ -514,7 +519,7 @@ impl State {
                     if self
                         .handle_ax_result(
                             wid,
-                            trace("set_size", &elem, || elem.set_size(desired.size.to_cgtype())),
+                            trace("set_size", &elem, || elem.set_size(desired.size)),
                         )?
                         .is_none()
                     {
@@ -524,7 +529,7 @@ impl State {
 
                 let frame =
                     match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
-                        Some(frame) => frame.to_icrate(),
+                        Some(frame) => frame,
                         None => return Ok(false),
                     };
 
@@ -538,61 +543,50 @@ impl State {
             }
             &mut Request::SetBatchWindowFrame(ref mut frames, txid) => {
                 unsafe { SLSDisableUpdate(*G_CONNECTION) };
-                let result =
-                    with_system_enhanced_ui_disabled(|| -> Result<(), accessibility::Error> {
-                        for (wid, desired) in frames.iter() {
-                            let elem = match self.window_mut(*wid) {
-                                Ok(window) => {
-                                    window.last_seen_txid = txid;
-                                    window.elem.clone()
-                                }
-                                Err(err) => {
-                                    if self.handle_ax_error(*wid, &err)
-                                        || matches!(err, accessibility::Error::NotFound)
-                                    {
+                let result = with_system_enhanced_ui_disabled(|| -> Result<(), AxError> {
+                    for (wid, desired) in frames.iter() {
+                        let elem = match self.window_mut(*wid) {
+                            Ok(window) => {
+                                window.last_seen_txid = txid;
+                                window.elem.clone()
+                            }
+                            Err(err) => match err {
+                                AxError::Ax(code) => {
+                                    if self.handle_ax_error(*wid, &code) {
                                         continue;
                                     }
-                                    return Err(err);
+                                    return Err(AxError::Ax(code));
                                 }
-                            };
+                                AxError::NotFound => continue,
+                            },
+                        };
 
-                            if self
-                                .handle_ax_result(*wid, elem.set_size(desired.size.to_cgtype()))?
-                                .is_none()
-                            {
-                                continue;
-                            }
-                            if self
-                                .handle_ax_result(
-                                    *wid,
-                                    elem.set_position(desired.origin.to_cgtype()),
-                                )?
-                                .is_none()
-                            {
-                                continue;
-                            }
-                            if self
-                                .handle_ax_result(*wid, elem.set_size(desired.size.to_cgtype()))?
-                                .is_none()
-                            {
-                                continue;
-                            }
-
-                            let frame = match self.handle_ax_result(*wid, elem.frame())? {
-                                Some(frame) => frame.to_icrate(),
-                                None => continue,
-                            };
-
-                            self.send_event(Event::WindowFrameChanged(
-                                *wid,
-                                frame,
-                                Some(txid),
-                                Requested(true),
-                                None,
-                            ));
+                        if self.handle_ax_result(*wid, elem.set_size(desired.size))?.is_none() {
+                            continue;
                         }
-                        Ok(())
-                    });
+                        if self.handle_ax_result(*wid, elem.set_position(desired.origin))?.is_none()
+                        {
+                            continue;
+                        }
+                        if self.handle_ax_result(*wid, elem.set_size(desired.size))?.is_none() {
+                            continue;
+                        }
+
+                        let frame = match self.handle_ax_result(*wid, elem.frame())? {
+                            Some(frame) => frame,
+                            None => continue,
+                        };
+
+                        self.send_event(Event::WindowFrameChanged(
+                            *wid,
+                            frame,
+                            Some(txid),
+                            Requested(true),
+                            None,
+                        ));
+                    }
+                    Ok(())
+                });
                 unsafe { SLSReenableUpdate(*G_CONNECTION) };
                 if let Err(err) = result {
                     return Err(err);
@@ -605,19 +599,20 @@ impl State {
             &mut Request::EndWindowAnimation(wid) => {
                 let (elem, last_seen_txid) = match self.window(wid) {
                     Ok(window) => (window.elem.clone(), window.last_seen_txid),
-                    Err(err) => {
-                        if self.handle_ax_error(wid, &err)
-                            || matches!(err, accessibility::Error::NotFound)
-                        {
-                            return Ok(false);
+                    Err(err) => match err {
+                        AxError::Ax(code) => {
+                            if self.handle_ax_error(wid, &code) {
+                                return Ok(false);
+                            }
+                            return Err(AxError::Ax(code));
                         }
-                        return Err(err);
-                    }
+                        AxError::NotFound => return Ok(false),
+                    },
                 };
                 self.restart_notifications_after_animation(&elem);
                 let frame =
                     match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
-                        Some(frame) => frame.to_icrate(),
+                        Some(frame) => frame,
                         None => return Ok(false),
                     };
                 self.send_event(Event::WindowFrameChanged(
@@ -680,14 +675,19 @@ impl State {
                 let last_seen = match self.window(wid) {
                     Ok(window) => window.last_seen_txid,
                     Err(err) => {
-                        if self.handle_ax_error(wid, &err) {
-                            return;
+                        match err {
+                            AxError::Ax(code) => {
+                                if self.handle_ax_error(wid, &code) {
+                                    return;
+                                }
+                            }
+                            AxError::NotFound => {}
                         }
                         return;
                     }
                 };
                 let frame = match self.handle_ax_result(wid, elem.frame()) {
-                    Ok(Some(frame)) => frame.to_icrate(),
+                    Ok(Some(frame)) => frame,
                     Ok(None) => return,
                     Err(err) => {
                         debug!(?wid, ?err, "Failed to read frame for window");
@@ -724,14 +724,14 @@ impl State {
 }
 
 #[derive(Debug)]
-#[allow(dead_code, reason = "used by Debug impls")]
+#[allow(dead_code, reason = "uesed by Debug impls")]
 enum RaiseError {
     RaiseCancelled,
-    AXError(accessibility::Error),
+    AXError(AxError),
 }
 
-impl From<accessibility::Error> for RaiseError {
-    fn from(value: accessibility::Error) -> Self { Self::AXError(value) }
+impl From<AxError> for RaiseError {
+    fn from(value: AxError) -> Self { Self::AXError(value) }
 }
 
 impl State {
@@ -757,7 +757,7 @@ impl State {
         let is_standard = {
             let this = this_ref.borrow();
             let window = this.window(first)?;
-            window.elem.subrole().map(|s| s == kAXStandardWindowSubrole).unwrap_or(false)
+            window.elem.subrole().map(|s| s == AX_STANDARD_WINDOW_SUBROLE).unwrap_or(false)
         };
 
         check_cancel()?;
@@ -768,7 +768,7 @@ impl State {
         check_cancel()?;
         let mut this = this_ref.borrow_mut();
 
-        let is_frontmost: bool = trace("is_frontmost", &this.app, || this.app.frontmost())?.into();
+        let is_frontmost = trace("is_frontmost", &this.app, || this.app.frontmost())?;
 
         let make_key_result = window_server::make_key_window(
             this.pid,
@@ -881,9 +881,9 @@ impl State {
         Some(wid)
     }
 
-    fn on_activation_changed(&mut self) -> Result<(), accessibility::Error> {
+    fn on_activation_changed(&mut self) -> Result<(), AxError> {
         // TODO: this prolly isnt needed
-        let is_frontmost: bool = trace("is_frontmost", &self.app, || self.app.frontmost())?.into();
+        let is_frontmost = trace("is_frontmost", &self.app, || self.app.frontmost())?;
         let old_frontmost = std::mem::replace(&mut self.is_frontmost, is_frontmost);
         debug!(
             "on_activation_changed, pid={:?}, is_frontmost={:?}, old_frontmost={:?}",
@@ -949,11 +949,7 @@ impl State {
         // TODO: improve this heuristic using ideas from AeroSpace(maybe implement a similar testing architecture based on ax dumps)
         if (self.bundle_id.as_deref() == Some("com.googlecode.iterm2")
             || self.bundle_id.as_deref() == Some("com.apple.TextInputUI.xpc.CursorUIViewService"))
-            && elem
-                .attribute(&AXAttribute::new(&CFString::from_static_string(
-                    "AXTitleUIElement",
-                )))
-                .is_err()
+            && elem.attribute("AXTitleUIElement").is_err()
         {
             info.is_standard = false;
         }
@@ -998,7 +994,7 @@ impl State {
 
         fn register_notifs(win: &AXUIElement, state: &State) -> bool {
             match win.role() {
-                Ok(role) if role == kAXWindowRole => (),
+                Ok(role) if role == AX_WINDOW_ROLE => (),
                 _ => return false,
             }
             for notif in WINDOW_NOTIFICATIONS {
@@ -1006,8 +1002,7 @@ impl State {
                 if let Err(err) = res {
                     let is_already_registered = matches!(
                         err,
-                        accessibility::Error::Ax(code)
-                            if code == kAXErrorNotificationAlreadyRegistered
+                        AxError::Ax(code) if code == AXError::NotificationAlreadyRegistered
                     );
                     if !is_already_registered {
                         trace!("Watching failed with error {err:?} on window {win:#?}");
@@ -1019,12 +1014,8 @@ impl State {
         }
     }
 
-    fn handle_ax_error(&mut self, wid: WindowId, err: &accessibility::Error) -> bool {
-        let accessibility::Error::Ax(code) = err else {
-            return false;
-        };
-
-        if matches!(*code, kAXErrorInvalidUIElement | kAXErrorCannotComplete) {
+    fn handle_ax_error(&mut self, wid: WindowId, err: &AXError) -> bool {
+        if matches!(*err, AXError::InvalidUIElement | AXError::CannotComplete) {
             if self.windows.remove(&wid).is_some() {
                 self.send_event(Event::WindowDestroyed(wid));
                 self.on_main_window_changed(Some(wid));
@@ -1038,33 +1029,34 @@ impl State {
     fn handle_ax_result<T>(
         &mut self,
         wid: WindowId,
-        result: Result<T, accessibility::Error>,
-    ) -> Result<Option<T>, accessibility::Error> {
+        result: Result<T, AxError>,
+    ) -> Result<Option<T>, AxError> {
         match result {
             Ok(value) => Ok(Some(value)),
-            Err(err) => {
-                if self.handle_ax_error(wid, &err) {
+            Err(AxError::Ax(code)) => {
+                if self.handle_ax_error(wid, &code) {
                     Ok(None)
                 } else {
-                    Err(err)
+                    Err(AxError::Ax(code))
                 }
             }
+            Err(AxError::NotFound) => Ok(None),
         }
     }
 
     fn send_event(&self, event: Event) { self.events_tx.send(event); }
 
-    fn window(&self, wid: WindowId) -> Result<&WindowState, accessibility::Error> {
+    fn window(&self, wid: WindowId) -> Result<&WindowState, AxError> {
         assert_eq!(wid.pid, self.pid);
-        self.windows.get(&wid).ok_or(accessibility::Error::NotFound)
+        self.windows.get(&wid).ok_or(AxError::NotFound)
     }
 
-    fn window_mut(&mut self, wid: WindowId) -> Result<&mut WindowState, accessibility::Error> {
+    fn window_mut(&mut self, wid: WindowId) -> Result<&mut WindowState, AxError> {
         assert_eq!(wid.pid, self.pid);
-        self.windows.get_mut(&wid).ok_or(accessibility::Error::NotFound)
+        self.windows.get_mut(&wid).ok_or(AxError::NotFound)
     }
 
-    fn id(&self, elem: &AXUIElement) -> Result<WindowId, accessibility::Error> {
+    fn id(&self, elem: &AXUIElement) -> Result<WindowId, AxError> {
         if let Ok(id) = WindowServerId::try_from(elem) {
             let wid = WindowId {
                 pid: self.pid,
@@ -1076,7 +1068,7 @@ impl State {
         } else if let Some((&wid, _)) = self.windows.iter().find(|(_, w)| &w.elem == elem) {
             return Ok(wid);
         }
-        Err(accessibility::Error::NotFound)
+        Err(AxError::NotFound)
     }
 
     fn stop_notifications_for_animation(&self, elem: &AXUIElement) {
@@ -1159,8 +1151,8 @@ fn app_thread_main(pid: pid_t, info: AppInfo, events_tx: reactor::Sender) {
 fn trace<T>(
     desc: &str,
     elem: &AXUIElement,
-    f: impl FnOnce() -> Result<T, accessibility::Error>,
-) -> Result<T, accessibility::Error> {
+    f: impl FnOnce() -> Result<T, AxError>,
+) -> Result<T, AxError> {
     let start = Instant::now();
     let out = f();
     let end = Instant::now();
@@ -1168,12 +1160,12 @@ fn trace<T>(
     // to the app.
     trace!(time = ?(end - start), /*?elem,*/ "{desc:12}");
     if let Err(err) = &out {
-        let app = elem.parent();
+        let app = elem.parent().ok().flatten();
         match err {
-            accessibility::Error::Ax(ax_err)
+            AxError::Ax(ax_err)
                 if matches!(
                     *ax_err,
-                    kAXErrorCannotComplete | kAXErrorInvalidUIElement | kAXErrorFailure
+                    AXError::CannotComplete | AXError::InvalidUIElement | AXError::Failure
                 ) =>
             {
                 debug!("{desc} failed with {err} - app may have quit or become unresponsive");

@@ -1,8 +1,6 @@
 use std::path::PathBuf;
 
-use accessibility::{AXUIElement, AXUIElementAttributes};
-pub use accessibility_sys::pid_t;
-use accessibility_sys::{kAXStandardWindowSubrole, kAXWindowRole};
+pub use nix::libc::pid_t;
 use objc2::rc::Retained;
 use objc2::{class, msg_send};
 use objc2_app_kit::{NSRunningApplication, NSWorkspace};
@@ -10,8 +8,11 @@ use objc2_core_foundation::CGRect;
 use objc2_foundation::NSString;
 use serde::{Deserialize, Serialize};
 
-use super::geometry::{CGRectDef, ToICrate};
+use super::geometry::CGRectDef;
 use super::window_server::WindowServerId;
+use crate::sys::axuielement::{
+    AX_STANDARD_WINDOW_SUBROLE, AX_WINDOW_ROLE, AXUIElement, Error as AxError,
+};
 
 pub fn running_apps(bundle: Option<String>) -> impl Iterator<Item = (pid_t, AppInfo)> {
     NSWorkspace::sharedWorkspace()
@@ -83,19 +84,20 @@ pub struct WindowInfo {
 }
 
 impl TryFrom<&AXUIElement> for WindowInfo {
-    type Error = accessibility::Error;
+    type Error = AxError;
 
-    fn try_from(element: &AXUIElement) -> Result<Self, accessibility::Error> {
+    fn try_from(element: &AXUIElement) -> Result<Self, AxError> {
         // TODO: make this use fframe
         let frame = element.frame()?;
-        let is_standard =
-            element.role()? == kAXWindowRole && element.subrole()? == kAXStandardWindowSubrole;
+        let role = element.role()?;
+        let subrole = element.subrole()?;
+        let is_standard = role == AX_WINDOW_ROLE && subrole == AX_STANDARD_WINDOW_SUBROLE;
 
-        let ax_role = element.role().ok().map(|r| r.to_string());
-        let ax_subrole = element.subrole().ok().map(|s| s.to_string());
+        let ax_role = Some(role.clone());
+        let ax_subrole = Some(subrole.clone());
 
         let id = WindowServerId::try_from(element).ok();
-        let is_minimized = element.minimized().map(|b| bool::from(b)).unwrap_or_default();
+        let is_minimized = element.minimized().unwrap_or_default();
 
         let (bundle_id, path) = if !is_standard {
             (None, None)
@@ -120,8 +122,8 @@ impl TryFrom<&AXUIElement> for WindowInfo {
             is_standard,
             is_root: true,
             is_minimized,
-            title: element.title().map(|t| t.to_string()).unwrap_or_default(),
-            frame: frame.to_icrate(),
+            title: element.title().unwrap_or_default(),
+            frame,
             sys_id: id,
             bundle_id,
             path,

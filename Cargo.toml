@@ -18,15 +18,10 @@ incremental = true
 doctest = false
 
 [dependencies]
-accessibility = "0.1.6"
-accessibility-sys = "0.1.3"
 anyhow = "1.0.83"
 ascii_tree = "0.1.1"
 bitflags = "2.4.1"
 clap = { version = "4.5.4", features = ["derive"] }
-core-foundation = "0.9.4"
-core-graphics = "0.23.2"
-core-graphics-types = "0.1.3"
 dirs = "6.0.0"
 dispatchr = { git = "https://github.com/drewcrawford/dispatchr" }
 livesplit-hotkey = "0.8.0"
@@ -63,6 +58,15 @@ objc2-app-kit = { version = "0.3.1", default-features = false, features = [
     "objc2-core-foundation",
     "objc2-core-graphics",
     "objc2-quartz-core"
+] }
+objc2-application-services = {version = "0.3.2", default-features = false, features = [
+	"AXUIElement",
+	"AXError",
+	"AXValue",
+	"HIServices",
+	"AXAttributeConstants",
+	"AXNotificationConstants",
+	"libc",
 ] }
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
     "CFCGTypes",
@@ -116,9 +120,7 @@ tracing-tree = { version = "0.4.0", features = ["time"] }
 continue = { git = "https://github.com/drewcrawford/continue" }
 futures-task = "0.3.31"
 regex = "1.11.0"
-smallvec = "1.15.1"
 enum_dispatch = "0.3.13"
-crossbeam = "0.8.4"
 crossbeam-channel = "0.5"
 num_enum = "0.7.4"
 notify = "8.2.0"
@@ -149,11 +151,3 @@ objc2-app-kit = { version = "0.3.1", default-features = false, features = [
     "NSWorkspace",
     "objc2-core-foundation",
 ] }
-
-[patch.crates-io]
-core-foundation = { git = "https://github.com/tmandry/core-foundation-rs", branch = "master" }
-core-foundation-sys = { git = "https://github.com/tmandry/core-foundation-rs", branch = "master" }
-core-graphics = { git = "https://github.com/tmandry/core-foundation-rs", branch = "master" }
-core-graphics-types = { git = "https://github.com/tmandry/core-foundation-rs", branch = "master" }
-accessibility = { git = "https://github.com/tmandry/accessibility", branch = "master" }
-accessibility-sys = { git = "https://github.com/tmandry/accessibility", branch = "master" }

@@ -2,10 +2,9 @@ use std::ffi::{c_int, c_void};
 use std::ptr::NonNull;
 use std::time::Duration;
 
-use accessibility::AXUIElement;
-use accessibility_sys::{kAXErrorSuccess, pid_t};
-use core_foundation::base::TCFType;
+use nix::libc::pid_t;
 use objc2_app_kit::NSWindowLevel;
+use objc2_application_services::AXError;
 use objc2_core_foundation::{
     CFArray, CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType, CGPoint, CGRect,
     CGSize, Type, kCFBooleanTrue,
@@ -21,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use super::geometry::CGRectDef;
 use crate::actor::app::WindowId;
 use crate::layout_engine::Direction;
+use crate::sys::axuielement::{AXUIElement, Error as AxError};
 use crate::sys::cg_ok;
 use crate::sys::process::ProcessSerialNumber;
 use crate::sys::skylight::*;
@@ -44,13 +44,13 @@ impl From<WindowServerId> for u32 {
 }
 
 impl TryFrom<&AXUIElement> for WindowServerId {
-    type Error = accessibility::Error;
+    type Error = AxError;
 
     fn try_from(element: &AXUIElement) -> Result<Self, Self::Error> {
         let mut id = 0;
-        let res = unsafe { _AXUIElementGetWindow(element.as_concrete_TypeRef(), &mut id) };
-        if res != kAXErrorSuccess {
-            return Err(accessibility::Error::Ax(res));
+        let res = unsafe { _AXUIElementGetWindow(element.raw_ptr().as_ptr(), &mut id) };
+        if res != AXError::Success {
+            return Err(AxError::Ax(res));
         }
         Ok(Self(id))
     }
@@ -78,10 +78,7 @@ impl WindowQuery {
             return None;
         }
         let cf_numbers = cf_array_from_ids(ids);
-        Self::new_from_cfarray(
-            CFRetained::<CFArray<CFNumber>>::as_ptr(&cf_numbers).as_ptr(),
-            ids.len() as c_int,
-        )
+        Self::new_from_cfarray(CFRetained::as_ptr(&cf_numbers).as_ptr(), ids.len() as c_int)
     }
 
     /// expected_count is a hint; keep whatever you used at call sites (0, 1, ids.len()).
@@ -166,10 +163,7 @@ pub fn connection_id_for_pid(pid: pid_t) -> Option<i32> {
 
 pub fn window_parent(id: WindowServerId) -> Option<WindowServerId> {
     let cf_windows = cf_array_from_ids(&[id]);
-    let query = WindowQuery::new_from_cfarray(
-        CFRetained::<CFArray<CFNumber>>::as_ptr(&cf_windows).as_ptr(),
-        1,
-    )?;
+    let query = WindowQuery::new_from_cfarray(CFRetained::as_ptr(&cf_windows).as_ptr(), 1)?;
     if query.count() == 1 && query.advance() {
         let p = query.parent_id();
         (p != 0).then(|| WindowServerId::new(p))
@@ -181,11 +175,7 @@ pub fn window_parent(id: WindowServerId) -> Option<WindowServerId> {
 pub fn window_is_sticky(id: WindowServerId) -> bool {
     let cf_windows = cf_array_from_ids(&[id]);
     let space_list_ref = unsafe {
-        SLSCopySpacesForWindows(
-            *G_CONNECTION,
-            0x7,
-            CFRetained::<CFArray<CFNumber>>::as_ptr(&cf_windows).as_ptr(),
-        )
+        SLSCopySpacesForWindows(*G_CONNECTION, 0x7, CFRetained::as_ptr(&cf_windows).as_ptr())
     };
     if space_list_ref.is_null() {
         return false;
@@ -257,10 +247,9 @@ pub fn get_windows(ids: &[WindowServerId]) -> Vec<WindowServerInfo> {
     }
     let cf_ids = cf_array_from_ids(ids);
 
-    let Some(query) = WindowQuery::new_from_cfarray(
-        CFRetained::<CFArray<CFNumber>>::as_ptr(&cf_ids).as_ptr(),
-        ids.len() as c_int,
-    ) else {
+    let Some(query) =
+        WindowQuery::new_from_cfarray(CFRetained::as_ptr(&cf_ids).as_ptr(), ids.len() as c_int)
+    else {
         return Vec::new();
     };
 
@@ -331,7 +320,7 @@ pub fn window_level(wid: u32) -> Option<NSWindowLevel> {
     let cf = cf_array_from_ids(&[WindowServerId::new(wid)]);
 
     let query = WindowQuery::new_from_cfarray(
-        CFRetained::<CFArray<CFNumber>>::as_ptr(&cf).as_ptr(),
+        CFRetained::as_ptr(&cf).as_ptr(),
         0x1, // preserve your hint
     )?;
     query.advance();
@@ -373,7 +362,7 @@ pub fn space_window_list_for_connection(
         SLSCopyWindowsWithOptionsAndTags(
             *G_CONNECTION,
             owner,
-            CFRetained::<CFArray<CFNumber>>::as_ptr(&cf_space_array).as_ptr(),
+            CFRetained::as_ptr(&cf_space_array).as_ptr(),
             options,
             &mut set_tags,
             &mut clear_tags,
@@ -440,7 +429,7 @@ pub fn app_window_suitable(id: WindowServerId) -> bool {
     let cf = cf_array_from_ids(&[id]);
 
     let Some(query) = WindowQuery::new_from_cfarray(
-        CFRetained::<CFArray<CFNumber>>::as_ptr(&cf).as_ptr(),
+        CFRetained::as_ptr(&cf).as_ptr(),
         0x0, // keep your original hint
     ) else {
         return false;
@@ -476,7 +465,7 @@ pub fn get_front_window(cid: i32) -> u32 {
         SLSCopyWindowsWithOptionsAndTags(
             cid,
             target_cid as u32,
-            CFRetained::<CFArray<CFNumber>>::as_ptr(&cf_space_array).as_ptr(),
+            CFRetained::as_ptr(&cf_space_array).as_ptr(),
             0x2,
             &mut set_tags,
             &mut clear_tags,
@@ -519,13 +508,8 @@ pub fn window_space_id(cid: i32, wid: u32) -> u64 {
 
     let cf_windows = CFArray::from_retained_objects(&[CFNumber::new_i64(wid as i64)]);
 
-    let space_list_ref = unsafe {
-        SLSCopySpacesForWindows(
-            cid,
-            0x7,
-            CFRetained::<CFArray<CFNumber>>::as_ptr(&cf_windows).as_ptr(),
-        )
-    };
+    let space_list_ref =
+        unsafe { SLSCopySpacesForWindows(cid, 0x7, CFRetained::as_ptr(&cf_windows).as_ptr()) };
 
     if !space_list_ref.is_null() {
         let spaces_cf: CFRetained<CFArray<CFNumber>> =

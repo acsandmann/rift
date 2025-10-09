@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use accessibility_sys::pid_t;
+use nix::libc::pid_t;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use tracing::debug;
 

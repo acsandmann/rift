@@ -8,7 +8,7 @@ use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake};
 
-use core_foundation::runloop::CFRunLoop;
+use objc2_core_foundation::CFRunLoop;
 use parking_lot::Mutex;
 
 use super::run_loop::WakeupHandle;
@@ -58,7 +58,7 @@ impl Executor {
                 // Run the loop until it is stopped by process_tasks below.
                 // We do this in a loop just in case there were "spurious"
                 // stops by some other code.
-                CFRunLoop::run_current();
+                CFRunLoop::run();
             }
         });
 
@@ -97,7 +97,9 @@ impl State {
         let mut context = Context::from_waker(&waker);
         if self.main_task.as_mut().unwrap().as_mut().poll(&mut context) == Poll::Ready(()) {
             self.main_task.take();
-            CFRunLoop::get_current().stop();
+            if let Some(rl) = CFRunLoop::current() {
+                rl.stop();
+            }
         }
     }
 }

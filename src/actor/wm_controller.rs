@@ -5,7 +5,7 @@
 use std::borrow::Cow;
 use std::path::PathBuf;
 
-use accessibility_sys::pid_t;
+use nix::libc::pid_t;
 use objc2_app_kit::NSScreen;
 use objc2_core_foundation::CGRect;
 use objc2_foundation::MainThreadMarker;

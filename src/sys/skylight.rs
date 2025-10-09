@@ -6,9 +6,9 @@ use std::ffi::{c_int, c_uint, c_void};
 use std::fmt;
 use std::ops::BitAnd;
 
-use accessibility_sys::{AXError, AXUIElementRef};
 use bitflags::bitflags;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use objc2_application_services::{AXError, AXUIElement};
 use objc2_core_foundation::{CFArray, CFDictionary, CFNumber, CFString, CFType, CGPoint, CGRect};
 use objc2_core_graphics::{CGContext, CGError, CGImage, CGWindowID};
 use objc2_foundation::NSArray;
@@ -147,7 +147,7 @@ unsafe extern "C" {
         rect: *mut CGRect,
     ) -> bool;
 
-    pub fn _AXUIElementGetWindow(elem: AXUIElementRef, wid: *mut CGWindowID) -> AXError;
+    pub fn _AXUIElementGetWindow(elem: *mut AXUIElement, wid: *mut CGWindowID) -> AXError;
 
     pub fn CGEventCreate(source: *mut CFType) -> *mut CFType;
     pub fn CGEventSetIntegerValueField(event: *mut CFType, field: u32, value: i64);
