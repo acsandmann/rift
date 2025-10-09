@@ -8,6 +8,16 @@ build = "build.rs"
 name = "rift"
 test = false
 
+[profile.dev]
+opt-level = 0
+debug = 1
+incremental = true
+codegen-units = 16
+debug-assertions = true
+overflow-checks = true
+split-debuginfo = "packed"
+panic = "unwind"
+
 [profile.release]
 debug = 1
 codegen-units = 1
@@ -135,19 +145,3 @@ test-log = { version = "0.2.16", default-features = false, features = [
 ] }
 test_bin = "0.4.0"
 tempfile = { version = "3.17.1", default-features = false }
-objc2-app-kit = { version = "0.3.1", default-features = false, features = [
-    "NSApplication",
-    "NSControl",
-    "NSEvent",
-    "NSFont",
-    "NSGraphics",
-    "NSRunningApplication",
-    "NSResponder",
-    "NSScreen",
-    "NSText",
-    "NSTextField",
-    "NSView",
-    "NSWindow",
-    "NSWorkspace",
-    "objc2-core-foundation",
-] }

@@ -221,10 +221,7 @@ fn main() {
         }
     });
 
-    let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
-    unsafe {
-        let _: () = objc2::msg_send![&*app, run];
-    }
+    objc2_app_kit::NSApplication::sharedApplication(mtm).run();
 }
 
 #[cfg(panic = "unwind")]
