@@ -933,8 +933,7 @@ impl TraditionalLayoutSystem {
                         None
                     }
                 }
-                Direction::Right | Direction::Down => (current_position < siblings.len() - 1)
-                    .then_some(siblings[current_position + 1]),
+                Direction::Right | Direction::Down => siblings.get(current_position + 1).copied(),
             }
         }
     }
