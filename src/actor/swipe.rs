@@ -156,16 +156,6 @@ unsafe extern "C-unwind" fn gesture_callback(
 ) -> *mut CGEvent {
     let ctx = unsafe { &*(user_info as *const CallbackCtx) };
 
-    if matches!(
-        event_type,
-        CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
-    ) {
-        if let Some(tap) = ctx.swipe.tap.borrow().as_ref() {
-            tap.set_enabled(true);
-        }
-        return event_ref.as_ptr();
-    }
-
     if event_type.0 != NSEventType::Gesture.0 as u32 {
         return event_ref.as_ptr();
     }

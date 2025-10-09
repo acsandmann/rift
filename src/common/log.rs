@@ -33,7 +33,7 @@ fn timing_layer() -> TimingLayer {
         .layer(|| Histogram::new_with_max(100_000_000, 2).unwrap())
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MetricsCommand {
     ShowTiming,

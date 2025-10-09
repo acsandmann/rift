@@ -72,9 +72,7 @@ fn main() {
         use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
         let app = NSApplication::sharedApplication(mtm);
         let _ = app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-        unsafe {
-            let _: () = objc2::msg_send![&*app, finishLaunching];
-        }
+        app.finishLaunching();
         NSApplication::load();
     }
 
@@ -173,6 +171,9 @@ fn main() {
         stack_line_tx.clone(),
         mc_tx.clone(),
     );
+
+    let _ = events_tx.send(reactor::Event::RegisterWmSender(wm_controller_sender.clone()));
+
     let notification_center = NotificationCenter::new(wm_controller_sender.clone());
 
     let mouse = Mouse::new(config.clone(), events_tx.clone(), mouse_rx);

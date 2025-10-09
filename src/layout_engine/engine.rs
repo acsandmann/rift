@@ -25,7 +25,7 @@ pub struct GroupContainerInfo {
 }
 
 #[non_exhaustive]
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LayoutCommand {
     NextWindow,

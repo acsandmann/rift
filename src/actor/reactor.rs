@@ -18,6 +18,7 @@ use main_window::MainWindowTracker;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 pub use replay::{Record, replay};
 use serde::{Deserialize, Serialize};
+use serde_json;
 use serde_with::serde_as;
 use tracing::{debug, error, info, instrument, trace, warn};
 
@@ -155,6 +156,9 @@ pub enum Event {
 
     Command(Command),
 
+    #[serde(skip)]
+    RegisterWmSender(crate::actor::wm_controller::Sender),
+
     // Query events with response channels (not serialized)
     #[serde(skip)]
     QueryWorkspaces(r#continue::Sender<WorkspaceQueryResponse>),
@@ -195,7 +199,7 @@ pub enum Event {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Requested(pub bool);
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum Command {
     Layout(LayoutCommand),
@@ -203,7 +207,7 @@ pub enum Command {
     Reactor(ReactorCommand),
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReactorCommand {
     Debug,
@@ -240,6 +244,7 @@ pub struct Reactor {
     stack_line_tx: Option<stack_line::Sender>,
     raise_manager_tx: raise_manager::Sender,
     event_broadcaster: BroadcastSender,
+    wm_sender: Option<crate::actor::wm_controller::Sender>,
     app_rules_recently_applied: std::time::Instant,
     last_auto_workspace_switch: Option<std::time::Instant>,
     last_sls_notification_ids: Vec<u32>,
@@ -379,6 +384,7 @@ impl Reactor {
             stack_line_tx: None,
             raise_manager_tx,
             event_broadcaster: broadcast_tx,
+            wm_sender: None,
             app_rules_recently_applied: std::time::Instant::now(),
             last_auto_workspace_switch: None,
             last_sls_notification_ids: Vec::new(),
@@ -511,6 +517,7 @@ impl Reactor {
             Event::ApplicationGloballyActivated(pid) => {
                 self.handle_app_activation_workspace_switch(pid);
             }
+            Event::RegisterWmSender(sender) => self.wm_sender = Some(sender),
             Event::WindowsDiscovered { pid, new, known_visible } => {
                 self.on_windows_discovered_with_app_info(pid, new, known_visible, None);
             }
@@ -863,9 +870,19 @@ impl Reactor {
             }
             Event::Command(Command::Metrics(cmd)) => log::handle_command(cmd),
             Event::ConfigUpdated(new_cfg) => {
+                let old_keys = self.config.keys.clone();
+
                 self.config = new_cfg;
                 self.layout_engine.set_layout_settings(&self.config.settings.layout);
                 let _ = self.update_layout(false, true);
+
+                if old_keys != self.config.keys {
+                    if let Some(wm) = &self.wm_sender {
+                        let _ = wm.send(crate::actor::wm_controller::WmEvent::ConfigUpdated(
+                            self.config.clone(),
+                        ));
+                    }
+                }
             }
             Event::Command(Command::Reactor(ReactorCommand::Debug)) => {
                 for screen in &self.screens {

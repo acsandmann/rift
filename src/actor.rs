@@ -40,3 +40,9 @@ impl<Event> Sender<Event> {
 impl<Event> Clone for Sender<Event> {
     fn clone(&self) -> Self { Self(self.0.clone()) }
 }
+
+impl<Event> std::fmt::Debug for Sender<Event> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("actor::Sender(...)")
+    }
+}

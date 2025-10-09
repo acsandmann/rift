@@ -14,6 +14,7 @@ pub mod event_tap;
 pub mod executor;
 pub mod geometry;
 pub mod haptics;
+pub mod hotkey;
 pub mod mach;
 pub mod observer;
 pub mod power;

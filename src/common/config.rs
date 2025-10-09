@@ -2,12 +2,12 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::bail;
-use livesplit_hotkey::Hotkey;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::collections::HashMap;
 use crate::actor::wm_controller::WmCommand;
+use crate::sys::hotkey::Hotkey;
 
 const MAX_WORKSPACES: usize = 32;
 
@@ -76,7 +76,7 @@ pub struct VirtualWorkspaceSettings {
 
 // Allow specifying a workspace by numeric index or by name in the config.
 // This supports both `workspace = 2` and `workspace = "coding"` in app rules.
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Eq)]
 #[serde(untagged)]
 pub enum WorkspaceSelector {
     Index(usize),
@@ -1074,7 +1074,7 @@ mod tests {
         // but we can verify parsing succeeds and the right number of keys are present
         assert!(config.keys.iter().any(|(hotkey, _)| {
             // This would be Alt + Shift + C
-            hotkey.key_code == livesplit_hotkey::KeyCode::KeyC
+            hotkey.key_code == crate::sys::hotkey::KeyCode::KeyC
         }));
     }
 

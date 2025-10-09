@@ -10,6 +10,7 @@ use objc2_app_kit::NSScreen;
 use objc2_core_foundation::CGRect;
 use objc2_foundation::MainThreadMarker;
 use serde::{Deserialize, Serialize};
+use serde_json;
 use tracing::{debug, error, info, instrument};
 
 use crate::common::config::WorkspaceSelector;
@@ -43,17 +44,18 @@ pub enum WmEvent {
     ),
     SystemWoke,
     PowerStateChanged(bool),
+    ConfigUpdated(crate::common::config::Config),
     Command(WmCommand),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum WmCommand {
     Wm(WmCmd),
     ReactorCommand(reactor::Command),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WmCmd {
     ToggleSpaceActivated,
@@ -70,7 +72,7 @@ pub enum WmCmd {
     ShowMissionControlCurrent,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum ExecCmd {
     String(String),
@@ -213,6 +215,27 @@ impl WmController {
             }
             AppTerminated(pid) => {
                 self.events_tx.send(Event::ApplicationTerminated(pid));
+            }
+            ConfigUpdated(new_cfg) => {
+                let old_keys_ser = serde_json::to_string(&self.config.config.keys).ok();
+
+                self.config.config = new_cfg;
+
+                if let Some(old_ser) = old_keys_ser {
+                    if serde_json::to_string(&self.config.config.keys).ok().as_deref()
+                        != Some(&old_ser)
+                    {
+                        debug!("hotkey bindings changed; reloading hotkeys");
+                        self.unregister_hotkeys();
+                        self.register_hotkeys();
+                    } else {
+                        debug!("hotkey bindings unchanged; skipping reload");
+                    }
+                } else {
+                    debug!("could not compare hotkey bindings; reloading hotkeys");
+                    self.unregister_hotkeys();
+                    self.register_hotkeys();
+                }
             }
             ScreenParametersChanged(frames, ids, converter, spaces) => {
                 self.screen_params_received = true;
@@ -443,6 +466,11 @@ impl WmController {
 
     fn register_hotkeys(&mut self) {
         debug!("register_hotkeys");
+        if self.hotkeys.is_some() {
+            debug!("Hotkeys already registered; dropping existing manager before re-creating");
+            self.hotkeys = None;
+        }
+
         let mgr = HotkeyManager::new(self.sender.clone());
         for (key, cmd) in &self.config.config.keys {
             mgr.register_wm(key.modifiers, key.key_code, cmd.clone());

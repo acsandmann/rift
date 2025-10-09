@@ -80,7 +80,7 @@ unsafe fn drop_mouse_ctx(ptr: *mut std::ffi::c_void) {
 
 impl Mouse {
     pub fn new(config: Config, events_tx: reactor::Sender, requests_rx: Receiver) -> Self {
-        let disable_hotkey = config.settings.focus_follows_mouse_disable_hotkey;
+        let disable_hotkey = config.settings.focus_follows_mouse_disable_hotkey.clone();
         Mouse {
             config,
             events_tx,
@@ -238,7 +238,7 @@ impl Mouse {
     }
 
     fn handle_keyboard_event(&self, event_type: CGEventType, event: &CGEvent, state: &mut State) {
-        let Some(target) = self.disable_hotkey else {
+        let Some(target) = &self.disable_hotkey else {
             return;
         };
 
@@ -255,7 +255,7 @@ impl Mouse {
 
         let flags = CGEvent::flags(Some(event));
         state.current_flags = flags;
-        state.disable_hotkey_active = state.compute_disable_hotkey_active(target);
+        state.disable_hotkey_active = state.compute_disable_hotkey_active(target.clone());
 
         if state.disable_hotkey_active != prev_active {
             if state.disable_hotkey_active {
@@ -274,14 +274,6 @@ unsafe extern "C-unwind" fn mouse_callback(
     user_info: *mut std::ffi::c_void,
 ) -> *mut CGEvent {
     let ctx = unsafe { &*(user_info as *const CallbackCtx) };
-    // kCGEventTapDisabledByTimeout (-2) and kCGEventTapDisabledByUserInput (-1).
-    let ety = event_type.0 as i64;
-    if ety == -1 || ety == -2 {
-        if let Some(tap) = ctx.this.tap.borrow().as_ref() {
-            tap.set_enabled(true);
-        }
-        return event_ref.as_ptr();
-    }
 
     let event = unsafe { event_ref.as_ref() };
     ctx.this.on_event(event_type, event);

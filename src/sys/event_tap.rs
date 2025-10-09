@@ -7,6 +7,7 @@ use objc2_core_graphics::{
     CGEvent, CGEventMask, CGEventTapLocation as CGTapLoc, CGEventTapOptions as CGTapOpt,
     CGEventTapPlacement as CGTapPlace, CGEventTapProxy, CGEventType,
 };
+use tracing::debug;
 
 pub type TapCallback = Option<
     unsafe extern "C-unwind" fn(
@@ -16,6 +17,56 @@ pub type TapCallback = Option<
         *mut c_void,
     ) -> *mut CGEvent,
 >;
+
+struct TrampolineCtx {
+    callback: TapCallback,
+    original_user_info: *mut c_void,
+    original_drop: Option<unsafe fn(*mut c_void)>,
+    port_ptr: *const CFRetained<CFMachPort>,
+}
+
+extern "C-unwind" fn trampoline_callback(
+    proxy: CGEventTapProxy,
+    etype: CGEventType,
+    event_ref: core::ptr::NonNull<CGEvent>,
+    user_info: *mut c_void,
+) -> *mut CGEvent {
+    if user_info.is_null() {
+        return event_ref.as_ptr();
+    }
+
+    let ctx = unsafe { &*(user_info as *const TrampolineCtx) };
+
+    // kCGEventTapDisabledByTimeout (-2) & kCGEventTapDisabledByUserInput (-1)
+    let ety = etype.0 as i64;
+    if ety == -1 || ety == -2 {
+        if !ctx.port_ptr.is_null() {
+            let port_ptr = ctx.port_ptr as *const CFRetained<CFMachPort>;
+            unsafe { CGEvent::tap_enable(&*port_ptr, true) };
+        }
+
+        return event_ref.as_ptr();
+    }
+
+    if let Some(orig_cb) = ctx.callback {
+        return unsafe { orig_cb(proxy, etype, event_ref, ctx.original_user_info) };
+    }
+
+    event_ref.as_ptr()
+}
+
+unsafe fn trampoline_drop(ptr: *mut c_void) {
+    if ptr.is_null() {
+        return;
+    }
+
+    let ctx: Box<TrampolineCtx> = unsafe { Box::from_raw(ptr as *mut TrampolineCtx) };
+    if let Some(dropper) = ctx.original_drop {
+        if !ctx.original_user_info.is_null() {
+            unsafe { dropper(ctx.original_user_info) };
+        }
+    }
+}
 
 pub struct EventTap {
     port: CFRetained<CFMachPort>,
@@ -32,28 +83,48 @@ impl EventTap {
         user_info: *mut c_void,
         drop_ctx: Option<unsafe fn(*mut c_void)>,
     ) -> Option<Self> {
+        let tramp = Box::new(TrampolineCtx {
+            callback,
+            original_user_info: user_info,
+            original_drop: drop_ctx,
+            port_ptr: std::ptr::null(),
+        });
+        let tramp_ptr = Box::into_raw(tramp) as *mut c_void;
+
         let port = unsafe {
             CGEvent::tap_create(
                 CGTapLoc::SessionEventTap,
                 CGTapPlace::HeadInsertEventTap,
                 options,
                 mask,
-                callback,
-                user_info,
+                Some(trampoline_callback),
+                tramp_ptr,
             )?
         };
 
+        unsafe {
+            let tramp_ctx = &mut *(tramp_ptr as *mut TrampolineCtx);
+            tramp_ctx.port_ptr = &port as *const CFRetained<CFMachPort>;
+        }
+
         let source = CFMachPort::new_run_loop_source(None, Some(&port), 0)?;
         if let Some(rl) = CFRunLoop::current() {
+            debug!(
+                "EventTap::new_with_options: CFRunLoop::current() returned a run loop; adding source"
+            );
             unsafe { rl.add_source(Some(&source), kCFRunLoopDefaultMode) };
+        } else {
+            debug!(
+                "EventTap::new_with_options: CFRunLoop::current() returned None; run loop not present"
+            );
         }
         CGEvent::tap_enable(&port, true);
 
         Some(Self {
             port,
             source,
-            user_info,
-            drop_ctx,
+            user_info: tramp_ptr,
+            drop_ctx: Some(trampoline_drop),
         })
     }
 
