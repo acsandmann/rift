@@ -1722,10 +1722,63 @@ impl MissionControlOverlay {
     }
 
     fn emit_action(&self, action: MissionControlAction) {
+        // Ensure the user-provided action handler runs on the main queue. Event taps
+        // deliver events on a separate thread/CFRunLoop; invoking the handler
+        // directly can cause UI work (like hiding the mission control overlay)
+        // to happen off the main thread which can lead to races where the overlay
+        // doesn't get hidden when using the mouse.
+        //
+        // We capture the handler (if any) and schedule a small context to run on
+        // the main queue. We use `queue::main().after_f` with a zero delay and a
+        // thin C callback, mirroring the pattern used for fade completion and
+        // preview refresh scheduling in this file.
         let handler = self.state.borrow().on_action.clone();
-        if let Some(cb) = handler {
-            cb(action);
+        let Some(cb) = handler else {
+            return;
+        };
+
+        // Build a boxed context that holds a boxed Rc<dyn Fn(MissionControlAction)>
+        // and the action value. We'll reconstruct and drop both boxes in the callback
+        // so there are no leaks.
+        #[repr(C)]
+        struct ActionCtx {
+            handler: *mut Rc<dyn Fn(MissionControlAction)>,
+            action: *mut MissionControlAction,
         }
+
+        extern "C" fn action_callback(ctx: *const c_void) {
+            unsafe {
+                if ctx.is_null() {
+                    return;
+                }
+                let boxed_ctx: Box<ActionCtx> = Box::from_raw(ctx as *mut ActionCtx);
+
+                if boxed_ctx.handler.is_null() {
+                    if !boxed_ctx.action.is_null() {
+                        let _ = Box::from_raw(boxed_ctx.action);
+                    }
+                    return;
+                }
+
+                let boxed_handler: Box<Rc<dyn Fn(MissionControlAction)>> =
+                    Box::from_raw(boxed_ctx.handler);
+                let boxed_action: Box<MissionControlAction> = Box::from_raw(boxed_ctx.action);
+
+                let handler_rc: Rc<dyn Fn(MissionControlAction)> = *boxed_handler;
+                handler_rc(*boxed_action);
+            }
+        }
+
+        let rc_handler = cb.clone();
+        let boxed_rc_ptr = Box::into_raw(Box::new(rc_handler));
+        let boxed_action_ptr = Box::into_raw(Box::new(action));
+
+        let ctx = Box::into_raw(Box::new(ActionCtx {
+            handler: boxed_rc_ptr,
+            action: boxed_action_ptr,
+        })) as *mut c_void;
+
+        queue::main().async_f(ctx, action_callback);
     }
 
     fn handle_keycode(&self, keycode: u16) {
