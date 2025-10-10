@@ -899,10 +899,9 @@ impl MissionControlOverlay {
     }
 
     fn activate_selection_action(&self) {
-        let (handler, action) = {
+        let action = {
             let mut state = self.state.borrow_mut();
             state.ensure_selection();
-            let handler = state.on_action.clone();
             let mode = state.mode();
             let selection = state.selection();
 
@@ -940,12 +939,11 @@ impl MissionControlOverlay {
                 }
                 _ => None,
             };
-            (handler, action)
+            action
         };
 
-        let Some(cb) = handler else { return };
         if let Some(action) = action {
-            cb(action);
+            self.emit_action(action);
         }
     }
 
