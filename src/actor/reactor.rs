@@ -1674,6 +1674,12 @@ impl Reactor {
             if window_server::window_is_sticky(id) {
                 return false;
             }
+
+            if let Some(level) = window_server::window_level(id.0) {
+                if level != NSNormalWindowLevel {
+                    return false;
+                }
+            }
         }
         window.is_ax_standard && window.is_ax_root
     }
