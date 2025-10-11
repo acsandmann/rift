@@ -1,9 +1,8 @@
 use enum_dispatch::enum_dispatch;
-use nix::libc::pid_t;
 use objc2_core_foundation::CGRect;
 use serde::{Deserialize, Serialize};
 
-use crate::actor::app::WindowId;
+use crate::actor::app::{WindowId, pid_t};
 use crate::layout_engine::{Direction, LayoutKind};
 
 slotmap::new_key_type! { pub struct LayoutId; }

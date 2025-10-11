@@ -2,7 +2,6 @@ use std::ffi::{c_int, c_void};
 use std::ptr::NonNull;
 use std::time::Duration;
 
-use nix::libc::pid_t;
 use objc2_app_kit::NSWindowLevel;
 use objc2_application_services::AXError;
 use objc2_core_foundation::{
@@ -20,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use super::geometry::CGRectDef;
 use crate::actor::app::WindowId;
 use crate::layout_engine::Direction;
+use crate::sys::app::pid_t;
 use crate::sys::axuielement::{AXUIElement, Error as AxError};
 use crate::sys::cg_ok;
 use crate::sys::process::ProcessSerialNumber;

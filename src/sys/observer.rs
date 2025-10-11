@@ -5,12 +5,12 @@ use std::ptr::{self, NonNull};
 
 use dispatchr::queue;
 use dispatchr::time::Time;
-use nix::libc::pid_t;
 use objc2_application_services::{AXError, AXObserver, AXUIElement as RawAXUIElement};
 use objc2_core_foundation::{
     CFRetained, CFRunLoop, CFRunLoopMode, CFString, kCFRunLoopCommonModes,
 };
 
+use crate::sys::app::pid_t;
 use crate::sys::axuielement::{AXUIElement, Error as AxError};
 use crate::sys::dispatch::DispatchExt;
 

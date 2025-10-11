@@ -1,4 +1,3 @@
-use nix::libc::pid_t;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -11,6 +10,7 @@ use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{AppWorkspaceRule, VirtualWorkspaceSettings, WorkspaceSelector};
 use crate::common::log::trace_misc;
 use crate::layout_engine::Direction;
+use crate::sys::app::pid_t;
 use crate::sys::geometry::CGRectDef;
 use crate::sys::screen::SpaceId;
 

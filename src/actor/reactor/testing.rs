@@ -1,6 +1,5 @@
 use std::io::Write;
 
-use nix::libc::pid_t;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use tracing::debug;
 
@@ -10,7 +9,7 @@ use crate::actor::app::{AppThreadHandle, Request, WindowId};
 use crate::common::collections::BTreeMap;
 use crate::common::config::Config;
 use crate::layout_engine::LayoutEngine;
-use crate::sys::app::{AppInfo, WindowInfo};
+use crate::sys::app::{AppInfo, WindowInfo, pid_t};
 use crate::sys::geometry::SameAs;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 

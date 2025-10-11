@@ -5,7 +5,6 @@ use std::hash::{Hash, Hasher};
 use std::ops::Deref;
 use std::ptr::{self, NonNull};
 
-use nix::libc::pid_t;
 use objc2_application_services::{AXError, AXUIElement as RawAXUIElement, AXValue, AXValueType};
 use objc2_core_foundation::{
     CFArray, CFBoolean, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize, ConcreteType,
@@ -13,6 +12,7 @@ use objc2_core_foundation::{
 
 use super::skylight::{CGSGetWindowBounds, G_CONNECTION};
 use crate::actor::app::WindowId;
+use crate::sys::app::pid_t;
 
 pub const AX_WINDOW_ROLE: &str = "AXWindow";
 pub const AX_STANDARD_WINDOW_SUBROLE: &str = "AXStandardWindow";

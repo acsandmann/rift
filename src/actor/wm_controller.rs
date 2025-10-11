@@ -5,7 +5,6 @@
 use std::borrow::Cow;
 use std::path::PathBuf;
 
-use nix::libc::pid_t;
 use objc2_app_kit::NSScreen;
 use objc2_core_foundation::CGRect;
 use objc2_foundation::MainThreadMarker;
@@ -14,6 +13,7 @@ use serde_json;
 use tracing::{debug, error, info, instrument};
 
 use crate::common::config::WorkspaceSelector;
+use crate::sys::app::pid_t;
 
 pub type Sender = actor::Sender<WmEvent>;
 

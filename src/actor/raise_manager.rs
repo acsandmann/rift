@@ -1,7 +1,6 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use nix::libc::pid_t;
 use objc2_core_foundation::CGPoint;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
@@ -9,6 +8,7 @@ use tracing::{debug, trace, warn};
 use crate::actor::app::{AppThreadHandle, Quiet, Request, WindowId};
 use crate::actor::{self, mouse, reactor};
 use crate::common::collections::{HashMap, HashSet};
+use crate::sys::app::pid_t;
 use crate::sys::timer::Timer;
 
 /// Messages that can be sent to the raise manager
