@@ -343,6 +343,10 @@ pub struct Settings {
     /// Trackpad gesture settings
     #[serde(default)]
     pub gestures: GestureSettings,
+
+    #[serde(default)]
+    pub window_snapping: WindowSnappingSettings,
+
     /// Commands to run on startup (e.g., for subscribing to events)
     #[serde(default)]
     pub run_on_start: Vec<String>,
@@ -436,6 +440,13 @@ impl Default for GestureSettings {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default, Copy)]
+#[serde(deny_unknown_fields)]
+pub struct WindowSnappingSettings {
+    #[serde(default = "default_drag_swap_fraction")]
+    pub drag_swap_fraction: f64,
+}
+
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct MenuBarSettings {
@@ -470,6 +481,8 @@ pub struct MissionControlSettings {
 }
 
 fn default_mission_control_fade_duration_ms() -> f64 { 180.0 }
+
+fn default_drag_swap_fraction() -> f64 { 0.3 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
 #[serde(rename_all = "snake_case")]

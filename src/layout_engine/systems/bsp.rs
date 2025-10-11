@@ -774,6 +774,55 @@ impl LayoutSystem for BspLayoutSystem {
         true
     }
 
+    fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
+        let Some(&node_a) = self.window_to_node.get(&a) else {
+            return false;
+        };
+        let Some(&node_b) = self.window_to_node.get(&b) else {
+            return false;
+        };
+        if node_a == node_b {
+            return false;
+        }
+
+        if let Some(state) = self.layouts.get(layout).copied() {
+            if !self.belongs_to_layout(state, node_a) || !self.belongs_to_layout(state, node_b) {
+                return false;
+            }
+        } else {
+            return false;
+        }
+
+        let mut a_window = None;
+        let mut b_window = None;
+        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get(node_a) {
+            a_window = *window;
+        }
+        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get(node_b) {
+            b_window = *window;
+        }
+
+        if a_window.is_none() && b_window.is_none() {
+            return false;
+        }
+
+        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(node_a) {
+            *window = b_window;
+        }
+        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(node_b) {
+            *window = a_window;
+        }
+
+        if let Some(w) = a_window {
+            self.window_to_node.insert(w, node_b);
+        }
+        if let Some(w) = b_window {
+            self.window_to_node.insert(w, node_a);
+        }
+
+        true
+    }
+
     fn move_selection_to_layout_after_selection(
         &mut self,
         from_layout: LayoutId,

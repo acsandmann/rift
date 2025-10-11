@@ -52,6 +52,8 @@ pub enum LayoutCommand {
     MoveWindowToWorkspace(usize),
     CreateWorkspace,
     SwitchToLastWorkspace,
+
+    SwapWindows(crate::actor::app::WindowId, crate::actor::app::WindowId),
 }
 
 #[non_exhaustive]
@@ -669,6 +671,13 @@ impl LayoutEngine {
         match command {
             LayoutCommand::ToggleWindowFloating => unreachable!(),
             LayoutCommand::ToggleFocusFloating => unreachable!(),
+
+            LayoutCommand::SwapWindows(a, b) => {
+                let layout = self.layout(space);
+                let _ = self.tree.swap_windows(layout, a, b);
+
+                EventResponse::default()
+            }
 
             LayoutCommand::NextWindow => {
                 self.move_focus_internal(space, visible_spaces, Direction::Left, is_floating)

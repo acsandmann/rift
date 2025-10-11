@@ -132,6 +132,20 @@ impl AXUIElement {
         Ok(boolean.value())
     }
 
+    pub fn is_settable(&self, name: &'static str) -> Result<bool> {
+        let mut is_settable = false;
+        let status = unsafe {
+            self.inner.is_attribute_settable(
+                CFString::from_static_str(name).as_ref(),
+                NonNull::new_unchecked((&mut is_settable as *mut bool).cast::<u8>()),
+            )
+        };
+        match status {
+            AXError::Success => Ok(is_settable),
+            err => Err(Error::Ax(err)),
+        }
+    }
+
     pub fn frame(&self) -> Result<CGRect> {
         let value = self.copy_required_attribute("AXFrame")?;
         let ax_value = self.downcast::<AXValue>(value)?;
@@ -238,6 +252,10 @@ impl AXUIElement {
         let attr = CFString::from_static_str(name);
         self.set_attribute_value(attr.as_ref(), cf_bool.as_ref())
     }
+
+    pub fn can_move(&self) -> Result<bool> { self.bool_attribute("AXPosition") }
+
+    pub fn can_resize(&self) -> Result<bool> { self.bool_attribute("AXSize") }
 }
 
 impl Deref for AXUIElement {

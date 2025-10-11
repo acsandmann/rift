@@ -15,6 +15,7 @@ use std::{mem, thread};
 
 use animation::Animation;
 use main_window::MainWindowTracker;
+use objc2_app_kit::NSNormalWindowLevel;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 pub use replay::{Record, replay};
 use serde::{Deserialize, Serialize};
@@ -254,6 +255,9 @@ pub struct Reactor {
     pending_refocus_space: Option<SpaceId>,
     window_notify_tx: Option<crate::actor::window_notify::Sender>,
     window_tx_store: Option<WindowTxStore>,
+    drag_manager: crate::actor::drag_swap::DragManager,
+    skip_layout_for_window: Option<WindowId>,
+    pending_drag_swap: Option<(WindowId, WindowId)>,
 }
 
 #[derive(Debug)]
@@ -364,7 +368,7 @@ impl Reactor {
             None => (None, None),
         };
         Reactor {
-            config,
+            config: config.clone(),
             apps: HashMap::default(),
             layout_engine,
             windows: HashMap::default(),
@@ -394,6 +398,11 @@ impl Reactor {
             pending_refocus_space: None,
             window_notify_tx,
             window_tx_store,
+            drag_manager: crate::actor::drag_swap::DragManager::new(
+                config.settings.window_snapping,
+            ),
+            skip_layout_for_window: None,
+            pending_drag_swap: None,
         }
     }
 
@@ -567,6 +576,26 @@ impl Reactor {
                 self.windows.remove(&wid);
                 self.send_layout_event(LayoutEvent::WindowRemoved(wid));
                 window_was_destroyed = true;
+
+                if let Some((dragged_wid, target_wid)) = self.pending_drag_swap {
+                    if dragged_wid == wid || target_wid == wid {
+                        trace!(
+                            ?wid,
+                            "Clearing pending drag swap because a participant window was destroyed"
+                        );
+                        self.pending_drag_swap = None;
+                    }
+                }
+
+                if self.drag_manager.dragged() == Some(wid)
+                    || self.drag_manager.last_target() == Some(wid)
+                {
+                    self.drag_manager.reset();
+                }
+
+                if self.skip_layout_for_window == Some(wid) {
+                    self.skip_layout_for_window = None;
+                }
             }
             Event::WindowServerDestroyed(wsid) => {
                 if let Some(wid) = self.window_ids.get(&wsid).copied() {
@@ -709,6 +738,10 @@ impl Reactor {
                         is_resize = true;
                     } else if mouse_state == Some(MouseState::Down) {
                         self.in_drag = true;
+                        // When a window is being dragged (mouse down while its frame
+                        // moved), check whether it sufficiently overlaps another tiled
+                        // window; if so, trigger a swap command.
+                        self.maybe_swap_on_drag(wid, new_frame);
                     }
                 }
             }
@@ -791,6 +824,50 @@ impl Reactor {
             }
             Event::MouseUp => {
                 self.in_drag = false;
+
+                if let Some((dragged_wid, target_wid)) = self.pending_drag_swap.take() {
+                    trace!(?dragged_wid, ?target_wid, "Performing deferred swap on MouseUp");
+
+                    self.skip_layout_for_window = Some(dragged_wid);
+
+                    if !self.windows.contains_key(&dragged_wid)
+                        || !self.windows.contains_key(&target_wid)
+                    {
+                        trace!(
+                            ?dragged_wid,
+                            ?target_wid,
+                            "Skipping deferred swap; one of the windows no longer exists"
+                        );
+                    } else {
+                        let visible_spaces =
+                            self.screens.iter().flat_map(|s| s.space).collect::<Vec<_>>();
+
+                        let swap_space = self
+                            .windows
+                            .get(&dragged_wid)
+                            .and_then(|w| self.best_space_for_window(&w.frame_monotonic))
+                            .or_else(|| {
+                                self.drag_manager
+                                    .origin_frame()
+                                    .and_then(|f| self.best_space_for_window(&f))
+                            })
+                            .or_else(|| self.screens.iter().find_map(|s| s.space));
+                        let response = self.layout_engine.handle_command(
+                            swap_space,
+                            &visible_spaces,
+                            layout::LayoutCommand::SwapWindows(dragged_wid, target_wid),
+                        );
+                        self.handle_layout_response(response);
+
+                        let _ = self.update_layout(false, false);
+                    }
+
+                    self.skip_layout_for_window = None;
+                }
+
+                self.drag_manager.reset();
+
+                self.skip_layout_for_window = None;
             }
             Event::MenuOpened => {
                 debug!("menu opened");
@@ -874,6 +951,7 @@ impl Reactor {
 
                 self.config = new_cfg;
                 self.layout_engine.set_layout_settings(&self.config.settings.layout);
+                let _ = self.drag_manager.update_config(self.config.settings.window_snapping);
                 let _ = self.update_layout(false, true);
 
                 if old_keys != self.config.keys {
@@ -1986,6 +2064,81 @@ impl Reactor {
         _ = self.raise_manager_tx.send(msg);
     }
 
+    fn maybe_swap_on_drag(&mut self, wid: WindowId, new_frame: CGRect) {
+        if self.windows.get(&wid).is_none() {
+            return;
+        }
+
+        if !self.in_drag {
+            trace!(?wid, "Skipping swap: not in drag (mouse up received)");
+            return;
+        }
+
+        let Some(space) = self.best_space_for_window(&new_frame) else {
+            return;
+        };
+
+        if !self.layout_engine.is_window_in_active_workspace(space, wid) {
+            return;
+        }
+
+        let mut candidates: Vec<(WindowId, CGRect)> = Vec::new();
+        for (&other_wid, other_state) in &self.windows {
+            if other_wid == wid {
+                continue;
+            }
+
+            let Some(other_space) = self.best_space_for_window(&other_state.frame_monotonic) else {
+                continue;
+            };
+            if other_space != space
+                || !self.layout_engine.is_window_in_active_workspace(space, other_wid)
+                || self.layout_engine.is_window_floating(other_wid)
+            {
+                continue;
+            }
+
+            candidates.push((other_wid, other_state.frame_monotonic));
+        }
+
+        let previous_pending = self.pending_drag_swap;
+        let new_candidate = self.drag_manager.on_frame_change(wid, new_frame, &candidates);
+        let active_target = self.drag_manager.last_target();
+
+        if let Some(target_wid) = active_target {
+            if new_candidate.is_some()
+                || previous_pending.map(|(dragged, target)| (dragged, target))
+                    != Some((wid, target_wid))
+            {
+                trace!(
+                    ?wid,
+                    ?target_wid,
+                    "Detected swap candidate; deferring until MouseUp"
+                );
+            }
+
+            self.pending_drag_swap = Some((wid, target_wid));
+
+            self.skip_layout_for_window = Some(wid);
+        } else {
+            if let Some((pending_wid, pending_target)) = previous_pending {
+                if pending_wid == wid {
+                    trace!(
+                        ?wid,
+                        ?pending_target,
+                        "Clearing pending drag swap; overlap ended before MouseUp"
+                    );
+                    self.pending_drag_swap = None;
+                }
+            }
+
+            if self.skip_layout_for_window == Some(wid) {
+                self.skip_layout_for_window = None;
+            }
+        }
+        // wait for mouse::up before doing *anything*
+    }
+
     fn window_id_under_cursor(&self) -> Option<WindowId> {
         let wsid = window_server::window_under_cursor()?;
         self.window_ids.get(&wsid).copied()
@@ -2123,6 +2276,7 @@ impl Reactor {
         let screens = self.screens.clone();
         let main_window = self.main_window();
         trace!(?main_window);
+        let skip_wid = self.skip_layout_for_window.take().or(self.drag_manager.dragged());
         let mut any_frame_changed = false;
         for screen in screens {
             let Some(space) = screen.space else { continue };
@@ -2175,6 +2329,12 @@ impl Reactor {
             if suppress_animation {
                 let mut per_app: HashMap<pid_t, Vec<(WindowId, CGRect)>> = HashMap::default();
                 for &(wid, target_frame) in &layout {
+                    // Skip applying a layout frame for the window currently being dragged.
+                    if skip_wid == Some(wid) {
+                        trace!(?wid, "Skipping layout update for window currently being dragged");
+                        continue;
+                    }
+
                     let Some(window) = self.windows.get_mut(&wid) else {
                         debug!(?wid, "Skipping layout - window no longer exists");
                         continue;
@@ -2259,6 +2419,15 @@ impl Reactor {
 
                     let mut animated_wids_wsids: Vec<u32> = Vec::new();
                     for &(wid, target_frame) in &layout {
+                        // Skip applying layout frames and animations for the window currently being dragged.
+                        if skip_wid == Some(wid) {
+                            trace!(
+                                ?wid,
+                                "Skipping animated layout update for window currently being dragged"
+                            );
+                            continue;
+                        }
+
                         let target_frame = target_frame.round();
                         let (current_frame, window_server_id, txid) =
                             match self.windows.get_mut(&wid) {

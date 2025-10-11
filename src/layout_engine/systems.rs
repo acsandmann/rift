@@ -51,6 +51,9 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
         new_frame: CGRect,
         screen: CGRect,
     );
+
+    fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool;
+
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool;
     fn move_selection_to_layout_after_selection(
         &mut self,
@@ -62,7 +65,7 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction);
     fn apply_stacking_to_parent_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId>;
     fn unstack_parent_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId>;
-    fn unjoin_selection(&mut self, layout: LayoutId);
+    fn unjoin_selection(&mut self, _layout: LayoutId);
     fn resize_selection_by(&mut self, layout: LayoutId, amount: f64);
     fn rebalance(&mut self, layout: LayoutId);
 }

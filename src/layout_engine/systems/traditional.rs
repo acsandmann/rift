@@ -679,6 +679,57 @@ impl LayoutSystem for TraditionalLayoutSystem {
         let root = self.root(layout);
         self.rebalance_node(root)
     }
+
+    fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
+        let node_a = match self.tree.data.window.node_for(layout, a) {
+            Some(n) => n,
+            None => return false,
+        };
+        let node_b = match self.tree.data.window.node_for(layout, b) {
+            Some(n) => n,
+            None => return false,
+        };
+
+        if node_a == node_b {
+            return false;
+        }
+
+        let wa = self.tree.data.window.at(node_a);
+        let wb = self.tree.data.window.at(node_b);
+
+        match (wa, wb) {
+            (None, None) => return false,
+            _ => {
+                if let Some(w) = wa {
+                    self.tree.data.window.windows.insert(node_b, w);
+                } else {
+                    self.tree.data.window.windows.remove(node_b);
+                }
+                if let Some(w) = wb {
+                    self.tree.data.window.windows.insert(node_a, w);
+                } else {
+                    self.tree.data.window.windows.remove(node_a);
+                }
+            }
+        }
+
+        if let Some(infos) = self.tree.data.window.window_nodes.get_mut(&a) {
+            for info in &mut infos.0 {
+                if info.layout == layout {
+                    info.node = node_b;
+                }
+            }
+        }
+        if let Some(infos) = self.tree.data.window.window_nodes.get_mut(&b) {
+            for info in &mut infos.0 {
+                if info.layout == layout {
+                    info.node = node_a;
+                }
+            }
+        }
+
+        true
+    }
 }
 
 impl TraditionalLayoutSystem {

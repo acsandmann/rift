@@ -113,8 +113,10 @@ vert_placement = "left"
 # how thick the line indicator will be (in px)
 thickness = 3.0
 
+# experimental mission control
 [settings.ui.mission_control]
 enabled = false
+# enable fade animation when entering/exiting mission control
 fade_enabled = false
 # native macos mission control fade is about 180ms
 fade_duration_ms = 180.0
@@ -138,6 +140,15 @@ distance_pct = 0.12
 haptics_enabled = true
 haptic_pattern = "level_change"
 
+# Window snapping / drag-swap behavior
+[settings.window_snapping]
+# Fraction threshold (0.0..1.0) specifying how much of the dragged window
+# area must be overlapped by a candidate window in order to trigger a
+# swap while dragging. Typical values are around 0.2–0.4.
+# If you prefer more aggressive swapping, lower the value; increase it
+# to require greater overlap before a swap occurs.
+drag_swap_fraction = 0.3
+
 [virtual_workspaces]
 # Virtual workspaces
 # - enabled: if false, rift behaves like a simple tiling WM with a single space
@@ -148,6 +159,11 @@ enabled = true
 default_workspace_count = 4
 auto_assign_windows = true
 preserve_focus_per_workspace = true
+
+# Default workspace to activate on startup (0-based index).
+# If omitted, defaults to 0 (first workspace). Must be less than default_workspace_count.
+# Uncomment to change:
+# default_workspace = 0
 
 # Workspace names (indexed order). If fewer than default_workspace_count are provided,
 # remaining workspaces are named "Workspace X".
@@ -168,6 +184,7 @@ workspace_names = [
 #
 # Rule options:
 #   - workspace (integer, 0-based): target workspace index. If omitted or invalid, uses the active workspace.
+#     Alternatively, `workspace` may be a workspace name string to target by name.
 #   - floating (boolean): whether matched windows should float by default.
 #
 # Matching behavior (summary):
