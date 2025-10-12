@@ -12,6 +12,7 @@
   - Binary Space Partitioning (bspwm-like)
 - Menubar icon that shows all of the workspaces and the layouts within <details> <summary><sup>click to see the menu bar icon</sup></summary><img src="assets/menubar.png" alt="Rift menu bar icon" /></details>
 - MacOS-style mission control that allows you to visually navigate between workspaces <details><summary><sup>click to see mission control</sup></summary><img src="assets/mission_control.png" alt="Rift Mission Control view" /></details>
+- Focus follows mouse with auto raise
 - Drag windows over one another to swap positions
 - Performant animations <sup>(as seen in the [demo](#rift))</sup>
 - Switch to next/previous workspace with trackpad gestures <sup>(just like native macOS)</sup>
