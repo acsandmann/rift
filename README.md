@@ -1,7 +1,7 @@
 <div align="center">
 
 # Rift
-  <p>Rift is a tiling window manager for MacOS that focuses on performance and usability. </p>
+  <p>Rift is a tiling window manager for macOS that focuses on performance and usability. </p>
   <img src="assets/demo.gif" alt="Rift demo" />
 </div>
 
@@ -12,16 +12,16 @@
   - Binary Space Partitioning (bspwm-like)
 - Menubar icon that shows all of the workspaces and the layouts within <details> <summary><sup>click to see the menu bar icon</sup></summary><img src="assets/menubar.png" alt="Rift menu bar icon" /></details>
 - MacOS-style mission control that allows you to visually navigate between workspaces <details><summary><sup>click to see mission control</sup></summary><img src="assets/mission_control.png" alt="Rift Mission Control view" /></details>
-- Focus follows mouse with auto raise
+- Focus follows the mouse with auto raise
 - Drag windows over one another to swap positions
 - Performant animations <sup>(as seen in the [demo](#rift))</sup>
 - Switch to next/previous workspace with trackpad gestures <sup>(just like native macOS)</sup>
 - Hot reloadable configuration
-- interop with third party programs (ie Sketchybar)
-  - requests can be made to rift via the cli or the mach port exposed [(lua client here)](https://github.com/acsandmann/rift.lua)
-  - signals can be sent on startup, workspace switches, and when the windows within a workspace change. these signals can be sent via a command(cli) or through a mach connection
+- Interop with third-party programs (ie Sketchybar)
+  - Requests can be made to rift via the cli or the mach port exposed [(lua client here)](https://github.com/acsandmann/rift.lua)
+  - Signals can be sent on startup, workspace switches, and when the windows within a workspace change. These signals can be sent via a command(cli) or through a mach connection
 - Does **not** require disabling SIP
-- Works with “Displays have separate Spaces” enabled (unlike all other major WM's)
+- Works with “Displays have separate Spaces” enabled (unlike all other major WMs)
 
 ## Quick Start
 Get up and running via the wiki:
@@ -38,7 +38,7 @@ Rift is in active development but is still generally stable. There is no officia
 > Issues and PRs are very welcome.
 
 ## Motivation
-Aerospace worked well for me, but I missed animations and the ability to use fullscreen on one display while working on the other. I also prefer leveraging private/undocumented API's as they tend to be more reliable (due to the os being built on them, as well as all the public api's) and performant.
+Aerospace worked well for me, but I missed animations and the ability to use fullscreen on one display while working on the other. I also prefer leveraging private/undocumented APIs as they tend to be more reliable (due to the OS being built on them and all the public APIs) and performant.
 <sup><sup>for more on why rift exists and what rift thrives to do, see the [manifesto](manifesto.md)</sup></sup>
 
 
