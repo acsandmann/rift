@@ -1744,7 +1744,7 @@ impl MissionControlOverlay {
             action: *mut MissionControlAction,
         }
 
-        extern "C" fn action_callback(ctx: *const c_void) {
+        extern "C" fn action_callback(ctx: *mut c_void) {
             unsafe {
                 if ctx.is_null() {
                     return;
@@ -1776,7 +1776,7 @@ impl MissionControlOverlay {
             action: boxed_action_ptr,
         })) as *mut c_void;
 
-        queue::main().async_f(ctx, action_callback);
+        queue::main().after_f(Time::NOW, ctx, action_callback);
     }
 
     fn handle_keycode(&self, keycode: u16) {
