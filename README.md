@@ -39,7 +39,7 @@ Rift is in active development but is still generally stable. There is no officia
 
 ## Motivation
 Aerospace worked well for me, but I missed animations and the ability to use fullscreen on one display while working on the other. I also prefer leveraging private/undocumented APIs as they tend to be more reliable (due to the OS being built on them and all the public APIs) and performant.
-<sup><sup>for more on why rift exists and what rift thrives to do, see the [manifesto](manifesto.md)</sup></sup>
+<sup><sup>for more on why rift exists and what rift strives to do, see the [manifesto](manifesto.md)</sup></sup>
 
 
 ## Credits
