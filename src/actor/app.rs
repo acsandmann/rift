@@ -36,7 +36,7 @@ use crate::sys::executor::Executor;
 use crate::sys::observer::Observer;
 use crate::sys::process::ProcessInfo;
 use crate::sys::skylight::{G_CONNECTION, SLSDisableUpdate, SLSReenableUpdate};
-use crate::sys::window_server::{self, WindowServerId};
+use crate::sys::window_server::{self, WindowServerId, WindowServerInfo};
 
 const kAXApplicationActivatedNotification: &str = "AXApplicationActivated";
 const kAXApplicationDeactivatedNotification: &str = "AXApplicationDeactivated";
@@ -363,21 +363,33 @@ impl State {
             return false;
         };
 
-        self.windows.reserve(initial_window_elements.len() as usize);
-        let mut windows = Vec::with_capacity(initial_window_elements.len() as usize);
-        let mut wsids = Vec::with_capacity(initial_window_elements.len() as usize);
-        for elem in initial_window_elements.iter() {
-            let elem = elem.clone();
+        let window_count = initial_window_elements.len() as usize;
+        self.windows.reserve(window_count);
+        let mut windows = Vec::with_capacity(window_count);
+
+        let mut elements_with_ids = Vec::with_capacity(window_count);
+        let mut wsids = Vec::with_capacity(window_count);
+        for elem in initial_window_elements.into_iter() {
             let wsid = WindowServerId::try_from(&elem).ok();
-            let Some((info, wid)) = self.register_window(elem) else {
+            if let Some(id) = wsid {
+                wsids.push(id);
+            }
+            elements_with_ids.push((elem, wsid));
+        }
+
+        let window_server_info = window_server::get_windows(&wsids);
+        let mut server_info_by_id: HashMap<WindowServerId, WindowServerInfo> = HashMap::default();
+        for info in &window_server_info {
+            server_info_by_id.insert(info.id, *info);
+        }
+
+        for (elem, wsid) in elements_with_ids {
+            let hint = wsid.and_then(|id| server_info_by_id.get(&id).copied());
+            let Some((info, wid, _)) = self.register_window(elem, hint) else {
                 continue;
             };
-            if let Some(wsid) = wsid {
-                wsids.push(wsid);
-            }
             windows.push((wid, info));
         }
-        let window_server_info = window_server::get_windows(&wsids);
 
         self.main_window = self.app.main_window().ok().and_then(|w| self.id(&w).ok());
         self.is_frontmost = self.app.frontmost().unwrap_or(false);
@@ -423,7 +435,7 @@ impl State {
                         known_visible.push(id);
                         continue;
                     }
-                    let Some((info, wid)) = self.register_window(elem) else {
+                    let Some((info, wid, _)) = self.register_window(elem, None) else {
                         continue;
                     };
                     new.push((wid, info));
@@ -646,10 +658,12 @@ impl State {
                 if self.id(&elem).is_ok() {
                     return;
                 }
-                let Some((window, wid)) = self.register_window(elem) else {
+                let Some((window, wid, window_server_info)) = self.register_window(elem, None)
+                else {
                     return;
                 };
-                let window_server_info = window_server::get_window(WindowServerId(wid.idx.into()));
+                let window_server_info = window_server_info
+                    .or_else(|| window.sys_id.and_then(window_server::get_window));
                 self.send_event(Event::WindowCreated(
                     wid,
                     window,
@@ -854,11 +868,12 @@ impl State {
         let wid = match self.id(&elem).ok() {
             Some(wid) => wid,
             None => {
-                let Some((info, wid)) = self.register_window(elem) else {
+                let Some((info, wid, window_server_info)) = self.register_window(elem, None) else {
                     warn!(?self.pid, "Got MainWindowChanged on unknown window");
                     return None;
                 };
-                let window_server_info = window_server::get_window(WindowServerId(wid.idx.into()));
+                let window_server_info =
+                    window_server_info.or_else(|| info.sys_id.and_then(window_server::get_window));
                 self.send_event(Event::WindowCreated(
                     wid,
                     info,
@@ -915,8 +930,13 @@ impl State {
     }
 
     #[must_use]
-    fn register_window(&mut self, elem: AXUIElement) -> Option<(WindowInfo, WindowId)> {
-        let Ok(mut info) = WindowInfo::try_from(&elem) else {
+    fn register_window(
+        &mut self,
+        elem: AXUIElement,
+        server_info_hint: Option<WindowServerInfo>,
+    ) -> Option<(WindowInfo, WindowId, Option<WindowServerInfo>)> {
+        let Ok((mut info, server_info)) = WindowInfo::from_ax_element(&elem, server_info_hint)
+        else {
             return None;
         };
 
@@ -990,7 +1010,7 @@ impl State {
             last_seen_txid: TransactionId::default(),
         });
         debug_assert!(old.is_none(), "Duplicate window id {wid:?}");
-        return Some((info, wid));
+        return Some((info, wid, server_info));
 
         fn register_notifs(win: &AXUIElement, state: &State) -> bool {
             match win.role() {

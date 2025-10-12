@@ -290,6 +290,7 @@ struct WindowState {
     is_ax_standard: bool,
     is_ax_root: bool,
     is_minimized: bool,
+    is_manageable: bool,
     last_sent_txid: TransactionId,
     window_server_id: Option<WindowServerId>,
     #[allow(unused)]
@@ -316,6 +317,7 @@ impl From<WindowInfo> for WindowState {
             is_ax_standard: info.is_standard,
             is_ax_root: info.is_root,
             is_minimized: info.is_minimized,
+            is_manageable: false,
             last_sent_txid: TransactionId::default(),
             window_server_id: info.sys_id,
             bundle_id: info.bundle_id,
@@ -538,8 +540,15 @@ impl Reactor {
                     self.window_ids.insert(wsid, wid);
                     self.observed_window_server_ids.remove(&wsid);
                 }
+                if let Some(info) = ws_info {
+                    self.observed_window_server_ids.remove(&info.id);
+                    self.window_server_info.insert(info.id, info);
+                }
+
                 let frame = window.frame;
-                let window_state: WindowState = window.into();
+                let mut window_state: WindowState = window.into();
+                let is_manageable = self.compute_window_manageability(&window_state);
+                window_state.is_manageable = is_manageable;
                 self.store_txid(
                     window_state.window_server_id,
                     window_state.last_sent_txid,
@@ -547,15 +556,8 @@ impl Reactor {
                 );
                 self.windows.insert(wid, window_state);
 
-                if let Some(info) = ws_info {
-                    self.observed_window_server_ids.remove(&info.id);
-                    self.window_server_info.insert(info.id, info);
-                }
-
-                if let Some(space) = self.best_space_for_window(&frame) {
-                    if self.window_is_standard(wid)
-                    // && crate::sys::window_server::app_window_suitable(wid.into())
-                    {
+                if is_manageable {
+                    if let Some(space) = self.best_space_for_window(&frame) {
                         self.send_layout_event(LayoutEvent::WindowAdded(space, wid));
                     }
                 }
@@ -626,6 +628,7 @@ impl Reactor {
                         return;
                     }
                     window.is_minimized = true;
+                    window.is_manageable = false;
                     if let Some(ws_id) = window.window_server_id {
                         self.visible_windows.remove(&ws_id);
                     }
@@ -635,24 +638,39 @@ impl Reactor {
                 }
             }
             Event::WindowDeminiaturized(wid) => {
-                let frame = match self.windows.get_mut(&wid) {
-                    Some(window) => {
-                        if !window.is_minimized {
+                let (frame, server_id, is_ax_standard, is_ax_root) =
+                    match self.windows.get_mut(&wid) {
+                        Some(window) => {
+                            if !window.is_minimized {
+                                return;
+                            }
+                            window.is_minimized = false;
+                            (
+                                window.frame_monotonic,
+                                window.window_server_id,
+                                window.is_ax_standard,
+                                window.is_ax_root,
+                            )
+                        }
+                        None => {
+                            debug!(
+                                ?wid,
+                                "Received WindowDeminiaturized for unknown window - ignoring"
+                            );
                             return;
                         }
-                        window.is_minimized = false;
-                        window.frame_monotonic
-                    }
-                    None => {
-                        debug!(
-                            ?wid,
-                            "Received WindowDeminiaturized for unknown window - ignoring"
-                        );
-                        return;
-                    }
-                };
+                    };
+                let is_manageable = self.compute_manageability_from_parts(
+                    server_id,
+                    false,
+                    is_ax_standard,
+                    is_ax_root,
+                );
+                if let Some(window) = self.windows.get_mut(&wid) {
+                    window.is_manageable = is_manageable;
+                }
 
-                if self.window_is_standard(wid) {
+                if is_manageable {
                     if let Some(space) = self.best_space_for_window(&frame) {
                         self.send_layout_event(LayoutEvent::WindowAdded(space, wid));
                     }
@@ -1494,19 +1512,34 @@ impl Reactor {
         for info in ws_info.iter() {
             // If we've been observing this server id from SLS callbacks, clear it.
             self.observed_window_server_ids.remove(&info.id);
-        }
+            self.window_server_info.insert(info.id, *info);
 
-        for info in ws_info.iter().filter(|i| i.layer == 0) {
-            let Some(wid) = self.window_ids.get(&info.id) else {
-                continue;
-            };
-            let Some(window) = self.windows.get_mut(wid) else {
-                continue;
-            };
-
-            window.frame_monotonic = info.frame;
+            if let Some(wid) = self.window_ids.get(&info.id).copied() {
+                let (server_id, is_minimized, is_ax_standard, is_ax_root) =
+                    if let Some(window) = self.windows.get_mut(&wid) {
+                        if info.layer == 0 {
+                            window.frame_monotonic = info.frame;
+                        }
+                        (
+                            window.window_server_id,
+                            window.is_minimized,
+                            window.is_ax_standard,
+                            window.is_ax_root,
+                        )
+                    } else {
+                        continue;
+                    };
+                let manageable = self.compute_manageability_from_parts(
+                    server_id,
+                    is_minimized,
+                    is_ax_standard,
+                    is_ax_root,
+                );
+                if let Some(window) = self.windows.get_mut(&wid) {
+                    window.is_manageable = manageable;
+                }
+            }
         }
-        self.window_server_info.extend(ws_info.into_iter().map(|info| (info.id, info)));
     }
 
     fn check_for_new_windows(&mut self) {
@@ -1608,9 +1641,15 @@ impl Reactor {
         let app_rules_recently_applied = time_since_app_rules.as_secs() < 1;
 
         if app_rules_recently_applied && app_info.is_none() {
-            self.window_ids
-                .extend(new.iter().flat_map(|(wid, info)| info.sys_id.map(|wsid| (wsid, *wid))));
-            self.windows.extend(new.into_iter().map(|(wid, info)| (wid, info.into())));
+            for (wid, info) in new {
+                if let Some(wsid) = info.sys_id {
+                    self.window_ids.insert(wsid, wid);
+                }
+                let mut state: WindowState = info.into();
+                let manageable = self.compute_window_manageability(&state);
+                state.is_manageable = manageable;
+                self.windows.insert(wid, state);
+            }
             return;
         }
 
@@ -1630,9 +1669,15 @@ impl Reactor {
         //
         // TODO: Notice when returning from the login screen and ask again for
         // undiscovered windows.
-        self.window_ids
-            .extend(new.iter().flat_map(|(wid, info)| info.sys_id.map(|wsid| (wsid, *wid))));
-        self.windows.extend(new.into_iter().map(|(wid, info)| (wid, info.into())));
+        for (wid, info) in new {
+            if let Some(wsid) = info.sys_id {
+                self.window_ids.insert(wsid, wid);
+            }
+            let mut state: WindowState = info.into();
+            let manageable = self.compute_window_manageability(&state);
+            state.is_manageable = manageable;
+            self.windows.insert(wid, state);
+        }
         if !self.windows.iter().any(|(wid, _)| wid.pid == pid) {
             return;
         }
@@ -1735,31 +1780,47 @@ impl Reactor {
         }
     }
 
-    fn window_is_standard(&self, id: WindowId) -> bool {
-        let Some(window) = self.windows.get(&id) else {
-            return false;
-        };
-        if window.is_minimized {
+    fn compute_window_manageability(&self, window: &WindowState) -> bool {
+        self.compute_manageability_from_parts(
+            window.window_server_id,
+            window.is_minimized,
+            window.is_ax_standard,
+            window.is_ax_root,
+        )
+    }
+
+    fn compute_manageability_from_parts(
+        &self,
+        window_server_id: Option<WindowServerId>,
+        is_minimized: bool,
+        is_ax_standard: bool,
+        is_ax_root: bool,
+    ) -> bool {
+        if is_minimized {
             return false;
         }
 
-        if let Some(id) = window.window_server_id {
-            if let Some(info) = self.window_server_info.get(&id) {
+        if let Some(wsid) = window_server_id {
+            if let Some(info) = self.window_server_info.get(&wsid) {
                 if info.layer != 0 {
                     return false;
                 }
             }
-            if window_server::window_is_sticky(id) {
+            if window_server::window_is_sticky(wsid) {
                 return false;
             }
 
-            if let Some(level) = window_server::window_level(id.0) {
+            if let Some(level) = window_server::window_level(wsid.0) {
                 if level != NSNormalWindowLevel {
                     return false;
                 }
             }
         }
-        window.is_ax_standard && window.is_ax_root
+        is_ax_standard && is_ax_root
+    }
+
+    fn window_is_standard(&self, id: WindowId) -> bool {
+        self.windows.get(&id).map_or(false, |window| window.is_manageable)
     }
 
     fn send_layout_event(&mut self, event: LayoutEvent) {
