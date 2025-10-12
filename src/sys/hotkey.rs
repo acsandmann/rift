@@ -556,7 +556,7 @@ unsafe extern "C-unwind" fn tap_callback(
                 }
             }
         }
-        _ => debug!("tap_callback: unhandled event type {:?}", etype),
+        _ => {}
     }
 
     event_ptr.as_ptr()
