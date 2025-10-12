@@ -978,13 +978,11 @@ impl TraditionalLayoutSystem {
             let current_position = siblings.iter().position(|&s| s == from)?;
             match direction {
                 Direction::Left | Direction::Up => {
-                    if current_position > 0 {
-                        Some(siblings[current_position - 1])
-                    } else {
-                        None
-                    }
+                    current_position.checked_sub(1).and_then(|pos| siblings.get(pos).copied())
                 }
-                Direction::Right | Direction::Down => siblings.get(current_position + 1).copied(),
+                Direction::Right | Direction::Down => {
+                    current_position.checked_add(1).and_then(|pos| siblings.get(pos).copied())
+                }
             }
         }
     }
@@ -1853,4 +1851,98 @@ fn adjust_stack_container_rect(
         container_rect.size.width = new_w;
     }
     container_rect
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout_engine::{Direction, LayoutKind};
+
+    struct TestTraditionalLayoutSystem {
+        system: TraditionalLayoutSystem,
+        _root: OwnedNode,
+        root_id: NodeId,
+    }
+
+    impl TestTraditionalLayoutSystem {
+        fn new() -> Self {
+            let mut system = TraditionalLayoutSystem::default();
+            let root = OwnedNode::new_root_in(&mut system.tree, "test_root");
+            let root_id = *root;
+            system.tree.data.layout.set_kind(root_id, LayoutKind::Horizontal);
+            Self { system, _root: root, root_id }
+        }
+
+        fn add_child(&mut self, parent: NodeId, kind: LayoutKind) -> NodeId {
+            let child = self.system.tree.mk_node().push_back(parent);
+            self.system.tree.data.layout.set_kind(child, kind);
+            child
+        }
+
+        fn move_over(&self, from: NodeId, direction: Direction) -> Option<NodeId> {
+            self.system.move_over(from, direction)
+        }
+    }
+
+    impl Drop for TestTraditionalLayoutSystem {
+        fn drop(&mut self) { self._root.remove(&mut self.system.tree); }
+    }
+
+    #[test]
+    fn test_move_over_no_parent() {
+        let system = TestTraditionalLayoutSystem::new();
+        // Root has no parent
+        assert_eq!(system.move_over(system.root_id, Direction::Right), None);
+    }
+
+    #[test]
+    fn test_move_over_matching_orientation() {
+        let mut system = TestTraditionalLayoutSystem::new();
+        // Root is Horizontal
+        let child1 = system.add_child(system.root_id, LayoutKind::Horizontal);
+        let child2 = system.add_child(system.root_id, LayoutKind::Horizontal);
+        let child3 = system.add_child(system.root_id, LayoutKind::Horizontal);
+
+        // Direction Right (Horizontal), should move to next sibling
+        assert_eq!(system.move_over(child1, Direction::Right), Some(child2));
+        assert_eq!(system.move_over(child2, Direction::Right), Some(child3));
+        assert_eq!(system.move_over(child3, Direction::Right), None);
+
+        // Direction Left
+        assert_eq!(system.move_over(child3, Direction::Left), Some(child2));
+        assert_eq!(system.move_over(child2, Direction::Left), Some(child1));
+        assert_eq!(system.move_over(child1, Direction::Left), None);
+    }
+
+    #[test]
+    fn test_move_over_non_matching_non_stacked() {
+        let mut system = TestTraditionalLayoutSystem::new();
+        // Root is Horizontal
+        let child1 = system.add_child(system.root_id, LayoutKind::Vertical);
+        let _child2 = system.add_child(system.root_id, LayoutKind::Vertical);
+
+        // Direction Up (Vertical), root is Horizontal, not matching, and not stacked
+        assert_eq!(system.move_over(child1, Direction::Up), None);
+    }
+
+    #[test]
+    fn test_move_over_non_matching_stacked() {
+        let mut system = TestTraditionalLayoutSystem::new();
+        // Create a stacked parent
+        let stacked_parent = system.add_child(system.root_id, LayoutKind::HorizontalStack);
+        let child1 = system.add_child(stacked_parent, LayoutKind::Horizontal);
+        let child2 = system.add_child(stacked_parent, LayoutKind::Horizontal);
+        let child3 = system.add_child(stacked_parent, LayoutKind::Horizontal);
+
+        // Direction Up (Vertical), parent is HorizontalStack (Horizontal), not matching Vertical, but stacked
+        // Should move in siblings list: Up -> prev
+        assert_eq!(system.move_over(child2, Direction::Up), Some(child1));
+        assert_eq!(system.move_over(child3, Direction::Up), Some(child2));
+        assert_eq!(system.move_over(child1, Direction::Up), None);
+
+        // Direction Down -> next
+        assert_eq!(system.move_over(child1, Direction::Down), Some(child2));
+        assert_eq!(system.move_over(child2, Direction::Down), Some(child3));
+        assert_eq!(system.move_over(child3, Direction::Down), None);
+    }
 }
