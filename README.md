@@ -7,7 +7,7 @@
 
 
 ## Features
-- multiple layout styles
+- Multiple layout styles
   - Tiling (i3/sway-like)
   - Binary Space Partitioning (bspwm-like)
 - Menubar icon that shows all of the workspaces and the layouts within <details> <summary><sup>click to see the menu bar icon</sup></summary><img src="assets/menubar.png" alt="Rift menu bar icon" /></details>
