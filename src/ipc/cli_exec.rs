@@ -1,7 +1,5 @@
-use std::convert::Infallible;
-use std::ffi::CString;
+use std::process::Command;
 
-use nix::unistd::{ForkResult, execvp, fork};
 use tracing::{debug, error};
 
 use crate::actor::broadcast::BroadcastEvent;
@@ -65,35 +63,21 @@ impl CliExecutor for DefaultCliExecutor {
             shell_cmd.push_str(&shell_escape::escape(arg.into()));
         }
 
-        match unsafe { fork() } {
-            Ok(ForkResult::Parent { .. }) => {
-                debug!("Parent process forked child for CLI subscription");
-                return;
-            }
-            Ok(ForkResult::Child) => {
-                debug!("Child executing CLI subscription command: {}", shell_cmd);
-
-                for (k, v) in env_vars {
-                    unsafe {
-                        std::env::set_var(k, v);
+        std::thread::spawn(move || {
+            debug!("Spawning CLI subscription command: {}", shell_cmd);
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c").arg(shell_cmd).envs(env_vars);
+            match cmd.spawn() {
+                Ok(mut child) => {
+                    if let Err(e) = child.wait() {
+                        error!("Failed to wait for CLI subscription command: {}", e);
                     }
                 }
-
-                let c_shell = CString::new("sh").unwrap();
-                let c_flag = CString::new("-c").unwrap();
-                let c_cmd = CString::new(shell_cmd).unwrap();
-                let exec_args: &[&CString] = &[&c_shell, &c_flag, &c_cmd];
-
-                let result: Result<Infallible, _> = execvp(&c_shell, exec_args);
-
-                error!("execvp failed: {}", result.unwrap_err());
-
-                std::process::exit(1);
+                Err(e) => {
+                    error!("Failed to spawn CLI subscription command: {}", e);
+                }
             }
-            Err(e) => {
-                error!("Failed to fork for CLI subscription: {}", e);
-            }
-        }
+        });
     }
 }
 
