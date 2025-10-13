@@ -56,7 +56,7 @@ jobs:
           sccache --version || true
 
       - name: Formatting
-        run: cargo fmt --check --verbose
+        run: cargo +nightly fmt --check --verbose
 
       - name: Check (host)
         run: cargo check --verbose --locked
