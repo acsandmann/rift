@@ -106,14 +106,6 @@ impl WorkspaceLayouts {
         self.map.get(&(space, workspace_id)).and_then(|l| l.active())
     }
 
-    pub(crate) fn active_layout(
-        &self,
-        space: SpaceId,
-        workspace_id: crate::model::VirtualWorkspaceId,
-    ) -> LayoutId {
-        self.active(space, workspace_id).expect("No active layout for workspace")
-    }
-
     pub(crate) fn mark_last_saved(
         &mut self,
         space: SpaceId,

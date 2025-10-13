@@ -425,23 +425,34 @@ impl LayoutEngine {
                                 }
                                 workspace_id
                             }
-                            Err(_) => self
-                                .virtual_workspace_manager
-                                .auto_assign_window(wid, space)
-                                .unwrap_or_else(|_| {
-                                    self.virtual_workspace_manager
-                                        .active_workspace(space)
-                                        .expect("No active workspace available")
-                                }),
+                            Err(_) => {
+                                match self.virtual_workspace_manager.auto_assign_window(wid, space)
+                                {
+                                    Ok(ws) => ws,
+                                    Err(_) => {
+                                        tracing::warn!(
+                                            "Could not determine workspace for window {:?} on space {:?}; skipping assignment",
+                                            wid,
+                                            space
+                                        );
+                                        // Skip this window - no active workspace available.
+                                        continue;
+                                    }
+                                }
+                            }
                         }
                     } else {
-                        self.virtual_workspace_manager
-                            .auto_assign_window(wid, space)
-                            .unwrap_or_else(|_| {
-                                self.virtual_workspace_manager
-                                    .active_workspace(space)
-                                    .expect("No active workspace available")
-                            })
+                        match self.virtual_workspace_manager.auto_assign_window(wid, space) {
+                            Ok(ws) => ws,
+                            Err(_) => {
+                                tracing::warn!(
+                                    "Could not auto-assign window {:?} on space {:?}; skipping assignment",
+                                    wid,
+                                    space
+                                );
+                                continue;
+                            }
+                        }
                     };
                     windows_by_workspace.entry(assigned_workspace).or_default().push(wid);
                 }
@@ -634,11 +645,24 @@ impl LayoutEngine {
         let Some(space) = space else {
             return EventResponse::default();
         };
-        let workspace_id = self
-            .virtual_workspace_manager
-            .active_workspace(space)
-            .expect("No active workspace for space");
-        let layout = self.workspace_layouts.active_layout(space, workspace_id);
+        let workspace_id = match self.virtual_workspace_manager.active_workspace(space) {
+            Some(id) => id,
+            None => {
+                tracing::warn!("No active virtual workspace for space {:?}", space);
+                return EventResponse::default();
+            }
+        };
+        let layout = match self.workspace_layouts.active(space, workspace_id) {
+            Some(id) => id,
+            None => {
+                tracing::warn!(
+                    "No active layout for workspace {:?} on space {:?}; command ignored",
+                    workspace_id,
+                    space
+                );
+                return EventResponse::default();
+            }
+        };
 
         if let LayoutCommand::ToggleFocusFloating = &command {
             if is_floating {
@@ -955,7 +979,35 @@ impl LayoutEngine {
                 }
             }
         };
-        self.workspace_layouts.active_layout(space, workspace_id)
+
+        // If there's no active layout registered for this workspace, try to ensure
+        // one exists. Some code paths call `layout()` before a SpaceExposed event
+        // has run; avoid panicking in that case by creating an active layout for
+        // the workspace using a reasonable default size.
+        if let Some(layout) = self.workspace_layouts.active(space, workspace_id) {
+            layout
+        } else {
+            // Create active layouts for all workspaces on this space using a
+            // reasonable default size so callers of `layout()` won't panic.
+            let workspaces = self
+                .virtual_workspace_manager_mut()
+                .list_workspaces(space)
+                .into_iter()
+                .map(|(id, _)| id);
+            let default_size = CGSize::new(1000.0, 1000.0);
+            self.workspace_layouts.ensure_active_for_space(
+                space,
+                default_size,
+                workspaces,
+                &mut self.tree,
+            );
+
+            // After ensuring an active layout exists, return it. If something
+            // unexpected happened, surface an informative panic.
+            self.workspace_layouts
+                .active(space, workspace_id)
+                .expect("Failed to create an active layout for the workspace")
+        }
     }
 
     pub fn load(path: PathBuf) -> anyhow::Result<Self> {
