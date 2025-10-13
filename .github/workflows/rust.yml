@@ -14,9 +14,6 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   RUSTFLAGS: "-C debuginfo=0"
-  RUSTC_WRAPPER: sccache
-  SCCACHE_GHA_ENABLED: "true"
-  SCCACHE_CACHE_SIZE: 10G
 
 jobs:
   ci:
@@ -27,30 +24,58 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Setup Rust (stable default)
+      - name: Setup Rust (stable)
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Setup Rust (nightly fmt)
+      - name: Setup Rust (nightly for fmt)
         uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
 
-      - name: Rust cache
+      - name: Rust build cache
         uses: Swatinem/rust-cache@v2
+        continue-on-error: true
         with:
-          shared-key: "macos14"
+          shared-key: macos14
           cache-on-failure: true
 
-      - name: sccache
-        uses: mozilla-actions/sccache-action@v0.0.3
+      - name: Cache sccache (filesystem backend)
+        uses: actions/cache@v4
+        continue-on-error: true
+        with:
+          path: ~/.cache/sccache
+          key: ${{ runner.os }}-sccache-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
+          restore-keys: |
+            ${{ runner.os }}-sccache-
 
-      - name: rustc version
-        run: rustc -Vv
+      - name: Install sccache
+        uses: taiki-e/install-action@v2
+        with:
+          tool: sccache
+
+      - name: Configure sccache (force filesystem; only enable if healthy)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # Force local filesystem cache; explicitly disable GHA backend
+          echo "SCCACHE_CACHE_TYPE=filesystem" >> "$GITHUB_ENV"
+          echo "SCCACHE_DIR=$HOME/.cache/sccache" >> "$GITHUB_ENV"
+          echo "SCCACHE_CACHE_SIZE=10G" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
+          # Start server and probe
+          sccache --start-server || true
+          if sccache --show-stats >/dev/null 2>&1; then
+            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+            echo "sccache OK (filesystem backend)."
+          else
+            echo "sccache unhealthy; falling back to plain rustc."
+          fi
+          sccache --show-stats || true
 
       - name: Formatting (nightly)
         run: cargo +nightly fmt --all --check --verbose
 
-      - name: Cargo check
+      - name: Check
         run: cargo check --workspace --all-targets --locked --verbose
 
       - name: Test
