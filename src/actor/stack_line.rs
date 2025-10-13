@@ -155,11 +155,13 @@ impl StackLine {
             selected_index: group.selected_index,
         };
 
-        let Some((cocoa_group_frame, indicator_frame)) =
-            self.compute_indicator_frames(group.frame, group_kind, config)
-        else {
-            return;
-        };
+        let indicator_frame = Self::calculate_indicator_frame(
+            group.frame,
+            group_kind,
+            config.bar_thickness,
+            config.horizontal_placement,
+            config.vertical_placement,
+        );
 
         let node_id = group.node_id;
 
@@ -186,7 +188,6 @@ impl StackLine {
 
         tracing::debug!(
             ?group.frame,
-            ?cocoa_group_frame,
             ?indicator_frame,
             "Positioned indicator"
         );
@@ -213,30 +214,6 @@ impl StackLine {
         }
 
         indicator
-    }
-
-    fn compute_indicator_frames(
-        &self,
-        group_frame: CGRect,
-        group_kind: GroupKind,
-        config: IndicatorConfig,
-    ) -> Option<(CGRect, CGRect)> {
-        let cocoa_group_frame = match self.coordinate_converter.convert_rect(group_frame) {
-            Some(frame) => frame,
-            None => {
-                tracing::warn!("Failed to convert group frame coordinates");
-                return None;
-            }
-        };
-
-        let indicator_frame = Self::calculate_indicator_frame(
-            group_frame,
-            group_kind,
-            config.bar_thickness,
-            config.horizontal_placement,
-            config.vertical_placement,
-        );
-        Some((cocoa_group_frame, indicator_frame))
     }
 
     // TODO: We should just pass in the coordinates from the layout calculation.
