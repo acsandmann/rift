@@ -3,9 +3,22 @@
 # Rift
   <p>Rift is a tiling window manager for macOS that focuses on performance and usability. </p>
   <img src="assets/demo.gif" alt="Rift demo" />
-</div>
 
-[![Rust](https://github.com/acsandmann/rift/actions/workflows/rust.yml/badge.svg?branch=main)](https://github.com/acsandmann/rift/actions/workflows/rust.yml)
+  <p>
+    <a href="https://github.com/acsandmann/rift/actions/workflows/rust.yml">
+      <img src="https://img.shields.io/github/actions/workflow/status/acsandmann/rift/rust.yml?style=flat-square" alt="Rust CI Status" />
+    </a>
+    <a href="https://github.com/acsandmann/rift/commits/main">
+      <img src="https://img.shields.io/github/last-commit/acsandmann/rift?style=flat-square" alt="Last Commit" />
+    </a>
+    <a href="https://github.com/acsandmann/rift/issues">
+      <img src="https://img.shields.io/github/issues/acsandmann/rift?style=flat-square" alt="Open Issues" />
+    </a>
+    <a href="https://github.com/acsandmann/rift/stargazers">
+      <img src="https://img.shields.io/github/stars/acsandmann/rift?style=flat-square" alt="GitHub stars" />
+    </a>
+  </p>
+</div>
 
 ## Features
 - Multiple layout styles
