@@ -102,25 +102,6 @@ impl BspLayoutSystem {
         }
     }
 
-    fn equalize_tree(&mut self, layout: LayoutId) {
-        if let Some(state) = self.layouts.get(layout).copied() {
-            self.equalize_node_recursive(state.root);
-        }
-    }
-
-    fn equalize_node_recursive(&mut self, node: NodeId) {
-        match self.kind.get_mut(node) {
-            Some(NodeKind::Split { ratio, .. }) => {
-                *ratio = 0.5;
-                let children: Vec<_> = node.children(&self.tree.map).collect();
-                for child in children {
-                    self.equalize_node_recursive(child);
-                }
-            }
-            _ => {}
-        }
-    }
-
     fn smart_insert_window(&mut self, layout: LayoutId, window: WindowId) -> bool {
         if let Some(sel) = self.selection_of_layout(layout) {
             let leaf = self.descend_to_leaf(sel);
@@ -940,5 +921,5 @@ impl LayoutSystem for BspLayoutSystem {
         }
     }
 
-    fn rebalance(&mut self, layout: LayoutId) { self.equalize_tree(layout); }
+    fn rebalance(&mut self, _layout: LayoutId) {}
 }

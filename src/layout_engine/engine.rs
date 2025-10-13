@@ -563,6 +563,10 @@ impl LayoutEngine {
                 for (space, screen) in screens {
                     let layout = self.layout(space);
                     self.tree.on_window_resized(layout, wid, old_frame, new_frame, screen);
+
+                    if let Some(ws) = self.virtual_workspace_manager.active_workspace(space) {
+                        self.workspace_layouts.mark_last_saved(space, ws, layout);
+                    }
                 }
             }
         }
