@@ -1,4 +1,4 @@
-name: Rust (fast)
+name: rust
 
 on:
   push:
@@ -50,7 +50,7 @@ jobs:
       - name: Formatting (nightly)
         run: cargo +nightly fmt --all --check --verbose
 
-      - name: Cargo check (fast host compile)
+      - name: Cargo check
         run: cargo check --workspace --all-targets --locked --verbose
 
       - name: Test
