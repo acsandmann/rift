@@ -166,6 +166,7 @@ unsafe extern "C" {
     pub fn CGSCopySpaces(cid: c_int, mask: CGSSpaceMask) -> *mut CFArray<SpaceId>;
     pub fn CGSCopyManagedDisplays(cid: c_int) -> *mut CFArray;
     pub fn CGSCopyManagedDisplaySpaces(cid: c_int) -> *mut NSArray;
+    pub fn SLSGetSpaceManagementMode(cid: cid_t) -> c_int;
     pub fn CGSManagedDisplayGetCurrentSpace(cid: c_int, uuid: *mut CFString) -> u64;
     pub fn CGSCopyBestManagedDisplayForRect(cid: c_int, rect: CGRect) -> *mut CFString;
     pub fn CGDisplayCreateUUIDFromDisplayID(did: u32) -> *mut CFType;

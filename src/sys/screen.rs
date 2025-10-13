@@ -15,7 +15,7 @@ use tracing::{debug, warn};
 use super::skylight::{
     CGSCopyBestManagedDisplayForRect, CGSCopyManagedDisplaySpaces, CGSCopyManagedDisplays,
     CGSCopySpaces, CGSGetActiveSpace, CGSManagedDisplayGetCurrentSpace, CGSSpaceMask,
-    SLSMainConnectionID,
+    SLSGetSpaceManagementMode, SLSMainConnectionID,
 };
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -255,6 +255,10 @@ pub fn get_active_space_number() -> Option<SpaceId> {
     } else {
         Some(SpaceId::new(active_id))
     }
+}
+
+pub fn displays_have_separate_spaces() -> bool {
+    unsafe { SLSGetSpaceManagementMode(SLSMainConnectionID()) == 1 }
 }
 
 /// Utilities for querying the current system configuration. For diagnostic purposes only.

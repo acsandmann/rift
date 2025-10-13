@@ -21,7 +21,7 @@ use rift_wm::layout_engine::LayoutEngine;
 use rift_wm::model::tx_store::WindowTxStore;
 use rift_wm::sys::accessibility::ensure_accessibility_permission;
 use rift_wm::sys::executor::Executor;
-use rift_wm::sys::screen::CoordinateConverter;
+use rift_wm::sys::screen::{CoordinateConverter, displays_have_separate_spaces};
 use rift_wm::sys::skylight::{CGSEventType, KnownCGSEvent};
 use tokio::join;
 
@@ -77,6 +77,15 @@ fn main() {
     }
 
     ensure_accessibility_permission();
+
+    if !displays_have_separate_spaces() {
+        eprintln!(
+            "Rift detected that the macOS setting \"Displays have separate Spaces\" \
+is disabled. Rift currently requires this setting to be enabled. \
+Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift."
+        );
+        std::process::exit(1);
+    }
 
     let mut config = if config_file().exists() {
         Config::read(&config_file()).unwrap()
