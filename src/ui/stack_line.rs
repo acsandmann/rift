@@ -6,7 +6,6 @@ use objc2::rc::Retained;
 use objc2_app_kit::NSPopUpMenuWindowLevel;
 use objc2_core_foundation::{CFType, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::CGContext;
-use objc2_foundation::NSArray;
 use objc2_quartz_core::{CALayer, CATransaction};
 use tracing::warn;
 
@@ -242,9 +241,7 @@ impl GroupIndicatorWindow {
     fn clear_layers(&self) {
         CATransaction::begin();
         CATransaction::setDisableActions(true);
-        unsafe {
-            let _: () = objc2::msg_send![&*self.root_layer, setSublayers: ptr::null::<NSArray>()];
-        }
+        unsafe { self.root_layer.setSublayers(None) };
         CATransaction::commit();
 
         let mut state = self.state.borrow_mut();
