@@ -5,6 +5,7 @@
   <img src="assets/demo.gif" alt="Rift demo" />
 </div>
 
+[![Rust](https://github.com/acsandmann/rift/actions/workflows/rust.yml/badge.svg?branch=main)](https://github.com/acsandmann/rift/actions/workflows/rust.yml)
 
 ## Features
 - Multiple layout styles
