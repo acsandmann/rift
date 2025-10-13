@@ -311,7 +311,7 @@ mod tests {
             VerticalPlacement::Right,
         );
         assert_eq!(frame_top.origin.x, 100.0);
-        assert_eq!(frame_top.origin.y, 200.0 + 300.0 - thickness);
+        assert_eq!(frame_top.origin.y, 200.0);
         assert_eq!(frame_top.size.width, 400.0);
         assert_eq!(frame_top.size.height, thickness);
 
@@ -323,7 +323,7 @@ mod tests {
             VerticalPlacement::Right,
         );
         assert_eq!(frame_bottom.origin.x, 100.0);
-        assert_eq!(frame_bottom.origin.y, 200.0);
+        assert_eq!(frame_bottom.origin.y, 200.0 + 300.0 - thickness);
         assert_eq!(frame_bottom.size.width, 400.0);
         assert_eq!(frame_bottom.size.height, thickness);
 
