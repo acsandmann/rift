@@ -7,18 +7,18 @@ on:
     branches: ["main"]
 
 concurrency:
-  group: rust-ci-${{ github.ref }}
+  group: rust-ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
+  RUSTC_WRAPPER: sccache
+  CARGO_INCREMENTAL: 0
+  SCCACHE_CACHE_SIZE: 10G
 
 jobs:
   check:
     runs-on: macos-14
-    env:
-      RUSTC_WRAPPER: sccache
-      SCCACHE_CACHE_SIZE: 10G
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -34,39 +34,40 @@ jobs:
             target
             ~/.cache/sccache
             ~/.cargo/bin
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ env.RUSTC_WRAPPER }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Install latest stable toolchain
+      - name: Add cargo bin to PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Install stable & nightly toolchains (+ nightly rustfmt)
         run: |
           rustup toolchain install stable
+          rustup toolchain install nightly
           rustup default stable
-
-      - name: Install components
-        run: |
-          rustup component add --toolchain nightly-aarch64-apple-darwin rustfmt
+          rustup component add rustfmt --toolchain nightly
+          rustup show
 
       - name: Install sccache
         run: |
-          # Install sccache to ~/.cargo/bin (cached above). If already present this is fast.
-          export PATH="$HOME/.cargo/bin:$PATH"
           cargo install sccache || true
-          echo "sccache binary: $(which sccache)"
+          sccache --start-server || true
           sccache --version || true
 
-      - name: Formatting
-        run: cargo +nightly fmt --check --verbose
+      - name: Formatting (nightly)
+        run: cargo +nightly fmt --all --check --verbose
 
       - name: Check (host)
         run: cargo check --verbose --locked
 
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
+
   build:
     needs: check
     runs-on: macos-14
-    env:
-      RUSTC_WRAPPER: sccache
-      SCCACHE_CACHE_SIZE: 10G
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -82,24 +83,23 @@ jobs:
             target
             ~/.cache/sccache
             ~/.cargo/bin
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ env.RUSTC_WRAPPER }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
+
+      - name: Add cargo bin to PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Install latest stable toolchain
         run: |
           rustup toolchain install stable
           rustup default stable
-
-      - name: Install components
-        run: |
-          rustup component add --toolchain nightly-aarch64-apple-darwin rustfmt
+          rustup show
 
       - name: Install sccache
         run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
           cargo install sccache || true
-          echo "sccache binary: $(which sccache)"
+          sccache --start-server || true
           sccache --version || true
 
       - name: Build
@@ -107,3 +107,7 @@ jobs:
 
       - name: Run tests
         run: cargo test --verbose --locked
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
