@@ -45,7 +45,7 @@ jobs:
 
       - name: Install components
         run: |
-          rustup component add rustfmt
+          rustup component add --toolchain nightly-aarch64-apple-darwin rustfmt
 
       - name: Install sccache
         run: |
@@ -93,7 +93,7 @@ jobs:
 
       - name: Install components
         run: |
-          rustup component add rustfmt
+          rustup component add --toolchain nightly-aarch64-apple-darwin rustfmt
 
       - name: Install sccache
         run: |
