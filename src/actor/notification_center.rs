@@ -11,14 +11,14 @@ use objc2_app_kit::{
 };
 use objc2_core_foundation::CGRect;
 use objc2_foundation::{
-    MainThreadMarker, NSNotification, NSNotificationCenter, NSObject, NSString,
+    MainThreadMarker, NSNotification, NSNotificationCenter, NSObject, NSProcessInfo, NSString,
 };
 use tracing::{debug, info_span, trace, warn};
 
 use super::wm_controller::{self, WmEvent};
 use crate::actor::app::AppInfo;
 use crate::sys::app::NSRunningApplicationExt;
-use crate::sys::power::{NSProcessInfo, init_power_state, set_low_power_mode_state};
+use crate::sys::power::{init_power_state, set_low_power_mode_state};
 use crate::sys::screen::{ScreenCache, ScreenId};
 
 #[repr(C)]
@@ -110,8 +110,8 @@ impl NotificationCenterInner {
         let span = info_span!("notification_center::handle_power_event");
         let _s = span.enter();
 
-        let process_info = NSProcessInfo::process_info();
-        let current_state = process_info.is_low_power_mode_enabled();
+        let process_info = NSProcessInfo::processInfo();
+        let current_state = process_info.isLowPowerModeEnabled();
         let old_state = set_low_power_mode_state(current_state);
 
         if old_state != current_state {
