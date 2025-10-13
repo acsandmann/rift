@@ -76,16 +76,13 @@ impl<'de> serde::de::Deserialize<'de> for WindowId {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where D: serde::de::Deserializer<'de> {
         struct WindowIdVisitor;
-
         impl<'de> serde::de::Visitor<'de> for WindowIdVisitor {
             type Value = WindowId;
-
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
                 formatter.write_str(
                     "a WindowId struct (with fields `pid` and `idx`), a tuple/seq (pid, idx), or a debug string like `WindowId { pid: 123, idx: 456 }`",
                 )
             }
-
             fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
             where E: serde::de::Error {
                 WindowId::from_debug_string(v)
@@ -97,12 +94,15 @@ impl<'de> serde::de::Deserialize<'de> for WindowId {
                 let pid: pid_t = seq
                     .next_element()?
                     .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
+
                 let idx_u32: u32 = seq
                     .next_element()?
                     .ok_or_else(|| serde::de::Error::invalid_length(1, &self))?;
+
                 let idx = std::num::NonZeroU32::new(idx_u32)
                     .ok_or_else(|| serde::de::Error::custom("idx must be non-zero"))?;
                 Ok(WindowId { pid, idx })
+
             }
 
             fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
@@ -907,16 +907,18 @@ impl State {
 
         let event = if is_frontmost {
             let quiet = match self.last_activated.take() {
-                Some((ts, quiet, tx)) if ts.elapsed() < Duration::from_millis(1000) => {
+                Some((ts, quiet, tx)) if ts.elapsed() <= Duration::from_millis(1000) => {
                     trace!("by us");
                     _ = tx.send(());
                     quiet
                 }
-                _ => {
+                Some((ts, _, tx)) if ts.elapsed() > Duration::from_millis(1000) => {
                     trace!("by user");
+                    _ = tx.send(());
                     self.on_main_window_changed(None);
                     Quiet::No
                 }
+                _ => Quiet::No,
             };
             Event::ApplicationActivated(self.pid, quiet)
         } else {
