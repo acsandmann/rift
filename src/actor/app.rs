@@ -76,7 +76,6 @@ impl<'de> serde::de::Deserialize<'de> for WindowId {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where D: serde::de::Deserializer<'de> {
         struct WindowIdVisitor;
-
         impl<'de> serde::de::Visitor<'de> for WindowIdVisitor {
             type Value = WindowId;
 
@@ -97,9 +96,11 @@ impl<'de> serde::de::Deserialize<'de> for WindowId {
                 let pid: pid_t = seq
                     .next_element()?
                     .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
+
                 let idx_u32: u32 = seq
                     .next_element()?
                     .ok_or_else(|| serde::de::Error::invalid_length(1, &self))?;
+
                 let idx = std::num::NonZeroU32::new(idx_u32)
                     .ok_or_else(|| serde::de::Error::custom("idx must be non-zero"))?;
                 Ok(WindowId { pid, idx })
@@ -139,8 +140,7 @@ impl<'de> serde::de::Deserialize<'de> for WindowId {
 }
 
 impl WindowId {
-    #[cfg(test)]
-    pub(crate) fn new(pid: pid_t, idx: u32) -> WindowId {
+    pub fn new(pid: pid_t, idx: u32) -> WindowId {
         WindowId {
             pid,
             idx: NonZeroU32::new(idx).unwrap(),
@@ -907,16 +907,18 @@ impl State {
 
         let event = if is_frontmost {
             let quiet = match self.last_activated.take() {
-                Some((ts, quiet, tx)) if ts.elapsed() < Duration::from_millis(1000) => {
+                Some((ts, quiet, tx)) if ts.elapsed() <= Duration::from_millis(1000) => {
                     trace!("by us");
                     _ = tx.send(());
                     quiet
                 }
-                _ => {
+                Some((ts, _, tx)) if ts.elapsed() > Duration::from_millis(1000) => {
                     trace!("by user");
+                    _ = tx.send(());
                     self.on_main_window_changed(None);
                     Quiet::No
                 }
+                _ => Quiet::No,
             };
             Event::ApplicationActivated(self.pid, quiet)
         } else {

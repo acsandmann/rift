@@ -39,6 +39,8 @@ impl NodeMap {
     pub fn capacity(&self) -> usize { self.map.capacity() }
 
     pub fn reserve(&mut self, additional: usize) { self.map.reserve(additional) }
+
+    pub fn contains(&self, id: NodeId) -> bool { self.map.contains_key(id) }
 }
 
 impl Index<NodeId> for NodeMap {
@@ -55,7 +57,7 @@ impl IndexMut<NodeId> for NodeMap {
 ///
 /// Nodes must be removed manually, because removal requires a reference to the
 /// [`map`].  If a value of this type is dropped without
-/// [`OwnedNode::remove`] being called, it will panic.
+/// [`OwnedNode::remove`] being called, it will panic in debug builds.
 ///
 /// Every `OwnedNode` has a name which will be used in the panic message.
 #[must_use]
@@ -72,15 +74,13 @@ impl OwnedNode {
     /// Marks a non-root node as owned.
     pub fn own(node: NodeId, name: &'static str) -> Self { OwnedNode(Some(node), name.to_owned()) }
 
-    pub fn id(&self) -> NodeId { self.0.unwrap() }
+    pub fn id(&self) -> NodeId { self.0.expect("OwnedNode::id called on removed OwnedNode") }
 
     #[track_caller]
     pub fn remove(&mut self, tree: &mut Tree<impl Observer>) {
-        UnattachedNode {
-            id: self.0.take().unwrap(),
-            tree,
+        if let Some(id) = self.0.take() {
+            UnattachedNode { id, tree }.remove()
         }
-        .remove()
     }
 
     #[track_caller]
@@ -93,20 +93,26 @@ impl OwnedNode {
 impl Deref for OwnedNode {
     type Target = NodeId;
 
-    fn deref(&self) -> &Self::Target { self.0.as_ref().unwrap() }
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref().expect("OwnedNode deref on removed OwnedNode")
+    }
 }
 
 impl DerefMut for OwnedNode {
-    fn deref_mut(&mut self) -> &mut Self::Target { self.0.as_mut().unwrap() }
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.as_mut().expect("OwnedNode deref_mut on removed OwnedNode")
+    }
 }
 
 impl Drop for OwnedNode {
     fn drop(&mut self) {
-        if let Some(node) = self.0 {
-            panic!(
-                "OwnedNode {name:?} dropped without OwnedNode::remove being called: {node:?}",
-                name = self.1,
-            );
+        if cfg!(debug_assertions) {
+            if let Some(node) = self.0 {
+                panic!(
+                    "OwnedNode {name:?} dropped without OwnedNode::remove being called: {node:?}",
+                    name = self.1,
+                );
+            }
         }
     }
 }
@@ -123,19 +129,24 @@ impl NodeId {
     }
 
     #[track_caller]
-    pub fn parent(self, map: &NodeMap) -> Option<NodeId> { map[self].parent }
+    pub fn parent(self, map: &NodeMap) -> Option<NodeId> {
+        map.map.get(self).and_then(|n| n.parent)
+    }
 
     #[track_caller]
     pub fn children(self, map: &NodeMap) -> impl Iterator<Item = NodeId> + '_ {
         ChildIterator {
-            cur: map[self].first_child,
+            cur: map.map.get(self).and_then(|n| n.first_child),
             map,
         }
     }
 
     #[track_caller]
     pub fn children_rev(self, map: &NodeMap) -> impl Iterator<Item = NodeId> + '_ {
-        ChildRevIterator { cur: map[self].last_child, map }
+        ChildRevIterator {
+            cur: map.map.get(self).and_then(|n| n.last_child),
+            map,
+        }
     }
 
     #[track_caller]
@@ -154,7 +165,7 @@ impl NodeId {
         let mut next = Some(self);
         std::iter::from_fn(move || {
             let node = next;
-            next = next.and_then(|n| map[n].parent);
+            next = node.and_then(|n| map.map.get(n).and_then(|nd| nd.parent));
             node
         })
     }
@@ -168,7 +179,7 @@ impl NodeId {
         let mut next = Some(self);
         std::iter::from_fn(move || {
             let node = next;
-            next = next.and_then(|n| map[n].parent);
+            next = node.and_then(|n| map.map.get(n).and_then(|nd| nd.parent));
             node.map(|n| (n, next))
         })
     }
@@ -185,7 +196,10 @@ impl NodeId {
             while old.parent(&tree.map) != stack.last().map(|(oldp, _newp)| *oldp) {
                 stack.pop();
             }
-            let parent = stack.last().unwrap().1;
+            let parent = stack
+                .last()
+                .map(|(_, newp)| *newp)
+                .expect("deep_copy: structural invariant violated");
             let new = tree.mk_node().push_back(parent);
             stack.push((old, new));
         }
@@ -193,19 +207,29 @@ impl NodeId {
     }
 
     #[track_caller]
-    pub fn next_sibling(self, map: &NodeMap) -> Option<NodeId> { map[self].next_sibling }
+    pub fn next_sibling(self, map: &NodeMap) -> Option<NodeId> {
+        map.map.get(self).and_then(|n| n.next_sibling)
+    }
 
     #[track_caller]
-    pub fn prev_sibling(self, map: &NodeMap) -> Option<NodeId> { map[self].prev_sibling }
+    pub fn prev_sibling(self, map: &NodeMap) -> Option<NodeId> {
+        map.map.get(self).and_then(|n| n.prev_sibling)
+    }
 
     #[track_caller]
-    pub fn first_child(self, map: &NodeMap) -> Option<NodeId> { map[self].first_child }
+    pub fn first_child(self, map: &NodeMap) -> Option<NodeId> {
+        map.map.get(self).and_then(|n| n.first_child)
+    }
 
     #[track_caller]
-    pub fn last_child(self, map: &NodeMap) -> Option<NodeId> { map[self].last_child }
+    pub fn last_child(self, map: &NodeMap) -> Option<NodeId> {
+        map.map.get(self).and_then(|n| n.last_child)
+    }
 
     #[track_caller]
-    pub fn is_empty(self, map: &NodeMap) -> bool { map[self].first_child.is_none() }
+    pub fn is_empty(self, map: &NodeMap) -> bool {
+        map.map.get(self).map(|n| n.first_child.is_none()).unwrap_or(true)
+    }
 
     #[track_caller]
     pub fn remove_root<O: Observer>(self, tree: &mut Tree<O>) {
@@ -213,7 +237,9 @@ impl NodeId {
             self.parent(&tree.map).is_none(),
             "remove_root called on non-root node"
         );
-        tree.map.map.remove(self).unwrap().delete_recursive(tree, self);
+        if let Some(node) = tree.map.map.remove(self) {
+            node.delete_recursive(tree, self);
+        }
     }
 }
 
@@ -273,7 +299,9 @@ impl<'a, O: Observer> UnattachedNode<'a, O> {
     #[track_caller]
     pub(crate) fn remove(self) {
         debug_assert!(self.id.parent(&self.tree.map).is_none());
-        self.tree.map.map.remove(self.id).unwrap().delete_recursive(self.tree, self.id);
+        if let Some(node) = self.tree.map.map.remove(self.id) {
+            node.delete_recursive(self.tree, self.id);
+        }
     }
 
     fn attach_with(mut self, attach: impl FnOnce(&mut Self)) -> NodeId {
@@ -299,8 +327,9 @@ impl<'a, O: Observer> DetachedNode<'a, O> {
 
     #[track_caller]
     pub(crate) fn insert_before(self, sibling: NodeId) -> ReattachedNode<'a, O> {
-        let new_parent =
-            sibling.parent(&self.tree.map).expect("cannot make a sibling of a root node");
+        let new_parent = sibling
+            .parent(&self.tree.map)
+            .expect("cannot make a sibling of a root node or invalid sibling");
         self.attach_with(new_parent, |this| {
             this.id.link_before(sibling, &mut this.tree.map)
         })
@@ -308,8 +337,9 @@ impl<'a, O: Observer> DetachedNode<'a, O> {
 
     #[track_caller]
     pub(crate) fn insert_after(self, sibling: NodeId) -> ReattachedNode<'a, O> {
-        let new_parent =
-            sibling.parent(&self.tree.map).expect("cannot make a sibling of a root node");
+        let new_parent = sibling
+            .parent(&self.tree.map)
+            .expect("cannot make a sibling of a root node or invalid sibling");
         self.attach_with(new_parent, |this| {
             this.id.link_after(sibling, &mut this.tree.map)
         })
@@ -317,11 +347,14 @@ impl<'a, O: Observer> DetachedNode<'a, O> {
 
     #[track_caller]
     pub(crate) fn remove(self) {
-        let parent = self.id.parent(&self.tree.map).unwrap();
-        self.tree.data.removing_from_parent(&self.tree.map, self.id);
-        self.tree.map.unlink(self.id);
-        O::removed_child(self.tree, parent);
-        self.tree.map.map.remove(self.id).unwrap().delete_recursive(self.tree, self.id);
+        if let Some(parent) = self.id.parent(&self.tree.map) {
+            self.tree.data.removing_from_parent(&self.tree.map, self.id);
+            self.tree.map.unlink(self.id);
+            O::removed_child(self.tree, parent);
+            if let Some(node) = self.tree.map.map.remove(self.id) {
+                node.delete_recursive(self.tree, self.id);
+            }
+        }
     }
 
     fn attach_with(
@@ -329,13 +362,13 @@ impl<'a, O: Observer> DetachedNode<'a, O> {
         new_parent: NodeId,
         attach: impl FnOnce(&mut Self),
     ) -> ReattachedNode<'a, O> {
-        let old_parent = self.id.parent(&self.tree.map).unwrap();
-        if old_parent != new_parent {
+        let old_parent = self.id.parent(&self.tree.map);
+        if old_parent.is_some() && old_parent != Some(new_parent) {
             self.tree.data.removing_from_parent(&self.tree.map, self.id);
         }
         self.tree.map.unlink(self.id);
         attach(&mut self);
-        if old_parent != new_parent {
+        if old_parent.is_some() && old_parent != Some(new_parent) {
             self.tree.data.added_to_parent(&self.tree.map, self.id);
         }
         ReattachedNode {
@@ -348,7 +381,7 @@ impl<'a, O: Observer> DetachedNode<'a, O> {
 
 pub struct ReattachedNode<'a, O: Observer> {
     detached: DetachedNode<'a, O>,
-    old_parent: NodeId,
+    old_parent: Option<NodeId>,
     new_parent: NodeId,
 }
 
@@ -366,8 +399,10 @@ impl<'a, O: Observer> ReattachedNode<'a, O> {
 
 impl<'a, O: Observer> Drop for ReattachedNode<'a, O> {
     fn drop(&mut self) {
-        if self.old_parent != self.new_parent {
-            O::removed_child(self.detached.tree, self.old_parent);
+        if let Some(old) = self.old_parent {
+            if old != self.new_parent {
+                O::removed_child(self.detached.tree, old);
+            }
         }
     }
 }
@@ -383,55 +418,119 @@ pub struct Node {
 
 impl NodeId {
     pub(crate) fn link_under_back(self, parent: NodeId, map: &mut NodeMap) {
-        assert_ne!(self, parent);
-        map[self].parent = Some(parent);
-        map[parent].first_child.get_or_insert(self);
-        if let Some(prev) = map[parent].last_child.replace(self) {
+        if self == parent {
+            return;
+        }
+        if !map.contains(self) || !map.contains(parent) {
+            return;
+        }
+
+        let prev_child = {
+            let parent_node = map.map.get_mut(parent).expect("parent missing after contains check");
+            parent_node.first_child.get_or_insert(self);
+            parent_node.last_child.replace(self)
+        };
+
+        if let Some(self_node) = map.map.get_mut(self) {
+            self_node.parent = Some(parent);
+        } else {
+            return;
+        }
+
+        if let Some(prev) = prev_child {
             self.hlink_after(prev, map);
         }
     }
 
     #[track_caller]
     pub(crate) fn link_before(self, next: NodeId, map: &mut NodeMap) {
-        let parent = map[next].parent.expect("cannot make a sibling of a root node");
-        map[self].parent.replace(parent);
-        debug_assert!(map[parent].first_child.is_some());
-        if map[parent].first_child == Some(next) {
-            map[parent].first_child.replace(self);
+        let parent = map.map.get(next).and_then(|n| n.parent);
+        let parent = parent.expect("cannot make a sibling of a root node or invalid sibling");
+        if let Some(self_node) = map.map.get_mut(self) {
+            self_node.parent = Some(parent);
+        } else {
+            return;
+        }
+        if let Some(parent_node) = map.map.get_mut(parent) {
+            debug_assert!(parent_node.first_child.is_some());
+            if parent_node.first_child == Some(next) {
+                parent_node.first_child.replace(self);
+            }
         }
         self.hlink_before(next, map);
     }
 
     #[track_caller]
     pub(crate) fn link_after(self, prev: NodeId, map: &mut NodeMap) {
-        let parent = map[prev].parent.expect("cannot make a sibling of a root node");
-        map[self].parent.replace(parent);
-        debug_assert!(map[parent].last_child.is_some());
-        if map[parent].last_child == Some(prev) {
-            map[parent].last_child.replace(self);
+        let parent = map.map.get(prev).and_then(|n| n.parent);
+        let parent = parent.expect("cannot make a sibling of a root node or invalid sibling");
+        if let Some(self_node) = map.map.get_mut(self) {
+            self_node.parent = Some(parent);
+        } else {
+            return;
+        }
+        if let Some(parent_node) = map.map.get_mut(parent) {
+            debug_assert!(parent_node.last_child.is_some());
+            if parent_node.last_child == Some(prev) {
+                parent_node.last_child.replace(self);
+            }
         }
         self.hlink_after(prev, map);
     }
 
     pub(crate) fn hlink_after(self, prev: NodeId, map: &mut NodeMap) {
-        debug_assert_ne!(self, prev);
-        debug_assert_eq!(map[self].prev_sibling, None);
-        map[self].prev_sibling.replace(prev);
-        let next = map[prev].next_sibling.replace(self);
-        if let Some(next) = next {
-            map[next].prev_sibling.replace(self);
-            map[self].next_sibling.replace(next);
+        if self == prev {
+            return;
+        }
+        if map.map.get(self).is_none() || map.map.get(prev).is_none() {
+            return;
+        }
+
+        if let Some(self_node) = map.map.get_mut(self) {
+            debug_assert_eq!(self_node.prev_sibling, None);
+            self_node.prev_sibling.replace(prev);
+        } else {
+            return;
+        }
+
+        if let Some(prev_node) = map.map.get_mut(prev) {
+            let next = prev_node.next_sibling.replace(self);
+            if let Some(next) = next {
+                if let Some(next_node) = map.map.get_mut(next) {
+                    next_node.prev_sibling.replace(self);
+                }
+                if let Some(self_node) = map.map.get_mut(self) {
+                    self_node.next_sibling.replace(next);
+                }
+            }
         }
     }
 
     pub(crate) fn hlink_before(self, next: NodeId, map: &mut NodeMap) {
-        debug_assert_ne!(self, next);
-        debug_assert_eq!(map[self].next_sibling, None);
-        map[self].next_sibling.replace(next);
-        let prev = map[next].prev_sibling.replace(self);
-        if let Some(prev) = prev {
-            map[prev].next_sibling.replace(self);
-            map[self].prev_sibling.replace(prev);
+        if self == next {
+            return;
+        }
+        if map.map.get(self).is_none() || map.map.get(next).is_none() {
+            return;
+        }
+
+        if let Some(self_node) = map.map.get_mut(self) {
+            debug_assert_eq!(self_node.next_sibling, None);
+            self_node.next_sibling.replace(next);
+        } else {
+            return;
+        }
+
+        if let Some(next_node) = map.map.get_mut(next) {
+            let prev = next_node.prev_sibling.replace(self);
+            if let Some(prev) = prev {
+                if let Some(prev_node) = map.map.get_mut(prev) {
+                    prev_node.next_sibling.replace(self);
+                }
+                if let Some(self_node) = map.map.get_mut(self) {
+                    self_node.prev_sibling.replace(prev);
+                }
+            }
         }
     }
 }
@@ -439,20 +538,34 @@ impl NodeId {
 impl NodeMap {
     #[track_caller]
     pub(crate) fn unlink(&mut self, id: NodeId) {
-        let prev_sibling = self[id].prev_sibling.take();
-        let next_sibling = self[id].next_sibling.take();
-        if let Some(prev) = prev_sibling {
-            self[prev].next_sibling = next_sibling;
-        }
-        if let Some(next) = next_sibling {
-            self[next].prev_sibling = prev_sibling;
-        }
-        if let Some(parent) = self[id].parent {
-            if Some(id) == self[parent].first_child {
-                self[parent].first_child = next_sibling;
+        if let Some((prev_sibling, next_sibling, parent)) =
+            self.map.get(id).map(|n| (n.prev_sibling, n.next_sibling, n.parent))
+        {
+            if let Some(prev) = prev_sibling {
+                if let Some(prev_node) = self.map.get_mut(prev) {
+                    prev_node.next_sibling = next_sibling;
+                }
             }
-            if Some(id) == self[parent].last_child {
-                self[parent].last_child = prev_sibling;
+            if let Some(next) = next_sibling {
+                if let Some(next_node) = self.map.get_mut(next) {
+                    next_node.prev_sibling = prev_sibling;
+                }
+            }
+            if let Some(parent) = parent {
+                if let Some(parent_node) = self.map.get_mut(parent) {
+                    if parent_node.first_child == Some(id) {
+                        parent_node.first_child = next_sibling;
+                    }
+                    if parent_node.last_child == Some(id) {
+                        parent_node.last_child = prev_sibling;
+                    }
+                }
+            }
+
+            if let Some(node) = self.map.get_mut(id) {
+                node.prev_sibling = None;
+                node.next_sibling = None;
+                node.parent = None;
             }
         }
     }
@@ -464,9 +577,11 @@ impl Node {
         cx.data.removed_from_forest(&cx.map, id);
         let mut iter = self.first_child;
         while let Some(child) = iter {
-            let node = cx.map.map.remove(child).unwrap();
-            node.delete_recursive(cx, child);
-            iter = node.next_sibling;
+            let next = cx.map.map.get(child).and_then(|n| n.next_sibling);
+            if let Some(node) = cx.map.map.remove(child) {
+                node.delete_recursive(cx, child);
+            }
+            iter = next;
         }
     }
 }
@@ -480,8 +595,8 @@ impl<'a> Iterator for ChildIterator<'a> {
     type Item = NodeId;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let Some(id) = self.cur else { return None };
-        self.cur = self.map[id].next_sibling;
+        let id = self.cur?;
+        self.cur = self.map.map.get(id).and_then(|n| n.next_sibling);
         Some(id)
     }
 }
@@ -495,8 +610,8 @@ impl<'a> Iterator for ChildRevIterator<'a> {
     type Item = NodeId;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let Some(id) = self.cur else { return None };
-        self.cur = self.map[id].prev_sibling;
+        let id = self.cur?;
+        self.cur = self.map.map.get(id).and_then(|n| n.prev_sibling);
         Some(id)
     }
 }
@@ -528,9 +643,7 @@ impl<'a> Iterator for PostorderTraversal<'a> {
     type Item = NodeId;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let Some(node) = self.cur else {
-            return None;
-        };
+        let node = self.cur?;
         self.cur = None;
         if node != self.top {
             if let Some(next) = node.next_sibling(self.map) {
@@ -563,9 +676,7 @@ impl<'a> Iterator for PreorderTraversal<'a> {
     type Item = NodeId;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let Some(node) = self.cur else {
-            return None;
-        };
+        let node = self.cur?;
         if let Some(child) = node.first_child(self.map) {
             self.cur = Some(child);
         } else {
@@ -712,7 +823,9 @@ mod tests {
         }
 
         fn removing_from_parent(&mut self, map: &NodeMap, node: NodeId) {
-            self.0.push(RemovingFromParent(node, node.parent(map).unwrap()))
+            let parent =
+                node.parent(map).expect("removing_from_parent called on node without parent");
+            self.0.push(RemovingFromParent(node, parent))
         }
 
         fn removed_child(tree: &mut Tree<Self>, parent: NodeId) {

@@ -1648,9 +1648,7 @@ impl MissionControlOverlay {
     }
 
     fn stop_active_fade(&self) {
-        unsafe {
-            let _: () = msg_send![&*self.root_layer, removeAllAnimations];
-        }
+        self.root_layer.removeAllAnimations();
         self.fade_state.borrow_mut().take();
     }
 

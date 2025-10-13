@@ -15,7 +15,7 @@ use std::{mem, thread};
 
 use animation::Animation;
 use main_window::MainWindowTracker;
-use objc2_app_kit::NSNormalWindowLevel;
+use objc2_app_kit::{NSNormalWindowLevel, NSRunningApplication};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 pub use replay::{Record, replay};
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,7 @@ use super::mouse;
 use crate::actor::app::{AppInfo, AppThreadHandle, Quiet, Request, WindowId, WindowInfo, pid_t};
 use crate::actor::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::actor::raise_manager::{self, RaiseRequest};
+use crate::actor::wm_controller::WmEvent;
 use crate::actor::{self, menu_bar, stack_line};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
 use crate::common::config::Config;
@@ -620,6 +621,28 @@ impl Reactor {
                     );
                     return;
                 }
+                // TODO: figure out why this is happening, we should really know about this app,
+                // why dont we get notifications that its being launched?
+                if let Some(window_server_info) = crate::sys::window_server::get_window(wsid) {
+                    if !self.apps.contains_key(&window_server_info.pid) {
+                        if let Some(app) =
+                            NSRunningApplication::runningApplicationWithProcessIdentifier(
+                                window_server_info.pid,
+                            )
+                        {
+                            debug!(
+                                ?app,
+                                "Received WindowServerAppeared for unknown app - synthesizing AppLaunch"
+                            );
+                            self.wm_sender.as_ref().map(|wm| {
+                                wm.send(WmEvent::AppLaunch(
+                                    window_server_info.pid,
+                                    AppInfo::from(&*app),
+                                ))
+                            });
+                        }
+                    }
+                };
                 self.observed_window_server_ids.insert(wsid);
             }
             Event::WindowMinimized(wid) => {
@@ -954,7 +977,7 @@ impl Reactor {
                         }
                     }
                     _ => self.layout_engine.handle_command(
-                        self.main_window_space(),
+                        self.workspace_command_space(),
                         &visible_spaces,
                         cmd,
                     ),
@@ -2312,6 +2335,7 @@ impl Reactor {
 
     fn workspace_command_space(&self) -> Option<SpaceId> {
         self.main_window_space()
+            .or_else(|| get_active_space_number())
             .or_else(|| self.screens.iter().find_map(|screen| screen.space))
     }
 

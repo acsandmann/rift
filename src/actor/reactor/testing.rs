@@ -1,5 +1,3 @@
-use std::io::Write;
-
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use tracing::debug;
 
@@ -30,7 +28,7 @@ impl Reactor {
     }
 }
 
-impl Drop for Reactor {
+/*impl Drop for Reactor {
     fn drop(&mut self) {
         if std::thread::panicking() {
             return;
@@ -50,7 +48,7 @@ impl Drop for Reactor {
             }
         }
     }
-}
+}*/
 
 pub fn make_window(idx: usize) -> WindowInfo {
     WindowInfo {

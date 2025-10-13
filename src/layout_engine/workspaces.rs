@@ -60,12 +60,17 @@ impl WorkspaceLayouts {
                 ),
                 crate::common::collections::hash_map::Entry::Occupied(entry) => {
                     let info = entry.into_mut();
-                    let mut unchanged = None;
-                    if info.active() != info.last_saved {
-                        unchanged = info.configurations.remove(&info.active_size);
+                    let old_size = info.active_size;
+                    if old_size != size {
+                        if let Some(active_layout) = info.active() {
+                            info.configurations.entry(old_size).or_insert(active_layout);
+                        }
+                        let taken = info.configurations.remove(&old_size);
+                        info.active_size = size;
+                        (info, taken)
+                    } else {
+                        (info, None)
                     }
-                    info.active_size = size;
-                    (info, unchanged)
                 }
             };
 
@@ -104,14 +109,6 @@ impl WorkspaceLayouts {
         workspace_id: crate::model::VirtualWorkspaceId,
     ) -> Option<LayoutId> {
         self.map.get(&(space, workspace_id)).and_then(|l| l.active())
-    }
-
-    pub(crate) fn active_layout(
-        &self,
-        space: SpaceId,
-        workspace_id: crate::model::VirtualWorkspaceId,
-    ) -> LayoutId {
-        self.active(space, workspace_id).expect("No active layout for workspace")
     }
 
     pub(crate) fn mark_last_saved(

@@ -210,7 +210,7 @@ impl WindowNotify {
                             let mouse_state = event::get_mouse_state();
                             let wsid = WindowServerId::new(window_id);
                             if let Some(query) = WindowQuery::new(&[wsid]) {
-                                if !query.advance() {
+                                if query.advance().is_none() {
                                     continue;
                                 }
                                 let bounds = query.bounds();

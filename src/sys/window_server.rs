@@ -102,7 +102,13 @@ impl WindowQuery {
     pub fn count(&self) -> i32 { unsafe { SLSWindowIteratorGetCount(self.iter) } }
 
     #[inline]
-    pub fn advance(&self) -> bool { unsafe { SLSWindowIteratorAdvance(self.iter) } }
+    pub fn advance<'a>(&'a self) -> Option<&'a Self> {
+        if unsafe { SLSWindowIteratorAdvance(self.iter) } {
+            return Some(self);
+        }
+
+        None
+    }
 
     #[inline]
     pub fn window_id(&self) -> u32 { unsafe { SLSWindowIteratorGetWindowID(self.iter) } }
@@ -164,8 +170,8 @@ pub fn connection_id_for_pid(pid: pid_t) -> Option<i32> {
 pub fn window_parent(id: WindowServerId) -> Option<WindowServerId> {
     let cf_windows = cf_array_from_ids(&[id]);
     let query = WindowQuery::new_from_cfarray(CFRetained::as_ptr(&cf_windows).as_ptr(), 1)?;
-    if query.count() == 1 && query.advance() {
-        let p = query.parent_id();
+    if query.count() == 1 {
+        let p = query.advance()?.parent_id();
         (p != 0).then(|| WindowServerId::new(p))
     } else {
         None
@@ -241,6 +247,19 @@ fn make_info(
     None
 }
 
+#[cfg(test)]
+pub fn get_windows(ids: &[WindowServerId]) -> Vec<WindowServerInfo> {
+    ids.iter()
+        .map(|&id| WindowServerInfo {
+            id,
+            pid: 1234,
+            layer: 0,
+            frame: CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(800.0, 600.0)),
+        })
+        .collect()
+}
+
+#[cfg(not(test))]
 pub fn get_windows(ids: &[WindowServerId]) -> Vec<WindowServerInfo> {
     if ids.is_empty() {
         return Vec::new();
@@ -254,7 +273,7 @@ pub fn get_windows(ids: &[WindowServerId]) -> Vec<WindowServerInfo> {
     };
 
     let mut out = Vec::with_capacity(ids.len());
-    while query.advance() {
+    while query.advance().is_some() {
         out.push(WindowServerInfo {
             id: WindowServerId::new(query.window_id()),
             pid: query.pid() as i32,
@@ -316,6 +335,10 @@ pub fn window_under_cursor() -> Option<WindowServerId> {
     get_window_at_point(point)
 }
 
+#[cfg(test)]
+pub fn window_level(_wid: u32) -> Option<NSWindowLevel> { Some(0) }
+
+#[cfg(not(test))]
 pub fn window_level(wid: u32) -> Option<NSWindowLevel> {
     let cf = cf_array_from_ids(&[WindowServerId::new(wid)]);
 
@@ -323,8 +346,7 @@ pub fn window_level(wid: u32) -> Option<NSWindowLevel> {
         CFRetained::as_ptr(&cf).as_ptr(),
         0x1, // preserve your hint
     )?;
-    query.advance();
-    Some(query.level() as NSWindowLevel)
+    Some(query.advance()?.level() as NSWindowLevel)
 }
 
 fn iterator_window_suitable(iterator: *mut CFType) -> bool {
@@ -435,7 +457,7 @@ pub fn app_window_suitable(id: WindowServerId) -> bool {
         return false;
     };
 
-    if query.count() > 0 && query.advance() {
+    if query.count() > 0 && query.advance().is_some() {
         iterator_window_suitable(query.iter)
     } else {
         false

@@ -41,6 +41,7 @@ impl Record {
     pub fn new_for_test(temp: NamedTempFile) -> Self { Self { file: None, temp: Some(temp) } }
 
     #[cfg(test)]
+    #[allow(unused)]
     pub(super) fn temp(&mut self) -> Option<&mut NamedTempFile> { self.temp.as_mut() }
 
     fn file(&mut self) -> Option<&mut File> {

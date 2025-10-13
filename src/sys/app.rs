@@ -4,6 +4,7 @@ pub use nix::libc::pid_t;
 use objc2::rc::Retained;
 use objc2::{class, msg_send};
 use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication, NSWorkspace};
+use objc2_app_kit::{NSRunningApplication, NSWorkspace};
 use objc2_core_foundation::CGRect;
 use objc2_foundation::NSString;
 use serde::{Deserialize, Serialize};
@@ -42,13 +43,10 @@ pub trait NSRunningApplicationExt {
 
 impl NSRunningApplicationExt for NSRunningApplication {
     fn with_process_id(pid: pid_t) -> Option<Retained<Self>> {
-        unsafe {
-            // For some reason this binding isn't generated in icrate.
-            msg_send![class!(NSRunningApplication), runningApplicationWithProcessIdentifier:pid]
-        }
+        NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
     }
 
-    fn pid(&self) -> pid_t { unsafe { msg_send![self, processIdentifier] } }
+    fn pid(&self) -> pid_t { self.processIdentifier() }
 
     fn bundle_id(&self) -> Option<Retained<NSString>> { self.bundleIdentifier() }
 

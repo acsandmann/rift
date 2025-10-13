@@ -307,8 +307,13 @@ comb1 = "Alt + Shift"
 "Alt + Shift + Equal" = "resize_window_grow"
 "Alt + Shift + Minus" = "resize_window_shrink"
 
+# if mission control is enabled
+# this will show an exploded view of the windows in the active workspace
+# "Alt + Ctrl + Shift + M" = "show_mission_control_current"
+# this will show the mission control view shown in the readme
+# "Alt + Ctrl + M" = "show_mission_control_all"
+
 "Alt + Shift + D" = "debug" # prints layout tree
 
-"Alt + Ctrl + M" = "show_timing"
 "Alt + Ctrl + S" = "serialize"
 "Alt + Ctrl + Q" = "save_and_exit"

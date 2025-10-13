@@ -227,7 +227,6 @@ impl Mouse {
                     && !state.disable_hotkey_active =>
             {
                 let loc = NSEvent::mouseLocation();
-                trace!("Mouse moved {loc:?}");
                 if let Some(wsid) = state.track_mouse_move(loc) {
                     debug!("Focusing window {wsid:?} under mouse");
                     _ = self.events_tx.send(Event::MouseMovedOverWindow(wsid));
@@ -311,8 +310,7 @@ impl State {
     }
 
     fn track_mouse_move(&mut self, loc: CGPoint) -> Option<WindowServerId> {
-        let new_window =
-            trace_misc("get_window_at_point", || window_server::get_window_at_point(loc));
+        let new_window = window_server::get_window_at_point(loc);
         if self.above_window == new_window {
             return None;
         }
