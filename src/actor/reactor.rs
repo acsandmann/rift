@@ -954,7 +954,7 @@ impl Reactor {
                         }
                     }
                     _ => self.layout_engine.handle_command(
-                        self.main_window_space(),
+                        self.workspace_command_space(),
                         &visible_spaces,
                         cmd,
                     ),
@@ -2312,6 +2312,7 @@ impl Reactor {
 
     fn workspace_command_space(&self) -> Option<SpaceId> {
         self.main_window_space()
+            .or_else(|| get_active_space_number())
             .or_else(|| self.screens.iter().find_map(|screen| screen.space))
     }
 
