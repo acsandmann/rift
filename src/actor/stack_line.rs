@@ -155,11 +155,13 @@ impl StackLine {
             selected_index: group.selected_index,
         };
 
-        let Some((cocoa_group_frame, indicator_frame)) =
-            self.compute_indicator_frames(group.frame, group_kind, config)
-        else {
-            return;
-        };
+        let indicator_frame = Self::calculate_indicator_frame(
+            group.frame,
+            group_kind,
+            config.bar_thickness,
+            config.horizontal_placement,
+            config.vertical_placement,
+        );
 
         let node_id = group.node_id;
 
@@ -186,7 +188,6 @@ impl StackLine {
 
         tracing::debug!(
             ?group.frame,
-            ?cocoa_group_frame,
             ?indicator_frame,
             "Positioned indicator"
         );
@@ -208,36 +209,11 @@ impl StackLine {
             }
         }));
 
-        if let Err(err) = indicator.update(config, group_data) {
+        if let Err(err) = indicator.update(config, group_data.clone()) {
             tracing::warn!(?err, "failed to initialize stack line indicator");
         }
 
         indicator
-    }
-
-    fn compute_indicator_frames(
-        &self,
-        group_frame: CGRect,
-        group_kind: GroupKind,
-        config: IndicatorConfig,
-    ) -> Option<(CGRect, CGRect)> {
-        let cocoa_group_frame = match self.coordinate_converter.convert_rect(group_frame) {
-            Some(frame) => frame,
-            None => {
-                tracing::warn!("Failed to convert group frame coordinates");
-                return None;
-            }
-        };
-
-        let indicator_frame = Self::calculate_indicator_frame(
-            cocoa_group_frame,
-            group_kind,
-            config.bar_thickness,
-            config.horizontal_placement,
-            config.vertical_placement,
-        );
-
-        Some((cocoa_group_frame, indicator_frame))
     }
 
     // TODO: We should just pass in the coordinates from the layout calculation.
@@ -251,14 +227,14 @@ impl StackLine {
         match group_kind {
             GroupKind::Horizontal => match horizontal_placement {
                 HorizontalPlacement::Top => CGRect::new(
+                    group_frame.origin,
+                    CGSize::new(group_frame.size.width, thickness),
+                ),
+                HorizontalPlacement::Bottom => CGRect::new(
                     CGPoint::new(
                         group_frame.origin.x,
                         group_frame.origin.y + group_frame.size.height - thickness,
                     ),
-                    CGSize::new(group_frame.size.width, thickness),
-                ),
-                HorizontalPlacement::Bottom => CGRect::new(
-                    group_frame.origin,
                     CGSize::new(group_frame.size.width, thickness),
                 ),
             },
@@ -335,7 +311,7 @@ mod tests {
             VerticalPlacement::Right,
         );
         assert_eq!(frame_top.origin.x, 100.0);
-        assert_eq!(frame_top.origin.y, 200.0 + 300.0 - thickness);
+        assert_eq!(frame_top.origin.y, 200.0);
         assert_eq!(frame_top.size.width, 400.0);
         assert_eq!(frame_top.size.height, thickness);
 
@@ -347,7 +323,7 @@ mod tests {
             VerticalPlacement::Right,
         );
         assert_eq!(frame_bottom.origin.x, 100.0);
-        assert_eq!(frame_bottom.origin.y, 200.0);
+        assert_eq!(frame_bottom.origin.y, 200.0 + 300.0 - thickness);
         assert_eq!(frame_bottom.size.width, 400.0);
         assert_eq!(frame_bottom.size.height, thickness);
 
