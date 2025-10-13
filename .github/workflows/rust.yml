@@ -1,4 +1,4 @@
-name: Rust
+name: rust
 
 on:
   push:
@@ -13,111 +13,77 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  SCCACHE_CACHE_SIZE: 10G
+  RUSTFLAGS: "-C debuginfo=0"
 
 jobs:
-  check:
+  ci:
     runs-on: macos-14
     steps:
-      - name: Checkout repository
+      - name: Checkout (shallow)
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
-      - name: Cache Cargo registry, git index, target and sccache
-        uses: actions/cache@v4
+      - name: Setup Rust (nightly for fmt)
+        uses: dtolnay/rust-toolchain@nightly
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-            ~/.cache/sccache
-            ~/.cargo/bin
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+          components: rustfmt
 
-      - name: Add cargo bin to PATH
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Setup Rust (stable default)
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Install stable & nightly toolchains (+ nightly rustfmt)
+      - name: Prepare sccache dir
         run: |
-          rustup toolchain install stable
-          rustup toolchain install nightly
-          rustup default stable
-          rustup component add rustfmt --toolchain nightly
-          rustup show
+          echo "SCCACHE_DIR=${HOME}/.cache/sccache" >> "$GITHUB_ENV"
+          mkdir -p "${HOME}/.cache/sccache"
+          ls -ld "${HOME}/.cache/sccache"
+
+      - name: Cache sccache (filesystem backend)
+        uses: actions/cache@v4
+        continue-on-error: true
+        with:
+          path: ${{ env.SCCACHE_DIR }}
+          key: ${{ runner.os }}-sccache-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
+          restore-keys: |
+            ${{ runner.os }}-sccache-
+
+      - name: Rust build cache
+        uses: Swatinem/rust-cache@v2
+        continue-on-error: true
+        with:
+          shared-key: macos14
+          cache-on-failure: true
 
       - name: Install sccache
-        env:
-          RUSTC_WRAPPER: "" # ensure cargo doesn't try to call sccache yet
+        uses: taiki-e/install-action@v2
+        with:
+          tool: sccache
+
+      - name: Configure sccache (force filesystem; enable only if healthy)
+        shell: bash
         run: |
-          cargo install sccache || true
-          command -v sccache
-          sccache --version
+          set -euxo pipefail
+          # Force FS backend; explicitly disable GH artifact cache backend
+          echo "SCCACHE_CACHE_TYPE=filesystem" >> "$GITHUB_ENV"
+          echo "SCCACHE_CACHE_SIZE=10G" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
           sccache --start-server || true
+          if sccache --show-stats >/dev/null 2>&1; then
+            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+            echo "sccache OK (filesystem backend)."
+          else
+            echo "sccache unhealthy; building without wrapper."
+          fi
+          sccache --show-stats || true
 
       - name: Formatting (nightly)
         run: cargo +nightly fmt --all --check --verbose
 
-      - name: Check (host)
-        env:
-          RUSTC_WRAPPER: sccache
-        run: cargo check --verbose --locked
+      - name: Check
+        run: cargo check --workspace --all-targets --locked --verbose
 
-      - name: sccache stats
-        if: always()
-        run: sccache --show-stats || true
-
-  build:
-    needs: check
-    runs-on: macos-14
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Cache Cargo registry, git index, target and sccache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-            ~/.cache/sccache
-            ~/.cargo/bin
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Add cargo bin to PATH
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-
-      - name: Install latest stable toolchain
-        run: |
-          rustup toolchain install stable
-          rustup default stable
-          rustup show
-
-      - name: Install sccache
-        env:
-          RUSTC_WRAPPER: ""
-        run: |
-          cargo install sccache || true
-          command -v sccache
-          sccache --version
-          sccache --start-server || true
-
-      - name: Build
-        env:
-          RUSTC_WRAPPER: sccache
-        run: cargo build --verbose --locked
-
-      - name: Run tests
-        env:
-          RUSTC_WRAPPER: sccache
-        run: cargo test --verbose --locked
+      - name: Test
+        run: cargo test --workspace --locked --verbose
 
       - name: sccache stats
         if: always()
