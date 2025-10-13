@@ -140,8 +140,7 @@ impl<'de> serde::de::Deserialize<'de> for WindowId {
 }
 
 impl WindowId {
-    #[cfg(test)]
-    pub(crate) fn new(pid: pid_t, idx: u32) -> WindowId {
+    pub fn new(pid: pid_t, idx: u32) -> WindowId {
         WindowId {
             pid,
             idx: NonZeroU32::new(idx).unwrap(),
