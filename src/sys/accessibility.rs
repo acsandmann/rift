@@ -49,5 +49,5 @@ pub fn ensure_accessibility_permission() {
 
     println!("if you have granted accessibility permission, please restart");
 
-    std::process::exit(0);
+    std::process::exit(1);
 }
