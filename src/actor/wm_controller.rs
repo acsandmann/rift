@@ -32,6 +32,7 @@ pub enum WmEvent {
     DiscoverRunningApps,
     AppEventsRegistered,
     AppLaunch(pid_t, AppInfo),
+    AppThreadTerminated(pid_t),
     AppGloballyActivated(pid_t),
     AppGloballyDeactivated(pid_t),
     AppTerminated(pid_t),
@@ -101,6 +102,8 @@ pub struct WmController {
     last_known_space_by_screen: HashMap<ScreenId, SpaceId>,
     login_window_pid: Option<pid_t>,
     login_window_active: bool,
+    spawning_apps: HashSet<pid_t>,
+    known_apps: HashSet<pid_t>,
     hotkeys: Option<HotkeyManager>,
     mtm: MainThreadMarker,
     screen_params_received: bool,
@@ -131,6 +134,8 @@ impl WmController {
             last_known_space_by_screen: HashMap::default(),
             login_window_pid: None,
             login_window_active: false,
+            spawning_apps: HashSet::default(),
+            known_apps: HashSet::default(),
             hotkeys: None,
             mtm: MainThreadMarker::new().unwrap(),
             screen_params_received: false,
@@ -214,7 +219,22 @@ impl WmController {
                 self.events_tx.send(Event::ApplicationGloballyDeactivated(pid));
             }
             AppTerminated(pid) => {
+                if self.known_apps.remove(&pid) {
+                    debug!(pid = ?pid, "App terminated; removed from known_apps");
+                }
+                if self.spawning_apps.remove(&pid) {
+                    debug!(pid = ?pid, "App terminated; removed from spawning_apps");
+                }
                 self.events_tx.send(Event::ApplicationTerminated(pid));
+            }
+            AppThreadTerminated(pid) => {
+                if self.known_apps.remove(&pid) {
+                    debug!(pid = ?pid, "App thread terminated; removed from known_apps");
+                }
+                if self.spawning_apps.remove(&pid) {
+                    debug!(pid = ?pid, "App thread terminated; removed from spawning_apps");
+                }
+                self.events_tx.send(Event::ApplicationThreadTerminated(pid));
             }
             ConfigUpdated(new_cfg) => {
                 let old_keys_ser = serde_json::to_string(&self.config.config.keys).ok();
@@ -388,7 +408,18 @@ impl WmController {
         if info.bundle_id.as_deref() == Some("com.apple.loginwindow") {
             self.login_window_pid = Some(pid);
         }
+
+        if self.known_apps.contains(&pid) || self.spawning_apps.contains(&pid) {
+            debug!(pid = ?pid, "Duplicate AppLaunch received; skipping spawn");
+            return;
+        }
+
+        self.spawning_apps.insert(pid);
+
         actor::app::spawn_app_thread(pid, info, self.events_tx.clone());
+
+        self.spawning_apps.remove(&pid);
+        self.known_apps.insert(pid);
     }
 
     fn get_focused_space(&self) -> Option<SpaceId> {

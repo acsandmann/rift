@@ -520,6 +520,11 @@ impl Reactor {
                 // application. Full application termination (Event::ApplicationTerminated)
                 // is responsible for informing other subsystems when windows
                 // should be removed.
+                // Notify the WM controller that the app thread exited so it can
+                // clear any tracking (e.g. known_apps) and allow future launches.
+                if let Some(wm) = self.wm_sender.as_ref() {
+                    wm.send(WmEvent::AppThreadTerminated(pid));
+                }
                 self.apps.remove(&pid);
             }
             Event::ApplicationActivated(..)
