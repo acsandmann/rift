@@ -12,7 +12,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTC_WRAPPER: sccache
   CARGO_INCREMENTAL: 0
   SCCACHE_CACHE_SIZE: 10G
 
@@ -50,15 +49,20 @@ jobs:
           rustup show
 
       - name: Install sccache
+        env:
+          RUSTC_WRAPPER: "" # ensure cargo doesn't try to call sccache yet
         run: |
           cargo install sccache || true
+          command -v sccache
+          sccache --version
           sccache --start-server || true
-          sccache --version || true
 
       - name: Formatting (nightly)
         run: cargo +nightly fmt --all --check --verbose
 
       - name: Check (host)
+        env:
+          RUSTC_WRAPPER: sccache
         run: cargo check --verbose --locked
 
       - name: sccache stats
@@ -97,15 +101,22 @@ jobs:
           rustup show
 
       - name: Install sccache
+        env:
+          RUSTC_WRAPPER: ""
         run: |
           cargo install sccache || true
+          command -v sccache
+          sccache --version
           sccache --start-server || true
-          sccache --version || true
 
       - name: Build
+        env:
+          RUSTC_WRAPPER: sccache
         run: cargo build --verbose --locked
 
       - name: Run tests
+        env:
+          RUSTC_WRAPPER: sccache
         run: cargo test --verbose --locked
 
       - name: sccache stats
