@@ -1,4 +1,4 @@
-name: Rust
+name: Rust (fast)
 
 on:
   push:
@@ -13,111 +13,48 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  RUSTFLAGS: "-C debuginfo=0"
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
   SCCACHE_CACHE_SIZE: 10G
 
 jobs:
-  check:
+  ci:
     runs-on: macos-14
     steps:
-      - name: Checkout repository
+      - name: Checkout (shallow)
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
-      - name: Cache Cargo registry, git index, target and sccache
-        uses: actions/cache@v4
+      - name: Setup Rust (stable default)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Rust (nightly fmt)
+        uses: dtolnay/rust-toolchain@nightly
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-            ~/.cache/sccache
-            ~/.cargo/bin
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+          components: rustfmt
 
-      - name: Add cargo bin to PATH
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "macos14"
+          cache-on-failure: true
 
-      - name: Install stable & nightly toolchains (+ nightly rustfmt)
-        run: |
-          rustup toolchain install stable
-          rustup toolchain install nightly
-          rustup default stable
-          rustup component add rustfmt --toolchain nightly
-          rustup show
+      - name: sccache
+        uses: mozilla-actions/sccache-action@v0.0.3
 
-      - name: Install sccache
-        env:
-          RUSTC_WRAPPER: "" # ensure cargo doesn't try to call sccache yet
-        run: |
-          cargo install sccache || true
-          command -v sccache
-          sccache --version
-          sccache --start-server || true
+      - name: rustc version
+        run: rustc -Vv
 
       - name: Formatting (nightly)
         run: cargo +nightly fmt --all --check --verbose
 
-      - name: Check (host)
-        env:
-          RUSTC_WRAPPER: sccache
-        run: cargo check --verbose --locked
+      - name: Cargo check (fast host compile)
+        run: cargo check --workspace --all-targets --locked --verbose
 
-      - name: sccache stats
-        if: always()
-        run: sccache --show-stats || true
-
-  build:
-    needs: check
-    runs-on: macos-14
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Cache Cargo registry, git index, target and sccache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-            ~/.cache/sccache
-            ~/.cargo/bin
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Add cargo bin to PATH
-        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-
-      - name: Install latest stable toolchain
-        run: |
-          rustup toolchain install stable
-          rustup default stable
-          rustup show
-
-      - name: Install sccache
-        env:
-          RUSTC_WRAPPER: ""
-        run: |
-          cargo install sccache || true
-          command -v sccache
-          sccache --version
-          sccache --start-server || true
-
-      - name: Build
-        env:
-          RUSTC_WRAPPER: sccache
-        run: cargo build --verbose --locked
-
-      - name: Run tests
-        env:
-          RUSTC_WRAPPER: sccache
-        run: cargo test --verbose --locked
+      - name: Test
+        run: cargo test --workspace --locked --verbose
 
       - name: sccache stats
         if: always()
