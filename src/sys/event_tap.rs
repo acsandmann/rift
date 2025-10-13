@@ -22,7 +22,7 @@ struct TrampolineCtx {
     callback: TapCallback,
     original_user_info: *mut c_void,
     original_drop: Option<unsafe fn(*mut c_void)>,
-    port_ptr: *const CFRetained<CFMachPort>,
+    port_ptr: Option<core::ptr::NonNull<CFMachPort>>,
 }
 
 extern "C-unwind" fn trampoline_callback(
@@ -40,9 +40,8 @@ extern "C-unwind" fn trampoline_callback(
     // kCGEventTapDisabledByTimeout (-2) & kCGEventTapDisabledByUserInput (-1)
     let ety = etype.0 as i64;
     if ety == -1 || ety == -2 {
-        if !ctx.port_ptr.is_null() {
-            let port_ptr = ctx.port_ptr as *const CFRetained<CFMachPort>;
-            unsafe { CGEvent::tap_enable(&*port_ptr, true) };
+        if let Some(port_ptr) = ctx.port_ptr {
+            unsafe { CGEvent::tap_enable(port_ptr.as_ref(), true) };
         }
 
         return event_ref.as_ptr();
@@ -87,7 +86,7 @@ impl EventTap {
             callback,
             original_user_info: user_info,
             original_drop: drop_ctx,
-            port_ptr: std::ptr::null(),
+            port_ptr: None,
         });
         let tramp_ptr = Box::into_raw(tramp) as *mut c_void;
 
@@ -102,11 +101,6 @@ impl EventTap {
             )?
         };
 
-        unsafe {
-            let tramp_ctx = &mut *(tramp_ptr as *mut TrampolineCtx);
-            tramp_ctx.port_ptr = &port as *const CFRetained<CFMachPort>;
-        }
-
         let source = CFMachPort::new_run_loop_source(None, Some(&port), 0)?;
         if let Some(rl) = CFRunLoop::current() {
             debug!(
@@ -120,12 +114,19 @@ impl EventTap {
         }
         CGEvent::tap_enable(&port, true);
 
-        Some(Self {
+        let event_tap = Self {
             port,
             source,
             user_info: tramp_ptr,
             drop_ctx: Some(trampoline_drop),
-        })
+        };
+
+        unsafe {
+            let tramp_ctx = &mut *(tramp_ptr as *mut TrampolineCtx);
+            tramp_ctx.port_ptr = Some(CFRetained::as_ptr(&event_tap.port));
+        }
+
+        Some(event_tap)
     }
 
     pub unsafe fn new_listen_only(
