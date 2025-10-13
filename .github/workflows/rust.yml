@@ -1,0 +1,109 @@
+name: Rust
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+concurrency:
+  group: rust-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: macos-14
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_CACHE_SIZE: 10G
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Cache Cargo registry, git index, target and sccache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            ~/.cache/sccache
+            ~/.cargo/bin
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ env.RUSTC_WRAPPER }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install latest stable toolchain
+        run: |
+          rustup toolchain install stable
+          rustup default stable
+
+      - name: Install components
+        run: |
+          rustup component add rustfmt
+
+      - name: Install sccache
+        run: |
+          # Install sccache to ~/.cargo/bin (cached above). If already present this is fast.
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo install sccache || true
+          echo "sccache binary: $(which sccache)"
+          sccache --version || true
+
+      - name: Formatting
+        run: cargo fmt --check --verbose
+
+      - name: Check (host)
+        run: cargo check --verbose --locked
+
+  build:
+    needs: check
+    runs-on: macos-14
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_CACHE_SIZE: 10G
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Cache Cargo registry, git index, target and sccache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            ~/.cache/sccache
+            ~/.cargo/bin
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ env.RUSTC_WRAPPER }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install latest stable toolchain
+        run: |
+          rustup toolchain install stable
+          rustup default stable
+
+      - name: Install components
+        run: |
+          rustup component add rustfmt
+
+      - name: Install sccache
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo install sccache || true
+          echo "sccache binary: $(which sccache)"
+          sccache --version || true
+
+      - name: Build
+        run: cargo build --verbose --locked
+
+      - name: Run tests
+        run: cargo test --verbose --locked
