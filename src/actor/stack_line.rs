@@ -208,7 +208,7 @@ impl StackLine {
             }
         }));
 
-        if let Err(err) = indicator.update(config, group_data) {
+        if let Err(err) = indicator.update(config, group_data.clone()) {
             tracing::warn!(?err, "failed to initialize stack line indicator");
         }
 
@@ -230,13 +230,12 @@ impl StackLine {
         };
 
         let indicator_frame = Self::calculate_indicator_frame(
-            cocoa_group_frame,
+            group_frame,
             group_kind,
             config.bar_thickness,
             config.horizontal_placement,
             config.vertical_placement,
         );
-
         Some((cocoa_group_frame, indicator_frame))
     }
 
@@ -251,14 +250,14 @@ impl StackLine {
         match group_kind {
             GroupKind::Horizontal => match horizontal_placement {
                 HorizontalPlacement::Top => CGRect::new(
+                    group_frame.origin,
+                    CGSize::new(group_frame.size.width, thickness),
+                ),
+                HorizontalPlacement::Bottom => CGRect::new(
                     CGPoint::new(
                         group_frame.origin.x,
                         group_frame.origin.y + group_frame.size.height - thickness,
                     ),
-                    CGSize::new(group_frame.size.width, thickness),
-                ),
-                HorizontalPlacement::Bottom => CGRect::new(
-                    group_frame.origin,
                     CGSize::new(group_frame.size.width, thickness),
                 ),
             },
