@@ -1,7 +1,7 @@
 use std::ffi::c_void;
 
 use objc2_core_foundation::{
-    CFMachPort, CFRetained, CFRunLoop, CFRunLoopSource, kCFRunLoopDefaultMode,
+    CFMachPort, CFRetained, CFRunLoop, CFRunLoopMode, CFRunLoopSource, kCFRunLoopCommonModes,
 };
 use objc2_core_graphics::{
     CGEvent, CGEventMask, CGEventTapLocation as CGTapLoc, CGEventTapOptions as CGTapOpt,
@@ -104,9 +104,13 @@ impl EventTap {
         let source = CFMachPort::new_run_loop_source(None, Some(&port), 0)?;
         if let Some(rl) = CFRunLoop::current() {
             debug!(
-                "EventTap::new_with_options: CFRunLoop::current() returned a run loop; adding source"
+                "EventTap::new_with_options: CFRunLoop::current() returned a run loop; adding source to common modes"
             );
-            unsafe { rl.add_source(Some(&source), kCFRunLoopDefaultMode) };
+            let mode: &CFRunLoopMode = unsafe {
+                kCFRunLoopCommonModes
+                    .expect("kCFRunLoopCommonModes should be available on macOS")
+            };
+            rl.add_source(Some(&source), Some(mode));
         } else {
             debug!(
                 "EventTap::new_with_options: CFRunLoop::current() returned None; run loop not present"
@@ -145,7 +149,11 @@ impl Drop for EventTap {
     fn drop(&mut self) {
         CGEvent::tap_enable(&self.port, false);
         if let Some(rl) = CFRunLoop::current() {
-            unsafe { rl.remove_source(Some(&self.source), kCFRunLoopDefaultMode) };
+            let mode: &CFRunLoopMode = unsafe {
+                kCFRunLoopCommonModes
+                    .expect("kCFRunLoopCommonModes should be available on macOS")
+            };
+            rl.remove_source(Some(&self.source), Some(mode));
         }
         if let Some(dropper) = self.drop_ctx {
             unsafe { dropper(self.user_info) };
