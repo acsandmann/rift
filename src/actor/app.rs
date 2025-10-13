@@ -907,16 +907,18 @@ impl State {
 
         let event = if is_frontmost {
             let quiet = match self.last_activated.take() {
-                Some((ts, quiet, tx)) if ts.elapsed() < Duration::from_millis(1000) => {
+                Some((ts, quiet, tx)) if ts.elapsed() <= Duration::from_millis(1000) => {
                     trace!("by us");
                     _ = tx.send(());
                     quiet
                 }
-                _ => {
+                Some((ts, _, tx)) if ts.elapsed() > Duration::from_millis(1000) => {
                     trace!("by user");
                     self.on_main_window_changed(None);
+                    _ = tx.send(());
                     Quiet::No
                 }
+                _ => Quiet::No,
             };
             Event::ApplicationActivated(self.pid, quiet)
         } else {
