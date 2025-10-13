@@ -149,28 +149,25 @@ impl BspLayoutSystem {
         if let Some(NodeKind::Leaf { window, .. }) = self.kind.get(leaf).cloned() {
             let orientation = direction.orientation();
 
-            let left = self.make_leaf(window);
-            let right = self.make_leaf(Some(new_window));
+            let existing_node = self.make_leaf(window);
+            let new_node = self.make_leaf(Some(new_window));
 
             if let Some(w) = window {
-                self.window_to_node.insert(w, left);
+                self.window_to_node.insert(w, existing_node);
             }
-            self.window_to_node.insert(new_window, right);
+            self.window_to_node.insert(new_window, new_node);
 
             self.kind.insert(leaf, NodeKind::Split { orientation, ratio: 0.5 });
 
-            match direction {
-                Direction::Left | Direction::Up => {
-                    right.detach(&mut self.tree).push_back(leaf);
-                    left.detach(&mut self.tree).push_back(leaf);
-                }
-                Direction::Right | Direction::Down => {
-                    left.detach(&mut self.tree).push_back(leaf);
-                    right.detach(&mut self.tree).push_back(leaf);
-                }
-            }
+            let (first_child, second_child) = match direction {
+                Direction::Left | Direction::Up => (new_node, existing_node),
+                Direction::Right | Direction::Down => (existing_node, new_node),
+            };
 
-            self.tree.data.selection.select(&self.tree.map, right);
+            first_child.detach(&mut self.tree).push_back(leaf);
+            second_child.detach(&mut self.tree).push_back(leaf);
+
+            self.tree.data.selection.select(&self.tree.map, new_node);
         }
     }
 }
@@ -250,9 +247,11 @@ impl BspLayoutSystem {
         let Some(parent_id) = node.parent(&self.tree.map) else {
             return node;
         };
-        let NodeKind::Split { .. } = self.kind[parent_id] else {
+
+        if let Some(NodeKind::Split { .. }) = self.kind.get(parent_id) {
+        } else {
             return parent_id;
-        };
+        }
 
         let children: Vec<_> = parent_id.children(&self.tree.map).collect();
         if children.len() != 2 {
@@ -264,7 +263,11 @@ impl BspLayoutSystem {
             children[0]
         };
 
-        let sibling_kind = self.kind[sibling].clone();
+        let sibling_kind = match self.kind.get(sibling) {
+            Some(k) => k.clone(),
+            None => return parent_id,
+        };
+
         self.kind.insert(parent_id, sibling_kind.clone());
         match sibling_kind {
             NodeKind::Split { .. } => {
@@ -351,11 +354,9 @@ impl BspLayoutSystem {
                 .layouts
                 .get(layout)
                 .map(|s| self.tree.data.selection.current_selection(s.root));
-            let needs_reset = sel_snapshot.and_then(|sel| self.kind.get(sel)).is_none();
-            let new_sel = if needs_reset {
-                self.descend_to_leaf(fallback)
-            } else {
-                self.descend_to_leaf(sel_snapshot.unwrap())
+            let new_sel = match sel_snapshot {
+                Some(sel) if self.kind.get(sel).is_some() => self.descend_to_leaf(sel),
+                _ => self.descend_to_leaf(fallback),
             };
             self.tree.data.selection.select(&self.tree.map, new_sel);
         }
@@ -368,24 +369,24 @@ impl BspLayoutSystem {
         gaps: &crate::common::config::GapSettings,
         out: &mut Vec<(WindowId, CGRect)>,
     ) {
-        match &self.kind[node] {
-            NodeKind::Leaf { window, fullscreen, .. } => {
+        match self.kind.get(node) {
+            Some(NodeKind::Leaf { window, .. }) => {
                 if let Some(w) = window {
-                    let r = if *fullscreen { rect } else { rect };
-                    out.push((*w, r));
+                    out.push((*w, rect));
                 }
             }
-            NodeKind::Split { orientation, ratio } => match orientation {
+            Some(NodeKind::Split { orientation, ratio }) => match orientation {
                 Orientation::Horizontal => {
-                    let gap = gaps.inner.horizontal;
+                    let gap = gaps.inner.horizontal as f64;
                     let total = rect.size.width;
-                    let first_w = (total - gap) as f32 * *ratio;
-                    let second_w = (total - gap) - f64::from(first_w);
-                    let r1 =
-                        CGRect::new(rect.origin, CGSize::new(first_w as f64, rect.size.height));
+                    let available = (total - gap).max(0.0);
+                    let first_w_f = available * (*ratio as f64);
+                    let first_w = first_w_f.max(0.0);
+                    let second_w = (available - first_w).max(0.0);
+                    let r1 = CGRect::new(rect.origin, CGSize::new(first_w, rect.size.height));
                     let r2 = CGRect::new(
-                        CGPoint::new(rect.origin.x + first_w as f64 + gap, rect.origin.y),
-                        CGSize::new(second_w.max(0.0), rect.size.height),
+                        CGPoint::new(rect.origin.x + first_w + gap, rect.origin.y),
+                        CGSize::new(second_w, rect.size.height),
                     );
                     let mut it = node.children(&self.tree.map);
                     if let Some(first) = it.next() {
@@ -396,14 +397,16 @@ impl BspLayoutSystem {
                     }
                 }
                 Orientation::Vertical => {
-                    let gap = gaps.inner.vertical;
+                    let gap = gaps.inner.vertical as f64;
                     let total = rect.size.height;
-                    let first_h = (total - gap) as f32 * *ratio;
-                    let second_h = (total - gap) - f64::from(first_h);
-                    let r1 = CGRect::new(rect.origin, CGSize::new(rect.size.width, first_h as f64));
+                    let available = (total - gap).max(0.0);
+                    let first_h_f = available * (*ratio as f64);
+                    let first_h = first_h_f.max(0.0);
+                    let second_h = (available - first_h).max(0.0);
+                    let r1 = CGRect::new(rect.origin, CGSize::new(rect.size.width, first_h));
                     let r2 = CGRect::new(
-                        CGPoint::new(rect.origin.x, rect.origin.y + first_h as f64 + gap),
-                        CGSize::new(rect.size.width, second_h.max(0.0)),
+                        CGPoint::new(rect.origin.x, rect.origin.y + first_h + gap),
+                        CGSize::new(rect.size.width, second_h),
                     );
                     let mut it = node.children(&self.tree.map);
                     if let Some(first) = it.next() {
@@ -414,6 +417,7 @@ impl BspLayoutSystem {
                     }
                 }
             },
+            None => {}
         }
     }
 
@@ -448,17 +452,7 @@ impl crate::model::tree::Observer for Components {
         self.dispatch_event(map, TreeEvent::RemovingFromParent(node))
     }
 
-    fn removed_child(tree: &mut Tree<Self>, parent: NodeId) {
-        if parent.parent(&tree.map).is_none() {
-            return;
-        }
-        if parent.is_empty(&tree.map) {
-            parent.detach(tree).remove();
-        } else if parent.first_child(&tree.map) == parent.last_child(&tree.map) {
-            let child = parent.first_child(&tree.map).unwrap();
-            child.detach(tree).insert_after(parent).finish();
-        }
-    }
+    fn removed_child(_tree: &mut Tree<Self>, _parent: NodeId) {}
 
     fn removed_from_forest(&mut self, map: &NodeMap, node: NodeId) {
         self.dispatch_event(map, TreeEvent::RemovedFromForest(node))
@@ -623,8 +617,8 @@ impl LayoutSystem for BspLayoutSystem {
             return (None, vec![]);
         };
         self.tree.data.selection.select(&self.tree.map, next_leaf);
-        let focus = match &self.kind[next_leaf] {
-            NodeKind::Leaf { window, .. } => *window,
+        let focus = match self.kind.get(next_leaf) {
+            Some(NodeKind::Leaf { window, .. }) => *window,
             _ => None,
         };
         (focus, raise_windows)
