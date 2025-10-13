@@ -78,11 +78,13 @@ impl<'de> serde::de::Deserialize<'de> for WindowId {
         struct WindowIdVisitor;
         impl<'de> serde::de::Visitor<'de> for WindowIdVisitor {
             type Value = WindowId;
+
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
                 formatter.write_str(
                     "a WindowId struct (with fields `pid` and `idx`), a tuple/seq (pid, idx), or a debug string like `WindowId { pid: 123, idx: 456 }`",
                 )
             }
+
             fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
             where E: serde::de::Error {
                 WindowId::from_debug_string(v)
@@ -102,7 +104,6 @@ impl<'de> serde::de::Deserialize<'de> for WindowId {
                 let idx = std::num::NonZeroU32::new(idx_u32)
                     .ok_or_else(|| serde::de::Error::custom("idx must be non-zero"))?;
                 Ok(WindowId { pid, idx })
-
             }
 
             fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
