@@ -25,7 +25,8 @@ pub fn running_apps(bundle: Option<String>) -> impl Iterator<Item = (pid_t, AppI
                     return None;
                 }
             }
-            if app.activationPolicy() != NSApplicationActivationPolicy::Regular {
+            if app.activationPolicy() != NSApplicationActivationPolicy::Regular
+                && bundle_id != "com.apple.loginwindow" {
                 return None;
             }
             Some((app.pid(), AppInfo::from(&*app)))
