@@ -33,6 +33,7 @@ use crate::common::collections::{BTreeMap, HashMap, HashSet};
 use crate::common::config::Config;
 use crate::common::log::{self, MetricsCommand};
 use crate::layout_engine::{self as layout, Direction, LayoutCommand, LayoutEngine, LayoutEvent};
+use crate::model::VirtualWorkspaceId;
 use crate::model::tx_store::WindowTxStore;
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
@@ -248,7 +249,7 @@ pub struct Reactor {
     event_broadcaster: BroadcastSender,
     wm_sender: Option<crate::actor::wm_controller::Sender>,
     app_rules_recently_applied: std::time::Instant,
-    last_auto_workspace_switch: Option<std::time::Instant>,
+    last_auto_workspace_switch: Option<AutoWorkspaceSwitch>,
     last_sls_notification_ids: Vec<u32>,
     menu_open_depth: usize,
     mission_control_active: bool,
@@ -272,6 +273,14 @@ struct AppState {
 struct Screen {
     frame: CGRect,
     space: Option<SpaceId>,
+}
+
+#[derive(Clone, Debug)]
+struct AutoWorkspaceSwitch {
+    occurred_at: std::time::Instant,
+    space: SpaceId,
+    from_workspace: Option<VirtualWorkspaceId>,
+    to_workspace: VirtualWorkspaceId,
 }
 
 /// A per-window counter that tracks the last time the reactor sent a request to
@@ -2056,7 +2065,22 @@ impl Reactor {
         };
 
         if window_workspace != current_workspace {
-            self.last_auto_workspace_switch = Some(std::time::Instant::now());
+            const AUTO_SWITCH_BOUNCE_MS: u64 = 300;
+            if let Some(last_switch) = &self.last_auto_workspace_switch {
+                if last_switch.space == window_space
+                    && last_switch.to_workspace == current_workspace
+                    && last_switch.from_workspace == Some(window_workspace)
+                    && last_switch.occurred_at.elapsed()
+                        < std::time::Duration::from_millis(AUTO_SWITCH_BOUNCE_MS)
+                {
+                    debug!(
+                        ?current_workspace,
+                        ?window_workspace,
+                        "Suppressing auto workspace switch to avoid rapid oscillation"
+                    );
+                    return;
+                }
+            }
 
             let workspaces =
                 self.layout_engine.virtual_workspace_manager_mut().list_workspaces(window_space);
@@ -2069,6 +2093,12 @@ impl Reactor {
                 );
 
                 self.store_current_floating_positions(window_space);
+                self.last_auto_workspace_switch = Some(AutoWorkspaceSwitch {
+                    occurred_at: std::time::Instant::now(),
+                    space: window_space,
+                    from_workspace: Some(current_workspace),
+                    to_workspace: window_workspace,
+                });
                 self.workspace_switch_generation = self.workspace_switch_generation.wrapping_add(1);
                 self.active_workspace_switch = Some(self.workspace_switch_generation);
                 self.is_workspace_switch = true;
