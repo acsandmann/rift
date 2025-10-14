@@ -2068,6 +2068,12 @@ impl Reactor {
                     workspace_index, pid
                 );
 
+                self.store_current_floating_positions(window_space);
+                self.workspace_switch_generation =
+                    self.workspace_switch_generation.wrapping_add(1);
+                self.active_workspace_switch = Some(self.workspace_switch_generation);
+                self.is_workspace_switch = true;
+
                 let response = self.layout_engine.handle_virtual_workspace_command(
                     window_space,
                     &layout::LayoutCommand::SwitchToWorkspace(workspace_index),
