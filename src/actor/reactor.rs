@@ -2069,8 +2069,7 @@ impl Reactor {
                 );
 
                 self.store_current_floating_positions(window_space);
-                self.workspace_switch_generation =
-                    self.workspace_switch_generation.wrapping_add(1);
+                self.workspace_switch_generation = self.workspace_switch_generation.wrapping_add(1);
                 self.active_workspace_switch = Some(self.workspace_switch_generation);
                 self.is_workspace_switch = true;
 
