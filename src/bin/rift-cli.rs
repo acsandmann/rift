@@ -256,6 +256,7 @@ enum SubscribeCommands {
 }
 
 fn main() {
+    sigpipe::reset();
     let cli = Cli::parse();
 
     if let Commands::Service { service } = &cli.command {
