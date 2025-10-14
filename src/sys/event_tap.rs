@@ -148,10 +148,7 @@ impl Drop for EventTap {
     fn drop(&mut self) {
         CGEvent::tap_enable(&self.port, false);
         if let Some(rl) = CFRunLoop::current() {
-            let mode: &CFRunLoopMode = unsafe {
-                kCFRunLoopCommonModes.expect("kCFRunLoopCommonModes should be available on macOS")
-            };
-            rl.remove_source(Some(&self.source), Some(mode));
+            rl.remove_source(Some(&self.source), unsafe { kCFRunLoopCommonModes });
         }
         if let Some(dropper) = self.drop_ctx {
             unsafe { dropper(self.user_info) };

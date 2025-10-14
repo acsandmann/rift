@@ -20,9 +20,9 @@ pub type Sender = actor::Sender<WmEvent>;
 type Receiver = actor::Receiver<WmEvent>;
 
 use crate::actor::app::AppInfo;
-use crate::actor::{self, mission_control, mouse, reactor};
+use crate::actor::{self, event_tap, mission_control, reactor};
 use crate::common::collections::{HashMap, HashSet};
-use crate::sys::event::HotkeyManager;
+use crate::sys::event::Hotkey;
 use crate::sys::screen::{CoordinateConverter, NSScreenExt, ScreenId, SpaceId};
 use crate::sys::window_server::WindowServerInfo;
 use crate::{layout_engine as layout, sys};
@@ -89,7 +89,7 @@ pub struct Config {
 pub struct WmController {
     config: Config,
     events_tx: reactor::Sender,
-    mouse_tx: mouse::Sender,
+    event_tap_tx: event_tap::Sender,
     stack_line_tx: Option<crate::actor::stack_line::Sender>,
     mission_control_tx: Option<crate::actor::mission_control::Sender>,
     receiver: Receiver,
@@ -104,7 +104,7 @@ pub struct WmController {
     login_window_active: bool,
     spawning_apps: HashSet<pid_t>,
     known_apps: HashSet<pid_t>,
-    hotkeys: Option<HotkeyManager>,
+    hotkeys_registered: bool,
     mtm: MainThreadMarker,
     screen_params_received: bool,
 }
@@ -113,7 +113,7 @@ impl WmController {
     pub fn new(
         config: Config,
         events_tx: reactor::Sender,
-        mouse_tx: mouse::Sender,
+        event_tap_tx: event_tap::Sender,
         stack_line_tx: crate::actor::stack_line::Sender,
         mission_control_tx: crate::actor::mission_control::Sender,
     ) -> (Self, actor::Sender<WmEvent>) {
@@ -125,7 +125,7 @@ impl WmController {
         let this = Self {
             config,
             events_tx,
-            mouse_tx,
+            event_tap_tx,
             stack_line_tx: Some(stack_line_tx),
             mission_control_tx: Some(mission_control_tx),
             receiver,
@@ -140,7 +140,7 @@ impl WmController {
             login_window_active: false,
             spawning_apps: HashSet::default(),
             known_apps: HashSet::default(),
-            hotkeys: None,
+            hotkeys_registered: false,
             mtm: MainThreadMarker::new().unwrap(),
             screen_params_received: false,
         };
@@ -165,10 +165,10 @@ impl WmController {
         match event {
             SystemWoke => self.events_tx.send(Event::SystemWoke),
             AppEventsRegistered => {
-                _ = self.mouse_tx.send(mouse::Request::SetEventProcessing(false));
+                _ = self.event_tap_tx.send(event_tap::Request::SetEventProcessing(false));
 
                 let sender = self.sender.clone();
-                let mouse_tx = self.mouse_tx.clone();
+                let event_tap_tx = self.event_tap_tx.clone();
                 std::thread::spawn(move || {
                     use std::time::Duration;
 
@@ -180,7 +180,7 @@ impl WmController {
                         let _ = sender.send(WmEvent::DiscoverRunningApps);
 
                         Timer::sleep(Duration::from_millis(350)).await;
-                        _ = mouse_tx.send(mouse::Request::SetEventProcessing(true));
+                        _ = event_tap_tx.send(event_tap::Request::SetEventProcessing(true));
                     });
                 });
             }
@@ -202,7 +202,7 @@ impl WmController {
                 self.new_app(pid, info);
             }
             AppGloballyActivated(pid) => {
-                _ = self.mouse_tx.send(mouse::Request::EnforceHidden);
+                _ = self.event_tap_tx.send(event_tap::Request::EnforceHidden);
 
                 if self.login_window_pid == Some(pid) {
                     info!("Login window activated");
@@ -271,7 +271,9 @@ impl WmController {
                     self.active_spaces(),
                     self.get_windows(),
                 ));
-                _ = self.mouse_tx.send(mouse::Request::ScreenParametersChanged(frames, converter));
+                _ = self
+                    .event_tap_tx
+                    .send(event_tap::Request::ScreenParametersChanged(frames, converter));
                 if let Some(tx) = &self.stack_line_tx {
                     _ = tx.try_send(crate::actor::stack_line::Event::ScreenParametersChanged(
                         converter,
@@ -519,21 +521,23 @@ impl WmController {
 
     fn register_hotkeys(&mut self) {
         debug!("register_hotkeys");
-        if self.hotkeys.is_some() {
-            debug!("Hotkeys already registered; dropping existing manager before re-creating");
-            self.hotkeys = None;
+        if self.hotkeys_registered {
+            debug!("Hotkeys already registered; refreshing bindings");
         }
 
-        let mgr = HotkeyManager::new(self.sender.clone());
-        for (key, cmd) in &self.config.config.keys {
-            mgr.register_wm(key.modifiers, key.key_code, cmd.clone());
-        }
-        self.hotkeys = Some(mgr);
+        let bindings: Vec<(Hotkey, WmCommand)> = self.config.config.keys.iter().cloned().collect();
+
+        _ = self.event_tap_tx.send(event_tap::Request::SetHotkeys(bindings));
+
+        self.hotkeys_registered = true;
     }
 
     fn unregister_hotkeys(&mut self) {
         debug!("unregister_hotkeys");
-        self.hotkeys = None;
+        if self.hotkeys_registered {
+            _ = self.event_tap_tx.send(event_tap::Request::SetHotkeys(Vec::new()));
+            self.hotkeys_registered = false;
+        }
     }
 
     fn get_windows(&self) -> Vec<WindowServerInfo> {

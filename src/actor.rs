@@ -7,14 +7,13 @@ pub mod broadcast;
 pub mod config;
 pub mod config_watcher;
 pub mod drag_swap;
+pub mod event_tap;
 pub mod menu_bar;
 pub mod mission_control;
-pub mod mouse;
 pub mod notification_center;
 pub mod raise_manager;
 pub mod reactor;
 pub mod stack_line;
-pub mod swipe;
 pub mod window_notify;
 pub mod wm_controller;
 
