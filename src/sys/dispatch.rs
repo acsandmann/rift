@@ -1,4 +1,5 @@
 use std::ffi::c_void;
+use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
@@ -35,12 +36,14 @@ fn sources_map() -> &'static Mutex<HashMap<pid_t, DSource>> {
 unsafe extern "C" {
     static _dispatch_source_type_proc: c_void;
 
-    pub fn dispatch_after_f(
+    fn dispatch_after_f(
         when: Time,
         queue: *const Unmanaged,
         context: *mut c_void,
         work: extern "C" fn(*mut c_void),
     );
+
+    fn dispatch_set_context(object: *mut c_void, context: *mut c_void);
 }
 
 #[inline]
@@ -54,11 +57,28 @@ fn dispatch_source_type_proc() -> DSrcTy {
 
 pub trait DispatchExt {
     fn after_f(&self, when: Time, context: *mut c_void, work: extern "C" fn(*mut c_void));
+    fn set_context(&self, context: *mut c_void);
 }
 
 impl DispatchExt for Unmanaged {
     fn after_f(&self, when: Time, context: *mut c_void, work: extern "C" fn(*mut c_void)) {
         unsafe { dispatch_after_f(when, self, context, work) }
+    }
+
+    fn set_context(&self, context: *mut c_void) {
+        unsafe { dispatch_set_context(self as *const _ as *mut c_void, context) }
+    }
+}
+
+impl DispatchExt for DSource {
+    fn after_f(&self, when: Time, context: *mut c_void, work: extern "C" fn(*mut c_void)) {
+        unsafe {
+            dispatch_after_f(when, self.deref() as *const _ as *const Unmanaged, context, work)
+        }
+    }
+
+    fn set_context(&self, context: *mut c_void) {
+        unsafe { dispatch_set_context(self.deref() as *const _ as *mut c_void, context) }
     }
 }
 
@@ -108,25 +128,24 @@ pub fn reap_on_exit_proc(pid: pid_t) {
     let tipe = dispatch_source_type_proc();
 
     let src = DSource::create(tipe, pid as _, DISPATCH_PROC_EXIT as _, q);
-
-    extern "C" fn proc_event_handler(_ctx: *mut c_void) {
-        loop {
-            match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
-                Ok(WaitStatus::StillAlive) => break,
-                Ok(WaitStatus::Exited(p, _)) | Ok(WaitStatus::Signaled(p, _, _)) => {
-                    let raw = p.as_raw();
-                    if let Some(_src) = sources_map().lock().remove(&raw) {
-                        // drop -> dispatch_release; source is gone
-                    }
-                    continue;
+    let ctx = Box::into_raw(Box::new(pid)) as *mut c_void;
+    extern "C" fn proc_event_handler(ctx: *mut c_void) {
+        let pid = unsafe { *(ctx as *mut pid_t) };
+        match waitpid(Pid::from_raw(pid), Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::StillAlive) => {}
+            Ok(WaitStatus::Exited(p, _)) | Ok(WaitStatus::Signaled(p, _, _)) => {
+                let raw = p.as_raw();
+                if let Some(_src) = sources_map().lock().remove(&raw) {
+                    // drop -> dispatch_release; source is gone
                 }
-                Ok(_) | Err(Errno::ECHILD) | Err(_) => break,
+                let _ = unsafe { Box::from_raw(ctx as *mut pid_t) };
             }
+            Ok(_) | Err(Errno::ECHILD) | Err(_) => {}
         }
     }
 
+    src.set_context(ctx);
     src.set_event_handler_f(proc_event_handler);
     src.resume();
-
     sources_map().lock().insert(pid, src);
 }
