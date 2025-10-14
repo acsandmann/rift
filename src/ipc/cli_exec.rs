@@ -1,21 +1,26 @@
-use std::collections::HashMap as StdHashMap;
 use std::ffi::CString;
-use std::os::unix::ffi::OsStringExt;
+use std::os::unix::ffi::OsStrExt;
 use std::ptr;
 
 use nix::libc::{
-    c_char, pid_t, posix_spawnattr_destroy, posix_spawnattr_init, posix_spawnattr_t, posix_spawnp,
+    O_RDONLY, O_WRONLY, POSIX_SPAWN_CLOEXEC_DEFAULT, POSIX_SPAWN_SETPGROUP, c_char, pid_t,
+    posix_spawn_file_actions_addopen, posix_spawn_file_actions_destroy,
+    posix_spawn_file_actions_init, posix_spawn_file_actions_t, posix_spawnattr_destroy,
+    posix_spawnattr_init, posix_spawnattr_setflags, posix_spawnattr_setpgroup, posix_spawnattr_t,
+    posix_spawnp,
 };
-use nix::sys::wait::waitpid;
-use nix::unistd::{ForkResult, fork, setsid};
-use tracing::{debug, error};
+use tracing::error;
 
 use crate::actor::broadcast::BroadcastEvent;
-use crate::common::collections::HashMap;
+use crate::common::collections::{HashMap, HashSet};
 use crate::ipc::subscriptions::CliSubscription;
 
 pub trait CliExecutor: Send + Sync + 'static {
-    fn execute(&self, event: &BroadcastEvent, subscription: &CliSubscription);
+    fn execute(
+        &self,
+        event: &BroadcastEvent,
+        subscription: &CliSubscription,
+    ) -> Result<i32, std::io::Error>;
 }
 
 pub struct DefaultCliExecutor;
@@ -25,7 +30,11 @@ impl DefaultCliExecutor {
 }
 
 impl CliExecutor for DefaultCliExecutor {
-    fn execute(&self, event: &BroadcastEvent, subscription: &CliSubscription) {
+    fn execute(
+        &self,
+        event: &BroadcastEvent,
+        subscription: &CliSubscription,
+    ) -> Result<i32, std::io::Error> {
         let mut env_vars: HashMap<String, String> = HashMap::default();
         match event {
             BroadcastEvent::WorkspaceChanged {
@@ -55,7 +64,10 @@ impl CliExecutor for DefaultCliExecutor {
             Ok(s) => s,
             Err(e) => {
                 error!("Failed to serialize event for CLI executor: {}", e);
-                return;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "serialization error",
+                ));
             }
         };
         env_vars.insert("RIFT_EVENT_JSON".to_string(), event_json.clone());
@@ -64,97 +76,105 @@ impl CliExecutor for DefaultCliExecutor {
         let mut args = subscription.args.clone();
         args.push(event_json.clone());
 
-        let mut shell_cmd = String::new();
-        shell_cmd.push_str(&shell_escape::escape(command.into()));
-        for arg in &args {
-            shell_cmd.push(' ');
-            shell_cmd.push_str(&shell_escape::escape(arg.into()));
+        let mut argv_storage: Vec<CString> = Vec::with_capacity(1 + args.len());
+        argv_storage.push(CString::new(command).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "command contains NUL")
+        })?);
+        for a in args {
+            argv_storage.push(CString::new(a.as_str()).map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "arg contains NUL")
+            })?);
         }
-
-        let c_sh = CString::new("/bin/sh").unwrap();
-        let c_dash_c = CString::new("-c").unwrap();
-        let c_cmd = CString::new(shell_cmd.clone()).unwrap();
-
-        let mut argv_storage = vec![c_sh.clone(), c_dash_c.clone(), c_cmd.clone()];
         let mut argv: Vec<*mut c_char> =
             argv_storage.iter_mut().map(|s| s.as_ptr() as *mut c_char).collect();
         argv.push(ptr::null_mut());
 
-        let mut merged: StdHashMap<Vec<u8>, Vec<u8>> = StdHashMap::new();
+        let mut override_keys =
+            HashSet::<Vec<u8>>::with_capacity_and_hasher(env_vars.len(), Default::default());
+        for (k, _) in env_vars.clone() {
+            override_keys.insert(k.as_bytes().to_vec());
+        }
+        let mut env_storage: Vec<CString> = Vec::new();
         for (k, v) in std::env::vars_os() {
-            merged.insert(k.into_vec(), v.into_vec());
+            let kb = k.as_bytes().to_vec();
+            if override_keys.contains(&kb) {
+                continue;
+            }
+            let mut kv = kb;
+            kv.push(b'=');
+            kv.extend_from_slice(v.as_bytes());
+            env_storage.push(CString::new(kv).unwrap());
         }
         for (k, v) in env_vars {
-            merged.insert(k.into_bytes(), v.into_bytes());
-        }
-
-        let mut env_storage: Vec<CString> = Vec::with_capacity(merged.len());
-        for (k, v) in merged {
-            let mut kv = k;
+            let mut kv = k.clone().into_bytes();
             kv.push(b'=');
-            kv.extend_from_slice(&v);
+            kv.extend_from_slice(v.as_bytes());
             env_storage.push(CString::new(kv).unwrap());
         }
         let mut envp: Vec<*mut c_char> =
             env_storage.iter_mut().map(|s| s.as_ptr() as *mut c_char).collect();
         envp.push(ptr::null_mut());
 
-        match unsafe { fork() } {
-            Ok(ForkResult::Parent { child, .. }) => {
-                debug!(
-                    "Parent forked child1 (pid {}) for CLI subscription; waiting to reap",
-                    child
-                );
-                if let Err(e) = waitpid(child, None) {
-                    error!("Failed to waitpid for child1: {}", e);
-                }
-                return;
-            }
-            Ok(ForkResult::Child) => {
-                if let Err(e) = setsid() {
-                    error!("child1: failed to setsid: {}", e);
-                    std::process::exit(1);
-                }
-
-                let mut attr: posix_spawnattr_t = unsafe { std::mem::zeroed() };
-                let rc_init = unsafe { posix_spawnattr_init(&mut attr) };
-                if rc_init != 0 {
-                    error!(
-                        "posix_spawnattr_init failed: {}",
-                        std::io::Error::from_raw_os_error(rc_init)
-                    );
-                    std::process::exit(1);
-                }
-
-                let mut child2_pid: pid_t = 0;
-                let rc = unsafe {
-                    posix_spawnp(
-                        &mut child2_pid as *mut pid_t,
-                        c_sh.as_ptr(),
-                        ptr::null(),
-                        &attr as *const _,
-                        argv.as_mut_ptr(),
-                        envp.as_mut_ptr(),
-                    )
-                };
-                let _ = unsafe { posix_spawnattr_destroy(&mut attr) };
-
-                if rc != 0 {
-                    error!(
-                        "posix_spawnp('/bin/sh', ...) failed: {}",
-                        std::io::Error::from_raw_os_error(rc)
-                    );
-                    std::process::exit(1);
-                }
-
-                std::process::exit(0);
-            }
-            Err(e) => error!("Failed to fork for CLI subscription: {}", e),
+        let mut attr: posix_spawnattr_t = unsafe { std::mem::zeroed() };
+        let rc_init = unsafe { posix_spawnattr_init(&mut attr) };
+        if rc_init != 0 {
+            return Err(std::io::Error::from_raw_os_error(rc_init));
         }
+
+        let mut flags: i16 = 0;
+        flags |= POSIX_SPAWN_CLOEXEC_DEFAULT as i16; // close-on-exec default
+        flags |= POSIX_SPAWN_SETPGROUP as i16; // child in its own process group
+        let rc_flags = unsafe { posix_spawnattr_setflags(&mut attr, flags) };
+        if rc_flags != 0 {
+            let _ = unsafe { posix_spawnattr_destroy(&mut attr) };
+            return Err(std::io::Error::from_raw_os_error(rc_flags));
+        }
+
+        let rc_pgrp = unsafe { posix_spawnattr_setpgroup(&mut attr, 0) };
+        if rc_pgrp != 0 {
+            let _ = unsafe { posix_spawnattr_destroy(&mut attr) };
+            return Err(std::io::Error::from_raw_os_error(rc_pgrp));
+        }
+
+        let mut fa: posix_spawn_file_actions_t = unsafe { std::mem::zeroed() };
+        let rc_fa = unsafe { posix_spawn_file_actions_init(&mut fa) };
+        if rc_fa != 0 {
+            let _ = unsafe { posix_spawnattr_destroy(&mut attr) };
+            return Err(std::io::Error::from_raw_os_error(rc_fa));
+        }
+        let devnull = CString::new("/dev/null").unwrap();
+        unsafe {
+            let _ = posix_spawn_file_actions_addopen(&mut fa, 0, devnull.as_ptr(), O_RDONLY, 0);
+            let _ = posix_spawn_file_actions_addopen(&mut fa, 1, devnull.as_ptr(), O_WRONLY, 0);
+            let _ = posix_spawn_file_actions_addopen(&mut fa, 2, devnull.as_ptr(), O_WRONLY, 0);
+        }
+
+        let mut child_pid: pid_t = 0;
+        let rc = unsafe {
+            posix_spawnp(
+                &mut child_pid as *mut pid_t,
+                argv_storage[0].as_ptr(),
+                &fa as *const _,
+                &attr as *const _,
+                argv.as_mut_ptr(),
+                envp.as_mut_ptr(),
+            )
+        };
+
+        let _ = unsafe { posix_spawn_file_actions_destroy(&mut fa) };
+        let _ = unsafe { posix_spawnattr_destroy(&mut attr) };
+
+        if rc != 0 {
+            return Err(std::io::Error::from_raw_os_error(rc));
+        }
+
+        crate::sys::dispatch::reap_on_exit_proc(child_pid);
+
+        Ok(child_pid)
     }
 }
 
 pub fn execute_cli_subscription(event: &BroadcastEvent, subscription: &CliSubscription) {
     let exec = DefaultCliExecutor::new();
-    exec.execute(event, subscription);
+    let _ = exec.execute(event, subscription);
 }
