@@ -23,7 +23,7 @@ use serde_json;
 use serde_with::serde_as;
 use tracing::{debug, error, info, instrument, trace, warn};
 
-use super::mouse;
+use super::event_tap;
 use crate::actor::app::{AppInfo, AppThreadHandle, Quiet, Request, WindowId, WindowInfo, pid_t};
 use crate::actor::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::actor::raise_manager::{self, RaiseRequest};
@@ -242,7 +242,7 @@ pub struct Reactor {
     workspace_switch_generation: u64,
     active_workspace_switch: Option<u64>,
     record: Record,
-    mouse_tx: Option<mouse::Sender>,
+    event_tap_tx: Option<event_tap::Sender>,
     menu_tx: Option<menu_bar::Sender>,
     stack_line_tx: Option<stack_line::Sender>,
     raise_manager_tx: raise_manager::Sender,
@@ -343,7 +343,7 @@ impl Reactor {
         config: Config,
         layout_engine: LayoutEngine,
         record: Record,
-        mouse_tx: mouse::Sender,
+        event_tap_tx: event_tap::Sender,
         broadcast_tx: BroadcastSender,
         menu_tx: menu_bar::Sender,
         stack_line_tx: stack_line::Sender,
@@ -356,7 +356,7 @@ impl Reactor {
             .spawn(move || {
                 let mut reactor =
                     Reactor::new(config, layout_engine, record, broadcast_tx, window_notify);
-                reactor.mouse_tx.replace(mouse_tx);
+                reactor.event_tap_tx.replace(event_tap_tx);
                 reactor.menu_tx.replace(menu_tx);
                 reactor.stack_line_tx.replace(stack_line_tx);
                 Executor::run(reactor.run(events, events_tx_clone));
@@ -395,7 +395,7 @@ impl Reactor {
             workspace_switch_generation: 0,
             active_workspace_switch: None,
             record,
-            mouse_tx: None,
+            event_tap_tx: None,
             menu_tx: None,
             stack_line_tx: None,
             raise_manager_tx,
@@ -443,9 +443,9 @@ impl Reactor {
         let (raise_manager_tx, raise_manager_rx) = actor::channel();
         self.raise_manager_tx = raise_manager_tx.clone();
 
-        let mouse_tx = self.mouse_tx.clone();
+        let event_tap_tx = self.event_tap_tx.clone();
         let reactor_task = self.run_reactor_loop(events);
-        let raise_manager_task = RaiseManager::run(raise_manager_rx, events_tx, mouse_tx);
+        let raise_manager_task = RaiseManager::run(raise_manager_rx, events_tx, event_tap_tx);
 
         let _ = tokio::join!(reactor_task, raise_manager_task);
     }
@@ -2348,8 +2348,8 @@ impl Reactor {
     }
 
     fn set_focus_follows_mouse_enabled(&self, enabled: bool) {
-        if let Some(mouse_tx) = self.mouse_tx.as_ref() {
-            mouse_tx.send(mouse::Request::SetFocusFollowsMouseEnabled(enabled));
+        if let Some(event_tap_tx) = self.event_tap_tx.as_ref() {
+            event_tap_tx.send(event_tap::Request::SetFocusFollowsMouseEnabled(enabled));
         }
     }
 

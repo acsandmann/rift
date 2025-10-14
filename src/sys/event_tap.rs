@@ -38,7 +38,7 @@ extern "C-unwind" fn trampoline_callback(
     let ctx = unsafe { &*(user_info as *const TrampolineCtx) };
 
     // kCGEventTapDisabledByTimeout (-2) & kCGEventTapDisabledByUserInput (-1)
-    let ety = etype.0 as i64;
+    let ety = etype.0 as i32;
     if ety == -1 || ety == -2 {
         if let Some(port_ptr) = ctx.port_ptr {
             unsafe { CGEvent::tap_enable(port_ptr.as_ref(), true) };
@@ -148,10 +148,7 @@ impl Drop for EventTap {
     fn drop(&mut self) {
         CGEvent::tap_enable(&self.port, false);
         if let Some(rl) = CFRunLoop::current() {
-            let mode: &CFRunLoopMode = unsafe {
-                kCFRunLoopCommonModes.expect("kCFRunLoopCommonModes should be available on macOS")
-            };
-            rl.remove_source(Some(&self.source), Some(mode));
+            rl.remove_source(Some(&self.source), unsafe { kCFRunLoopCommonModes });
         }
         if let Some(dropper) = self.drop_ctx {
             unsafe { dropper(self.user_info) };

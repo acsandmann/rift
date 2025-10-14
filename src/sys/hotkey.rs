@@ -1,19 +1,8 @@
-use std::collections::HashMap;
-use std::ffi::c_void;
 use std::fmt;
 use std::str::FromStr;
-use std::sync::Arc;
 
-use objc2_core_graphics::{
-    CGEvent, CGEventField, CGEventFlags, CGEventMask, CGEventTapOptions as CGTapOpt,
-    CGEventTapProxy, CGEventType,
-};
-use parking_lot::Mutex;
+use objc2_core_graphics::{CGEvent, CGEventField, CGEventFlags};
 use serde::{Deserialize, Serialize};
-use tracing::debug;
-
-use crate::actor::wm_controller::{Sender, WmCommand, WmEvent};
-use crate::sys::event_tap::EventTap;
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct Modifiers(u8);
@@ -364,8 +353,49 @@ impl<'de> Deserialize<'de> for Hotkey {
     }
 }
 
-fn cg_keycode_to_keycode(code: u16) -> Option<KeyCode> {
+pub fn modifiers_from_flags(flags: CGEventFlags) -> Modifiers {
+    let mut mods = Modifiers::empty();
+    if flags.contains(CGEventFlags::MaskControl) {
+        mods.insert(Modifiers::CONTROL);
+    }
+    if flags.contains(CGEventFlags::MaskAlternate) {
+        mods.insert(Modifiers::ALT);
+    }
+    if flags.contains(CGEventFlags::MaskCommand) {
+        mods.insert(Modifiers::META);
+    }
+    if flags.contains(CGEventFlags::MaskShift) {
+        mods.insert(Modifiers::SHIFT);
+    }
+    mods
+}
+
+pub fn modifier_flag_for_key(key_code: KeyCode) -> Option<CGEventFlags> {
+    match key_code {
+        KeyCode::ShiftLeft | KeyCode::ShiftRight => Some(CGEventFlags::MaskShift),
+        KeyCode::ControlLeft | KeyCode::ControlRight => Some(CGEventFlags::MaskControl),
+        KeyCode::AltLeft | KeyCode::AltRight => Some(CGEventFlags::MaskAlternate),
+        KeyCode::MetaLeft | KeyCode::MetaRight => Some(CGEventFlags::MaskCommand),
+        KeyCode::CapsLock => Some(CGEventFlags::MaskAlphaShift),
+        KeyCode::Fn => Some(CGEventFlags::MaskSecondaryFn),
+        KeyCode::NumLock => Some(CGEventFlags::MaskNumericPad),
+        _ => None,
+    }
+}
+
+pub fn is_modifier_key(key_code: KeyCode) -> bool { modifier_flag_for_key(key_code).is_some() }
+
+pub fn key_code_from_event(event: &CGEvent) -> Option<KeyCode> {
+    let raw = CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode);
+    if raw < 0 {
+        return None;
+    }
+    cg_keycode_to_keycode(raw as u16)
+}
+
+pub fn cg_keycode_to_keycode(code: u16) -> Option<KeyCode> {
     use KeyCode::*;
+
     let key = match code {
         0x00 => KeyA,
         0x01 => KeyS,
@@ -492,137 +522,4 @@ fn cg_keycode_to_keycode(code: u16) -> Option<KeyCode> {
     };
 
     Some(key)
-}
-
-struct HotkeyManagerInner {
-    bindings: Mutex<HashMap<Hotkey, Vec<WmCommand>>>,
-    events_tx: Sender,
-    tap_ptr: Mutex<Option<Box<crate::sys::event_tap::EventTap>>>,
-}
-
-unsafe fn drop_ctx(ptr: *mut c_void) {
-    if ptr.is_null() {
-        return;
-    }
-    let _boxed: Box<Arc<HotkeyManagerInner>> =
-        unsafe { Box::from_raw(ptr as *mut Arc<HotkeyManagerInner>) };
-}
-
-unsafe extern "C-unwind" fn tap_callback(
-    _proxy: CGEventTapProxy,
-    etype: CGEventType,
-    event_ptr: core::ptr::NonNull<CGEvent>,
-    user_info: *mut c_void,
-) -> *mut CGEvent {
-    let arc_ptr = user_info as *const Arc<HotkeyManagerInner>;
-    if arc_ptr.is_null() {
-        return event_ptr.as_ptr();
-    }
-    let arc = unsafe { &*arc_ptr };
-
-    match etype {
-        CGEventType::KeyDown => {
-            let event = unsafe { event_ptr.as_ref() };
-            let raw_key =
-                CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode);
-            if raw_key < 0 {
-                return event_ptr.as_ptr();
-            }
-            let raw_key = raw_key as u16;
-            if let Some(key_code) = cg_keycode_to_keycode(raw_key) {
-                let flags = CGEvent::flags(Some(event));
-                let mut mods = Modifiers::empty();
-                if flags.contains(CGEventFlags::MaskControl) {
-                    mods.insert(Modifiers::CONTROL);
-                }
-                if flags.contains(CGEventFlags::MaskAlternate) {
-                    mods.insert(Modifiers::ALT);
-                }
-                if flags.contains(CGEventFlags::MaskCommand) {
-                    mods.insert(Modifiers::META);
-                }
-                if flags.contains(CGEventFlags::MaskShift) {
-                    mods.insert(Modifiers::SHIFT);
-                }
-
-                let hk = Hotkey::new(mods, key_code);
-                let guards = arc.bindings.lock();
-
-                if let Some(cmds) = guards.get(&hk) {
-                    for cmd in cmds.iter() {
-                        let _ = arc.events_tx.send(WmEvent::Command(cmd.clone()));
-                    }
-                    return core::ptr::null_mut();
-                }
-            }
-        }
-        _ => {}
-    }
-
-    event_ptr.as_ptr()
-}
-
-pub struct HotkeyManager {
-    inner: Arc<HotkeyManagerInner>,
-}
-
-impl HotkeyManager {
-    pub fn new(events_tx: Sender) -> Result<Self, anyhow::Error> {
-        let mut m: u64 = 0;
-        for ty in [
-            CGEventType::KeyDown,
-            CGEventType::KeyUp,
-            CGEventType::FlagsChanged,
-        ] {
-            m |= 1u64 << (ty.0 as u64);
-        }
-        let mask: CGEventMask = m;
-
-        let inner = Arc::new(HotkeyManagerInner {
-            bindings: Mutex::new(HashMap::new()),
-            events_tx,
-            tap_ptr: Mutex::new(None),
-        });
-
-        let boxed_arc = Box::new(Arc::clone(&inner));
-        let user_info = Box::into_raw(boxed_arc) as *mut c_void;
-
-        let tap = unsafe {
-            EventTap::new_with_options(
-                CGTapOpt::Default,
-                mask,
-                Some(tap_callback),
-                user_info,
-                Some(drop_ctx),
-            )
-        };
-
-        let tap = tap.ok_or_else(|| anyhow::anyhow!("Failed to create EventTap (permissions?)"))?;
-
-        let boxed_tap = Box::new(tap);
-        inner.tap_ptr.lock().replace(boxed_tap);
-
-        Ok(HotkeyManager { inner })
-    }
-
-    pub fn register(
-        &self,
-        modifiers: Modifiers,
-        key_code: KeyCode,
-        cmd: crate::actor::reactor::Command,
-    ) {
-        self.register_wm(modifiers, key_code, WmCommand::ReactorCommand(cmd))
-    }
-
-    pub fn register_wm(&self, modifiers: Modifiers, key_code: KeyCode, cmd: WmCommand) {
-        let hk = Hotkey::new(modifiers, key_code);
-        let mut guards = self.inner.bindings.lock();
-        let entry = guards.entry(hk).or_default();
-
-        if !entry.iter().any(|c| c == &cmd) {
-            entry.push(cmd);
-        } else {
-            debug!("hotkey already registered: {} {}", modifiers, key_code);
-        }
-    }
 }

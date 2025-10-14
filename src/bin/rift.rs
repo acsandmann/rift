@@ -4,13 +4,12 @@ use clap::Parser;
 use objc2::MainThreadMarker;
 use rift_wm::actor::config::ConfigActor;
 use rift_wm::actor::config_watcher::ConfigWatcher;
+use rift_wm::actor::event_tap::EventTap;
 use rift_wm::actor::menu_bar::Menu;
 use rift_wm::actor::mission_control::MissionControlActor;
-use rift_wm::actor::mouse::Mouse;
 use rift_wm::actor::notification_center::NotificationCenter;
 use rift_wm::actor::reactor::{self, Reactor};
 use rift_wm::actor::stack_line::StackLine;
-use rift_wm::actor::swipe::Swipe;
 use rift_wm::actor::window_notify as window_notify_actor;
 use rift_wm::actor::wm_controller::{self, WmController};
 use rift_wm::common::config::{Config, config_file, restore_file};
@@ -113,7 +112,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
             Some(broadcast_tx.clone()),
         )
     };
-    let (mouse_tx, mouse_rx) = rift_wm::actor::channel();
+    let (event_tap_tx, event_tap_rx) = rift_wm::actor::channel();
     let (menu_tx, menu_rx) = rift_wm::actor::channel();
     let (stack_line_tx, stack_line_rx) = rift_wm::actor::channel();
     let (wnd_tx, wnd_rx) = rift_wm::actor::channel();
@@ -122,7 +121,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         config.clone(),
         layout,
         reactor::Record::new(opt.record.as_deref()),
-        mouse_tx.clone(),
+        event_tap_tx.clone(),
         broadcast_tx.clone(),
         menu_tx.clone(),
         stack_line_tx.clone(),
@@ -176,7 +175,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
     let (wm_controller, wm_controller_sender) = WmController::new(
         wm_config,
         events_tx.clone(),
-        mouse_tx.clone(),
+        event_tap_tx.clone(),
         stack_line_tx.clone(),
         mc_tx.clone(),
     );
@@ -185,7 +184,12 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
 
     let notification_center = NotificationCenter::new(wm_controller_sender.clone());
 
-    let mouse = Mouse::new(config.clone(), events_tx.clone(), mouse_rx);
+    let event_tap = EventTap::new(
+        config.clone(),
+        events_tx.clone(),
+        event_tap_rx,
+        Some(wm_controller_sender.clone()),
+    );
     let menu = Menu::new(config.clone(), menu_rx, mtm);
     let stack_line = StackLine::new(
         config.clone(),
@@ -203,32 +207,16 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         by default this is bound to Alt+Z but can be changed in the config file."
     );
 
-    let (_swipe_tx, swipe_rx) = rift_wm::actor::channel();
-    let swipe = Swipe::new(config.clone(), wm_controller_sender.clone(), swipe_rx);
-
     let _executor_session = Executor::start(async move {
-        if let Some(swipe) = swipe {
-            join!(
-                wm_controller.run(),
-                notification_center.watch_for_notifications(),
-                mouse.run(),
-                menu.run(),
-                stack_line.run(),
-                wn_actor.run(),
-                swipe.run(),
-                mission_control.run(),
-            );
-        } else {
-            join!(
-                wm_controller.run(),
-                notification_center.watch_for_notifications(),
-                mouse.run(),
-                menu.run(),
-                stack_line.run(),
-                wn_actor.run(),
-                mission_control.run(),
-            );
-        }
+        join!(
+            wm_controller.run(),
+            notification_center.watch_for_notifications(),
+            event_tap.run(),
+            menu.run(),
+            stack_line.run(),
+            wn_actor.run(),
+            mission_control.run(),
+        );
     });
 
     objc2_app_kit::NSApplication::sharedApplication(mtm).run();
