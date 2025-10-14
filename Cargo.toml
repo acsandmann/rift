@@ -115,7 +115,7 @@ parking_lot = "0.12"
 ron = "0.11.0"
 rustc-hash = "2.0.0"
 serde = { version = "1.0.201", features = ["derive"] }
-serde_json = "1.0"
+serde_json = "1.0.145"
 serde_with = "3.9.0"
 shell-escape = "0.1.5"
 slotmap = { version = "1.0.7", features = ["serde"] }
@@ -127,7 +127,7 @@ tokio = { version = "1.35.1", features = [
     "net",
     "io-util",
     "process",
-] }
+], default-features = false }
 tokio-stream = "0.1.16"
 tokio-util = "0.7.15"
 toml = "0.9.2"
@@ -151,5 +151,5 @@ tokio = { version = "1.35.1", features = ["rt", "sync", "macros"] }
 test-log = { version = "0.2.16", default-features = false, features = [
     "trace",
 ] }
-test_bin = "0.4.0"
+test_bin = "0.5.0"
 tempfile = { version = "3.17.1", default-features = false }
