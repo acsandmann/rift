@@ -532,12 +532,11 @@ impl State {
     }
 
     fn track_mouse_move(&mut self, loc: CGPoint) -> Option<WindowServerId> {
-        let new_window = window_server::get_window_at_point(loc)?;
-        if let Some(above_window) = self.above_window {
-            if above_window == new_window {
-                return None;
-            }
+        let new_window = window_server::get_window_at_point(loc);
+        if self.above_window == new_window {
+            return None;
         }
+
         debug!("Mouse is now above window {new_window:?} at {loc:?}");
 
         // There is a gap between the menu bar and the actual menu pop-ups when
@@ -558,9 +557,10 @@ impl State {
             }
         }
 
-        let old_window = replace(&mut self.above_window, Some(new_window));
+        let old_window = replace(&mut self.above_window, new_window);
 
-        let new_window_level = trace_misc("window_level", || window_level(new_window.into()))
+        let new_window_level = new_window
+            .and_then(|id| trace_misc("window_level", || window_level(id.into())))
             .unwrap_or(NSWindowLevel::MIN);
         let old_window_level = replace(&mut self.above_window_level, new_window_level);
         debug!(?old_window, ?old_window_level, ?new_window, ?new_window_level);
@@ -573,7 +573,7 @@ impl State {
             return None;
         }
 
-        Some(new_window)
+        new_window
     }
 }
 
