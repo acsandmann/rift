@@ -5,7 +5,7 @@
 use std::borrow::Cow;
 use std::path::PathBuf;
 
-use objc2_app_kit::NSScreen;
+use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication, NSScreen};
 use objc2_core_foundation::CGRect;
 use objc2_foundation::MainThreadMarker;
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,7 @@ use serde_json;
 use tracing::{debug, error, info, instrument};
 
 use crate::common::config::WorkspaceSelector;
-use crate::sys::app::pid_t;
+use crate::sys::app::{NSRunningApplicationExt, pid_t};
 
 pub type Sender = actor::Sender<WmEvent>;
 
@@ -118,6 +118,10 @@ impl WmController {
         mission_control_tx: crate::actor::mission_control::Sender,
     ) -> (Self, actor::Sender<WmEvent>) {
         let (sender, receiver) = actor::channel();
+        sys::app::set_activation_policy_callback({
+            let sender = sender.clone();
+            move |pid, info| sender.send(WmEvent::AppLaunch(pid, info))
+        });
         let this = Self {
             config,
             events_tx,
@@ -219,6 +223,7 @@ impl WmController {
                 self.events_tx.send(Event::ApplicationGloballyDeactivated(pid));
             }
             AppTerminated(pid) => {
+                sys::app::remove_activation_policy_observer(pid);
                 if self.known_apps.remove(&pid) {
                     debug!(pid = ?pid, "App terminated; removed from known_apps");
                 }
@@ -411,6 +416,23 @@ impl WmController {
 
         if self.known_apps.contains(&pid) || self.spawning_apps.contains(&pid) {
             debug!(pid = ?pid, "Duplicate AppLaunch received; skipping spawn");
+            return;
+        }
+
+        let Some(running_app) = NSRunningApplication::with_process_id(pid) else {
+            debug!(pid = ?pid, "Failed to resolve NSRunningApplication for new app");
+            return;
+        };
+
+        if running_app.activationPolicy() != NSApplicationActivationPolicy::Regular
+            && info.bundle_id.as_deref() != Some("com.apple.loginwindow")
+        {
+            sys::app::ensure_activation_policy_observer(pid, info.clone());
+            debug!(
+                pid = ?pid,
+                bundle = ?info.bundle_id,
+                "App not yet regular; deferring spawn until activation policy changes"
+            );
             return;
         }
 
