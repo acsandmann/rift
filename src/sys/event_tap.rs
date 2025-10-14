@@ -107,7 +107,8 @@ impl EventTap {
                 "EventTap::new_with_options: CFRunLoop::current() returned a run loop; adding source to common modes"
             );
             let mode: &CFRunLoopMode = unsafe {
-                kCFRunLoopCommonModes.expect("kCFRunLoopCommonModes should be available on macOS")
+                kCFRunLoopCommonModes
+                    .expect("kCFRunLoopCommonModes should be available on macOS")
             };
             rl.add_source(Some(&source), Some(mode));
         } else {
@@ -149,7 +150,8 @@ impl Drop for EventTap {
         CGEvent::tap_enable(&self.port, false);
         if let Some(rl) = CFRunLoop::current() {
             let mode: &CFRunLoopMode = unsafe {
-                kCFRunLoopCommonModes.expect("kCFRunLoopCommonModes should be available on macOS")
+                kCFRunLoopCommonModes
+                    .expect("kCFRunLoopCommonModes should be available on macOS")
             };
             rl.remove_source(Some(&self.source), Some(mode));
         }
