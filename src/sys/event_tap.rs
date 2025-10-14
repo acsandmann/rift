@@ -38,7 +38,7 @@ extern "C-unwind" fn trampoline_callback(
     let ctx = unsafe { &*(user_info as *const TrampolineCtx) };
 
     // kCGEventTapDisabledByTimeout (-2) & kCGEventTapDisabledByUserInput (-1)
-    let ety = etype.0 as i64;
+    let ety = etype.0 as i32;
     if ety == -1 || ety == -2 {
         if let Some(port_ptr) = ctx.port_ptr {
             unsafe { CGEvent::tap_enable(port_ptr.as_ref(), true) };
