@@ -126,7 +126,7 @@ impl EventTap {
 
         unsafe {
             let tramp_ctx = &mut *(tramp_ptr as *mut TrampolineCtx);
-            tramp_ctx.port_ptr = Some(CFRetained::as_ptr(&event_tap.port));
+            tramp_ctx.port_ptr = Some(core::ptr::NonNull::from(&*event_tap.port));
         }
 
         Some(event_tap)

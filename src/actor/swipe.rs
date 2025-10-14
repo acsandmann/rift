@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::ffi::c_void;
 use std::rc::Rc;
 
-use objc2_app_kit::{NSEvent, NSEventType, NSTouchPhase};
+use objc2_app_kit::{NSEvent, NSEventPhase, NSEventType, NSTouchPhase};
 use objc2_core_graphics::{CGEvent, CGEventMask, CGEventTapProxy, CGEventType};
 use tracing::trace;
 
@@ -169,6 +169,16 @@ unsafe extern "C-unwind" fn gesture_callback(
 }
 
 fn handle_gesture(swipe: &Swipe, state: &RefCell<SwipeState>, nsevent: &NSEvent) {
+    let phase = nsevent.phase();
+    if phase.contains(NSEventPhase::Ended) || phase.contains(NSEventPhase::Cancelled) {
+        state.borrow_mut().reset();
+        return;
+    }
+
+    if phase.contains(NSEventPhase::Began) {
+        state.borrow_mut().reset();
+    }
+
     let touches = nsevent.allTouches();
     let mut sum_x = 0.0f64;
     let mut sum_y = 0.0f64;
