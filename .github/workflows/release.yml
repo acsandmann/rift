@@ -1,0 +1,121 @@
+name: release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    runs-on: macos-14
+    env:
+      CARGO_TERM_COLOR: always
+      ASSET_BASENAME: rift-universal-macos
+      TAP_REPO: acsandmann/homebrew-tap
+      TAP_FILE_PATH: Formula/rift.rb
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust + targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Show toolchain
+        run: |
+          rustc -V
+          cargo -V
+          rustup target list --installed
+          sw_vers
+
+      - name: Build release for both targets (both bins)
+        run: |
+          set -euxo pipefail
+          # Build arm64
+          cargo build --release --locked --bins --target aarch64-apple-darwin
+          # Build x86_64
+          cargo build --release --locked --bins --target x86_64-apple-darwin
+
+      - name: Create universal binaries with lipo
+        run: |
+          set -euxo pipefail
+          mkdir -p dist
+
+          # Combine rift
+          lipo -create \
+            target/aarch64-apple-darwin/release/rift \
+            target/x86_64-apple-darwin/release/rift \
+            -output dist/rift
+
+          # Combine rift-cli
+          lipo -create \
+            target/aarch64-apple-darwin/release/rift-cli \
+            target/x86_64-apple-darwin/release/rift-cli \
+            -output dist/rift-cli
+
+          # Optional: strip symbols to reduce size
+          strip -x dist/rift dist/rift-cli
+
+      - name: Package tarball
+        id: pkg
+        run: |
+          set -euxo pipefail
+          TAG="${GITHUB_REF_NAME}"      # e.g. v1.2.3 or 1.2.3
+          VERSION="${TAG#v}"            # strip leading 'v' if present
+          ASSET="${ASSET_BASENAME}-${VERSION}.tar.gz"
+
+          tar -C dist -czf "${ASSET}" rift rift-cli
+          sha256=$(shasum -a 256 "${ASSET}" | awk '{print $1}')
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "asset=${ASSET}" >> "$GITHUB_OUTPUT"
+          echo "sha256=${sha256}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload asset to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.pkg.outputs.asset }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Checkout tap repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TAP_REPO }}
+          path: tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }} # PAT with repo:push to the tap
+
+      - name: Update formula version & sha256
+        run: |
+          set -euxo pipefail
+          VERSION="${{ steps.pkg.outputs.version }}"
+          SHA256="${{ steps.pkg.outputs.sha256 }}"
+          FORMULA="tap/${TAP_FILE_PATH}"
+
+          # Update version "..."
+          /usr/bin/sed -i '' -E \
+            "s/^[[:space:]]*version[[:space:]]+\"[^\"]*\"/  version \"${VERSION}\"/" \
+            "${FORMULA}" || true
+
+          # Update sha256 "..."
+          /usr/bin/sed -i '' -E \
+            "s/^[[:space:]]*sha256[[:space:]]+\"[^\"]*\"/  sha256 \"${SHA256}\"/" \
+            "${FORMULA}"
+
+          echo "Updated ${FORMULA}: version=${VERSION}, sha256=${SHA256}"
+          echo "---- Formula preview ----"
+          sed -n '1,120p' "${FORMULA}"
+
+      - name: Commit & push formula update
+        run: |
+          set -euxo pipefail
+          git -C tap config user.name "github-actions[bot]"
+          git -C tap config user.email "github-actions[bot]@users.noreply.github.com"
+          git -C tap add "${TAP_FILE_PATH}"
+          git -C tap commit -m "chore(formula): rift ${{ steps.pkg.outputs.version }} (universal) - sha256 ${{ steps.pkg.outputs.sha256 }}"
+          git -C tap push origin HEAD
