@@ -521,6 +521,9 @@ pub struct LayoutSettings {
     /// Gap configuration for window spacing
     #[serde(default)]
     pub gaps: GapSettings,
+    /// Scroll layout specific settings
+    #[serde(default)]
+    pub scroll: ScrollLayoutSettings,
 }
 
 /// Layout mode enum
@@ -532,6 +535,41 @@ pub enum LayoutMode {
     Traditional,
     /// Binary space partitioning tiling
     Bsp,
+    /// Horizontal scrolling strip layout (PaperWM/Niri style)
+    Scroll,
+}
+
+fn default_scroll_gesture_fingers() -> usize { 3 }
+fn default_scroll_gesture_sensitivity() -> f64 { 1.25 }
+fn default_scroll_wheel_divisor() -> f64 { 600.0 }
+fn default_scroll_wheel_sensitivity() -> f64 { 1.0 }
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct ScrollLayoutSettings {
+    /// Number of fingers required when using gesture-based scrolling
+    #[serde(default = "default_scroll_gesture_fingers")]
+    pub gesture_fingers: usize,
+    /// Multiplier applied to horizontal gesture deltas (larger values scroll faster)
+    #[serde(default = "default_scroll_gesture_sensitivity")]
+    pub gesture_sensitivity: f64,
+    /// Pixel delta that corresponds to one window when using a scroll wheel
+    #[serde(default = "default_scroll_wheel_divisor")]
+    pub wheel_pixels_per_window: f64,
+    /// Additional sensitivity multiplier applied to scroll-wheel deltas
+    #[serde(default = "default_scroll_wheel_sensitivity")]
+    pub wheel_sensitivity: f64,
+}
+
+impl Default for ScrollLayoutSettings {
+    fn default() -> Self {
+        Self {
+            gesture_fingers: default_scroll_gesture_fingers(),
+            gesture_sensitivity: default_scroll_gesture_sensitivity(),
+            wheel_pixels_per_window: default_scroll_wheel_divisor(),
+            wheel_sensitivity: default_scroll_wheel_sensitivity(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]

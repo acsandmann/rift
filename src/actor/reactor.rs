@@ -36,7 +36,7 @@ use crate::actor::raise_manager::{self, RaiseRequest};
 use crate::actor::wm_controller::WmEvent;
 use crate::actor::{self, menu_bar, stack_line};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
-use crate::common::config::Config;
+use crate::common::config::{Config, LayoutMode};
 use crate::common::log::{self, MetricsCommand};
 use crate::layout_engine::{self as layout, Direction, LayoutCommand, LayoutEngine, LayoutEvent};
 use crate::model::VirtualWorkspaceId;
@@ -216,7 +216,7 @@ pub enum Event {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Requested(pub bool);
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(untagged)]
 pub enum Command {
     Layout(LayoutCommand),
@@ -1192,9 +1192,11 @@ impl Reactor {
                 }
             }
             Event::MouseMovedOverWindow(wsid) => {
-                let Some(&wid) = self.window_ids.get(&wsid) else { return };
-                if self.should_raise_on_mouse_over(wid) {
-                    self.raise_window(wid, Quiet::No, None);
+                if !matches!(self.config.settings.layout.mode, LayoutMode::Scroll) {
+                    let Some(&wid) = self.window_ids.get(&wsid) else { return };
+                    if self.should_raise_on_mouse_over(wid) {
+                        self.raise_window(wid, Quiet::No, None);
+                    }
                 }
             }
             Event::SystemWoke => {
@@ -1256,12 +1258,16 @@ impl Reactor {
                     _ => self.layout_engine.handle_command(
                         self.workspace_command_space(),
                         &visible_spaces,
-                        cmd,
+                        cmd.clone(),
                     ),
                 };
 
                 self.is_workspace_switch = is_workspace_switch;
                 self.handle_layout_response(response);
+
+                if matches!(cmd, LayoutCommand::ScrollWorkspace { .. }) {
+                    let _ = self.update_layout(false, false);
+                }
             }
             Event::Command(Command::Metrics(cmd)) => log::handle_command(cmd),
             Event::ConfigUpdated(new_cfg) => {
@@ -1278,6 +1284,7 @@ impl Reactor {
                 }
 
                 let _ = self.update_layout(false, true);
+                self.update_focus_follows_mouse_state();
 
                 if old_keys != self.config.keys {
                     if let Some(wm) = &self.wm_sender {
@@ -2650,7 +2657,9 @@ impl Reactor {
     }
 
     fn update_focus_follows_mouse_state(&self) {
-        let should_enable = self.menu_open_depth == 0 && !self.mission_control_active;
+        let is_scroll_layout = matches!(self.config.settings.layout.mode, LayoutMode::Scroll);
+        let should_enable =
+            self.menu_open_depth == 0 && !self.mission_control_active && !is_scroll_layout;
         self.set_focus_follows_mouse_enabled(should_enable);
     }
 
@@ -2765,10 +2774,12 @@ impl Reactor {
                 }
             }
 
-            let suppress_animation = is_workspace_switch || self.active_workspace_switch.is_some();
+            let is_scroll_layout = matches!(self.config.settings.layout.mode, LayoutMode::Scroll);
+            let suppress_animation =
+                is_workspace_switch || self.active_workspace_switch.is_some() || is_scroll_layout;
             if suppress_animation {
                 let mut per_app: HashMap<pid_t, Vec<(WindowId, CGRect)>> = HashMap::default();
-                for &(wid, target_frame) in &layout {
+                for &(wid, mut target_frame) in &layout {
                     // Skip applying a layout frame for the window currently being dragged.
                     if skip_wid == Some(wid) {
                         trace!(?wid, "Skipping layout update for window currently being dragged");
@@ -2779,9 +2790,11 @@ impl Reactor {
                         debug!(?wid, "Skipping layout - window no longer exists");
                         continue;
                     };
-                    let target_frame = target_frame.round();
+                    if !is_scroll_layout {
+                        target_frame = target_frame.round();
+                    }
                     let current_frame = window.frame_monotonic;
-                    if target_frame.same_as(current_frame) {
+                    if !is_scroll_layout && target_frame.same_as(current_frame) {
                         continue;
                     }
                     any_frame_changed = true;
