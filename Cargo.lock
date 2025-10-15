@@ -1290,6 +1290,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "shell-escape",
+ "sigpipe",
  "slotmap",
  "static_assertions",
  "tempfile",
@@ -1497,6 +1498,15 @@ name = "signal-hook-registry"
 version = "1.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b2a4719bff48cee6b39d12c020eeb490953ad2443b7055bd0b21fca26bd8c28b"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "sigpipe"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5584bfb3e0d348139d8210285e39f6d2f8a1902ac06de343e06357d1d763d8e6"
 dependencies = [
  "libc",
 ]
