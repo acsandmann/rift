@@ -1056,7 +1056,10 @@ impl State {
         match result {
             Ok(value) => Ok(Some(value)),
             Err(AxError::Ax(code)) if code == AXError::CannotComplete => {
-                trace!(?wid, "AX request returned CannotComplete; leaving window registered");
+                trace!(
+                    ?wid,
+                    "AX request returned CannotComplete; leaving window registered"
+                );
                 Ok(None)
             }
             Err(AxError::Ax(code)) => {
