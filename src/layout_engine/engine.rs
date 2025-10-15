@@ -25,7 +25,7 @@ pub struct GroupContainerInfo {
 }
 
 #[non_exhaustive]
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum LayoutCommand {
     NextWindow,
@@ -45,6 +45,7 @@ pub enum LayoutCommand {
 
     ResizeWindowGrow,
     ResizeWindowShrink,
+    ScrollWorkspace { delta: f64, finalize: bool },
 
     NextWorkspace(Option<bool>),
     PrevWorkspace(Option<bool>),
@@ -336,6 +337,9 @@ impl LayoutEngine {
             ),
             crate::common::config::LayoutMode::Bsp => {
                 LayoutSystemKind::Bsp(crate::layout_engine::BspLayoutSystem::default())
+            }
+            crate::common::config::LayoutMode::Scroll => {
+                LayoutSystemKind::Scroll(crate::layout_engine::ScrollLayoutSystem::default())
             }
         };
 
@@ -703,6 +707,35 @@ impl LayoutEngine {
             LayoutCommand::SwapWindows(a, b) => {
                 let layout = self.layout(space);
                 let _ = self.tree.swap_windows(layout, a, b);
+
+                EventResponse::default()
+            }
+            LayoutCommand::ScrollWorkspace { delta, finalize } => {
+                if let LayoutSystemKind::Scroll(system) = &mut self.tree {
+                    let mut focus_window = None;
+                    if delta.abs() > f64::EPSILON {
+                        focus_window = system.scroll_by(layout, delta);
+                    }
+                    if finalize {
+                        let _ = system.finalize_scroll(layout);
+                        if focus_window.is_none() {
+                            focus_window = system.selected_window(layout);
+                        }
+                    }
+
+                    if let Some(wid) = focus_window {
+                        self.focused_window = Some(wid);
+                        self.virtual_workspace_manager.set_last_focused_window(
+                            space,
+                            workspace_id,
+                            Some(wid),
+                        );
+                        return EventResponse {
+                            focus_window: Some(wid),
+                            raise_windows: vec![wid],
+                        };
+                    }
+                }
 
                 EventResponse::default()
             }

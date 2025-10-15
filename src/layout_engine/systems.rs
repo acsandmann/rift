@@ -74,6 +74,8 @@ mod traditional;
 pub use traditional::TraditionalLayoutSystem;
 mod bsp;
 pub use bsp::BspLayoutSystem;
+mod scroll;
+pub use scroll::ScrollLayoutSystem;
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -81,4 +83,5 @@ pub use bsp::BspLayoutSystem;
 pub enum LayoutSystemKind {
     Traditional(TraditionalLayoutSystem),
     Bsp(BspLayoutSystem),
+    Scroll(ScrollLayoutSystem),
 }
