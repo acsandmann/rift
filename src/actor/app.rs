@@ -1035,7 +1035,7 @@ impl State {
     }
 
     fn handle_ax_error(&mut self, wid: WindowId, err: &AXError) -> bool {
-        if matches!(*err, AXError::InvalidUIElement | AXError::CannotComplete) {
+        if matches!(*err, AXError::InvalidUIElement) {
             if self.windows.remove(&wid).is_some() {
                 self.send_event(Event::WindowDestroyed(wid));
                 self.on_main_window_changed(Some(wid));
@@ -1053,6 +1053,13 @@ impl State {
     ) -> Result<Option<T>, AxError> {
         match result {
             Ok(value) => Ok(Some(value)),
+            Err(AxError::Ax(code)) if code == AXError::CannotComplete => {
+                trace!(
+                    ?wid,
+                    "AX request returned CannotComplete; leaving window registered"
+                );
+                Ok(None)
+            }
             Err(AxError::Ax(code)) => {
                 if self.handle_ax_error(wid, &code) {
                     Ok(None)
