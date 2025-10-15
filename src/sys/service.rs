@@ -80,6 +80,15 @@ fn plist_contents() -> io::Result<String> {
     </dict>
     <key>RunAtLoad</key>
     <true/>
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>MachServices</key>
+    <dict>
+        <key>{name}</key>
+        <true/>
+    </dict>
     <key>KeepAlive</key>
     <dict>
         <key>SuccessfulExit</key>
@@ -138,6 +147,14 @@ fn run_launchctl(args: &[&str], suppress_output: bool) -> io::Result<i32> {
     }
 }
 
+fn spawn_launchctl(args: &[&str]) -> io::Result<()> {
+    let mut cmd = Command::new(LAUNCHCTL_PATH);
+    cmd.args(args);
+    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    let _child = cmd.spawn()?;
+    Ok(())
+}
+
 pub fn service_install_internal(plist_path: &Path) -> io::Result<()> {
     let plist = plist_contents()?;
     write_file_atomic(plist_path, &plist)?;
@@ -188,18 +205,17 @@ pub fn service_start() -> io::Result<()> {
 
     let is_bootstrapped = run_launchctl(&["print", &service_target], true).unwrap_or(1);
     if is_bootstrapped != 0 {
-        let _ = run_launchctl(&["enable", &service_target], false);
+        let _ = run_launchctl(&["enable", &service_target], true);
 
-        let code = run_launchctl(
-            &["bootstrap", &domain_target, plist_path.to_str().unwrap()],
-            false,
-        )?;
+        let _ = spawn_launchctl(&["bootstrap", &domain_target, plist_path.to_str().unwrap()]);
+        let _ = std::thread::sleep(std::time::Duration::from_millis(150));
+        let code = run_launchctl(&["kickstart", &service_target], false)?;
         if code == 0 {
             Ok(())
         } else {
             Err(io::Error::new(
                 io::ErrorKind::Other,
-                format!("bootstrap failed (exit {})", code),
+                format!("kickstart after bootstrap failed (exit {})", code),
             ))
         }
     } else {
