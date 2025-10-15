@@ -19,28 +19,44 @@ fn plist_path() -> io::Result<PathBuf> {
     Ok(home.join("Library").join("LaunchAgents").join(format!("{RIFT_PLIST}.plist")))
 }
 
+fn find_rift_executable() -> io::Result<PathBuf> {
+    if let Ok(path_env) = env::var("PATH") {
+        for dir in env::split_paths(&path_env) {
+            let candidate = dir.join("rift");
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    let exe_path = env::current_exe().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            "unable to retrieve path of current executable",
+        )
+    })?;
+    let sibling = exe_path.with_file_name("rift");
+    if sibling.is_file() {
+        return Ok(sibling);
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!(
+            "rift agent executable not found: not present in $PATH and no sibling 'rift' next to current executable ('{}')",
+            exe_path.display()
+        ),
+    ))
+}
+
 fn plist_contents() -> io::Result<String> {
     let user =
         env::var("USER").map_err(|_| io::Error::new(io::ErrorKind::Other, "env USER not set"))?;
     let path_env =
         env::var("PATH").map_err(|_| io::Error::new(io::ErrorKind::Other, "env PATH not set"))?;
-    let exe_path = env::current_exe().map_err(|_| {
-        io::Error::new(io::ErrorKind::Other, "unable to retrieve path of executable")
-    })?;
 
-    let preferred_agent_path = exe_path.with_file_name("rift");
-    if !preferred_agent_path.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!(
-                "rift agent executable '{}' not found next to current executable; \
-place the 'rift' binary adjacent to the CLI or install the agent first",
-                preferred_agent_path.display()
-            ),
-        ));
-    }
-
-    let exe_str = preferred_agent_path
+    let agent_exe = find_rift_executable()?;
+    let exe_str = agent_exe
         .to_str()
         .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "non-UTF8 executable path"))?;
 
