@@ -122,6 +122,10 @@ impl WmController {
             let sender = sender.clone();
             move |pid, info| sender.send(WmEvent::AppLaunch(pid, info))
         });
+        sys::app::set_finished_launching_callback({
+            let sender = sender.clone();
+            move |pid, info| sender.send(WmEvent::AppLaunch(pid, info))
+        });
         let this = Self {
             config,
             events_tx,
@@ -434,6 +438,16 @@ impl WmController {
                 pid = ?pid,
                 bundle = ?info.bundle_id,
                 "App not yet regular; deferring spawn until activation policy changes"
+            );
+            return;
+        }
+
+        if !running_app.isFinishedLaunching() {
+            sys::app::ensure_finished_launching_observer(pid, info.clone());
+            debug!(
+                pid = ?pid,
+                bundle = ?info.bundle_id,
+                "App has not finished launching; deferring spawn until finished"
             );
             return;
         }

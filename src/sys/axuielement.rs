@@ -7,12 +7,13 @@ use std::ptr::{self, NonNull};
 
 use objc2_application_services::{AXError, AXUIElement as RawAXUIElement, AXValue, AXValueType};
 use objc2_core_foundation::{
-    CFArray, CFBoolean, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize, ConcreteType,
+    CFArray, CFBoolean, CFData, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize, ConcreteType,
 };
 
 use super::skylight::{CGSGetWindowBounds, G_CONNECTION};
 use crate::actor::app::WindowId;
 use crate::sys::app::pid_t;
+use crate::sys::skylight::_AXUIElementCreateWithRemoteToken;
 
 pub const AX_WINDOW_ROLE: &str = "AXWindow";
 pub const AX_STANDARD_WINDOW_SUBROLE: &str = "AXStandardWindow";
@@ -62,6 +63,35 @@ impl AXUIElement {
         // owns +1 retain count.
         let inner = unsafe { RawAXUIElement::new_system_wide() };
         Self::new(inner)
+    }
+
+    // TODO: im not sure this works...
+    #[inline]
+    pub fn from_window_id(wid: WindowId) -> Self {
+        const BUFSIZE: usize = 0x14;
+        const MAGIC: u32 = 0x636f636f;
+
+        let mut data = [0u8; BUFSIZE];
+
+        let pid_bytes = (wid.pid as u32).to_ne_bytes();
+        data[0x0..0x0 + pid_bytes.len()].copy_from_slice(&pid_bytes);
+
+        let magic_bytes = MAGIC.to_ne_bytes();
+        data[0x8..0x8 + magic_bytes.len()].copy_from_slice(&magic_bytes);
+
+        let element_id = wid.idx.get() as u64;
+        let element_bytes = element_id.to_ne_bytes();
+        data[0xc..0xc + element_bytes.len()].copy_from_slice(&element_bytes);
+
+        debug_assert_eq!(data.len(), BUFSIZE);
+        let data = CFData::from_bytes(&data);
+
+        let inner = unsafe {
+            _AXUIElementCreateWithRemoteToken(CFRetained::<CFData>::as_ptr(&data).as_ptr())
+        };
+        Self::new(unsafe {
+            CFRetained::from_raw(NonNull::new(inner).expect("non-null AXUIElement pointer"))
+        })
     }
 
     #[inline]
@@ -289,7 +319,7 @@ fn rect_from_axvalue(value: &AXValue) -> Result<CGRect> {
     if success {
         Ok(rect)
     } else {
-        Err(Error::Ax(AXError::CannotComplete))
+        Err(Error::Ax(AXError::Failure))
     }
 }
 

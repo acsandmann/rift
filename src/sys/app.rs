@@ -119,6 +119,96 @@ impl Drop for ActivationPolicyObserver {
     }
 }
 
+struct FinishedLaunchingObserverIvars {
+    app: Retained<NSRunningApplication>,
+    key_path: Retained<NSString>,
+    handler: ActivationPolicyCallback,
+    info: AppInfo,
+    pid: pid_t,
+    notified: Cell<bool>,
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[ivars = FinishedLaunchingObserverIvars]
+    struct FinishedLaunchingObserver;
+
+    impl FinishedLaunchingObserver {
+        #[unsafe(method(observeValueForKeyPath:ofObject:change:context:))]
+        fn observe_value(
+            &self,
+            _key_path: Option<&NSString>,
+            _object: Option<&AnyObject>,
+            _change: Option<&AnyObject>,
+            _context: *mut c_void,
+        ) {
+            self.handle_finished_launching();
+        }
+    }
+
+    unsafe impl NSObjectProtocol for FinishedLaunchingObserver {}
+);
+
+impl FinishedLaunchingObserver {
+    fn new(
+        app: Retained<NSRunningApplication>,
+        info: AppInfo,
+        handler: ActivationPolicyCallback,
+    ) -> Retained<Self> {
+        let key_path = ns_string!("finishedLaunching");
+        let pid = app.pid();
+        let observer = Self::alloc().set_ivars(FinishedLaunchingObserverIvars {
+            app,
+            key_path: key_path.copy(),
+            handler,
+            info,
+            pid,
+            notified: Cell::new(false),
+        });
+        let observer: Retained<Self> = unsafe { msg_send![super(observer), init] };
+        unsafe {
+            let ivars = observer.ivars();
+            let _: () = msg_send![
+                &*ivars.app,
+                addObserver: &*observer,
+                forKeyPath: &*ivars.key_path,
+                options: (NS_KEY_VALUE_OBSERVING_OPTION_NEW | NS_KEY_VALUE_OBSERVING_OPTION_INITIAL),
+                context: std::ptr::null_mut::<c_void>()
+            ];
+        }
+        observer
+    }
+
+    fn handle_finished_launching(&self) {
+        let (callback, info, pid) = {
+            let ivars = self.ivars();
+            if ivars.notified.get() {
+                return;
+            }
+            if !ivars.app.isFinishedLaunching() {
+                return;
+            }
+            ivars.notified.set(true);
+            (ivars.handler.clone(), ivars.info.clone(), ivars.pid)
+        };
+        callback(pid, info);
+        schedule_observer_cleanup(pid);
+    }
+}
+
+impl Drop for FinishedLaunchingObserver {
+    fn drop(&mut self) {
+        unsafe {
+            let ivars = self.ivars();
+            let _: () = msg_send![
+                &*ivars.app,
+                removeObserver: &*self,
+                forKeyPath: &*ivars.key_path
+            ];
+        }
+    }
+}
+
 struct CleanupCtx(pid_t);
 
 extern "C" fn cleanup_observer(ctx: *mut c_void) {
@@ -129,6 +219,12 @@ extern "C" fn cleanup_observer(ctx: *mut c_void) {
     if let Some(observer) = ACTIVATION_POLICY_OBSERVERS.lock().remove(&pid) {
         unsafe {
             let ptr = observer as *mut ActivationPolicyObserver;
+            let _ = Retained::from_raw(ptr);
+        }
+    }
+    if let Some(observer) = FINISHED_LAUNCHING_OBSERVERS.lock().remove(&pid) {
+        unsafe {
+            let ptr = observer as *mut FinishedLaunchingObserver;
             let _ = Retained::from_raw(ptr);
         }
     }
@@ -145,12 +241,25 @@ static ACTIVATION_POLICY_CALLBACK: Lazy<Mutex<Option<ActivationPolicyCallback>>>
 static ACTIVATION_POLICY_OBSERVERS: Lazy<Mutex<HashMap<pid_t, usize>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+static FINISHED_LAUNCHING_CALLBACK: Lazy<Mutex<Option<ActivationPolicyCallback>>> =
+    Lazy::new(|| Mutex::new(None));
+
+static FINISHED_LAUNCHING_OBSERVERS: Lazy<Mutex<HashMap<pid_t, usize>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
 pub fn set_activation_policy_callback<F>(callback: F)
 where F: Fn(pid_t, AppInfo) + Send + Sync + 'static {
     *ACTIVATION_POLICY_CALLBACK.lock() = Some(Arc::new(callback));
 }
 
 pub fn clear_activation_policy_callback() { *ACTIVATION_POLICY_CALLBACK.lock() = None; }
+
+pub fn set_finished_launching_callback<F>(callback: F)
+where F: Fn(pid_t, AppInfo) + Send + Sync + 'static {
+    *FINISHED_LAUNCHING_CALLBACK.lock() = Some(Arc::new(callback));
+}
+
+pub fn clear_finished_launching_callback() { *FINISHED_LAUNCHING_CALLBACK.lock() = None; }
 
 pub fn ensure_activation_policy_observer(pid: pid_t, info: AppInfo) {
     let callback = ACTIVATION_POLICY_CALLBACK.lock().clone();
@@ -166,10 +275,37 @@ pub fn ensure_activation_policy_observer(pid: pid_t, info: AppInfo) {
     observe_activation_policy(app, info, callback);
 }
 
+pub fn ensure_finished_launching_observer(pid: pid_t, info: AppInfo) {
+    let callback = FINISHED_LAUNCHING_CALLBACK.lock().clone();
+    let Some(callback) = callback else {
+        return;
+    };
+    if FINISHED_LAUNCHING_OBSERVERS.lock().contains_key(&pid) {
+        return;
+    }
+    let Some(app) = NSRunningApplication::with_process_id(pid) else {
+        return;
+    };
+    if app.isFinishedLaunching() {
+        return;
+    }
+
+    observe_finished_launching(app, info, callback);
+}
+
 pub fn remove_activation_policy_observer(pid: pid_t) {
     if let Some(observer) = ACTIVATION_POLICY_OBSERVERS.lock().remove(&pid) {
         unsafe {
             let ptr = observer as *mut ActivationPolicyObserver;
+            let _ = Retained::from_raw(ptr);
+        }
+    }
+}
+
+pub fn remove_finished_launching_observer(pid: pid_t) {
+    if let Some(observer) = FINISHED_LAUNCHING_OBSERVERS.lock().remove(&pid) {
+        unsafe {
+            let ptr = observer as *mut FinishedLaunchingObserver;
             let _ = Retained::from_raw(ptr);
         }
     }
@@ -191,15 +327,37 @@ fn observe_activation_policy(
     ACTIVATION_POLICY_OBSERVERS.lock().insert(pid, raw as usize);
 }
 
+fn observe_finished_launching(
+    app: Retained<NSRunningApplication>,
+    info: AppInfo,
+    callback: ActivationPolicyCallback,
+) {
+    let pid = app.pid();
+    {
+        if FINISHED_LAUNCHING_OBSERVERS.lock().contains_key(&pid) {
+            return;
+        }
+    }
+    let observer = FinishedLaunchingObserver::new(app, info, callback);
+    let raw = Retained::into_raw(observer) as *mut FinishedLaunchingObserver;
+    FINISHED_LAUNCHING_OBSERVERS.lock().insert(pid, raw as usize);
+}
+
 pub fn running_apps(bundle: Option<String>) -> impl Iterator<Item = (pid_t, AppInfo)> {
     let callback = ACTIVATION_POLICY_CALLBACK.lock().clone();
     NSWorkspace::sharedWorkspace()
         .runningApplications()
         .into_iter()
         .filter_map(move |app| {
-            let bundle_id = app.bundle_id()?.to_string();
+            let bundle_id_opt = app.bundle_id();
+
+            let bundle_id = bundle_id_opt.as_ref().map(|b| b.to_string());
             if let Some(filter) = &bundle {
-                if !bundle_id.contains(filter) {
+                if let Some(ref bid) = bundle_id {
+                    if !bid.contains(filter) {
+                        return None;
+                    }
+                } else {
                     return None;
                 }
             }
@@ -208,7 +366,7 @@ pub fn running_apps(bundle: Option<String>) -> impl Iterator<Item = (pid_t, AppI
             let pid = app.pid();
 
             if app.activationPolicy() != NSApplicationActivationPolicy::Regular
-                && bundle_id != "com.apple.loginwindow"
+                && bundle_id.as_deref() != Some("com.apple.loginwindow")
             {
                 if let Some(cb) = callback.clone() {
                     observe_activation_policy(app, info, cb);

@@ -359,9 +359,7 @@ impl State {
             }
         }
 
-        let Ok(initial_window_elements) = self.app.windows() else {
-            return false;
-        };
+        let initial_window_elements = self.app.windows().unwrap_or_default();
 
         let window_count = initial_window_elements.len() as usize;
         self.windows.reserve(window_count);
@@ -958,7 +956,7 @@ impl State {
         }
 
         if info.ax_role.as_deref() == Some("AXPopover")
-            || info.ax_subrole.as_deref() == Some("AXUnknown")
+        //|| info.ax_subrole.as_deref() == Some("AXUnknown")
         {
             trace!(
                 role = ?info.ax_role,

@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use objc2::MainThreadMarker;
+use objc2_application_services::AXUIElement;
 use rift_wm::actor::config::ConfigActor;
 use rift_wm::actor::config_watcher::ConfigWatcher;
 use rift_wm::actor::event_tap::EventTap;
@@ -206,6 +207,8 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         you must activate it by using the toggle_spaces_activated command.
         by default this is bound to Alt+Z but can be changed in the config file."
     );
+
+    unsafe { AXUIElement::new_system_wide().set_messaging_timeout(1.0) };
 
     let _executor_session = Executor::start(async move {
         join!(

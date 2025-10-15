@@ -260,6 +260,7 @@ pub struct Reactor {
     drag_manager: crate::actor::drag_swap::DragManager,
     skip_layout_for_window: Option<WindowId>,
     pending_drag_swap: Option<(WindowId, WindowId)>,
+    events_tx: Option<Sender>,
 }
 
 #[derive(Debug)]
@@ -359,6 +360,7 @@ impl Reactor {
                 reactor.event_tap_tx.replace(event_tap_tx);
                 reactor.menu_tx.replace(menu_tx);
                 reactor.stack_line_tx.replace(stack_line_tx);
+                reactor.events_tx = Some(events_tx_clone.clone());
                 Executor::run(reactor.run(events, events_tx_clone));
             })
             .unwrap();
@@ -415,6 +417,7 @@ impl Reactor {
             ),
             skip_layout_for_window: None,
             pending_drag_swap: None,
+            events_tx: None,
         }
     }
 
@@ -635,9 +638,12 @@ impl Reactor {
                     );
                     return;
                 }
+
+                self.observed_window_server_ids.insert(wsid);
                 // TODO: figure out why this is happening, we should really know about this app,
                 // why dont we get notifications that its being launched?
                 if let Some(window_server_info) = crate::sys::window_server::get_window(wsid) {
+                    self.update_partial_window_server_info(vec![window_server_info]);
                     if !self.apps.contains_key(&window_server_info.pid) {
                         if let Some(app) =
                             NSRunningApplication::runningApplicationWithProcessIdentifier(
@@ -655,9 +661,17 @@ impl Reactor {
                                 ))
                             });
                         }
+                    } else if let Some(app) = self.apps.get(&window_server_info.pid) {
+                        if let Err(err) = app.handle.send(Request::GetVisibleWindows) {
+                            debug!(
+                                pid = window_server_info.pid,
+                                ?wsid,
+                                ?err,
+                                "Failed to refresh windows after WindowServerAppeared"
+                            );
+                        }
                     }
-                };
-                self.observed_window_server_ids.insert(wsid);
+                }
             }
             Event::WindowMinimized(wid) => {
                 if let Some(window) = self.windows.get_mut(&wid) {
