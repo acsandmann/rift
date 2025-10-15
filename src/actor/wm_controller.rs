@@ -243,7 +243,6 @@ impl WmController {
                 if self.spawning_apps.remove(&pid) {
                     debug!(pid = ?pid, "App thread terminated; removed from spawning_apps");
                 }
-                self.events_tx.send(Event::ApplicationThreadTerminated(pid));
             }
             ConfigUpdated(new_cfg) => {
                 let old_keys_ser = serde_json::to_string(&self.config.config.keys).ok();
