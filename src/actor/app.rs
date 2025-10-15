@@ -942,28 +942,40 @@ impl State {
             return None;
         };
 
-        let bundle_is_widget = info.bundle_id.as_deref().map_or(false, |id| {
+        // Only filter out obvious widgets/extensions, but be more conservative
+        // Focus on actual widget bundle IDs rather than broad patterns
+        let is_actual_widget = info.bundle_id.as_deref().map_or(false, |id| {
             let id_lower = id.to_ascii_lowercase();
-            id_lower.ends_with(".widget") || id_lower.contains(".widget.")
+            // Only filter very specific widget patterns
+            id_lower.ends_with(".widget")
+                && (id_lower.contains("dashboard")
+                    || id_lower.contains("notification")
+                    || id_lower.contains("today"))
         });
 
-        let path_is_extension = info.path.as_ref().and_then(|p| p.to_str()).map_or(false, |path| {
-            let lower = path.to_ascii_lowercase();
-            lower.contains(".appex/") || lower.ends_with(".appex")
-        });
+        let is_system_extension =
+            info.path.as_ref().and_then(|p| p.to_str()).map_or(false, |path| {
+                let lower = path.to_ascii_lowercase();
+                // Only filter system extensions, not app extensions
+                lower.contains("/system/library/") && lower.contains(".appex")
+            });
 
-        if bundle_is_widget || path_is_extension {
-            trace!(bundle_id = ?info.bundle_id, path = ?info.path, "Ignoring widget/app-extension window");
+        if is_actual_widget || is_system_extension {
+            trace!(bundle_id = ?info.bundle_id, path = ?info.path, "Ignoring system widget/extension window");
             return None;
         }
 
+        // Filter out obvious non-window UI elements, but be conservative
+        // Focus on clearly non-window roles rather than unknown ones
         if info.ax_role.as_deref() == Some("AXPopover")
-            || info.ax_subrole.as_deref() == Some("AXUnknown")
+            || info.ax_role.as_deref() == Some("AXMenu")
+            || info.ax_role.as_deref() == Some("AXMenuBar")
         {
             trace!(
                 role = ?info.ax_role,
                 subrole = ?info.ax_subrole,
-                "Ignoring non-standard AX window"
+                bundle_id = ?info.bundle_id,
+                "Ignoring non-window UI element"
             );
             return None;
         }

@@ -99,6 +99,7 @@ impl ActivationPolicyObserver {
                 return;
             }
             ivars.notified.set(true);
+
             (ivars.handler.clone(), ivars.info.clone(), ivars.pid)
         };
         callback(pid, info);
@@ -197,18 +198,26 @@ pub fn running_apps(bundle: Option<String>) -> impl Iterator<Item = (pid_t, AppI
         .runningApplications()
         .into_iter()
         .filter_map(move |app| {
-            let bundle_id = app.bundle_id()?.to_string();
+            let bundle_id_opt = app.bundle_id();
+
+            let bundle_id = bundle_id_opt.as_ref().map(|b| b.to_string());
             if let Some(filter) = &bundle {
-                if !bundle_id.contains(filter) {
+                if let Some(ref bid) = bundle_id {
+                    if !bid.contains(filter) {
+                        return None;
+                    }
+                } else {
+                    // If filtering by bundle and this app has no bundle ID, skip it
                     return None;
                 }
             }
 
-            let info = AppInfo::from(&*app);
+            // Get app properties once to avoid multiple calls that could cause memory issues
             let pid = app.pid();
+            let info = AppInfo::from(&*app);
 
             if app.activationPolicy() != NSApplicationActivationPolicy::Regular
-                && bundle_id != "com.apple.loginwindow"
+                && bundle_id.as_deref() != Some("com.apple.loginwindow")
             {
                 if let Some(cb) = callback.clone() {
                     observe_activation_policy(app, info, cb);
