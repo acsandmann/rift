@@ -122,6 +122,10 @@ impl WmController {
             let sender = sender.clone();
             move |pid, info| sender.send(WmEvent::AppLaunch(pid, info))
         });
+        sys::app::set_finished_launching_callback({
+            let sender = sender.clone();
+            move |pid, info| sender.send(WmEvent::AppLaunch(pid, info))
+        });
         let this = Self {
             config,
             events_tx,
@@ -239,7 +243,6 @@ impl WmController {
                 if self.spawning_apps.remove(&pid) {
                     debug!(pid = ?pid, "App thread terminated; removed from spawning_apps");
                 }
-                self.events_tx.send(Event::ApplicationThreadTerminated(pid));
             }
             ConfigUpdated(new_cfg) => {
                 let old_keys_ser = serde_json::to_string(&self.config.config.keys).ok();
@@ -434,6 +437,16 @@ impl WmController {
                 pid = ?pid,
                 bundle = ?info.bundle_id,
                 "App not yet regular; deferring spawn until activation policy changes"
+            );
+            return;
+        }
+
+        if !running_app.isFinishedLaunching() {
+            sys::app::ensure_finished_launching_observer(pid, info.clone());
+            debug!(
+                pid = ?pid,
+                bundle = ?info.bundle_id,
+                "App has not finished launching; deferring spawn until finished"
             );
             return;
         }
