@@ -24,7 +24,8 @@ fn find_rift_executable() -> io::Result<PathBuf> {
         for dir in env::split_paths(&path_env) {
             let candidate = dir.join("rift");
             if candidate.is_file() {
-                return Ok(candidate);
+                let real = fs::canonicalize(&candidate).unwrap_or(candidate);
+                return Ok(real);
             }
         }
     }
@@ -37,7 +38,8 @@ fn find_rift_executable() -> io::Result<PathBuf> {
     })?;
     let sibling = exe_path.with_file_name("rift");
     if sibling.is_file() {
-        return Ok(sibling);
+        let real = fs::canonicalize(&sibling).unwrap_or(sibling);
+        return Ok(real);
     }
 
     Err(io::Error::new(
@@ -61,15 +63,15 @@ fn plist_contents() -> io::Result<String> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "non-UTF8 executable path"))?;
 
     let plist = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
+        r#"<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
+<plist version=\"1.0\">
 <dict>
     <key>Label</key>
     <string>{name}</string>
     <key>ProgramArguments</key>
     <array>
-    	<string>{exe}</string>
+        <string>{exe}</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>
@@ -80,15 +82,6 @@ fn plist_contents() -> io::Result<String> {
     </dict>
     <key>RunAtLoad</key>
     <true/>
-    <key>LimitLoadToSessionType</key>
-    <string>Aqua</string>
-    <key>ProcessType</key>
-    <string>Interactive</string>
-    <key>MachServices</key>
-    <dict>
-        <key>{name}</key>
-        <true/>
-    </dict>
     <key>KeepAlive</key>
     <dict>
         <key>SuccessfulExit</key>
@@ -100,6 +93,13 @@ fn plist_contents() -> io::Result<String> {
     <string>/tmp/rift_{user}.out.log</string>
     <key>StandardErrorPath</key>
     <string>/tmp/rift_{user}.err.log</string>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>MachServices</key>
+    <dict>
+        <key>{name}</key>
+        <true/>
+    </dict>
     <key>Nice</key>
     <integer>-20</integer>
 </dict>

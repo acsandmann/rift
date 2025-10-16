@@ -1,4 +1,6 @@
 use std::ffi::c_void;
+use std::time::{Duration, Instant};
+use std::{ptr, thread};
 
 use objc2::rc::autoreleasepool;
 use objc2::runtime::AnyObject;
@@ -7,7 +9,6 @@ use tracing::info;
 
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
-    fn AXIsProcessTrusted() -> bool;
     fn AXIsProcessTrustedWithOptions(options: *const c_void) -> bool;
 
     static kAXTrustedCheckOptionPrompt: *const c_void;
@@ -18,8 +19,11 @@ unsafe extern "C" {
     static kCFBooleanTrue: *const c_void;
 }
 
+const AX_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const AX_POLL_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[inline]
-fn ax_is_trusted() -> bool { unsafe { AXIsProcessTrusted() } }
+fn ax_is_trusted() -> bool { unsafe { AXIsProcessTrustedWithOptions(ptr::null()) } }
 
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn prompt_ax_trust_dialog() {
@@ -47,7 +51,23 @@ pub fn ensure_accessibility_permission() {
 
     unsafe { prompt_ax_trust_dialog() };
 
-    println!("if you have granted accessibility permission, please restart");
+    let start = Instant::now();
+    loop {
+        if ax_is_trusted() {
+            info!("Accessibility permission granted");
+            return;
+        }
+
+        if start.elapsed() >= AX_POLL_TIMEOUT {
+            break;
+        }
+
+        thread::sleep(AX_POLL_INTERVAL);
+    }
+
+    println!(
+        "Rift still does not have accessibility permission. Enable it in System Settings > Privacy & Security > Accessibility, then restart Rift."
+    );
 
     std::process::exit(1);
 }
