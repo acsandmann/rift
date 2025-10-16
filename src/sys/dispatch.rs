@@ -57,12 +57,23 @@ fn dispatch_source_type_proc() -> DSrcTy {
 
 pub trait DispatchExt {
     fn after_f(&self, when: Time, context: *mut c_void, work: extern "C" fn(*mut c_void));
+    fn after_f_s<T>(&self, when: Time, context: T, work: fn(T));
     fn set_context(&self, context: *mut c_void);
 }
 
 impl DispatchExt for Unmanaged {
     fn after_f(&self, when: Time, context: *mut c_void, work: extern "C" fn(*mut c_void)) {
         unsafe { dispatch_after_f(when, self, context, work) }
+    }
+
+    fn after_f_s<T>(&self, when: Time, context: T, work: fn(T)) {
+        extern "C" fn trampoline<T>(ctx: *mut c_void) {
+            let ctx = unsafe { Box::from_raw(ctx as *mut (T, fn(T))) };
+            let (context, work) = *ctx;
+            work(context);
+        }
+        let ctx = Box::into_raw(Box::new((context, work))) as *mut c_void;
+        self.after_f(when, ctx, trampoline::<T>);
     }
 
     fn set_context(&self, context: *mut c_void) {
@@ -75,6 +86,16 @@ impl DispatchExt for DSource {
         unsafe {
             dispatch_after_f(when, self.deref() as *const _ as *const Unmanaged, context, work)
         }
+    }
+
+    fn after_f_s<T>(&self, when: Time, context: T, work: fn(T)) {
+        extern "C" fn trampoline<T>(ctx: *mut c_void) {
+            let ctx = unsafe { Box::from_raw(ctx as *mut (T, fn(T))) };
+            let (context, work) = *ctx;
+            work(context);
+        }
+        let ctx = Box::into_raw(Box::new((context, work))) as *mut c_void;
+        self.after_f(when, ctx, trampoline::<T>);
     }
 
     fn set_context(&self, context: *mut c_void) {

@@ -5,6 +5,8 @@
 use std::borrow::Cow;
 use std::path::PathBuf;
 
+use dispatchr::queue;
+use dispatchr::time::Time;
 use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication, NSScreen};
 use objc2_core_foundation::CGRect;
 use objc2_foundation::MainThreadMarker;
@@ -22,6 +24,7 @@ type Receiver = actor::Receiver<WmEvent>;
 use crate::actor::app::AppInfo;
 use crate::actor::{self, event_tap, mission_control, reactor};
 use crate::common::collections::{HashMap, HashSet};
+use crate::sys::dispatch::DispatchExt;
 use crate::sys::event::Hotkey;
 use crate::sys::screen::{CoordinateConverter, NSScreenExt, ScreenId, SpaceId};
 use crate::sys::window_server::WindowServerInfo;
@@ -173,29 +176,26 @@ impl WmController {
 
                 let sender = self.sender.clone();
                 let event_tap_tx = self.event_tap_tx.clone();
-                std::thread::spawn(move || {
-                    use std::time::Duration;
+                queue::main().after_f_s(
+                    Time::new_after(Time::NOW, 250 * 1000000),
+                    (sender, WmEvent::DiscoverRunningApps),
+                    |(sender, event)| sender.send(event),
+                );
 
-                    use crate::sys::executor::Executor;
-                    use crate::sys::timer::Timer;
-
-                    Executor::run(async move {
-                        Timer::sleep(Duration::from_millis(250)).await;
-                        let _ = sender.send(WmEvent::DiscoverRunningApps);
-
-                        Timer::sleep(Duration::from_millis(350)).await;
-                        _ = event_tap_tx.send(event_tap::Request::SetEventProcessing(true));
-                    });
-                });
+                queue::main().after_f_s(
+                    Time::new_after(Time::NOW, (250 + 350) * 1000000),
+                    (event_tap_tx, event_tap::Request::SetEventProcessing(true)),
+                    |(sender, event)| sender.send(event),
+                );
             }
             DiscoverRunningApps => {
                 if !self.screen_params_received {
                     let sender = self.sender.clone();
-                    std::thread::spawn(move || {
-                        use std::time::Duration;
-                        std::thread::sleep(Duration::from_millis(200));
-                        let _ = sender.send(WmEvent::DiscoverRunningApps);
-                    });
+                    queue::main().after_f_s(
+                        Time::new_after(Time::NOW, 200 * 1000000),
+                        (sender, WmEvent::DiscoverRunningApps),
+                        |(sender, event)| sender.send(event),
+                    );
                     return;
                 }
                 for (pid, info) in sys::app::running_apps(None) {
