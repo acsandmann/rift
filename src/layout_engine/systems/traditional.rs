@@ -858,8 +858,7 @@ impl TraditionalLayoutSystem {
         }
         self.tree.data.layout.info[node].total = count;
         for &child in &children {
-            if child.children(map).next().is_none() || self.tree.data.layout.info[child].size == 0.0
-            {
+            if self.tree.data.layout.info[child].size == 0.0 {
                 self.tree.data.layout.info[child].size = 1.0;
             }
         }
