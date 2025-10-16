@@ -5,7 +5,6 @@ use rift_wm::actor::reactor;
 use rift_wm::ipc::{RiftCommand, RiftMachClient, RiftRequest, RiftResponse};
 use rift_wm::layout_engine as layout;
 use rift_wm::model::server::{ApplicationData, LayoutStateData, WindowData, WorkspaceData};
-use rift_wm::sys::service;
 use serde_json::Value;
 
 #[derive(Parser)]
@@ -259,17 +258,11 @@ fn main() {
     sigpipe::reset();
     let cli = Cli::parse();
 
-    if let Commands::Service { service } = &cli.command {
-        match handle_service_command(service) {
-            Ok(msg) => {
-                println!("{}", msg);
-                process::exit(0);
-            }
-            Err(e) => {
-                eprintln!("{}", e);
-                process::exit(1);
-            }
-        }
+    if let Commands::Service { .. } = &cli.command {
+        println!(
+            "service commands have been moved to the `rift` binary. (ie `rift service install`)"
+        );
+        process::exit(0);
     }
 
     let request = match build_request(cli.command) {
@@ -313,26 +306,6 @@ fn main() {
             eprintln!("Communication error: {}", e);
             process::exit(1);
         }
-    }
-}
-
-fn handle_service_command(cmd: &ServiceCommands) -> Result<&'static str, String> {
-    match cmd {
-        ServiceCommands::Install => service::service_install()
-            .map(|_| "Service installed.")
-            .map_err(|e| format!("Failed to install service: {}", e)),
-        ServiceCommands::Uninstall => service::service_uninstall()
-            .map(|_| "Service uninstalled.")
-            .map_err(|e| format!("Failed to uninstall service: {}", e)),
-        ServiceCommands::Start => service::service_start()
-            .map(|_| "Service started.")
-            .map_err(|e| format!("Failed to start service: {}", e)),
-        ServiceCommands::Stop => service::service_stop()
-            .map(|_| "Service stopped.")
-            .map_err(|e| format!("Failed to stop service: {}", e)),
-        ServiceCommands::Restart => service::service_restart()
-            .map(|_| "Service restarted.")
-            .map_err(|e| format!("Failed to restart service: {}", e)),
     }
 }
 

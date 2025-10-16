@@ -7,10 +7,45 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use clap::Subcommand;
 use nix::unistd::getuid;
 
 const LAUNCHCTL_PATH: &str = "/bin/launchctl";
 const RIFT_PLIST: &str = "com.acsandmann.rift";
+
+#[derive(Subcommand)]
+pub enum ServiceCommands {
+    /// Install the per-user launchd service
+    Install,
+    /// Uninstall the per-user launchd service
+    Uninstall,
+    /// Start (or bootstrap) the service
+    Start,
+    /// Stop (or bootout/kill) the service
+    Stop,
+    /// Restart the service (kickstart -k)
+    Restart,
+}
+
+pub fn handle_service_command(cmd: &ServiceCommands) -> Result<&'static str, String> {
+    match cmd {
+        ServiceCommands::Install => service_install()
+            .map(|_| "Service installed.")
+            .map_err(|e| format!("Failed to install service: {}", e)),
+        ServiceCommands::Uninstall => service_uninstall()
+            .map(|_| "Service uninstalled.")
+            .map_err(|e| format!("Failed to uninstall service: {}", e)),
+        ServiceCommands::Start => service_start()
+            .map(|_| "Service started.")
+            .map_err(|e| format!("Failed to start service: {}", e)),
+        ServiceCommands::Stop => service_stop()
+            .map(|_| "Service stopped.")
+            .map_err(|e| format!("Failed to stop service: {}", e)),
+        ServiceCommands::Restart => service_restart()
+            .map(|_| "Service restarted.")
+            .map_err(|e| format!("Failed to restart service: {}", e)),
+    }
+}
 
 fn plist_path() -> io::Result<PathBuf> {
     let home = env::var_os("HOME")

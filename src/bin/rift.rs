@@ -1,6 +1,7 @@
 use std::path::PathBuf;
+use std::process;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use objc2::MainThreadMarker;
 use objc2_application_services::AXUIElement;
 use rift_wm::actor::config::ConfigActor;
@@ -22,6 +23,7 @@ use rift_wm::model::tx_store::WindowTxStore;
 use rift_wm::sys::accessibility::ensure_accessibility_permission;
 use rift_wm::sys::executor::Executor;
 use rift_wm::sys::screen::{CoordinateConverter, displays_have_separate_spaces};
+use rift_wm::sys::service::{ServiceCommands, handle_service_command};
 use rift_wm::sys::skylight::{CGSEventType, KnownCGSEvent};
 use tokio::join;
 
@@ -55,10 +57,37 @@ struct Cli {
     /// exists.
     #[arg(long)]
     record: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Manage the launchd service for rift
+    Service {
+        #[command(subcommand)]
+        service: ServiceCommands,
+    },
 }
 
 fn main() {
-    let opt: Cli = Parser::parse();
+    sigpipe::reset();
+    let opt = Cli::parse();
+
+    if let Some(Commands::Service { service }) = &opt.command {
+        println!("Service management is not yet implemented.");
+        match handle_service_command(service) {
+            Ok(msg) => {
+                println!("{}", msg);
+                process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("{}", e);
+                process::exit(1);
+            }
+        }
+    }
 
     if std::env::var_os("RUST_BACKTRACE").is_none() {
         // SAFETY: We are single threaded at this point.
