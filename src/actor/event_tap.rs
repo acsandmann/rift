@@ -161,7 +161,11 @@ impl EventTap {
         requests_rx: Receiver,
         wm_sender: Option<wm_controller::Sender>,
     ) -> Self {
-        let disable_hotkey = config.settings.focus_follows_mouse_disable_hotkey.clone();
+        let disable_hotkey = config
+            .settings
+            .focus_follows_mouse_disable_hotkey
+            .clone()
+            .and_then(|spec| spec.to_hotkey());
         let swipe_cfg = SwipeConfig::from_config(&config);
         let swipe = if swipe_cfg.enabled && wm_sender.is_some() {
             Some(SwipeHandler {

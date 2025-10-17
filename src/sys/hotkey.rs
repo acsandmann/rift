@@ -1,6 +1,7 @@
 use std::fmt;
 use std::str::FromStr;
 
+use anyhow::anyhow;
 use objc2_core_graphics::{CGEvent, CGEventField, CGEventFlags};
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +21,28 @@ impl Modifiers {
     pub fn insert(&mut self, other: Modifiers) { self.0 |= other.0; }
 
     pub fn remove(&mut self, other: Modifiers) { self.0 &= !other.0; }
+
+    pub fn insert_from_token(&mut self, token: &str) -> bool {
+        match token.to_lowercase().as_str() {
+            "alt" | "option" => {
+                self.insert(Modifiers::ALT);
+                true
+            }
+            "ctrl" | "control" => {
+                self.insert(Modifiers::CONTROL);
+                true
+            }
+            "shift" => {
+                self.insert(Modifiers::SHIFT);
+                true
+            }
+            "meta" | "cmd" | "command" => {
+                self.insert(Modifiers::META);
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 impl fmt::Display for Modifiers {
@@ -210,6 +233,88 @@ impl fmt::Display for KeyCode {
     }
 }
 
+impl FromStr for KeyCode {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        use KeyCode::*;
+        match s.to_uppercase().as_str() {
+            "A" => Ok(KeyA),
+            "B" => Ok(KeyB),
+            "C" => Ok(KeyC),
+            "D" => Ok(KeyD),
+            "E" => Ok(KeyE),
+            "F" => Ok(KeyF),
+            "G" => Ok(KeyG),
+            "H" => Ok(KeyH),
+            "I" => Ok(KeyI),
+            "J" => Ok(KeyJ),
+            "K" => Ok(KeyK),
+            "L" => Ok(KeyL),
+            "M" => Ok(KeyM),
+            "N" => Ok(KeyN),
+            "O" => Ok(KeyO),
+            "P" => Ok(KeyP),
+            "Q" => Ok(KeyQ),
+            "R" => Ok(KeyR),
+            "S" => Ok(KeyS),
+            "T" => Ok(KeyT),
+            "U" => Ok(KeyU),
+            "V" => Ok(KeyV),
+            "W" => Ok(KeyW),
+            "X" => Ok(KeyX),
+            "Y" => Ok(KeyY),
+            "Z" => Ok(KeyZ),
+            "FN" => Ok(Fn),
+            "LEFT" | "ARROWLEFT" => Ok(ArrowLeft),
+            "RIGHT" | "ARROWRIGHT" => Ok(ArrowRight),
+            "UP" | "ARROWUP" => Ok(ArrowUp),
+            "DOWN" | "ARROWDOWN" => Ok(ArrowDown),
+            "TAB" => Ok(Tab),
+            "SPACE" => Ok(Space),
+            "ENTER" | "RETURN" => Ok(Enter),
+            "ESC" | "ESCAPE" => Ok(Escape),
+            "0" => Ok(Digit0),
+            "1" => Ok(Digit1),
+            "2" => Ok(Digit2),
+            "3" => Ok(Digit3),
+            "4" => Ok(Digit4),
+            "5" => Ok(Digit5),
+            "6" => Ok(Digit6),
+            "7" => Ok(Digit7),
+            "8" => Ok(Digit8),
+            "9" => Ok(Digit9),
+            "-" => Ok(Minus),
+            "MINUS" | "HYPHEN" => Ok(Minus),
+            "=" => Ok(Equal),
+            "EQUAL" | "EQUALS" => Ok(Equal),
+            "," => Ok(Comma),
+            "COMMA" => Ok(Comma),
+            "." => Ok(Period),
+            "DOT" | "PERIOD" => Ok(Period),
+            "/" => Ok(Slash),
+            "SLASH" | "FORWARD_SLASH" => Ok(Slash),
+            ";" => Ok(Semicolon),
+            "SEMICOLON" => Ok(Semicolon),
+            "'" => Ok(Quote),
+            "QUOTE" | "APOSTROPHE" => Ok(Quote),
+            "`" => Ok(Backquote),
+            "BACKQUOTE" | "GRAVE" | "TILDE" => Ok(Backquote),
+            "\\" => Ok(Backslash),
+            "BACKSLASH" => Ok(Backslash),
+            _ => match s.to_lowercase().as_str() {
+                "left" => Ok(ArrowLeft),
+                "right" => Ok(ArrowRight),
+                "up" => Ok(ArrowUp),
+                "down" => Ok(ArrowDown),
+                "space" => Ok(Space),
+                "tab" => Ok(Tab),
+                other => Err(anyhow!("Unrecognized key token: {}", other)),
+            },
+        }
+    }
+}
+
 #[derive(Serialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Hotkey {
     pub modifiers: Modifiers,
@@ -230,104 +335,29 @@ impl fmt::Display for Hotkey {
     }
 }
 
+fn parse_mods_and_optional_key(s: &str) -> Result<(Modifiers, Option<KeyCode>), anyhow::Error> {
+    let parts: Vec<&str> = s.split('+').map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
+
+    let mut mods = Modifiers::empty();
+    let mut key_opt: Option<KeyCode> = None;
+
+    for part in parts {
+        if mods.insert_from_token(part) {
+            continue;
+        }
+        let code = KeyCode::from_str(part)?;
+        key_opt = Some(code);
+    }
+
+    Ok((mods, key_opt))
+}
+
 impl FromStr for Hotkey {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let parts: Vec<&str> = s.split('+').map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
-        let mut mods = Modifiers::empty();
-        let mut key_opt: Option<KeyCode> = None;
-
-        for part in parts {
-            match part.to_lowercase().as_str() {
-                "alt" | "option" => mods.insert(Modifiers::ALT),
-                "ctrl" | "control" => mods.insert(Modifiers::CONTROL),
-                "shift" => mods.insert(Modifiers::SHIFT),
-                "meta" | "cmd" | "command" => mods.insert(Modifiers::META),
-                k => {
-                    let code = match k.to_uppercase().as_str() {
-                        "A" => KeyCode::KeyA,
-                        "B" => KeyCode::KeyB,
-                        "C" => KeyCode::KeyC,
-                        "D" => KeyCode::KeyD,
-                        "E" => KeyCode::KeyE,
-                        "F" => KeyCode::KeyF,
-                        "G" => KeyCode::KeyG,
-                        "H" => KeyCode::KeyH,
-                        "I" => KeyCode::KeyI,
-                        "J" => KeyCode::KeyJ,
-                        "K" => KeyCode::KeyK,
-                        "L" => KeyCode::KeyL,
-                        "M" => KeyCode::KeyM,
-                        "N" => KeyCode::KeyN,
-                        "O" => KeyCode::KeyO,
-                        "P" => KeyCode::KeyP,
-                        "Q" => KeyCode::KeyQ,
-                        "R" => KeyCode::KeyR,
-                        "S" => KeyCode::KeyS,
-                        "T" => KeyCode::KeyT,
-                        "U" => KeyCode::KeyU,
-                        "V" => KeyCode::KeyV,
-                        "W" => KeyCode::KeyW,
-                        "X" => KeyCode::KeyX,
-                        "Y" => KeyCode::KeyY,
-                        "Z" => KeyCode::KeyZ,
-                        "FN" => KeyCode::Fn,
-                        "LEFT" | "ARROWLEFT" => KeyCode::ArrowLeft,
-                        "RIGHT" | "ARROWRIGHT" => KeyCode::ArrowRight,
-                        "UP" | "ARROWUP" => KeyCode::ArrowUp,
-                        "DOWN" | "ARROWDOWN" => KeyCode::ArrowDown,
-                        "TAB" => KeyCode::Tab,
-                        "SPACE" => KeyCode::Space,
-                        "ENTER" | "RETURN" => KeyCode::Enter,
-                        "ESC" | "ESCAPE" => KeyCode::Escape,
-                        "0" => KeyCode::Digit0,
-                        "1" => KeyCode::Digit1,
-                        "2" => KeyCode::Digit2,
-                        "3" => KeyCode::Digit3,
-                        "4" => KeyCode::Digit4,
-                        "5" => KeyCode::Digit5,
-                        "6" => KeyCode::Digit6,
-                        "7" => KeyCode::Digit7,
-                        "8" => KeyCode::Digit8,
-                        "9" => KeyCode::Digit9,
-                        "-" => KeyCode::Minus,
-                        "MINUS" | "HYPHEN" => KeyCode::Minus,
-                        "=" => KeyCode::Equal,
-                        "EQUAL" | "EQUALS" => KeyCode::Equal,
-                        "," => KeyCode::Comma,
-                        "COMMA" => KeyCode::Comma,
-                        "." => KeyCode::Period,
-                        "DOT" | "PERIOD" => KeyCode::Period,
-                        "/" => KeyCode::Slash,
-                        "SLASH" | "FORWARD_SLASH" => KeyCode::Slash,
-                        ";" => KeyCode::Semicolon,
-                        "SEMICOLON" => KeyCode::Semicolon,
-                        "'" => KeyCode::Quote,
-                        "QUOTE" | "APOSTROPHE" => KeyCode::Quote,
-                        "`" => KeyCode::Backquote,
-                        "BACKQUOTE" | "GRAVE" | "TILDE" => KeyCode::Backquote,
-                        "\\" => KeyCode::Backslash,
-                        "BACKSLASH" => KeyCode::Backslash,
-                        other => match other.to_lowercase().as_str() {
-                            "left" => KeyCode::ArrowLeft,
-                            "right" => KeyCode::ArrowRight,
-                            "up" => KeyCode::ArrowUp,
-                            "down" => KeyCode::ArrowDown,
-                            "space" => KeyCode::Space,
-                            "tab" => KeyCode::Tab,
-                            _ => {
-                                return Err(anyhow::anyhow!("Unrecognized key token: {}", other));
-                            }
-                        },
-                    };
-                    key_opt = Some(code);
-                }
-            }
-        }
-
-        let key_code =
-            key_opt.ok_or_else(|| anyhow::anyhow!("No key specified in hotkey: {}", s))?;
+        let (mods, key_opt) = parse_mods_and_optional_key(s)?;
+        let key_code = key_opt.ok_or_else(|| anyhow!("No key specified in hotkey: {}", s))?;
         Ok(Hotkey::new(mods, key_code))
     }
 }
@@ -384,6 +414,95 @@ pub fn modifier_flag_for_key(key_code: KeyCode) -> Option<CGEventFlags> {
 }
 
 pub fn is_modifier_key(key_code: KeyCode) -> bool { modifier_flag_for_key(key_code).is_some() }
+
+#[derive(Serialize, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum HotkeySpec {
+    Hotkey(Hotkey),
+    ModifiersOnly { modifiers: Modifiers },
+}
+
+impl<'de> serde::de::Deserialize<'de> for HotkeySpec {
+    fn deserialize<D>(deserializer: D) -> Result<HotkeySpec, D::Error>
+    where D: serde::Deserializer<'de> {
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum HotkeyRepr {
+            Str(String),
+            Map {
+                modifiers: Option<Modifiers>,
+                key_code: Option<KeyCode>,
+            },
+        }
+
+        let repr = HotkeyRepr::deserialize(deserializer)?;
+        match repr {
+            HotkeyRepr::Str(s) => {
+                let (mods, key_opt) =
+                    parse_mods_and_optional_key(&s).map_err(serde::de::Error::custom)?;
+                if let Some(k) = key_opt {
+                    Ok(HotkeySpec::Hotkey(Hotkey::new(mods, k)))
+                } else if mods != Modifiers::empty() {
+                    Ok(HotkeySpec::ModifiersOnly { modifiers: mods })
+                } else {
+                    Err(serde::de::Error::custom(format!(
+                        "No key specified in hotkey: {}",
+                        s
+                    )))
+                }
+            }
+            HotkeyRepr::Map { modifiers, key_code } => {
+                let m = modifiers.unwrap_or(Modifiers::empty());
+                if let Some(k) = key_code {
+                    Ok(HotkeySpec::Hotkey(Hotkey::new(m, k)))
+                } else if m != Modifiers::empty() {
+                    Ok(HotkeySpec::ModifiersOnly { modifiers: m })
+                } else {
+                    Err(serde::de::Error::custom("No key specified in hotkey map"))
+                }
+            }
+        }
+    }
+}
+
+fn default_key_for_modifiers(mods: Modifiers) -> Option<KeyCode> {
+    if mods.contains(Modifiers::CONTROL) {
+        Some(KeyCode::ControlLeft)
+    } else if mods.contains(Modifiers::ALT) {
+        Some(KeyCode::AltLeft)
+    } else if mods.contains(Modifiers::META) {
+        Some(KeyCode::MetaLeft)
+    } else if mods.contains(Modifiers::SHIFT) {
+        Some(KeyCode::ShiftLeft)
+    } else {
+        None
+    }
+}
+
+impl HotkeySpec {
+    pub fn to_hotkey(&self) -> Option<Hotkey> {
+        match self {
+            HotkeySpec::Hotkey(h) => Some(h.clone()),
+            HotkeySpec::ModifiersOnly { modifiers } => {
+                default_key_for_modifiers(*modifiers).map(|k| Hotkey::new(*modifiers, k))
+            }
+        }
+    }
+}
+
+impl From<HotkeySpec> for Hotkey {
+    fn from(spec: HotkeySpec) -> Hotkey {
+        match spec {
+            HotkeySpec::Hotkey(h) => h,
+            HotkeySpec::ModifiersOnly { modifiers } => {
+                if let Some(k) = default_key_for_modifiers(modifiers) {
+                    Hotkey::new(modifiers, k)
+                } else {
+                    Hotkey::new(modifiers, KeyCode::ShiftLeft)
+                }
+            }
+        }
+    }
+}
 
 pub fn key_code_from_event(event: &CGEvent) -> Option<KeyCode> {
     let raw = CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode);

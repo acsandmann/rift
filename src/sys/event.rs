@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::screen::CoordinateConverter;
 use crate::sys::cg_ok;
-pub use crate::sys::hotkey::{Hotkey, KeyCode, Modifiers};
+pub use crate::sys::hotkey::{Hotkey, HotkeySpec, KeyCode, Modifiers};
 use crate::sys::skylight::CGWarpMouseCursorPosition;
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, Eq, PartialEq)]

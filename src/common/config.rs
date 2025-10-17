@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use super::collections::HashMap;
 use crate::actor::wm_controller::WmCommand;
-use crate::sys::hotkey::Hotkey;
+use crate::sys::hotkey::{Hotkey, HotkeySpec};
 
 const MAX_WORKSPACES: usize = 32;
 
@@ -329,8 +329,9 @@ pub struct Settings {
     #[serde(default = "yes")]
     pub focus_follows_mouse: bool,
     /// Hotkey that disables focus-follows-mouse while held.
+    /// Accepts either a full hotkey (e.g. "Ctrl + A") or a modifier-only spec (e.g. "Ctrl")
     #[serde(default)]
-    pub focus_follows_mouse_disable_hotkey: Option<Hotkey>,
+    pub focus_follows_mouse_disable_hotkey: Option<HotkeySpec>,
     /// Apps that should not trigger automatic workspace switching when activated.
     /// List of bundle identifiers (e.g., "com.apple.Spotlight") that often
     /// inappropriately steal focus and shouldn't cause workspace switches.
