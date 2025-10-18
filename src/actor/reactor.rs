@@ -114,9 +114,9 @@ pub enum Event {
     WindowCreated(WindowId, WindowInfo, Option<WindowServerInfo>, MouseState),
     WindowDestroyed(WindowId),
     #[serde(skip)]
-    WindowServerDestroyed(crate::sys::window_server::WindowServerId),
+    WindowServerDestroyed(crate::sys::window_server::WindowServerId, SpaceId),
     #[serde(skip)]
-    WindowServerAppeared(crate::sys::window_server::WindowServerId),
+    WindowServerAppeared(crate::sys::window_server::WindowServerId, SpaceId),
     WindowMinimized(WindowId),
     WindowDeminiaturized(WindowId),
     WindowFrameChanged(
@@ -617,7 +617,7 @@ impl Reactor {
                     self.skip_layout_for_window = None;
                 }
             }
-            Event::WindowServerDestroyed(wsid) => {
+            Event::WindowServerDestroyed(wsid, sid) => {
                 if let Some(wid) = self.window_ids.get(&wsid).copied() {
                     self.handle_event(Event::WindowDestroyed(wid));
                 } else {
@@ -628,7 +628,7 @@ impl Reactor {
                 }
                 return;
             }
-            Event::WindowServerAppeared(wsid) => {
+            Event::WindowServerAppeared(wsid, sid) => {
                 if self.window_server_info.contains_key(&wsid)
                     || self.observed_window_server_ids.contains(&wsid)
                 {
