@@ -15,8 +15,6 @@ use std::time::Duration;
 use std::{mem, thread};
 
 use animation::Animation;
-use dispatchr::queue;
-use dispatchr::time::Time;
 use main_window::MainWindowTracker;
 use objc2_app_kit::{NSNormalWindowLevel, NSRunningApplication};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
@@ -38,7 +36,6 @@ use crate::common::log::{self, MetricsCommand};
 use crate::layout_engine::{self as layout, Direction, LayoutCommand, LayoutEngine, LayoutEvent};
 use crate::model::VirtualWorkspaceId;
 use crate::model::tx_store::WindowTxStore;
-use crate::sys::dispatch::DispatchExt;
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt, Round, SameAs};
@@ -637,12 +634,22 @@ impl Reactor {
                 }
             }
             Event::WindowServerDestroyed(wsid, sid) => {
-                if space_is_fullscreen(sid.get()) && self.window_ids.contains_key(&wsid) {
-                    println!("{wsid:?} destroyed on fullscreened space {sid:?} - ignoring");
-                    return;
+                if space_is_fullscreen(sid.get()) {
+                    if let Some(&wid) = self.window_ids.get(&wsid) {
+                        if let Some(app_state) = self.apps.get(&wid.pid) {
+                            let _ =
+                                app_state.handle.send(Request::MarkWindowsNeedingInfo(vec![wid]));
+                        }
+                        println!("{wsid:?} destroyed on fullscreened space {sid:?} - ignoring");
+                        return;
+                    }
                 } else if space_is_user(sid.get()) {
                     println!("{wsid:?} destroyed on user space {sid:?}");
                     if let Some(wid) = self.window_ids.remove(&wsid) {
+                        if let Some(app_state) = self.apps.get(&wid.pid) {
+                            let _ =
+                                app_state.handle.send(Request::MarkWindowsNeedingInfo(vec![wid]));
+                        }
                         // // Do not destroy the window; just clear WSID mapping and cached info.
                         // self.remove_txid_for_window(Some(wsid));
                         // self.window_server_info.remove(&wsid);
@@ -694,6 +701,24 @@ impl Reactor {
                         println!("{wsid:?} fullscreened on {sid:?}");
                         self.fullscreened = true;
                         self.fullscreen_pids.insert(window_server_info.pid);
+                        if let Some(&wid) = self.window_ids.get(&wsid) {
+                            if let Some(app_state) = self.apps.get(&wid.pid) {
+                                let _ = app_state
+                                    .handle
+                                    .send(Request::MarkWindowsNeedingInfo(vec![wid]));
+                            }
+                        } else if let Some(app_state) = self.apps.get(&window_server_info.pid) {
+                            let resync: Vec<_> = self
+                                .windows
+                                .keys()
+                                .copied()
+                                .filter(|wid| wid.pid == window_server_info.pid)
+                                .collect();
+                            if !resync.is_empty() {
+                                let _ =
+                                    app_state.handle.send(Request::MarkWindowsNeedingInfo(resync));
+                            }
+                        }
                         return;
                     } else if space_is_user(sid.get()) {
                         println!("{wsid:?} appeared on user space {sid:?}");
@@ -718,7 +743,9 @@ impl Reactor {
                             });
                         }
                     } else if let Some(app) = self.apps.get(&window_server_info.pid) {
-                        if let Err(err) = app.handle.send(Request::GetVisibleWindows) {
+                        if let Err(err) =
+                            app.handle.send(Request::GetVisibleWindows { force_refresh: false })
+                        {
                             debug!(
                                 pid = window_server_info.pid,
                                 ?wsid,
@@ -922,7 +949,10 @@ impl Reactor {
                         for pid in self.fullscreen_pids.drain() {
                             if let Some(app) = self.apps.get(&pid) {
                                 println!("{pid:?} - {app:?}");
-                                if let Err(err) = app.handle.send(Request::GetVisibleWindows) {
+                                if let Err(err) = app
+                                    .handle
+                                    .send(Request::GetVisibleWindows { force_refresh: true })
+                                {
                                     println!(
                                         "Failed to refresh windows after exiting fullscreen {err:?}"
                                     );
@@ -1682,7 +1712,7 @@ impl Reactor {
         for app in self.apps.values_mut() {
             // Errors mean the app terminated (and a termination event
             // is coming); ignore.
-            _ = app.handle.send(Request::GetVisibleWindows);
+            _ = app.handle.send(Request::GetVisibleWindows { force_refresh: false });
         }
     }
 
@@ -1701,8 +1731,17 @@ impl Reactor {
 
         let known_visible_set: HashSet<WindowId> = known_visible.into_iter().collect();
 
+        let has_window_server_visibles_without_ax = {
+            let known_visible_set = &known_visible_set;
+            self.visible_windows
+                .iter()
+                .filter_map(|wsid| self.window_ids.get(wsid))
+                .any(|wid| wid.pid == pid && !known_visible_set.contains(wid))
+        };
+
         let skip_stale_cleanup = self.suppress_stale_window_cleanup
-            || (known_visible_set.is_empty() && !self.has_visible_window_server_ids_for_pid(pid));
+            || (known_visible_set.is_empty() && !self.has_visible_window_server_ids_for_pid(pid))
+            || has_window_server_visibles_without_ax;
 
         let stale_windows: Vec<WindowId> = if skip_stale_cleanup {
             Vec::new()
@@ -3253,7 +3292,7 @@ pub mod tests {
         let requests = apps.requests();
         for request in requests {
             match request {
-                Request::GetVisibleWindows => {
+                Request::GetVisibleWindows { .. } => {
                     // Simulate the login screen condition: No windows are
                     // considered visible by the accessibility API, but they are
                     // from the window server API in the event above.
@@ -3335,7 +3374,7 @@ pub mod tests {
             let mut other_requests = Vec::new();
             for request in requests {
                 match request {
-                    Request::GetVisibleWindows => {
+                    Request::GetVisibleWindows { .. } => {
                         reactor.handle_event(Event::WindowsDiscovered {
                             pid: 1,
                             new: vec![],
