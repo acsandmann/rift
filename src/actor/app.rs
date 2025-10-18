@@ -955,7 +955,7 @@ impl State {
             return None;
         }
 
-        if info.ax_role.as_deref() == Some("AXPopover")
+        if info.ax_role.as_deref() == Some("AXPopover") || info.ax_role.as_deref() == Some("AXMenu")
         //|| info.ax_subrole.as_deref() == Some("AXUnknown")
         {
             trace!(

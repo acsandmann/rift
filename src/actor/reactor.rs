@@ -643,6 +643,15 @@ impl Reactor {
                 // TODO: figure out why this is happening, we should really know about this app,
                 // why dont we get notifications that its being launched?
                 if let Some(window_server_info) = crate::sys::window_server::get_window(wsid) {
+                    // Ignore non-normal windows (e.g., menus, popovers)
+                    if window_server_info.layer != 0 {
+                        debug!(
+                            ?wsid,
+                            layer = window_server_info.layer,
+                            "Ignoring non-normal window"
+                        );
+                        return;
+                    }
                     self.update_partial_window_server_info(vec![window_server_info]);
                     if !self.apps.contains_key(&window_server_info.pid) {
                         if let Some(app) =
