@@ -600,6 +600,9 @@ impl Reactor {
                 }
             }
             Event::WindowDestroyed(wid) => {
+                if !self.windows.contains_key(&wid) {
+                    return;
+                }
                 let window_server_id = self.windows.get(&wid).and_then(|w| w.window_server_id);
                 self.remove_txid_for_window(window_server_id);
                 if let Some(ws_id) = window_server_id {
@@ -640,13 +643,20 @@ impl Reactor {
                 } else if space_is_user(sid.get()) {
                     println!("{wsid:?} destroyed on user space {sid:?}");
                     if let Some(wid) = self.window_ids.remove(&wsid) {
-                        // Do not destroy the window; just clear WSID mapping and cached info.
-                        self.remove_txid_for_window(Some(wsid));
-                        self.window_server_info.remove(&wsid);
-                        self.visible_windows.remove(&wsid);
-                        if let Some(win) = self.windows.get_mut(&wid) {
-                            win.window_server_id = None;
-                        }
+                        // // Do not destroy the window; just clear WSID mapping and cached info.
+                        // self.remove_txid_for_window(Some(wsid));
+                        // self.window_server_info.remove(&wsid);
+                        // self.visible_windows.remove(&wsid);
+                        // if let Some(win) = self.windows.get_mut(&wid) {
+                        //     win.window_server_id = None;
+                        // }
+
+                        // // TODO: do we do this, or do we return??
+                        // self.send_layout_event(LayoutEvent::WindowRemoved(wid));
+                        // if let Some(app) = self.apps.get(&wid.pid) {
+                        //     let _ = app.handle.send(Request::GetVisibleWindows);
+                        // }
+                        self.events_tx.as_ref().map(|tx| tx.send(Event::WindowDestroyed(wid)));
                     } else {
                         debug!(
                             ?wsid,
@@ -1892,9 +1902,13 @@ impl Reactor {
         // If we have no visible WSIDs (e.g., SpaceChanged provided empty ws_info),
         // fall back to the app-reported known_visible list for this pid.
         for wid in known_visible_set.iter().copied().filter(|wid| wid.pid == pid) {
-            if included.contains(&wid) || !self.window_is_standard(wid) { continue; }
+            if included.contains(&wid) || !self.window_is_standard(wid) {
+                continue;
+            }
             let Some(state) = self.windows.get(&wid) else { continue };
-            let Some(space) = self.best_space_for_window(&state.frame_monotonic) else { continue };
+            let Some(space) = self.best_space_for_window(&state.frame_monotonic) else {
+                continue;
+            };
             included.insert(wid);
             app_windows.entry(space).or_default().push(wid);
         }
