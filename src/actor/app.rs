@@ -431,6 +431,11 @@ impl State {
                     let elem = elem.clone();
                     if let Ok(id) = self.id(&elem) {
                         known_visible.push(id);
+                        // Always send fresh WindowInfo for known windows so Reactor can
+                        // re-sync mapping/state after fullscreen or desyncs.
+                        if let Ok((info, _)) = WindowInfo::from_ax_element(&elem, None) {
+                            new.push((id, info));
+                        }
                         continue;
                     }
                     let Some((info, wid, _)) = self.register_window(elem, None) else {

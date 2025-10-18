@@ -11,9 +11,12 @@ mod replay;
 #[cfg(test)]
 mod testing;
 
+use std::time::Duration;
 use std::{mem, thread};
 
 use animation::Animation;
+use dispatchr::queue;
+use dispatchr::time::Time;
 use main_window::MainWindowTracker;
 use objc2_app_kit::{NSNormalWindowLevel, NSRunningApplication};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
@@ -35,12 +38,17 @@ use crate::common::log::{self, MetricsCommand};
 use crate::layout_engine::{self as layout, Direction, LayoutCommand, LayoutEngine, LayoutEvent};
 use crate::model::VirtualWorkspaceId;
 use crate::model::tx_store::WindowTxStore;
+use crate::sys::dispatch::DispatchExt;
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt, Round, SameAs};
 use crate::sys::power;
 use crate::sys::screen::{SpaceId, get_active_space_number};
-use crate::sys::window_server::{self, WindowServerId, WindowServerInfo};
+use crate::sys::timer::Timer;
+use crate::sys::window_server::{
+    self, WindowServerId, WindowServerInfo, space_is_fullscreen, space_is_user,
+    wait_for_native_fullscreen_transition,
+};
 
 pub type Sender = actor::Sender<Event>;
 type Receiver = actor::Receiver<Event>;
@@ -261,6 +269,8 @@ pub struct Reactor {
     skip_layout_for_window: Option<WindowId>,
     pending_drag_swap: Option<(WindowId, WindowId)>,
     events_tx: Option<Sender>,
+    fullscreened: bool,
+    fullscreen_pids: HashSet<pid_t>,
 }
 
 #[derive(Debug)]
@@ -418,6 +428,8 @@ impl Reactor {
             skip_layout_for_window: None,
             pending_drag_swap: None,
             events_tx: None,
+            fullscreened: false,
+            fullscreen_pids: HashSet::default(),
         }
     }
 
@@ -548,6 +560,10 @@ impl Reactor {
             }
             Event::RegisterWmSender(sender) => self.wm_sender = Some(sender),
             Event::WindowsDiscovered { pid, new, known_visible } => {
+                println!(
+                    "Reactor: WindowsDiscovered for pid {} - {new:?} - {known_visible:?}",
+                    pid
+                );
                 self.on_windows_discovered_with_app_info(pid, new, known_visible, None);
             }
             Event::WindowCreated(wid, window, ws_info, mouse_state) => {
@@ -618,15 +634,27 @@ impl Reactor {
                 }
             }
             Event::WindowServerDestroyed(wsid, sid) => {
-                if let Some(wid) = self.window_ids.get(&wsid).copied() {
-                    self.handle_event(Event::WindowDestroyed(wid));
-                } else {
-                    debug!(
-                        ?wsid,
-                        "Received WindowServerDestroyed for unknown window - ignoring"
-                    );
+                if space_is_fullscreen(sid.get()) && self.window_ids.contains_key(&wsid) {
+                    println!("{wsid:?} destroyed on fullscreened space {sid:?} - ignoring");
+                    return;
+                } else if space_is_user(sid.get()) {
+                    println!("{wsid:?} destroyed on user space {sid:?}");
+                    if let Some(wid) = self.window_ids.remove(&wsid) {
+                        // Do not destroy the window; just clear WSID mapping and cached info.
+                        self.remove_txid_for_window(Some(wsid));
+                        self.window_server_info.remove(&wsid);
+                        self.visible_windows.remove(&wsid);
+                        if let Some(win) = self.windows.get_mut(&wid) {
+                            win.window_server_id = None;
+                        }
+                    } else {
+                        debug!(
+                            ?wsid,
+                            "Received WindowServerDestroyed for unknown window - ignoring"
+                        );
+                    }
+                    return;
                 }
-                return;
             }
             Event::WindowServerAppeared(wsid, sid) => {
                 if self.window_server_info.contains_key(&wsid)
@@ -651,6 +679,16 @@ impl Reactor {
                         );
                         return;
                     }
+
+                    if space_is_fullscreen(sid.get()) {
+                        println!("{wsid:?} fullscreened on {sid:?}");
+                        self.fullscreened = true;
+                        self.fullscreen_pids.insert(window_server_info.pid);
+                        return;
+                    } else if space_is_user(sid.get()) {
+                        println!("{wsid:?} appeared on user space {sid:?}");
+                    }
+
                     self.update_partial_window_server_info(vec![window_server_info]);
                     if !self.apps.contains_key(&window_server_info.pid) {
                         if let Some(app) =
@@ -862,6 +900,33 @@ impl Reactor {
                 // FIXME: Update visible windows if space changed
             }
             Event::SpaceChanged(spaces, ws_info) => {
+                if let Some(space) = spaces.first().and_then(|s| *s) {
+                    if space_is_fullscreen(space.get()) {
+                        println!("switched to fullscreen space {space:?} - ignoring");
+                        return;
+                    }
+                    if space_is_user(space.get()) && self.fullscreened {
+                        println!("switched to user space {space:?}, waiting");
+                        wait_for_native_fullscreen_transition();
+                        Timer::sleep(Duration::from_millis(50));
+                        for pid in self.fullscreen_pids.drain() {
+                            if let Some(app) = self.apps.get(&pid) {
+                                println!("{pid:?} - {app:?}");
+                                if let Err(err) = app.handle.send(Request::GetVisibleWindows) {
+                                    println!(
+                                        "Failed to refresh windows after exiting fullscreen {err:?}"
+                                    );
+                                }
+                            }
+                        }
+                        self.fullscreened = false;
+                        if let Some(space) = self.screens.iter().flat_map(|s| s.space).next() {
+                            self.pending_refocus_space = Some(space);
+                            let _ = self.update_layout(false, false);
+                            self.update_focus_follows_mouse_state();
+                        }
+                    }
+                }
                 let spaces_all_none = spaces.iter().all(|space| space.is_none());
                 self.suppress_stale_window_cleanup = spaces_all_none;
                 if spaces.len() != self.screens.len() {
@@ -1699,17 +1764,58 @@ impl Reactor {
         let time_since_app_rules = self.app_rules_recently_applied.elapsed();
         let app_rules_recently_applied = time_since_app_rules.as_secs() < 1;
 
-        if app_rules_recently_applied && app_info.is_none() {
-            for (wid, info) in new {
+        if app_rules_recently_applied && app_info.is_none() && !new.is_empty() {
+            // Update state for any newly reported windows, but do not early-return;
+            // proceed to emit WindowsOnScreenUpdated so existing mappings are respected
+            // without reapplying app rules.
+            for i in 0..new.len() {
+                let (wid, ref info) = new[i];
                 if let Some(wsid) = info.sys_id {
                     self.window_ids.insert(wsid, wid);
                 }
-                let mut state: WindowState = info.into();
-                let manageable = self.compute_window_manageability(&state);
-                state.is_manageable = manageable;
-                self.windows.insert(wid, state);
+                if self.windows.contains_key(&wid) {
+                    let manageable = self.compute_manageability_from_parts(
+                        info.sys_id,
+                        info.is_minimized,
+                        info.is_standard,
+                        info.is_root,
+                    );
+                    if let Some(existing) = self.windows.get_mut(&wid) {
+                        existing.title = info.title.clone();
+                        if info.frame.size.width != 0.0 || info.frame.size.height != 0.0 {
+                            existing.frame_monotonic = info.frame;
+                        }
+                        existing.is_ax_standard = info.is_standard;
+                        existing.is_ax_root = info.is_root;
+                        existing.is_minimized = info.is_minimized;
+                        existing.window_server_id = info.sys_id;
+                        existing.bundle_id = info.bundle_id.clone();
+                        existing.bundle_path = info.path.clone();
+                        existing.ax_role = info.ax_role.clone();
+                        existing.ax_subrole = info.ax_subrole.clone();
+                        existing.is_manageable = manageable;
+                    }
+                } else {
+                    let mut state: WindowState = WindowState {
+                        title: info.title.clone(),
+                        frame_monotonic: info.frame,
+                        is_ax_standard: info.is_standard,
+                        is_ax_root: info.is_root,
+                        is_minimized: info.is_minimized,
+                        is_manageable: false,
+                        last_sent_txid: TransactionId::default(),
+                        window_server_id: info.sys_id,
+                        bundle_id: info.bundle_id.clone(),
+                        bundle_path: info.path.clone(),
+                        ax_role: info.ax_role.clone(),
+                        ax_subrole: info.ax_subrole.clone(),
+                    };
+                    let manageable = self.compute_window_manageability(&state);
+                    state.is_manageable = manageable;
+                    self.windows.insert(wid, state);
+                }
             }
-            return;
+            // fall through
         }
 
         // Note that we rely on the window server info, not accessibility, to
@@ -1732,15 +1838,42 @@ impl Reactor {
             if let Some(wsid) = info.sys_id {
                 self.window_ids.insert(wsid, wid);
             }
-            let mut state: WindowState = info.into();
-            let manageable = self.compute_window_manageability(&state);
-            state.is_manageable = manageable;
-            self.windows.insert(wid, state);
+            if self.windows.contains_key(&wid) {
+                // Refresh existing window state (frame/title/ax attrs/minimized) without
+                // losing workspace or layout node mapping.
+                let manageable = self.compute_manageability_from_parts(
+                    info.sys_id,
+                    info.is_minimized,
+                    info.is_standard,
+                    info.is_root,
+                );
+                if let Some(existing) = self.windows.get_mut(&wid) {
+                    existing.title = info.title.clone();
+                    if info.frame.size.width != 0.0 || info.frame.size.height != 0.0 {
+                        existing.frame_monotonic = info.frame;
+                    }
+                    existing.is_ax_standard = info.is_standard;
+                    existing.is_ax_root = info.is_root;
+                    existing.is_minimized = info.is_minimized;
+                    existing.window_server_id = info.sys_id;
+                    existing.bundle_id = info.bundle_id.clone();
+                    existing.bundle_path = info.path.clone();
+                    existing.ax_role = info.ax_role.clone();
+                    existing.ax_subrole = info.ax_subrole.clone();
+                    existing.is_manageable = manageable;
+                }
+            } else {
+                let mut state: WindowState = info.into();
+                let manageable = self.compute_window_manageability(&state);
+                state.is_manageable = manageable;
+                self.windows.insert(wid, state);
+            }
         }
         if !self.windows.iter().any(|(wid, _)| wid.pid == pid) {
             return;
         }
         let mut app_windows: BTreeMap<SpaceId, Vec<WindowId>> = BTreeMap::new();
+        let mut included: HashSet<WindowId> = HashSet::default();
         for wid in self
             .visible_windows
             .iter()
@@ -1753,6 +1886,16 @@ impl Reactor {
             else {
                 continue;
             };
+            included.insert(wid);
+            app_windows.entry(space).or_default().push(wid);
+        }
+        // If we have no visible WSIDs (e.g., SpaceChanged provided empty ws_info),
+        // fall back to the app-reported known_visible list for this pid.
+        for wid in known_visible_set.iter().copied().filter(|wid| wid.pid == pid) {
+            if included.contains(&wid) || !self.window_is_standard(wid) { continue; }
+            let Some(state) = self.windows.get(&wid) else { continue };
+            let Some(space) = self.best_space_for_window(&state.frame_monotonic) else { continue };
+            included.insert(wid);
             app_windows.entry(space).or_default().push(wid);
         }
         let screens = self.screens.clone();
