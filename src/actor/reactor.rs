@@ -557,11 +557,7 @@ impl Reactor {
             }
             Event::RegisterWmSender(sender) => self.wm_sender = Some(sender),
             Event::WindowsDiscovered { pid, new, known_visible } => {
-                println!(
-                    "Reactor: WindowsDiscovered for pid {} - {new:?} - {known_visible:?}",
-                    pid
-                );
-                self.on_windows_discovered_with_app_info(pid, new, known_visible, None);
+                self.on_windows_discovered_with_app_info(pid, new, known_visible, None)
             }
             Event::WindowCreated(wid, window, ws_info, mouse_state) => {
                 // TODO: It's possible for a window to be on multiple spaces
@@ -640,29 +636,14 @@ impl Reactor {
                             let _ =
                                 app_state.handle.send(Request::MarkWindowsNeedingInfo(vec![wid]));
                         }
-                        println!("{wsid:?} destroyed on fullscreened space {sid:?} - ignoring");
                         return;
                     }
                 } else if space_is_user(sid.get()) {
-                    println!("{wsid:?} destroyed on user space {sid:?}");
                     if let Some(wid) = self.window_ids.remove(&wsid) {
                         if let Some(app_state) = self.apps.get(&wid.pid) {
                             let _ =
                                 app_state.handle.send(Request::MarkWindowsNeedingInfo(vec![wid]));
                         }
-                        // // Do not destroy the window; just clear WSID mapping and cached info.
-                        // self.remove_txid_for_window(Some(wsid));
-                        // self.window_server_info.remove(&wsid);
-                        // self.visible_windows.remove(&wsid);
-                        // if let Some(win) = self.windows.get_mut(&wid) {
-                        //     win.window_server_id = None;
-                        // }
-
-                        // // TODO: do we do this, or do we return??
-                        // self.send_layout_event(LayoutEvent::WindowRemoved(wid));
-                        // if let Some(app) = self.apps.get(&wid.pid) {
-                        //     let _ = app.handle.send(Request::GetVisibleWindows);
-                        // }
                         self.events_tx.as_ref().map(|tx| tx.send(Event::WindowDestroyed(wid)));
                     } else {
                         debug!(
@@ -698,7 +679,6 @@ impl Reactor {
                     }
 
                     if space_is_fullscreen(sid.get()) {
-                        println!("{wsid:?} fullscreened on {sid:?}");
                         self.fullscreened = true;
                         self.fullscreen_pids.insert(window_server_info.pid);
                         if let Some(&wid) = self.window_ids.get(&wsid) {
@@ -720,8 +700,6 @@ impl Reactor {
                             }
                         }
                         return;
-                    } else if space_is_user(sid.get()) {
-                        println!("{wsid:?} appeared on user space {sid:?}");
                     }
 
                     self.update_partial_window_server_info(vec![window_server_info]);
@@ -939,21 +917,18 @@ impl Reactor {
             Event::SpaceChanged(spaces, ws_info) => {
                 if let Some(space) = spaces.first().and_then(|s| *s) {
                     if space_is_fullscreen(space.get()) {
-                        println!("switched to fullscreen space {space:?} - ignoring");
                         return;
                     }
                     if space_is_user(space.get()) && self.fullscreened {
-                        println!("switched to user space {space:?}, waiting");
                         wait_for_native_fullscreen_transition();
                         Timer::sleep(Duration::from_millis(50));
                         for pid in self.fullscreen_pids.drain() {
                             if let Some(app) = self.apps.get(&pid) {
-                                println!("{pid:?} - {app:?}");
                                 if let Err(err) = app
                                     .handle
                                     .send(Request::GetVisibleWindows { force_refresh: true })
                                 {
-                                    println!(
+                                    error!(
                                         "Failed to refresh windows after exiting fullscreen {err:?}"
                                     );
                                 }

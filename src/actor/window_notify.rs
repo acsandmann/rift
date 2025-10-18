@@ -239,9 +239,6 @@ impl WindowNotify {
                                 }
                             };
                         }
-                        CGSEventType::Known(KnownCGSEvent::FrontmostApplicationChanged) => {
-                            println!("{:?} frontmost changed", evt)
-                        }
                         _ => {}
                     }
                 }
