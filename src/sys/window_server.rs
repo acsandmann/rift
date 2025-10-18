@@ -569,7 +569,7 @@ pub fn space_is_user(sid: u64) -> bool { unsafe { SLSSpaceGetType(*G_CONNECTION,
 pub fn space_is_fullscreen(sid: u64) -> bool { unsafe { SLSSpaceGetType(*G_CONNECTION, sid) == 4 } }
 pub fn space_is_system(sid: u64) -> bool { unsafe { SLSSpaceGetType(*G_CONNECTION, sid) == 2 } }
 pub fn wait_for_native_fullscreen_transition() {
-    while space_is_user(unsafe { CGSGetActiveSpace(*G_CONNECTION) }) {
+    while !space_is_user(unsafe { CGSGetActiveSpace(*G_CONNECTION) }) {
         Timer::sleep(Duration::from_millis(100));
     }
 }
