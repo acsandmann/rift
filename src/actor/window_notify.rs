@@ -9,6 +9,7 @@ use crate::actor::reactor::Requested;
 use crate::common::collections::{HashMap, HashSet};
 use crate::model::swaparc::SwapArc;
 use crate::model::tx_store::WindowTxStore;
+use crate::sys::screen::SpaceId;
 use crate::sys::skylight::{CGSEventType, KnownCGSEvent};
 use crate::sys::window_server::{WindowQuery, WindowServerId};
 use crate::sys::{event, window_notify};
@@ -201,10 +202,18 @@ impl WindowNotify {
                     }
 
                     match event {
-                        CGSEventType::Known(KnownCGSEvent::SpaceWindowDestroyed) => events_tx
-                            .send(Event::WindowServerDestroyed(WindowServerId::new(window_id))),
-                        CGSEventType::Known(KnownCGSEvent::SpaceWindowCreated) => events_tx
-                            .send(Event::WindowServerAppeared(WindowServerId::new(window_id))),
+                        CGSEventType::Known(KnownCGSEvent::SpaceWindowDestroyed) => {
+                            events_tx.send(Event::WindowServerDestroyed(
+                                WindowServerId::new(window_id),
+                                SpaceId::new(evt.space_id.unwrap()),
+                            ))
+                        }
+                        CGSEventType::Known(KnownCGSEvent::SpaceWindowCreated) => {
+                            events_tx.send(Event::WindowServerAppeared(
+                                WindowServerId::new(window_id),
+                                SpaceId::new(evt.space_id.unwrap()),
+                            ))
+                        }
                         CGSEventType::Known(KnownCGSEvent::WindowMoved)
                         | CGSEventType::Known(KnownCGSEvent::WindowResized) => {
                             let mouse_state = event::get_mouse_state();

@@ -206,6 +206,8 @@ impl AXUIElement {
 
     pub fn minimized(&self) -> Result<bool> { self.bool_attribute("AXMinimized") }
 
+    pub fn fullscreen(&self) -> Result<bool> { self.bool_attribute("AXFullscreen") }
+
     pub fn title(&self) -> Result<String> {
         let value = self.copy_required_attribute("AXTitle")?;
         let string = self.downcast::<CFString>(value)?;

@@ -223,6 +223,7 @@ unsafe extern "C" {
     ) -> *mut CFArray<CFNumber>;
     pub fn SLSManagedDisplayGetCurrentSpace(cid: cid_t, uuid: *mut CFString) -> u64;
     pub fn SLSCopyActiveMenuBarDisplayIdentifier(cid: cid_t) -> *mut CFString;
+    pub fn SLSSpaceGetType(cid: cid_t, sid: u64) -> c_int;
 
     pub fn SLSWindowQueryWindows(
         cid: c_int,
