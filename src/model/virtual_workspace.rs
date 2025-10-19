@@ -334,17 +334,16 @@ impl VirtualWorkspaceManager {
 
             if let Some((existing_space, old_workspace_id)) = existing_mapping {
                 if existing_space != space {
-                    error!(
-                        "Attempted to move window {:?} across macOS spaces: from {:?} to {:?}",
-                        window_id, existing_space, space
-                    );
-                    return false;
+                    if let Some(old_workspace) = self.workspaces.get_mut(old_workspace_id) {
+                        old_workspace.remove_window(window_id);
+                    }
+                    self.window_to_workspace.remove(&(existing_space, window_id));
+                } else {
+                    if let Some(old_workspace) = self.workspaces.get_mut(old_workspace_id) {
+                        old_workspace.remove_window(window_id);
+                    }
+                    self.window_to_workspace.remove(&(existing_space, window_id));
                 }
-
-                if let Some(old_workspace) = self.workspaces.get_mut(old_workspace_id) {
-                    old_workspace.remove_window(window_id);
-                }
-                self.window_to_workspace.remove(&(existing_space, window_id));
             }
 
             if let Some(workspace) = self.workspaces.get_mut(workspace_id) {

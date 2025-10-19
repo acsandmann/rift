@@ -985,6 +985,7 @@ impl MissionControlOverlay {
                         .or_insert_with(|| {
                             let lay = CALayer::layer();
                             parent_layer.addSublayer(&lay);
+                            lay.setContentsScale(self.scale);
                             lay
                         })
                         .clone();
@@ -994,6 +995,7 @@ impl MissionControlOverlay {
                         .or_insert_with(|| {
                             let tl = CATextLayer::layer();
                             parent_layer.addSublayer(&tl);
+                            tl.setContentsScale(self.scale);
                             tl
                         })
                         .clone();
@@ -1044,7 +1046,7 @@ impl MissionControlOverlay {
                     CGSize::new((rect.size.width - 12.0).max(10.0), label_height),
                 );
                 label_layer.setFrame(label_frame);
-                label_layer.setContentsScale(2.0);
+                label_layer.setContentsScale(self.scale);
                 label_layer.setMasksToBounds(false);
 
                 label_layer.setFontSize(12.0);
@@ -1113,6 +1115,7 @@ impl MissionControlOverlay {
                         .or_insert_with(|| {
                             let lay = CALayer::layer();
                             parent_layer.addSublayer(&lay);
+                            lay.setContentsScale(self.scale);
                             lay
                         })
                         .clone();
@@ -1143,7 +1146,7 @@ impl MissionControlOverlay {
                 layer.setFrame(rect);
                 layer.setMasksToBounds(true);
                 layer.setCornerRadius(4.0);
-                layer.setContentsScale(2.0);
+                layer.setContentsScale(self.scale);
                 if style_changed {
                     if is_selected {
                         layer.setBorderColor(Some(&**SELECTED_BORDER_COLOR));
@@ -1478,15 +1481,19 @@ pub struct MissionControlOverlay {
     fade_counter: AtomicU64,
     pending_hide: RefCell<bool>,
     refresh_pending: AtomicBool,
+    scale: f64,
 }
 
 impl MissionControlOverlay {
-    pub fn new(config: Config, mtm: MainThreadMarker, frame: CGRect) -> Self {
+    pub fn new(config: Config, mtm: MainThreadMarker, frame: CGRect, scale: f64) -> Self {
         let root_layer = CALayer::layer();
         root_layer.setGeometryFlipped(true);
-        root_layer.setFrame(frame);
+
+        root_layer.setFrame(CGRect::new(CGPoint::new(0.0, 0.0), frame.size));
+        root_layer.setContentsScale(scale);
 
         let cgs_window = CgsWindow::new(frame).expect("failed to create CGS window");
+        let _ = cgs_window.set_resolution(scale);
         let _ = cgs_window.set_opacity(false);
         let _ = cgs_window.set_alpha(1.0);
         let _ = cgs_window.set_level(NSPopUpMenuWindowLevel as i32);
@@ -1506,6 +1513,7 @@ impl MissionControlOverlay {
             fade_counter: AtomicU64::new(0),
             pending_hide: RefCell::new(false),
             refresh_pending: AtomicBool::new(false),
+            scale,
         }
     }
 
@@ -1531,6 +1539,35 @@ impl MissionControlOverlay {
     pub fn update(&self, mode: MissionControlMode) {
         self.stop_active_fade();
         *self.pending_hide.borrow_mut() = false;
+
+        {
+            let (new_frame, new_scale) =
+                if let Some(screen) = objc2_app_kit::NSScreen::mainScreen(self.mtm) {
+                    (screen.frame(), screen.backingScaleFactor())
+                } else {
+                    (self.frame, self.scale)
+                };
+
+            let frame_changed = new_frame.origin.x != self.frame.origin.x
+                || new_frame.origin.y != self.frame.origin.y
+                || new_frame.size.width != self.frame.size.width
+                || new_frame.size.height != self.frame.size.height;
+            let scale_changed = (new_scale - self.scale).abs() > f64::EPSILON;
+
+            if frame_changed || scale_changed {
+                let _ = self.cgs_window.set_shape(new_frame);
+                let _ = self.cgs_window.set_resolution(new_scale);
+
+                unsafe {
+                    let me = self as *const _ as *mut MissionControlOverlay;
+                    (*me).frame = new_frame;
+                    (*me).scale = new_scale;
+                }
+
+                self.root_layer.setFrame(CGRect::new(CGPoint::new(0.0, 0.0), self.frame.size));
+                self.root_layer.setContentsScale(self.scale);
+            }
+        }
 
         {
             let mut st = self.state.borrow_mut();
@@ -1686,9 +1723,14 @@ impl MissionControlOverlay {
     fn draw_and_present(&self) {
         CATransaction::begin();
         CATransaction::setDisableActions(true);
-        self.root_layer.setFrame(self.frame);
+
+        self.root_layer.setFrame(CGRect::new(CGPoint::new(0.0, 0.0), self.frame.size));
         self.root_layer.setGeometryFlipped(true);
-        self.draw_contents_into_layer(self.frame, &self.root_layer);
+
+        self.draw_contents_into_layer(
+            CGRect::new(CGPoint::new(0.0, 0.0), self.frame.size),
+            &self.root_layer,
+        );
         CATransaction::commit();
 
         let ctx: *mut CGContext = unsafe {

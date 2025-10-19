@@ -272,6 +272,12 @@ impl CgsWindow {
             .map_err(CgsWindowError::Property)
         }
     }
+
+    #[inline]
+    pub fn set_resolution(&self, scale: f64) -> Result<(), CgsWindowError> {
+        unsafe { cg_ok(SLSSetWindowResolution(self.connection, self.id, scale)) }
+            .map_err(CgsWindowError::Resolution)
+    }
 }
 
 impl Drop for CgsWindow {

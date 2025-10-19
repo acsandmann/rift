@@ -11,6 +11,7 @@ mod replay;
 #[cfg(test)]
 mod testing;
 
+use std::collections::hash_map::Entry;
 use std::time::Duration;
 use std::{mem, thread};
 
@@ -49,7 +50,7 @@ use crate::sys::window_server::{
 
 pub type Sender = actor::Sender<Event>;
 type Receiver = actor::Receiver<Event>;
-
+use std::collections::VecDeque;
 use std::path::PathBuf;
 
 use crate::model::server::{
@@ -131,7 +132,9 @@ pub enum Event {
         Requested,
         Option<MouseState>,
     ),
+    ResyncAppForWindow(WindowServerId),
     MenuOpened,
+    WindowIsChangingScreens(WindowServerId),
     MenuClosed,
 
     /// Left mouse button was released.
@@ -229,6 +232,12 @@ pub enum ReactorCommand {
     SetMissionControlActive(bool),
 }
 
+#[derive(Default, Debug, Clone)]
+struct FullscreenTrack {
+    pids: HashSet<pid_t>,
+    last_removed: VecDeque<WindowServerId>,
+}
+
 use crate::actor::raise_manager::RaiseManager;
 
 pub struct Reactor {
@@ -265,9 +274,12 @@ pub struct Reactor {
     drag_manager: crate::actor::drag_swap::DragManager,
     skip_layout_for_window: Option<WindowId>,
     pending_drag_swap: Option<(WindowId, WindowId)>,
+    drag_layout_pending: bool,
+    drag_space_origin: Option<SpaceId>,
+    drag_space_current: Option<SpaceId>,
     events_tx: Option<Sender>,
-    fullscreened: bool,
-    fullscreen_pids: HashSet<pid_t>,
+    fullscreen_by_space: HashMap<u64, FullscreenTrack>,
+    changing_screens: HashSet<WindowServerId>,
 }
 
 #[derive(Debug)]
@@ -424,9 +436,12 @@ impl Reactor {
             ),
             skip_layout_for_window: None,
             pending_drag_swap: None,
+            drag_layout_pending: false,
+            drag_space_origin: None,
+            drag_space_current: None,
+            changing_screens: HashSet::default(),
             events_tx: None,
-            fullscreened: false,
-            fullscreen_pids: HashSet::default(),
+            fullscreen_by_space: HashMap::default(),
         }
     }
 
@@ -552,12 +567,55 @@ impl Reactor {
             | Event::ApplicationDeactivated(..)
             | Event::ApplicationGloballyDeactivated(..)
             | Event::ApplicationMainWindowChanged(..) => {}
+            Event::ResyncAppForWindow(wsid) => {
+                if let Some(&wid) = self.window_ids.get(&wsid) {
+                    if let Some(app_state) = self.apps.get(&wid.pid) {
+                        let _ = app_state
+                            .handle
+                            .send(Request::GetVisibleWindows { force_refresh: true });
+                    }
+                } else if let Some(info) = self
+                    .window_server_info
+                    .get(&wsid)
+                    .cloned()
+                    .or_else(|| window_server::get_window(wsid))
+                {
+                    if let Some(app_state) = self.apps.get(&info.pid) {
+                        let _ = app_state
+                            .handle
+                            .send(Request::GetVisibleWindows { force_refresh: true });
+                    }
+                }
+            }
             Event::ApplicationGloballyActivated(pid) => {
                 self.handle_app_activation_workspace_switch(pid);
             }
             Event::RegisterWmSender(sender) => self.wm_sender = Some(sender),
             Event::WindowsDiscovered { pid, new, known_visible } => {
                 self.on_windows_discovered_with_app_info(pid, new, known_visible, None)
+            }
+            Event::WindowIsChangingScreens(wsid) => {
+                self.changing_screens.insert(wsid);
+                if let Some((dragged_wid, target_wid)) = self.pending_drag_swap.take() {
+                    trace!(
+                        ?dragged_wid,
+                        ?target_wid,
+                        ?wsid,
+                        "Clearing pending drag swap; window is moving between spaces"
+                    );
+                    if self.skip_layout_for_window == Some(dragged_wid) {
+                        self.skip_layout_for_window = None;
+                    }
+                }
+                self.drag_manager.reset();
+                self.clear_drag_space_tracking();
+                self.in_drag = true;
+                if let Some(&wid) = self.window_ids.get(&wsid) {
+                    if let Some(frame) = self.windows.get(&wid).map(|window| window.frame_monotonic)
+                    {
+                        self.ensure_drag_space_origin(&frame);
+                    }
+                }
             }
             Event::WindowCreated(wid, window, ws_info, mouse_state) => {
                 // TODO: It's possible for a window to be on multiple spaces
@@ -619,10 +677,14 @@ impl Reactor {
                     }
                 }
 
-                if self.drag_manager.dragged() == Some(wid)
-                    || self.drag_manager.last_target() == Some(wid)
-                {
+                let dragged_window = self.drag_manager.dragged();
+                let last_target = self.drag_manager.last_target();
+                if dragged_window == Some(wid) || last_target == Some(wid) {
                     self.drag_manager.reset();
+                    if dragged_window == Some(wid) {
+                        self.clear_drag_space_tracking();
+                        self.in_drag = false;
+                    }
                 }
 
                 if self.skip_layout_for_window == Some(wid) {
@@ -631,20 +693,45 @@ impl Reactor {
             }
             Event::WindowServerDestroyed(wsid, sid) => {
                 if space_is_fullscreen(sid.get()) {
+                    let entry = match self.fullscreen_by_space.entry(sid.get()) {
+                        Entry::Occupied(o) => o.into_mut(),
+                        Entry::Vacant(v) => v.insert(FullscreenTrack::default()),
+                    };
                     if let Some(&wid) = self.window_ids.get(&wsid) {
+                        entry.pids.insert(wid.pid);
+                        if entry.last_removed.len() >= 5 {
+                            let _ = entry.last_removed.pop_front();
+                        }
+                        entry.last_removed.push_back(wsid);
                         if let Some(app_state) = self.apps.get(&wid.pid) {
                             let _ =
                                 app_state.handle.send(Request::MarkWindowsNeedingInfo(vec![wid]));
                         }
                         return;
+                    } else if let Some(info) = self.window_server_info.get(&wsid) {
+                        entry.pids.insert(info.pid);
+                        if entry.last_removed.len() >= 5 {
+                            let _ = entry.last_removed.pop_front();
+                        }
+                        entry.last_removed.push_back(wsid);
+                        return;
                     }
+                    return;
                 } else if space_is_user(sid.get()) {
-                    if let Some(wid) = self.window_ids.remove(&wsid) {
+                    if let Some(&wid) = self.window_ids.get(&wsid) {
+                        let _ = self.window_ids.remove(&wsid);
+                        self.window_server_info.remove(&wsid);
+                        self.visible_windows.remove(&wsid);
                         if let Some(app_state) = self.apps.get(&wid.pid) {
                             let _ =
                                 app_state.handle.send(Request::MarkWindowsNeedingInfo(vec![wid]));
+                            let _ = app_state
+                                .handle
+                                .send(Request::GetVisibleWindows { force_refresh: true });
                         }
-                        self.events_tx.as_ref().map(|tx| tx.send(Event::WindowDestroyed(wid)));
+                        if let Some(tx) = self.events_tx.as_ref() {
+                            tx.send(Event::WindowDestroyed(wid));
+                        }
                     } else {
                         debug!(
                             ?wsid,
@@ -679,8 +766,15 @@ impl Reactor {
                     }
 
                     if space_is_fullscreen(sid.get()) {
-                        self.fullscreened = true;
-                        self.fullscreen_pids.insert(window_server_info.pid);
+                        let entry = match self.fullscreen_by_space.entry(sid.get()) {
+                            Entry::Occupied(o) => o.into_mut(),
+                            Entry::Vacant(v) => v.insert(FullscreenTrack::default()),
+                        };
+                        entry.pids.insert(window_server_info.pid);
+                        if entry.last_removed.len() >= 5 {
+                            let _ = entry.last_removed.pop_front();
+                        }
+                        entry.last_removed.push_back(wsid);
                         if let Some(&wid) = self.window_ids.get(&wsid) {
                             if let Some(app_state) = self.apps.get(&wid.pid) {
                                 let _ = app_state
@@ -703,6 +797,7 @@ impl Reactor {
                     }
 
                     self.update_partial_window_server_info(vec![window_server_info]);
+
                     if !self.apps.contains_key(&window_server_info.pid) {
                         if let Some(app) =
                             NSRunningApplication::runningApplicationWithProcessIdentifier(
@@ -790,6 +885,13 @@ impl Reactor {
             }
             Event::WindowFrameChanged(wid, new_frame, last_seen, requested, mouse_state) => {
                 if let Some(window) = self.windows.get_mut(&wid) {
+                    if self.mission_control_active
+                        || window
+                            .window_server_id
+                            .is_some_and(|wsid| self.changing_screens.contains(&wsid))
+                    {
+                        return;
+                    }
                     let triggered_by_rift =
                         last_seen.is_some_and(|seen| seen == window.last_sent_txid);
                     if let Some(last_seen) = last_seen
@@ -858,7 +960,50 @@ impl Reactor {
                         .flat_map(|screen| Some((screen.space?, screen.frame)))
                         .collect::<Vec<_>>();
 
-                    if old_frame.size != new_frame.size {
+                    if mouse_state == Some(MouseState::Down) {
+                        if !self.in_drag {
+                            self.in_drag = true;
+                        }
+                        self.ensure_drag_space_origin(&old_frame);
+                    }
+
+                    let old_space = if self.in_drag {
+                        self.drag_space_current.or_else(|| self.best_space_for_window(&old_frame))
+                    } else {
+                        self.best_space_for_window(&old_frame)
+                    };
+
+                    let new_space = if self.in_drag {
+                        self.drag_effective_space(&new_frame)
+                    } else {
+                        self.best_space_for_window(&new_frame)
+                    };
+
+                    if old_space != new_space {
+                        if let Some(space) = new_space {
+                            // Assign immediately to the new space's active workspace and add
+                            if let Some(active_ws) = self.layout_engine.active_workspace(space) {
+                                let _ = self
+                                    .layout_engine
+                                    .virtual_workspace_manager_mut()
+                                    .assign_window_to_workspace(space, wid, active_ws);
+                            }
+                            self.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+                            if self.in_drag {
+                                self.skip_layout_for_window = Some(wid);
+                                self.drag_layout_pending = true;
+                            } else {
+                                let _ = self.update_layout(false, false);
+                            }
+                        } else {
+                            self.send_layout_event(LayoutEvent::WindowRemoved(wid));
+                            if self.in_drag {
+                                self.drag_layout_pending = true;
+                            } else {
+                                let _ = self.update_layout(false, false);
+                            }
+                        }
+                    } else if old_frame.size != new_frame.size {
                         self.send_layout_event(LayoutEvent::WindowResized {
                             wid,
                             old_frame,
@@ -867,7 +1012,6 @@ impl Reactor {
                         });
                         is_resize = true;
                     } else if mouse_state == Some(MouseState::Down) {
-                        self.in_drag = true;
                         // When a window is being dragged (mouse down while its frame
                         // moved), check whether it sufficiently overlaps another tiled
                         // window; if so, trigger a swap command.
@@ -915,26 +1059,21 @@ impl Reactor {
                 // FIXME: Update visible windows if space changed
             }
             Event::SpaceChanged(spaces, ws_info) => {
-                if let Some(space) = spaces.first().and_then(|s| *s) {
-                    if space_is_fullscreen(space.get()) {
-                        return;
-                    }
-                    if space_is_user(space.get()) && self.fullscreened {
+                // TODO: this logic is flawed if multiple spaces are changing at once
+                if spaces.iter().flatten().any(|s| space_is_fullscreen(s.get())) {
+                    return;
+                }
+                for s in spaces.iter().flatten() {
+                    if let Some(track) = self.fullscreen_by_space.remove(&s.get()) {
                         wait_for_native_fullscreen_transition();
                         Timer::sleep(Duration::from_millis(50));
-                        for pid in self.fullscreen_pids.drain() {
+                        for pid in track.pids {
                             if let Some(app) = self.apps.get(&pid) {
-                                if let Err(err) = app
+                                let _ = app
                                     .handle
-                                    .send(Request::GetVisibleWindows { force_refresh: true })
-                                {
-                                    error!(
-                                        "Failed to refresh windows after exiting fullscreen {err:?}"
-                                    );
-                                }
+                                    .send(Request::GetVisibleWindows { force_refresh: true });
                             }
                         }
-                        self.fullscreened = false;
                         if let Some(space) = self.screens.iter().flat_map(|s| s.space).next() {
                             self.pending_refocus_space = Some(space);
                             let _ = self.update_layout(false, false);
@@ -957,6 +1096,7 @@ impl Reactor {
                     screen.space = *space;
                 }
                 self.expose_all_spaces();
+                self.changing_screens.clear();
                 if let Some(main_window) = self.main_window() {
                     let spaces = self.visible_spaces();
                     self.send_layout_event(LayoutEvent::WindowFocused(spaces, main_window));
@@ -981,6 +1121,8 @@ impl Reactor {
             }
             Event::MouseUp => {
                 self.in_drag = false;
+
+                let mut layout_updated = false;
 
                 if let Some((dragged_wid, target_wid)) = self.pending_drag_swap.take() {
                     trace!(?dragged_wid, ?target_wid, "Performing deferred swap on MouseUp");
@@ -1017,6 +1159,7 @@ impl Reactor {
                         self.handle_layout_response(response);
 
                         let _ = self.update_layout(false, false);
+                        layout_updated = true;
                     }
 
                     self.skip_layout_for_window = None;
@@ -1024,7 +1167,20 @@ impl Reactor {
 
                 self.drag_manager.reset();
 
-                self.skip_layout_for_window = None;
+                self.clear_drag_space_tracking();
+
+                if self.drag_layout_pending && !layout_updated {
+                    let _ = self.update_layout(false, false);
+                    layout_updated = true;
+                }
+
+                if layout_updated {
+                    self.drag_layout_pending = false;
+                }
+
+                if self.skip_layout_for_window.is_some() {
+                    self.skip_layout_for_window = None;
+                }
             }
             Event::MenuOpened => {
                 debug!("menu opened");
@@ -1967,7 +2123,7 @@ impl Reactor {
             self.send_layout_event(LayoutEvent::WindowsOnScreenUpdated(
                 space,
                 pid,
-                windows_with_titles,
+                windows_with_titles.clone(),
                 app_info.clone(),
             ));
         }
@@ -1985,6 +2141,86 @@ impl Reactor {
             .iter()
             .max_by_key(|s| s.frame.intersection(frame).area() as i64)?
             .space
+    }
+
+    fn ensure_drag_space_origin(&mut self, frame: &CGRect) {
+        if self.drag_space_origin.is_some() {
+            return;
+        }
+        let origin = self.best_space_for_window(frame);
+        self.drag_space_origin = origin;
+        self.drag_space_current = origin;
+    }
+
+    fn clear_drag_space_tracking(&mut self) {
+        self.drag_space_origin = None;
+        self.drag_space_current = None;
+    }
+
+    fn drag_space_candidate(&self, frame: &CGRect) -> Option<SpaceId> {
+        let center = frame.mid();
+        self.screens.iter().find_map(|screen| {
+            let space = screen.space?;
+            if screen.frame.contains(center) {
+                Some(space)
+            } else {
+                None
+            }
+        })
+    }
+
+    fn drag_space_overlap_ratio(&self, frame: &CGRect, space: SpaceId) -> f64 {
+        let Some(screen) = self.screens.iter().find(|s| s.space == Some(space)) else {
+            return 0.0;
+        };
+        let intersection = screen.frame.intersection(frame);
+        let frame_area = frame.area();
+        if frame_area <= 0.0 {
+            0.0
+        } else {
+            (intersection.area() / frame_area).clamp(0.0, 1.0)
+        }
+    }
+
+    fn drag_effective_space(&mut self, frame: &CGRect) -> Option<SpaceId> {
+        if !self.in_drag {
+            return self.best_space_for_window(frame);
+        }
+
+        self.ensure_drag_space_origin(frame);
+
+        let current = self.drag_space_current;
+        if frame.area() <= 0.0 {
+            return current.or_else(|| self.best_space_for_window(frame));
+        }
+
+        let candidate =
+            self.drag_space_candidate(frame).or_else(|| self.best_space_for_window(frame));
+
+        match (current, candidate) {
+            (None, Some(space)) => {
+                self.drag_space_current = Some(space);
+                Some(space)
+            }
+            (Some(cur), Some(space)) if cur == space => Some(cur),
+            (Some(cur), Some(space)) => {
+                const ENTER_THRESHOLD: f64 = 0.6;
+                const EXIT_THRESHOLD: f64 = 0.3;
+                let candidate_ratio = self.drag_space_overlap_ratio(frame, space);
+                let current_ratio = self.drag_space_overlap_ratio(frame, cur);
+
+                if candidate_ratio >= ENTER_THRESHOLD
+                    || (candidate_ratio > current_ratio && current_ratio <= EXIT_THRESHOLD)
+                {
+                    self.drag_space_current = Some(space);
+                    Some(space)
+                } else {
+                    Some(cur)
+                }
+            }
+            (Some(cur), None) => Some(cur),
+            (None, None) => None,
+        }
     }
 
     fn visible_spaces(&self) -> Vec<SpaceId> {
@@ -2126,17 +2362,26 @@ impl Reactor {
         window_ids: Vec<WindowId>,
         app_info: AppInfo,
     ) {
-        let Some(primary_space) = self.screens.iter().find_map(|screen| screen.space) else {
+        if window_ids.is_empty() {
             return;
-        };
+        }
 
-        if !window_ids.is_empty() {
-            for wid in &window_ids {
+        let mut windows_by_space: BTreeMap<SpaceId, Vec<WindowId>> = BTreeMap::new();
+        for &wid in &window_ids {
+            let Some(state) = self.windows.get(&wid) else { continue };
+            let Some(space) = self.best_space_for_window(&state.frame_monotonic) else {
+                continue;
+            };
+            windows_by_space.entry(space).or_default().push(wid);
+        }
+
+        for (space, wids) in windows_by_space {
+            for wid in &wids {
                 let title_opt = self.windows.get(wid).map(|w| w.title.clone());
                 let _ =
                     self.layout_engine.virtual_workspace_manager_mut().assign_window_with_app_info(
                         *wid,
-                        primary_space,
+                        space,
                         (&app_info.bundle_id).as_deref(),
                         (&app_info.localized_name).as_deref(),
                         title_opt.as_deref(),
@@ -2150,7 +2395,7 @@ impl Reactor {
                 Option<String>,
                 Option<String>,
                 Option<String>,
-            )> = window_ids
+            )> = wids
                 .iter()
                 .map(|&wid| {
                     let title_opt = self.windows.get(&wid).map(|w| w.title.clone());
@@ -2161,10 +2406,10 @@ impl Reactor {
                 .collect();
 
             self.send_layout_event(LayoutEvent::WindowsOnScreenUpdated(
-                primary_space,
+                space,
                 pid,
                 windows_with_titles,
-                Some(app_info),
+                Some(app_info.clone()),
             ));
         }
     }
@@ -2306,6 +2551,11 @@ impl Reactor {
     }
 
     fn handle_layout_response(&mut self, response: layout::EventResponse) {
+        if self.in_drag {
+            self.is_workspace_switch = false;
+            return;
+        }
+
         let mut pending_refocus_space = self.pending_refocus_space.take();
         let layout::EventResponse {
             raise_windows,
@@ -2315,7 +2565,7 @@ impl Reactor {
         let mut handled_without_raise = false;
 
         if raise_windows.is_empty() && focus_window.is_none() {
-            if self.is_workspace_switch {
+            if self.is_workspace_switch && !self.in_drag {
                 if let Some(wid) = self.window_id_under_cursor() {
                     focus_window = Some(wid);
                 } else if self.focus_untracked_window_under_cursor() {
@@ -2324,10 +2574,12 @@ impl Reactor {
             } else if let Some(space) = pending_refocus_space.take() {
                 if let Some(wid) = self.last_focused_window_in_space(space) {
                     focus_window = Some(wid);
-                } else if let Some(wid) = self.window_id_under_cursor() {
-                    focus_window = Some(wid);
-                } else if self.focus_untracked_window_under_cursor() {
-                    handled_without_raise = true;
+                } else if !self.in_drag {
+                    if let Some(wid) = self.window_id_under_cursor() {
+                        focus_window = Some(wid);
+                    } else if self.focus_untracked_window_under_cursor() {
+                        handled_without_raise = true;
+                    }
                 }
             }
         }
@@ -2382,18 +2634,61 @@ impl Reactor {
     }
 
     fn maybe_swap_on_drag(&mut self, wid: WindowId, new_frame: CGRect) {
-        if self.windows.get(&wid).is_none() {
-            return;
-        }
-
         if !self.in_drag {
             trace!(?wid, "Skipping swap: not in drag (mouse up received)");
             return;
         }
 
-        let Some(space) = self.best_space_for_window(&new_frame) else {
+        {
+            let Some(window) = self.windows.get(&wid) else {
+                return;
+            };
+
+            if window
+                .window_server_id
+                .is_some_and(|wsid| self.changing_screens.contains(&wsid))
+            {
+                trace!(?wid, "Skipping swap: window is changing screens");
+                return;
+            }
+        }
+
+        let Some(space) = (if self.in_drag {
+            self.drag_space_current.or_else(|| self.best_space_for_window(&new_frame))
+        } else {
+            self.best_space_for_window(&new_frame)
+        }) else {
             return;
         };
+
+        if let Some(origin_space) = self
+            .drag_manager
+            .origin_frame()
+            .and_then(|frame| self.best_space_for_window(&frame))
+        {
+            if origin_space != space {
+                if let Some((pending_wid, pending_target)) = self.pending_drag_swap {
+                    if pending_wid == wid {
+                        trace!(
+                            ?wid,
+                            ?pending_target,
+                            ?origin_space,
+                            ?space,
+                            "Clearing pending drag swap; dragged window entered new space"
+                        );
+                        self.pending_drag_swap = None;
+                    }
+                }
+                trace!(
+                    ?wid,
+                    ?origin_space,
+                    ?space,
+                    "Resetting drag swap tracking after space change"
+                );
+                self.drag_manager.reset();
+                return;
+            }
+        }
 
         if !self.layout_engine.is_window_in_active_workspace(space, wid) {
             return;
@@ -2591,6 +2886,7 @@ impl Reactor {
 
     #[instrument(skip(self), fields())]
     pub fn update_layout(&mut self, is_resize: bool, is_workspace_switch: bool) -> bool {
+        self.drag_layout_pending = false;
         let screens = self.screens.clone();
         let main_window = self.main_window();
         trace!(?main_window);

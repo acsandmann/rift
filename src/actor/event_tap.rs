@@ -327,7 +327,7 @@ impl EventTap {
                     && state.focus_follows_mouse_enabled
                     && !state.disable_hotkey_active =>
             {
-                let loc = NSEvent::mouseLocation();
+                let loc = CGEvent::location(Some(event));
                 if let Some(wsid) = state.track_mouse_move(loc) {
                     _ = self.events_tx.send(Event::MouseMovedOverWindow(wsid));
                 }
@@ -580,7 +580,9 @@ impl State {
             return None;
         }
 
-        if !(0..NSPopUpMenuWindowLevel).contains(&new_window_level) {
+        if !(0..NSPopUpMenuWindowLevel).contains(&new_window_level)
+            && new_window_level != NSWindowLevel::MIN
+        {
             return None;
         }
 

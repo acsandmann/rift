@@ -214,8 +214,27 @@ impl WindowNotify {
                                 SpaceId::new(evt.space_id.unwrap()),
                             ))
                         }
+                        CGSEventType::Known(KnownCGSEvent::WindowIsChangingScreens)
+                        | CGSEventType::Known(KnownCGSEvent::WorkspaceWindowDidMove) => {
+                            if let Some(wsid) = evt.window_id {
+                                events_tx
+                                    .send(Event::ResyncAppForWindow(WindowServerId::new(wsid)));
+                            }
+                        }
+                        CGSEventType::Known(KnownCGSEvent::WorkspaceWindowIsViewable)
+                        | CGSEventType::Known(KnownCGSEvent::WorkspaceWindowIsNotViewable)
+                        | CGSEventType::Known(
+                            KnownCGSEvent::WorkspacesWindowDidOrderInOnNonCurrentManagedSpacesOnly,
+                        )
+                        | CGSEventType::Known(
+                            KnownCGSEvent::WorkspacesWindowDidOrderOutOnNonCurrentManagedSpaces,
+                        ) => {
+                            events_tx
+                                .send(Event::ResyncAppForWindow(WindowServerId::new(window_id)));
+                        }
                         CGSEventType::Known(KnownCGSEvent::WindowMoved)
                         | CGSEventType::Known(KnownCGSEvent::WindowResized) => {
+                            // TODO: suppress move/resize while Mission Control is active
                             let mouse_state = event::get_mouse_state();
                             let wsid = WindowServerId::new(window_id);
                             if let Some(query) = WindowQuery::new(&[wsid]) {
