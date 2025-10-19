@@ -27,6 +27,8 @@ use rift_wm::sys::service::{ServiceCommands, handle_service_command};
 use rift_wm::sys::skylight::{CGSEventType, KnownCGSEvent};
 use tokio::join;
 
+embed_plist::embed_info_plist!("../../assets/Info.plist");
+
 #[derive(Parser)]
 struct Cli {
     /// Only run the window manager on the current space.
