@@ -238,6 +238,15 @@ struct FullscreenTrack {
     last_removed: VecDeque<WindowServerId>,
 }
 
+#[derive(Debug, Clone)]
+struct DragSession {
+    window: WindowId,
+    last_frame: CGRect,
+    origin_space: Option<SpaceId>,
+    settled_space: Option<SpaceId>,
+    layout_dirty: bool,
+}
+
 use crate::actor::raise_manager::RaiseManager;
 
 pub struct Reactor {
@@ -274,9 +283,7 @@ pub struct Reactor {
     drag_manager: crate::actor::drag_swap::DragManager,
     skip_layout_for_window: Option<WindowId>,
     pending_drag_swap: Option<(WindowId, WindowId)>,
-    drag_layout_pending: bool,
-    drag_space_origin: Option<SpaceId>,
-    drag_space_current: Option<SpaceId>,
+    active_drag: Option<DragSession>,
     events_tx: Option<Sender>,
     fullscreen_by_space: HashMap<u64, FullscreenTrack>,
     changing_screens: HashSet<WindowServerId>,
@@ -436,9 +443,7 @@ impl Reactor {
             ),
             skip_layout_for_window: None,
             pending_drag_swap: None,
-            drag_layout_pending: false,
-            drag_space_origin: None,
-            drag_space_current: None,
+            active_drag: None,
             changing_screens: HashSet::default(),
             events_tx: None,
             fullscreen_by_space: HashMap::default(),
@@ -608,12 +613,12 @@ impl Reactor {
                     }
                 }
                 self.drag_manager.reset();
-                self.clear_drag_space_tracking();
+                self.active_drag = None;
                 self.in_drag = true;
                 if let Some(&wid) = self.window_ids.get(&wsid) {
                     if let Some(frame) = self.windows.get(&wid).map(|window| window.frame_monotonic)
                     {
-                        self.ensure_drag_space_origin(&frame);
+                        self.ensure_active_drag(wid, &frame);
                     }
                 }
             }
@@ -682,7 +687,7 @@ impl Reactor {
                 if dragged_window == Some(wid) || last_target == Some(wid) {
                     self.drag_manager.reset();
                     if dragged_window == Some(wid) {
-                        self.clear_drag_space_tracking();
+                        self.active_drag = None;
                         self.in_drag = false;
                     }
                 }
@@ -954,68 +959,53 @@ impl Reactor {
                     if old_frame == new_frame {
                         return;
                     }
-                    let screens = self
-                        .screens
-                        .iter()
-                        .flat_map(|screen| Some((screen.space?, screen.frame)))
-                        .collect::<Vec<_>>();
 
-                    if mouse_state == Some(MouseState::Down) {
+                    let dragging = mouse_state == Some(MouseState::Down) || self.in_drag;
+
+                    if dragging {
                         if !self.in_drag {
                             self.in_drag = true;
                         }
-                        self.ensure_drag_space_origin(&old_frame);
-                    }
-
-                    let old_space = if self.in_drag {
-                        self.drag_space_current.or_else(|| self.best_space_for_window(&old_frame))
-                    } else {
-                        self.best_space_for_window(&old_frame)
-                    };
-
-                    let new_space = if self.in_drag {
-                        self.drag_effective_space(&new_frame)
-                    } else {
-                        self.best_space_for_window(&new_frame)
-                    };
-
-                    if old_space != new_space {
-                        if let Some(space) = new_space {
-                            // Assign immediately to the new space's active workspace and add
-                            if let Some(active_ws) = self.layout_engine.active_workspace(space) {
-                                let _ = self
-                                    .layout_engine
-                                    .virtual_workspace_manager_mut()
-                                    .assign_window_to_workspace(space, wid, active_ws);
-                            }
-                            self.send_layout_event(LayoutEvent::WindowAdded(space, wid));
-                            if self.in_drag {
-                                self.skip_layout_for_window = Some(wid);
-                                self.drag_layout_pending = true;
-                            } else {
-                                let _ = self.update_layout(false, false);
-                            }
-                        } else {
-                            self.send_layout_event(LayoutEvent::WindowRemoved(wid));
-                            if self.in_drag {
-                                self.drag_layout_pending = true;
-                            } else {
-                                let _ = self.update_layout(false, false);
-                            }
+                        self.ensure_active_drag(wid, &old_frame);
+                        self.update_active_drag(wid, &new_frame);
+                        if old_frame.size != new_frame.size {
+                            self.mark_drag_dirty(wid);
                         }
-                    } else if old_frame.size != new_frame.size {
-                        self.send_layout_event(LayoutEvent::WindowResized {
-                            wid,
-                            old_frame,
-                            new_frame,
-                            screens,
-                        });
-                        is_resize = true;
-                    } else if mouse_state == Some(MouseState::Down) {
-                        // When a window is being dragged (mouse down while its frame
-                        // moved), check whether it sufficiently overlaps another tiled
-                        // window; if so, trigger a swap command.
                         self.maybe_swap_on_drag(wid, new_frame);
+                    } else {
+                        let screens = self
+                            .screens
+                            .iter()
+                            .flat_map(|screen| Some((screen.space?, screen.frame)))
+                            .collect::<Vec<_>>();
+
+                        let old_space = self.best_space_for_window(&old_frame);
+                        let new_space = self.best_space_for_window(&new_frame);
+
+                        if old_space != new_space {
+                            if let Some(space) = new_space {
+                                if let Some(active_ws) = self.layout_engine.active_workspace(space)
+                                {
+                                    let _ = self
+                                        .layout_engine
+                                        .virtual_workspace_manager_mut()
+                                        .assign_window_to_workspace(space, wid, active_ws);
+                                }
+                                self.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+                                let _ = self.update_layout(false, false);
+                            } else {
+                                self.send_layout_event(LayoutEvent::WindowRemoved(wid));
+                                let _ = self.update_layout(false, false);
+                            }
+                        } else if old_frame.size != new_frame.size {
+                            self.send_layout_event(LayoutEvent::WindowResized {
+                                wid,
+                                old_frame,
+                                new_frame,
+                                screens,
+                            });
+                            is_resize = true;
+                        }
                     }
                 }
             }
@@ -1122,7 +1112,7 @@ impl Reactor {
             Event::MouseUp => {
                 self.in_drag = false;
 
-                let mut layout_updated = false;
+                let mut need_layout_refresh = false;
 
                 if let Some((dragged_wid, target_wid)) = self.pending_drag_swap.take() {
                     trace!(?dragged_wid, ?target_wid, "Performing deferred swap on MouseUp");
@@ -1158,29 +1148,23 @@ impl Reactor {
                         );
                         self.handle_layout_response(response);
 
-                        let _ = self.update_layout(false, false);
-                        layout_updated = true;
+                        need_layout_refresh = true;
                     }
-
-                    self.skip_layout_for_window = None;
                 }
+
+                let finalize_needs_layout = self.finalize_active_drag();
 
                 self.drag_manager.reset();
 
-                self.clear_drag_space_tracking();
+                if finalize_needs_layout {
+                    need_layout_refresh = true;
+                }
 
-                if self.drag_layout_pending && !layout_updated {
+                if need_layout_refresh {
                     let _ = self.update_layout(false, false);
-                    layout_updated = true;
                 }
 
-                if layout_updated {
-                    self.drag_layout_pending = false;
-                }
-
-                if self.skip_layout_for_window.is_some() {
-                    self.skip_layout_for_window = None;
-                }
+                self.skip_layout_for_window = None;
             }
             Event::MenuOpened => {
                 debug!("menu opened");
@@ -2143,18 +2127,52 @@ impl Reactor {
             .space
     }
 
-    fn ensure_drag_space_origin(&mut self, frame: &CGRect) {
-        if self.drag_space_origin.is_some() {
-            return;
+    fn ensure_active_drag(&mut self, wid: WindowId, frame: &CGRect) {
+        let needs_new_session =
+            self.active_drag.as_ref().map_or(true, |session| session.window != wid);
+        if needs_new_session {
+            let origin_space = self.best_space_for_window(frame);
+            self.active_drag = Some(DragSession {
+                window: wid,
+                last_frame: *frame,
+                origin_space,
+                settled_space: origin_space,
+                layout_dirty: false,
+            });
         }
-        let origin = self.best_space_for_window(frame);
-        self.drag_space_origin = origin;
-        self.drag_space_current = origin;
+        if self.skip_layout_for_window != Some(wid) {
+            self.skip_layout_for_window = Some(wid);
+        }
     }
 
-    fn clear_drag_space_tracking(&mut self) {
-        self.drag_space_origin = None;
-        self.drag_space_current = None;
+    fn update_active_drag(&mut self, wid: WindowId, new_frame: &CGRect) {
+        let resolved_space = match self.active_drag.as_ref() {
+            Some(session) if session.window == wid => self.resolve_drag_space(session, new_frame),
+            _ => return,
+        };
+
+        if let Some(session) = self.active_drag.as_mut() {
+            if session.window != wid {
+                return;
+            }
+            session.last_frame = *new_frame;
+            if session.settled_space != resolved_space {
+                session.settled_space = resolved_space;
+                session.layout_dirty = true;
+                self.skip_layout_for_window = Some(session.window);
+            }
+        }
+    }
+
+    fn mark_drag_dirty(&mut self, wid: WindowId) {
+        if let Some(session) = self.active_drag.as_mut() {
+            if session.window == wid {
+                session.layout_dirty = true;
+                if self.skip_layout_for_window != Some(wid) {
+                    self.skip_layout_for_window = Some(wid);
+                }
+            }
+        }
     }
 
     fn drag_space_candidate(&self, frame: &CGRect) -> Option<SpaceId> {
@@ -2182,26 +2200,16 @@ impl Reactor {
         }
     }
 
-    fn drag_effective_space(&mut self, frame: &CGRect) -> Option<SpaceId> {
-        if !self.in_drag {
-            return self.best_space_for_window(frame);
-        }
-
-        self.ensure_drag_space_origin(frame);
-
-        let current = self.drag_space_current;
+    fn resolve_drag_space(&self, session: &DragSession, frame: &CGRect) -> Option<SpaceId> {
         if frame.area() <= 0.0 {
-            return current.or_else(|| self.best_space_for_window(frame));
+            return session.settled_space.or_else(|| self.best_space_for_window(frame));
         }
-
+        let current = session.settled_space;
         let candidate =
             self.drag_space_candidate(frame).or_else(|| self.best_space_for_window(frame));
 
         match (current, candidate) {
-            (None, Some(space)) => {
-                self.drag_space_current = Some(space);
-                Some(space)
-            }
+            (None, Some(space)) => Some(space),
             (Some(cur), Some(space)) if cur == space => Some(cur),
             (Some(cur), Some(space)) => {
                 const ENTER_THRESHOLD: f64 = 0.6;
@@ -2212,7 +2220,6 @@ impl Reactor {
                 if candidate_ratio >= ENTER_THRESHOLD
                     || (candidate_ratio > current_ratio && current_ratio <= EXIT_THRESHOLD)
                 {
-                    self.drag_space_current = Some(space);
                     Some(space)
                 } else {
                     Some(cur)
@@ -2220,6 +2227,40 @@ impl Reactor {
             }
             (Some(cur), None) => Some(cur),
             (None, None) => None,
+        }
+    }
+
+    fn finalize_active_drag(&mut self) -> bool {
+        let Some(session) = self.active_drag.take() else {
+            return false;
+        };
+        let wid = session.window;
+
+        let final_space = self
+            .windows
+            .get(&wid)
+            .and_then(|window| self.best_space_for_window(&window.frame_monotonic));
+
+        if session.origin_space != final_space {
+            if session.origin_space.is_some() {
+                self.send_layout_event(LayoutEvent::WindowRemoved(wid));
+            }
+            if let Some(space) = final_space {
+                if let Some(active_ws) = self.layout_engine.active_workspace(space) {
+                    let _ = self
+                        .layout_engine
+                        .virtual_workspace_manager_mut()
+                        .assign_window_to_workspace(space, wid, active_ws);
+                }
+                self.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+            }
+            self.skip_layout_for_window = Some(wid);
+            true
+        } else if session.layout_dirty {
+            self.skip_layout_for_window = Some(wid);
+            true
+        } else {
+            false
         }
     }
 
@@ -2654,18 +2695,24 @@ impl Reactor {
         }
 
         let Some(space) = (if self.in_drag {
-            self.drag_space_current.or_else(|| self.best_space_for_window(&new_frame))
+            self.active_drag
+                .as_ref()
+                .and_then(|session| session.settled_space)
+                .or_else(|| self.best_space_for_window(&new_frame))
         } else {
             self.best_space_for_window(&new_frame)
         }) else {
             return;
         };
 
-        if let Some(origin_space) = self
-            .drag_manager
-            .origin_frame()
-            .and_then(|frame| self.best_space_for_window(&frame))
-        {
+        let origin_space_hint =
+            self.active_drag.as_ref().and_then(|session| session.origin_space).or_else(|| {
+                self.drag_manager
+                    .origin_frame()
+                    .and_then(|frame| self.best_space_for_window(&frame))
+            });
+
+        if let Some(origin_space) = origin_space_hint {
             if origin_space != space {
                 if let Some((pending_wid, pending_target)) = self.pending_drag_swap {
                     if pending_wid == wid {
@@ -2886,7 +2933,6 @@ impl Reactor {
 
     #[instrument(skip(self), fields())]
     pub fn update_layout(&mut self, is_resize: bool, is_workspace_switch: bool) -> bool {
-        self.drag_layout_pending = false;
         let screens = self.screens.clone();
         let main_window = self.main_window();
         trace!(?main_window);
