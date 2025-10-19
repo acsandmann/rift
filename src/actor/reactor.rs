@@ -2072,6 +2072,18 @@ impl Reactor {
 
         let candidate_frame = window.frame_monotonic;
 
+        // Skip raising unsuitable windows (likely tooltips or menus) to prevent cursor warping
+        if let Some(wsid) = window.window_server_id {
+            if !window_server::app_window_suitable(wsid) {
+                trace!(
+                    ?wid,
+                    ?wsid,
+                    "skipping autoraise for unsuitable window (likely tooltip/menu)"
+                );
+                return false;
+            }
+        }
+
         if self.menu_open_depth > 0 {
             trace!(?wid, "Skipping autoraise while menu open");
             return false;
