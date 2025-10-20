@@ -654,7 +654,7 @@ pub fn resize_cgimage_fit(
             CGBitmapInfo(2u32 | 2 << 12),
         )));
 
-        CGContext::set_interpolation_quality(Some(ctx.as_ref()), CGInterpolationQuality::None);
+        CGContext::set_interpolation_quality(Some(ctx.as_ref()), CGInterpolationQuality::Low);
 
         let dst = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(dst_w as f64, dst_h as f64));
         CGContext::draw_image(Some(ctx.as_ref()), dst, Some(src));
