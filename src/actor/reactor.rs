@@ -1816,8 +1816,7 @@ impl Reactor {
                 Timer::sleep(Duration::from_millis(50));
                 for pid in track.pids {
                     if let Some(app) = self.apps.get(&pid) {
-                        let _ =
-                            app.handle.send(Request::GetVisibleWindows { force_refresh: true });
+                        let _ = app.handle.send(Request::GetVisibleWindows { force_refresh: true });
                     }
                 }
                 if let Some(space) = self.screens.iter().flat_map(|s| s.space).next() {
