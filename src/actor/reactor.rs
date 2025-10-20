@@ -283,6 +283,7 @@ pub struct Reactor {
     drag_manager: crate::actor::drag_swap::DragManager,
     skip_layout_for_window: Option<WindowId>,
     pending_drag_swap: Option<(WindowId, WindowId)>,
+    pending_space_change: Option<PendingSpaceChange>,
     active_drag: Option<DragSession>,
     events_tx: Option<Sender>,
     fullscreen_by_space: HashMap<u64, FullscreenTrack>,
@@ -294,6 +295,12 @@ struct AppState {
     #[allow(unused)]
     pub info: AppInfo,
     pub handle: AppThreadHandle,
+}
+
+#[derive(Debug, Clone)]
+struct PendingSpaceChange {
+    spaces: Vec<Option<SpaceId>>,
+    ws_info: Vec<WindowServerInfo>,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -443,6 +450,7 @@ impl Reactor {
             ),
             skip_layout_for_window: None,
             pending_drag_swap: None,
+            pending_space_change: None,
             active_drag: None,
             changing_screens: HashSet::default(),
             events_tx: None,
@@ -1013,6 +1021,7 @@ impl Reactor {
                 info!("screen parameters changed");
                 let spaces_all_none = spaces.iter().all(|space| space.is_none());
                 self.suppress_stale_window_cleanup = spaces_all_none;
+                let mut ws_info_opt = Some(ws_info);
                 if frames.is_empty() {
                     if spaces.is_empty() {
                         if !self.screens.is_empty() {
@@ -1020,10 +1029,10 @@ impl Reactor {
                             self.expose_all_spaces();
                         }
                     } else if spaces.len() == self.screens.len() {
-                        for (space, screen) in spaces.into_iter().zip(&mut self.screens) {
-                            screen.space = space;
+                        self.set_screen_spaces(&spaces);
+                        if let Some(info) = ws_info_opt.take() {
+                            self.finalize_space_change(&spaces, info);
                         }
-                        self.expose_all_spaces();
                     } else {
                         warn!(
                             "Ignoring empty screen update: we have {} screens, but {} spaces",
@@ -1038,76 +1047,41 @@ impl Reactor {
                         spaces.len()
                     );
                 } else {
+                    let spaces_clone = spaces.clone();
                     self.screens = frames
                         .into_iter()
                         .zip(spaces.into_iter())
                         .map(|(frame, space)| Screen { frame, space })
                         .collect();
-                    self.expose_all_spaces();
+                    if let Some(info) = ws_info_opt.take() {
+                        self.finalize_space_change(&spaces_clone, info);
+                    }
                 }
-                self.update_complete_window_server_info(ws_info);
-                // FIXME: Update visible windows if space changed
+                if let Some(info) = ws_info_opt.take() {
+                    self.update_complete_window_server_info(info);
+                }
+                self.try_apply_pending_space_change();
             }
             Event::SpaceChanged(spaces, ws_info) => {
                 // TODO: this logic is flawed if multiple spaces are changing at once
-                if spaces.iter().flatten().any(|s| space_is_fullscreen(s.get())) {
+                if self.handle_fullscreen_space_transition(&spaces) {
                     return;
-                }
-                for s in spaces.iter().flatten() {
-                    if let Some(track) = self.fullscreen_by_space.remove(&s.get()) {
-                        wait_for_native_fullscreen_transition();
-                        Timer::sleep(Duration::from_millis(50));
-                        for pid in track.pids {
-                            if let Some(app) = self.apps.get(&pid) {
-                                let _ = app
-                                    .handle
-                                    .send(Request::GetVisibleWindows { force_refresh: true });
-                            }
-                        }
-                        if let Some(space) = self.screens.iter().flat_map(|s| s.space).next() {
-                            self.pending_refocus_space = Some(space);
-                            let _ = self.update_layout(false, false);
-                            self.update_focus_follows_mouse_state();
-                        }
-                    }
                 }
                 let spaces_all_none = spaces.iter().all(|space| space.is_none());
                 self.suppress_stale_window_cleanup = spaces_all_none;
                 if spaces.len() != self.screens.len() {
                     warn!(
-                        "Ignoring space change event: we have {} spaces, but {} screens",
-                        spaces.len(),
-                        self.screens.len()
+                        "Deferring space change: have {} screens but {} spaces",
+                        self.screens.len(),
+                        spaces.len()
                     );
+                    self.pending_space_change = Some(PendingSpaceChange { spaces, ws_info });
                     return;
                 }
                 info!("space changed");
-                for (space, screen) in spaces.iter().zip(&mut self.screens) {
-                    screen.space = *space;
-                }
-                self.expose_all_spaces();
-                self.changing_screens.clear();
-                if let Some(main_window) = self.main_window() {
-                    let spaces = self.visible_spaces();
-                    self.send_layout_event(LayoutEvent::WindowFocused(spaces, main_window));
-                }
-                self.update_complete_window_server_info(ws_info);
-                self.check_for_new_windows();
-
-                if let Some(space) = spaces.first().and_then(|s| *s) {
-                    if let Some(workspace_id) = self.layout_engine.active_workspace(space) {
-                        let workspace_name = self
-                            .layout_engine
-                            .workspace_name(space, workspace_id)
-                            .unwrap_or_else(|| format!("Workspace {:?}", workspace_id));
-                        let broadcast_event = BroadcastEvent::WorkspaceChanged {
-                            workspace_id,
-                            workspace_name,
-                            space_id: space,
-                        };
-                        _ = self.event_broadcaster.send(broadcast_event);
-                    }
-                }
+                self.pending_space_change = None;
+                self.set_screen_spaces(&spaces);
+                self.finalize_space_change(&spaces, ws_info);
             }
             Event::MouseUp => {
                 self.in_drag = false;
@@ -1828,6 +1802,83 @@ impl Reactor {
             // Errors mean the app terminated (and a termination event
             // is coming); ignore.
             _ = app.handle.send(Request::GetVisibleWindows { force_refresh: false });
+        }
+    }
+
+    fn handle_fullscreen_space_transition(&mut self, spaces: &[Option<SpaceId>]) -> bool {
+        if spaces.iter().flatten().any(|s| space_is_fullscreen(s.get())) {
+            return true;
+        }
+
+        for space in spaces.iter().flatten() {
+            if let Some(track) = self.fullscreen_by_space.remove(&space.get()) {
+                wait_for_native_fullscreen_transition();
+                Timer::sleep(Duration::from_millis(50));
+                for pid in track.pids {
+                    if let Some(app) = self.apps.get(&pid) {
+                        let _ =
+                            app.handle.send(Request::GetVisibleWindows { force_refresh: true });
+                    }
+                }
+                if let Some(space) = self.screens.iter().flat_map(|s| s.space).next() {
+                    self.pending_refocus_space = Some(space);
+                    let _ = self.update_layout(false, false);
+                    self.update_focus_follows_mouse_state();
+                }
+            }
+        }
+
+        false
+    }
+
+    fn set_screen_spaces(&mut self, spaces: &[Option<SpaceId>]) {
+        for (space, screen) in spaces.iter().copied().zip(&mut self.screens) {
+            screen.space = space;
+        }
+    }
+
+    fn finalize_space_change(
+        &mut self,
+        spaces: &[Option<SpaceId>],
+        ws_info: Vec<WindowServerInfo>,
+    ) {
+        self.suppress_stale_window_cleanup = spaces.iter().all(|space| space.is_none());
+        self.expose_all_spaces();
+        self.changing_screens.clear();
+        if let Some(main_window) = self.main_window() {
+            let spaces = self.visible_spaces();
+            self.send_layout_event(LayoutEvent::WindowFocused(spaces, main_window));
+        }
+        self.update_complete_window_server_info(ws_info);
+        self.check_for_new_windows();
+
+        if let Some(space) = spaces.iter().copied().flatten().next() {
+            if let Some(workspace_id) = self.layout_engine.active_workspace(space) {
+                let workspace_name = self
+                    .layout_engine
+                    .workspace_name(space, workspace_id)
+                    .unwrap_or_else(|| format!("Workspace {:?}", workspace_id));
+                let broadcast_event = BroadcastEvent::WorkspaceChanged {
+                    workspace_id,
+                    workspace_name,
+                    space_id: space,
+                };
+                _ = self.event_broadcaster.send(broadcast_event);
+            }
+        }
+    }
+
+    fn try_apply_pending_space_change(&mut self) {
+        if let Some(pending) = self.pending_space_change.take() {
+            if pending.spaces.len() == self.screens.len() {
+                if self.handle_fullscreen_space_transition(&pending.spaces) {
+                    return;
+                }
+                self.set_screen_spaces(&pending.spaces);
+                self.finalize_space_change(&pending.spaces, pending.ws_info);
+            } else {
+                self.pending_space_change = Some(pending);
+            }
         }
     }
 
