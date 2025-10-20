@@ -22,11 +22,11 @@ pub struct ConfigWatcher {
 }
 
 impl ConfigWatcher {
-    pub fn spawn(config_tx: config_actor::Sender, config: config::Config) {
+    pub fn spawn(config_tx: config_actor::Sender, config: config::Config, config_path: PathBuf) {
         thread::Builder::new()
             .name("config-watcher".to_string())
             .spawn(move || {
-                let file = config::config_file();
+                let file = config_path;
                 let real_file = fs::canonicalize(&file).ok();
 
                 let real_file_id = real_file

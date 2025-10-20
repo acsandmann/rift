@@ -58,6 +58,10 @@ struct Cli {
     #[arg(long)]
     record: Option<PathBuf>,
 
+    /// Path to configuration file to use (overrides default).
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -116,8 +120,9 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         std::process::exit(1);
     }
 
-    let mut config = if config_file().exists() {
-        Config::read(&config_file()).unwrap()
+    let config_path = opt.config.clone().unwrap_or_else(|| config_file());
+    let mut config = if config_path.exists() {
+        Config::read(&config_path).unwrap()
     } else {
         Config::default()
     };
@@ -158,9 +163,10 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         Some((wnd_tx.clone(), window_tx_store.clone())),
     );
 
-    let config_tx = ConfigActor::spawn(config.clone(), events_tx.clone());
+    let config_tx =
+        ConfigActor::spawn_with_path(config.clone(), events_tx.clone(), config_path.clone());
 
-    ConfigWatcher::spawn(config_tx.clone(), config.clone());
+    ConfigWatcher::spawn(config_tx.clone(), config.clone(), config_path.clone());
 
     let wn_actor = window_notify_actor::WindowNotify::new(
         events_tx.clone(),
