@@ -9,7 +9,7 @@ use tracing::debug;
 use super::{Direction, FloatingManager, LayoutId, LayoutSystemKind, WorkspaceLayouts};
 use crate::actor::app::{AppInfo, WindowId, pid_t};
 use crate::actor::broadcast::{BroadcastEvent, BroadcastSender};
-use crate::common::collections::{BTreeSet, HashMap};
+use crate::common::collections::HashMap;
 use crate::common::config::LayoutSettings;
 use crate::layout_engine::LayoutSystem;
 use crate::model::{VirtualWorkspaceId, VirtualWorkspaceManager};
@@ -68,7 +68,7 @@ pub enum LayoutEvent {
     AppClosed(pid_t),
     WindowAdded(SpaceId, WindowId),
     WindowRemoved(WindowId),
-    WindowFocused(Vec<SpaceId>, WindowId),
+    WindowFocused(SpaceId, WindowId),
     WindowResized {
         wid: WindowId,
         old_frame: CGRect,
@@ -290,23 +290,21 @@ impl LayoutEngine {
         }
     }
 
-    fn spaces_with_window(&self, wid: WindowId) -> Vec<SpaceId> {
-        let mut spaces: BTreeSet<SpaceId> = BTreeSet::new();
+    fn space_with_window(&self, wid: WindowId) -> Option<SpaceId> {
         for space in self.workspace_layouts.spaces() {
             if let Some(ws_id) = self.virtual_workspace_manager.active_workspace(space) {
                 if let Some(layout) = self.workspace_layouts.active(space, ws_id) {
                     if self.tree.contains_window(layout, wid) {
-                        spaces.insert(space);
-                        continue;
+                        return Some(space);
                     }
                 }
             }
 
             if self.floating.active_flat(space).contains(&wid) {
-                spaces.insert(space);
+                return Some(space);
             }
         }
-        spaces.into_iter().collect()
+        None
     }
 
     fn active_workspace_id_and_name(
@@ -525,7 +523,7 @@ impl LayoutEngine {
                 self.broadcast_windows_changed(space);
             }
             LayoutEvent::WindowRemoved(wid) => {
-                let affected_spaces: Vec<SpaceId> = self.spaces_with_window(wid);
+                let affected_space: Option<SpaceId> = self.space_with_window(wid);
 
                 self.tree.remove_window(wid);
 
@@ -539,29 +537,27 @@ impl LayoutEngine {
                     self.focused_window = None;
                 }
 
-                for space in affected_spaces {
+                if let Some(space) = affected_space {
                     self.broadcast_windows_changed(space);
                 }
 
                 self.rebalance_all_layouts();
             }
-            LayoutEvent::WindowFocused(spaces, wid) => {
+            LayoutEvent::WindowFocused(space, wid) => {
                 self.focused_window = Some(wid);
                 if self.floating.is_floating(wid) {
                     self.floating.set_last_focus(Some(wid));
                 } else {
-                    for space in spaces {
-                        let layout = self.layout(space);
-                        let _ = self.tree.select_window(layout, wid);
-                        if let Some(workspace_id) =
-                            self.virtual_workspace_manager.active_workspace(space)
-                        {
-                            self.virtual_workspace_manager.set_last_focused_window(
-                                space,
-                                workspace_id,
-                                Some(wid),
-                            );
-                        }
+                    let layout = self.layout(space);
+                    let _ = self.tree.select_window(layout, wid);
+                    if let Some(workspace_id) =
+                        self.virtual_workspace_manager.active_workspace(space)
+                    {
+                        self.virtual_workspace_manager.set_last_focused_window(
+                            space,
+                            workspace_id,
+                            Some(wid),
+                        );
                     }
                 }
             }
@@ -1105,14 +1101,11 @@ impl LayoutEngine {
                     None => return EventResponse::default(),
                 };
 
-                let inferred_spaces = self.spaces_with_window(focused_window);
-                let op_space = if inferred_spaces.contains(&space) {
+                let inferred_space = self.space_with_window(focused_window);
+                let op_space = if inferred_space == Some(space) {
                     space
                 } else {
-                    match inferred_spaces.first().copied() {
-                        Some(s) => s,
-                        None => space, // NOTE: this should rarely if not ever occur
-                    }
+                    inferred_space.unwrap_or(space)
                 };
 
                 let workspaces = self.virtual_workspace_manager_mut().list_workspaces(op_space);

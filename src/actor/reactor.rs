@@ -631,8 +631,6 @@ impl Reactor {
                 }
             }
             Event::WindowCreated(wid, window, ws_info, mouse_state) => {
-                // TODO: It's possible for a window to be on multiple spaces
-                // or move spaces. (Add a test)
                 // FIXME: We assume all windows are on the main screen.
                 if let Some(wsid) = window.sys_id {
                     self.window_ids.insert(wsid, wid);
@@ -1451,8 +1449,13 @@ impl Reactor {
                 window_server_id,
             })) => {
                 if self.windows.contains_key(&wid) {
-                    let spaces = self.visible_spaces();
-                    self.send_layout_event(LayoutEvent::WindowFocused(spaces, wid));
+                    if let Some(space) = self
+                        .windows
+                        .get(&wid)
+                        .and_then(|w| self.best_space_for_window(&w.frame_monotonic))
+                    {
+                        self.send_layout_event(LayoutEvent::WindowFocused(space, wid));
+                    }
 
                     let mut app_handles: HashMap<i32, AppThreadHandle> = HashMap::default();
                     if let Some(app) = self.apps.get(&wid.pid) {
@@ -1498,8 +1501,13 @@ impl Reactor {
             }
         }
         if let Some(raised_window) = raised_window {
-            let spaces = self.visible_spaces();
-            self.send_layout_event(LayoutEvent::WindowFocused(spaces, raised_window));
+            if let Some(space) = self
+                .windows
+                .get(&raised_window)
+                .and_then(|w| self.best_space_for_window(&w.frame_monotonic))
+            {
+                self.send_layout_event(LayoutEvent::WindowFocused(space, raised_window));
+            }
         }
 
         let mut layout_changed = false;
@@ -1845,8 +1853,9 @@ impl Reactor {
         self.expose_all_spaces();
         self.changing_screens.clear();
         if let Some(main_window) = self.main_window() {
-            let spaces = self.visible_spaces();
-            self.send_layout_event(LayoutEvent::WindowFocused(spaces, main_window));
+            if let Some(space) = self.main_window_space() {
+                self.send_layout_event(LayoutEvent::WindowFocused(space, main_window));
+            }
         }
         self.update_complete_window_server_info(ws_info);
         self.check_for_new_windows();
@@ -2164,17 +2173,31 @@ impl Reactor {
 
         if let Some(main_window) = self.main_window() {
             if main_window.pid == pid {
-                let spaces = self.screens.iter().flat_map(|screen| screen.space).collect();
-                self.send_layout_event(LayoutEvent::WindowFocused(spaces, main_window));
+                if let Some(space) = self.main_window_space() {
+                    self.send_layout_event(LayoutEvent::WindowFocused(space, main_window));
+                }
             }
         }
     }
 
     fn best_space_for_window(&self, frame: &CGRect) -> Option<SpaceId> {
+        let center = frame.mid();
         self.screens
             .iter()
-            .max_by_key(|s| s.frame.intersection(frame).area() as i64)?
-            .space
+            .find_map(|s| {
+                let space = s.space?;
+                if s.frame.contains(center) {
+                    Some(space)
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                self.screens
+                    .iter()
+                    .max_by_key(|s| s.frame.intersection(frame).area() as i64)?
+                    .space
+            })
     }
 
     fn ensure_active_drag(&mut self, wid: WindowId, frame: &CGRect) {
@@ -2237,47 +2260,14 @@ impl Reactor {
         })
     }
 
-    fn drag_space_overlap_ratio(&self, frame: &CGRect, space: SpaceId) -> f64 {
-        let Some(screen) = self.screens.iter().find(|s| s.space == Some(space)) else {
-            return 0.0;
-        };
-        let intersection = screen.frame.intersection(frame);
-        let frame_area = frame.area();
-        if frame_area <= 0.0 {
-            0.0
-        } else {
-            (intersection.area() / frame_area).clamp(0.0, 1.0)
-        }
-    }
-
     fn resolve_drag_space(&self, session: &DragSession, frame: &CGRect) -> Option<SpaceId> {
         if frame.area() <= 0.0 {
             return session.settled_space.or_else(|| self.best_space_for_window(frame));
         }
-        let current = session.settled_space;
-        let candidate =
-            self.drag_space_candidate(frame).or_else(|| self.best_space_for_window(frame));
 
-        match (current, candidate) {
-            (None, Some(space)) => Some(space),
-            (Some(cur), Some(space)) if cur == space => Some(cur),
-            (Some(cur), Some(space)) => {
-                const ENTER_THRESHOLD: f64 = 0.6;
-                const EXIT_THRESHOLD: f64 = 0.3;
-                let candidate_ratio = self.drag_space_overlap_ratio(frame, space);
-                let current_ratio = self.drag_space_overlap_ratio(frame, cur);
-
-                if candidate_ratio >= ENTER_THRESHOLD
-                    || (candidate_ratio > current_ratio && current_ratio <= EXIT_THRESHOLD)
-                {
-                    Some(space)
-                } else {
-                    Some(cur)
-                }
-            }
-            (Some(cur), None) => Some(cur),
-            (None, None) => None,
-        }
+        self.drag_space_candidate(frame)
+            .or_else(|| self.best_space_for_window(frame))
+            .or(session.settled_space)
     }
 
     fn finalize_active_drag(&mut self) -> bool {
@@ -2312,14 +2302,6 @@ impl Reactor {
         } else {
             false
         }
-    }
-
-    fn visible_spaces(&self) -> Vec<SpaceId> {
-        self.screens.iter().flat_map(|screen| screen.space).collect()
-    }
-
-    fn visible_space_ids_u64(&self) -> Vec<u64> {
-        self.visible_spaces().into_iter().map(|sid| sid.get()).collect()
     }
 
     fn has_visible_window_server_ids_for_pid(&self, pid: pid_t) -> bool {
@@ -2416,13 +2398,10 @@ impl Reactor {
         let Some(candidate_wsid) = window.window_server_id else {
             return true;
         };
-        let space_ids: Vec<u64> = self.visible_space_ids_u64();
-        if space_ids.is_empty() {
-            return true;
-        }
-
-        let order =
-            crate::sys::window_server::space_window_list_for_connection(&space_ids, 0, false);
+        let order = {
+            let space_id = space.get();
+            crate::sys::window_server::space_window_list_for_connection(&[space_id], 0, false)
+        };
         let candidate_u32 = candidate_wsid.as_u32();
 
         for above_u32 in order {

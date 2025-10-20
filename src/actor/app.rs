@@ -204,8 +204,8 @@ pub enum Request {
     BeginWindowAnimation(WindowId),
     EndWindowAnimation(WindowId),
 
-    /// Raise the windows on the screen, in the given order. All windows must be
-    /// on the same screen, or they will not be raised correctly.
+    /// Raise the windows within a single space, in the given order. All windows must be
+    /// in the same space, or they will not be raised correctly.
     ///
     /// Events attributed to this request will use the provided [`Quiet`]
     /// parameter for the last window only. Events for other windows will be
