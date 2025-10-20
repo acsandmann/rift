@@ -261,15 +261,15 @@ const APP_NOTIFICATIONS: &[&str] = &[
 
 const WINDOW_NOTIFICATIONS: &[&str] = &[
     kAXUIElementDestroyedNotification,
-    // kAXWindowMovedNotification,
-    // kAXWindowResizedNotification,
+    kAXWindowMovedNotification,
+    kAXWindowResizedNotification,
     kAXWindowMiniaturizedNotification,
     kAXWindowDeminiaturizedNotification,
     kAXTitleChangedNotification,
 ];
 
-const WINDOW_ANIMATION_NOTIFICATIONS: &[&str] = &[];
-//&[kAXWindowMovedNotification, kAXWindowResizedNotification];
+const WINDOW_ANIMATION_NOTIFICATIONS: &[&str] =
+    &[kAXWindowMovedNotification, kAXWindowResizedNotification];
 
 impl State {
     async fn run(
