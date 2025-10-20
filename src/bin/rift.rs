@@ -78,7 +78,6 @@ fn main() {
     let opt = Cli::parse();
 
     if let Some(Commands::Service { service }) = &opt.command {
-        println!("Service management is not yet implemented.");
         match handle_service_command(service) {
             Ok(msg) => {
                 println!("{}", msg);
