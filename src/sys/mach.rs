@@ -9,9 +9,10 @@
 
 use core::mem::{size_of, zeroed};
 use core::ptr::{copy_nonoverlapping, null, null_mut, write_bytes};
-use std::alloc::alloc;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
+
+use tracing::error;
 
 const MAX_MESSAGE_SIZE: u32 = 16_384;
 const MACH_BS_NAME_FMT_PREFIX: &str = "com.";
@@ -33,8 +34,9 @@ const MACH_RCV_MSG: mach_msg_option_t = 0x0000_0002;
 
 const MACH_MSG_TIMEOUT_NONE: u32 = 0;
 
-const MACH_MSG_TYPE_MAKE_SEND: u32 = 20;
 const MACH_MSG_TYPE_COPY_SEND: u32 = 19;
+const MACH_MSG_TYPE_MOVE_SEND_ONCE: u32 = 18;
+const MACH_MSG_TYPE_MAKE_SEND_ONCE: u32 = 21;
 
 const MACH_PORT_RIGHT_RECEIVE: c_int = 1;
 const MACH_PORT_LIMITS_INFO: c_int = 1;
@@ -43,12 +45,10 @@ const MACH_PORT_QLIMIT_LARGE: u32 = 1024;
 
 const TASK_BOOTSTRAP_PORT: c_int = 4;
 
+const BOOTSTRAP_UNKNOWN_SERVICE: kern_return_t = 1102;
+
 #[inline]
 const fn MACH_MSGH_BITS(remote: u32, local: u32) -> u32 { remote | (local << 8) }
-#[inline]
-const fn MACH_MSGH_BITS_REMOTE(bits: u32) -> u32 { bits & 0xff }
-#[inline]
-const fn MACH_MSGH_BITS_LOCAL(bits: u32) -> u32 { (bits >> 8) & 0xff }
 
 type CFIndex = isize;
 type CFAllocatorRef = *const c_void;
@@ -77,7 +77,7 @@ unsafe extern "C" {
         portNum: mach_port_t,
         callout: CFMachPortCallBack,
         context: *const CFMachPortContext,
-        shouldFreeInfo: bool,
+        shouldFreeInfo: u8,
     ) -> CFMachPortRef;
 
     fn CFMachPortCreateRunLoopSource(
@@ -98,12 +98,12 @@ unsafe extern "C" {
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct mach_msg_header_t {
-    msgh_bits: mach_msg_bits_t,
-    msgh_size: mach_msg_size_t,
+    pub msgh_bits: mach_msg_bits_t,
+    pub msgh_size: mach_msg_size_t,
     pub msgh_remote_port: mach_port_t,
-    msgh_local_port: mach_port_t,
-    msgh_voucher_port: mach_port_name_t,
-    msgh_id: mach_msg_id_t,
+    pub msgh_local_port: mach_port_t,
+    pub msgh_voucher_port: mach_port_name_t,
+    pub msgh_id: mach_msg_id_t,
 }
 
 #[repr(C)]
@@ -178,6 +178,12 @@ unsafe extern "C" {
         service_name: *const c_char,
         sp: *mut mach_port_t,
     ) -> kern_return_t;
+
+    fn bootstrap_register(
+        bp: mach_port_t,
+        service_name: *const c_char,
+        sp: mach_port_t,
+    ) -> kern_return_t;
 }
 
 #[repr(C)]
@@ -189,12 +195,18 @@ struct simple_message {
 unsafe fn mach_get_bs_port(bs_name: &CStr) -> mach_port_t {
     let mut bs_port: mach_port_t = 0;
     if task_get_special_port(mach_task_self(), TASK_BOOTSTRAP_PORT, &mut bs_port) != KERN_SUCCESS {
+        error!("mach_get_bs_port: task_get_special_port failed");
         return 0;
     }
 
     let mut service_port: mach_port_t = 0;
     let result = bootstrap_look_up(bs_port, bs_name.as_ptr(), &mut service_port);
     if result != KERN_SUCCESS {
+        error!(
+            "mach_get_bs_port: bootstrap_look_up failed for {} (kr={})",
+            bs_name.to_string_lossy(),
+            result
+        );
         return 0;
     }
     service_port
@@ -217,32 +229,22 @@ pub unsafe fn mach_send_message(
         if mach_port_allocate(task, MACH_PORT_RIGHT_RECEIVE, &mut reply_port) != KERN_SUCCESS {
             return null_mut();
         }
-        if mach_port_insert_right(task, reply_port, reply_port, MACH_MSG_TYPE_MAKE_SEND as c_int)
-            != KERN_SUCCESS
-        {
-            let _ = mach_port_mod_refs(task, reply_port, MACH_PORT_RIGHT_RECEIVE, -1);
-            return null_mut();
-        }
     }
 
     let mut msg: simple_message = zeroed();
 
-    let mut aligned_len = (len + 3) & !3;
-    let mut total_size = (size_of::<mach_msg_header_t>() as u32) + aligned_len;
-
-    if total_size < 64 {
-        total_size = 64;
-        aligned_len = total_size - (size_of::<mach_msg_header_t>() as u32);
-    }
+    let aligned_len = (len + 3) & !3;
+    let total_size = (size_of::<mach_msg_header_t>() as u32) + aligned_len;
 
     msg.header.msgh_remote_port = port;
-    msg.header.msgh_local_port = reply_port;
+    msg.header.msgh_local_port = if await_response { reply_port } else { 0 };
     msg.header.msgh_size = total_size;
     msg.header.msgh_id = 1234;
     msg.header.msgh_voucher_port = 0;
 
     if await_response {
-        msg.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND);
+        msg.header.msgh_bits =
+            MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE);
     } else {
         msg.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
     }
@@ -266,7 +268,6 @@ pub unsafe fn mach_send_message(
         MACH_MSG_TIMEOUT_NONE,
         0,
     );
-
     if send_result != MACH_MSG_SUCCESS {
         if await_response && reply_port != 0 {
             let _ = mach_port_mod_refs(task, reply_port, MACH_PORT_RIGHT_RECEIVE, -1);
@@ -287,33 +288,27 @@ pub unsafe fn mach_send_message(
             0,
         );
 
+        let _ = mach_port_mod_refs(task, reply_port, MACH_PORT_RIGHT_RECEIVE, -1);
+        let _ = mach_port_deallocate(task, reply_port);
+
         if recv_result != MACH_MSG_SUCCESS {
-            let _ = mach_port_mod_refs(task, reply_port, MACH_PORT_RIGHT_RECEIVE, -1);
-            let _ = mach_port_deallocate(task, reply_port);
             return null_mut();
         }
 
-        let response_len = response.header.msgh_size - (size_of::<mach_msg_header_t>() as u32);
+        let response_len =
+            response.header.msgh_size.saturating_sub(size_of::<mach_msg_header_t>() as u32);
 
         let layout = std::alloc::Layout::array::<c_char>((response_len as usize) + 1).unwrap();
-        let buf = alloc(layout) as *mut c_char;
+        let buf = std::alloc::alloc(layout) as *mut c_char;
         if buf.is_null() {
-            let _ = mach_port_mod_refs(task, reply_port, MACH_PORT_RIGHT_RECEIVE, -1);
-            let _ = mach_port_deallocate(task, reply_port);
             return null_mut();
         }
-
-        // Copy response payload from Mach message buffer into a new C string buffer
         copy_nonoverlapping(
             response.data.as_ptr() as *const u8,
             buf as *mut u8,
             response_len as usize,
         );
         *buf.add(response_len as usize) = 0;
-
-        let _ = mach_port_mod_refs(task, reply_port, MACH_PORT_RIGHT_RECEIVE, -1);
-        let _ = mach_port_deallocate(task, reply_port);
-
         return buf;
     }
 
@@ -322,16 +317,32 @@ pub unsafe fn mach_send_message(
 
 pub unsafe fn mach_send_request(message: *const c_char, len: u32) -> *mut c_char {
     if message.is_null() || len > MAX_MESSAGE_SIZE {
+        error!(
+            "mach_send_request: invalid args message={:?} len={}",
+            message, len
+        );
         return null_mut();
     }
 
     let bs_name = CString::new(format!("{}{}", MACH_BS_NAME_FMT_PREFIX, G_NAME)).unwrap();
     let service_port = mach_get_bs_port(&bs_name);
     if service_port == 0 {
+        error!(
+            "mach_send_request: mach_get_bs_port returned 0 for {}",
+            bs_name.to_string_lossy()
+        );
         return null_mut();
     }
 
     mach_send_message(service_port, message, len, true)
+}
+
+pub unsafe fn mach_free_response(ptr: *mut c_char, len: u32) {
+    if ptr.is_null() {
+        return;
+    }
+    let layout = std::alloc::Layout::array::<c_char>((len as usize) + 1).unwrap();
+    std::alloc::dealloc(ptr as *mut u8, layout);
 }
 
 pub type mach_handler = unsafe extern "C" fn(
@@ -377,25 +388,14 @@ extern "C" fn mach_message_callback(
         let mach_server = &mut *(context as *mut mach_server);
         let msg = &mut *(message as *mut simple_message);
 
-        let padded_data_len =
+        let payload_len =
             msg.header.msgh_size.saturating_sub(size_of::<mach_msg_header_t>() as u32);
-
-        let mut actual_data_len = 0u32;
-        for i in 0..padded_data_len {
-            if msg.data[i as usize] == 0 {
-                actual_data_len = i;
-                break;
-            }
-        }
-        if actual_data_len == 0 {
-            actual_data_len = padded_data_len;
-        }
 
         if let Some(handler) = mach_server.handler {
             handler(
                 mach_server.context,
                 msg.data.as_mut_ptr() as *mut c_char,
-                actual_data_len,
+                payload_len,
                 &mut msg.header as *mut mach_msg_header_t,
             );
         }
@@ -409,10 +409,57 @@ pub unsafe fn mach_server_begin(
 ) -> bool {
     mach_server.task = mach_task_self();
 
-    if mach_port_allocate(mach_server.task, MACH_PORT_RIGHT_RECEIVE, &mut mach_server.port)
+    if task_get_special_port(mach_server.task, TASK_BOOTSTRAP_PORT, &mut mach_server.bs_port)
         != KERN_SUCCESS
     {
         return false;
+    }
+
+    let bs_name = CString::new(format!("{}{}", MACH_BS_NAME_FMT_PREFIX, G_NAME)).unwrap();
+
+    let mut port_from_launchd: mach_port_t = 0;
+    let kr = bootstrap_check_in(mach_server.bs_port, bs_name.as_ptr(), &mut port_from_launchd);
+    if kr == KERN_SUCCESS {
+        mach_server.port = port_from_launchd;
+    } else if kr == BOOTSTRAP_UNKNOWN_SERVICE {
+        // fall through to stand-alone below
+    } else {
+        return false;
+    }
+
+    if mach_server.port == 0 {
+        if mach_port_allocate(mach_server.task, MACH_PORT_RIGHT_RECEIVE, &mut mach_server.port)
+            != KERN_SUCCESS
+        {
+            return false;
+        }
+        if mach_port_insert_right(
+            mach_server.task,
+            mach_server.port,
+            mach_server.port,
+            MACH_MSG_TYPE_MAKE_SEND_ONCE as c_int,
+        ) != KERN_SUCCESS
+        {
+            let _ = mach_port_insert_right(
+                mach_server.task,
+                mach_server.port,
+                mach_server.port,
+                MACH_MSG_TYPE_COPY_SEND as c_int,
+            );
+        }
+
+        let _ = mach_port_insert_right(
+            mach_server.task,
+            mach_server.port,
+            mach_server.port,
+            MACH_MSG_TYPE_COPY_SEND as c_int,
+        );
+
+        if bootstrap_register(mach_server.bs_port, bs_name.as_ptr(), mach_server.port)
+            != KERN_SUCCESS
+        {
+            return false;
+        }
     }
 
     let limits = mach_port_limits {
@@ -426,36 +473,6 @@ pub unsafe fn mach_server_begin(
         MACH_PORT_LIMITS_INFO_COUNT,
     );
 
-    if mach_port_insert_right(
-        mach_server.task,
-        mach_server.port,
-        mach_server.port,
-        MACH_MSG_TYPE_MAKE_SEND as c_int,
-    ) != KERN_SUCCESS
-    {
-        return false;
-    }
-
-    if task_get_special_port(mach_server.task, TASK_BOOTSTRAP_PORT, &mut mach_server.bs_port)
-        != KERN_SUCCESS
-    {
-        return false;
-    }
-
-    let bs_name = CString::new(format!("{}{}", MACH_BS_NAME_FMT_PREFIX, G_NAME)).unwrap();
-
-    // If it exists, check-in to take ownership
-    let mut existing_port: mach_port_t = 0;
-    if bootstrap_look_up(mach_server.bs_port, bs_name.as_ptr(), &mut existing_port) == KERN_SUCCESS
-    {
-        let _ = bootstrap_check_in(mach_server.bs_port, bs_name.as_ptr(), &mut mach_server.port);
-    }
-
-    let kr = bootstrap_check_in(mach_server.bs_port, bs_name.as_ptr(), &mut mach_server.port);
-    if kr != KERN_SUCCESS {
-        return false;
-    }
-
     mach_server.handler = Some(handler);
     mach_server.context = context;
     mach_server.is_running = true;
@@ -467,25 +484,22 @@ pub unsafe fn mach_server_begin(
         release: None,
         copyDescription: None,
     };
-
     let cf_mach_port = CFMachPortCreateWithPort(
         null(),
         mach_server.port,
         Some(mach_message_callback),
         &cf_context,
-        false,
+        0,
     );
     if cf_mach_port.is_null() {
         return false;
     }
-
     let source = CFMachPortCreateRunLoopSource(null(), cf_mach_port, 0);
     if source.is_null() {
         CFRelease(cf_mach_port);
         return false;
     }
-
-    CFRunLoopAddSource(CFRunLoopGetMain(), source, unsafe { kCFRunLoopDefaultMode });
+    CFRunLoopAddSource(CFRunLoopGetMain(), source, kCFRunLoopDefaultMode);
     CFRelease(source);
     CFRelease(cf_mach_port);
 
@@ -498,39 +512,55 @@ pub unsafe fn send_mach_reply(
     response_len: u32,
 ) -> bool {
     if original_msg.is_null() || response_data.is_null() || response_len > MAX_MESSAGE_SIZE {
+        error!(
+            "send_mach_reply: invalid args original_msg={:?} response_data={:?} response_len={}",
+            original_msg, response_data, response_len
+        );
         return false;
     }
 
-    let original = &*original_msg;
+    let mut remote_port_type: u32 = 0;
+    let mut local_port_type: u32 = 0;
+    let _ = mach_port_type(
+        mach_task_self(),
+        (*original_msg).msgh_remote_port,
+        &mut remote_port_type,
+    );
+    let _ = mach_port_type(
+        mach_task_self(),
+        (*original_msg).msgh_local_port,
+        &mut local_port_type,
+    );
 
-    let reply_port: mach_port_t;
-
-    if original.msgh_remote_port != 0 {
-        reply_port = original.msgh_remote_port;
-    } else if original.msgh_local_port != 0 {
-        reply_port = original.msgh_local_port;
-    } else {
-        return false;
+    let mut reply_port = (*original_msg).msgh_remote_port;
+    if reply_port == 0 {
+        reply_port = (*original_msg).msgh_local_port;
+        if reply_port == 0 {
+            error!(
+                "send_mach_reply: no reply port (both msgh_remote_port and msgh_local_port are 0)"
+            );
+            return false;
+        }
     }
 
     let mut reply: simple_message = zeroed();
 
-    let mut aligned_len = (response_len + 3) & !3;
-    let mut total_size = (size_of::<mach_msg_header_t>() as u32) + aligned_len;
+    let aligned_len = (response_len + 3) & !3;
+    let total_size = (size_of::<mach_msg_header_t>() as u32) + aligned_len;
 
-    if total_size < 64 {
-        total_size = 64;
-        aligned_len = total_size - (size_of::<mach_msg_header_t>() as u32);
-    }
+    let remote_descriptor = if ((*original_msg).msgh_bits & 0xff) == MACH_MSG_TYPE_MAKE_SEND_ONCE {
+        MACH_MSG_TYPE_MOVE_SEND_ONCE
+    } else {
+        MACH_MSG_TYPE_COPY_SEND
+    };
 
-    reply.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+    reply.header.msgh_bits = MACH_MSGH_BITS(remote_descriptor as u32, 0);
     reply.header.msgh_size = total_size;
     reply.header.msgh_remote_port = reply_port;
     reply.header.msgh_local_port = 0;
     reply.header.msgh_voucher_port = 0;
-    reply.header.msgh_id = original.msgh_id;
+    reply.header.msgh_id = (*original_msg).msgh_id;
 
-    // Copy response bytes into the reply message buffer
     copy_nonoverlapping(
         response_data as *const u8,
         reply.data.as_mut_ptr() as *mut u8,
@@ -556,8 +586,12 @@ pub unsafe fn send_mach_reply(
     );
 
     if result != MACH_MSG_SUCCESS {
-        let mut port_type: u32 = 0;
-        let _ = mach_port_type(mach_task_self(), reply_port, &mut port_type);
+        let mut _port_type: u32 = 0;
+        let _ = mach_port_type(mach_task_self(), reply_port, &mut _port_type);
+        error!(
+            "send_mach_reply: mach_msg failed result={} reply_port={} port_type={} descriptor={}",
+            result, reply_port, _port_type, remote_descriptor
+        );
         return false;
     }
 
