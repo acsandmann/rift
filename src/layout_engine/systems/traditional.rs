@@ -404,6 +404,26 @@ impl LayoutSystem for TraditionalLayoutSystem {
 
             for (node, parent) in new_node.ancestors_with_parent(map) {
                 let Some(parent) = parent else { break };
+                // Check if parent or any ancestor is a stacked container with perpendicular orientation
+                let mut current = parent;
+                let mut skip = false;
+                loop {
+                    let current_layout = self.layout(current);
+                    if current_layout.is_stacked()
+                        && current_layout.orientation() != direction.orientation()
+                    {
+                        skip = true;
+                        break;
+                    }
+                    if let Some(p) = current.parent(map) {
+                        current = p;
+                    } else {
+                        break;
+                    }
+                }
+                if skip {
+                    continue;
+                }
                 if self.tree.data.selection.select_locally(map, node) {
                     if self.layout(parent).is_group() {
                         highest_revealed = node;
@@ -918,22 +938,54 @@ impl TraditionalLayoutSystem {
                 }
             }
             let next_child = match (layout_kind, direction) {
-                (LayoutKind::Horizontal, Direction::Left) => children.first().copied(),
-                (LayoutKind::Horizontal, Direction::Right) => children.last().copied(),
-                (LayoutKind::Horizontal, Direction::Up | Direction::Down) => self
+                (LayoutKind::Horizontal, Direction::Left) => self
                     .tree
                     .data
                     .selection
                     .local_selection(map, current)
                     .or(children.first().copied()),
-                (LayoutKind::Vertical, Direction::Up) => children.first().copied(),
-                (LayoutKind::Vertical, Direction::Down) => children.last().copied(),
-                (LayoutKind::Vertical, Direction::Left | Direction::Right) => self
+                (LayoutKind::Horizontal, Direction::Right) => self
+                    .tree
+                    .data
+                    .selection
+                    .local_selection(map, current)
+                    .or(children.last().copied()),
+                (LayoutKind::Horizontal, Direction::Up) => self
                     .tree
                     .data
                     .selection
                     .local_selection(map, current)
                     .or(children.first().copied()),
+                (LayoutKind::Horizontal, Direction::Down) => self
+                    .tree
+                    .data
+                    .selection
+                    .local_selection(map, current)
+                    .or(children.last().copied()),
+                (LayoutKind::Vertical, Direction::Up) => self
+                    .tree
+                    .data
+                    .selection
+                    .local_selection(map, current)
+                    .or(children.first().copied()),
+                (LayoutKind::Vertical, Direction::Down) => self
+                    .tree
+                    .data
+                    .selection
+                    .local_selection(map, current)
+                    .or(children.last().copied()),
+                (LayoutKind::Vertical, Direction::Left) => self
+                    .tree
+                    .data
+                    .selection
+                    .local_selection(map, current)
+                    .or(children.first().copied()),
+                (LayoutKind::Vertical, Direction::Right) => self
+                    .tree
+                    .data
+                    .selection
+                    .local_selection(map, current)
+                    .or(children.last().copied()),
                 _ if layout_kind.is_stacked() => self
                     .tree
                     .data
@@ -973,20 +1025,7 @@ impl TraditionalLayoutSystem {
                 Direction::Right | Direction::Down => from.next_sibling(&self.tree.map),
             }
         } else {
-            let parent_layout = self.tree.data.layout.kind(parent);
-            if !parent_layout.is_stacked() {
-                return None;
-            }
-            let siblings: Vec<_> = parent.children(&self.tree.map).collect();
-            let current_position = siblings.iter().position(|&s| s == from)?;
-            match direction {
-                Direction::Left | Direction::Up => {
-                    current_position.checked_sub(1).and_then(|pos| siblings.get(pos).copied())
-                }
-                Direction::Right | Direction::Down => {
-                    current_position.checked_add(1).and_then(|pos| siblings.get(pos).copied())
-                }
-            }
+            None
         }
     }
 
@@ -1937,15 +1976,36 @@ mod tests {
         let child2 = system.add_child(stacked_parent, LayoutKind::Horizontal);
         let child3 = system.add_child(stacked_parent, LayoutKind::Horizontal);
 
-        // Direction Up (Vertical), parent is HorizontalStack (Horizontal), not matching Vertical, but stacked
-        // Should move in siblings list: Up -> prev
-        assert_eq!(system.move_over(child2, Direction::Up), Some(child1));
-        assert_eq!(system.move_over(child3, Direction::Up), Some(child2));
+        // Direction Up (Vertical), parent is HorizontalStack (Horizontal), orientations don't match
+        // Should not move within stack, return None
+        assert_eq!(system.move_over(child2, Direction::Up), None);
+        assert_eq!(system.move_over(child3, Direction::Up), None);
         assert_eq!(system.move_over(child1, Direction::Up), None);
 
-        // Direction Down -> next
-        assert_eq!(system.move_over(child1, Direction::Down), Some(child2));
-        assert_eq!(system.move_over(child2, Direction::Down), Some(child3));
+        // Direction Down -> also None
+        assert_eq!(system.move_over(child1, Direction::Down), None);
+        assert_eq!(system.move_over(child2, Direction::Down), None);
         assert_eq!(system.move_over(child3, Direction::Down), None);
+    }
+
+    #[test]
+    fn test_move_over_matching_stacked() {
+        let mut system = TestTraditionalLayoutSystem::new();
+        // Create a stacked parent
+        let stacked_parent = system.add_child(system.root_id, LayoutKind::HorizontalStack);
+        let child1 = system.add_child(stacked_parent, LayoutKind::Horizontal);
+        let child2 = system.add_child(stacked_parent, LayoutKind::Horizontal);
+        let child3 = system.add_child(stacked_parent, LayoutKind::Horizontal);
+
+        // Direction Left (Horizontal), parent is HorizontalStack (Horizontal), orientations match
+        // Should move in siblings list: Left -> prev
+        assert_eq!(system.move_over(child2, Direction::Left), Some(child1));
+        assert_eq!(system.move_over(child3, Direction::Left), Some(child2));
+        assert_eq!(system.move_over(child1, Direction::Left), None);
+
+        // Direction Right -> next
+        assert_eq!(system.move_over(child1, Direction::Right), Some(child2));
+        assert_eq!(system.move_over(child2, Direction::Right), Some(child3));
+        assert_eq!(system.move_over(child3, Direction::Right), None);
     }
 }

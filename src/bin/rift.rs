@@ -28,6 +28,8 @@ use rift_wm::sys::service::{ServiceCommands, handle_service_command};
 use rift_wm::sys::skylight::{CGSEventType, KnownCGSEvent};
 use tokio::join;
 
+embed_plist::embed_info_plist!("../../assets/Info.plist");
+
 #[derive(Parser)]
 struct Cli {
     /// Only run the window manager on the current space.
@@ -81,7 +83,6 @@ fn main() {
     let opt = Cli::parse();
 
     if let Some(Commands::Service { service }) = &opt.command {
-        println!("Service management is not yet implemented.");
         match handle_service_command(service) {
             Ok(msg) => {
                 println!("{}", msg);

@@ -380,17 +380,28 @@ unsafe extern "C" fn handle_mach_request_c(
 
     let handler = unsafe { &*(context as *const MachHandler) };
     let message_slice = unsafe { std::slice::from_raw_parts(message as *const u8, len as usize) };
-    let message_str = match std::str::from_utf8(message_slice) {
+
+    let trimmed_slice = if let Some(pos) = message_slice.iter().position(|&b| b == 0) {
+        &message_slice[..pos]
+    } else {
+        message_slice
+    };
+
+    let message_str = match std::str::from_utf8(trimmed_slice) {
         Ok(s) => s,
         Err(e) => {
-            error!("Invalid UTF-8 in message: {}", e);
+            let lossy = String::from_utf8_lossy(trimmed_slice);
+            error!(
+                "Invalid UTF-8 in message after trimming NULs: {}. Contents (lossy): {}",
+                e, lossy
+            );
             return;
         }
     };
 
     debug!("Received message: {}", message_str);
 
-    let client_port = unsafe { (*original_msg).msgh_remote_port };
+    let client_port = unsafe { (*original_msg).msgh_local_port };
 
     let request: RiftRequest = match serde_json::from_str(message_str) {
         Ok(req) => req,
