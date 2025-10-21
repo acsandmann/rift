@@ -152,6 +152,11 @@ pub enum Event {
     /// System woke from sleep; used to re-subscribe SLS notifications.
     SystemWoke,
 
+    #[serde(skip)]
+    MissionControlNativeEntered,
+    #[serde(skip)]
+    MissionControlNativeExited,
+
     /// A raise request completed. Used by the raise manager to track when
     /// all raise requests in a sequence have finished.
     RaiseCompleted {
@@ -288,6 +293,7 @@ pub struct Reactor {
     events_tx: Option<Sender>,
     fullscreen_by_space: HashMap<u64, FullscreenTrack>,
     changing_screens: HashSet<WindowServerId>,
+    pending_mission_control_refresh: HashSet<pid_t>,
 }
 
 #[derive(Debug)]
@@ -455,6 +461,7 @@ impl Reactor {
             changing_screens: HashSet::default(),
             events_tx: None,
             fullscreen_by_space: HashMap::default(),
+            pending_mission_control_refresh: HashSet::default(),
         }
     }
 
@@ -1161,6 +1168,15 @@ impl Reactor {
                 let ids: Vec<u32> = self.window_ids.keys().map(|wsid| wsid.as_u32()).collect();
                 crate::sys::window_notify::update_window_notifications(&ids);
                 self.last_sls_notification_ids = ids;
+            }
+            Event::MissionControlNativeEntered => {
+                self.set_mission_control_active(true);
+            }
+            Event::MissionControlNativeExited => {
+                if self.mission_control_active {
+                    self.set_mission_control_active(false);
+                }
+                self.refresh_windows_after_mission_control();
             }
             Event::RaiseCompleted { window_id, sequence_id } => {
                 let msg = raise_manager::Event::RaiseCompleted { window_id, sequence_id };
@@ -1904,6 +1920,7 @@ impl Reactor {
         const MIN_REAL_WINDOW_DIMENSION: f64 = 2.0;
 
         let known_visible_set: HashSet<WindowId> = known_visible.into_iter().collect();
+        let pending_refresh = self.pending_mission_control_refresh.contains(&pid);
 
         let has_window_server_visibles_without_ax = {
             let known_visible_set = &known_visible_set;
@@ -1914,6 +1931,7 @@ impl Reactor {
         };
 
         let skip_stale_cleanup = self.suppress_stale_window_cleanup
+            || pending_refresh
             || (known_visible_set.is_empty() && !self.has_visible_window_server_ids_for_pid(pid))
             || has_window_server_visibles_without_ax;
 
@@ -1982,6 +2000,10 @@ impl Reactor {
 
         for wid in stale_windows {
             self.handle_event(Event::WindowDestroyed(wid));
+        }
+
+        if pending_refresh {
+            self.pending_mission_control_refresh.remove(&pid);
         }
 
         let time_since_app_rules = self.app_rules_recently_applied.elapsed();
@@ -2928,6 +2950,25 @@ impl Reactor {
         }
         self.mission_control_active = active;
         self.update_focus_follows_mouse_state();
+    }
+
+    fn refresh_windows_after_mission_control(&mut self) {
+        debug!("Refreshing window state after Mission Control");
+        let ws_info = window_server::get_visible_windows_with_layer(None);
+        self.update_partial_window_server_info(ws_info);
+        self.pending_mission_control_refresh.clear();
+        self.force_refresh_all_windows();
+        self.check_for_new_windows();
+        let _ = self.update_layout(false, false);
+        self.maybe_send_menu_update();
+    }
+
+    fn force_refresh_all_windows(&mut self) {
+        for (&pid, app) in &self.apps {
+            if app.handle.send(Request::GetVisibleWindows { force_refresh: true }).is_ok() {
+                self.pending_mission_control_refresh.insert(pid);
+            }
+        }
     }
 
     fn main_window(&self) -> Option<WindowId> { self.main_window_tracker.main_window() }

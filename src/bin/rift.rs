@@ -9,6 +9,7 @@ use rift_wm::actor::config_watcher::ConfigWatcher;
 use rift_wm::actor::event_tap::EventTap;
 use rift_wm::actor::menu_bar::Menu;
 use rift_wm::actor::mission_control::MissionControlActor;
+use rift_wm::actor::mission_control_observer::NativeMissionControl;
 use rift_wm::actor::notification_center::NotificationCenter;
 use rift_wm::actor::reactor::{self, Reactor};
 use rift_wm::actor::stack_line::StackLine;
@@ -209,6 +210,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         config: config.clone(),
     };
     let (mc_tx, mc_rx) = rift_wm::actor::channel();
+    let (_mc_native_tx, mc_native_rx) = rift_wm::actor::channel();
     let (wm_controller, wm_controller_sender) = WmController::new(
         wm_config,
         events_tx.clone(),
@@ -237,6 +239,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
     );
 
     let mission_control = MissionControlActor::new(config.clone(), mc_rx, events_tx.clone(), mtm);
+    let mission_control_native = NativeMissionControl::new(events_tx.clone(), mc_native_rx);
 
     println!(
         "NOTICE: by default rift starts in a deactivated state.
@@ -254,6 +257,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
             menu.run(),
             stack_line.run(),
             wn_actor.run(),
+            mission_control_native.run(),
             mission_control.run(),
         );
     });
