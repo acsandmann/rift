@@ -9,6 +9,7 @@ use rift_wm::actor::config_watcher::ConfigWatcher;
 use rift_wm::actor::event_tap::EventTap;
 use rift_wm::actor::menu_bar::Menu;
 use rift_wm::actor::mission_control::MissionControlActor;
+use rift_wm::actor::mission_control_observer::NativeMissionControl;
 use rift_wm::actor::notification_center::NotificationCenter;
 use rift_wm::actor::reactor::{self, Reactor};
 use rift_wm::actor::stack_line::StackLine;
@@ -59,6 +60,10 @@ struct Cli {
     /// exists.
     #[arg(long)]
     record: Option<PathBuf>,
+
+    /// Path to configuration file to use (overrides default).
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -117,8 +122,9 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         std::process::exit(1);
     }
 
-    let mut config = if config_file().exists() {
-        Config::read(&config_file()).unwrap()
+    let config_path = opt.config.clone().unwrap_or_else(|| config_file());
+    let mut config = if config_path.exists() {
+        Config::read(&config_path).unwrap()
     } else {
         Config::default()
     };
@@ -159,9 +165,10 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         Some((wnd_tx.clone(), window_tx_store.clone())),
     );
 
-    let config_tx = ConfigActor::spawn(config.clone(), events_tx.clone());
+    let config_tx =
+        ConfigActor::spawn_with_path(config.clone(), events_tx.clone(), config_path.clone());
 
-    ConfigWatcher::spawn(config_tx.clone(), config.clone());
+    ConfigWatcher::spawn(config_tx.clone(), config.clone(), config_path.clone());
 
     let wn_actor = window_notify_actor::WindowNotify::new(
         events_tx.clone(),
@@ -169,6 +176,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         &[
             CGSEventType::Known(KnownCGSEvent::SpaceWindowDestroyed),
             CGSEventType::Known(KnownCGSEvent::SpaceWindowCreated),
+            CGSEventType::Known(KnownCGSEvent::WindowIsChangingScreens),
             CGSEventType::Known(KnownCGSEvent::WindowMoved),
             CGSEventType::Known(KnownCGSEvent::WindowResized),
         ],
@@ -203,6 +211,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         config: config.clone(),
     };
     let (mc_tx, mc_rx) = rift_wm::actor::channel();
+    let (_mc_native_tx, mc_native_rx) = rift_wm::actor::channel();
     let (wm_controller, wm_controller_sender) = WmController::new(
         wm_config,
         events_tx.clone(),
@@ -231,6 +240,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
     );
 
     let mission_control = MissionControlActor::new(config.clone(), mc_rx, events_tx.clone(), mtm);
+    let mission_control_native = NativeMissionControl::new(events_tx.clone(), mc_native_rx);
 
     println!(
         "NOTICE: by default rift starts in a deactivated state.
@@ -248,6 +258,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
             menu.run(),
             stack_line.run(),
             wn_actor.run(),
+            mission_control_native.run(),
             mission_control.run(),
         );
     });

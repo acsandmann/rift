@@ -9,6 +9,7 @@ use crate::actor::reactor::Requested;
 use crate::common::collections::{HashMap, HashSet};
 use crate::model::swaparc::SwapArc;
 use crate::model::tx_store::WindowTxStore;
+use crate::sys::screen::SpaceId;
 use crate::sys::skylight::{CGSEventType, KnownCGSEvent};
 use crate::sys::window_server::{WindowQuery, WindowServerId};
 use crate::sys::{event, window_notify};
@@ -201,12 +202,39 @@ impl WindowNotify {
                     }
 
                     match event {
-                        CGSEventType::Known(KnownCGSEvent::SpaceWindowDestroyed) => events_tx
-                            .send(Event::WindowServerDestroyed(WindowServerId::new(window_id))),
-                        CGSEventType::Known(KnownCGSEvent::SpaceWindowCreated) => events_tx
-                            .send(Event::WindowServerAppeared(WindowServerId::new(window_id))),
+                        CGSEventType::Known(KnownCGSEvent::SpaceWindowDestroyed) => {
+                            events_tx.send(Event::WindowServerDestroyed(
+                                WindowServerId::new(window_id),
+                                SpaceId::new(evt.space_id.unwrap()),
+                            ))
+                        }
+                        CGSEventType::Known(KnownCGSEvent::SpaceWindowCreated) => {
+                            events_tx.send(Event::WindowServerAppeared(
+                                WindowServerId::new(window_id),
+                                SpaceId::new(evt.space_id.unwrap()),
+                            ))
+                        }
+                        CGSEventType::Known(KnownCGSEvent::WindowIsChangingScreens)
+                        | CGSEventType::Known(KnownCGSEvent::WorkspaceWindowDidMove) => {
+                            if let Some(wsid) = evt.window_id {
+                                events_tx
+                                    .send(Event::ResyncAppForWindow(WindowServerId::new(wsid)));
+                            }
+                        }
+                        CGSEventType::Known(KnownCGSEvent::WorkspaceWindowIsViewable)
+                        | CGSEventType::Known(KnownCGSEvent::WorkspaceWindowIsNotViewable)
+                        | CGSEventType::Known(
+                            KnownCGSEvent::WorkspacesWindowDidOrderInOnNonCurrentManagedSpacesOnly,
+                        )
+                        | CGSEventType::Known(
+                            KnownCGSEvent::WorkspacesWindowDidOrderOutOnNonCurrentManagedSpaces,
+                        ) => {
+                            events_tx
+                                .send(Event::ResyncAppForWindow(WindowServerId::new(window_id)));
+                        }
                         CGSEventType::Known(KnownCGSEvent::WindowMoved)
                         | CGSEventType::Known(KnownCGSEvent::WindowResized) => {
+                            // TODO: suppress move/resize while Mission Control is active
                             let mouse_state = event::get_mouse_state();
                             let wsid = WindowServerId::new(window_id);
                             if let Some(query) = WindowQuery::new(&[wsid]) {
@@ -229,9 +257,6 @@ impl WindowNotify {
                                     ));
                                 }
                             };
-                        }
-                        CGSEventType::Known(KnownCGSEvent::FrontmostApplicationChanged) => {
-                            println!("{:?} frontmost changed", evt)
                         }
                         _ => {}
                     }

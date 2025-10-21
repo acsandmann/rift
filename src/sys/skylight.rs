@@ -55,6 +55,7 @@ pub enum KnownCGSEvent {
     WindowUpdated = 723,
     // maybe loginwindow active? kCGSEventNotificationSystemDefined = 724,
     WindowClosed = 804,
+    WindowIsChangingScreens = 805,
     WindowMoved = 806,
     WindowResized = 807,
     WindowReordered = 808,
@@ -67,7 +68,20 @@ pub enum KnownCGSEvent {
     SpaceWindowDestroyed = 1326,
     SpaceCreated = 1327,
     SpaceDestroyed = 1328,
+    WorkspaceWillChange = 1400,
+    WorkspaceDidChange = 1401,
+    WorkspaceWindowIsViewable = 1402,
+    WorkspaceWindowIsNotViewable = 1403,
+    WorkspaceWindowDidMove = 1404,
+    WorkspacePrefsDidChange = 1405,
+    WorkspacesWindowDragDidStart = 1411,
+    WorkspacesWindowDragDidEnd = 1412,
+    WorkspacesWindowDragWillEnd = 1413,
+    WorkspacesShowSpaceForProcess = 1414,
+    WorkspacesWindowDidOrderInOnNonCurrentManagedSpacesOnly = 1415,
+    WorkspacesWindowDidOrderOutOnNonCurrentManagedSpaces = 1416,
     FrontmostApplicationChanged = 1508,
+    TransitionDidFinish = 1700,
     All = 0xFFFF_FFFF,
 }
 
@@ -223,6 +237,7 @@ unsafe extern "C" {
     ) -> *mut CFArray<CFNumber>;
     pub fn SLSManagedDisplayGetCurrentSpace(cid: cid_t, uuid: *mut CFString) -> u64;
     pub fn SLSCopyActiveMenuBarDisplayIdentifier(cid: cid_t) -> *mut CFString;
+    pub fn SLSSpaceGetType(cid: cid_t, sid: u64) -> c_int;
 
     pub fn SLSWindowQueryWindows(
         cid: c_int,

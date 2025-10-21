@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
@@ -22,15 +24,28 @@ pub enum Event {
 pub struct ConfigActor {
     config: Config,
     reactor_tx: reactor::Sender,
+    config_path: PathBuf,
 }
 
 impl ConfigActor {
     pub fn spawn(config: Config, reactor_tx: reactor::Sender) -> Sender {
+        Self::spawn_with_path(config, reactor_tx, crate::common::config::config_file())
+    }
+
+    pub fn spawn_with_path(
+        config: Config,
+        reactor_tx: reactor::Sender,
+        config_path: PathBuf,
+    ) -> Sender {
         let (tx, rx) = actor::channel();
         std::thread::Builder::new()
             .name("config".to_string())
             .spawn(move || {
-                let actor = ConfigActor { config, reactor_tx };
+                let actor = ConfigActor {
+                    config,
+                    reactor_tx,
+                    config_path,
+                };
                 crate::sys::executor::Executor::run(actor.run(rx));
             })
             .unwrap();
@@ -266,18 +281,18 @@ impl ConfigActor {
     }
 
     fn save_config_to_file(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let config_path = crate::common::config::config_file();
-        self.config.save(&config_path)?;
+        let config_path = &self.config_path;
+        self.config.save(config_path)?;
         Ok(())
     }
 
     fn load_config_from_file(
         &mut self,
     ) -> Result<crate::common::config::Config, Box<dyn std::error::Error>> {
-        let config_path = crate::common::config::config_file();
+        let config_path = &self.config_path;
 
         if config_path.exists() {
-            let new_config = crate::common::config::Config::read(&config_path)?;
+            let new_config = crate::common::config::Config::read(config_path)?;
             Ok(new_config)
         } else {
             Err("Config file not found".into())

@@ -61,12 +61,17 @@ impl MissionControlActor {
 
     fn ensure_overlay(&mut self) -> &MissionControlOverlay {
         if self.overlay.is_none() {
-            let frame = if let Some(screen) = NSScreen::mainScreen(self.mtm) {
-                screen.frame()
+            let (frame, scale) = if let Some(screen) = NSScreen::mainScreen(self.mtm) {
+                let frame = screen.frame();
+                let scale = screen.backingScaleFactor();
+                (frame, scale)
             } else {
-                CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1280.0, 800.0))
+                (
+                    CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1280.0, 800.0)),
+                    1.0,
+                )
             };
-            let overlay = MissionControlOverlay::new(self.config.clone(), self.mtm, frame);
+            let overlay = MissionControlOverlay::new(self.config.clone(), self.mtm, frame, scale);
             let self_ptr: *mut MissionControlActor = self as *mut _;
             overlay.set_action_handler(Rc::new(move |action| unsafe {
                 let this: &mut MissionControlActor = &mut *self_ptr;

@@ -24,7 +24,7 @@ use tracing::{Instrument, Span, debug, error, info, instrument, trace, warn};
 
 use crate::actor;
 use crate::actor::reactor::{self, Event, Requested, TransactionId};
-use crate::common::collections::HashMap;
+use crate::common::collections::{HashMap, HashSet};
 use crate::sys::app::NSRunningApplicationExt;
 pub use crate::sys::app::{AppInfo, WindowInfo, pid_t};
 use crate::sys::axuielement::{
@@ -192,7 +192,10 @@ impl Debug for AppThreadHandle {
 #[derive(Debug)]
 pub enum Request {
     Terminate,
-    GetVisibleWindows,
+    GetVisibleWindows {
+        force_refresh: bool,
+    },
+    MarkWindowsNeedingInfo(Vec<WindowId>),
 
     SetWindowFrame(WindowId, CGRect, TransactionId, bool),
     SetBatchWindowFrame(Vec<(WindowId, CGRect)>, TransactionId),
@@ -201,8 +204,8 @@ pub enum Request {
     BeginWindowAnimation(WindowId),
     EndWindowAnimation(WindowId),
 
-    /// Raise the windows on the screen, in the given order. All windows must be
-    /// on the same screen, or they will not be raised correctly.
+    /// Raise the windows within a single space, in the given order. All windows must be
+    /// in the same space, or they will not be raised correctly.
     ///
     /// Events attributed to this request will use the provided [`Quiet`]
     /// parameter for the last window only. Events for other windows will be
@@ -234,6 +237,7 @@ struct State {
     observer: Observer,
     events_tx: reactor::Sender,
     windows: HashMap<WindowId, WindowState>,
+    needs_resync: HashSet<WindowId>,
     last_window_idx: u32,
     main_window: Option<WindowId>,
     last_activated: Option<(Instant, Quiet, r#continue::Sender<()>)>,
@@ -257,8 +261,8 @@ const APP_NOTIFICATIONS: &[&str] = &[
 
 const WINDOW_NOTIFICATIONS: &[&str] = &[
     kAXUIElementDestroyedNotification,
-    // kAXWindowMovedNotification,
-    // kAXWindowResizedNotification,
+    //kAXWindowMovedNotification,
+    //kAXWindowResizedNotification,
     kAXWindowMiniaturizedNotification,
     kAXWindowDeminiaturizedNotification,
     kAXTitleChangedNotification,
@@ -413,7 +417,14 @@ impl State {
                 self.send_event(Event::ApplicationThreadTerminated(self.pid));
                 return Ok(true);
             }
-            Request::GetVisibleWindows => {
+            Request::MarkWindowsNeedingInfo(wids) => {
+                for wid in wids.iter().copied() {
+                    if wid.pid == self.pid && self.windows.contains_key(&wid) {
+                        self.needs_resync.insert(wid);
+                    }
+                }
+            }
+            Request::GetVisibleWindows { force_refresh } => {
                 let window_elems = match self.app.windows() {
                     Ok(elems) => elems,
                     Err(e) => {
@@ -431,12 +442,41 @@ impl State {
                     let elem = elem.clone();
                     if let Ok(id) = self.id(&elem) {
                         known_visible.push(id);
+                        let needs_refresh = *force_refresh || self.needs_resync.contains(&id);
+                        if needs_refresh {
+                            match WindowInfo::from_ax_element(&elem, None) {
+                                Ok((info, _)) => {
+                                    if info.sys_id.is_some() {
+                                        self.needs_resync.remove(&id);
+                                    }
+                                    new.push((id, info));
+                                }
+                                Err(err) => {
+                                    trace!(
+                                        ?id,
+                                        ?err,
+                                        "Failed to refresh window info; will retry later"
+                                    );
+                                }
+                            }
+                        }
                         continue;
                     }
                     let Some((info, wid, _)) = self.register_window(elem, None) else {
                         continue;
                     };
+                    self.needs_resync.remove(&wid);
                     new.push((wid, info));
+                }
+                if !*force_refresh {
+                    for wid in self.needs_resync.iter().copied() {
+                        if wid.pid == self.pid
+                            && self.windows.contains_key(&wid)
+                            && !known_visible.contains(&wid)
+                        {
+                            known_visible.push(wid);
+                        }
+                    }
                 }
                 self.send_event(Event::WindowsDiscovered {
                     pid: self.pid,
@@ -676,6 +716,7 @@ impl State {
                     return;
                 };
                 self.windows.remove(&wid);
+                self.needs_resync.remove(&wid);
                 self.send_event(Event::WindowDestroyed(wid));
 
                 self.on_main_window_changed(Some(wid));
@@ -1037,6 +1078,7 @@ impl State {
     fn handle_ax_error(&mut self, wid: WindowId, err: &AXError) -> bool {
         if matches!(*err, AXError::InvalidUIElement) {
             if self.windows.remove(&wid).is_some() {
+                self.needs_resync.remove(&wid);
                 self.send_event(Event::WindowDestroyed(wid));
                 self.on_main_window_changed(Some(wid));
             }
@@ -1164,6 +1206,7 @@ fn app_thread_main(pid: pid_t, info: AppInfo, events_tx: reactor::Sender) {
         observer,
         events_tx,
         windows: HashMap::default(),
+        needs_resync: HashSet::default(),
         last_window_idx: 0,
         main_window: None,
         last_activated: None,

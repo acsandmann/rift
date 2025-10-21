@@ -491,8 +491,12 @@ impl LayoutSystem for TraditionalLayoutSystem {
                     desired.next();
                 }
                 (_, Some((_, node))) => {
-                    node.detach(&mut self.tree).remove();
-                    current.next();
+                    if self.tree.data.layout.info[*node].is_fullscreen {
+                        current.next();
+                    } else {
+                        node.detach(&mut self.tree).remove();
+                        current.next();
+                    }
                 }
                 (None, None) => break,
             }

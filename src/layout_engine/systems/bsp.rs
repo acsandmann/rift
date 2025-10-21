@@ -2,7 +2,7 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use serde::{Deserialize, Serialize};
 
 use crate::actor::app::{WindowId, pid_t};
-use crate::common::collections::HashMap;
+use crate::common::collections::{HashMap, HashSet};
 use crate::layout_engine::systems::LayoutSystem;
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{Direction, LayoutId, LayoutKind, Orientation};
@@ -347,13 +347,15 @@ impl BspLayoutSystem {
         &self,
         node: NodeId,
         rect: CGRect,
+        screen: CGRect,
         gaps: &crate::common::config::GapSettings,
         out: &mut Vec<(WindowId, CGRect)>,
     ) {
         match self.kind.get(node) {
-            Some(NodeKind::Leaf { window, .. }) => {
+            Some(NodeKind::Leaf { window, fullscreen, .. }) => {
                 if let Some(w) = window {
-                    out.push((*w, rect));
+                    let target = if *fullscreen { screen } else { rect };
+                    out.push((*w, target));
                 }
             }
             Some(NodeKind::Split { orientation, ratio }) => match orientation {
@@ -371,10 +373,10 @@ impl BspLayoutSystem {
                     );
                     let mut it = node.children(&self.tree.map);
                     if let Some(first) = it.next() {
-                        self.calculate_layout_recursive(first, r1, gaps, out);
+                        self.calculate_layout_recursive(first, r1, screen, gaps, out);
                     }
                     if let Some(second) = it.next() {
-                        self.calculate_layout_recursive(second, r2, gaps, out);
+                        self.calculate_layout_recursive(second, r2, screen, gaps, out);
                     }
                 }
                 Orientation::Vertical => {
@@ -391,10 +393,10 @@ impl BspLayoutSystem {
                     );
                     let mut it = node.children(&self.tree.map);
                     if let Some(first) = it.next() {
-                        self.calculate_layout_recursive(first, r1, gaps, out);
+                        self.calculate_layout_recursive(first, r1, screen, gaps, out);
                     }
                     if let Some(second) = it.next() {
-                        self.calculate_layout_recursive(second, r2, gaps, out);
+                        self.calculate_layout_recursive(second, r2, screen, gaps, out);
                     }
                 }
             },
@@ -525,7 +527,7 @@ impl LayoutSystem for BspLayoutSystem {
         let mut out = Vec::new();
         if let Some(state) = self.layouts.get(layout).copied() {
             let rect = Self::apply_outer_gaps(screen, gaps);
-            self.calculate_layout_recursive(state.root, rect, gaps, &mut out);
+            self.calculate_layout_recursive(state.root, rect, screen, gaps, &mut out);
         }
         out
     }
@@ -641,15 +643,29 @@ impl LayoutSystem for BspLayoutSystem {
     }
 
     fn set_windows_for_app(&mut self, layout: LayoutId, pid: pid_t, desired: Vec<WindowId>) {
+        let desired_set: HashSet<WindowId> = desired.iter().copied().collect();
+        let mut current_set: HashSet<WindowId> = HashSet::default();
         if let Some(state) = self.layouts.get(layout).copied() {
-            let mut under = Vec::new();
+            let mut under: Vec<WindowId> = Vec::new();
             self.collect_windows_under(state.root, &mut under);
             for w in under.into_iter().filter(|w| w.pid == pid) {
-                self.remove_window_internal(layout, w);
+                current_set.insert(w);
+                if !desired_set.contains(&w) {
+                    if let Some(&node) = self.window_to_node.get(&w) {
+                        if let Some(NodeKind::Leaf { fullscreen, .. }) = self.kind.get(node) {
+                            if *fullscreen {
+                                continue; // keep fullscreen node in tree
+                            }
+                        }
+                    }
+                    self.remove_window_internal(layout, w);
+                }
             }
         }
         for w in desired {
-            self.add_window_after_selection(layout, w);
+            if !current_set.contains(&w) {
+                self.add_window_after_selection(layout, w);
+            }
         }
     }
 
