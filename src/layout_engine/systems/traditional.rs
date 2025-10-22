@@ -754,6 +754,34 @@ impl LayoutSystem for TraditionalLayoutSystem {
 
         true
     }
+
+    fn toggle_tile_orientation(&mut self, layout: LayoutId) {
+        use crate::layout_engine::LayoutKind;
+
+        let map = self.map();
+        let selection_node = self.selection(layout);
+
+        let target_node = match selection_node.parent(map) {
+            Some(p) => p,
+            None => self.root(layout),
+        };
+
+        let current_kind = self.layout(target_node);
+
+        if current_kind.is_group() {
+            return;
+        }
+
+        let new_kind = match current_kind {
+            LayoutKind::Horizontal => LayoutKind::Vertical,
+            LayoutKind::Vertical => LayoutKind::Horizontal,
+            other => other,
+        };
+
+        self.set_layout(target_node, new_kind);
+
+        self.rebalance(layout);
+    }
 }
 
 impl TraditionalLayoutSystem {

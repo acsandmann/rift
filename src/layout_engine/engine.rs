@@ -39,6 +39,7 @@ pub enum LayoutCommand {
     StackWindows,
     UnstackWindows,
     UnjoinWindows,
+    ToggleTileOrientation,
     ToggleFocusFloating,
     ToggleWindowFloating,
     ToggleFullscreen,
@@ -783,6 +784,16 @@ impl LayoutEngine {
             LayoutCommand::UnjoinWindows => {
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
                 self.tree.unjoin_selection(layout);
+                EventResponse::default()
+            }
+            LayoutCommand::ToggleTileOrientation => {
+                self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
+
+                match &mut self.tree {
+                    LayoutSystemKind::Traditional(s) => s.toggle_tile_orientation(layout),
+                    LayoutSystemKind::Bsp(s) => s.toggle_tile_orientation(layout),
+                }
+
                 EventResponse::default()
             }
             LayoutCommand::ResizeWindowGrow => {

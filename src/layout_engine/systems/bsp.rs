@@ -938,4 +938,39 @@ impl LayoutSystem for BspLayoutSystem {
     }
 
     fn rebalance(&mut self, _layout: LayoutId) {}
+
+    fn toggle_tile_orientation(&mut self, layout: LayoutId) {
+        let sel_snapshot = self.selection_of_layout(layout);
+
+        let start_node = if let Some(sel) = sel_snapshot {
+            sel
+        } else {
+            let Some(state) = self.layouts.get(layout) else {
+                return;
+            };
+            state.root
+        };
+
+        let mut node_opt = Some(start_node);
+        while let Some(node) = node_opt {
+            if let Some(NodeKind::Split { orientation, .. }) = self.kind.get_mut(node) {
+                *orientation = match *orientation {
+                    Orientation::Horizontal => Orientation::Vertical,
+                    Orientation::Vertical => Orientation::Horizontal,
+                };
+                return;
+            }
+            node_opt = node.parent(&self.tree.map);
+        }
+
+        if let Some(state) = self.layouts.get_mut(layout) {
+            let root = state.root;
+            if let Some(NodeKind::Split { orientation, .. }) = self.kind.get_mut(root) {
+                *orientation = match *orientation {
+                    Orientation::Horizontal => Orientation::Vertical,
+                    Orientation::Vertical => Orientation::Horizontal,
+                };
+            }
+        }
+    }
 }

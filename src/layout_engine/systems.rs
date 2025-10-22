@@ -68,6 +68,7 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     fn unjoin_selection(&mut self, _layout: LayoutId);
     fn resize_selection_by(&mut self, layout: LayoutId, amount: f64);
     fn rebalance(&mut self, layout: LayoutId);
+    fn toggle_tile_orientation(&mut self, layout: LayoutId);
 }
 
 mod traditional;

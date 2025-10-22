@@ -296,6 +296,7 @@ comb1 = "Alt + Shift"
 "Alt + Shift + Up" = { join_window = "up" }
 "Alt + Shift + Down" = { join_window = "down" }
 "Alt + Comma" = "stack_windows"
+"Alt + Shift + Comma" = "toggle_tile_orientation"
 "Alt + Slash" = "unstack_windows"
 "Alt + Ctrl + E" = "unjoin_windows" # FIXME: doesnt work
 
