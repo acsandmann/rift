@@ -525,12 +525,46 @@ pub unsafe fn send_mach_reply(
         return false;
     }
 
-    let reply_port = if (*original_msg).msgh_local_port != 0 {
-        (*original_msg).msgh_local_port
-    } else if (*original_msg).msgh_remote_port != 0 {
-        (*original_msg).msgh_remote_port
+    let task = mach_task_self();
+    let mut remote_port_type: u32 = 0;
+    let mut local_port_type: u32 = 0;
+
+    if (*original_msg).msgh_remote_port != 0 {
+        let _ = mach_port_type(task, (*original_msg).msgh_remote_port, &mut remote_port_type);
+    }
+    if (*original_msg).msgh_local_port != 0 {
+        let _ = mach_port_type(task, (*original_msg).msgh_local_port, &mut local_port_type);
+    }
+
+    const MACH_PORT_TYPE_SEND: u32 = 0x1 << (0 + 16);
+    const MACH_PORT_TYPE_SEND_ONCE: u32 = 0x1 << (2 + 16);
+
+    let (reply_port, reply_descriptor) = if (*original_msg).msgh_local_port != 0
+        && (local_port_type & (MACH_PORT_TYPE_SEND | MACH_PORT_TYPE_SEND_ONCE)) != 0
+    {
+        let descriptor = if (local_port_type & MACH_PORT_TYPE_SEND_ONCE) != 0 {
+            MACH_MSG_TYPE_MOVE_SEND_ONCE
+        } else {
+            MACH_MSG_TYPE_COPY_SEND
+        };
+        ((*original_msg).msgh_local_port, descriptor)
+    } else if (*original_msg).msgh_remote_port != 0
+        && (remote_port_type & (MACH_PORT_TYPE_SEND | MACH_PORT_TYPE_SEND_ONCE)) != 0
+    {
+        let descriptor = if (remote_port_type & MACH_PORT_TYPE_SEND_ONCE) != 0 {
+            MACH_MSG_TYPE_MOVE_SEND_ONCE
+        } else {
+            MACH_MSG_TYPE_COPY_SEND
+        };
+        ((*original_msg).msgh_remote_port, descriptor)
     } else {
-        error!("send_mach_reply: no reply port (both msgh_local_port and msgh_remote_port are 0)");
+        error!(
+            "send_mach_reply: no available send right (remote_port_type={} local_port_type={} remote_port={} local_port={})",
+            remote_port_type,
+            local_port_type,
+            (*original_msg).msgh_remote_port,
+            (*original_msg).msgh_local_port
+        );
         return false;
     };
 
@@ -539,13 +573,7 @@ pub unsafe fn send_mach_reply(
     let aligned_len = (response_len + 3) & !3;
     let total_size = (size_of::<mach_msg_header_t>() as u32) + aligned_len;
 
-    let local_descriptor = MACH_MSGH_BITS_LOCAL((*original_msg).msgh_bits);
-    let remote_descriptor = match local_descriptor {
-        MACH_MSG_TYPE_MAKE_SEND_ONCE | MACH_MSG_TYPE_MOVE_SEND_ONCE => MACH_MSG_TYPE_MOVE_SEND_ONCE,
-        _ => MACH_MSG_TYPE_COPY_SEND,
-    };
-
-    reply.header.msgh_bits = MACH_MSGH_BITS(remote_descriptor as u32, 0);
+    reply.header.msgh_bits = MACH_MSGH_BITS(reply_descriptor as u32, 0);
     reply.header.msgh_size = total_size;
     reply.header.msgh_remote_port = reply_port;
     reply.header.msgh_local_port = 0;
@@ -577,26 +605,14 @@ pub unsafe fn send_mach_reply(
     );
 
     if result != MACH_MSG_SUCCESS {
-        let mut remote_port_type: u32 = 0;
-        let mut local_port_type: u32 = 0;
-        let _ = mach_port_type(
-            mach_task_self(),
-            (*original_msg).msgh_remote_port,
-            &mut remote_port_type,
-        );
-        let _ = mach_port_type(
-            mach_task_self(),
-            (*original_msg).msgh_local_port,
-            &mut local_port_type,
-        );
         let mut _port_type: u32 = 0;
-        let _ = mach_port_type(mach_task_self(), reply_port, &mut _port_type);
+        let _ = mach_port_type(task, reply_port, &mut _port_type);
         error!(
             "send_mach_reply: mach_msg failed result={} reply_port={} port_type={} descriptor={} remote_port_type={} local_port_type={} original_remote={} original_local={}",
             result,
             reply_port,
             _port_type,
-            remote_descriptor,
+            reply_descriptor,
             remote_port_type,
             local_port_type,
             MACH_MSGH_BITS_REMOTE((*original_msg).msgh_bits),
