@@ -8,7 +8,7 @@ use notify::RecursiveMode;
 use notify_debouncer_mini::{
     DebounceEventResult, DebouncedEvent, DebouncedEventKind, new_debouncer,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::actor::config::{self as config_actor, Event as ConfigEvent};
 use crate::common::config::{self, ConfigCommand};
@@ -82,13 +82,33 @@ impl ConfigWatcher {
         }
 
         while let Some(event) = rx.recv().await {
-            if self.enabled && self.is_relevant(&event) {
-                debug!("change detected (debounced): {:?} {:?}", event.kind, event.path);
+            if !self.is_relevant(&event) {
+                continue;
+            }
+
+            trace!("change detected (debounced): {:?} {:?}", event.kind, event.path);
+
+            let mut should_reload = self.enabled;
+
+            if !should_reload {
+                match crate::common::config::Config::read(&self.file) {
+                    Ok(new_cfg) => {
+                        if let Ok(current_cfg) = self.query_config().await {
+                            if new_cfg.keys != current_cfg.keys {
+                                should_reload = true;
+                            }
+                        }
+                    }
+                    Err(e) => warn!("Failed to read config file for diff check: {:?}", e),
+                }
+            }
+
+            if should_reload {
                 if self.request_reload().await.is_ok()
                     && let Ok(new_config) = self.query_config().await
                 {
                     self.enabled = new_config.settings.hot_reload;
-                    info!("config reloaded successfully");
+                    debug!("config reloaded successfully");
                 }
             }
         }
