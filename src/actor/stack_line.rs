@@ -143,7 +143,10 @@ impl StackLine {
             // Stack line was disabled, clear all indicators
             for indicator in self.indicators.values() {
                 if let Err(err) = indicator.clear() {
-                    tracing::warn!(?err, "failed to clear stack line indicator during config update");
+                    tracing::warn!(
+                        ?err,
+                        "failed to clear stack line indicator during config update"
+                    );
                 }
             }
             self.indicators.clear();
@@ -154,7 +157,11 @@ impl StackLine {
             for (node_id, indicator) in &self.indicators {
                 if let Some(group_data) = indicator.group_data() {
                     if let Err(err) = indicator.update(new_config, group_data) {
-                        tracing::warn!(?err, ?node_id, "failed to update stack line indicator with new config");
+                        tracing::warn!(
+                            ?err,
+                            ?node_id,
+                            "failed to update stack line indicator with new config"
+                        );
                     }
                 }
             }

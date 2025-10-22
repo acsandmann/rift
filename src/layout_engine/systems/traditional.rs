@@ -901,7 +901,8 @@ impl TraditionalLayoutSystem {
         }
 
         // Calculate the target child's size
-        let ratio = f64::from(self.tree.data.layout.info[siblings[child_index]].size) / f64::from(total);
+        let ratio =
+            f64::from(self.tree.data.layout.info[siblings[child_index]].size) / f64::from(total);
         let seg_len = usable_axis * ratio;
 
         if horizontal {
@@ -937,7 +938,8 @@ impl TraditionalLayoutSystem {
             crate::layout_engine::LayoutKind::Vertical => {
                 self.calculate_child_frame_in_axis(parent_rect, &siblings, child_index, false, gaps)
             }
-            crate::layout_engine::LayoutKind::HorizontalStack | crate::layout_engine::LayoutKind::VerticalStack => {
+            crate::layout_engine::LayoutKind::HorizontalStack
+            | crate::layout_engine::LayoutKind::VerticalStack => {
                 // For stacks, children occupy the full parent rect (they're stacked)
                 parent_rect
             }
