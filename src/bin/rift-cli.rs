@@ -388,6 +388,10 @@ fn build_execute_request(execute: ExecuteCommands) -> Result<RiftRequest, String
         )),
     };
 
+    if let RiftCommand::Config(rift_wm::common::config::ConfigCommand::GetConfig) = &rift_command {
+        return Ok(RiftRequest::GetConfig);
+    }
+
     let maybe_config_json = match &rift_command {
         RiftCommand::Config(cfg_cmd) => match serde_json::to_string(cfg_cmd) {
             Ok(s) => Some(s),
@@ -564,9 +568,7 @@ fn map_config_command(cmd: ConfigCommands) -> Result<RiftCommand, String> {
             };
             ConfigCommand::Set { key, value: parsed_value }
         }
-        ConfigCommands::Get => {
-            return Err("__get_config_request__".to_string());
-        }
+        ConfigCommands::Get => ConfigCommand::GetConfig,
         ConfigCommands::Save => ConfigCommand::SaveConfig,
         ConfigCommands::Reload => ConfigCommand::ReloadConfig,
     };
