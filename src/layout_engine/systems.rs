@@ -50,6 +50,7 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
         old_frame: CGRect,
         new_frame: CGRect,
         screen: CGRect,
+        gaps: &crate::common::config::GapSettings,
     );
 
     fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool;
@@ -61,7 +62,10 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
         to_layout: LayoutId,
     );
     fn split_selection(&mut self, layout: LayoutId, kind: LayoutKind);
+
     fn toggle_fullscreen_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId>;
+    fn toggle_fullscreen_within_gaps_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId>;
+
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction);
     fn apply_stacking_to_parent_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId>;
     fn unstack_parent_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId>;

@@ -302,6 +302,7 @@ comb1 = "Alt + Shift"
 
 "Alt + Shift + Space" = "toggle_window_floating"
 "Alt + F" = "toggle_fullscreen"
+"Alt + Shift + F" = "toggle_fullscreen_within_gaps"
 "comb1 + Ctrl + Space" = "toggle_focus_floating" # briefly bring focus to floating window
 
 # smartly resize windows

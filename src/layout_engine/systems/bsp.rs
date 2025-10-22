@@ -18,6 +18,7 @@ enum NodeKind {
     Leaf {
         window: Option<WindowId>,
         fullscreen: bool,
+        fullscreen_within_gaps: bool,
         preselected: Option<Direction>,
     },
 }
@@ -170,6 +171,7 @@ impl BspLayoutSystem {
         self.kind.insert(id, NodeKind::Leaf {
             window,
             fullscreen: false,
+            fullscreen_within_gaps: false,
             preselected: None,
         });
         if let Some(w) = window {
@@ -257,10 +259,21 @@ impl BspLayoutSystem {
                     c.detach(&mut self.tree).push_back(parent_id);
                 }
             }
-            NodeKind::Leaf { window, .. } => {
+            NodeKind::Leaf {
+                window,
+                fullscreen,
+                fullscreen_within_gaps,
+                preselected,
+            } => {
                 if let Some(w) = window {
                     self.window_to_node.insert(w, parent_id);
                 }
+                self.kind.insert(parent_id, NodeKind::Leaf {
+                    window,
+                    fullscreen,
+                    fullscreen_within_gaps,
+                    preselected,
+                });
             }
         }
 
@@ -287,10 +300,16 @@ impl BspLayoutSystem {
         };
         let sel = self.tree.data.selection.current_selection(state.root);
         match self.kind.get_mut(sel) {
-            Some(NodeKind::Leaf { window, fullscreen, .. }) => {
+            Some(NodeKind::Leaf {
+                window,
+                fullscreen,
+                fullscreen_within_gaps,
+                ..
+            }) => {
                 if window.is_none() {
                     *window = Some(wid);
                     *fullscreen = false;
+                    *fullscreen_within_gaps = false;
                     self.window_to_node.insert(wid, sel);
                 } else {
                     let existing = *window;
@@ -352,9 +371,20 @@ impl BspLayoutSystem {
         out: &mut Vec<(WindowId, CGRect)>,
     ) {
         match self.kind.get(node) {
-            Some(NodeKind::Leaf { window, fullscreen, .. }) => {
+            Some(NodeKind::Leaf {
+                window,
+                fullscreen,
+                fullscreen_within_gaps,
+                ..
+            }) => {
                 if let Some(w) = window {
-                    let target = if *fullscreen { screen } else { rect };
+                    let target = if *fullscreen {
+                        screen
+                    } else if *fullscreen_within_gaps {
+                        Self::apply_outer_gaps(screen, gaps)
+                    } else {
+                        rect
+                    };
                     out.push((*w, target));
                 }
             }
@@ -652,8 +682,13 @@ impl LayoutSystem for BspLayoutSystem {
                 current_set.insert(w);
                 if !desired_set.contains(&w) {
                     if let Some(&node) = self.window_to_node.get(&w) {
-                        if let Some(NodeKind::Leaf { fullscreen, .. }) = self.kind.get(node) {
-                            if *fullscreen {
+                        if let Some(NodeKind::Leaf {
+                            fullscreen,
+                            fullscreen_within_gaps,
+                            ..
+                        }) = self.kind.get(node)
+                        {
+                            if *fullscreen || *fullscreen_within_gaps {
                                 continue; // keep fullscreen node in tree
                             }
                         }
@@ -712,18 +747,33 @@ impl LayoutSystem for BspLayoutSystem {
         old_frame: CGRect,
         new_frame: CGRect,
         screen: CGRect,
+        gaps: &crate::common::config::GapSettings,
     ) {
         if let Some(&node) = self.window_to_node.get(&wid) {
             if let Some(state) = self.layouts.get(layout).copied() {
                 if !self.belongs_to_layout(state, node) {
                     return;
                 }
-                if let Some(NodeKind::Leaf { window: _, fullscreen, .. }) = self.kind.get_mut(node)
+                if let Some(NodeKind::Leaf {
+                    window: _,
+                    fullscreen,
+                    fullscreen_within_gaps,
+                    ..
+                }) = self.kind.get_mut(node)
                 {
                     if new_frame == screen {
                         *fullscreen = true;
+                        *fullscreen_within_gaps = false;
                     } else if old_frame == screen {
                         *fullscreen = false;
+                    } else {
+                        let tiling = Self::apply_outer_gaps(screen, gaps);
+                        if new_frame == tiling {
+                            *fullscreen_within_gaps = true;
+                            *fullscreen = false;
+                        } else if old_frame == tiling {
+                            *fullscreen_within_gaps = false;
+                        }
                     }
                 }
             }
@@ -860,10 +910,36 @@ impl LayoutSystem for BspLayoutSystem {
         if let Some(sel) = self.selection_of_layout(layout) {
             let sel_leaf = self.descend_to_leaf(sel);
             if let Some(NodeKind::Leaf {
-                window: Some(w), fullscreen, ..
+                window: Some(w),
+                fullscreen,
+                fullscreen_within_gaps,
+                ..
             }) = self.kind.get_mut(sel_leaf)
             {
                 *fullscreen = !*fullscreen;
+                if *fullscreen {
+                    *fullscreen_within_gaps = false;
+                }
+                return vec![*w];
+            }
+        }
+        vec![]
+    }
+
+    fn toggle_fullscreen_within_gaps_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
+        if let Some(sel) = self.selection_of_layout(layout) {
+            let sel_leaf = self.descend_to_leaf(sel);
+            if let Some(NodeKind::Leaf {
+                window: Some(w),
+                fullscreen_within_gaps,
+                fullscreen,
+                ..
+            }) = self.kind.get_mut(sel_leaf)
+            {
+                *fullscreen_within_gaps = !*fullscreen_within_gaps;
+                if *fullscreen_within_gaps {
+                    *fullscreen = false;
+                }
                 return vec![*w];
             }
         }

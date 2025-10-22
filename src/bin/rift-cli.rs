@@ -117,8 +117,10 @@ enum WindowCommands {
     },
     /// Toggle window floating state
     ToggleFloat,
-    /// Toggle fullscreen mode
+    /// Toggle fullscreen mode (fills the whole screen, ignores outer gaps)
     ToggleFullscreen,
+    /// Toggle fullscreen within configured outer gaps (respects outer gaps / fills tiling area)
+    ToggleFullscreenWithinGaps,
     /// Grow the current window size
     ResizeGrow,
     /// Shrink the current window size
@@ -419,6 +421,9 @@ fn map_window_command(cmd: WindowCommands) -> Result<RiftCommand, String> {
         WindowCommands::ToggleFullscreen => Ok(RiftCommand::Reactor(reactor::Command::Layout(
             LC::ToggleFullscreen,
         ))),
+        WindowCommands::ToggleFullscreenWithinGaps => Ok(RiftCommand::Reactor(
+            reactor::Command::Layout(LC::ToggleFullscreenWithinGaps),
+        )),
         WindowCommands::ResizeGrow => Ok(RiftCommand::Reactor(reactor::Command::Layout(
             LC::ResizeWindowGrow,
         ))),

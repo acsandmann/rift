@@ -43,6 +43,7 @@ pub enum LayoutCommand {
     ToggleFocusFloating,
     ToggleWindowFloating,
     ToggleFullscreen,
+    ToggleFullscreenWithinGaps,
 
     ResizeWindowGrow,
     ResizeWindowShrink,
@@ -570,7 +571,8 @@ impl LayoutEngine {
             } => {
                 for (space, screen) in screens {
                     let layout = self.layout(space);
-                    self.tree.on_window_resized(layout, wid, old_frame, new_frame, screen);
+                    let gaps = &self.layout_settings.gaps;
+                    self.tree.on_window_resized(layout, wid, old_frame, new_frame, screen, gaps);
 
                     if let Some(ws) = self.virtual_workspace_manager.active_workspace(space) {
                         self.workspace_layouts.mark_last_saved(space, ws, layout);
@@ -744,6 +746,17 @@ impl LayoutEngine {
             }
             LayoutCommand::ToggleFullscreen => {
                 let raise_windows = self.tree.toggle_fullscreen_of_selection(layout);
+                if raise_windows.is_empty() {
+                    EventResponse::default()
+                } else {
+                    EventResponse {
+                        raise_windows,
+                        focus_window: None,
+                    }
+                }
+            }
+            LayoutCommand::ToggleFullscreenWithinGaps => {
+                let raise_windows = self.tree.toggle_fullscreen_within_gaps_of_selection(layout);
                 if raise_windows.is_empty() {
                     EventResponse::default()
                 } else {

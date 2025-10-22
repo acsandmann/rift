@@ -530,6 +530,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
         old_frame: CGRect,
         new_frame: CGRect,
         screen: CGRect,
+        gaps: &crate::common::config::GapSettings,
     ) {
         if let Some(node) = self.tree.data.window.node_for(layout, wid) {
             if new_frame == screen {
@@ -537,7 +538,14 @@ impl LayoutSystem for TraditionalLayoutSystem {
             } else if old_frame == screen {
                 self.tree.data.layout.set_fullscreen(node, false);
             } else {
-                self.set_frame_from_resize(node, old_frame, new_frame, screen);
+                let tiling = compute_tiling_area(screen, gaps);
+                if new_frame == tiling {
+                    self.tree.data.layout.set_fullscreen_within_gaps(node, true);
+                } else if old_frame == tiling {
+                    self.tree.data.layout.set_fullscreen_within_gaps(node, false);
+                } else {
+                    self.set_frame_from_resize(node, old_frame, new_frame, screen);
+                }
             }
         }
     }
@@ -582,6 +590,15 @@ impl LayoutSystem for TraditionalLayoutSystem {
     fn toggle_fullscreen_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
         let node = self.selection(layout);
         if self.tree.data.layout.toggle_fullscreen(node) {
+            self.visible_windows_under_internal(node)
+        } else {
+            vec![]
+        }
+    }
+
+    fn toggle_fullscreen_within_gaps_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
+        let node = self.selection(layout);
+        if self.tree.data.layout.toggle_fullscreen_within_gaps(node) {
             self.visible_windows_under_internal(node)
         } else {
             vec![]
@@ -1688,6 +1705,8 @@ struct LayoutInfo {
     last_ungrouped_kind: LayoutKind,
     #[serde(default)]
     is_fullscreen: bool,
+    #[serde(default)]
+    is_fullscreen_within_gaps: bool,
 }
 
 impl Layout {
@@ -1744,11 +1763,32 @@ impl Layout {
 
     fn set_fullscreen(&mut self, node: NodeId, is_fullscreen: bool) {
         self.info[node].is_fullscreen = is_fullscreen;
+        if is_fullscreen {
+            self.info[node].is_fullscreen_within_gaps = false;
+        }
+    }
+
+    fn set_fullscreen_within_gaps(&mut self, node: NodeId, within: bool) {
+        self.info[node].is_fullscreen_within_gaps = within;
+        if within {
+            self.info[node].is_fullscreen = false;
+        }
     }
 
     fn toggle_fullscreen(&mut self, node: NodeId) -> bool {
         self.info[node].is_fullscreen = !self.info[node].is_fullscreen;
+        if self.info[node].is_fullscreen {
+            self.info[node].is_fullscreen_within_gaps = false;
+        }
         self.info[node].is_fullscreen
+    }
+
+    fn toggle_fullscreen_within_gaps(&mut self, node: NodeId) -> bool {
+        self.info[node].is_fullscreen_within_gaps = !self.info[node].is_fullscreen_within_gaps;
+        if self.info[node].is_fullscreen_within_gaps {
+            self.info[node].is_fullscreen = false;
+        }
+        self.info[node].is_fullscreen_within_gaps
     }
 
     fn debug(&self, node: NodeId, is_container: bool) -> String {
@@ -1789,7 +1829,13 @@ impl Layout {
         stack_line_vert: crate::common::config::VerticalPlacement,
     ) {
         let info = &self.info[node];
-        let rect = if info.is_fullscreen { screen } else { rect };
+        let rect = if info.is_fullscreen {
+            screen
+        } else if info.is_fullscreen_within_gaps {
+            compute_tiling_area(screen, gaps)
+        } else {
+            rect
+        };
         if let Some(wid) = window.at(node) {
             debug_assert!(
                 node.children(map).next().is_none(),
