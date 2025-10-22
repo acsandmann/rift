@@ -12,7 +12,7 @@ use core::ptr::{copy_nonoverlapping, null, null_mut, write_bytes};
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
 
-use tracing::error;
+use tracing::{debug, error, info};
 
 const MAX_MESSAGE_SIZE: u32 = 16_384;
 const MACH_BS_NAME_FMT_PREFIX: &str = "com.";
@@ -31,12 +31,15 @@ const MACH_MSG_SUCCESS: kern_return_t = 0;
 
 const MACH_SEND_MSG: mach_msg_option_t = 0x0000_0001;
 const MACH_RCV_MSG: mach_msg_option_t = 0x0000_0002;
+const MACH_RCV_TIMEOUT: mach_msg_option_t = 0x0000_0100;
 
 const MACH_MSG_TIMEOUT_NONE: u32 = 0;
 
 const MACH_MSG_TYPE_COPY_SEND: u32 = 19;
 const MACH_MSG_TYPE_MOVE_SEND_ONCE: u32 = 18;
 const MACH_MSG_TYPE_MAKE_SEND_ONCE: u32 = 21;
+const MACH_MSGH_BITS_COMPLEX: u32 = 0x8000_0000;
+const MACH_MSG_TYPE_MAKE_SEND: u32 = 20;
 
 const MACH_PORT_RIGHT_RECEIVE: c_int = 1;
 const MACH_PORT_LIMITS_INFO: c_int = 1;
@@ -45,6 +48,7 @@ const MACH_PORT_QLIMIT_LARGE: u32 = 1024;
 
 const TASK_BOOTSTRAP_PORT: c_int = 4;
 
+const BOOTSTRAP_NOT_PRIVILEGED: kern_return_t = 1100;
 const BOOTSTRAP_UNKNOWN_SERVICE: kern_return_t = 1102;
 
 #[inline]
@@ -93,6 +97,7 @@ unsafe extern "C" {
     ) -> CFRunLoopSourceRef;
 
     fn CFRunLoopAddSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
+    fn CFRunLoopGetCurrent() -> CFRunLoopRef;
     fn CFRunLoopGetMain() -> CFRunLoopRef;
     fn CFRunLoopRun();
 
@@ -115,6 +120,23 @@ pub struct mach_msg_header_t {
 #[repr(C)]
 struct mach_port_limits {
     mpl_qlimit: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct mach_msg_body_t {
+    msgh_descriptor_count: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct mach_msg_ool_descriptor_t {
+    address: *mut c_void,
+    size: u32,
+    deallocate: u8, // boolean_t
+    copy: u8,       // mach_msg_copy_options_t
+    pad1: u16,
+    type_: u32, // MACH_MSG_OOL_DESCRIPTOR = 1
 }
 
 #[link(name = "System", kind = "framework")]
@@ -172,6 +194,8 @@ unsafe extern "C" {
         timeout: u32,
         notify: mach_port_name_t,
     ) -> kern_return_t;
+
+    fn mach_msg_destroy(msg: *mut mach_msg_header_t) -> kern_return_t;
 
     fn bootstrap_look_up(
         bp: mach_port_t,
@@ -235,6 +259,13 @@ pub unsafe fn mach_send_message(
         if mach_port_allocate(task, MACH_PORT_RIGHT_RECEIVE, &mut reply_port) != KERN_SUCCESS {
             return null_mut();
         }
+        if mach_port_insert_right(task, reply_port, reply_port, MACH_MSG_TYPE_MAKE_SEND as c_int)
+            != KERN_SUCCESS
+        {
+            let _ = mach_port_mod_refs(task, reply_port, MACH_PORT_RIGHT_RECEIVE, -1);
+            let _ = mach_port_deallocate(task, reply_port);
+            return null_mut();
+        }
     }
 
     let mut msg: simple_message = zeroed();
@@ -245,12 +276,11 @@ pub unsafe fn mach_send_message(
     msg.header.msgh_remote_port = port;
     msg.header.msgh_local_port = if await_response { reply_port } else { 0 };
     msg.header.msgh_size = total_size;
-    msg.header.msgh_id = 1234;
+    msg.header.msgh_id = reply_port as i32;
     msg.header.msgh_voucher_port = 0;
 
     if await_response {
-        msg.header.msgh_bits =
-            MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE);
+        msg.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND);
     } else {
         msg.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
     }
@@ -274,6 +304,10 @@ pub unsafe fn mach_send_message(
         MACH_MSG_TIMEOUT_NONE,
         0,
     );
+    debug!(
+        "mach_send_message: send_result={} remote_port={} reply_port={}",
+        send_result, port, reply_port
+    );
     if send_result != MACH_MSG_SUCCESS {
         if await_response && reply_port != 0 {
             let _ = mach_port_mod_refs(task, reply_port, MACH_PORT_RIGHT_RECEIVE, -1);
@@ -286,12 +320,16 @@ pub unsafe fn mach_send_message(
         let mut response: simple_message = zeroed();
         let recv_result = mach_msg(
             &mut response.header,
-            MACH_RCV_MSG,
+            MACH_RCV_MSG | MACH_RCV_TIMEOUT,
             0,
             size_of::<simple_message>() as u32,
             reply_port,
-            MACH_MSG_TIMEOUT_NONE,
+            3000,
             0,
+        );
+        debug!(
+            "mach_send_message: recv_result={} from reply_port={}",
+            recv_result, reply_port
         );
 
         let _ = mach_port_mod_refs(task, reply_port, MACH_PORT_RIGHT_RECEIVE, -1);
@@ -318,7 +356,7 @@ pub unsafe fn mach_send_message(
         return buf;
     }
 
-    null_mut()
+    1 as *mut c_char
 }
 
 pub unsafe fn mach_send_request(message: *const c_char, len: u32) -> *mut c_char {
@@ -392,19 +430,36 @@ extern "C" fn mach_message_callback(
             return;
         }
         let mach_server = &mut *(context as *mut mach_server);
-        let msg = &mut *(message as *mut simple_message);
+        let header = &mut *(message as *mut mach_msg_header_t);
 
-        let payload_len =
-            msg.header.msgh_size.saturating_sub(size_of::<mach_msg_header_t>() as u32);
+        let mut payload_ptr: *mut c_char = null_mut();
+        let mut payload_len: u32 = 0;
+
+        if (header.msgh_bits & MACH_MSGH_BITS_COMPLEX) != 0 {
+            let body =
+                (message as *mut u8).add(size_of::<mach_msg_header_t>()) as *mut mach_msg_body_t;
+            if (*body).msgh_descriptor_count >= 1 {
+                let desc = (body as *mut u8).add(size_of::<mach_msg_body_t>())
+                    as *mut mach_msg_ool_descriptor_t;
+                payload_ptr = (*desc).address as *mut c_char;
+                payload_len = (*desc).size;
+            }
+        } else {
+            let msg = &mut *(message as *mut simple_message);
+            payload_len = header.msgh_size.saturating_sub(size_of::<mach_msg_header_t>() as u32);
+            payload_ptr = msg.data.as_mut_ptr() as *mut c_char;
+        }
 
         if let Some(handler) = mach_server.handler {
             handler(
                 mach_server.context,
-                msg.data.as_mut_ptr() as *mut c_char,
+                payload_ptr,
                 payload_len,
-                &mut msg.header as *mut mach_msg_header_t,
+                header as *mut mach_msg_header_t,
             );
         }
+
+        let _ = mach_msg_destroy(header);
     }
 }
 
@@ -418,6 +473,7 @@ pub unsafe fn mach_server_begin(
     if task_get_special_port(mach_server.task, TASK_BOOTSTRAP_PORT, &mut mach_server.bs_port)
         != KERN_SUCCESS
     {
+        error!("mach_server_begin: task_get_special_port failed");
         return false;
     }
 
@@ -427,43 +483,40 @@ pub unsafe fn mach_server_begin(
     let kr = bootstrap_check_in(mach_server.bs_port, bs_name.as_ptr(), &mut port_from_launchd);
     if kr == KERN_SUCCESS {
         mach_server.port = port_from_launchd;
-    } else if kr == BOOTSTRAP_UNKNOWN_SERVICE {
+    } else if kr == BOOTSTRAP_UNKNOWN_SERVICE || kr == 1100 {
         // fall through to stand-alone below
     } else {
         return false;
     }
 
     if mach_server.port == 0 {
-        if mach_port_allocate(mach_server.task, MACH_PORT_RIGHT_RECEIVE, &mut mach_server.port)
-            != KERN_SUCCESS
-        {
+        let ar =
+            mach_port_allocate(mach_server.task, MACH_PORT_RIGHT_RECEIVE, &mut mach_server.port);
+        if ar != KERN_SUCCESS {
+            error!("mach_server_begin: mach_port_allocate failed (kr={})", ar);
             return false;
         }
-        if mach_port_insert_right(
+        let ir = mach_port_insert_right(
             mach_server.task,
             mach_server.port,
             mach_server.port,
-            MACH_MSG_TYPE_MAKE_SEND_ONCE as c_int,
-        ) != KERN_SUCCESS
-        {
-            let _ = mach_port_insert_right(
-                mach_server.task,
-                mach_server.port,
-                mach_server.port,
-                MACH_MSG_TYPE_COPY_SEND as c_int,
+            MACH_MSG_TYPE_MAKE_SEND as c_int,
+        );
+        if ir != KERN_SUCCESS {
+            error!(
+                "mach_server_begin: mach_port_insert_right (MAKE_SEND) failed (kr={})",
+                ir
             );
+            return false;
         }
 
-        let _ = mach_port_insert_right(
-            mach_server.task,
-            mach_server.port,
-            mach_server.port,
-            MACH_MSG_TYPE_COPY_SEND as c_int,
-        );
-
-        if bootstrap_register(mach_server.bs_port, bs_name.as_ptr(), mach_server.port)
-            != KERN_SUCCESS
-        {
+        let rr = bootstrap_register(mach_server.bs_port, bs_name.as_ptr(), mach_server.port);
+        if rr != KERN_SUCCESS {
+            error!(
+                "mach_server_begin: bootstrap_register failed (kr={}) for {}",
+                rr,
+                bs_name.to_string_lossy()
+            );
             return false;
         }
     }
@@ -498,14 +551,19 @@ pub unsafe fn mach_server_begin(
         0,
     );
     if cf_mach_port.is_null() {
+        error!(
+            "mach_server_begin: CFMachPortCreateWithPort returned null (port={})",
+            mach_server.port
+        );
         return false;
     }
     let source = CFMachPortCreateRunLoopSource(null(), cf_mach_port, 0);
     if source.is_null() {
+        error!("mach_server_begin: CFMachPortCreateRunLoopSource returned null");
         CFRelease(cf_mach_port);
         return false;
     }
-    CFRunLoopAddSource(CFRunLoopGetMain(), source, kCFRunLoopDefaultMode);
+    CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopDefaultMode);
     CFRelease(source);
     CFRelease(cf_mach_port);
 
@@ -624,7 +682,7 @@ pub unsafe fn send_mach_reply(
     true
 }
 
-pub unsafe fn mach_server_run(context: *mut c_void, handler: mach_handler) {
+pub unsafe fn mach_server_run(context: *mut c_void, handler: mach_handler) -> bool {
     static mut SERVER: mach_server = mach_server {
         is_running: false,
         task: 0,
@@ -634,10 +692,14 @@ pub unsafe fn mach_server_run(context: *mut c_void, handler: mach_handler) {
         context: null_mut(),
     };
 
+    info!("mach_server_run: initializing server");
     #[allow(static_mut_refs)]
     if !mach_server_begin(&mut SERVER, context, handler) {
-        return;
+        error!("mach_server_run: mach_server_begin failed, aborting run loop");
+        return false;
     }
 
+    info!("mach_server_run: entering CFRunLoopRun");
     CFRunLoopRun();
+    true
 }

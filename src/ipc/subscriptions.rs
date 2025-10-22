@@ -196,9 +196,9 @@ impl ServerState {
                 false,
             );
             if result.is_null() {
-                debug!("Successfully sent event to client {}", client_port);
-            } else {
                 warn!("Failed to send event to client {}", client_port);
+            } else {
+                debug!("Successfully sent event to client {}", client_port);
             }
         }
     }

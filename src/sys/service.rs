@@ -130,11 +130,6 @@ fn plist_contents() -> io::Result<String> {
     <string>/tmp/rift_{user}.err.log</string>
     <key>ProcessType</key>
     <string>Interactive</string>
-    <key>MachServices</key>
-    <dict>
-        <key>{name}</key>
-        <true/>
-    </dict>
     <key>Nice</key>
     <integer>-20</integer>
 </dict>
@@ -148,6 +143,11 @@ fn plist_contents() -> io::Result<String> {
 
     Ok(plist)
 }
+/*<key>MachServices</key>
+<dict>
+    <key>{name}</key>
+    <true/>
+</dict> */
 
 fn ensure_parent_dir(path: &Path) -> io::Result<()> {
     if let Some(parent) = path.parent() {
