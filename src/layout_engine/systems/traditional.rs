@@ -819,12 +819,18 @@ impl TraditionalLayoutSystem {
                     self.tree.data.selection.local_selection(map, node).unwrap_or(children[0]);
                 let selected_index = children.iter().position(|&c| c == local_sel).unwrap_or(0);
 
+                let ui_selected_index = if matches!(kind, VerticalStack) {
+                    children.len().saturating_sub(1).saturating_sub(selected_index)
+                } else {
+                    selected_index
+                };
+
                 out.push(crate::layout_engine::engine::GroupContainerInfo {
                     node_id: node,
                     container_kind: kind,
                     frame: rect,
                     total_count: children.len(),
-                    selected_index,
+                    selected_index: ui_selected_index,
                 });
 
                 let mut container_rect = rect;
@@ -857,6 +863,7 @@ impl TraditionalLayoutSystem {
                 .local_selection(map, node)
                 .or_else(|| node.first_child(map))
             {
+                rect = self.calculate_child_frame_in_container(node, next, rect, gaps);
                 node = next;
                 continue;
             }
@@ -864,6 +871,96 @@ impl TraditionalLayoutSystem {
         }
 
         out
+    }
+
+    fn calculate_child_frame_in_axis(
+        &self,
+        parent_rect: CGRect,
+        siblings: &[NodeId],
+        child_index: usize,
+        horizontal: bool,
+        gaps: &crate::common::config::GapSettings,
+    ) -> CGRect {
+        use objc2_core_foundation::{CGPoint, CGSize};
+
+        if siblings.is_empty() || child_index >= siblings.len() {
+            return parent_rect;
+        }
+
+        let total: f32 = siblings.iter().map(|&child| self.tree.data.layout.info[child].size).sum();
+        let inner_gap = if horizontal {
+            gaps.inner.horizontal
+        } else {
+            gaps.inner.vertical
+        };
+
+        let axis_len = if horizontal {
+            parent_rect.size.width
+        } else {
+            parent_rect.size.height
+        };
+
+        let total_gap = (siblings.len().saturating_sub(1)) as f64 * inner_gap;
+        let usable_axis = if inner_gap == 0.0 {
+            axis_len
+        } else {
+            (axis_len - total_gap).max(0.0)
+        };
+
+        let mut offset = if horizontal {
+            parent_rect.origin.x
+        } else {
+            parent_rect.origin.y
+        };
+
+        for i in 0..child_index {
+            let ratio = f64::from(self.tree.data.layout.info[siblings[i]].size) / f64::from(total);
+            let seg_len = usable_axis * ratio;
+            offset += seg_len;
+            if i < siblings.len() - 1 {
+                offset += inner_gap;
+            }
+        }
+
+        let ratio =
+            f64::from(self.tree.data.layout.info[siblings[child_index]].size) / f64::from(total);
+        let seg_len = usable_axis * ratio;
+
+        if horizontal {
+            CGRect::new(
+                CGPoint::new(offset, parent_rect.origin.y),
+                CGSize::new(seg_len, parent_rect.size.height),
+            )
+        } else {
+            CGRect::new(
+                CGPoint::new(parent_rect.origin.x, offset),
+                CGSize::new(parent_rect.size.width, seg_len),
+            )
+        }
+    }
+
+    fn calculate_child_frame_in_container(
+        &self,
+        parent_node: NodeId,
+        child_node: NodeId,
+        parent_rect: CGRect,
+        gaps: &crate::common::config::GapSettings,
+    ) -> CGRect {
+        let parent_kind = self.tree.data.layout.kind(parent_node);
+        let map = &self.tree.map;
+        let siblings: Vec<_> = parent_node.children(map).collect();
+        let child_index = siblings.iter().position(|&n| n == child_node).unwrap_or(0);
+
+        match parent_kind {
+            crate::layout_engine::LayoutKind::Horizontal => {
+                self.calculate_child_frame_in_axis(parent_rect, &siblings, child_index, true, gaps)
+            }
+            crate::layout_engine::LayoutKind::Vertical => {
+                self.calculate_child_frame_in_axis(parent_rect, &siblings, child_index, false, gaps)
+            }
+            crate::layout_engine::LayoutKind::HorizontalStack
+            | crate::layout_engine::LayoutKind::VerticalStack => parent_rect,
+        }
     }
 }
 
