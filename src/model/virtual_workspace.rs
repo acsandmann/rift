@@ -96,6 +96,8 @@ pub struct VirtualWorkspaceManager {
     pub active_workspace_per_space:
         HashMap<SpaceId, (Option<VirtualWorkspaceId>, VirtualWorkspaceId)>,
     pub window_to_workspace: HashMap<(SpaceId, WindowId), VirtualWorkspaceId>,
+    #[serde(skip)]
+    window_rule_floating: HashMap<(SpaceId, WindowId), bool>,
     floating_positions: HashMap<(SpaceId, VirtualWorkspaceId), FloatingWindowPositions>,
     workspace_counter: usize,
     #[serde(skip)]
@@ -127,6 +129,7 @@ impl VirtualWorkspaceManager {
             workspaces_by_space: HashMap::default(),
             active_workspace_per_space: HashMap::default(),
             window_to_workspace: HashMap::default(),
+            window_rule_floating: HashMap::default(),
             floating_positions: HashMap::default(),
             workspace_counter: 1,
             app_rules: config.app_rules.clone(),
@@ -338,11 +341,13 @@ impl VirtualWorkspaceManager {
                         old_workspace.remove_window(window_id);
                     }
                     self.window_to_workspace.remove(&(existing_space, window_id));
+                    self.window_rule_floating.remove(&(existing_space, window_id));
                 } else {
                     if let Some(old_workspace) = self.workspaces.get_mut(old_workspace_id) {
                         old_workspace.remove_window(window_id);
                     }
                     self.window_to_workspace.remove(&(existing_space, window_id));
+                    self.window_rule_floating.remove(&(existing_space, window_id));
                 }
             }
 
@@ -380,6 +385,7 @@ impl VirtualWorkspaceManager {
                 if let Some(workspace) = self.workspaces.get_mut(workspace_id) {
                     workspace.remove_window(wid);
                 }
+                self.window_rule_floating.remove(&(space, wid));
             }
         }
     }
@@ -402,6 +408,7 @@ impl VirtualWorkspaceManager {
                 if let Some(workspace) = self.workspaces.get_mut(ws_id) {
                     workspace.remove_window(window_id);
                 }
+                self.window_rule_floating.remove(&(space, window_id));
             }
         }
     }
@@ -612,6 +619,7 @@ impl VirtualWorkspaceManager {
     ) -> Result<VirtualWorkspaceId, WorkspaceError> {
         let default_workspace_id = self.get_default_workspace(space)?;
         if self.assign_window_to_workspace(space, window_id, default_workspace_id) {
+            self.window_rule_floating.remove(&(space, window_id));
             Ok(default_workspace_id)
         } else {
             Err(WorkspaceError::AssignmentFailed)
@@ -634,7 +642,12 @@ impl VirtualWorkspaceManager {
         }
 
         if let Some(existing_ws) = self.window_to_workspace.get(&(space, window_id)).copied() {
-            return Ok((existing_ws, false));
+            let should_float = self
+                .window_rule_floating
+                .get(&(space, window_id))
+                .copied()
+                .unwrap_or(false);
+            return Ok((existing_ws, should_float));
         }
 
         let rule_match = self
@@ -689,6 +702,12 @@ impl VirtualWorkspaceManager {
             };
 
             if self.assign_window_to_workspace(space, window_id, target_workspace_id) {
+                if rule.floating {
+                    self.window_rule_floating
+                        .insert((space, window_id), true);
+                } else {
+                    self.window_rule_floating.remove(&(space, window_id));
+                }
                 return Ok((target_workspace_id, rule.floating));
             } else {
                 error!("Failed to assign window to workspace from app rule");
@@ -697,6 +716,7 @@ impl VirtualWorkspaceManager {
 
         let default_workspace_id = self.get_default_workspace(space)?;
         if self.assign_window_to_workspace(space, window_id, default_workspace_id) {
+            self.window_rule_floating.remove(&(space, window_id));
             Ok((default_workspace_id, false))
         } else {
             error!("Failed to assign window to default workspace");
@@ -1074,5 +1094,69 @@ mod tests {
 
         assert_eq!(manager.prev_workspace(space, ws2_id, None), Some(ws1_id));
         assert_eq!(manager.prev_workspace(space, ws3_id, None), Some(ws2_id));
+    }
+
+    #[test]
+    fn test_app_rule_floating_state_persists() {
+        let mut settings = VirtualWorkspaceSettings::default();
+        settings.app_rules = vec![AppWorkspaceRule {
+            app_id: Some("com.example.test".to_string()),
+            workspace: None,
+            floating: true,
+            app_name: None,
+            title_regex: None,
+            title_substring: None,
+            ax_role: None,
+            ax_subrole: None,
+        }];
+        let mut manager = VirtualWorkspaceManager::new_with_config(&settings);
+        let space = SpaceId::new(1);
+        let window = WindowId::new(42, 7);
+
+        let (_, should_float) = manager
+            .assign_window_with_app_info(
+                window,
+                space,
+                Some("com.example.test"),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(should_float);
+        assert_eq!(
+            manager.window_rule_floating.get(&(space, window)),
+            Some(&true)
+        );
+
+        let (_, still_floats) = manager
+            .assign_window_with_app_info(
+                window,
+                space,
+                Some("com.example.test"),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(still_floats);
+
+        manager.remove_window(window);
+        assert!(!manager.window_rule_floating.contains_key(&(space, window)));
+
+        let (_, floats_again) = manager
+            .assign_window_with_app_info(
+                window,
+                space,
+                Some("com.example.test"),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(floats_again);
     }
 }
