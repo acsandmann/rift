@@ -30,6 +30,7 @@ pub enum Event {
         groups: Vec<GroupInfo>,
     },
     ScreenParametersChanged(CoordinateConverter),
+    ConfigUpdated(Config),
 }
 
 pub struct StackLine {
@@ -88,6 +89,9 @@ impl StackLine {
             Event::ScreenParametersChanged(converter) => {
                 self.handle_screen_parameters_changed(converter);
             }
+            Event::ConfigUpdated(config) => {
+                self.handle_config_updated(config);
+            }
         }
     }
 
@@ -128,6 +132,35 @@ impl StackLine {
     fn handle_screen_parameters_changed(&mut self, converter: CoordinateConverter) {
         self.coordinate_converter = converter;
         tracing::debug!("Updated coordinate converter for group indicators");
+    }
+
+    fn handle_config_updated(&mut self, config: Config) {
+        let old_enabled = self.is_enabled();
+        self.config = config;
+        let new_enabled = self.is_enabled();
+
+        if old_enabled && !new_enabled {
+            // Stack line was disabled, clear all indicators
+            for indicator in self.indicators.values() {
+                if let Err(err) = indicator.clear() {
+                    tracing::warn!(?err, "failed to clear stack line indicator during config update");
+                }
+            }
+            self.indicators.clear();
+            self.group_sigs_by_space.clear();
+        } else if new_enabled {
+            // Stack line is enabled, update all existing indicators with new config
+            let new_config = self.indicator_config();
+            for (node_id, indicator) in &self.indicators {
+                if let Some(group_data) = indicator.group_data() {
+                    if let Err(err) = indicator.update(new_config, group_data) {
+                        tracing::warn!(?err, ?node_id, "failed to update stack line indicator with new config");
+                    }
+                }
+            }
+        }
+
+        tracing::debug!("Updated stack line configuration");
     }
 
     // TODO: make this work
