@@ -16,7 +16,9 @@ use crate::actor::reactor::{self, Event};
 use crate::ipc::subscriptions::SharedServerState;
 use crate::model::server::WorkspaceQueryResponse;
 use crate::sys::dispatch::block_on;
-use crate::sys::mach::{mach_msg_header_t, mach_send_request, mach_server_run, send_mach_reply};
+use crate::sys::mach::{
+    mach_free_response, mach_msg_header_t, mach_send_request, mach_server_run, send_mach_reply,
+};
 
 type ClientPort = u32;
 
@@ -75,7 +77,9 @@ impl RiftMachClient {
 
         let response_str = unsafe {
             let c_str = std::ffi::CStr::from_ptr(response_ptr);
-            c_str.to_string_lossy().to_string()
+            let response = c_str.to_string_lossy().into_owned();
+            mach_free_response(response_ptr, c_str.to_bytes().len() as u32);
+            response
         };
 
         let response: RiftResponse = serde_json::from_str(&response_str)
@@ -401,7 +405,14 @@ unsafe extern "C" fn handle_mach_request_c(
 
     debug!("Received message: {}", message_str);
 
-    let client_port = unsafe { (*original_msg).msgh_local_port };
+    let client_port = unsafe {
+        let local = (*original_msg).msgh_local_port;
+        if local != 0 {
+            local
+        } else {
+            (*original_msg).msgh_remote_port
+        }
+    };
 
     let request: RiftRequest = match serde_json::from_str(message_str) {
         Ok(req) => req,
@@ -424,10 +435,19 @@ fn send_response(original_msg: *mut mach_msg_header_t, response: &RiftResponse) 
     let c_response = CString::new(response_json).unwrap();
 
     unsafe {
-        send_mach_reply(
+        if !send_mach_reply(
             original_msg,
             c_response.as_ptr() as *mut c_char,
             c_response.as_bytes().len() as u32,
-        );
+        ) {
+            error!(
+                "Failed to send mach reply for message id {}",
+                if original_msg.is_null() {
+                    -1
+                } else {
+                    (*original_msg).msgh_id
+                }
+            );
+        }
     }
 }

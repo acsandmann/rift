@@ -304,6 +304,7 @@ fn main() {
         },
         Err(e) => {
             eprintln!("Communication error: {}", e);
+            eprintln!("Hint: ensure the rift service is running (try `rift service start`).");
             process::exit(1);
         }
     }
