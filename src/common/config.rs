@@ -530,6 +530,15 @@ pub enum LayoutMode {
     Bsp,
 }
 
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum StackDefaultOrientation {
+    Perpendicular,
+    Same,
+    Horizontal,
+    Vertical,
+}
+
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct StackSettings {
@@ -539,6 +548,14 @@ pub struct StackSettings {
     /// Recommended values: 30-50 pixels for good visibility.
     #[serde(default = "default_stack_offset")]
     pub stack_offset: f64,
+
+    /// Default orientation behavior when stacking windows.
+    /// Options:
+    /// - "perpendicular" (default): choose the perpendicular orientation to the parent layout
+    /// - "same": use the same orientation as the parent layout
+    /// - "horizontal"/"vertical": explicitly use a specific orientation
+    #[serde(default = "default_stack_orientation")]
+    pub default_orientation: StackDefaultOrientation,
 }
 
 /// Gap configuration for window spacing
@@ -587,6 +604,7 @@ impl Default for StackSettings {
     fn default() -> Self {
         Self {
             stack_offset: default_stack_offset(),
+            default_orientation: default_stack_orientation(),
         }
     }
 }
@@ -819,6 +837,8 @@ impl InnerGaps {
 fn yes() -> bool { true }
 
 fn default_stack_offset() -> f64 { 40.0 }
+
+fn default_stack_orientation() -> StackDefaultOrientation { StackDefaultOrientation::Perpendicular }
 
 fn default_animation_duration() -> f64 { 0.3 }
 

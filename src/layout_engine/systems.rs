@@ -67,7 +67,11 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     fn toggle_fullscreen_within_gaps_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId>;
 
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction);
-    fn apply_stacking_to_parent_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId>;
+    fn apply_stacking_to_parent_of_selection(
+        &mut self,
+        layout: LayoutId,
+        default_orientation: crate::common::config::StackDefaultOrientation,
+    ) -> Vec<WindowId>;
     fn unstack_parent_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId>;
     fn unjoin_selection(&mut self, _layout: LayoutId);
     fn resize_selection_by(&mut self, layout: LayoutId, amount: f64);

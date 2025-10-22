@@ -194,6 +194,11 @@ enum ConfigCommands {
     SetStackOffset {
         value: f64,
     },
+    /// Set the default stack orientation behavior. Value should be one of:
+    /// "perpendicular", "same", "horizontal", or "vertical"
+    SetStackDefaultOrientation {
+        value: String,
+    },
     SetOuterGaps {
         top: f64,
         left: f64,
@@ -538,6 +543,13 @@ fn map_config_command(cmd: ConfigCommands) -> Result<RiftCommand, String> {
             ConfigCommand::SetFocusFollowsMouse(value)
         }
         ConfigCommands::SetStackOffset { value } => ConfigCommand::SetStackOffset(value),
+        ConfigCommands::SetStackDefaultOrientation { value } => {
+            let parsed_value: serde_json::Value = serde_json::Value::String(value.clone());
+            ConfigCommand::Set {
+                key: "settings.layout.stack.default_orientation".to_string(),
+                value: parsed_value,
+            }
+        }
         ConfigCommands::SetOuterGaps { top, left, bottom, right } => {
             ConfigCommand::SetOuterGaps { top, left, bottom, right }
         }

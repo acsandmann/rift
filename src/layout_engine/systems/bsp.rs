@@ -984,7 +984,11 @@ impl LayoutSystem for BspLayoutSystem {
         }
     }
 
-    fn apply_stacking_to_parent_of_selection(&mut self, _layout: LayoutId) -> Vec<WindowId> {
+    fn apply_stacking_to_parent_of_selection(
+        &mut self,
+        _layout: LayoutId,
+        _default_orientation: crate::common::config::StackDefaultOrientation,
+    ) -> Vec<WindowId> {
         vec![]
     }
 

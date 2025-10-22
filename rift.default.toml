@@ -82,6 +82,13 @@ mode = "traditional"
 # Recommended: 30-50 for clear edges while keeping focus visible.
 stack_offset = 30.0
 
+# Default stacking orientation when creating a new stack.
+# Options:
+# - "perpendicular" (default): choose the perpendicular orientation to the parent layout
+# - "same": use the same orientation as the parent layout
+# - "horizontal"/"vertical": force a specific orientation
+default_orientation = "perpendicular"
+
 [settings.layout.gaps]
 # Gap configuration
 # - outer: space between windows and screen edges

@@ -613,7 +613,11 @@ impl LayoutSystem for TraditionalLayoutSystem {
         }
     }
 
-    fn apply_stacking_to_parent_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
+    fn apply_stacking_to_parent_of_selection(
+        &mut self,
+        layout: LayoutId,
+        default_orientation: crate::common::config::StackDefaultOrientation,
+    ) -> Vec<WindowId> {
         let selection = self.selection(layout);
 
         let target_container = if self.tree.data.window.at(selection).is_some() {
@@ -626,10 +630,36 @@ impl LayoutSystem for TraditionalLayoutSystem {
             let current_layout = self.layout(container);
 
             let new_layout = match current_layout {
-                LayoutKind::Horizontal => Some(LayoutKind::HorizontalStack),
-                LayoutKind::Vertical => Some(LayoutKind::VerticalStack),
                 LayoutKind::HorizontalStack => Some(LayoutKind::VerticalStack),
                 LayoutKind::VerticalStack => Some(LayoutKind::HorizontalStack),
+                LayoutKind::Horizontal => match default_orientation {
+                    crate::common::config::StackDefaultOrientation::Perpendicular => {
+                        Some(LayoutKind::VerticalStack)
+                    }
+                    crate::common::config::StackDefaultOrientation::Same => {
+                        Some(LayoutKind::HorizontalStack)
+                    }
+                    crate::common::config::StackDefaultOrientation::Horizontal => {
+                        Some(LayoutKind::HorizontalStack)
+                    }
+                    crate::common::config::StackDefaultOrientation::Vertical => {
+                        Some(LayoutKind::VerticalStack)
+                    }
+                },
+                LayoutKind::Vertical => match default_orientation {
+                    crate::common::config::StackDefaultOrientation::Perpendicular => {
+                        Some(LayoutKind::HorizontalStack)
+                    }
+                    crate::common::config::StackDefaultOrientation::Same => {
+                        Some(LayoutKind::VerticalStack)
+                    }
+                    crate::common::config::StackDefaultOrientation::Horizontal => {
+                        Some(LayoutKind::HorizontalStack)
+                    }
+                    crate::common::config::StackDefaultOrientation::Vertical => {
+                        Some(LayoutKind::VerticalStack)
+                    }
+                },
             };
 
             if let Some(nl) = new_layout {
@@ -2178,5 +2208,66 @@ mod tests {
         assert_eq!(system.move_over(child1, Direction::Right), Some(child2));
         assert_eq!(system.move_over(child2, Direction::Right), Some(child3));
         assert_eq!(system.move_over(child3, Direction::Right), None);
+    }
+
+    #[test]
+    fn test_stack_default_orientation_behavior() {
+        use crate::common::config::StackDefaultOrientation;
+
+        let mut system = TestTraditionalLayoutSystem::new();
+        let layout = system.system.create_layout();
+        let root_node = system.system.root(layout);
+
+        for &parent_kind in &[LayoutKind::Horizontal, LayoutKind::Vertical] {
+            let container = system.add_child(root_node, parent_kind);
+            system.system.tree.data.selection.select(&system.system.tree.map, container);
+            let _ =
+                crate::layout_engine::systems::LayoutSystem::apply_stacking_to_parent_of_selection(
+                    &mut system.system,
+                    layout,
+                    StackDefaultOrientation::Perpendicular,
+                );
+            let expected_perp = match parent_kind {
+                LayoutKind::Horizontal => LayoutKind::VerticalStack,
+                LayoutKind::Vertical => LayoutKind::HorizontalStack,
+                _ => unreachable!(),
+            };
+            assert_eq!(system.system.layout(container), expected_perp);
+
+            let container = system.add_child(root_node, parent_kind);
+            system.system.tree.data.selection.select(&system.system.tree.map, container);
+            let _ =
+                crate::layout_engine::systems::LayoutSystem::apply_stacking_to_parent_of_selection(
+                    &mut system.system,
+                    layout,
+                    StackDefaultOrientation::Same,
+                );
+            let expected_same = match parent_kind {
+                LayoutKind::Horizontal => LayoutKind::HorizontalStack,
+                LayoutKind::Vertical => LayoutKind::VerticalStack,
+                _ => unreachable!(),
+            };
+            assert_eq!(system.system.layout(container), expected_same);
+
+            let container = system.add_child(root_node, parent_kind);
+            system.system.tree.data.selection.select(&system.system.tree.map, container);
+            let _ =
+                crate::layout_engine::systems::LayoutSystem::apply_stacking_to_parent_of_selection(
+                    &mut system.system,
+                    layout,
+                    StackDefaultOrientation::Horizontal,
+                );
+            assert_eq!(system.system.layout(container), LayoutKind::HorizontalStack);
+
+            let container = system.add_child(root_node, parent_kind);
+            system.system.tree.data.selection.select(&system.system.tree.map, container);
+            let _ =
+                crate::layout_engine::systems::LayoutSystem::apply_stacking_to_parent_of_selection(
+                    &mut system.system,
+                    layout,
+                    StackDefaultOrientation::Vertical,
+                );
+            assert_eq!(system.system.layout(container), LayoutKind::VerticalStack);
+        }
     }
 }
