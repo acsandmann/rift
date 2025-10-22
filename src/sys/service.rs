@@ -11,7 +11,7 @@ use clap::Subcommand;
 use nix::unistd::getuid;
 
 const LAUNCHCTL_PATH: &str = "/bin/launchctl";
-const RIFT_PLIST: &str = "com.acsandmann.rift";
+const RIFT_PLIST: &str = "git.acsandmann.rift";
 
 #[derive(Subcommand)]
 pub enum ServiceCommands {

@@ -7,7 +7,7 @@
 	<key>CFBundleExecutable</key>
 	<string>rift</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.acsandmann.rift</string>
+	<string>git.acsandmann.rift</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>0.1.0</string>
 	<key>CFBundleName</key>

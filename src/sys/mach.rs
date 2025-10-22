@@ -324,7 +324,7 @@ pub unsafe fn mach_send_message(
             0,
             size_of::<simple_message>() as u32,
             reply_port,
-            3000,
+            10000,
             0,
         );
         debug!(
@@ -369,11 +369,30 @@ pub unsafe fn mach_send_request(message: *const c_char, len: u32) -> *mut c_char
     }
 
     let bs_name = CString::new(format!("{}{}", MACH_BS_NAME_FMT_PREFIX, G_NAME)).unwrap();
-    let service_port = mach_get_bs_port(&bs_name);
+
+    let mut service_port: mach_port_t = 0;
+    let mut attempt = 0;
+    while attempt < 5 {
+        service_port = mach_get_bs_port(&bs_name);
+        if service_port != 0 {
+            break;
+        }
+        let backoff_ms = 50u64.saturating_mul(1u64 << attempt);
+        debug!(
+            "mach_send_request: service not found (attempt {}), retrying in {}ms for {}",
+            attempt + 1,
+            backoff_ms,
+            bs_name.to_string_lossy()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+        attempt += 1;
+    }
+
     if service_port == 0 {
         error!(
-            "mach_send_request: mach_get_bs_port returned 0 for {}",
-            bs_name.to_string_lossy()
+            "mach_send_request: mach_get_bs_port returned 0 for {} after {} attempts",
+            bs_name.to_string_lossy(),
+            attempt
         );
         return null_mut();
     }
@@ -481,11 +500,29 @@ pub unsafe fn mach_server_begin(
 
     let mut port_from_launchd: mach_port_t = 0;
     let kr = bootstrap_check_in(mach_server.bs_port, bs_name.as_ptr(), &mut port_from_launchd);
+    debug!(
+        "mach_server_begin: bootstrap_check_in kr={} bs_name={}",
+        kr,
+        bs_name.to_string_lossy()
+    );
     if kr == KERN_SUCCESS {
+        info!(
+            "mach_server_begin: obtained port from launchd: {} (bs_port={})",
+            port_from_launchd, mach_server.bs_port
+        );
         mach_server.port = port_from_launchd;
     } else if kr == BOOTSTRAP_UNKNOWN_SERVICE || kr == 1100 {
+        info!(
+            "mach_server_begin: service not registered with launchd (kr={}), falling back to stand-alone registration",
+            kr
+        );
         // fall through to stand-alone below
     } else {
+        error!(
+            "mach_server_begin: bootstrap_check_in failed (kr={}) for {}",
+            kr,
+            bs_name.to_string_lossy()
+        );
         return false;
     }
 
@@ -682,6 +719,7 @@ pub unsafe fn send_mach_reply(
     true
 }
 
+#[allow(static_mut_refs)]
 pub unsafe fn mach_server_run(context: *mut c_void, handler: mach_handler) -> bool {
     static mut SERVER: mach_server = mach_server {
         is_running: false,
@@ -693,13 +731,25 @@ pub unsafe fn mach_server_run(context: *mut c_void, handler: mach_handler) -> bo
     };
 
     info!("mach_server_run: initializing server");
-    #[allow(static_mut_refs)]
+    debug!(
+        "mach_server_run: initial state task={} port={} bs_port={} handler_set={} context_ptr={:?}",
+        SERVER.task,
+        SERVER.port,
+        SERVER.bs_port,
+        SERVER.handler.is_some(),
+        SERVER.context
+    );
+
     if !mach_server_begin(&mut SERVER, context, handler) {
         error!("mach_server_run: mach_server_begin failed, aborting run loop");
         return false;
     }
 
     info!("mach_server_run: entering CFRunLoopRun");
+    debug!(
+        "mach_server_run: ports ready (task={}, port={}, bs_port={})",
+        SERVER.task, SERVER.port, SERVER.bs_port
+    );
     CFRunLoopRun();
     true
 }
