@@ -94,6 +94,13 @@ enum ExecuteCommands {
         #[command(subcommand)]
         config_cmd: ConfigCommands,
     },
+    /// Mission control commands
+    MissionControl {
+        #[command(subcommand)]
+        mission_cmd: MissionControlCommands,
+    },
+    /// Save current state and exit rift
+    SaveAndExit,
     /// Show timing metrics
     ShowTiming,
 }
@@ -219,6 +226,18 @@ enum ConfigCommands {
 
     /// Reload config from file
     Reload,
+}
+
+#[derive(Subcommand)]
+enum MissionControlCommands {
+    /// Show all workspaces in mission control
+    ShowAll,
+    /// Show current workspace in mission control
+    ShowCurrent,
+    /// Dismiss mission control
+    Dismiss,
+    /// Explicitly set mission control active state
+    SetActive { active: bool },
 }
 
 #[derive(Subcommand)]
@@ -351,6 +370,12 @@ fn build_execute_request(execute: ExecuteCommands) -> Result<RiftRequest, String
         ExecuteCommands::Workspace { workspace_cmd } => map_workspace_command(workspace_cmd)?,
         ExecuteCommands::Layout { layout_cmd } => map_layout_command(layout_cmd)?,
         ExecuteCommands::Config { config_cmd } => map_config_command(config_cmd)?,
+        ExecuteCommands::MissionControl { mission_cmd } => {
+            map_mission_control_command(mission_cmd)?
+        }
+        ExecuteCommands::SaveAndExit => {
+            RiftCommand::Reactor(reactor::Command::Reactor(reactor::ReactorCommand::SaveAndExit))
+        }
         ExecuteCommands::ShowTiming => RiftCommand::Reactor(reactor::Command::Metrics(
             rift_wm::common::log::MetricsCommand::ShowTiming,
         )),
@@ -530,6 +555,23 @@ fn map_config_command(cmd: ConfigCommands) -> Result<RiftCommand, String> {
     };
 
     Ok(RiftCommand::Config(cfg_cmd))
+}
+
+fn map_mission_control_command(cmd: MissionControlCommands) -> Result<RiftCommand, String> {
+    match cmd {
+        MissionControlCommands::ShowAll => Ok(RiftCommand::Reactor(reactor::Command::Reactor(
+            reactor::ReactorCommand::SetMissionControlActive(true),
+        ))),
+        MissionControlCommands::ShowCurrent => Ok(RiftCommand::Reactor(reactor::Command::Reactor(
+            reactor::ReactorCommand::SetMissionControlActive(true),
+        ))),
+        MissionControlCommands::Dismiss => Ok(RiftCommand::Reactor(reactor::Command::Reactor(
+            reactor::ReactorCommand::SetMissionControlActive(false),
+        ))),
+        MissionControlCommands::SetActive { active } => Ok(RiftCommand::Reactor(
+            reactor::Command::Reactor(reactor::ReactorCommand::SetMissionControlActive(active)),
+        )),
+    }
 }
 
 fn handle_success_response(request: &RiftRequest, data: serde_json::Value) -> Result<(), String> {
