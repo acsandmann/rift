@@ -791,8 +791,6 @@ impl TraditionalLayoutSystem {
                     self.tree.data.selection.local_selection(map, node).unwrap_or(children[0]);
                 let selected_index = children.iter().position(|&c| c == local_sel).unwrap_or(0);
 
-                // For vertical stacks, the UI uses bottom-up indexing while the layout engine uses top-down
-                // So we need to invert the index for vertical stacks
                 let ui_selected_index = if matches!(kind, VerticalStack) {
                     children.len().saturating_sub(1).saturating_sub(selected_index)
                 } else {
@@ -837,7 +835,6 @@ impl TraditionalLayoutSystem {
                 .local_selection(map, node)
                 .or_else(|| node.first_child(map))
             {
-                // Calculate the frame for the next node within the current container
                 rect = self.calculate_child_frame_in_container(node, next, rect, gaps);
                 node = next;
                 continue;
@@ -848,7 +845,6 @@ impl TraditionalLayoutSystem {
         out
     }
 
-    /// Calculate the frame for a specific child within an axis-based container
     fn calculate_child_frame_in_axis(
         &self,
         parent_rect: CGRect,
@@ -863,7 +859,6 @@ impl TraditionalLayoutSystem {
             return parent_rect;
         }
 
-        // Calculate sizes based on the layout logic similar to layout_axis
         let total: f32 = siblings.iter().map(|&child| self.tree.data.layout.info[child].size).sum();
         let inner_gap = if horizontal {
             gaps.inner.horizontal
@@ -884,7 +879,6 @@ impl TraditionalLayoutSystem {
             (axis_len - total_gap).max(0.0)
         };
 
-        // Calculate offset up to the target child
         let mut offset = if horizontal {
             parent_rect.origin.x
         } else {
@@ -900,7 +894,6 @@ impl TraditionalLayoutSystem {
             }
         }
 
-        // Calculate the target child's size
         let ratio =
             f64::from(self.tree.data.layout.info[siblings[child_index]].size) / f64::from(total);
         let seg_len = usable_axis * ratio;
@@ -918,7 +911,6 @@ impl TraditionalLayoutSystem {
         }
     }
 
-    /// Calculate the frame for a child node within its parent container
     fn calculate_child_frame_in_container(
         &self,
         parent_node: NodeId,
@@ -939,10 +931,7 @@ impl TraditionalLayoutSystem {
                 self.calculate_child_frame_in_axis(parent_rect, &siblings, child_index, false, gaps)
             }
             crate::layout_engine::LayoutKind::HorizontalStack
-            | crate::layout_engine::LayoutKind::VerticalStack => {
-                // For stacks, children occupy the full parent rect (they're stacked)
-                parent_rect
-            }
+            | crate::layout_engine::LayoutKind::VerticalStack => parent_rect,
         }
     }
 }

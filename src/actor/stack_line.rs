@@ -140,7 +140,6 @@ impl StackLine {
         let new_enabled = self.is_enabled();
 
         if old_enabled && !new_enabled {
-            // Stack line was disabled, clear all indicators
             for indicator in self.indicators.values() {
                 if let Err(err) = indicator.clear() {
                     tracing::warn!(
@@ -152,7 +151,6 @@ impl StackLine {
             self.indicators.clear();
             self.group_sigs_by_space.clear();
         } else if new_enabled {
-            // Stack line is enabled, update all existing indicators with new config
             let new_config = self.indicator_config();
             for (node_id, indicator) in &self.indicators {
                 if let Some(group_data) = indicator.group_data() {

@@ -1252,7 +1252,6 @@ impl Reactor {
                 self.layout_engine.set_layout_settings(&self.config.settings.layout);
                 let _ = self.drag_manager.update_config(self.config.settings.window_snapping);
 
-                // Send config update to stack line
                 if let Some(tx) = &self.stack_line_tx {
                     let _ = tx.try_send(crate::actor::stack_line::Event::ConfigUpdated(
                         self.config.clone(),
