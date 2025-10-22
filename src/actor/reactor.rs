@@ -2297,6 +2297,7 @@ impl Reactor {
             raise_windows,
             mut focus_window,
         } = response;
+        let original_focus = focus_window;
 
         let mut handled_without_raise = false;
 
@@ -2358,7 +2359,13 @@ impl Reactor {
         }
 
         let mut app_handles = HashMap::default();
-        for &wid in raise_windows.iter().chain(&focus_window) {
+        for &wid in raise_windows.iter() {
+            if let Some(app) = self.apps.get(&wid.pid) {
+                app_handles.insert(wid.pid, app.handle.clone());
+            }
+        }
+
+        if let Some(wid) = original_focus {
             if let Some(app) = self.apps.get(&wid.pid) {
                 app_handles.insert(wid.pid, app.handle.clone());
             }
