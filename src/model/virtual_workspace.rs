@@ -642,11 +642,8 @@ impl VirtualWorkspaceManager {
         }
 
         if let Some(existing_ws) = self.window_to_workspace.get(&(space, window_id)).copied() {
-            let should_float = self
-                .window_rule_floating
-                .get(&(space, window_id))
-                .copied()
-                .unwrap_or(false);
+            let should_float =
+                self.window_rule_floating.get(&(space, window_id)).copied().unwrap_or(false);
             return Ok((existing_ws, should_float));
         }
 
@@ -703,8 +700,7 @@ impl VirtualWorkspaceManager {
 
             if self.assign_window_to_workspace(space, window_id, target_workspace_id) {
                 if rule.floating {
-                    self.window_rule_floating
-                        .insert((space, window_id), true);
+                    self.window_rule_floating.insert((space, window_id), true);
                 } else {
                     self.window_rule_floating.remove(&(space, window_id));
                 }
@@ -1125,10 +1121,7 @@ mod tests {
             )
             .unwrap();
         assert!(should_float);
-        assert_eq!(
-            manager.window_rule_floating.get(&(space, window)),
-            Some(&true)
-        );
+        assert_eq!(manager.window_rule_floating.get(&(space, window)), Some(&true));
 
         let (_, still_floats) = manager
             .assign_window_with_app_info(
