@@ -1010,19 +1010,33 @@ impl Reactor {
                         let new_space = self.best_space_for_window(&new_frame);
 
                         if old_space != new_space {
-                            if let Some(space) = new_space {
-                                if let Some(active_ws) = self.layout_engine.active_workspace(space)
-                                {
-                                    let _ = self
-                                        .layout_engine
-                                        .virtual_workspace_manager_mut()
-                                        .assign_window_to_workspace(space, wid, active_ws);
+                            if self.in_drag
+                                || self.active_drag.as_ref().is_some_and(|s| s.window == wid)
+                            {
+                                if let Some(space) = new_space {
+                                    if let Some(session) = self.active_drag.as_mut() {
+                                        if session.window == wid {
+                                            session.settled_space = Some(space);
+                                            session.layout_dirty = true;
+                                        }
+                                    }
                                 }
-                                self.send_layout_event(LayoutEvent::WindowAdded(space, wid));
-                                let _ = self.update_layout(false, false);
                             } else {
-                                self.send_layout_event(LayoutEvent::WindowRemoved(wid));
-                                let _ = self.update_layout(false, false);
+                                if let Some(space) = new_space {
+                                    if let Some(active_ws) =
+                                        self.layout_engine.active_workspace(space)
+                                    {
+                                        let _ = self
+                                            .layout_engine
+                                            .virtual_workspace_manager_mut()
+                                            .assign_window_to_workspace(space, wid, active_ws);
+                                    }
+                                    self.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+                                    let _ = self.update_layout(false, false);
+                                } else {
+                                    self.send_layout_event(LayoutEvent::WindowRemoved(wid));
+                                    let _ = self.update_layout(false, false);
+                                }
                             }
                         } else if old_frame.size != new_frame.size {
                             self.send_layout_event(LayoutEvent::WindowResized {
@@ -1084,6 +1098,11 @@ impl Reactor {
             Event::SpaceChanged(spaces, ws_info) => {
                 // TODO: this logic is flawed if multiple spaces are changing at once
                 if self.handle_fullscreen_space_transition(&spaces) {
+                    return;
+                }
+                if self.mission_control_active {
+                    // dont process whilst mc is active
+                    self.pending_space_change = Some(PendingSpaceChange { spaces, ws_info });
                     return;
                 }
                 let spaces_all_none = spaces.iter().all(|space| space.is_none());
@@ -1534,6 +1553,10 @@ impl Reactor {
 
         let skip_stale_cleanup = self.suppress_stale_window_cleanup
             || pending_refresh
+            || self.mission_control_active
+            || self.in_drag
+            || self.pid_has_changing_screens(pid)
+            || self.active_drag.as_ref().map_or(false, |s| s.window.pid == pid)
             || (known_visible_set.is_empty() && !self.has_visible_window_server_ids_for_pid(pid))
             || has_window_server_visibles_without_ax;
 
@@ -1587,10 +1610,15 @@ impl Reactor {
                     let ordered_in = window_server::window_is_ordered_in(ws_id);
                     let visible_in_snapshot = self.visible_windows.contains(&ws_id);
 
+                    let window_space = self.best_space_for_window(&info.frame);
+                    let is_on_visible_space = window_space.map_or(false, |s| {
+                        self.screens.iter().flat_map(|sc| sc.space).any(|vs| vs == s)
+                    });
+
                     if unsuitable
                         || invalid_layer
                         || too_small
-                        || (!ordered_in && !visible_in_snapshot)
+                        || (is_on_visible_space && !ordered_in && !visible_in_snapshot)
                     {
                         Some(wid)
                     } else {
@@ -1926,6 +1954,20 @@ impl Reactor {
         } else {
             false
         }
+    }
+
+    fn pid_has_changing_screens(&self, pid: pid_t) -> bool {
+        self.changing_screens.iter().any(|wsid| {
+            if let Some(wid) = self.window_ids.get(wsid) {
+                wid.pid == pid
+            } else if let Some(info) = self.window_server_info.get(wsid) {
+                info.pid == pid
+            } else if let Some(info) = crate::sys::window_server::get_window(*wsid) {
+                info.pid == pid
+            } else {
+                false
+            }
+        })
     }
 
     fn has_visible_window_server_ids_for_pid(&self, pid: pid_t) -> bool {
@@ -2278,6 +2320,27 @@ impl Reactor {
             }
         }
 
+        if let Some(wid) = focus_window {
+            if let Some(state) = self.windows.get(&wid) {
+                if let Some(wsid) = state.window_server_id {
+                    if self.changing_screens.contains(&wsid)
+                        || !self.visible_windows.contains(&wsid)
+                    {
+                        focus_window = None;
+                    } else if let Some(space) = self.best_space_for_window(&state.frame_monotonic) {
+                        if let Some(active_space) = self.screens.iter().flat_map(|s| s.space).next()
+                        {
+                            if space != active_space {
+                                focus_window = None;
+                            }
+                        }
+                    } else {
+                        focus_window = None;
+                    }
+                }
+            }
+        }
+
         if handled_without_raise && raise_windows.is_empty() && focus_window.is_none() {
             self.is_workspace_switch = false;
             return;
@@ -2476,10 +2539,28 @@ impl Reactor {
 
     fn last_focused_window_in_space(&self, space: SpaceId) -> Option<WindowId> {
         let active_workspace = self.layout_engine.active_workspace(space)?;
-        self.layout_engine
+        let wid = self
+            .layout_engine
             .virtual_workspace_manager()
-            .last_focused_window(space, active_workspace)
-            .filter(|wid| self.windows.contains_key(wid))
+            .last_focused_window(space, active_workspace)?;
+        let window = self.windows.get(&wid)?;
+
+        if let Some(actual_space) = self.best_space_for_window(&window.frame_monotonic) {
+            if actual_space != space {
+                return None;
+            }
+        } else {
+            return None;
+        }
+        if let Some(wsid) = window.window_server_id {
+            if self.changing_screens.contains(&wsid) {
+                return None;
+            }
+            if !self.visible_windows.contains(&wsid) {
+                return None;
+            }
+        }
+        Some(wid)
     }
 
     fn request_refocus_if_hidden(&mut self, space: SpaceId, window_id: WindowId) {
