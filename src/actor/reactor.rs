@@ -20,6 +20,11 @@ use std::thread;
 use std::time::Duration;
 
 use animation::Animation;
+use events::app::AppEventHandler;
+use events::command::CommandEventHandler;
+use events::drag::DragEventHandler;
+use events::space::SpaceEventHandler;
+use events::window::WindowEventHandler;
 use main_window::MainWindowTracker;
 use objc2_app_kit::NSNormalWindowLevel;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
@@ -50,12 +55,6 @@ use crate::sys::window_server::{
     self, WindowServerId, WindowServerInfo, space_is_fullscreen,
     wait_for_native_fullscreen_transition,
 };
-
-use events::app::AppEventHandler;
-use events::command::CommandEventHandler;
-use events::drag::DragEventHandler;
-use events::space::SpaceEventHandler;
-use events::window::WindowEventHandler;
 
 pub type Sender = actor::Sender<Event>;
 type Receiver = actor::Receiver<Event>;
@@ -478,9 +477,7 @@ impl Reactor {
     }
 
     fn update_txid_entries<I>(&self, entries: I)
-    where
-        I: IntoIterator<Item = (WindowServerId, TransactionId, CGRect)>,
-    {
+    where I: IntoIterator<Item = (WindowServerId, TransactionId, CGRect)> {
         if let Some(store) = self.window_tx_store.as_ref() {
             for (wsid, txid, target) in entries {
                 store.insert(wsid, txid, target);
@@ -2033,9 +2030,7 @@ impl Reactor {
         }
     }
 
-    fn main_window(&self) -> Option<WindowId> {
-        self.main_window_tracker.main_window()
-    }
+    fn main_window(&self) -> Option<WindowId> { self.main_window_tracker.main_window() }
 
     fn main_window_space(&self) -> Option<SpaceId> {
         // TODO: Optimize this with a cache or something.

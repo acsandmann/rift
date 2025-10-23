@@ -207,7 +207,7 @@ impl WindowEventHandler {
                         ?new_frame,
                         "Rift frame event without store; updating state"
                     );
-                     window.frame_monotonic = new_frame;
+                    window.frame_monotonic = new_frame;
                 }
                 return false;
             }
