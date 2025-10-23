@@ -104,15 +104,21 @@ impl TraditionalLayoutSystem {
         self.find_or_create_common_parent_internal(layout, node1, node2)
     }
 
-    fn root(&self, layout: LayoutId) -> NodeId { self.layout_roots[layout].id() }
+    fn root(&self, layout: LayoutId) -> NodeId {
+        self.layout_roots[layout].id()
+    }
 
     fn selection(&self, layout: LayoutId) -> NodeId {
         self.tree.data.selection.current_selection(self.root(layout))
     }
 
-    fn map(&self) -> &NodeMap { &self.tree.map }
+    fn map(&self) -> &NodeMap {
+        &self.tree.map
+    }
 
-    fn layout(&self, node: NodeId) -> LayoutKind { self.tree.data.layout.kind(node) }
+    fn layout(&self, node: NodeId) -> LayoutKind {
+        self.tree.data.layout.kind(node)
+    }
 
     fn set_layout(&mut self, node: NodeId, kind: LayoutKind) {
         self.tree.data.layout.set_kind(node, kind);
@@ -308,11 +314,9 @@ impl LayoutSystem for TraditionalLayoutSystem {
             source_root.traverse_preorder(&self.tree.map),
             cloned_root.traverse_preorder(&self.tree.map),
         ) {
-            self.tree.data.dispatch_event(&self.tree.map, TreeEvent::Copied {
-                src,
-                dest,
-                dest_layout,
-            });
+            self.tree
+                .data
+                .dispatch_event(&self.tree.map, TreeEvent::Copied { src, dest, dest_layout });
         }
         dest_layout
     }
@@ -1043,7 +1047,9 @@ impl TraditionalLayoutSystem {
         node
     }
 
-    fn window_at(&self, node: NodeId) -> Option<WindowId> { self.tree.data.window.at(node) }
+    fn window_at(&self, node: NodeId) -> Option<WindowId> {
+        self.tree.data.window.at(node)
+    }
 
     fn rebalance_node(&mut self, node: NodeId) {
         let map = &self.tree.map;
@@ -1541,7 +1547,9 @@ struct WindowNodeInfo {
 struct WindowNodeInfoVec(Vec<WindowNodeInfo>);
 
 impl Window {
-    fn at(&self, node: NodeId) -> Option<WindowId> { self.windows.get(node).copied() }
+    fn at(&self, node: NodeId) -> Option<WindowId> {
+        self.windows.get(node).copied()
+    }
 
     fn node_for(&self, layout: LayoutId, wid: WindowId) -> Option<NodeId> {
         self.window_nodes.get(&wid).and_then(|nodes| {
@@ -1677,41 +1685,37 @@ impl StackLayoutResult {
         const FOCUS_SIZE_INCREASE: f64 = 10.0;
         const FOCUS_OFFSET_DECREASE: f64 = 5.0;
         let offset_amount = index as f64 * self.stack_offset;
-        let (mut origin_x, mut origin_y) = if self.is_horizontal {
-            (
-                self.container_rect.origin.x + offset_amount - FOCUS_OFFSET_DECREASE,
-                self.container_rect.origin.y - FOCUS_OFFSET_DECREASE,
-            )
-        } else {
-            (
-                self.container_rect.origin.x - FOCUS_OFFSET_DECREASE,
-                self.container_rect.origin.y + offset_amount - FOCUS_OFFSET_DECREASE,
-            )
+        let container = &self.container_rect; // Alias for brevity and clarity
+        let (origin_x, origin_y) = match self.is_horizontal {
+            true => (
+                if index == 0 {
+                    container.origin.x
+                } else {
+                    container.origin.x + offset_amount - FOCUS_OFFSET_DECREASE
+                },
+                container.origin.y - FOCUS_OFFSET_DECREASE,
+            ),
+            false => (
+                container.origin.x - FOCUS_OFFSET_DECREASE,
+                if index == 0 {
+                    container.origin.y
+                } else {
+                    container.origin.y + offset_amount - FOCUS_OFFSET_DECREASE
+                },
+            ),
         };
-        if self.is_horizontal {
-            if index == 0 {
-                origin_x = self.container_rect.origin.x;
-            }
-            let max_x = self.container_rect.origin.x + self.container_rect.size.width
-                - (self.window_width + FOCUS_SIZE_INCREASE);
-            origin_x = origin_x.min(max_x);
-        }
-        if !self.is_horizontal {
-            if index == 0 {
-                origin_y = self.container_rect.origin.y;
-            }
-            let max_y = self.container_rect.origin.y + self.container_rect.size.height
-                - (self.window_height + FOCUS_SIZE_INCREASE);
-            origin_y = origin_y.min(max_y);
-        }
-        let screen_x = self.container_rect.origin.x;
-        let screen_y = self.container_rect.origin.y;
-        let screen_width = self.container_rect.size.width;
-        let screen_height = self.container_rect.size.height;
-        let width = (self.window_width + FOCUS_SIZE_INCREASE).min(screen_width);
-        let height = (self.window_height + FOCUS_SIZE_INCREASE).min(screen_height);
-        let x = origin_x.clamp(screen_x, screen_x + screen_width - width);
-        let y = origin_y.clamp(screen_y, screen_y + screen_height - height);
+        let width = (self.window_width + FOCUS_SIZE_INCREASE).min(container.size.width);
+        let height = (self.window_height + FOCUS_SIZE_INCREASE).min(container.size.height);
+        let container_x = container.origin.x;
+        let container_y = container.origin.y;
+        let container_width = container.size.width;
+        let container_height = container.size.height;
+        let min_x = container_x;
+        let max_x = (container_x + container_width - width).max(min_x);
+        let min_y = container_y;
+        let max_y = (container_y + container_height - height).max(min_y);
+        let x = origin_x.clamp(min_x, max_x);
+        let y = origin_y.clamp(min_y, max_y);
         CGRect {
             origin: CGPoint { x, y },
             size: CGSize { width, height },
@@ -1776,7 +1780,9 @@ impl Layout {
         }
     }
 
-    fn kind(&self, node: NodeId) -> LayoutKind { self.info[node].kind }
+    fn kind(&self, node: NodeId) -> LayoutKind {
+        self.info[node].kind
+    }
 
     fn proportion(&self, map: &NodeMap, node: NodeId) -> Option<f64> {
         let Some(parent) = node.parent(map) else { return None };
@@ -2100,6 +2106,7 @@ fn adjust_stack_container_rect(
 mod tests {
     use super::*;
     use crate::layout_engine::{Direction, LayoutKind};
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 
     struct TestTraditionalLayoutSystem {
         system: TraditionalLayoutSystem,
@@ -2128,7 +2135,9 @@ mod tests {
     }
 
     impl Drop for TestTraditionalLayoutSystem {
-        fn drop(&mut self) { self._root.remove(&mut self.system.tree); }
+        fn drop(&mut self) {
+            self._root.remove(&mut self.system.tree);
+        }
     }
 
     #[test]
@@ -2269,5 +2278,137 @@ mod tests {
                 );
             assert_eq!(system.system.layout(container), LayoutKind::VerticalStack);
         }
+    }
+
+    // Tests for StackLayoutResult::get_focused_frame_for_index
+    #[test]
+    fn test_get_focused_frame_for_index_horizontal_index_zero() {
+        let container_rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
+        let stack_result = StackLayoutResult::new(container_rect, 3, 50.0, true);
+        let frame = stack_result.get_focused_frame_for_index(0, 0);
+        // For index 0, horizontal: origin_x = container.origin.x = 0.0
+        // origin_y = container.origin.y - FOCUS_OFFSET_DECREASE = 0.0 - 5.0 = -5.0, but clamped
+        // width = min(window_width + 10, 1000) = min(1000-100 +10,1000)=910
+        // height = min(800+10,800)=800
+        // min_x=0, max_x=1000-910=90
+        // min_y=0, max_y=800-800=0
+        // x = clamp(-5, 0, 90) wait, origin_x for index 0 is set to 0.0
+        // In code: if index==0, origin_x = container.origin.x = 0.0
+        // origin_y = -5.0, clamped to min_y=0
+        // So x=0, y=0
+        assert_eq!(frame.origin.x, 0.0);
+        assert_eq!(frame.origin.y, 0.0);
+        assert_eq!(frame.size.width, 910.0);
+        assert_eq!(frame.size.height, 800.0);
+    }
+
+    #[test]
+    fn test_get_focused_frame_for_index_vertical_index_zero() {
+        let container_rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
+        let stack_result = StackLayoutResult::new(container_rect, 3, 50.0, false);
+        let frame = stack_result.get_focused_frame_for_index(0, 0);
+        // Vertical: origin_x = -5.0, clamped to 0
+        // origin_y = 0.0
+        assert_eq!(frame.origin.x, 0.0);
+        assert_eq!(frame.origin.y, 0.0);
+        // window_width = 1000, height = (800 - 100)/2 ? Wait, new() calculation
+        // total_offset_space = 2*50=100
+        // window_height = (800 - 100).max(100) = 700
+        // width = min(1000+10,1000)=1000
+        // height = min(700+10,800)=710
+        assert_eq!(frame.size.width, 1000.0);
+        assert_eq!(frame.size.height, 710.0);
+    }
+
+    #[test]
+    fn test_get_focused_frame_for_index_horizontal_index_one() {
+        let container_rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
+        let stack_result = StackLayoutResult::new(container_rect, 3, 50.0, true);
+        let frame = stack_result.get_focused_frame_for_index(1, 0);
+        // Horizontal, index=1, offset_amount=50.0
+        // origin_x = 0 + 50 - 5 = 45.0
+        // origin_y = 0 - 5 = -5.0 -> clamped to 0
+        // max_x for origin_x: container.width - (window_width +10) = 1000 - 910 = 90
+        // origin_x = 45.0.min(90) = 45.0
+        // Then clamp to min_x=0, max_x=90
+        assert_eq!(frame.origin.x, 45.0);
+        assert_eq!(frame.origin.y, 0.0);
+    }
+
+    #[test]
+    fn test_get_focused_frame_for_index_vertical_index_one() {
+        let container_rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
+        let stack_result = StackLayoutResult::new(container_rect, 3, 50.0, false);
+        let frame = stack_result.get_focused_frame_for_index(1, 0);
+        // Vertical, index=1, offset_amount=50.0
+        // origin_x = 0 - 5 = -5.0 -> clamped to 0
+        // origin_y = 0 + 50 - 5 = 45.0
+        // max_y for origin_y: 800 - 710 = 90
+        // origin_y = 45.0.min(90) = 45.0
+        assert_eq!(frame.origin.x, 0.0);
+        assert_eq!(frame.origin.y, 45.0);
+    }
+
+    #[test]
+    fn test_get_focused_frame_for_index_window_larger_than_container() {
+        let container_rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(100.0, 100.0));
+        let stack_result = StackLayoutResult::new(container_rect, 1, 0.0, true);
+        let frame = stack_result.get_focused_frame_for_index(0, 0);
+        // window_width = 100, height=100
+        // width = min(100+10,100)=100
+        // height=100
+        // max_x = 100 - 100 = 0, but .max(0)=0
+        // max_y=0
+        // x=0, y=0
+        assert_eq!(frame.origin.x, 0.0);
+        assert_eq!(frame.origin.y, 0.0);
+        assert_eq!(frame.size.width, 100.0);
+        assert_eq!(frame.size.height, 100.0);
+    }
+
+    #[test]
+    fn test_get_focused_frame_for_index_zero_stack_offset() {
+        let container_rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
+        let stack_result = StackLayoutResult::new(container_rect, 3, 0.0, true);
+        let frame = stack_result.get_focused_frame_for_index(1, 0);
+        // offset_amount=0
+        // origin_x = 0 + 0 - 5 = -5.0 -> 0
+        // origin_y = -5.0 -> 0
+        assert_eq!(frame.origin.x, 0.0);
+        assert_eq!(frame.origin.y, 0.0);
+    }
+
+    #[test]
+    fn test_get_focused_frame_for_index_floating_point_precision() {
+        // Test case that could cause min > max due to precision
+        let container_rect = CGRect::new(
+            CGPoint::new(1726.5118132741347, 1726.5118132741347),
+            CGSize::new(1.0, 1.0),
+        );
+        let stack_result = StackLayoutResult::new(container_rect, 1, 0.0, true);
+        let frame = stack_result.get_focused_frame_for_index(0, 0);
+        // Should not panic, and position should be reasonable
+        assert!(frame.origin.x.is_finite());
+        assert!(frame.origin.y.is_finite());
+        assert!(frame.size.width > 0.0);
+        assert!(frame.size.height > 0.0);
+        // Ensure within container bounds approximately
+        assert!(frame.origin.x >= container_rect.origin.x - 1.0);
+        assert!(frame.origin.y >= container_rect.origin.y - 1.0);
+    }
+
+    #[test]
+    fn test_get_focused_frame_for_index_small_container() {
+        let container_rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(10.0, 10.0));
+        let stack_result = StackLayoutResult::new(container_rect, 1, 0.0, true);
+        let frame = stack_result.get_focused_frame_for_index(0, 0);
+        // new() sets window_width = max(10-0,100)=100, but wait
+        // total_offset_space=0, window_width=(10-0).max(100)=100
+        // But then width = min(100+10,10)=10
+        // So max_x = 10 - 10 = 0
+        assert_eq!(frame.size.width, 10.0);
+        assert_eq!(frame.size.height, 10.0);
+        assert_eq!(frame.origin.x, 0.0);
+        assert_eq!(frame.origin.y, 0.0);
     }
 }
