@@ -15,7 +15,7 @@ use std::os::raw::{c_char, c_int, c_void};
 use tracing::{debug, error, info};
 
 const MAX_MESSAGE_SIZE: u32 = 16_384;
-const MACH_BS_NAME_FMT_PREFIX: &str = "com.";
+const MACH_BS_NAME_FMT_PREFIX: &str = "git.";
 static G_NAME: &str = "acsandmann.rift";
 
 type kern_return_t = c_int;
@@ -49,6 +49,7 @@ const MACH_PORT_QLIMIT_LARGE: u32 = 1024;
 const TASK_BOOTSTRAP_PORT: c_int = 4;
 
 const BOOTSTRAP_NOT_PRIVILEGED: kern_return_t = 1100;
+const BOOTSTRAP_NAME_IN_USE: kern_return_t = 1101;
 const BOOTSTRAP_UNKNOWN_SERVICE: kern_return_t = 1102;
 
 #[inline]
@@ -249,6 +250,10 @@ pub unsafe fn mach_send_message(
     await_response: bool,
 ) -> *mut c_char {
     if message.is_null() || port == 0 || len > MAX_MESSAGE_SIZE {
+        error!(
+            "mach_send_message: invalid input args message={:?} port={} len={}",
+            message, port, len
+        );
         return null_mut();
     }
 
@@ -257,11 +262,16 @@ pub unsafe fn mach_send_message(
 
     if await_response {
         if mach_port_allocate(task, MACH_PORT_RIGHT_RECEIVE, &mut reply_port) != KERN_SUCCESS {
+            error!("mach_send_message: mach_port_allocate failed for reply port");
             return null_mut();
         }
         if mach_port_insert_right(task, reply_port, reply_port, MACH_MSG_TYPE_MAKE_SEND as c_int)
             != KERN_SUCCESS
         {
+            error!(
+                "mach_send_message: mach_port_insert_right failed for reply port={}",
+                reply_port
+            );
             let _ = mach_port_mod_refs(task, reply_port, MACH_PORT_RIGHT_RECEIVE, -1);
             let _ = mach_port_deallocate(task, reply_port);
             return null_mut();
@@ -309,6 +319,10 @@ pub unsafe fn mach_send_message(
         send_result, port, reply_port
     );
     if send_result != MACH_MSG_SUCCESS {
+        error!(
+            "mach_send_message: mach_msg send failed (result={} remote_port={} reply_port={})",
+            send_result, port, reply_port
+        );
         if await_response && reply_port != 0 {
             let _ = mach_port_mod_refs(task, reply_port, MACH_PORT_RIGHT_RECEIVE, -1);
             let _ = mach_port_deallocate(task, reply_port);
@@ -336,15 +350,32 @@ pub unsafe fn mach_send_message(
         let _ = mach_port_deallocate(task, reply_port);
 
         if recv_result != MACH_MSG_SUCCESS {
+            error!(
+                "mach_send_message: failed to receive response (recv_result={} reply_port={})",
+                recv_result, reply_port
+            );
             return null_mut();
         }
 
         let response_len =
             response.header.msgh_size.saturating_sub(size_of::<mach_msg_header_t>() as u32);
 
-        let layout = std::alloc::Layout::array::<c_char>((response_len as usize) + 1).unwrap();
+        let layout = match std::alloc::Layout::array::<c_char>((response_len as usize) + 1) {
+            Ok(l) => l,
+            Err(e) => {
+                error!(
+                    "mach_send_message: invalid layout for response_len={} error={:?}",
+                    response_len, e
+                );
+                return null_mut();
+            }
+        };
         let buf = std::alloc::alloc(layout) as *mut c_char;
         if buf.is_null() {
+            error!(
+                "mach_send_message: allocation failed for response buffer len={}",
+                response_len
+            );
             return null_mut();
         }
         copy_nonoverlapping(
@@ -498,64 +529,44 @@ pub unsafe fn mach_server_begin(
 
     let bs_name = CString::new(format!("{}{}", MACH_BS_NAME_FMT_PREFIX, G_NAME)).unwrap();
 
-    let mut port_from_launchd: mach_port_t = 0;
-    let kr = bootstrap_check_in(mach_server.bs_port, bs_name.as_ptr(), &mut port_from_launchd);
-    debug!(
-        "mach_server_begin: bootstrap_check_in kr={} bs_name={}",
-        kr,
-        bs_name.to_string_lossy()
+    let ar = mach_port_allocate(mach_server.task, MACH_PORT_RIGHT_RECEIVE, &mut mach_server.port);
+    if ar != KERN_SUCCESS {
+        error!("mach_server_begin: mach_port_allocate failed (kr={})", ar);
+        return false;
+    }
+
+    let ir = mach_port_insert_right(
+        mach_server.task,
+        mach_server.port,
+        mach_server.port,
+        MACH_MSG_TYPE_MAKE_SEND as c_int,
     );
-    if kr == KERN_SUCCESS {
-        info!(
-            "mach_server_begin: obtained port from launchd: {} (bs_port={})",
-            port_from_launchd, mach_server.bs_port
-        );
-        mach_server.port = port_from_launchd;
-    } else if kr == BOOTSTRAP_UNKNOWN_SERVICE || kr == 1100 {
-        info!(
-            "mach_server_begin: service not registered with launchd (kr={}), falling back to stand-alone registration",
-            kr
-        );
-        // fall through to stand-alone below
-    } else {
+    if ir != KERN_SUCCESS {
         error!(
-            "mach_server_begin: bootstrap_check_in failed (kr={}) for {}",
-            kr,
-            bs_name.to_string_lossy()
+            "mach_server_begin: mach_port_insert_right (MAKE_SEND) failed (kr={})",
+            ir
         );
         return false;
     }
 
-    if mach_server.port == 0 {
-        let ar =
-            mach_port_allocate(mach_server.task, MACH_PORT_RIGHT_RECEIVE, &mut mach_server.port);
-        if ar != KERN_SUCCESS {
-            error!("mach_server_begin: mach_port_allocate failed (kr={})", ar);
-            return false;
-        }
-        let ir = mach_port_insert_right(
-            mach_server.task,
-            mach_server.port,
-            mach_server.port,
-            MACH_MSG_TYPE_MAKE_SEND as c_int,
-        );
-        if ir != KERN_SUCCESS {
-            error!(
-                "mach_server_begin: mach_port_insert_right (MAKE_SEND) failed (kr={})",
-                ir
-            );
-            return false;
-        }
-
-        let rr = bootstrap_register(mach_server.bs_port, bs_name.as_ptr(), mach_server.port);
-        if rr != KERN_SUCCESS {
-            error!(
+    let rr = bootstrap_register(mach_server.bs_port, bs_name.as_ptr(), mach_server.port);
+    if rr != KERN_SUCCESS {
+        match rr {
+            BOOTSTRAP_NAME_IN_USE => error!(
+                "mach_server_begin: bootstrap_register: name in use: {}.",
+                bs_name.to_string_lossy()
+            ),
+            BOOTSTRAP_NOT_PRIVILEGED => error!(
+                "mach_server_begin: bootstrap_register: not privileged for domain (kr={}).",
+                rr
+            ),
+            _ => error!(
                 "mach_server_begin: bootstrap_register failed (kr={}) for {}",
                 rr,
                 bs_name.to_string_lossy()
-            );
-            return false;
+            ),
         }
+        return false;
     }
 
     let limits = mach_port_limits {
@@ -604,6 +615,13 @@ pub unsafe fn mach_server_begin(
     CFRelease(source);
     CFRelease(cf_mach_port);
 
+    info!(
+        "mach_server_begin: registered '{}' in current bootstrap domain (port={}, bs_port={})",
+        bs_name.to_string_lossy(),
+        mach_server.port,
+        mach_server.bs_port
+    );
+
     true
 }
 
@@ -634,16 +652,7 @@ pub unsafe fn send_mach_reply(
     const MACH_PORT_TYPE_SEND: u32 = 0x1 << (0 + 16);
     const MACH_PORT_TYPE_SEND_ONCE: u32 = 0x1 << (2 + 16);
 
-    let (reply_port, reply_descriptor) = if (*original_msg).msgh_local_port != 0
-        && (local_port_type & (MACH_PORT_TYPE_SEND | MACH_PORT_TYPE_SEND_ONCE)) != 0
-    {
-        let descriptor = if (local_port_type & MACH_PORT_TYPE_SEND_ONCE) != 0 {
-            MACH_MSG_TYPE_MOVE_SEND_ONCE
-        } else {
-            MACH_MSG_TYPE_COPY_SEND
-        };
-        ((*original_msg).msgh_local_port, descriptor)
-    } else if (*original_msg).msgh_remote_port != 0
+    let (reply_port, reply_descriptor) = if (*original_msg).msgh_remote_port != 0
         && (remote_port_type & (MACH_PORT_TYPE_SEND | MACH_PORT_TYPE_SEND_ONCE)) != 0
     {
         let descriptor = if (remote_port_type & MACH_PORT_TYPE_SEND_ONCE) != 0 {
@@ -652,6 +661,15 @@ pub unsafe fn send_mach_reply(
             MACH_MSG_TYPE_COPY_SEND
         };
         ((*original_msg).msgh_remote_port, descriptor)
+    } else if (*original_msg).msgh_local_port != 0
+        && (local_port_type & (MACH_PORT_TYPE_SEND | MACH_PORT_TYPE_SEND_ONCE)) != 0
+    {
+        let descriptor = if (local_port_type & MACH_PORT_TYPE_SEND_ONCE) != 0 {
+            MACH_MSG_TYPE_MOVE_SEND_ONCE
+        } else {
+            MACH_MSG_TYPE_COPY_SEND
+        };
+        ((*original_msg).msgh_local_port, descriptor)
     } else {
         error!(
             "send_mach_reply: no available send right (remote_port_type={} local_port_type={} remote_port={} local_port={})",
