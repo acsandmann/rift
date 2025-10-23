@@ -255,7 +255,6 @@ struct simple_message {
 }
 
 unsafe fn mach_get_bs_port(bs_name: &CStr) -> mach_port_t {
-    println!("[mach] lookup name={}..", bs_name.to_string_lossy());
     let mut bs_port: mach_port_t = 0;
     if task_get_special_port(mach_task_self(), TASK_BOOTSTRAP_PORT, &mut bs_port) != KERN_SUCCESS {
         error!("mach_get_bs_port: task_get_special_port failed");
@@ -419,7 +418,6 @@ pub unsafe fn mach_send_message(
         *out.add(rsp_len) = 0;
 
         mach_msg_destroy(&mut buffer.message.header);
-        let preview = unsafe { std::slice::from_raw_parts(out as *const u8, rsp_len.min(128)) };
         return out;
     }
 
@@ -513,7 +511,6 @@ extern "C" fn mach_message_callback(
         let header_val = core::ptr::read_unaligned(message as *const mach_msg_header_t);
         let header_ptr = &header_val as *const mach_msg_header_t as *mut mach_msg_header_t;
         if header_val.msgh_remote_port == 0 {
-            println!("[mach] dropping notification (remote_port=0)");
             return;
         }
 
