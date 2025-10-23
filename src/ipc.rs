@@ -377,8 +377,11 @@ unsafe extern "C" fn handle_mach_request_c(
     len: u32,
     original_msg: *mut mach_msg_header_t,
 ) {
-    if context.is_null() || message.is_null() {
-        error!("Invalid context or message pointer");
+    if context.is_null() {
+        error!("Invalid context pointer");
+        return;
+    }
+    if message.is_null() || len == 0 {
         return;
     }
 
@@ -405,14 +408,7 @@ unsafe extern "C" fn handle_mach_request_c(
 
     debug!("Received message: {}", message_str);
 
-    let client_port = unsafe {
-        let local = (*original_msg).msgh_local_port;
-        if local != 0 {
-            local
-        } else {
-            (*original_msg).msgh_remote_port
-        }
-    };
+    let client_port = unsafe { (*original_msg).msgh_remote_port };
 
     let request: RiftRequest = match serde_json::from_str(message_str) {
         Ok(req) => req,
