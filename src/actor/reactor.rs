@@ -338,6 +338,10 @@ struct WindowState {
     /// This value only updates monotonically with respect to writes; in other
     /// words, we only accept reads when we know they come after the last write.
     frame_monotonic: CGRect,
+    /// The last known visible position before the window was hidden off-screen
+    last_visible_frame: Option<CGRect>,
+    /// Whether the window is currently hidden (positioned off-screen)
+    is_hidden: bool,
     is_ax_standard: bool,
     is_ax_root: bool,
     is_minimized: bool,
@@ -365,6 +369,8 @@ impl From<WindowInfo> for WindowState {
         WindowState {
             title: info.title,
             frame_monotonic: info.frame,
+            last_visible_frame: Some(info.frame),
+            is_hidden: false,
             is_ax_standard: info.is_standard,
             is_ax_root: info.is_root,
             is_minimized: info.is_minimized,
@@ -793,6 +799,21 @@ impl Reactor {
                             ?wsid,
                             layer = window_server_info.layer,
                             "Ignoring non-normal window"
+                        );
+                        return;
+                    }
+
+                    // Filter out very small windows (likely tooltips or similar UI elements)
+                    // that shouldn't be managed by the window manager
+                    const MIN_MANAGEABLE_WINDOW_SIZE: f64 = 50.0;
+                    if window_server_info.frame.size.width < MIN_MANAGEABLE_WINDOW_SIZE
+                        || window_server_info.frame.size.height < MIN_MANAGEABLE_WINDOW_SIZE
+                    {
+                        trace!(
+                            ?wsid,
+                            "Ignoring tiny window ({}x{}) - likely tooltip",
+                            window_server_info.frame.size.width,
+                            window_server_info.frame.size.height
                         );
                         return;
                     }
@@ -1694,6 +1715,8 @@ impl Reactor {
                     let mut state: WindowState = WindowState {
                         title: info.title.clone(),
                         frame_monotonic: info.frame,
+                        last_visible_frame: Some(info.frame),
+                        is_hidden: false,
                         is_ax_standard: info.is_standard,
                         is_ax_root: info.is_root,
                         is_minimized: info.is_minimized,
@@ -2402,7 +2425,16 @@ impl Reactor {
 
         let focus_window_with_warp = focus_window.map(|wid| {
             let warp = match self.config.settings.mouse_follows_focus {
-                true => self.windows.get(&wid).map(|w| w.frame_monotonic.mid()),
+                true => self.windows.get(&wid).and_then(|w| {
+                    // If the window is hidden, use the last visible frame for mouse warp
+                    // Otherwise, use the current frame
+                    let frame = if w.is_hidden && w.last_visible_frame.is_some() {
+                        w.last_visible_frame.unwrap()
+                    } else {
+                        w.frame_monotonic
+                    };
+                    Some(frame.mid())
+                }),
                 false => None,
             };
             (wid, warp)
@@ -2842,8 +2874,46 @@ impl Reactor {
                         continue;
                     }
 
-                    for (wid, target_frame) in &frames {
+                    // First pass: determine which windows are being hidden
+                    let mut window_hidden_states: Vec<(WindowId, bool)> = Vec::new();
+                    for (wid, _target_frame) in &frames {
+                        if let Some(window) = self.windows.get(wid) {
+                            // Check if this window is being positioned in an inactive workspace (hidden)
+                            let space = self.best_space_for_window(&window.frame_monotonic);
+                            let is_being_hidden = if let Some(space) = space {
+                                let active_workspace = self.layout_engine.active_workspace(space);
+                                let window_workspace = self
+                                    .layout_engine
+                                    .virtual_workspace_manager()
+                                    .workspace_for_window(space, *wid);
+                                match (active_workspace, window_workspace) {
+                                    (Some(active), Some(window_ws)) => active != window_ws,
+                                    _ => false,
+                                }
+                            } else {
+                                false
+                            };
+                            window_hidden_states.push((*wid, is_being_hidden));
+                        }
+                    }
+
+                    // Second pass: update window states
+                    for ((wid, target_frame), (_, is_being_hidden)) in
+                        frames.iter().zip(window_hidden_states.iter())
+                    {
                         if let Some(window) = self.windows.get_mut(wid) {
+                            if *is_being_hidden {
+                                // Store current visible position before hiding
+                                if !window.is_hidden {
+                                    window.last_visible_frame = Some(window.frame_monotonic);
+                                }
+                                window.is_hidden = true;
+                            } else {
+                                // Window is being positioned visibly
+                                window.is_hidden = false;
+                                window.last_visible_frame = Some(*target_frame);
+                            }
+
                             window.frame_monotonic = *target_frame;
                         }
                     }
@@ -2933,7 +3003,39 @@ impl Reactor {
                             }
                         }
 
+                        // Check if this window is being positioned in an inactive workspace (hidden)
+                        let is_being_hidden = if let Some(window) = self.windows.get(&wid) {
+                            let space = self.best_space_for_window(&window.frame_monotonic);
+                            if let Some(space) = space {
+                                let active_workspace = self.layout_engine.active_workspace(space);
+                                let window_workspace = self
+                                    .layout_engine
+                                    .virtual_workspace_manager()
+                                    .workspace_for_window(space, wid);
+                                match (active_workspace, window_workspace) {
+                                    (Some(active), Some(window_ws)) => active != window_ws,
+                                    _ => false,
+                                }
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+
                         if let Some(window) = self.windows.get_mut(&wid) {
+                            if is_being_hidden {
+                                // Store current visible position before hiding
+                                if !window.is_hidden {
+                                    window.last_visible_frame = Some(window.frame_monotonic);
+                                }
+                                window.is_hidden = true;
+                            } else {
+                                // Window is being positioned visibly
+                                window.is_hidden = false;
+                                window.last_visible_frame = Some(target_frame);
+                            }
+
                             window.frame_monotonic = target_frame;
                         }
                     }

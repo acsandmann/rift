@@ -996,6 +996,19 @@ impl State {
             return None;
         }
 
+        // Filter out very small windows (likely tooltips or similar UI elements)
+        // that shouldn't be managed by the window manager
+        const MIN_MANAGEABLE_WINDOW_SIZE: f64 = 50.0;
+        if info.frame.size.width < MIN_MANAGEABLE_WINDOW_SIZE
+            || info.frame.size.height < MIN_MANAGEABLE_WINDOW_SIZE
+        {
+            trace!(
+                "Ignoring tiny window ({}x{}) - likely tooltip",
+                info.frame.size.width, info.frame.size.height
+            );
+            return None;
+        }
+
         if info.ax_role.as_deref() == Some("AXPopover") || info.ax_role.as_deref() == Some("AXMenu")
         //|| info.ax_subrole.as_deref() == Some("AXUnknown")
         {
