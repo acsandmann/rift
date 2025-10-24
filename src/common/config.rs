@@ -468,6 +468,10 @@ pub struct StackLineSettings {
     pub horiz_placement: HorizontalPlacement,
     #[serde(default)]
     pub vert_placement: VerticalPlacement,
+    /// Distance to position the stack line away from the window edge (in points)
+    /// This creates spacing between the window and the stack line
+    #[serde(default = "default_stack_line_spacing")]
+    pub spacing: f64,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
@@ -863,6 +867,8 @@ fn default_workspace_names() -> Vec<String> {
 fn default_swipe_vertical_tolerance() -> f64 { 0.4 }
 fn default_swipe_fingers() -> usize { 3 }
 fn default_distance_pct() -> f64 { 0.08 }
+
+fn default_stack_line_spacing() -> f64 { 0.0 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
 #[serde(rename_all = "snake_case")]

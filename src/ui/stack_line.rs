@@ -55,18 +55,20 @@ pub struct IndicatorConfig {
     pub border_width: f64,
     pub horizontal_placement: HorizontalPlacement,
     pub vertical_placement: VerticalPlacement,
+    pub spacing: f64,
 }
 
 impl Default for IndicatorConfig {
     fn default() -> Self {
         Self {
-            bar_thickness: 4.0,
-            selected_color: Color::blue(),
-            unselected_color: Color::light_gray(),
-            border_color: Color::gray(),
-            border_width: 0.5,
+            bar_thickness: 6.0,
+            selected_color: Color { r: 0.0, g: 0.5, b: 1.0, a: 0.9 },
+            unselected_color: Color { r: 0.5, g: 0.5, b: 0.5, a: 0.4 },
+            border_color: Color { r: 0.3, g: 0.3, b: 0.3, a: 0.6 },
+            border_width: 0.3,
             horizontal_placement: HorizontalPlacement::Top,
             vertical_placement: VerticalPlacement::Right,
+            spacing: 4.0,
         }
     }
 }
@@ -81,6 +83,7 @@ impl From<&crate::common::config::StackLineSettings> for IndicatorConfig {
             border_width: 0.5,
             horizontal_placement: config.horiz_placement,
             vertical_placement: config.vert_placement,
+            spacing: config.spacing,
         }
     }
 }
@@ -261,8 +264,15 @@ impl GroupIndicatorWindow {
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         self.ensure_separator_layers(group_data.total_count);
-        self.update_background_layer(bounds);
-        self.update_separator_layers(&group_data, bounds);
+        self.update_background_layer(bounds, group_data.group_kind);
+
+        let config = {
+            let state = self.state.borrow();
+            state.config
+        };
+        let adjusted_bounds = self.calculate_adjusted_bounds(bounds, config, group_data.group_kind);
+        self.update_separator_layers(&group_data, adjusted_bounds);
+
         self.update_selected_layer(&group_data, bounds);
         CATransaction::commit();
     }
@@ -285,9 +295,71 @@ impl GroupIndicatorWindow {
         }
     }
 
-    fn update_background_layer(&self, bounds: CGRect) {
+    /// Calculate adjusted bounds with proper corner handling only
+    fn calculate_adjusted_bounds(
+        &self,
+        bounds: CGRect,
+        config: IndicatorConfig,
+        group_kind: GroupKind,
+    ) -> CGRect {
+        let corner_radius = 8.0;
+        let min_corner_offset = corner_radius * 0.7;
+
+        match group_kind {
+            GroupKind::Horizontal => {
+                let corner_offset = if corner_radius > 0.0 {
+                    min_corner_offset
+                } else {
+                    0.0
+                };
+                CGRect::new(
+                    CGPoint::new(bounds.origin.x + corner_offset, bounds.origin.y),
+                    CGSize::new(
+                        (bounds.size.width - 2.0 * corner_offset).max(20.0),
+                        config.bar_thickness,
+                    ),
+                )
+            }
+            GroupKind::Vertical => {
+                let corner_offset = if corner_radius > 0.0 {
+                    min_corner_offset
+                } else {
+                    0.0
+                };
+                CGRect::new(
+                    CGPoint::new(bounds.origin.x, bounds.origin.y + corner_offset),
+                    CGSize::new(
+                        config.bar_thickness,
+                        (bounds.size.height - 2.0 * corner_offset).max(20.0),
+                    ),
+                )
+            }
+        }
+    }
+
+    fn update_background_layer(&self, bounds: CGRect, group_kind: GroupKind) {
+        let config = {
+            let state = self.state.borrow();
+            state.config
+        };
+
+        let adjusted_bounds = self.calculate_adjusted_bounds(bounds, config, group_kind);
+        let corner_radius = 8.0;
+
+        if corner_radius > 0.0 {
+            self.update_background_layer_with_rounded_corners(
+                adjusted_bounds,
+                config,
+                corner_radius,
+                group_kind,
+            );
+        } else {
+            self.update_background_layer_standard(adjusted_bounds, config);
+        }
+    }
+
+    fn update_background_layer_standard(&self, bounds: CGRect, config: IndicatorConfig) {
         let mut state = self.state.borrow_mut();
-        let config = state.config;
 
         let background_layer = if let Some(existing) = &state.background_layer {
             existing.clone()
@@ -309,6 +381,43 @@ impl GroupIndicatorWindow {
         background_layer.setBorderWidth(config.border_width);
         let border_color = config.border_color.to_nscolor();
         background_layer.setBorderColor(Some(&border_color.CGColor()));
+    }
+
+    fn update_background_layer_with_rounded_corners(
+        &self,
+        bounds: CGRect,
+        config: IndicatorConfig,
+        corner_radius: f64,
+        _group_kind: GroupKind,
+    ) {
+        let mut state = self.state.borrow_mut();
+
+        if let Some(existing) = &state.background_layer {
+            existing.removeFromSuperlayer();
+        }
+
+        let background_layer = CALayer::layer();
+        background_layer.setFrame(bounds);
+
+        let bg_color = config.unselected_color.to_nscolor();
+        background_layer.setBackgroundColor(Some(&bg_color.CGColor()));
+        let effective_corner_radius =
+            (corner_radius * 0.4).min(bounds.size.width / 2.0).min(bounds.size.height / 2.0);
+        background_layer.setCornerRadius(effective_corner_radius);
+
+        background_layer.setShadowOpacity(0.15);
+        background_layer.setShadowOffset(CGSize::new(0.0, 1.0));
+        background_layer.setShadowRadius(2.0);
+
+        let shadow_color = objc2_app_kit::NSColor::blackColor();
+        background_layer.setShadowColor(Some(&shadow_color.CGColor()));
+
+        background_layer.setBorderWidth(0.3);
+        let border_color = config.border_color.to_nscolor();
+        background_layer.setBorderColor(Some(&border_color.CGColor()));
+
+        self.root_layer.insertSublayer_atIndex(&background_layer, 0);
+        state.background_layer = Some(background_layer);
     }
 
     fn update_separator_layers(&self, group_data: &GroupDisplayData, bounds: CGRect) {
@@ -360,8 +469,32 @@ impl GroupIndicatorWindow {
             return;
         }
 
+        let config = {
+            let state = self.state.borrow();
+            state.config
+        };
+        let adjusted_bounds = self.calculate_adjusted_bounds(bounds, config, group_data.group_kind);
+        let corner_radius = 8.0;
+
+        if corner_radius > 0.0 {
+            self.update_selected_layer_with_rounded_corners(
+                group_data,
+                adjusted_bounds,
+                config,
+                corner_radius,
+            );
+        } else {
+            self.update_selected_layer_standard(group_data, adjusted_bounds, config);
+        }
+    }
+
+    fn update_selected_layer_standard(
+        &self,
+        group_data: &GroupDisplayData,
+        bounds: CGRect,
+        config: IndicatorConfig,
+    ) {
         let mut state = self.state.borrow_mut();
-        let config = state.config;
 
         let selected_layer = if let Some(existing) = &state.selected_layer {
             existing.clone()
@@ -381,6 +514,52 @@ impl GroupIndicatorWindow {
         selected_layer.setBackgroundColor(Some(&selected_color.CGColor()));
     }
 
+    fn update_selected_layer_with_rounded_corners(
+        &self,
+        group_data: &GroupDisplayData,
+        bounds: CGRect,
+        config: IndicatorConfig,
+        corner_radius: f64,
+    ) {
+        let mut state = self.state.borrow_mut();
+
+        if let Some(existing) = &state.selected_layer {
+            existing.removeFromSuperlayer();
+        }
+
+        let selected_layer = CALayer::layer();
+
+        let segment_frame =
+            Self::calculate_segment_frame(group_data, bounds, group_data.selected_index);
+        selected_layer.setFrame(segment_frame);
+
+        let selected_color = config.selected_color.to_nscolor();
+        selected_layer.setBackgroundColor(Some(&selected_color.CGColor()));
+        let effective_corner_radius = (corner_radius * 0.4)
+            .min(segment_frame.size.width / 2.0)
+            .min(segment_frame.size.height / 2.0);
+        selected_layer.setCornerRadius(effective_corner_radius);
+
+        selected_layer.setShadowOpacity(0.25);
+        selected_layer.setShadowOffset(CGSize::new(0.0, 1.5));
+        selected_layer.setShadowRadius(3.0);
+
+        let shadow_color = objc2_app_kit::NSColor::blackColor();
+        selected_layer.setShadowColor(Some(&shadow_color.CGColor()));
+
+        selected_layer.setBorderWidth(0.5);
+        let border_color = objc2_app_kit::NSColor::colorWithRed_green_blue_alpha(
+            (config.selected_color.r + 0.1).min(1.0),
+            (config.selected_color.g + 0.1).min(1.0),
+            (config.selected_color.b + 0.1).min(1.0),
+            1.0,
+        );
+        selected_layer.setBorderColor(Some(&border_color.CGColor()));
+
+        self.root_layer.addSublayer(&selected_layer);
+        state.selected_layer = Some(selected_layer);
+    }
+
     fn animate_selection_change(&self, to_index: usize) {
         let state = self.state.borrow();
         let Some(selected_layer) = state.selected_layer.clone() else {
@@ -389,9 +568,13 @@ impl GroupIndicatorWindow {
         let Some(group_data) = state.group_data.clone() else {
             return;
         };
-        let bounds = self.bounds();
+        let config = state.config;
+        drop(state);
 
-        let to_frame = Self::calculate_segment_frame(&group_data, bounds, to_index);
+        let bounds = self.bounds();
+        let adjusted_bounds = self.calculate_adjusted_bounds(bounds, config, group_data.group_kind);
+
+        let to_frame = Self::calculate_segment_frame(&group_data, adjusted_bounds, to_index);
 
         selected_layer.setFrame(to_frame);
     }
@@ -408,13 +591,21 @@ impl GroupIndicatorWindow {
 
         let (seg_x, seg_y, seg_width, seg_height) = match group_data.group_kind {
             GroupKind::Horizontal => {
-                let seg_start = bar.origin.x + (segment_index as f64 * segment_length);
-                (seg_start, bar.origin.y, segment_length, bar.size.height)
+                let seg_start = (bar.origin.x + (segment_index as f64 * segment_length)).round();
+                let seg_end =
+                    (bar.origin.x + ((segment_index + 1) as f64 * segment_length)).round();
+                let actual_width = seg_end - seg_start;
+                (seg_start, bar.origin.y, actual_width, bar.size.height)
             }
             GroupKind::Vertical => {
-                let seg_start = bar.origin.y + bar.size.height
-                    - ((segment_index as f64 + 1.0) * segment_length);
-                (bar.origin.x, seg_start, bar.size.width, segment_length)
+                let seg_end =
+                    bar.origin.y + bar.size.height - (segment_index as f64 * segment_length);
+                let seg_start =
+                    bar.origin.y + bar.size.height - ((segment_index + 1) as f64 * segment_length);
+                let seg_start_rounded = seg_start.round();
+                let seg_end_rounded = seg_end.round();
+                let actual_height = seg_end_rounded - seg_start_rounded;
+                (bar.origin.x, seg_start_rounded, bar.size.width, actual_height)
             }
         };
 

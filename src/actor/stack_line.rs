@@ -199,6 +199,7 @@ impl StackLine {
             config.bar_thickness,
             config.horizontal_placement,
             config.vertical_placement,
+            config.spacing,
         );
 
         let node_id = group.node_id;
@@ -259,36 +260,23 @@ impl StackLine {
         group_frame: CGRect,
         group_kind: GroupKind,
         thickness: f64,
-        horizontal_placement: HorizontalPlacement,
-        vertical_placement: VerticalPlacement,
+        _horizontal_placement: HorizontalPlacement,
+        _vertical_placement: VerticalPlacement,
+        spacing: f64,
     ) -> CGRect {
+        let min_size = thickness * 2.0;
+        let adjusted_width = group_frame.size.width.max(min_size);
+        let adjusted_height = group_frame.size.height.max(min_size);
+
         match group_kind {
-            GroupKind::Horizontal => match horizontal_placement {
-                HorizontalPlacement::Top => CGRect::new(
-                    group_frame.origin,
-                    CGSize::new(group_frame.size.width, thickness),
-                ),
-                HorizontalPlacement::Bottom => CGRect::new(
-                    CGPoint::new(
-                        group_frame.origin.x,
-                        group_frame.origin.y + group_frame.size.height - thickness,
-                    ),
-                    CGSize::new(group_frame.size.width, thickness),
-                ),
-            },
-            GroupKind::Vertical => match vertical_placement {
-                VerticalPlacement::Left => CGRect::new(
-                    group_frame.origin,
-                    CGSize::new(thickness, group_frame.size.height),
-                ),
-                VerticalPlacement::Right => CGRect::new(
-                    CGPoint::new(
-                        group_frame.origin.x + group_frame.size.width - thickness,
-                        group_frame.origin.y,
-                    ),
-                    CGSize::new(thickness, group_frame.size.height),
-                ),
-            },
+            GroupKind::Horizontal => CGRect::new(
+                CGPoint::new(group_frame.origin.x, group_frame.origin.y - spacing),
+                CGSize::new(adjusted_width, thickness),
+            ),
+            GroupKind::Vertical => CGRect::new(
+                CGPoint::new(group_frame.origin.x - spacing, group_frame.origin.y),
+                CGSize::new(thickness, adjusted_height),
+            ),
         }
     }
 
@@ -340,53 +328,32 @@ mod tests {
     fn test_calculate_indicator_frame() {
         let group_frame = CGRect::new(CGPoint::new(100.0, 200.0), CGSize::new(400.0, 300.0));
         let thickness = 6.0;
+        let spacing = 4.0;
 
-        let frame_top = StackLine::calculate_indicator_frame(
+        let frame_horizontal = StackLine::calculate_indicator_frame(
             group_frame,
             GroupKind::Horizontal,
             thickness,
             HorizontalPlacement::Top,
             VerticalPlacement::Right,
+            spacing,
         );
-        assert_eq!(frame_top.origin.x, 100.0);
-        assert_eq!(frame_top.origin.y, 200.0);
-        assert_eq!(frame_top.size.width, 400.0);
-        assert_eq!(frame_top.size.height, thickness);
+        assert_eq!(frame_horizontal.origin.x, 100.0);
+        assert_eq!(frame_horizontal.origin.y, 200.0 - spacing);
+        assert_eq!(frame_horizontal.size.width, 400.0);
+        assert_eq!(frame_horizontal.size.height, thickness);
 
-        let frame_bottom = StackLine::calculate_indicator_frame(
-            group_frame,
-            GroupKind::Horizontal,
-            thickness,
-            HorizontalPlacement::Bottom,
-            VerticalPlacement::Right,
-        );
-        assert_eq!(frame_bottom.origin.x, 100.0);
-        assert_eq!(frame_bottom.origin.y, 200.0 + 300.0 - thickness);
-        assert_eq!(frame_bottom.size.width, 400.0);
-        assert_eq!(frame_bottom.size.height, thickness);
-
-        let frame_left = StackLine::calculate_indicator_frame(
+        let frame_vertical = StackLine::calculate_indicator_frame(
             group_frame,
             GroupKind::Vertical,
             thickness,
             HorizontalPlacement::Top,
             VerticalPlacement::Left,
+            spacing,
         );
-        assert_eq!(frame_left.origin.x, 100.0);
-        assert_eq!(frame_left.origin.y, 200.0);
-        assert_eq!(frame_left.size.width, thickness);
-        assert_eq!(frame_left.size.height, 300.0);
-
-        let frame_right = StackLine::calculate_indicator_frame(
-            group_frame,
-            GroupKind::Vertical,
-            thickness,
-            HorizontalPlacement::Top,
-            VerticalPlacement::Right,
-        );
-        assert_eq!(frame_right.origin.x, 100.0 + 400.0 - thickness);
-        assert_eq!(frame_right.origin.y, 200.0);
-        assert_eq!(frame_right.size.width, thickness);
-        assert_eq!(frame_right.size.height, 300.0);
+        assert_eq!(frame_vertical.origin.x, 100.0 - spacing);
+        assert_eq!(frame_vertical.origin.y, 200.0);
+        assert_eq!(frame_vertical.size.width, thickness);
+        assert_eq!(frame_vertical.size.height, 300.0);
     }
 }
