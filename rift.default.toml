@@ -118,7 +118,9 @@ horiz_placement = "top"
 # in a vertical stack where the line will be (left/right)
 vert_placement = "left"
 # how thick the line indicator will be (in px)
-thickness = 3.0
+thickness = 4.0
+# spacing between the stack line and window edges (in px)
+spacing = 2.0
 
 # experimental mission control
 [settings.ui.mission_control]
