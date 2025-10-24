@@ -2,7 +2,7 @@ use tracing::{error, info};
 
 use crate::actor::app::{AppThreadHandle, WindowId};
 use crate::actor::raise_manager;
-use crate::actor::reactor::Reactor;
+use crate::actor::reactor::{Reactor, WorkspaceSwitchState};
 use crate::actor::stack_line::Event as StackLineEvent;
 use crate::actor::wm_controller::WmEvent;
 use crate::common::collections::HashMap;
@@ -55,7 +55,11 @@ impl CommandEventHandler {
             ),
         };
 
-        reactor.is_workspace_switch = is_workspace_switch;
+        reactor.workspace_switch_state = if is_workspace_switch {
+            WorkspaceSwitchState::Active
+        } else {
+            WorkspaceSwitchState::Inactive
+        };
         reactor.handle_layout_response(response);
     }
 

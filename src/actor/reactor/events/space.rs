@@ -5,7 +5,10 @@ use objc2_core_foundation::CGRect;
 use tracing::{debug, info, trace, warn};
 
 use crate::actor::app::{AppInfo, Request};
-use crate::actor::reactor::{Event, FullscreenTrack, PendingSpaceChange, Reactor, Screen};
+use crate::actor::reactor::{
+    DragState, Event, FullscreenTrack, MissionControlState, PendingSpaceChange, Reactor, Screen,
+    StaleCleanupState,
+};
 use crate::actor::wm_controller::WmEvent;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
@@ -15,20 +18,22 @@ pub struct SpaceEventHandler;
 impl SpaceEventHandler {
     pub fn handle_window_is_changing_screens(reactor: &mut Reactor, wsid: WindowServerId) {
         reactor.changing_screens.insert(wsid);
-        if let Some((dragged_wid, target_wid)) = reactor.pending_drag_swap.take() {
+        if let DragState::PendingSwap { dragged, target } =
+            std::mem::replace(&mut reactor.drag_state, DragState::Inactive)
+        {
             trace!(
-                ?dragged_wid,
-                ?target_wid,
+                ?dragged,
+                ?target,
                 ?wsid,
                 "Clearing pending drag swap; window is moving between spaces"
             );
-            if reactor.skip_layout_for_window == Some(dragged_wid) {
+            if reactor.skip_layout_for_window == Some(dragged) {
                 reactor.skip_layout_for_window = None;
             }
         }
         reactor.drag_manager.reset();
-        reactor.active_drag = None;
-        reactor.in_drag = true;
+        reactor.drag_state = DragState::Inactive;
+        // finalize_active_drag will set to Inactive, but since we're starting a new drag, ensure_active_drag will set to Active
         if let Some(&wid) = reactor.window_ids.get(&wsid) {
             if let Some(frame) = reactor.windows.get(&wid).map(|window| window.frame_monotonic) {
                 reactor.ensure_active_drag(wid, &frame);
@@ -181,7 +186,11 @@ impl SpaceEventHandler {
     ) {
         info!("screen parameters changed");
         let spaces_all_none = spaces.iter().all(|space| space.is_none());
-        reactor.suppress_stale_window_cleanup = spaces_all_none;
+        reactor.stale_cleanup_state = if spaces_all_none {
+            StaleCleanupState::Suppressed
+        } else {
+            StaleCleanupState::Enabled
+        };
         let mut ws_info_opt = Some(ws_info);
         if frames.is_empty() {
             if spaces.is_empty() {
@@ -233,13 +242,17 @@ impl SpaceEventHandler {
         if reactor.handle_fullscreen_space_transition(&spaces) {
             return;
         }
-        if reactor.mission_control_active {
+        if matches!(reactor.mission_control_state, MissionControlState::Active) {
             // dont process whilst mc is active
             reactor.pending_space_change = Some(PendingSpaceChange { spaces, ws_info });
             return;
         }
         let spaces_all_none = spaces.iter().all(|space| space.is_none());
-        reactor.suppress_stale_window_cleanup = spaces_all_none;
+        reactor.stale_cleanup_state = if spaces_all_none {
+            StaleCleanupState::Suppressed
+        } else {
+            StaleCleanupState::Enabled
+        };
         if spaces.len() != reactor.screens.len() {
             warn!(
                 "Deferring space change: have {} screens but {} spaces",
@@ -260,7 +273,7 @@ impl SpaceEventHandler {
     }
 
     pub fn handle_mission_control_native_exited(reactor: &mut Reactor) {
-        if reactor.mission_control_active {
+        if matches!(reactor.mission_control_state, MissionControlState::Active) {
             reactor.set_mission_control_active(false);
         }
         reactor.refresh_windows_after_mission_control();

@@ -1,17 +1,23 @@
 use tracing::trace;
 
-use crate::actor::reactor::Reactor;
+use crate::actor::reactor::{DragState, Reactor};
 use crate::layout_engine::LayoutCommand;
 
 pub struct DragEventHandler;
 
 impl DragEventHandler {
     pub fn handle_mouse_up(reactor: &mut Reactor) {
-        reactor.in_drag = false;
-
         let mut need_layout_refresh = false;
 
-        if let Some((dragged_wid, target_wid)) = reactor.pending_drag_swap.take() {
+        let pending_swap = if let DragState::PendingSwap { dragged, target } =
+            std::mem::replace(&mut reactor.drag_state, DragState::Inactive)
+        {
+            Some((dragged, target))
+        } else {
+            None
+        };
+
+        if let Some((dragged_wid, target_wid)) = pending_swap {
             trace!(?dragged_wid, ?target_wid, "Performing deferred swap on MouseUp");
 
             reactor.skip_layout_for_window = Some(dragged_wid);

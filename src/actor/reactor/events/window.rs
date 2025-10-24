@@ -2,7 +2,9 @@ use objc2_core_foundation::CGRect;
 use tracing::{debug, trace};
 
 use crate::actor::app::WindowId;
-use crate::actor::reactor::{Quiet, Reactor, Requested, TransactionId, WindowState};
+use crate::actor::reactor::{
+    DragState, MissionControlState, Quiet, Reactor, Requested, TransactionId, WindowState,
+};
 use crate::layout_engine::LayoutEvent;
 use crate::sys::app::WindowInfo as Window;
 use crate::sys::event::MouseState;
@@ -17,7 +19,7 @@ impl WindowEventHandler {
         wid: WindowId,
         window: Window,
         ws_info: Option<WindowServerInfo>,
-        mouse_state: MouseState,
+        _mouse_state: MouseState,
     ) {
         // FIXME: We assume all windows are on the main screen.
         if let Some(wsid) = window.sys_id {
@@ -45,9 +47,10 @@ impl WindowEventHandler {
                 reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
             }
         }
-        if mouse_state == MouseState::Down {
-            reactor.in_drag = true;
-        }
+        // TODO: drag state is maybe managed by ensure_active_drag
+        // if mouse_state == MouseState::Down {
+        //     reactor.drag_state = DragState::Active { ... };
+        // }
     }
 
     pub fn handle_window_destroyed(reactor: &mut Reactor, wid: WindowId) {
@@ -66,13 +69,13 @@ impl WindowEventHandler {
         reactor.windows.remove(&wid);
         reactor.send_layout_event(LayoutEvent::WindowRemoved(wid));
 
-        if let Some((dragged_wid, target_wid)) = reactor.pending_drag_swap {
-            if dragged_wid == wid || target_wid == wid {
+        if let DragState::PendingSwap { dragged, target } = &reactor.drag_state {
+            if *dragged == wid || *target == wid {
                 trace!(
                     ?wid,
                     "Clearing pending drag swap because a participant window was destroyed"
                 );
-                reactor.pending_drag_swap = None;
+                reactor.drag_state = DragState::Inactive;
             }
         }
 
@@ -81,8 +84,7 @@ impl WindowEventHandler {
         if dragged_window == Some(wid) || last_target == Some(wid) {
             reactor.drag_manager.reset();
             if dragged_window == Some(wid) {
-                reactor.active_drag = None;
-                reactor.in_drag = false;
+                reactor.drag_state = DragState::Inactive;
             }
         }
 
@@ -151,7 +153,7 @@ impl WindowEventHandler {
         mouse_state: Option<MouseState>,
     ) -> bool {
         if let Some(window) = reactor.windows.get_mut(&wid) {
-            if reactor.mission_control_active
+            if matches!(reactor.mission_control_state, MissionControlState::Active)
                 || window
                     .window_server_id
                     .is_some_and(|wsid| reactor.changing_screens.contains(&wsid))
@@ -216,12 +218,13 @@ impl WindowEventHandler {
                 return false;
             }
 
-            let dragging = mouse_state == Some(MouseState::Down) || reactor.in_drag;
+            let dragging = mouse_state == Some(MouseState::Down)
+                || matches!(
+                    reactor.drag_state,
+                    DragState::Active { .. } | DragState::PendingSwap { .. }
+                );
 
             if dragging {
-                if !reactor.in_drag {
-                    reactor.in_drag = true;
-                }
                 reactor.ensure_active_drag(wid, &old_frame);
                 reactor.update_active_drag(wid, &new_frame);
                 if old_frame.size != new_frame.size {
@@ -239,11 +242,13 @@ impl WindowEventHandler {
                 let new_space = reactor.best_space_for_window(&new_frame);
 
                 if old_space != new_space {
-                    if reactor.in_drag
-                        || reactor.active_drag.as_ref().is_some_and(|s| s.window == wid)
+                    if matches!(
+                        reactor.drag_state,
+                        DragState::Active { .. } | DragState::PendingSwap { .. }
+                    ) || matches!(&reactor.drag_state, DragState::Active { session } if session.window == wid)
                     {
                         if let Some(space) = new_space {
-                            if let Some(session) = reactor.active_drag.as_mut() {
+                            if let DragState::Active { session } = &mut reactor.drag_state {
                                 if session.window == wid {
                                     session.settled_space = Some(space);
                                     session.layout_dirty = true;

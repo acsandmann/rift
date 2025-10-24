@@ -249,12 +249,50 @@ struct FullscreenTrack {
 }
 
 #[derive(Debug, Clone)]
-struct DragSession {
+pub struct DragSession {
     window: WindowId,
     last_frame: CGRect,
     origin_space: Option<SpaceId>,
     settled_space: Option<SpaceId>,
     layout_dirty: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum DragState {
+    Inactive,
+    Active { session: DragSession },
+    PendingSwap { dragged: WindowId, target: WindowId },
+}
+
+#[derive(Debug, Clone)]
+pub enum MissionControlState {
+    Inactive,
+    Active,
+    Transitioning,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MenuState {
+    Closed,
+    Open(usize),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkspaceSwitchState {
+    Inactive,
+    Active,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StaleCleanupState {
+    Enabled,
+    Suppressed,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RefocusState {
+    None,
+    Pending(SpaceId),
 }
 
 use crate::actor::raise_manager::RaiseManager;
@@ -270,8 +308,8 @@ pub struct Reactor {
     observed_window_server_ids: HashSet<WindowServerId>,
     screens: Vec<Screen>,
     main_window_tracker: MainWindowTracker,
-    in_drag: bool,
-    is_workspace_switch: bool,
+    drag_state: DragState,
+    workspace_switch_state: WorkspaceSwitchState,
     workspace_switch_generation: u64,
     active_workspace_switch: Option<u64>,
     record: Record,
@@ -284,17 +322,15 @@ pub struct Reactor {
     app_rules_recently_applied: std::time::Instant,
     last_auto_workspace_switch: Option<AutoWorkspaceSwitch>,
     last_sls_notification_ids: Vec<u32>,
-    menu_open_depth: usize,
-    mission_control_active: bool,
-    suppress_stale_window_cleanup: bool,
-    pending_refocus_space: Option<SpaceId>,
+    menu_state: MenuState,
+    mission_control_state: MissionControlState,
+    stale_cleanup_state: StaleCleanupState,
+    refocus_state: RefocusState,
     window_notify_tx: Option<crate::actor::window_notify::Sender>,
     window_tx_store: Option<WindowTxStore>,
     drag_manager: crate::actor::drag_swap::DragManager,
     skip_layout_for_window: Option<WindowId>,
-    pending_drag_swap: Option<(WindowId, WindowId)>,
     pending_space_change: Option<PendingSpaceChange>,
-    active_drag: Option<DragSession>,
     events_tx: Option<Sender>,
     fullscreen_by_space: HashMap<u64, FullscreenTrack>,
     changing_screens: HashSet<WindowServerId>,
@@ -436,8 +472,8 @@ impl Reactor {
             observed_window_server_ids: HashSet::default(),
             screens: vec![],
             main_window_tracker: MainWindowTracker::default(),
-            in_drag: false,
-            is_workspace_switch: false,
+            drag_state: DragState::Inactive,
+            workspace_switch_state: WorkspaceSwitchState::Inactive,
             workspace_switch_generation: 0,
             active_workspace_switch: None,
             record,
@@ -450,19 +486,17 @@ impl Reactor {
             app_rules_recently_applied: std::time::Instant::now(),
             last_auto_workspace_switch: None,
             last_sls_notification_ids: Vec::new(),
-            menu_open_depth: 0,
-            mission_control_active: false,
-            suppress_stale_window_cleanup: false,
-            pending_refocus_space: None,
+            menu_state: MenuState::Closed,
+            mission_control_state: MissionControlState::Inactive,
+            stale_cleanup_state: StaleCleanupState::Enabled,
+            refocus_state: RefocusState::None,
             window_notify_tx,
             window_tx_store,
             drag_manager: crate::actor::drag_swap::DragManager::new(
                 config.settings.window_snapping,
             ),
             skip_layout_for_window: None,
-            pending_drag_swap: None,
             pending_space_change: None,
-            active_drag: None,
             changing_screens: HashSet::default(),
             events_tx: None,
             fullscreen_by_space: HashMap::default(),
@@ -488,6 +522,46 @@ impl Reactor {
     fn remove_txid_for_window(&self, wsid: Option<WindowServerId>) {
         if let (Some(store), Some(id)) = (self.window_tx_store.as_ref(), wsid) {
             store.remove(&id);
+        }
+    }
+
+    fn is_in_drag(&self) -> bool { matches!(self.drag_state, DragState::Active { .. }) }
+
+    fn is_mission_control_active(&self) -> bool {
+        matches!(self.mission_control_state, MissionControlState::Active)
+    }
+
+    fn get_pending_drag_swap(&self) -> Option<(WindowId, WindowId)> {
+        if let DragState::PendingSwap { dragged, target } = &self.drag_state {
+            Some((*dragged, *target))
+        } else {
+            None
+        }
+    }
+
+    fn get_active_drag_session(&self) -> Option<&DragSession> {
+        if let DragState::Active { session } = &self.drag_state {
+            Some(session)
+        } else {
+            None
+        }
+    }
+
+    fn get_active_drag_session_mut(&mut self) -> Option<&mut DragSession> {
+        if let DragState::Active { session } = &mut self.drag_state {
+            Some(session)
+        } else {
+            None
+        }
+    }
+
+    fn take_active_drag_session(&mut self) -> Option<DragSession> {
+        if let DragState::Active { session } =
+            std::mem::replace(&mut self.drag_state, DragState::Inactive)
+        {
+            Some(session)
+        } else {
+            None
         }
     }
 
@@ -642,17 +716,26 @@ impl Reactor {
             }
             Event::MenuOpened => {
                 debug!("menu opened");
-                self.menu_open_depth = self.menu_open_depth.saturating_add(1);
+                self.menu_state = match self.menu_state {
+                    MenuState::Closed => MenuState::Open(1),
+                    MenuState::Open(depth) => MenuState::Open(depth.saturating_add(1)),
+                };
                 self.update_focus_follows_mouse_state();
             }
-            Event::MenuClosed => {
-                if self.menu_open_depth == 0 {
+            Event::MenuClosed => match self.menu_state {
+                MenuState::Closed => {
                     debug!("menu closed with zero depth");
-                } else {
-                    self.menu_open_depth -= 1;
+                }
+                MenuState::Open(depth) => {
+                    let new_depth = depth.saturating_sub(1);
+                    self.menu_state = if new_depth == 0 {
+                        MenuState::Closed
+                    } else {
+                        MenuState::Open(new_depth)
+                    };
                     self.update_focus_follows_mouse_state();
                 }
-            }
+            },
             Event::MouseMovedOverWindow(wsid) => {
                 WindowEventHandler.handle_mouse_moved_over_window(self, wsid);
             }
@@ -724,12 +807,15 @@ impl Reactor {
         }
 
         let mut layout_changed = false;
-        if !self.in_drag || window_was_destroyed {
-            layout_changed = self.update_layout(is_resize, self.is_workspace_switch);
+        if !self.is_in_drag() || window_was_destroyed {
+            layout_changed = self.update_layout(
+                is_resize,
+                matches!(self.workspace_switch_state, WorkspaceSwitchState::Active),
+            );
             self.maybe_send_menu_update();
         }
 
-        self.is_workspace_switch = false;
+        self.workspace_switch_state = WorkspaceSwitchState::Inactive;
         if self.active_workspace_switch.is_some() && !layout_changed {
             self.active_workspace_switch = None;
             trace!("Workspace switch stabilized with no further frame changes");
@@ -834,7 +920,7 @@ impl Reactor {
                     }
                 }
                 if let Some(space) = self.screens.iter().flat_map(|s| s.space).next() {
-                    self.pending_refocus_space = Some(space);
+                    self.refocus_state = RefocusState::Pending(space);
                     let _ = self.update_layout(false, false);
                     self.update_focus_follows_mouse_state();
                 }
@@ -855,7 +941,11 @@ impl Reactor {
         spaces: &[Option<SpaceId>],
         ws_info: Vec<WindowServerInfo>,
     ) {
-        self.suppress_stale_window_cleanup = spaces.iter().all(|space| space.is_none());
+        self.stale_cleanup_state = if spaces.iter().all(|space| space.is_none()) {
+            StaleCleanupState::Suppressed
+        } else {
+            StaleCleanupState::Enabled
+        };
         self.expose_all_spaces();
         self.changing_screens.clear();
         if let Some(main_window) = self.main_window() {
@@ -920,12 +1010,12 @@ impl Reactor {
                 .any(|wid| wid.pid == pid && !known_visible_set.contains(wid))
         };
 
-        let skip_stale_cleanup = self.suppress_stale_window_cleanup
+        let skip_stale_cleanup = matches!(self.stale_cleanup_state, StaleCleanupState::Suppressed)
             || pending_refresh
-            || self.mission_control_active
-            || self.in_drag
+            || self.is_mission_control_active()
+            || self.is_in_drag()
             || self.pid_has_changing_screens(pid)
-            || self.active_drag.as_ref().map_or(false, |s| s.window.pid == pid)
+            || self.get_active_drag_session().map_or(false, |s| s.window.pid == pid)
             || (known_visible_set.is_empty() && !self.has_visible_window_server_ids_for_pid(pid))
             || has_window_server_visibles_without_ax;
 
@@ -1223,16 +1313,17 @@ impl Reactor {
 
     fn ensure_active_drag(&mut self, wid: WindowId, frame: &CGRect) {
         let needs_new_session =
-            self.active_drag.as_ref().map_or(true, |session| session.window != wid);
+            self.get_active_drag_session().map_or(true, |session| session.window != wid);
         if needs_new_session {
             let origin_space = self.best_space_for_window(frame);
-            self.active_drag = Some(DragSession {
+            let session = DragSession {
                 window: wid,
                 last_frame: *frame,
                 origin_space,
                 settled_space: origin_space,
                 layout_dirty: false,
-            });
+            };
+            self.drag_state = DragState::Active { session };
         }
         if self.skip_layout_for_window != Some(wid) {
             self.skip_layout_for_window = Some(wid);
@@ -1240,12 +1331,12 @@ impl Reactor {
     }
 
     fn update_active_drag(&mut self, wid: WindowId, new_frame: &CGRect) {
-        let resolved_space = match self.active_drag.as_ref() {
+        let resolved_space = match self.get_active_drag_session() {
             Some(session) if session.window == wid => self.resolve_drag_space(session, new_frame),
             _ => return,
         };
 
-        if let Some(session) = self.active_drag.as_mut() {
+        if let Some(session) = self.get_active_drag_session_mut() {
             if session.window != wid {
                 return;
             }
@@ -1259,7 +1350,7 @@ impl Reactor {
     }
 
     fn mark_drag_dirty(&mut self, wid: WindowId) {
-        if let Some(session) = self.active_drag.as_mut() {
+        if let Some(session) = self.get_active_drag_session_mut() {
             if session.window == wid {
                 session.layout_dirty = true;
                 if self.skip_layout_for_window != Some(wid) {
@@ -1292,7 +1383,7 @@ impl Reactor {
     }
 
     fn finalize_active_drag(&mut self) -> bool {
-        let Some(session) = self.active_drag.take() else {
+        let Some(session) = self.take_active_drag_session() else {
             return false;
         };
         let wid = session.window;
@@ -1416,7 +1507,7 @@ impl Reactor {
 
         let candidate_frame = window.frame_monotonic;
 
-        if self.menu_open_depth > 0 {
+        if matches!(self.menu_state, MenuState::Open(_)) {
             trace!(?wid, "Skipping autoraise while menu open");
             return false;
         }
@@ -1644,7 +1735,7 @@ impl Reactor {
                 });
                 self.workspace_switch_generation = self.workspace_switch_generation.wrapping_add(1);
                 self.active_workspace_switch = Some(self.workspace_switch_generation);
-                self.is_workspace_switch = true;
+                self.workspace_switch_state = WorkspaceSwitchState::Active;
 
                 let response = self.layout_engine.handle_virtual_workspace_command(
                     window_space,
@@ -1656,12 +1747,16 @@ impl Reactor {
     }
 
     fn handle_layout_response(&mut self, response: layout::EventResponse) {
-        if self.in_drag {
-            self.is_workspace_switch = false;
+        if self.is_in_drag() {
+            self.workspace_switch_state = WorkspaceSwitchState::Inactive;
             return;
         }
 
-        let mut pending_refocus_space = self.pending_refocus_space.take();
+        let mut pending_refocus_space =
+            match std::mem::replace(&mut self.refocus_state, RefocusState::None) {
+                RefocusState::Pending(space) => Some(space),
+                RefocusState::None => None,
+            };
         let layout::EventResponse {
             raise_windows,
             mut focus_window,
@@ -1671,7 +1766,9 @@ impl Reactor {
         let mut handled_without_raise = false;
 
         if raise_windows.is_empty() && focus_window.is_none() {
-            if self.is_workspace_switch && !self.in_drag {
+            if matches!(self.workspace_switch_state, WorkspaceSwitchState::Active)
+                && !self.is_in_drag()
+            {
                 if let Some(wid) = self.window_id_under_cursor() {
                     focus_window = Some(wid);
                 } else if self.focus_untracked_window_under_cursor() {
@@ -1680,7 +1777,7 @@ impl Reactor {
             } else if let Some(space) = pending_refocus_space.take() {
                 if let Some(wid) = self.last_focused_window_in_space(space) {
                     focus_window = Some(wid);
-                } else if !self.in_drag {
+                } else if !self.is_in_drag() {
                     if let Some(wid) = self.window_id_under_cursor() {
                         focus_window = Some(wid);
                     } else if self.focus_untracked_window_under_cursor() {
@@ -1712,18 +1809,21 @@ impl Reactor {
         }
 
         if handled_without_raise && raise_windows.is_empty() && focus_window.is_none() {
-            self.is_workspace_switch = false;
+            self.workspace_switch_state = WorkspaceSwitchState::Inactive;
             return;
         }
 
         if let Some(space) = pending_refocus_space {
             // Preserve the pending refocus request if it was not consumed above.
-            if self.pending_refocus_space.is_none() {
-                self.pending_refocus_space = Some(space);
+            if matches!(self.refocus_state, RefocusState::None) {
+                self.refocus_state = RefocusState::Pending(space);
             }
         }
 
-        if raise_windows.is_empty() && focus_window.is_none() && !self.is_workspace_switch {
+        if raise_windows.is_empty()
+            && focus_window.is_none()
+            && matches!(self.workspace_switch_state, WorkspaceSwitchState::Inactive)
+        {
             return;
         }
 
@@ -1767,7 +1867,7 @@ impl Reactor {
     }
 
     fn maybe_swap_on_drag(&mut self, wid: WindowId, new_frame: CGRect) {
-        if !self.in_drag {
+        if !self.is_in_drag() {
             trace!(?wid, "Skipping swap: not in drag (mouse up received)");
             return;
         }
@@ -1786,9 +1886,8 @@ impl Reactor {
             }
         }
 
-        let Some(space) = (if self.in_drag {
-            self.active_drag
-                .as_ref()
+        let Some(space) = (if self.is_in_drag() {
+            self.get_active_drag_session()
                 .and_then(|session| session.settled_space)
                 .or_else(|| self.best_space_for_window(&new_frame))
         } else {
@@ -1797,8 +1896,10 @@ impl Reactor {
             return;
         };
 
-        let origin_space_hint =
-            self.active_drag.as_ref().and_then(|session| session.origin_space).or_else(|| {
+        let origin_space_hint = self
+            .get_active_drag_session()
+            .and_then(|session| session.origin_space)
+            .or_else(|| {
                 self.drag_manager
                     .origin_frame()
                     .and_then(|frame| self.best_space_for_window(&frame))
@@ -1806,7 +1907,7 @@ impl Reactor {
 
         if let Some(origin_space) = origin_space_hint {
             if origin_space != space {
-                if let Some((pending_wid, pending_target)) = self.pending_drag_swap {
+                if let Some((pending_wid, pending_target)) = self.get_pending_drag_swap() {
                     if pending_wid == wid {
                         trace!(
                             ?wid,
@@ -1815,7 +1916,7 @@ impl Reactor {
                             ?space,
                             "Clearing pending drag swap; dragged window entered new space"
                         );
-                        self.pending_drag_swap = None;
+                        self.drag_state = DragState::Inactive;
                     }
                 }
                 trace!(
@@ -1852,15 +1953,12 @@ impl Reactor {
             candidates.push((other_wid, other_state.frame_monotonic));
         }
 
-        let previous_pending = self.pending_drag_swap;
+        let previous_pending = self.get_pending_drag_swap();
         let new_candidate = self.drag_manager.on_frame_change(wid, new_frame, &candidates);
         let active_target = self.drag_manager.last_target();
 
         if let Some(target_wid) = active_target {
-            if new_candidate.is_some()
-                || previous_pending.map(|(dragged, target)| (dragged, target))
-                    != Some((wid, target_wid))
-            {
+            if new_candidate.is_some() || previous_pending != Some((wid, target_wid)) {
                 trace!(
                     ?wid,
                     ?target_wid,
@@ -1868,7 +1966,10 @@ impl Reactor {
                 );
             }
 
-            self.pending_drag_swap = Some((wid, target_wid));
+            self.drag_state = DragState::PendingSwap {
+                dragged: wid,
+                target: target_wid,
+            };
 
             self.skip_layout_for_window = Some(wid);
         } else {
@@ -1879,7 +1980,7 @@ impl Reactor {
                         ?pending_target,
                         "Clearing pending drag swap; overlap ended before MouseUp"
                     );
-                    self.pending_drag_swap = None;
+                    self.drag_state = DragState::Inactive;
                 }
             }
 
@@ -1952,7 +2053,7 @@ impl Reactor {
         };
 
         if window_workspace != active_workspace {
-            self.pending_refocus_space = Some(space);
+            self.refocus_state = RefocusState::Pending(space);
         }
     }
 
@@ -1972,7 +2073,7 @@ impl Reactor {
                         .map_or(false, |workspace_id| workspace_id != active_workspace)
                 });
                 if hidden_exists {
-                    self.pending_refocus_space = Some(*space);
+                    self.refocus_state = RefocusState::Pending(*space);
                 }
             }
             _ => {}
@@ -1999,15 +2100,21 @@ impl Reactor {
     }
 
     fn update_focus_follows_mouse_state(&self) {
-        let should_enable = self.menu_open_depth == 0 && !self.mission_control_active;
+        let should_enable =
+            matches!(self.menu_state, MenuState::Closed) && !self.is_mission_control_active();
         self.set_focus_follows_mouse_enabled(should_enable);
     }
 
     fn set_mission_control_active(&mut self, active: bool) {
-        if self.mission_control_active == active {
+        let new_state = if active {
+            MissionControlState::Active
+        } else {
+            MissionControlState::Inactive
+        };
+        if matches!(self.mission_control_state, MissionControlState::Active) == active {
             return;
         }
-        self.mission_control_active = active;
+        self.mission_control_state = new_state;
         self.update_focus_follows_mouse_state();
     }
 
