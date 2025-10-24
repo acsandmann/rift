@@ -7,6 +7,7 @@
 mod animation;
 mod events;
 mod main_window;
+mod managers;
 mod query;
 mod replay;
 
