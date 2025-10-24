@@ -10,7 +10,7 @@ impl DragEventHandler {
         let mut need_layout_refresh = false;
 
         let pending_swap = if let DragState::PendingSwap { dragged, target } =
-            std::mem::replace(&mut reactor.drag_state, DragState::Inactive)
+            std::mem::replace(&mut reactor.drag_manager.drag_state, DragState::Inactive)
         {
             Some((dragged, target))
         } else {
@@ -20,10 +20,10 @@ impl DragEventHandler {
         if let Some((dragged_wid, target_wid)) = pending_swap {
             trace!(?dragged_wid, ?target_wid, "Performing deferred swap on MouseUp");
 
-            reactor.skip_layout_for_window = Some(dragged_wid);
+            reactor.drag_manager.skip_layout_for_window = Some(dragged_wid);
 
-            if !reactor.windows.contains_key(&dragged_wid)
-                || !reactor.windows.contains_key(&target_wid)
+            if !reactor.window_manager.windows.contains_key(&dragged_wid)
+                || !reactor.window_manager.windows.contains_key(&target_wid)
             {
                 trace!(
                     ?dragged_wid,
@@ -32,20 +32,22 @@ impl DragEventHandler {
                 );
             } else {
                 let visible_spaces =
-                    reactor.screens.iter().flat_map(|s| s.space).collect::<Vec<_>>();
+                    reactor.space_manager.screens.iter().flat_map(|s| s.space).collect::<Vec<_>>();
 
                 let swap_space = reactor
+                    .window_manager
                     .windows
                     .get(&dragged_wid)
                     .and_then(|w| reactor.best_space_for_window(&w.frame_monotonic))
                     .or_else(|| {
                         reactor
                             .drag_manager
+                            .drag_swap_manager
                             .origin_frame()
                             .and_then(|f| reactor.best_space_for_window(&f))
                     })
-                    .or_else(|| reactor.screens.iter().find_map(|s| s.space));
-                let response = reactor.layout_engine.handle_command(
+                    .or_else(|| reactor.space_manager.screens.iter().find_map(|s| s.space));
+                let response = reactor.layout_manager.layout_engine.handle_command(
                     swap_space,
                     &visible_spaces,
                     LayoutCommand::SwapWindows(dragged_wid, target_wid),
@@ -68,6 +70,6 @@ impl DragEventHandler {
             let _ = reactor.update_layout(false, false);
         }
 
-        reactor.skip_layout_for_window = None;
+        reactor.drag_manager.skip_layout_for_window = None;
     }
 }

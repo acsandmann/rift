@@ -1,15 +1,22 @@
 use std::time::Instant;
 
+use objc2_core_foundation::CGRect;
+
+use super::main_window::MainWindowTracker;
 use super::replay::Record;
-use super::{AppState, AutoWorkspaceSwitch, Event, FullscreenTrack, Screen, WindowState};
+use super::{
+    AppState, AutoWorkspaceSwitch, Event, FullscreenTrack, PendingSpaceChange, Screen, WindowState,
+};
 use crate::actor;
 use crate::actor::app::{WindowId, pid_t};
 use crate::actor::broadcast::BroadcastSender;
 use crate::actor::drag_swap::DragManager as DragSwapManager;
 use crate::actor::{event_tap, menu_bar, raise_manager, stack_line, window_notify, wm_controller};
 use crate::common::collections::{HashMap, HashSet};
+use crate::common::config::{Config, WindowSnappingSettings};
+use crate::layout_engine::LayoutEngine;
 use crate::model::tx_store::WindowTxStore;
-use crate::sys::window_server::WindowServerId;
+use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 
 /// Manages window state and lifecycle
 pub struct WindowManager {
@@ -37,6 +44,20 @@ pub struct DragManager {
     pub drag_state: super::DragState,
     pub drag_swap_manager: DragSwapManager,
     pub skip_layout_for_window: Option<WindowId>,
+}
+
+impl DragManager {
+    pub fn reset(&mut self) { self.drag_swap_manager.reset(); }
+
+    pub fn last_target(&self) -> Option<WindowId> { self.drag_swap_manager.last_target() }
+
+    pub fn dragged(&self) -> Option<WindowId> { self.drag_swap_manager.dragged() }
+
+    pub fn origin_frame(&self) -> Option<CGRect> { self.drag_swap_manager.origin_frame() }
+
+    pub fn update_config(&mut self, config: WindowSnappingSettings) {
+        self.drag_swap_manager.update_config(config);
+    }
 }
 
 /// Manages window notifications and transaction store
@@ -85,4 +106,29 @@ pub struct CommunicationManager {
 /// Manages recording state
 pub struct RecordingManager {
     pub record: Record,
+}
+
+/// Manages configuration state
+pub struct ConfigManager {
+    pub config: Config,
+}
+
+/// Manages layout engine state
+pub struct LayoutManager {
+    pub layout_engine: LayoutEngine,
+}
+
+/// Manages window server information
+pub struct WindowServerInfoManager {
+    pub window_server_info: HashMap<WindowServerId, WindowServerInfo>,
+}
+
+/// Manages main window tracking
+pub struct MainWindowTrackerManager {
+    pub main_window_tracker: MainWindowTracker,
+}
+
+/// Manages pending space changes
+pub struct PendingSpaceChangeManager {
+    pub pending_space_change: Option<PendingSpaceChange>,
 }

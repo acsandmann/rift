@@ -17,9 +17,9 @@ pub struct SpaceEventHandler;
 
 impl SpaceEventHandler {
     pub fn handle_window_is_changing_screens(reactor: &mut Reactor, wsid: WindowServerId) {
-        reactor.changing_screens.insert(wsid);
+        reactor.space_manager.changing_screens.insert(wsid);
         if let DragState::PendingSwap { dragged, target } =
-            std::mem::replace(&mut reactor.drag_state, DragState::Inactive)
+            std::mem::replace(&mut reactor.drag_manager.drag_state, DragState::Inactive)
         {
             trace!(
                 ?dragged,
@@ -27,15 +27,17 @@ impl SpaceEventHandler {
                 ?wsid,
                 "Clearing pending drag swap; window is moving between spaces"
             );
-            if reactor.skip_layout_for_window == Some(dragged) {
-                reactor.skip_layout_for_window = None;
+            if reactor.drag_manager.skip_layout_for_window == Some(dragged) {
+                reactor.drag_manager.skip_layout_for_window = None;
             }
         }
         reactor.drag_manager.reset();
-        reactor.drag_state = DragState::Inactive;
+        reactor.drag_manager.drag_state = DragState::Inactive;
         // finalize_active_drag will set to Inactive, but since we're starting a new drag, ensure_active_drag will set to Active
-        if let Some(&wid) = reactor.window_ids.get(&wsid) {
-            if let Some(frame) = reactor.windows.get(&wid).map(|window| window.frame_monotonic) {
+        if let Some(&wid) = reactor.window_manager.window_ids.get(&wsid) {
+            if let Some(frame) =
+                reactor.window_manager.windows.get(&wid).map(|window| window.frame_monotonic)
+            {
                 reactor.ensure_active_drag(wid, &frame);
             }
         }
@@ -47,21 +49,23 @@ impl SpaceEventHandler {
         sid: SpaceId,
     ) {
         if crate::sys::window_server::space_is_fullscreen(sid.get()) {
-            let entry = match reactor.fullscreen_by_space.entry(sid.get()) {
+            let entry = match reactor.space_manager.fullscreen_by_space.entry(sid.get()) {
                 Entry::Occupied(o) => o.into_mut(),
                 Entry::Vacant(v) => v.insert(FullscreenTrack::default()),
             };
-            if let Some(&wid) = reactor.window_ids.get(&wsid) {
+            if let Some(&wid) = reactor.window_manager.window_ids.get(&wsid) {
                 entry.pids.insert(wid.pid);
                 if entry.last_removed.len() >= 5 {
                     let _ = entry.last_removed.pop_front();
                 }
                 entry.last_removed.push_back(wsid);
-                if let Some(app_state) = reactor.apps.get(&wid.pid) {
+                if let Some(app_state) = reactor.app_manager.apps.get(&wid.pid) {
                     let _ = app_state.handle.send(Request::MarkWindowsNeedingInfo(vec![wid]));
                 }
                 return;
-            } else if let Some(info) = reactor.window_server_info.get(&wsid) {
+            } else if let Some(info) =
+                reactor.window_server_info_manager.window_server_info.get(&wsid)
+            {
                 entry.pids.insert(info.pid);
                 if entry.last_removed.len() >= 5 {
                     let _ = entry.last_removed.pop_front();
@@ -71,16 +75,16 @@ impl SpaceEventHandler {
             }
             return;
         } else if crate::sys::window_server::space_is_user(sid.get()) {
-            if let Some(&wid) = reactor.window_ids.get(&wsid) {
-                let _ = reactor.window_ids.remove(&wsid);
-                reactor.window_server_info.remove(&wsid);
-                reactor.visible_windows.remove(&wsid);
-                if let Some(app_state) = reactor.apps.get(&wid.pid) {
+            if let Some(&wid) = reactor.window_manager.window_ids.get(&wsid) {
+                let _ = reactor.window_manager.window_ids.remove(&wsid);
+                reactor.window_server_info_manager.window_server_info.remove(&wsid);
+                reactor.window_manager.visible_windows.remove(&wsid);
+                if let Some(app_state) = reactor.app_manager.apps.get(&wid.pid) {
                     let _ = app_state.handle.send(Request::MarkWindowsNeedingInfo(vec![wid]));
                     let _ =
                         app_state.handle.send(Request::GetVisibleWindows { force_refresh: true });
                 }
-                if let Some(tx) = reactor.events_tx.as_ref() {
+                if let Some(tx) = reactor.communication_manager.events_tx.as_ref() {
                     tx.send(Event::WindowDestroyed(wid));
                 }
             } else {
@@ -98,8 +102,8 @@ impl SpaceEventHandler {
         wsid: WindowServerId,
         sid: SpaceId,
     ) {
-        if reactor.window_server_info.contains_key(&wsid)
-            || reactor.observed_window_server_ids.contains(&wsid)
+        if reactor.window_server_info_manager.window_server_info.contains_key(&wsid)
+            || reactor.window_manager.observed_window_server_ids.contains(&wsid)
         {
             debug!(
                 ?wsid,
@@ -108,7 +112,7 @@ impl SpaceEventHandler {
             return;
         }
 
-        reactor.observed_window_server_ids.insert(wsid);
+        reactor.window_manager.observed_window_server_ids.insert(wsid);
         // TODO: figure out why this is happening, we should really know about this app,
         // why dont we get notifications that its being launched?
         if let Some(window_server_info) = crate::sys::window_server::get_window(wsid) {
@@ -122,7 +126,7 @@ impl SpaceEventHandler {
             }
 
             if crate::sys::window_server::space_is_fullscreen(sid.get()) {
-                let entry = match reactor.fullscreen_by_space.entry(sid.get()) {
+                let entry = match reactor.space_manager.fullscreen_by_space.entry(sid.get()) {
                     Entry::Occupied(o) => o.into_mut(),
                     Entry::Vacant(v) => v.insert(FullscreenTrack::default()),
                 };
@@ -131,12 +135,15 @@ impl SpaceEventHandler {
                     let _ = entry.last_removed.pop_front();
                 }
                 entry.last_removed.push_back(wsid);
-                if let Some(&wid) = reactor.window_ids.get(&wsid) {
-                    if let Some(app_state) = reactor.apps.get(&wid.pid) {
+                if let Some(&wid) = reactor.window_manager.window_ids.get(&wsid) {
+                    if let Some(app_state) = reactor.app_manager.apps.get(&wid.pid) {
                         let _ = app_state.handle.send(Request::MarkWindowsNeedingInfo(vec![wid]));
                     }
-                } else if let Some(app_state) = reactor.apps.get(&window_server_info.pid) {
+                } else if let Some(app_state) =
+                    reactor.app_manager.apps.get(&window_server_info.pid)
+                {
                     let resync: Vec<_> = reactor
+                        .window_manager
                         .windows
                         .keys()
                         .copied()
@@ -151,7 +158,7 @@ impl SpaceEventHandler {
 
             reactor.update_partial_window_server_info(vec![window_server_info]);
 
-            if !reactor.apps.contains_key(&window_server_info.pid) {
+            if !reactor.app_manager.apps.contains_key(&window_server_info.pid) {
                 if let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(
                     window_server_info.pid,
                 ) {
@@ -159,11 +166,11 @@ impl SpaceEventHandler {
                         ?app,
                         "Received WindowServerAppeared for unknown app - synthesizing AppLaunch"
                     );
-                    reactor.wm_sender.as_ref().map(|wm| {
+                    reactor.communication_manager.wm_sender.as_ref().map(|wm| {
                         wm.send(WmEvent::AppLaunch(window_server_info.pid, AppInfo::from(&*app)))
                     });
                 }
-            } else if let Some(app) = reactor.apps.get(&window_server_info.pid) {
+            } else if let Some(app) = reactor.app_manager.apps.get(&window_server_info.pid) {
                 if let Err(err) =
                     app.handle.send(Request::GetVisibleWindows { force_refresh: false })
                 {
@@ -186,7 +193,7 @@ impl SpaceEventHandler {
     ) {
         info!("screen parameters changed");
         let spaces_all_none = spaces.iter().all(|space| space.is_none());
-        reactor.stale_cleanup_state = if spaces_all_none {
+        reactor.refocus_manager.stale_cleanup_state = if spaces_all_none {
             StaleCleanupState::Suppressed
         } else {
             StaleCleanupState::Enabled
@@ -194,11 +201,11 @@ impl SpaceEventHandler {
         let mut ws_info_opt = Some(ws_info);
         if frames.is_empty() {
             if spaces.is_empty() {
-                if !reactor.screens.is_empty() {
-                    reactor.screens.clear();
+                if !reactor.space_manager.screens.is_empty() {
+                    reactor.space_manager.screens.clear();
                     reactor.expose_all_spaces();
                 }
-            } else if spaces.len() == reactor.screens.len() {
+            } else if spaces.len() == reactor.space_manager.screens.len() {
                 reactor.set_screen_spaces(&spaces);
                 if let Some(info) = ws_info_opt.take() {
                     reactor.finalize_space_change(&spaces, info);
@@ -206,7 +213,7 @@ impl SpaceEventHandler {
             } else {
                 warn!(
                     "Ignoring empty screen update: we have {} screens, but {} spaces",
-                    reactor.screens.len(),
+                    reactor.space_manager.screens.len(),
                     spaces.len()
                 );
             }
@@ -218,7 +225,7 @@ impl SpaceEventHandler {
             );
         } else {
             let spaces_clone = spaces.clone();
-            reactor.screens = frames
+            reactor.space_manager.screens = frames
                 .into_iter()
                 .zip(spaces.into_iter())
                 .map(|(frame, space)| Screen { frame, space })
@@ -242,28 +249,33 @@ impl SpaceEventHandler {
         if reactor.handle_fullscreen_space_transition(&spaces) {
             return;
         }
-        if matches!(reactor.mission_control_state, MissionControlState::Active) {
+        if matches!(
+            reactor.mission_control_manager.mission_control_state,
+            MissionControlState::Active
+        ) {
             // dont process whilst mc is active
-            reactor.pending_space_change = Some(PendingSpaceChange { spaces, ws_info });
+            reactor.pending_space_change_manager.pending_space_change =
+                Some(PendingSpaceChange { spaces, ws_info });
             return;
         }
         let spaces_all_none = spaces.iter().all(|space| space.is_none());
-        reactor.stale_cleanup_state = if spaces_all_none {
+        reactor.refocus_manager.stale_cleanup_state = if spaces_all_none {
             StaleCleanupState::Suppressed
         } else {
             StaleCleanupState::Enabled
         };
-        if spaces.len() != reactor.screens.len() {
+        if spaces.len() != reactor.space_manager.screens.len() {
             warn!(
                 "Deferring space change: have {} screens but {} spaces",
-                reactor.screens.len(),
+                reactor.space_manager.screens.len(),
                 spaces.len()
             );
-            reactor.pending_space_change = Some(PendingSpaceChange { spaces, ws_info });
+            reactor.pending_space_change_manager.pending_space_change =
+                Some(PendingSpaceChange { spaces, ws_info });
             return;
         }
         info!("space changed");
-        reactor.pending_space_change = None;
+        reactor.pending_space_change_manager.pending_space_change = None;
         reactor.set_screen_spaces(&spaces);
         reactor.finalize_space_change(&spaces, ws_info);
     }
@@ -273,7 +285,10 @@ impl SpaceEventHandler {
     }
 
     pub fn handle_mission_control_native_exited(reactor: &mut Reactor) {
-        if matches!(reactor.mission_control_state, MissionControlState::Active) {
+        if matches!(
+            reactor.mission_control_manager.mission_control_state,
+            MissionControlState::Active
+        ) {
             reactor.set_mission_control_active(false);
         }
         reactor.refresh_windows_after_mission_control();

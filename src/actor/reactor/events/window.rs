@@ -23,12 +23,12 @@ impl WindowEventHandler {
     ) {
         // FIXME: We assume all windows are on the main screen.
         if let Some(wsid) = window.sys_id {
-            reactor.window_ids.insert(wsid, wid);
-            reactor.observed_window_server_ids.remove(&wsid);
+            reactor.window_manager.window_ids.insert(wsid, wid);
+            reactor.window_manager.observed_window_server_ids.remove(&wsid);
         }
         if let Some(info) = ws_info {
-            reactor.observed_window_server_ids.remove(&info.id);
-            reactor.window_server_info.insert(info.id, info);
+            reactor.window_manager.observed_window_server_ids.remove(&info.id);
+            reactor.window_server_info_manager.window_server_info.insert(info.id, info);
         }
 
         let frame = window.frame;
@@ -40,7 +40,7 @@ impl WindowEventHandler {
             window_state.last_sent_txid,
             window_state.frame_monotonic,
         );
-        reactor.windows.insert(wid, window_state);
+        reactor.window_manager.windows.insert(wid, window_state);
 
         if is_manageable {
             if let Some(space) = reactor.best_space_for_window(&frame) {
@@ -49,33 +49,34 @@ impl WindowEventHandler {
         }
         // TODO: drag state is maybe managed by ensure_active_drag
         // if mouse_state == MouseState::Down {
-        //     reactor.drag_state = DragState::Active { ... };
+        //     reactor.drag_manager.drag_state = DragState::Active { ... };
         // }
     }
 
     pub fn handle_window_destroyed(reactor: &mut Reactor, wid: WindowId) {
-        if !reactor.windows.contains_key(&wid) {
+        if !reactor.window_manager.windows.contains_key(&wid) {
             return;
         }
-        let window_server_id = reactor.windows.get(&wid).and_then(|w| w.window_server_id);
+        let window_server_id =
+            reactor.window_manager.windows.get(&wid).and_then(|w| w.window_server_id);
         reactor.remove_txid_for_window(window_server_id);
         if let Some(ws_id) = window_server_id {
-            reactor.window_ids.remove(&ws_id);
-            reactor.window_server_info.remove(&ws_id);
-            reactor.visible_windows.remove(&ws_id);
+            reactor.window_manager.window_ids.remove(&ws_id);
+            reactor.window_server_info_manager.window_server_info.remove(&ws_id);
+            reactor.window_manager.visible_windows.remove(&ws_id);
         } else {
             debug!(?wid, "Received WindowDestroyed for unknown window - ignoring");
         }
-        reactor.windows.remove(&wid);
+        reactor.window_manager.windows.remove(&wid);
         reactor.send_layout_event(LayoutEvent::WindowRemoved(wid));
 
-        if let DragState::PendingSwap { dragged, target } = &reactor.drag_state {
+        if let DragState::PendingSwap { dragged, target } = &reactor.drag_manager.drag_state {
             if *dragged == wid || *target == wid {
                 trace!(
                     ?wid,
                     "Clearing pending drag swap because a participant window was destroyed"
                 );
-                reactor.drag_state = DragState::Inactive;
+                reactor.drag_manager.drag_state = DragState::Inactive;
             }
         }
 
@@ -84,24 +85,24 @@ impl WindowEventHandler {
         if dragged_window == Some(wid) || last_target == Some(wid) {
             reactor.drag_manager.reset();
             if dragged_window == Some(wid) {
-                reactor.drag_state = DragState::Inactive;
+                reactor.drag_manager.drag_state = DragState::Inactive;
             }
         }
 
-        if reactor.skip_layout_for_window == Some(wid) {
-            reactor.skip_layout_for_window = None;
+        if reactor.drag_manager.skip_layout_for_window == Some(wid) {
+            reactor.drag_manager.skip_layout_for_window = None;
         }
     }
 
     pub fn handle_window_minimized(&self, reactor: &mut Reactor, wid: WindowId) {
-        if let Some(window) = reactor.windows.get_mut(&wid) {
+        if let Some(window) = reactor.window_manager.windows.get_mut(&wid) {
             if window.is_minimized {
                 return;
             }
             window.is_minimized = true;
             window.is_manageable = false;
             if let Some(ws_id) = window.window_server_id {
-                reactor.visible_windows.remove(&ws_id);
+                reactor.window_manager.visible_windows.remove(&ws_id);
             }
             reactor.send_layout_event(LayoutEvent::WindowRemoved(wid));
         } else {
@@ -110,30 +111,31 @@ impl WindowEventHandler {
     }
 
     pub fn handle_window_deminiaturized(&self, reactor: &mut Reactor, wid: WindowId) {
-        let (frame, server_id, is_ax_standard, is_ax_root) = match reactor.windows.get_mut(&wid) {
-            Some(window) => {
-                if !window.is_minimized {
+        let (frame, server_id, is_ax_standard, is_ax_root) =
+            match reactor.window_manager.windows.get_mut(&wid) {
+                Some(window) => {
+                    if !window.is_minimized {
+                        return;
+                    }
+                    window.is_minimized = false;
+                    (
+                        window.frame_monotonic,
+                        window.window_server_id,
+                        window.is_ax_standard,
+                        window.is_ax_root,
+                    )
+                }
+                None => {
+                    debug!(
+                        ?wid,
+                        "Received WindowDeminiaturized for unknown window - ignoring"
+                    );
                     return;
                 }
-                window.is_minimized = false;
-                (
-                    window.frame_monotonic,
-                    window.window_server_id,
-                    window.is_ax_standard,
-                    window.is_ax_root,
-                )
-            }
-            None => {
-                debug!(
-                    ?wid,
-                    "Received WindowDeminiaturized for unknown window - ignoring"
-                );
-                return;
-            }
-        };
+            };
         let is_manageable =
             reactor.compute_manageability_from_parts(server_id, false, is_ax_standard, is_ax_root);
-        if let Some(window) = reactor.windows.get_mut(&wid) {
+        if let Some(window) = reactor.window_manager.windows.get_mut(&wid) {
             window.is_manageable = is_manageable;
         }
 
@@ -152,11 +154,13 @@ impl WindowEventHandler {
         requested: Requested,
         mouse_state: Option<MouseState>,
     ) -> bool {
-        if let Some(window) = reactor.windows.get_mut(&wid) {
-            if matches!(reactor.mission_control_state, MissionControlState::Active)
-                || window
-                    .window_server_id
-                    .is_some_and(|wsid| reactor.changing_screens.contains(&wsid))
+        if let Some(window) = reactor.window_manager.windows.get_mut(&wid) {
+            if matches!(
+                reactor.mission_control_manager.mission_control_state,
+                MissionControlState::Active
+            ) || window
+                .window_server_id
+                .is_some_and(|wsid| reactor.space_manager.changing_screens.contains(&wsid))
             {
                 return false;
             }
@@ -177,7 +181,7 @@ impl WindowEventHandler {
                 return false;
             }
             if triggered_by_rift {
-                if let Some(store) = reactor.window_tx_store.as_ref()
+                if let Some(store) = reactor.notification_manager.window_tx_store.as_ref()
                     && let Some(wsid) = window.window_server_id
                 {
                     if let Some(record) = store.get(&wsid) {
@@ -220,7 +224,7 @@ impl WindowEventHandler {
 
             let dragging = mouse_state == Some(MouseState::Down)
                 || matches!(
-                    reactor.drag_state,
+                    reactor.drag_manager.drag_state,
                     DragState::Active { .. } | DragState::PendingSwap { .. }
                 );
 
@@ -233,6 +237,7 @@ impl WindowEventHandler {
                 reactor.maybe_swap_on_drag(wid, new_frame);
             } else {
                 let screens = reactor
+                    .space_manager
                     .screens
                     .iter()
                     .flat_map(|screen| Some((screen.space?, screen.frame)))
@@ -243,12 +248,14 @@ impl WindowEventHandler {
 
                 if old_space != new_space {
                     if matches!(
-                        reactor.drag_state,
+                        reactor.drag_manager.drag_state,
                         DragState::Active { .. } | DragState::PendingSwap { .. }
-                    ) || matches!(&reactor.drag_state, DragState::Active { session } if session.window == wid)
+                    ) || matches!(&reactor.drag_manager.drag_state, DragState::Active { session } if session.window == wid)
                     {
                         if let Some(space) = new_space {
-                            if let DragState::Active { session } = &mut reactor.drag_state {
+                            if let DragState::Active { session } =
+                                &mut reactor.drag_manager.drag_state
+                            {
                                 if session.window == wid {
                                     session.settled_space = Some(space);
                                     session.layout_dirty = true;
@@ -257,8 +264,11 @@ impl WindowEventHandler {
                         }
                     } else {
                         if let Some(space) = new_space {
-                            if let Some(active_ws) = reactor.layout_engine.active_workspace(space) {
+                            if let Some(active_ws) =
+                                reactor.layout_manager.layout_engine.active_workspace(space)
+                            {
                                 let _ = reactor
+                                    .layout_manager
                                     .layout_engine
                                     .virtual_workspace_manager_mut()
                                     .assign_window_to_workspace(space, wid, active_ws);
@@ -285,7 +295,7 @@ impl WindowEventHandler {
     }
 
     pub fn handle_mouse_moved_over_window(&self, reactor: &mut Reactor, wsid: WindowServerId) {
-        let Some(&wid) = reactor.window_ids.get(&wsid) else {
+        let Some(&wid) = reactor.window_manager.window_ids.get(&wsid) else {
             return;
         };
         if reactor.should_raise_on_mouse_over(wid) {

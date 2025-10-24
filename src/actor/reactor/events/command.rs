@@ -16,8 +16,12 @@ pub struct CommandEventHandler;
 impl CommandEventHandler {
     pub fn handle_command_layout(reactor: &mut Reactor, cmd: LayoutCommand) {
         info!(?cmd);
-        let visible_spaces =
-            reactor.screens.iter().flat_map(|screen| screen.space).collect::<Vec<_>>();
+        let visible_spaces = reactor
+            .space_manager
+            .screens
+            .iter()
+            .flat_map(|screen| screen.space)
+            .collect::<Vec<_>>();
 
         let is_workspace_switch = matches!(
             cmd,
@@ -30,9 +34,10 @@ impl CommandEventHandler {
             if let Some(space) = reactor.workspace_command_space() {
                 reactor.store_current_floating_positions(space);
             }
-            reactor.workspace_switch_generation =
-                reactor.workspace_switch_generation.wrapping_add(1);
-            reactor.active_workspace_switch = Some(reactor.workspace_switch_generation);
+            reactor.workspace_switch_manager.workspace_switch_generation =
+                reactor.workspace_switch_manager.workspace_switch_generation.wrapping_add(1);
+            reactor.workspace_switch_manager.active_workspace_switch =
+                Some(reactor.workspace_switch_manager.workspace_switch_generation);
         }
 
         let response = match &cmd {
@@ -43,19 +48,22 @@ impl CommandEventHandler {
             | LayoutCommand::CreateWorkspace
             | LayoutCommand::SwitchToLastWorkspace => {
                 if let Some(space) = reactor.workspace_command_space() {
-                    reactor.layout_engine.handle_virtual_workspace_command(space, &cmd)
+                    reactor
+                        .layout_manager
+                        .layout_engine
+                        .handle_virtual_workspace_command(space, &cmd)
                 } else {
                     EventResponse::default()
                 }
             }
-            _ => reactor.layout_engine.handle_command(
+            _ => reactor.layout_manager.layout_engine.handle_command(
                 reactor.workspace_command_space(),
                 &visible_spaces,
                 cmd,
             ),
         };
 
-        reactor.workspace_switch_state = if is_workspace_switch {
+        reactor.workspace_switch_manager.workspace_switch_state = if is_workspace_switch {
             WorkspaceSwitchState::Active
         } else {
             WorkspaceSwitchState::Inactive
@@ -68,29 +76,37 @@ impl CommandEventHandler {
     }
 
     pub fn handle_config_updated(reactor: &mut Reactor, new_cfg: Config) {
-        let old_keys = reactor.config.keys.clone();
+        let old_keys = reactor.config_manager.config.keys.clone();
 
-        reactor.config = new_cfg;
-        reactor.layout_engine.set_layout_settings(&reactor.config.settings.layout);
-        let _ = reactor.drag_manager.update_config(reactor.config.settings.window_snapping);
+        reactor.config_manager.config = new_cfg;
+        reactor
+            .layout_manager
+            .layout_engine
+            .set_layout_settings(&reactor.config_manager.config.settings.layout);
+        let _ = reactor
+            .drag_manager
+            .drag_swap_manager
+            .update_config(reactor.config_manager.config.settings.window_snapping);
 
-        if let Some(tx) = &reactor.stack_line_tx {
-            let _ = tx.try_send(StackLineEvent::ConfigUpdated(reactor.config.clone()));
+        if let Some(tx) = &reactor.communication_manager.stack_line_tx {
+            let _ = tx.try_send(StackLineEvent::ConfigUpdated(
+                reactor.config_manager.config.clone(),
+            ));
         }
 
         let _ = reactor.update_layout(false, true);
 
-        if old_keys != reactor.config.keys {
-            if let Some(wm) = &reactor.wm_sender {
-                let _ = wm.send(WmEvent::ConfigUpdated(reactor.config.clone()));
+        if old_keys != reactor.config_manager.config.keys {
+            if let Some(wm) = &reactor.communication_manager.wm_sender {
+                let _ = wm.send(WmEvent::ConfigUpdated(reactor.config_manager.config.clone()));
             }
         }
     }
 
     pub fn handle_command_reactor_debug(reactor: &mut Reactor) {
-        for screen in &reactor.screens {
+        for screen in &reactor.space_manager.screens {
             if let Some(space) = screen.space {
-                reactor.layout_engine.debug_tree_desc(space, "", true);
+                reactor.layout_manager.layout_engine.debug_tree_desc(space, "", true);
             }
         }
     }
@@ -102,7 +118,7 @@ impl CommandEventHandler {
     }
 
     pub fn handle_command_reactor_save_and_exit(reactor: &mut Reactor) {
-        match reactor.layout_engine.save(config::restore_file()) {
+        match reactor.layout_manager.layout_engine.save(config::restore_file()) {
             Ok(()) => std::process::exit(0),
             Err(e) => {
                 error!("Could not save layout: {e}");
@@ -123,8 +139,9 @@ impl CommandEventHandler {
         window_id: WindowId,
         window_server_id: Option<WindowServerId>,
     ) {
-        if reactor.windows.contains_key(&window_id) {
+        if reactor.window_manager.windows.contains_key(&window_id) {
             if let Some(space) = reactor
+                .window_manager
                 .windows
                 .get(&window_id)
                 .and_then(|w| reactor.best_space_for_window(&w.frame_monotonic))
@@ -133,7 +150,7 @@ impl CommandEventHandler {
             }
 
             let mut app_handles: HashMap<i32, AppThreadHandle> = HashMap::default();
-            if let Some(app) = reactor.apps.get(&window_id.pid) {
+            if let Some(app) = reactor.app_manager.apps.get(&window_id.pid) {
                 app_handles.insert(window_id.pid, app.handle.clone());
             }
             let request = raise_manager::Event::RaiseRequest(raise_manager::RaiseRequest {
@@ -141,7 +158,7 @@ impl CommandEventHandler {
                 focus_window: Some((window_id, None)),
                 app_handles,
             });
-            let _ = reactor.raise_manager_tx.try_send(request);
+            let _ = reactor.communication_manager.raise_manager_tx.try_send(request);
         } else if let Some(wsid) = window_server_id {
             let _ = window_server::make_key_window(window_id.pid, wsid);
         }
