@@ -85,7 +85,6 @@ impl CommandEventHandler {
             .set_layout_settings(&reactor.config_manager.config.settings.layout);
         let _ = reactor
             .drag_manager
-            .drag_swap_manager
             .update_config(reactor.config_manager.config.settings.window_snapping);
 
         if let Some(tx) = &reactor.communication_manager.stack_line_tx {
