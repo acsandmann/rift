@@ -1095,9 +1095,9 @@ impl Reactor {
                 }
                 self.try_apply_pending_space_change();
             }
-            Event::SpaceChanged(spaces, ws_info) => {
+            Event::SpaceChanged(mut spaces, ws_info) => {
                 // TODO: this logic is flawed if multiple spaces are changing at once
-                if self.handle_fullscreen_space_transition(&spaces) {
+                if self.handle_fullscreen_space_transition(&mut spaces) {
                     return;
                 }
                 if self.mission_control_active {
@@ -1450,12 +1450,32 @@ impl Reactor {
         }
     }
 
-    fn handle_fullscreen_space_transition(&mut self, spaces: &[Option<SpaceId>]) -> bool {
-        if spaces.iter().flatten().any(|s| space_is_fullscreen(s.get())) {
+    fn handle_fullscreen_space_transition(&mut self, spaces: &mut Vec<Option<SpaceId>>) -> bool {
+        let mut saw_fullscreen = false;
+        let mut all_fullscreen = !spaces.is_empty();
+        let mut refresh_spaces = Vec::new();
+
+        for slot in spaces.iter_mut() {
+            match slot {
+                Some(space) if space_is_fullscreen(space.get()) => {
+                    saw_fullscreen = true;
+                    *slot = None;
+                }
+                Some(space) => {
+                    all_fullscreen = false;
+                    refresh_spaces.push(*space);
+                }
+                None => {
+                    all_fullscreen = false;
+                }
+            }
+        }
+
+        if saw_fullscreen && all_fullscreen {
             return true;
         }
 
-        for space in spaces.iter().flatten() {
+        for space in refresh_spaces {
             if let Some(track) = self.fullscreen_by_space.remove(&space.get()) {
                 wait_for_native_fullscreen_transition();
                 Timer::sleep(Duration::from_millis(50));
@@ -1514,9 +1534,9 @@ impl Reactor {
     }
 
     fn try_apply_pending_space_change(&mut self) {
-        if let Some(pending) = self.pending_space_change.take() {
+        if let Some(mut pending) = self.pending_space_change.take() {
             if pending.spaces.len() == self.screens.len() {
-                if self.handle_fullscreen_space_transition(&pending.spaces) {
+                if self.handle_fullscreen_space_transition(&mut pending.spaces) {
                     return;
                 }
                 self.set_screen_spaces(&pending.spaces);
