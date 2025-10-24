@@ -25,6 +25,7 @@ use events::app::AppEventHandler;
 use events::command::CommandEventHandler;
 use events::drag::DragEventHandler;
 use events::space::SpaceEventHandler;
+use events::system::SystemEventHandler;
 use events::window::WindowEventHandler;
 use main_window::MainWindowTracker;
 use objc2_app_kit::NSNormalWindowLevel;
@@ -681,7 +682,9 @@ impl Reactor {
             Event::ApplicationGloballyActivated(pid) => {
                 AppEventHandler::handle_application_globally_activated(self, pid);
             }
-            Event::RegisterWmSender(sender) => self.communication_manager.wm_sender = Some(sender),
+            Event::RegisterWmSender(sender) => {
+                SystemEventHandler::handle_register_wm_sender(self, sender)
+            }
             Event::WindowsDiscovered { pid, new, known_visible } => {
                 AppEventHandler::handle_windows_discovered(self, pid, new, known_visible);
             }
@@ -692,8 +695,7 @@ impl Reactor {
                 WindowEventHandler::handle_window_created(self, wid, window, ws_info, mouse_state);
             }
             Event::WindowDestroyed(wid) => {
-                WindowEventHandler::handle_window_destroyed(self, wid);
-                window_was_destroyed = true;
+                window_was_destroyed = WindowEventHandler::handle_window_destroyed(self, wid);
             }
             Event::WindowServerDestroyed(wsid, sid) => {
                 SpaceEventHandler::handle_window_server_destroyed(self, wsid, sid);
@@ -702,22 +704,20 @@ impl Reactor {
                 SpaceEventHandler::handle_window_server_appeared(self, wsid, sid);
             }
             Event::WindowMinimized(wid) => {
-                WindowEventHandler.handle_window_minimized(self, wid);
+                WindowEventHandler::handle_window_minimized(self, wid);
             }
             Event::WindowDeminiaturized(wid) => {
-                WindowEventHandler.handle_window_deminiaturized(self, wid);
+                WindowEventHandler::handle_window_deminiaturized(self, wid);
             }
             Event::WindowFrameChanged(wid, new_frame, last_seen, requested, mouse_state) => {
-                if WindowEventHandler::handle_window_frame_changed(
+                is_resize = WindowEventHandler::handle_window_frame_changed(
                     self,
                     wid,
                     new_frame,
                     last_seen,
                     requested,
                     mouse_state,
-                ) {
-                    is_resize = true;
-                }
+                );
             }
             Event::ScreenParametersChanged(frames, spaces, ws_info) => {
                 SpaceEventHandler::handle_screen_parameters_changed(self, frames, spaces, ws_info);
@@ -728,37 +728,12 @@ impl Reactor {
             Event::MouseUp => {
                 DragEventHandler::handle_mouse_up(self);
             }
-            Event::MenuOpened => {
-                debug!("menu opened");
-                self.menu_manager.menu_state = match self.menu_manager.menu_state {
-                    MenuState::Closed => MenuState::Open(1),
-                    MenuState::Open(depth) => MenuState::Open(depth.saturating_add(1)),
-                };
-                self.update_focus_follows_mouse_state();
-            }
-            Event::MenuClosed => match self.menu_manager.menu_state {
-                MenuState::Closed => {
-                    debug!("menu closed with zero depth");
-                }
-                MenuState::Open(depth) => {
-                    let new_depth = depth.saturating_sub(1);
-                    self.menu_manager.menu_state = if new_depth == 0 {
-                        MenuState::Closed
-                    } else {
-                        MenuState::Open(new_depth)
-                    };
-                    self.update_focus_follows_mouse_state();
-                }
-            },
+            Event::MenuOpened => SystemEventHandler::handle_menu_opened(self),
+            Event::MenuClosed => SystemEventHandler::handle_menu_closed(self),
             Event::MouseMovedOverWindow(wsid) => {
-                WindowEventHandler.handle_mouse_moved_over_window(self, wsid);
+                WindowEventHandler::handle_mouse_moved_over_window(self, wsid);
             }
-            Event::SystemWoke => {
-                let ids: Vec<u32> =
-                    self.window_manager.window_ids.keys().map(|wsid| wsid.as_u32()).collect();
-                crate::sys::window_notify::update_window_notifications(&ids);
-                self.notification_manager.last_sls_notification_ids = ids;
-            }
+            Event::SystemWoke => SystemEventHandler::handle_system_woke(self),
             Event::MissionControlNativeEntered => {
                 SpaceEventHandler::handle_mission_control_native_entered(self);
             }
@@ -766,12 +741,10 @@ impl Reactor {
                 SpaceEventHandler::handle_mission_control_native_exited(self);
             }
             Event::RaiseCompleted { window_id, sequence_id } => {
-                let msg = raise_manager::Event::RaiseCompleted { window_id, sequence_id };
-                _ = self.communication_manager.raise_manager_tx.send(msg);
+                SystemEventHandler::handle_raise_completed(self, window_id, sequence_id);
             }
             Event::RaiseTimeout { sequence_id } => {
-                let msg = raise_manager::Event::RaiseTimeout { sequence_id };
-                _ = self.communication_manager.raise_manager_tx.send(msg);
+                SystemEventHandler::handle_raise_timeout(self, sequence_id);
             }
             Event::Command(Command::Layout(cmd)) => {
                 CommandEventHandler::handle_command_layout(self, cmd);

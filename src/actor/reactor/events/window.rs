@@ -53,9 +53,9 @@ impl WindowEventHandler {
         // }
     }
 
-    pub fn handle_window_destroyed(reactor: &mut Reactor, wid: WindowId) {
+    pub fn handle_window_destroyed(reactor: &mut Reactor, wid: WindowId) -> bool {
         if !reactor.window_manager.windows.contains_key(&wid) {
-            return;
+            return false;
         }
         let window_server_id =
             reactor.window_manager.windows.get(&wid).and_then(|w| w.window_server_id);
@@ -92,9 +92,10 @@ impl WindowEventHandler {
         if reactor.drag_manager.skip_layout_for_window == Some(wid) {
             reactor.drag_manager.skip_layout_for_window = None;
         }
+        true
     }
 
-    pub fn handle_window_minimized(&self, reactor: &mut Reactor, wid: WindowId) {
+    pub fn handle_window_minimized(reactor: &mut Reactor, wid: WindowId) {
         if let Some(window) = reactor.window_manager.windows.get_mut(&wid) {
             if window.is_minimized {
                 return;
@@ -110,7 +111,7 @@ impl WindowEventHandler {
         }
     }
 
-    pub fn handle_window_deminiaturized(&self, reactor: &mut Reactor, wid: WindowId) {
+    pub fn handle_window_deminiaturized(reactor: &mut Reactor, wid: WindowId) {
         let (frame, server_id, is_ax_standard, is_ax_root) =
             match reactor.window_manager.windows.get_mut(&wid) {
                 Some(window) => {
@@ -294,7 +295,7 @@ impl WindowEventHandler {
         false
     }
 
-    pub fn handle_mouse_moved_over_window(&self, reactor: &mut Reactor, wsid: WindowServerId) {
+    pub fn handle_mouse_moved_over_window(reactor: &mut Reactor, wsid: WindowServerId) {
         let Some(&wid) = reactor.window_manager.window_ids.get(&wsid) else {
             return;
         };
