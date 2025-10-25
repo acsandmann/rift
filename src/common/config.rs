@@ -521,6 +521,9 @@ pub struct LayoutSettings {
     /// Gap configuration for window spacing
     #[serde(default)]
     pub gaps: GapSettings,
+    /// Scroll layout specific settings
+    #[serde(default)]
+    pub scroll: ScrollLayoutSettings,
 }
 
 /// Layout mode enum
@@ -532,6 +535,98 @@ pub enum LayoutMode {
     Traditional,
     /// Binary space partitioning tiling
     Bsp,
+    /// Horizontal scrolling strip layout (PaperWM/Niri style)
+    Scroll,
+}
+
+fn default_scroll_gesture_fingers() -> usize { 3 }
+fn default_scroll_gesture_sensitivity() -> f64 { 1.25 }
+fn default_scroll_wheel_divisor() -> f64 { 600.0 }
+fn default_scroll_wheel_sensitivity() -> f64 { 1.0 }
+fn default_scroll_window_fraction() -> f64 { 1.0 }
+fn default_scroll_center_bias() -> f64 { 0.0 }
+fn default_scroll_snap_threshold() -> f64 { 0.5 }
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct ScrollLayoutSettings {
+    /// Number of fingers required when using gesture-based scrolling
+    #[serde(default = "default_scroll_gesture_fingers")]
+    pub gesture_fingers: usize,
+    /// Multiplier applied to horizontal gesture deltas (larger values scroll faster)
+    #[serde(default = "default_scroll_gesture_sensitivity")]
+    pub gesture_sensitivity: f64,
+    /// Pixel delta that corresponds to one window when using a scroll wheel
+    #[serde(default = "default_scroll_wheel_divisor")]
+    pub wheel_pixels_per_window: f64,
+    /// Additional sensitivity multiplier applied to scroll-wheel deltas
+    #[serde(default = "default_scroll_wheel_sensitivity")]
+    pub wheel_sensitivity: f64,
+    /// Default fraction of the available width assigned to new windows
+    #[serde(default = "default_scroll_window_fraction")]
+    pub window_fraction: f64,
+    /// Bias applied to the viewport center (-0.5..0.5)
+    #[serde(default = "default_scroll_center_bias")]
+    pub center_bias: f64,
+    /// Threshold (0-1) that determines when focus advances to the next window
+    #[serde(default = "default_scroll_snap_threshold")]
+    pub snap_threshold: f64,
+}
+
+impl Default for ScrollLayoutSettings {
+    fn default() -> Self {
+        Self {
+            gesture_fingers: default_scroll_gesture_fingers(),
+            gesture_sensitivity: default_scroll_gesture_sensitivity(),
+            wheel_pixels_per_window: default_scroll_wheel_divisor(),
+            wheel_sensitivity: default_scroll_wheel_sensitivity(),
+            window_fraction: default_scroll_window_fraction(),
+            center_bias: default_scroll_center_bias(),
+            snap_threshold: default_scroll_snap_threshold(),
+        }
+    }
+}
+
+impl ScrollLayoutSettings {
+    pub fn validate(&self) -> Vec<String> {
+        let mut issues = Vec::new();
+        if self.window_fraction <= 0.0 {
+            issues.push(format!(
+                "layout.scroll.window_fraction must be positive, got {}",
+                self.window_fraction
+            ));
+        }
+        if !(0.0..=1.0).contains(&self.snap_threshold) {
+            issues.push(format!(
+                "layout.scroll.snap_threshold must be within [0, 1], got {}",
+                self.snap_threshold
+            ));
+        }
+        if !(-0.5..=0.5).contains(&self.center_bias) {
+            issues.push(format!(
+                "layout.scroll.center_bias must be within [-0.5, 0.5], got {}",
+                self.center_bias
+            ));
+        }
+        issues
+    }
+
+    pub fn auto_fix_values(&mut self) -> usize {
+        let mut fixes = 0;
+        if self.window_fraction <= 0.0 {
+            self.window_fraction = default_scroll_window_fraction();
+            fixes += 1;
+        }
+        if !(0.0..=1.0).contains(&self.snap_threshold) {
+            self.snap_threshold = default_scroll_snap_threshold();
+            fixes += 1;
+        }
+        if !(-0.5..=0.5).contains(&self.center_bias) {
+            self.center_bias = default_scroll_center_bias();
+            fixes += 1;
+        }
+        fixes
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
@@ -675,14 +770,17 @@ impl LayoutSettings {
 
         issues.extend(self.gaps.validate());
 
+        issues.extend(self.scroll.validate());
+
         issues
     }
 
     pub fn auto_fix_values(&mut self) -> usize {
         let stack_fixes = self.stack.auto_fix_values();
         let gap_fixes = self.gaps.auto_fix_values();
+        let scroll_fixes = self.scroll.auto_fix_values();
 
-        stack_fixes + gap_fixes
+        stack_fixes + gap_fixes + scroll_fixes
     }
 }
 

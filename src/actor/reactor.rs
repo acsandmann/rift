@@ -36,7 +36,7 @@ use crate::actor::raise_manager::{self, RaiseRequest};
 use crate::actor::wm_controller::WmEvent;
 use crate::actor::{self, menu_bar, stack_line};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
-use crate::common::config::Config;
+use crate::common::config::{Config, LayoutMode};
 use crate::common::log::{self, MetricsCommand};
 use crate::layout_engine::{self as layout, Direction, LayoutCommand, LayoutEngine, LayoutEvent};
 use crate::model::VirtualWorkspaceId;
@@ -216,7 +216,7 @@ pub enum Event {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Requested(pub bool);
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(untagged)]
 pub enum Command {
     Layout(LayoutCommand),
@@ -509,7 +509,11 @@ impl Reactor {
 
     fn log_event(&self, event: &Event) {
         match event {
-            Event::WindowFrameChanged(..) | Event::MouseUp => trace!(?event, "Event"),
+            Event::WindowFrameChanged(..)
+            | Event::MouseUp
+            | Event::Command(Command::Layout(LayoutCommand::ScrollWorkspace { .. })) => {
+                trace!(?event, "Event")
+            }
             _ => debug!(?event, "Event"),
         }
     }
@@ -1210,7 +1214,9 @@ impl Reactor {
             }
             Event::MouseMovedOverWindow(wsid) => {
                 let Some(&wid) = self.window_ids.get(&wsid) else { return };
-                if self.should_raise_on_mouse_over(wid) {
+                if matches!(self.config.settings.layout.mode, LayoutMode::Scroll) {
+                    self.handle_mouse_over_in_scroll(wid);
+                } else if self.should_raise_on_mouse_over(wid) {
                     self.raise_window(wid, Quiet::No, None);
                 }
             }
@@ -1237,7 +1243,10 @@ impl Reactor {
                 _ = self.raise_manager_tx.send(msg);
             }
             Event::Command(Command::Layout(cmd)) => {
-                info!(?cmd);
+                match &cmd {
+                    layout::LayoutCommand::ScrollWorkspace { .. } => trace!(?cmd),
+                    _ => info!(?cmd),
+                };
                 let visible_spaces =
                     self.screens.iter().flat_map(|screen| screen.space).collect::<Vec<_>>();
 
@@ -1273,12 +1282,16 @@ impl Reactor {
                     _ => self.layout_engine.handle_command(
                         self.workspace_command_space(),
                         &visible_spaces,
-                        cmd,
+                        cmd.clone(),
                     ),
                 };
 
                 self.is_workspace_switch = is_workspace_switch;
                 self.handle_layout_response(response);
+
+                if matches!(cmd, LayoutCommand::ScrollWorkspace { .. }) {
+                    let _ = self.update_layout(false, false);
+                }
             }
             Event::Command(Command::Metrics(cmd)) => log::handle_command(cmd),
             Event::ConfigUpdated(new_cfg) => {
@@ -1295,6 +1308,7 @@ impl Reactor {
                 }
 
                 let _ = self.update_layout(false, true);
+                self.update_focus_follows_mouse_state();
 
                 if old_keys != self.config.keys {
                     if let Some(wm) = &self.wm_sender {
@@ -2142,6 +2156,31 @@ impl Reactor {
         true
     }
 
+    fn handle_mouse_over_in_scroll(&mut self, wid: WindowId) {
+        if !self.should_raise_on_mouse_over(wid) {
+            return;
+        }
+
+        if self.layout_engine.is_window_floating(wid) {
+            self.raise_window(wid, Quiet::No, None);
+            return;
+        }
+
+        let frame = match self.windows.get(&wid) {
+            Some(window) => window.frame_monotonic,
+            None => return,
+        };
+        let Some(space) = self.best_space_for_window(&frame) else {
+            return;
+        };
+        if !self.layout_engine.is_window_in_active_workspace(space, wid) {
+            return;
+        }
+
+        self.send_layout_event(LayoutEvent::WindowFocused(space, wid));
+        self.raise_window(wid, Quiet::No, None);
+    }
+
     fn process_windows_for_app_rules(
         &mut self,
         pid: pid_t,
@@ -2814,10 +2853,12 @@ impl Reactor {
                 }
             }
 
-            let suppress_animation = is_workspace_switch || self.active_workspace_switch.is_some();
+            let is_scroll_layout = matches!(self.config.settings.layout.mode, LayoutMode::Scroll);
+            let suppress_animation =
+                is_workspace_switch || self.active_workspace_switch.is_some() || is_scroll_layout;
             if suppress_animation {
                 let mut per_app: HashMap<pid_t, Vec<(WindowId, CGRect)>> = HashMap::default();
-                for &(wid, target_frame) in &layout {
+                for &(wid, mut target_frame) in &layout {
                     // Skip applying a layout frame for the window currently being dragged.
                     if skip_wid == Some(wid) {
                         trace!(?wid, "Skipping layout update for window currently being dragged");
@@ -2828,9 +2869,11 @@ impl Reactor {
                         debug!(?wid, "Skipping layout - window no longer exists");
                         continue;
                     };
-                    let target_frame = target_frame.round();
+                    if !is_scroll_layout {
+                        target_frame = target_frame.round();
+                    }
                     let current_frame = window.frame_monotonic;
-                    if target_frame.same_as(current_frame) {
+                    if !is_scroll_layout && target_frame.same_as(current_frame) {
                         continue;
                     }
                     any_frame_changed = true;
