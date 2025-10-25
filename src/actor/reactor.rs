@@ -2354,7 +2354,10 @@ impl Reactor {
         if raise_windows.is_empty() && focus_window.is_none() {
             if self.is_workspace_switch && !self.in_drag {
                 if let Some(wid) = self.window_id_under_cursor() {
-                    focus_window = Some(wid);
+                    // Only focus if it's different from the currently focused window to prevent duplicate focus
+                    if self.main_window() != Some(wid) {
+                        focus_window = Some(wid);
+                    }
                 } else if self.focus_untracked_window_under_cursor() {
                     handled_without_raise = true;
                 }
