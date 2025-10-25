@@ -270,6 +270,7 @@ pub struct Reactor {
     is_workspace_switch: bool,
     workspace_switch_generation: u64,
     active_workspace_switch: Option<u64>,
+    pending_workspace_mouse_warp: Option<WindowId>,
     record: Record,
     event_tap_tx: Option<event_tap::Sender>,
     menu_tx: Option<menu_bar::Sender>,
@@ -436,6 +437,7 @@ impl Reactor {
             is_workspace_switch: false,
             workspace_switch_generation: 0,
             active_workspace_switch: None,
+            pending_workspace_mouse_warp: None,
             record,
             event_tap_tx: None,
             menu_tx: None,
@@ -793,6 +795,21 @@ impl Reactor {
                             ?wsid,
                             layer = window_server_info.layer,
                             "Ignoring non-normal window"
+                        );
+                        return;
+                    }
+
+                    // Filter out very small windows (likely tooltips or similar UI elements)
+                    // that shouldn't be managed by the window manager
+                    const MIN_MANAGEABLE_WINDOW_SIZE: f64 = 50.0;
+                    if window_server_info.frame.size.width < MIN_MANAGEABLE_WINDOW_SIZE
+                        || window_server_info.frame.size.height < MIN_MANAGEABLE_WINDOW_SIZE
+                    {
+                        trace!(
+                            ?wsid,
+                            "Ignoring tiny window ({}x{}) - likely tooltip",
+                            window_server_info.frame.size.width,
+                            window_server_info.frame.size.height
                         );
                         return;
                     }
@@ -1364,6 +1381,19 @@ impl Reactor {
         if self.active_workspace_switch.is_some() && !layout_changed {
             self.active_workspace_switch = None;
             trace!("Workspace switch stabilized with no further frame changes");
+        }
+
+        // Execute deferred mouse warp after workspace switch completes
+        if let Some(wid) = self.pending_workspace_mouse_warp.take() {
+            if let Some(window) = self.windows.get(&wid) {
+                let window_center = window.frame_monotonic.mid();
+                // Only warp if the window is now positioned on-screen
+                if self.screens.iter().any(|s| s.frame.contains(window_center)) {
+                    if let Err(e) = crate::sys::event::warp_mouse(window_center) {
+                        warn!("Failed to execute deferred mouse warp: {e:?}");
+                    }
+                }
+            }
         }
 
         if should_update_notifications {
@@ -2324,7 +2354,10 @@ impl Reactor {
         if raise_windows.is_empty() && focus_window.is_none() {
             if self.is_workspace_switch && !self.in_drag {
                 if let Some(wid) = self.window_id_under_cursor() {
-                    focus_window = Some(wid);
+                    // Only focus if it's different from the currently focused window to prevent duplicate focus
+                    if self.main_window() != Some(wid) {
+                        focus_window = Some(wid);
+                    }
                 } else if self.focus_untracked_window_under_cursor() {
                     handled_without_raise = true;
                 }
@@ -2402,7 +2435,23 @@ impl Reactor {
 
         let focus_window_with_warp = focus_window.map(|wid| {
             let warp = match self.config.settings.mouse_follows_focus {
-                true => self.windows.get(&wid).map(|w| w.frame_monotonic.mid()),
+                true => {
+                    if self.is_workspace_switch {
+                        // During workspace switches, defer mouse warping until after layout completes
+                        self.pending_workspace_mouse_warp = Some(wid);
+                        None
+                    } else {
+                        self.windows.get(&wid).and_then(|w| {
+                            let window_center = w.frame_monotonic.mid();
+                            // Only warp if the window center is actually on a screen
+                            if self.screens.iter().any(|s| s.frame.contains(window_center)) {
+                                Some(window_center)
+                            } else {
+                                None
+                            }
+                        })
+                    }
+                }
                 false => None,
             };
             (wid, warp)
