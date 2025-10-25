@@ -791,7 +791,10 @@ impl LayoutEngine {
             }
             LayoutCommand::UnstackWindows => {
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
-                let unstacked_windows = self.tree.unstack_parent_of_selection(layout);
+                let default_orientation: crate::common::config::StackDefaultOrientation =
+                    self.layout_settings.stack.default_orientation;
+                let unstacked_windows =
+                    self.tree.unstack_parent_of_selection(layout, default_orientation);
                 EventResponse {
                     raise_windows: unstacked_windows,
                     focus_window: None,

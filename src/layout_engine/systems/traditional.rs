@@ -671,7 +671,11 @@ impl LayoutSystem for TraditionalLayoutSystem {
         vec![]
     }
 
-    fn unstack_parent_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
+    fn unstack_parent_of_selection(
+        &mut self,
+        layout: LayoutId,
+        default_orientation: crate::common::config::StackDefaultOrientation,
+    ) -> Vec<WindowId> {
         let selection = self.selection(layout);
 
         let target_container = if self.tree.data.window.at(selection).is_some() {
@@ -692,8 +696,34 @@ impl LayoutSystem for TraditionalLayoutSystem {
 
         if let Some(container) = target_container {
             let new_layout = match self.layout(container) {
-                LayoutKind::HorizontalStack => Some(LayoutKind::Horizontal),
-                LayoutKind::VerticalStack => Some(LayoutKind::Vertical),
+                LayoutKind::HorizontalStack => match default_orientation {
+                    crate::common::config::StackDefaultOrientation::Perpendicular => {
+                        Some(LayoutKind::Vertical)
+                    }
+                    crate::common::config::StackDefaultOrientation::Same => {
+                        Some(LayoutKind::Horizontal)
+                    }
+                    crate::common::config::StackDefaultOrientation::Horizontal => {
+                        Some(LayoutKind::Horizontal)
+                    }
+                    crate::common::config::StackDefaultOrientation::Vertical => {
+                        Some(LayoutKind::Vertical)
+                    }
+                },
+                LayoutKind::VerticalStack => match default_orientation {
+                    crate::common::config::StackDefaultOrientation::Perpendicular => {
+                        Some(LayoutKind::Horizontal)
+                    }
+                    crate::common::config::StackDefaultOrientation::Same => {
+                        Some(LayoutKind::Vertical)
+                    }
+                    crate::common::config::StackDefaultOrientation::Horizontal => {
+                        Some(LayoutKind::Horizontal)
+                    }
+                    crate::common::config::StackDefaultOrientation::Vertical => {
+                        Some(LayoutKind::Vertical)
+                    }
+                },
                 _ => None,
             };
 
@@ -2206,6 +2236,83 @@ mod tests {
         assert_eq!(system.move_over(child1, Direction::Right), Some(child2));
         assert_eq!(system.move_over(child2, Direction::Right), Some(child3));
         assert_eq!(system.move_over(child3, Direction::Right), None);
+    }
+
+    #[test]
+    fn test_unstack_default_orientation_behavior() {
+        use crate::common::config::StackDefaultOrientation;
+
+        let mut system = TestTraditionalLayoutSystem::new();
+        let layout = system.system.create_layout();
+        let root_node = system.system.root(layout);
+
+        let horizontal_stack_container = system.add_child(root_node, LayoutKind::HorizontalStack);
+        system
+            .system
+            .tree
+            .data
+            .selection
+            .select(&system.system.tree.map, horizontal_stack_container);
+        let _ = crate::layout_engine::systems::LayoutSystem::unstack_parent_of_selection(
+            &mut system.system,
+            layout,
+            StackDefaultOrientation::Perpendicular,
+        );
+        assert_eq!(
+            system.system.layout(horizontal_stack_container),
+            LayoutKind::Vertical
+        );
+
+        let vertical_stack_container = system.add_child(root_node, LayoutKind::VerticalStack);
+        system
+            .system
+            .tree
+            .data
+            .selection
+            .select(&system.system.tree.map, vertical_stack_container);
+        let _ = crate::layout_engine::systems::LayoutSystem::unstack_parent_of_selection(
+            &mut system.system,
+            layout,
+            StackDefaultOrientation::Perpendicular,
+        );
+        assert_eq!(
+            system.system.layout(vertical_stack_container),
+            LayoutKind::Horizontal
+        );
+
+        let horizontal_stack_container2 = system.add_child(root_node, LayoutKind::HorizontalStack);
+        system
+            .system
+            .tree
+            .data
+            .selection
+            .select(&system.system.tree.map, horizontal_stack_container2);
+        let _ = crate::layout_engine::systems::LayoutSystem::unstack_parent_of_selection(
+            &mut system.system,
+            layout,
+            StackDefaultOrientation::Same,
+        );
+        assert_eq!(
+            system.system.layout(horizontal_stack_container2),
+            LayoutKind::Horizontal
+        );
+
+        let vertical_stack_container2 = system.add_child(root_node, LayoutKind::VerticalStack);
+        system
+            .system
+            .tree
+            .data
+            .selection
+            .select(&system.system.tree.map, vertical_stack_container2);
+        let _ = crate::layout_engine::systems::LayoutSystem::unstack_parent_of_selection(
+            &mut system.system,
+            layout,
+            StackDefaultOrientation::Same,
+        );
+        assert_eq!(
+            system.system.layout(vertical_stack_container2),
+            LayoutKind::Vertical
+        );
     }
 
     #[test]
