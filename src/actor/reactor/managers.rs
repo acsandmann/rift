@@ -1,6 +1,7 @@
 use std::time::Instant;
+use tracing::trace;
 
-use objc2_core_foundation::CGRect;
+use objc2_core_foundation::{CGRect, CGSize};
 
 use super::main_window::MainWindowTracker;
 use super::replay::Record;
@@ -11,11 +12,14 @@ use crate::actor;
 use crate::actor::app::{WindowId, pid_t};
 use crate::actor::broadcast::BroadcastSender;
 use crate::actor::drag_swap::DragManager as DragSwapManager;
+use crate::actor::reactor::Reactor;
+use crate::actor::reactor::animation::AnimationManager;
 use crate::actor::{event_tap, menu_bar, raise_manager, stack_line, window_notify, wm_controller};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{Config, WindowSnappingSettings};
 use crate::layout_engine::LayoutEngine;
 use crate::model::tx_store::WindowTxStore;
+use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 
 /// Manages window state and lifecycle
@@ -47,13 +51,21 @@ pub struct DragManager {
 }
 
 impl DragManager {
-    pub fn reset(&mut self) { self.drag_swap_manager.reset(); }
+    pub fn reset(&mut self) {
+        self.drag_swap_manager.reset();
+    }
 
-    pub fn last_target(&self) -> Option<WindowId> { self.drag_swap_manager.last_target() }
+    pub fn last_target(&self) -> Option<WindowId> {
+        self.drag_swap_manager.last_target()
+    }
 
-    pub fn dragged(&self) -> Option<WindowId> { self.drag_swap_manager.dragged() }
+    pub fn dragged(&self) -> Option<WindowId> {
+        self.drag_swap_manager.dragged()
+    }
 
-    pub fn origin_frame(&self) -> Option<CGRect> { self.drag_swap_manager.origin_frame() }
+    pub fn origin_frame(&self) -> Option<CGRect> {
+        self.drag_swap_manager.origin_frame()
+    }
 
     pub fn update_config(&mut self, config: WindowSnappingSettings) {
         self.drag_swap_manager.update_config(config);
@@ -116,6 +128,120 @@ pub struct ConfigManager {
 /// Manages layout engine state
 pub struct LayoutManager {
     pub layout_engine: LayoutEngine,
+}
+
+pub type LayoutResult = Vec<(SpaceId, Vec<(WindowId, CGRect)>)>;
+
+impl LayoutManager {
+    pub fn update_layout(
+        reactor: &mut Reactor,
+        is_resize: bool,
+        is_workspace_switch: bool,
+    ) -> bool {
+        let layout_result = Self::calculate_layout(reactor);
+        Self::apply_layout(reactor, layout_result, is_resize, is_workspace_switch)
+    }
+
+    fn calculate_layout(reactor: &Reactor) -> LayoutResult {
+        let screens = reactor.space_manager.screens.clone();
+        // let mut layout_result = Vec::new();
+        let mut layout_result = LayoutResult::new();
+
+        for screen in screens {
+            let Some(space) = screen.space else { continue };
+            let layout =
+                reactor.layout_manager.layout_engine.calculate_layout_with_virtual_workspaces(
+                    space,
+                    screen.frame.clone(),
+                    reactor.config_manager.config.settings.ui.stack_line.thickness(),
+                    reactor.config_manager.config.settings.ui.stack_line.horiz_placement,
+                    reactor.config_manager.config.settings.ui.stack_line.vert_placement,
+                    |wid| {
+                        reactor
+                            .window_manager
+                            .windows
+                            .get(&wid)
+                            .map(|w| w.frame_monotonic.size)
+                            .unwrap_or_else(|| CGSize::new(500.0, 500.0))
+                    },
+                );
+            layout_result.push((space, layout));
+        }
+
+        layout_result
+    }
+
+    fn apply_layout(
+        reactor: &mut Reactor,
+        layout_result: LayoutResult,
+        is_resize: bool,
+        is_workspace_switch: bool,
+    ) -> bool {
+        let main_window = reactor.main_window();
+        trace!(?main_window);
+        let skip_wid = reactor
+            .drag_manager
+            .skip_layout_for_window
+            .take()
+            .or(reactor.drag_manager.drag_swap_manager.dragged());
+        let mut any_frame_changed = false;
+
+        for (space, layout) in layout_result {
+            // Handle stack_line
+            if reactor.config_manager.config.settings.ui.stack_line.enabled {
+                if let Some(tx) = &reactor.communication_manager.stack_line_tx {
+                    let screen =
+                        reactor.space_manager.screens.iter().find(|s| s.space == Some(space));
+                    if let Some(screen) = screen {
+                        let group_infos = reactor
+                            .layout_manager
+                            .layout_engine
+                            .collect_group_containers_in_selection_path(
+                                space,
+                                screen.frame,
+                                reactor.config_manager.config.settings.ui.stack_line.thickness(),
+                                reactor
+                                    .config_manager
+                                    .config
+                                    .settings
+                                    .ui
+                                    .stack_line
+                                    .horiz_placement,
+                                reactor.config_manager.config.settings.ui.stack_line.vert_placement,
+                            );
+
+                        let groups: Vec<crate::actor::stack_line::GroupInfo> = group_infos
+                            .into_iter()
+                            .map(|g| crate::actor::stack_line::GroupInfo {
+                                node_id: g.node_id,
+                                space_id: space,
+                                container_kind: g.container_kind,
+                                frame: g.frame,
+                                total_count: g.total_count,
+                                selected_index: g.selected_index,
+                            })
+                            .collect();
+                        _ = tx.try_send(crate::actor::stack_line::Event::GroupsUpdated {
+                            space_id: space,
+                            groups,
+                        });
+                    }
+                }
+            }
+
+            let suppress_animation = is_workspace_switch
+                || reactor.workspace_switch_manager.active_workspace_switch.is_some();
+            if suppress_animation {
+                any_frame_changed |= AnimationManager::instant_layout(reactor, &layout, skip_wid);
+            } else {
+                any_frame_changed |=
+                    AnimationManager::animate_layout(reactor, space, &layout, is_resize, skip_wid);
+            }
+        }
+
+        reactor.maybe_send_menu_update();
+        any_frame_changed
+    }
 }
 
 /// Manages window server information

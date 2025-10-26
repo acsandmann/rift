@@ -20,7 +20,6 @@ mod tests;
 use std::thread;
 use std::time::Duration;
 
-use animation::Animation;
 use events::app::AppEventHandler;
 use events::command::CommandEventHandler;
 use events::drag::DragEventHandler;
@@ -28,8 +27,9 @@ use events::space::SpaceEventHandler;
 use events::system::SystemEventHandler;
 use events::window::WindowEventHandler;
 use main_window::MainWindowTracker;
+use managers::LayoutManager;
 use objc2_app_kit::NSNormalWindowLevel;
-use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_core_foundation::{CGPoint, CGRect};
 pub use replay::{Record, replay};
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -50,8 +50,7 @@ use crate::model::VirtualWorkspaceId;
 use crate::model::tx_store::WindowTxStore;
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
-use crate::sys::geometry::{CGRectDef, CGRectExt, Round, SameAs};
-use crate::sys::power;
+use crate::sys::geometry::{CGRectDef, CGRectExt, SameAs};
 use crate::sys::screen::{SpaceId, get_active_space_number};
 use crate::sys::timer::Timer;
 use crate::sys::window_server::{
@@ -518,7 +517,9 @@ impl Reactor {
     }
 
     fn update_txid_entries<I>(&self, entries: I)
-    where I: IntoIterator<Item = (WindowServerId, TransactionId, CGRect)> {
+    where
+        I: IntoIterator<Item = (WindowServerId, TransactionId, CGRect)>,
+    {
         if let Some(store) = self.notification_manager.window_tx_store.as_ref() {
             for (wsid, txid, target) in entries {
                 store.insert(wsid, txid, target);
@@ -1940,294 +1941,6 @@ impl Reactor {
 
     #[instrument(skip(self), fields())]
     pub fn update_layout(&mut self, is_resize: bool, is_workspace_switch: bool) -> bool {
-        let screens = self.space_manager.screens.clone();
-        let main_window = self.main_window();
-        trace!(?main_window);
-        let skip_wid = self
-            .drag_manager
-            .skip_layout_for_window
-            .take()
-            .or(self.drag_manager.drag_swap_manager.dragged());
-        let mut any_frame_changed = false;
-        for screen in screens {
-            let Some(space) = screen.space else { continue };
-            trace!(?screen);
-            let layout =
-                self.layout_manager.layout_engine.calculate_layout_with_virtual_workspaces(
-                    space,
-                    screen.frame.clone(),
-                    self.config_manager.config.settings.ui.stack_line.thickness(),
-                    self.config_manager.config.settings.ui.stack_line.horiz_placement,
-                    self.config_manager.config.settings.ui.stack_line.vert_placement,
-                    |wid| {
-                        self.window_manager
-                            .windows
-                            .get(&wid)
-                            .map(|w| w.frame_monotonic.size)
-                            .unwrap_or_else(|| CGSize::new(500.0, 500.0))
-                    },
-                );
-            trace!(?layout, "Layout");
-
-            if self.config_manager.config.settings.ui.stack_line.enabled {
-                if let Some(tx) = &self.communication_manager.stack_line_tx {
-                    let group_infos = self
-                        .layout_manager
-                        .layout_engine
-                        .collect_group_containers_in_selection_path(
-                            space,
-                            screen.frame,
-                            self.config_manager.config.settings.ui.stack_line.thickness(),
-                            self.config_manager.config.settings.ui.stack_line.horiz_placement,
-                            self.config_manager.config.settings.ui.stack_line.vert_placement,
-                        );
-
-                    let groups: Vec<crate::actor::stack_line::GroupInfo> = group_infos
-                        .into_iter()
-                        .map(|g| crate::actor::stack_line::GroupInfo {
-                            node_id: g.node_id,
-                            space_id: space,
-                            container_kind: g.container_kind,
-                            frame: g.frame,
-                            total_count: g.total_count,
-                            selected_index: g.selected_index,
-                        })
-                        .collect();
-                    _ = tx.try_send(crate::actor::stack_line::Event::GroupsUpdated {
-                        space_id: space,
-                        groups,
-                    });
-                }
-            }
-
-            let suppress_animation = is_workspace_switch
-                || self.workspace_switch_manager.active_workspace_switch.is_some();
-            if suppress_animation {
-                let mut per_app: HashMap<pid_t, Vec<(WindowId, CGRect)>> = HashMap::default();
-                for &(wid, target_frame) in &layout {
-                    // Skip applying a layout frame for the window currently being dragged.
-                    if skip_wid == Some(wid) {
-                        trace!(?wid, "Skipping layout update for window currently being dragged");
-                        continue;
-                    }
-
-                    let Some(window) = self.window_manager.windows.get_mut(&wid) else {
-                        debug!(?wid, "Skipping layout - window no longer exists");
-                        continue;
-                    };
-                    let target_frame = target_frame.round();
-                    let current_frame = window.frame_monotonic;
-                    if target_frame.same_as(current_frame) {
-                        continue;
-                    }
-                    any_frame_changed = true;
-                    trace!(
-                        ?wid,
-                        ?current_frame,
-                        ?target_frame,
-                        "Instant workspace positioning"
-                    );
-
-                    per_app.entry(wid.pid).or_default().push((wid, target_frame));
-                }
-
-                for (pid, frames) in per_app.into_iter() {
-                    if frames.is_empty() {
-                        continue;
-                    }
-
-                    let Some(app_state) = self.app_manager.apps.get(&pid) else {
-                        debug!(?pid, "Skipping layout update for app - app no longer exists");
-                        continue;
-                    };
-
-                    let handle = app_state.handle.clone();
-
-                    let (first_wid, first_target) = frames[0];
-                    let mut txid = TransactionId::default();
-                    let mut has_txid = false;
-                    let mut txid_entries: Vec<(WindowServerId, TransactionId, CGRect)> = Vec::new();
-                    if let Some(window) = self.window_manager.windows.get_mut(&first_wid) {
-                        txid = window.next_txid();
-                        has_txid = true;
-                        if let Some(wsid) = window.window_server_id {
-                            txid_entries.push((wsid, txid, first_target));
-                        }
-                    }
-
-                    if has_txid {
-                        for (wid, frame) in frames.iter().skip(1) {
-                            if let Some(w) = self.window_manager.windows.get_mut(wid) {
-                                w.last_sent_txid = txid;
-                                if let Some(wsid) = w.window_server_id {
-                                    txid_entries.push((wsid, txid, *frame));
-                                }
-                            }
-                        }
-                        self.update_txid_entries(txid_entries);
-                    }
-
-                    let frames_to_send = frames.clone();
-                    if let Err(e) = handle.send(Request::SetBatchWindowFrame(frames_to_send, txid))
-                    {
-                        debug!(
-                            ?pid,
-                            ?e,
-                            "Failed to send batch frame request - app may have quit"
-                        );
-                        continue;
-                    }
-
-                    for (wid, target_frame) in &frames {
-                        if let Some(window) = self.window_manager.windows.get_mut(wid) {
-                            window.frame_monotonic = *target_frame;
-                        }
-                    }
-                }
-            } else {
-                if let Some(active_ws) = self.layout_manager.layout_engine.active_workspace(space) {
-                    let mut anim = Animation::new(
-                        self.config_manager.config.settings.animation_fps,
-                        self.config_manager.config.settings.animation_duration,
-                        self.config_manager.config.settings.animation_easing.clone(),
-                    );
-                    let mut animated_count = 0;
-
-                    let mut animated_wids_wsids: Vec<u32> = Vec::new();
-                    for &(wid, target_frame) in &layout {
-                        // Skip applying layout frames and animations for the window currently being dragged.
-                        if skip_wid == Some(wid) {
-                            trace!(
-                                ?wid,
-                                "Skipping animated layout update for window currently being dragged"
-                            );
-                            continue;
-                        }
-
-                        let target_frame = target_frame.round();
-                        let (current_frame, window_server_id, txid) =
-                            match self.window_manager.windows.get_mut(&wid) {
-                                Some(window) => {
-                                    let current_frame = window.frame_monotonic;
-                                    if target_frame.same_as(current_frame) {
-                                        continue;
-                                    }
-                                    let txid = window.next_txid();
-                                    let wsid = window.window_server_id;
-                                    (current_frame, wsid, txid)
-                                }
-                                None => {
-                                    debug!(?wid, "Skipping - window no longer exists");
-                                    continue;
-                                }
-                            };
-
-                        let Some(app_state) = &self.app_manager.apps.get(&wid.pid) else {
-                            debug!(?wid, "Skipping for window - app no longer exists");
-                            continue;
-                        };
-
-                        let is_active = self
-                            .layout_manager
-                            .layout_engine
-                            .virtual_workspace_manager()
-                            .workspace_for_window(space, wid)
-                            .map_or(false, |ws| ws == active_ws);
-
-                        if is_active {
-                            trace!(?wid, ?current_frame, ?target_frame, "Animating visible window");
-                            animated_wids_wsids.push(wid.idx.into());
-                            anim.add_window(
-                                &app_state.handle,
-                                wid,
-                                current_frame,
-                                target_frame,
-                                false,
-                                txid,
-                            );
-                            animated_count += 1;
-                            if let Some(wsid) = window_server_id {
-                                self.update_txid_entries([(wsid, txid, target_frame)]);
-                            }
-                        } else {
-                            trace!(
-                                ?wid,
-                                ?current_frame,
-                                ?target_frame,
-                                "Direct positioning hidden window"
-                            );
-                            if let Some(wsid) = window_server_id {
-                                self.update_txid_entries([(wsid, txid, target_frame)]);
-                            }
-                            if let Err(e) = app_state.handle.send(Request::SetWindowFrame(
-                                wid,
-                                target_frame,
-                                txid,
-                                true,
-                            )) {
-                                debug!(?wid, ?e, "Failed to send frame request for hidden window");
-                                continue;
-                            }
-                        }
-
-                        if let Some(window) = self.window_manager.windows.get_mut(&wid) {
-                            window.frame_monotonic = target_frame;
-                        }
-                    }
-
-                    if animated_count > 0 {
-                        if let Some(tx) = &self.notification_manager.window_notify_tx {
-                            for wsid in &animated_wids_wsids {
-                                let _ = tx.send(
-                                    crate::actor::window_notify::Request::IgnoreWindowEvent(
-                                        crate::sys::skylight::CGSEventType::Known(
-                                            crate::sys::skylight::KnownCGSEvent::WindowMoved,
-                                        ),
-                                        *wsid,
-                                    ),
-                                );
-                                let _ = tx.send(
-                                    crate::actor::window_notify::Request::IgnoreWindowEvent(
-                                        crate::sys::skylight::CGSEventType::Known(
-                                            crate::sys::skylight::KnownCGSEvent::WindowResized,
-                                        ),
-                                        *wsid,
-                                    ),
-                                );
-                            }
-                        }
-
-                        let low_power = power::is_low_power_mode_enabled();
-                        if is_resize || !self.config_manager.config.settings.animate || low_power {
-                            anim.skip_to_end();
-                        } else {
-                            anim.run();
-                        }
-                        if let Some(tx) = &self.notification_manager.window_notify_tx {
-                            for wsid in &animated_wids_wsids {
-                                let _ = tx.send(
-                                    crate::actor::window_notify::Request::UnignoreWindowEvent(
-                                        crate::sys::skylight::CGSEventType::Known(
-                                            crate::sys::skylight::KnownCGSEvent::WindowMoved,
-                                        ),
-                                        *wsid,
-                                    ),
-                                );
-                                let _ = tx.send(
-                                    crate::actor::window_notify::Request::UnignoreWindowEvent(
-                                        crate::sys::skylight::CGSEventType::Known(
-                                            crate::sys::skylight::KnownCGSEvent::WindowResized,
-                                        ),
-                                        *wsid,
-                                    ),
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        self.maybe_send_menu_update();
-        any_frame_changed
+        LayoutManager::update_layout(self, is_resize, is_workspace_switch)
     }
 }
