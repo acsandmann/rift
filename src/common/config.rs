@@ -127,7 +127,7 @@ impl Default for VirtualWorkspaceSettings {
             default_workspace_count: default_workspace_count(),
             auto_assign_windows: true,
             preserve_focus_per_workspace: true,
-            workspace_auto_back_and_forth: true,
+            workspace_auto_back_and_forth: false,
             workspace_names: default_workspace_names(),
             default_workspace: 0,
             app_rules: Vec::new(),
