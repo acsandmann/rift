@@ -4,7 +4,7 @@ use crate::actor::app::{AppInfo, WindowId, WindowInfo, pid_t};
 use crate::actor::reactor::{Event, LayoutEvent, Reactor, WindowState, utils};
 use crate::common::collections::{BTreeMap, HashSet};
 use crate::sys::screen::SpaceId;
-use crate::sys::window_server;
+use crate::sys::window_server::{self, WindowServerId};
 
 /// Handler for window discovery events, responsible for processing newly discovered windows
 /// and managing the lifecycle of window state in the reactor.
@@ -70,6 +70,30 @@ impl WindowDiscoveryHandler {
                 && !reactor.has_visible_window_server_ids_for_pid(pid))
             || has_window_server_visibles_without_ax;
 
+        let active_space_windows: Option<HashSet<WindowServerId>> = if skip_stale_cleanup {
+            None
+        } else {
+            let active_space_ids: Vec<u64> = reactor
+                .space_manager
+                .screens
+                .iter()
+                .flat_map(|screen| screen.space.map(|space| space.get()))
+                .collect();
+
+            if active_space_ids.is_empty() {
+                None
+            } else {
+                let window_ids = crate::sys::window_server::space_window_list_for_connection(
+                    &active_space_ids,
+                    0,
+                    true,
+                );
+                let mut set = HashSet::default();
+                set.extend(window_ids.into_iter().map(WindowServerId::new));
+                Some(set)
+            }
+        };
+
         match skip_stale_cleanup {
             true => return (Vec::new(), false),
             false => {
@@ -94,6 +118,17 @@ impl WindowDiscoveryHandler {
                                 );
                                 return None;
                             };
+
+                            if let Some(active_windows) = active_space_windows.as_ref() {
+                                if !active_windows.contains(&ws_id) {
+                                    trace!(
+                                        ?wid,
+                                        ws_id = ?ws_id,
+                                        "Skipping stale cleanup; window is not on an active space"
+                                    );
+                                    return None;
+                                }
+                            }
 
                             let server_info = reactor
                                 .window_server_info_manager
@@ -125,20 +160,14 @@ impl WindowDiscoveryHandler {
                             let visible_in_snapshot =
                                 reactor.window_manager.visible_windows.contains(&ws_id);
 
-                            let window_space = reactor.best_space_for_window(&info.frame);
-                            let is_on_visible_space = window_space.map_or(false, |s| {
-                                reactor
-                                    .space_manager
-                                    .screens
-                                    .iter()
-                                    .flat_map(|sc| sc.space)
-                                    .any(|vs| vs == s)
-                            });
+                            let is_on_active_space = active_space_windows
+                                .as_ref()
+                                .map_or(false, |set| set.contains(&ws_id));
 
                             if unsuitable
                                 || invalid_layer
                                 || too_small
-                                || (is_on_visible_space && !ordered_in && !visible_in_snapshot)
+                                || (is_on_active_space && !ordered_in && !visible_in_snapshot)
                             {
                                 Some(wid)
                             } else {
