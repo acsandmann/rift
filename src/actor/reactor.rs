@@ -1622,12 +1622,11 @@ impl Reactor {
             if active_space_ids.is_empty() {
                 None
             } else {
-                let window_ids =
-                    crate::sys::window_server::space_window_list_for_connection(
-                        &active_space_ids,
-                        0,
-                        true,
-                    );
+                let window_ids = crate::sys::window_server::space_window_list_for_connection(
+                    &active_space_ids,
+                    0,
+                    true,
+                );
                 let mut set = HashSet::default();
                 set.extend(window_ids.into_iter().map(WindowServerId::new));
                 Some(set)
@@ -1695,9 +1694,8 @@ impl Reactor {
                     let ordered_in = window_server::window_is_ordered_in(ws_id);
                     let visible_in_snapshot = self.visible_windows.contains(&ws_id);
 
-                    let is_on_active_space = active_space_windows
-                        .as_ref()
-                        .map_or(false, |set| set.contains(&ws_id));
+                    let is_on_active_space =
+                        active_space_windows.as_ref().map_or(false, |set| set.contains(&ws_id));
 
                     if unsuitable
                         || invalid_layer
