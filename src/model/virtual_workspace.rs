@@ -108,6 +108,8 @@ pub struct VirtualWorkspaceManager {
     default_workspace_count: usize,
     #[serde(skip)]
     default_workspace_names: Vec<String>,
+    #[serde(skip)]
+    workspace_auto_back_and_forth: bool,
 }
 
 impl Default for VirtualWorkspaceManager {
@@ -136,6 +138,7 @@ impl VirtualWorkspaceManager {
             max_workspaces: 32,
             default_workspace_count: config.default_workspace_count,
             default_workspace_names: config.workspace_names.clone(),
+            workspace_auto_back_and_forth: config.workspace_auto_back_and_forth,
         }
     }
 
@@ -197,6 +200,8 @@ impl VirtualWorkspaceManager {
     pub fn active_workspace(&self, space: SpaceId) -> Option<VirtualWorkspaceId> {
         self.active_workspace_per_space.get(&space).map(|tuple| tuple.1)
     }
+
+    pub fn workspace_auto_back_and_forth(&self) -> bool { self.workspace_auto_back_and_forth }
 
     pub fn set_active_workspace(
         &mut self,
