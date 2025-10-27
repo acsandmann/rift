@@ -66,7 +66,7 @@ pub struct VirtualWorkspaceSettings {
     pub auto_assign_windows: bool,
     #[serde(default = "yes")]
     pub preserve_focus_per_workspace: bool,
-    #[serde(default = "yes")]
+    #[serde(default = "no")]
     pub workspace_auto_back_and_forth: bool,
     #[serde(default = "default_workspace_names")]
     pub workspace_names: Vec<String>,
