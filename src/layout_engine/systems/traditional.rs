@@ -665,8 +665,6 @@ impl LayoutSystem for TraditionalLayoutSystem {
             if let Some(nl) = new_layout {
                 self.set_layout(container, nl);
 
-                // After converting to stack, ensure selection descends into the stack
-                // so that navigation within the stack works immediately
                 if nl.is_stacked() {
                     if let Some(first_child) = container.first_child(self.map()) {
                         self.select(first_child);
