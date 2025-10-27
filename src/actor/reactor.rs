@@ -1610,6 +1610,30 @@ impl Reactor {
             || (known_visible_set.is_empty() && !self.has_visible_window_server_ids_for_pid(pid))
             || has_window_server_visibles_without_ax;
 
+        let active_space_windows: Option<HashSet<WindowServerId>> = if skip_stale_cleanup {
+            None
+        } else {
+            let active_space_ids: Vec<u64> = self
+                .screens
+                .iter()
+                .flat_map(|screen| screen.space.map(|space| space.get()))
+                .collect();
+
+            if active_space_ids.is_empty() {
+                None
+            } else {
+                let window_ids =
+                    crate::sys::window_server::space_window_list_for_connection(
+                        &active_space_ids,
+                        0,
+                        true,
+                    );
+                let mut set = HashSet::default();
+                set.extend(window_ids.into_iter().map(WindowServerId::new));
+                Some(set)
+            }
+        };
+
         let stale_windows: Vec<WindowId> = if skip_stale_cleanup {
             Vec::new()
         } else {
@@ -1631,6 +1655,17 @@ impl Reactor {
                         );
                         return None;
                     };
+
+                    if let Some(active_windows) = active_space_windows.as_ref() {
+                        if !active_windows.contains(&ws_id) {
+                            trace!(
+                                ?wid,
+                                ws_id = ?ws_id,
+                                "Skipping stale cleanup; window is not on an active space"
+                            );
+                            return None;
+                        }
+                    }
 
                     let server_info = self
                         .window_server_info
@@ -1660,15 +1695,14 @@ impl Reactor {
                     let ordered_in = window_server::window_is_ordered_in(ws_id);
                     let visible_in_snapshot = self.visible_windows.contains(&ws_id);
 
-                    let window_space = self.best_space_for_window(&info.frame);
-                    let is_on_visible_space = window_space.map_or(false, |s| {
-                        self.screens.iter().flat_map(|sc| sc.space).any(|vs| vs == s)
-                    });
+                    let is_on_active_space = active_space_windows
+                        .as_ref()
+                        .map_or(false, |set| set.contains(&ws_id));
 
                     if unsuitable
                         || invalid_layer
                         || too_small
-                        || (is_on_visible_space && !ordered_in && !visible_in_snapshot)
+                        || (is_on_active_space && !ordered_in && !visible_in_snapshot)
                     {
                         Some(wid)
                     } else {
