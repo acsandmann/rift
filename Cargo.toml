@@ -30,6 +30,7 @@ doctest = false
 [dependencies]
 anyhow = "1.0.83"
 ascii_tree = "0.1.1"
+thiserror = "2.0.17"
 bitflags = "2.4.1"
 clap = { version = "4.5.4", features = ["derive"] }
 dirs = "6.0.0"

@@ -118,20 +118,20 @@ fn it_clears_screen_state_when_no_displays_are_reported() {
         vec![Some(SpaceId::new(1))],
         vec![],
     ));
-    assert_eq!(1, reactor.screens.len());
+    assert_eq!(1, reactor.space_manager.screens.len());
 
     reactor.handle_event(Event::ScreenParametersChanged(vec![], vec![], vec![]));
-    assert!(reactor.screens.is_empty());
+    assert!(reactor.space_manager.screens.is_empty());
 
     reactor.handle_event(Event::SpaceChanged(vec![], vec![]));
-    assert!(reactor.screens.is_empty());
+    assert!(reactor.space_manager.screens.is_empty());
 
     reactor.handle_event(Event::ScreenParametersChanged(
         vec![screen],
         vec![Some(SpaceId::new(1))],
         vec![],
     ));
-    assert_eq!(1, reactor.screens.len());
+    assert_eq!(1, reactor.space_manager.screens.len());
 }
 
 #[test]
@@ -243,7 +243,7 @@ fn handle_layout_response_groups_windows_by_app_and_screen() {
         None,
     ));
     let (raise_manager_tx, mut raise_manager_rx) = actor::channel();
-    reactor.raise_manager_tx = raise_manager_tx;
+    reactor.communication_manager.raise_manager_tx = raise_manager_tx;
     let screen1 = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
     let screen2 = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
     reactor.handle_event(Event::ScreenParametersChanged(
@@ -301,7 +301,7 @@ fn handle_layout_response_includes_handles_for_raise_and_focus_windows() {
         None,
     ));
     let (raise_manager_tx, mut raise_manager_rx) = actor::channel();
-    reactor.raise_manager_tx = raise_manager_tx;
+    reactor.communication_manager.raise_manager_tx = raise_manager_tx;
 
     reactor.handle_events(apps.make_app(1, make_windows(1)));
     reactor.handle_events(apps.make_app(2, make_windows(1)));
@@ -348,7 +348,7 @@ fn it_preserves_layout_after_login_screen() {
     ));
     reactor.handle_event(Event::ApplicationGloballyActivated(1));
     apps.simulate_until_quiet(&mut reactor);
-    let default = reactor.layout_engine.calculate_layout(
+    let default = reactor.layout_manager.layout_engine.calculate_layout(
         space,
         full_screen,
         0.0,
@@ -356,12 +356,12 @@ fn it_preserves_layout_after_login_screen() {
         crate::common::config::VerticalPlacement::Right,
     );
 
-    assert!(reactor.layout_engine.selected_window(space).is_some());
+    assert!(reactor.layout_manager.layout_engine.selected_window(space).is_some());
     reactor.handle_event(Event::Command(Command::Layout(LayoutCommand::MoveNode(
         Direction::Up,
     ))));
     apps.simulate_until_quiet(&mut reactor);
-    let modified = reactor.layout_engine.calculate_layout(
+    let modified = reactor.layout_manager.layout_engine.calculate_layout(
         space,
         full_screen,
         0.0,
@@ -411,7 +411,7 @@ fn it_preserves_layout_after_login_screen() {
     apps.simulate_until_quiet(&mut reactor);
 
     assert_eq!(
-        reactor.layout_engine.calculate_layout(
+        reactor.layout_manager.layout_engine.calculate_layout(
             space,
             full_screen,
             0.0,
@@ -493,7 +493,7 @@ fn it_retains_windows_without_server_ids_after_login_visibility_failure() {
         }
     }
 
-    assert!(reactor.windows.contains_key(&WindowId::new(1, 1)));
+    assert!(reactor.window_manager.windows.contains_key(&WindowId::new(1, 1)));
 }
 
 #[test]

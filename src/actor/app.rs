@@ -23,7 +23,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, Span, debug, error, info, instrument, trace, warn};
 
 use crate::actor;
-use crate::actor::reactor::{self, Event, Requested, TransactionId};
+use crate::actor::reactor::transaction_manager::TransactionId;
+use crate::actor::reactor::{self, Event, Requested};
 use crate::common::collections::{HashMap, HashSet};
 use crate::sys::app::NSRunningApplicationExt;
 pub use crate::sys::app::{AppInfo, WindowInfo, pid_t};

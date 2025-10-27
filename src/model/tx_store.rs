@@ -3,7 +3,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use objc2_core_foundation::CGRect;
 
-use crate::actor::reactor::TransactionId;
+use crate::actor::reactor::transaction_manager::TransactionId;
 use crate::sys::window_server::WindowServerId;
 
 #[derive(Clone, Copy, Debug)]
@@ -13,7 +13,7 @@ pub struct TxRecord {
 }
 
 /// Thread-safe cache mapping window server IDs to their last known transaction.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct WindowTxStore(Arc<DashMap<WindowServerId, TxRecord>>);
 
 impl WindowTxStore {
