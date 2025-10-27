@@ -127,7 +127,7 @@ impl LayoutManager {
         reactor: &mut Reactor,
         is_resize: bool,
         is_workspace_switch: bool,
-    ) -> bool {
+    ) -> Result<bool, super::error::ReactorError> {
         let layout_result = Self::calculate_layout(reactor);
         Self::apply_layout(reactor, layout_result, is_resize, is_workspace_switch)
     }
@@ -166,7 +166,7 @@ impl LayoutManager {
         layout_result: LayoutResult,
         is_resize: bool,
         is_workspace_switch: bool,
-    ) -> bool {
+    ) -> Result<bool, super::error::ReactorError> {
         let main_window = reactor.main_window();
         trace!(?main_window);
         let skip_wid = reactor
@@ -211,10 +211,14 @@ impl LayoutManager {
                                 selected_index: g.selected_index,
                             })
                             .collect();
-                        _ = tx.try_send(crate::actor::stack_line::Event::GroupsUpdated {
-                            space_id: space,
-                            groups,
-                        });
+                        if let Err(e) =
+                            tx.try_send(crate::actor::stack_line::Event::GroupsUpdated {
+                                space_id: space,
+                                groups,
+                            })
+                        {
+                            tracing::warn!("Failed to send groups update to stack_line: {}", e);
+                        }
                     }
                 }
             }
@@ -230,7 +234,7 @@ impl LayoutManager {
         }
 
         reactor.maybe_send_menu_update();
-        any_frame_changed
+        Ok(any_frame_changed)
     }
 }
 

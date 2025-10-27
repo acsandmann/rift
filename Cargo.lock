@@ -1303,6 +1303,7 @@ dependencies = [
  "tempfile",
  "test-log",
  "test_bin",
+ "thiserror",
  "tokio",
  "tokio-stream",
  "tokio-util",

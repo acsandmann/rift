@@ -5,6 +5,7 @@
 //! changes by sending requests out to the other actors in the system.
 
 mod animation;
+mod error;
 mod events;
 mod main_window;
 mod managers;
@@ -778,13 +779,18 @@ impl Reactor {
 
         let mut layout_changed = false;
         if !self.is_in_drag() || window_was_destroyed {
-            layout_changed = self.update_layout(
-                is_resize,
-                matches!(
-                    self.workspace_switch_manager.workspace_switch_state,
-                    WorkspaceSwitchState::Active
-                ),
-            );
+            layout_changed = self
+                .update_layout(
+                    is_resize,
+                    matches!(
+                        self.workspace_switch_manager.workspace_switch_state,
+                        WorkspaceSwitchState::Active
+                    ),
+                )
+                .unwrap_or_else(|e| {
+                    warn!("Layout update failed: {}", e);
+                    false
+                });
             self.maybe_send_menu_update();
         }
 
@@ -896,7 +902,10 @@ impl Reactor {
                 if let Some(space) = self.space_manager.screens.iter().flat_map(|s| s.space).next()
                 {
                     self.refocus_manager.refocus_state = RefocusState::Pending(space);
-                    let _ = self.update_layout(false, false);
+                    let _ = self.update_layout(false, false).unwrap_or_else(|e| {
+                        warn!("Layout update failed: {}", e);
+                        false
+                    });
                     self.update_focus_follows_mouse_state();
                 }
             }
@@ -1590,7 +1599,9 @@ impl Reactor {
             app_handles,
         });
 
-        _ = self.communication_manager.raise_manager_tx.send(msg);
+        if let Err(e) = self.communication_manager.raise_manager_tx.try_send(msg) {
+            warn!("Failed to send raise request to raise manager: {}", e);
+        }
     }
 
     fn maybe_swap_on_drag(&mut self, wid: WindowId, new_frame: CGRect) {
@@ -1869,7 +1880,10 @@ impl Reactor {
         self.mission_control_manager.pending_mission_control_refresh.clear();
         self.force_refresh_all_windows();
         self.check_for_new_windows();
-        let _ = self.update_layout(false, false);
+        let _ = self.update_layout(false, false).unwrap_or_else(|e| {
+            warn!("Layout update failed: {}", e);
+            false
+        });
         self.maybe_send_menu_update();
     }
 
@@ -1921,7 +1935,11 @@ impl Reactor {
     }
 
     #[instrument(skip(self), fields())]
-    pub fn update_layout(&mut self, is_resize: bool, is_workspace_switch: bool) -> bool {
+    pub fn update_layout(
+        &mut self,
+        is_resize: bool,
+        is_workspace_switch: bool,
+    ) -> Result<bool, error::ReactorError> {
         LayoutManager::update_layout(self, is_resize, is_workspace_switch)
     }
 }
