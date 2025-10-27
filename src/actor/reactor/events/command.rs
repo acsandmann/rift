@@ -1,4 +1,4 @@
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::actor::app::{AppThreadHandle, WindowId};
 use crate::actor::raise_manager;
@@ -83,21 +83,26 @@ impl CommandEventHandler {
             .layout_manager
             .layout_engine
             .set_layout_settings(&reactor.config_manager.config.settings.layout);
-        let _ = reactor
+        reactor
             .drag_manager
             .update_config(reactor.config_manager.config.settings.window_snapping);
 
         if let Some(tx) = &reactor.communication_manager.stack_line_tx {
-            let _ = tx.try_send(StackLineEvent::ConfigUpdated(
+            if let Err(e) = tx.try_send(StackLineEvent::ConfigUpdated(
                 reactor.config_manager.config.clone(),
-            ));
+            )) {
+                warn!("Failed to send config update to stack line: {}", e);
+            }
         }
 
-        let _ = reactor.update_layout(false, true);
+        let _ = reactor.update_layout(false, true).unwrap_or_else(|e| {
+            warn!("Layout update failed: {}", e);
+            false
+        });
 
         if old_keys != reactor.config_manager.config.keys {
             if let Some(wm) = &reactor.communication_manager.wm_sender {
-                let _ = wm.send(WmEvent::ConfigUpdated(reactor.config_manager.config.clone()));
+                wm.send(WmEvent::ConfigUpdated(reactor.config_manager.config.clone()));
             }
         }
     }
@@ -157,9 +162,13 @@ impl CommandEventHandler {
                 focus_window: Some((window_id, None)),
                 app_handles,
             });
-            let _ = reactor.communication_manager.raise_manager_tx.try_send(request);
+            if let Err(e) = reactor.communication_manager.raise_manager_tx.try_send(request) {
+                warn!("Failed to send raise request: {}", e);
+            }
         } else if let Some(wsid) = window_server_id {
-            let _ = window_server::make_key_window(window_id.pid, wsid);
+            if let Err(e) = window_server::make_key_window(window_id.pid, wsid) {
+                warn!("Failed to make key window: {:?}", e);
+            }
         }
     }
 

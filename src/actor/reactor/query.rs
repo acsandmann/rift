@@ -14,27 +14,27 @@ impl Reactor {
         match event {
             Event::QueryWorkspaces(response_tx) => {
                 let response = self.handle_workspace_query();
-                let _ = response_tx.send(response);
+                response_tx.send(response);
             }
             Event::QueryWindows { space_id, response } => {
                 let windows = self.handle_windows_query(space_id);
-                let _ = response.send(windows);
+                response.send(windows);
             }
             Event::QueryWindowInfo { window_id, response } => {
                 let window_info = self.handle_window_info_query(window_id);
-                let _ = response.send(window_info);
+                response.send(window_info);
             }
             Event::QueryApplications(response) => {
                 let apps = self.handle_applications_query();
-                let _ = response.send(apps);
+                response.send(apps);
             }
             Event::QueryLayoutState { space_id, response } => {
                 let layout_state = self.handle_layout_state_query(space_id);
-                let _ = response.send(layout_state);
+                response.send(layout_state);
             }
             Event::QueryMetrics(response) => {
                 let metrics = self.handle_metrics_query();
-                let _ = response.send(metrics);
+                response.send(metrics);
             }
             _ => {}
         }

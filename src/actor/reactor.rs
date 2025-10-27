@@ -896,13 +896,17 @@ impl Reactor {
                 Timer::sleep(Duration::from_millis(50));
                 for pid in track.pids {
                     if let Some(app) = self.app_manager.apps.get(&pid) {
-                        let _ = app.handle.send(Request::GetVisibleWindows { force_refresh: true });
+                        if let Err(e) =
+                            app.handle.send(Request::GetVisibleWindows { force_refresh: true })
+                        {
+                            warn!("Failed to send GetVisibleWindows to app {}: {}", pid, e);
+                        }
                     }
                 }
                 if let Some(space) = self.space_manager.screens.iter().flat_map(|s| s.space).next()
                 {
                     self.refocus_manager.refocus_state = RefocusState::Pending(space);
-                    let _ = self.update_layout(false, false).unwrap_or_else(|e| {
+                    self.update_layout(false, false).unwrap_or_else(|e| {
                         warn!("Layout update failed: {}", e);
                         false
                     });
@@ -1092,11 +1096,14 @@ impl Reactor {
             }
             if let Some(space) = final_space {
                 if let Some(active_ws) = self.layout_manager.layout_engine.active_workspace(space) {
-                    let _ = self
+                    let assigned = self
                         .layout_manager
                         .layout_engine
                         .virtual_workspace_manager_mut()
                         .assign_window_to_workspace(space, wid, active_ws);
+                    if !assigned {
+                        warn!("Failed to assign window {:?} to workspace {:?}", wid, active_ws);
+                    }
                 }
                 self.send_layout_event(LayoutEvent::WindowAdded(space, wid));
             }
@@ -1135,8 +1142,7 @@ impl Reactor {
         let screens = self.space_manager.screens.clone();
         for screen in screens {
             let Some(space) = screen.space else { continue };
-            let _ = self
-                .layout_manager
+            self.layout_manager
                 .layout_engine
                 .virtual_workspace_manager_mut()
                 .list_workspaces(space);
@@ -1278,7 +1284,7 @@ impl Reactor {
         for (space, wids) in windows_by_space {
             for wid in &wids {
                 let title_opt = self.window_manager.windows.get(wid).map(|w| w.title.clone());
-                let _ = self
+                if let Err(e) = self
                     .layout_manager
                     .layout_engine
                     .virtual_workspace_manager_mut()
@@ -1290,7 +1296,10 @@ impl Reactor {
                         title_opt.as_deref(),
                         self.window_manager.windows.get(wid).and_then(|w| w.ax_role.as_deref()),
                         self.window_manager.windows.get(wid).and_then(|w| w.ax_subrole.as_deref()),
-                    );
+                    )
+                {
+                    warn!("Failed to assign window {:?} to workspace: {:?}", wid, e);
+                }
             }
 
             let windows_with_titles: Vec<(
@@ -1880,7 +1889,7 @@ impl Reactor {
         self.mission_control_manager.pending_mission_control_refresh.clear();
         self.force_refresh_all_windows();
         self.check_for_new_windows();
-        let _ = self.update_layout(false, false).unwrap_or_else(|e| {
+        self.update_layout(false, false).unwrap_or_else(|e| {
             warn!("Layout update failed: {}", e);
             false
         });

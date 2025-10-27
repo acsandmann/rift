@@ -1,5 +1,5 @@
 use objc2_core_foundation::CGRect;
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 use crate::actor::app::WindowId;
 use crate::actor::reactor::{
@@ -276,17 +276,29 @@ impl WindowEventHandler {
                             if let Some(active_ws) =
                                 reactor.layout_manager.layout_engine.active_workspace(space)
                             {
-                                let _ = reactor
+                                let assigned = reactor
                                     .layout_manager
                                     .layout_engine
                                     .virtual_workspace_manager_mut()
                                     .assign_window_to_workspace(space, wid, active_ws);
+                                if !assigned {
+                                    warn!(
+                                        "Failed to assign window {:?} to workspace {:?}",
+                                        wid, active_ws
+                                    );
+                                }
                             }
                             reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
-                            let _ = reactor.update_layout(false, false);
+                            let _ = reactor.update_layout(false, false).unwrap_or_else(|e| {
+                                warn!("Layout update failed: {}", e);
+                                false
+                            });
                         } else {
                             reactor.send_layout_event(LayoutEvent::WindowRemoved(wid));
-                            let _ = reactor.update_layout(false, false);
+                            let _ = reactor.update_layout(false, false).unwrap_or_else(|e| {
+                                warn!("Layout update failed: {}", e);
+                                false
+                            });
                         }
                     }
                 } else if old_frame.size != new_frame.size {

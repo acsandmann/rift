@@ -1,4 +1,4 @@
-use tracing::trace;
+use tracing::{trace, warn};
 
 use crate::actor::reactor::{DragState, Reactor};
 use crate::layout_engine::LayoutCommand;
@@ -67,7 +67,10 @@ impl DragEventHandler {
         }
 
         if need_layout_refresh {
-            let _ = reactor.update_layout(false, false);
+            let _ = reactor.update_layout(false, false).unwrap_or_else(|e| {
+                warn!("Layout update failed: {}", e);
+                false
+            });
         }
 
         reactor.drag_manager.skip_layout_for_window = None;

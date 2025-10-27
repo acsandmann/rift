@@ -1,3 +1,5 @@
+use tracing::warn;
+
 use crate::actor::app::{AppInfo, AppThreadHandle, WindowId};
 use crate::actor::reactor::{AppState, Reactor};
 use crate::sys::app::WindowInfo;
@@ -44,7 +46,9 @@ impl AppEventHandler {
 
     pub fn handle_application_terminated(reactor: &mut Reactor, pid: i32) {
         if let Some(app) = reactor.app_manager.apps.get_mut(&pid) {
-            let _ = app.handle.send(crate::actor::app::Request::Terminate);
+            if let Err(e) = app.handle.send(crate::actor::app::Request::Terminate) {
+                warn!("Failed to send Terminate to app {}: {}", pid, e);
+            }
         }
     }
 
@@ -60,7 +64,7 @@ impl AppEventHandler {
         // Notify the WM controller that the app thread exited so it can
         // clear any tracking (e.g. known_apps) and allow future launches.
         if let Some(wm) = reactor.communication_manager.wm_sender.as_ref() {
-            let _ = wm.send(crate::actor::wm_controller::WmEvent::AppThreadTerminated(pid));
+            wm.send(crate::actor::wm_controller::WmEvent::AppThreadTerminated(pid));
         }
         reactor.app_manager.apps.remove(&pid);
     }
@@ -68,9 +72,12 @@ impl AppEventHandler {
     pub fn handle_resync_app_for_window(reactor: &mut Reactor, wsid: WindowServerId) {
         if let Some(&wid) = reactor.window_manager.window_ids.get(&wsid) {
             if let Some(app_state) = reactor.app_manager.apps.get(&wid.pid) {
-                let _ = app_state
+                if let Err(e) = app_state
                     .handle
-                    .send(crate::actor::app::Request::GetVisibleWindows { force_refresh: true });
+                    .send(crate::actor::app::Request::GetVisibleWindows { force_refresh: true })
+                {
+                    warn!("Failed to send GetVisibleWindows to app {}: {}", wid.pid, e);
+                }
             }
         } else if let Some(info) = reactor
             .window_server_info_manager
@@ -80,9 +87,12 @@ impl AppEventHandler {
             .or_else(|| window_server::get_window(wsid))
         {
             if let Some(app_state) = reactor.app_manager.apps.get(&info.pid) {
-                let _ = app_state
+                if let Err(e) = app_state
                     .handle
-                    .send(crate::actor::app::Request::GetVisibleWindows { force_refresh: true });
+                    .send(crate::actor::app::Request::GetVisibleWindows { force_refresh: true })
+                {
+                    warn!("Failed to send GetVisibleWindows to app {}: {}", info.pid, e);
+                }
             }
         }
     }

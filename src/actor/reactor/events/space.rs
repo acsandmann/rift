@@ -56,11 +56,15 @@ impl SpaceEventHandler {
             if let Some(&wid) = reactor.window_manager.window_ids.get(&wsid) {
                 entry.pids.insert(wid.pid);
                 if entry.last_removed.len() >= 5 {
-                    let _ = entry.last_removed.pop_front();
+                    entry.last_removed.pop_front();
                 }
                 entry.last_removed.push_back(wsid);
                 if let Some(app_state) = reactor.app_manager.apps.get(&wid.pid) {
-                    let _ = app_state.handle.send(Request::MarkWindowsNeedingInfo(vec![wid]));
+                    if let Err(e) =
+                        app_state.handle.send(Request::MarkWindowsNeedingInfo(vec![wid]))
+                    {
+                        warn!("Failed to send MarkWindowsNeedingInfo: {}", e);
+                    }
                 }
                 return;
             } else if let Some(info) =
@@ -68,7 +72,7 @@ impl SpaceEventHandler {
             {
                 entry.pids.insert(info.pid);
                 if entry.last_removed.len() >= 5 {
-                    let _ = entry.last_removed.pop_front();
+                    entry.last_removed.pop_front();
                 }
                 entry.last_removed.push_back(wsid);
                 return;
@@ -76,11 +80,15 @@ impl SpaceEventHandler {
             return;
         } else if crate::sys::window_server::space_is_user(sid.get()) {
             if let Some(&wid) = reactor.window_manager.window_ids.get(&wsid) {
-                let _ = reactor.window_manager.window_ids.remove(&wsid);
+                reactor.window_manager.window_ids.remove(&wsid);
                 reactor.window_server_info_manager.window_server_info.remove(&wsid);
                 reactor.window_manager.visible_windows.remove(&wsid);
                 if let Some(app_state) = reactor.app_manager.apps.get(&wid.pid) {
-                    let _ = app_state.handle.send(Request::MarkWindowsNeedingInfo(vec![wid]));
+                    if let Err(e) =
+                        app_state.handle.send(Request::MarkWindowsNeedingInfo(vec![wid]))
+                    {
+                        warn!("Failed to send MarkWindowsNeedingInfo: {}", e);
+                    }
                     let _ =
                         app_state.handle.send(Request::GetVisibleWindows { force_refresh: true });
                 }
@@ -132,12 +140,16 @@ impl SpaceEventHandler {
                 };
                 entry.pids.insert(window_server_info.pid);
                 if entry.last_removed.len() >= 5 {
-                    let _ = entry.last_removed.pop_front();
+                    entry.last_removed.pop_front();
                 }
                 entry.last_removed.push_back(wsid);
                 if let Some(&wid) = reactor.window_manager.window_ids.get(&wsid) {
                     if let Some(app_state) = reactor.app_manager.apps.get(&wid.pid) {
-                        let _ = app_state.handle.send(Request::MarkWindowsNeedingInfo(vec![wid]));
+                        if let Err(e) =
+                            app_state.handle.send(Request::MarkWindowsNeedingInfo(vec![wid]))
+                        {
+                            warn!("Failed to send MarkWindowsNeedingInfo: {}", e);
+                        }
                     }
                 } else if let Some(app_state) =
                     reactor.app_manager.apps.get(&window_server_info.pid)
@@ -150,7 +162,11 @@ impl SpaceEventHandler {
                         .filter(|wid| wid.pid == window_server_info.pid)
                         .collect();
                     if !resync.is_empty() {
-                        let _ = app_state.handle.send(Request::MarkWindowsNeedingInfo(resync));
+                        if let Err(e) =
+                            app_state.handle.send(Request::MarkWindowsNeedingInfo(resync))
+                        {
+                            warn!("Failed to send MarkWindowsNeedingInfo: {}", e);
+                        }
                     }
                 }
                 return;

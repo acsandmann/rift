@@ -1,4 +1,4 @@
-use tracing::trace;
+use tracing::{trace, warn};
 
 use crate::actor::app::{AppInfo, WindowId, WindowInfo, pid_t};
 use crate::actor::reactor::{Event, LayoutEvent, Reactor, WindowState};
@@ -360,7 +360,7 @@ impl WindowDiscoveryHandler {
                 for wid in &windows_for_space {
                     let title_opt =
                         reactor.window_manager.windows.get(wid).map(|w| w.title.clone());
-                    let _ = reactor
+                    if let Err(e) = reactor
                         .layout_manager
                         .layout_engine
                         .virtual_workspace_manager_mut()
@@ -380,7 +380,10 @@ impl WindowDiscoveryHandler {
                                 .windows
                                 .get(wid)
                                 .and_then(|w| w.ax_subrole.as_deref()),
-                        );
+                        )
+                    {
+                        warn!("Failed to assign window {:?} to workspace: {:?}", wid, e);
+                    }
                 }
             }
 
