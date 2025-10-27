@@ -664,6 +664,13 @@ impl LayoutSystem for TraditionalLayoutSystem {
 
             if let Some(nl) = new_layout {
                 self.set_layout(container, nl);
+
+                if nl.is_stacked() {
+                    if let Some(first_child) = container.first_child(self.map()) {
+                        self.select(first_child);
+                    }
+                }
+
                 return self.visible_windows_under_internal(container);
             }
         }
