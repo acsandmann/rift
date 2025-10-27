@@ -26,9 +26,9 @@ impl Default for TraditionalLayoutSystem {
 }
 
 impl TraditionalLayoutSystem {
-    fn find_best_focus_target(&self, node: NodeId) -> Option<WindowId> {
+    fn find_best_focus_target(&self, node: NodeId) -> Option<(NodeId, WindowId)> {
         if let Some(wid) = self.tree.data.window.at(node) {
-            return Some(wid);
+            return Some((node, wid));
         }
 
         let children: Vec<_> = node.children(self.map()).collect();
@@ -37,14 +37,14 @@ impl TraditionalLayoutSystem {
         }
 
         if let Some(selected) = self.tree.data.selection.local_selection(self.map(), node) {
-            if let Some(wid) = self.find_best_focus_target(selected) {
-                return Some(wid);
+            if let Some(target) = self.find_best_focus_target(selected) {
+                return Some(target);
             }
         }
 
         for &child in &children {
-            if let Some(wid) = self.find_best_focus_target(child) {
-                return Some(wid);
+            if let Some(target) = self.find_best_focus_target(child) {
+                return Some(target);
             }
         }
 
@@ -398,40 +398,29 @@ impl LayoutSystem for TraditionalLayoutSystem {
     ) -> (Option<WindowId>, Vec<WindowId>) {
         let selection = self.selection(layout);
         if let Some(new_node) = self.traverse_internal(selection, direction) {
-            let focus_window = self.find_best_focus_target(new_node);
+            let focus_target = self.find_best_focus_target(new_node);
+            let Some((focus_node, focus_window)) = focus_target else {
+                return (None, vec![]);
+            };
             let map = &self.tree.map;
-            let mut highest_revealed = new_node;
+            let mut highest_revealed = focus_node;
 
-            for (node, parent) in new_node.ancestors_with_parent(map) {
+            for (node, parent) in focus_node.ancestors_with_parent(map) {
                 let Some(parent) = parent else { break };
-                // Check if parent or any ancestor is a stacked container with perpendicular orientation
-                let mut current = parent;
-                let mut skip = false;
-                loop {
-                    let current_layout = self.layout(current);
-                    if current_layout.is_stacked()
-                        && current_layout.orientation() != direction.orientation()
-                    {
-                        skip = true;
-                        break;
-                    }
-                    if let Some(p) = current.parent(map) {
-                        current = p;
-                    } else {
-                        break;
-                    }
-                }
-                if skip {
+                let parent_layout = self.layout(parent);
+                if parent_layout.is_stacked()
+                    && parent_layout.orientation() != direction.orientation()
+                {
                     continue;
                 }
                 if self.tree.data.selection.select_locally(map, node) {
-                    if self.layout(parent).is_group() {
+                    if parent_layout.is_group() {
                         highest_revealed = node;
                     }
                 }
             }
             let raise_windows = self.visible_windows_under_internal(highest_revealed);
-            (focus_window, raise_windows)
+            (Some(focus_window), raise_windows)
         } else {
             (None, vec![])
         }
