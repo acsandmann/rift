@@ -133,6 +133,21 @@ impl SpaceEventHandler {
                 return;
             }
 
+            // Filter out very small windows (likely tooltips or similar UI elements)
+            // that shouldn't be managed by the window manager
+            const MIN_MANAGEABLE_WINDOW_SIZE: f64 = 50.0;
+            if window_server_info.frame.size.width < MIN_MANAGEABLE_WINDOW_SIZE
+                || window_server_info.frame.size.height < MIN_MANAGEABLE_WINDOW_SIZE
+            {
+                trace!(
+                    ?wsid,
+                    "Ignoring tiny window ({}x{}) - likely tooltip",
+                    window_server_info.frame.size.width,
+                    window_server_info.frame.size.height
+                );
+                return;
+            }
+
             if crate::sys::window_server::space_is_fullscreen(sid.get()) {
                 let entry = match reactor.space_manager.fullscreen_by_space.entry(sid.get()) {
                     Entry::Occupied(o) => o.into_mut(),
@@ -258,11 +273,11 @@ impl SpaceEventHandler {
 
     pub fn handle_space_changed(
         reactor: &mut Reactor,
-        spaces: Vec<Option<SpaceId>>,
+        mut spaces: Vec<Option<SpaceId>>,
         ws_info: Vec<WindowServerInfo>,
     ) {
         // TODO: this logic is flawed if multiple spaces are changing at once
-        if reactor.handle_fullscreen_space_transition(&spaces) {
+        if reactor.handle_fullscreen_space_transition(&mut spaces) {
             return;
         }
         if matches!(

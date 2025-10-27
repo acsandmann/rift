@@ -72,7 +72,11 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
         layout: LayoutId,
         default_orientation: crate::common::config::StackDefaultOrientation,
     ) -> Vec<WindowId>;
-    fn unstack_parent_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId>;
+    fn unstack_parent_of_selection(
+        &mut self,
+        layout: LayoutId,
+        default_orientation: crate::common::config::StackDefaultOrientation,
+    ) -> Vec<WindowId>;
     fn unjoin_selection(&mut self, _layout: LayoutId);
     fn resize_selection_by(&mut self, layout: LayoutId, amount: f64);
     fn rebalance(&mut self, layout: LayoutId);

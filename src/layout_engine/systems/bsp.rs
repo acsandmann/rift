@@ -992,7 +992,13 @@ impl LayoutSystem for BspLayoutSystem {
         vec![]
     }
 
-    fn unstack_parent_of_selection(&mut self, _layout: LayoutId) -> Vec<WindowId> { vec![] }
+    fn unstack_parent_of_selection(
+        &mut self,
+        _layout: LayoutId,
+        _default_orientation: crate::common::config::StackDefaultOrientation,
+    ) -> Vec<WindowId> {
+        vec![]
+    }
 
     fn unjoin_selection(&mut self, _layout: LayoutId) {}
 

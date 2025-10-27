@@ -791,7 +791,10 @@ impl LayoutEngine {
             }
             LayoutCommand::UnstackWindows => {
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
-                let unstacked_windows = self.tree.unstack_parent_of_selection(layout);
+                let default_orientation: crate::common::config::StackDefaultOrientation =
+                    self.layout_settings.stack.default_orientation;
+                let unstacked_windows =
+                    self.tree.unstack_parent_of_selection(layout, default_orientation);
                 EventResponse {
                     raise_windows: unstacked_windows,
                     focus_window: None,
@@ -1109,6 +1112,20 @@ impl LayoutEngine {
                     let workspace_id = *workspace_id;
                     if self.virtual_workspace_manager.active_workspace(space) == Some(workspace_id)
                     {
+                        // Check if workspace_auto_back_and_forth is enabled
+                        if self.virtual_workspace_manager.workspace_auto_back_and_forth() {
+                            // Switch to last workspace instead
+                            if let Some(last_workspace) =
+                                self.virtual_workspace_manager.last_workspace(space)
+                            {
+                                self.virtual_workspace_manager
+                                    .set_active_workspace(space, last_workspace);
+                                self.update_active_floating_windows(space);
+                                self.broadcast_workspace_changed(space);
+                                self.broadcast_windows_changed(space);
+                                return self.refocus_workspace(space, last_workspace);
+                            }
+                        }
                         return EventResponse::default();
                     }
                     self.virtual_workspace_manager.set_active_workspace(space, workspace_id);

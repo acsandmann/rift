@@ -130,6 +130,8 @@ fn plist_contents() -> io::Result<String> {
     <string>/tmp/rift_{user}.err.log</string>
     <key>ProcessType</key>
     <string>Interactive</string>
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
     <key>Nice</key>
     <integer>-20</integer>
 </dict>

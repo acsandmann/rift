@@ -465,6 +465,7 @@ impl Reactor {
                 workspace_switch_generation: 0,
                 active_workspace_switch: None,
                 last_auto_workspace_switch: None,
+                pending_workspace_mouse_warp: None,
             },
             recording_manager: managers::RecordingManager { record },
             communication_manager: managers::CommunicationManager {
@@ -800,6 +801,19 @@ impl Reactor {
             trace!("Workspace switch stabilized with no further frame changes");
         }
 
+        // Execute deferred mouse warp after workspace switch completes
+        if let Some(wid) = self.workspace_switch_manager.pending_workspace_mouse_warp.take() {
+            if let Some(window) = self.window_manager.windows.get(&wid) {
+                let window_center = window.frame_monotonic.mid();
+                // Only warp if the window is now positioned on-screen
+                if self.space_manager.screens.iter().any(|s| s.frame.contains(window_center)) {
+                    if let Err(e) = crate::sys::event::warp_mouse(window_center) {
+                        warn!("Failed to execute deferred mouse warp: {e:?}");
+                    }
+                }
+            }
+        }
+
         if should_update_notifications {
             let mut ids: Vec<u32> =
                 self.window_manager.window_ids.keys().map(|wsid| wsid.as_u32()).collect();
@@ -886,12 +900,32 @@ impl Reactor {
         }
     }
 
-    fn handle_fullscreen_space_transition(&mut self, spaces: &[Option<SpaceId>]) -> bool {
-        if spaces.iter().flatten().any(|s| space_is_fullscreen(s.get())) {
+    fn handle_fullscreen_space_transition(&mut self, spaces: &mut Vec<Option<SpaceId>>) -> bool {
+        let mut saw_fullscreen = false;
+        let mut all_fullscreen = !spaces.is_empty();
+        let mut refresh_spaces = Vec::new();
+
+        for slot in spaces.iter_mut() {
+            match slot {
+                Some(space) if space_is_fullscreen(space.get()) => {
+                    saw_fullscreen = true;
+                    *slot = None;
+                }
+                Some(space) => {
+                    all_fullscreen = false;
+                    refresh_spaces.push(*space);
+                }
+                None => {
+                    all_fullscreen = false;
+                }
+            }
+        }
+
+        if saw_fullscreen && all_fullscreen {
             return true;
         }
 
-        for space in spaces.iter().flatten() {
+        for space in refresh_spaces {
             if let Some(track) = self.space_manager.fullscreen_by_space.remove(&space.get()) {
                 wait_for_native_fullscreen_transition();
                 Timer::sleep(Duration::from_millis(50));
@@ -963,9 +997,9 @@ impl Reactor {
     }
 
     fn try_apply_pending_space_change(&mut self) {
-        if let Some(pending) = self.pending_space_change_manager.pending_space_change.take() {
+        if let Some(mut pending) = self.pending_space_change_manager.pending_space_change.take() {
             if pending.spaces.len() == self.space_manager.screens.len() {
-                if self.handle_fullscreen_space_transition(&pending.spaces) {
+                if self.handle_fullscreen_space_transition(&mut pending.spaces) {
                     return;
                 }
                 self.set_screen_spaces(&pending.spaces);
@@ -1471,7 +1505,10 @@ impl Reactor {
             ) && !self.is_in_drag()
             {
                 if let Some(wid) = self.window_id_under_cursor() {
-                    focus_window = Some(wid);
+                    // Only focus if it's different from the currently focused window to prevent duplicate focus
+                    if self.main_window() != Some(wid) {
+                        focus_window = Some(wid);
+                    }
                 } else if self.focus_untracked_window_under_cursor() {
                     handled_without_raise = true;
                 }
@@ -1558,7 +1595,30 @@ impl Reactor {
 
         let focus_window_with_warp = focus_window.map(|wid| {
             let warp = match self.config_manager.config.settings.mouse_follows_focus {
-                true => self.window_manager.windows.get(&wid).map(|w| w.frame_monotonic.mid()),
+                true => {
+                    if self.workspace_switch_manager.workspace_switch_state
+                        == WorkspaceSwitchState::Active
+                    {
+                        // During workspace switches, defer mouse warping until after layout completes
+                        self.workspace_switch_manager.pending_workspace_mouse_warp = Some(wid);
+                        None
+                    } else {
+                        self.window_manager.windows.get(&wid).and_then(|w| {
+                            let window_center = w.frame_monotonic.mid();
+                            // Only warp if the window center is actually on a screen
+                            if self
+                                .space_manager
+                                .screens
+                                .iter()
+                                .any(|s| s.frame.contains(window_center))
+                            {
+                                Some(window_center)
+                            } else {
+                                None
+                            }
+                        })
+                    }
+                }
                 false => None,
             };
             (wid, warp)
