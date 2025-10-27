@@ -483,11 +483,11 @@ impl LayoutSystem for TraditionalLayoutSystem {
                     current.next();
                 }
                 (Some(des), None) => {
-                    self.add_window_under(layout, root, *des);
+                    self.add_window_after_selection(layout, *des);
                     desired.next();
                 }
                 (Some(des), Some((cur, _))) if des < cur => {
-                    self.add_window_under(layout, root, *des);
+                    self.add_window_after_selection(layout, *des);
                     desired.next();
                 }
                 (_, Some((_, node))) => {
