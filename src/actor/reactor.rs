@@ -12,6 +12,7 @@ mod managers;
 mod query;
 mod replay;
 pub mod transaction_manager;
+mod utils;
 
 #[cfg(test)]
 mod testing;
@@ -30,7 +31,6 @@ use events::system::SystemEventHandler;
 use events::window::WindowEventHandler;
 use main_window::MainWindowTracker;
 use managers::LayoutManager;
-use objc2_app_kit::NSNormalWindowLevel;
 use objc2_core_foundation::{CGPoint, CGRect};
 pub use replay::{Record, replay};
 use serde::{Deserialize, Serialize};
@@ -862,11 +862,12 @@ impl Reactor {
                     } else {
                         continue;
                     };
-                let manageable = self.compute_manageability_from_parts(
+                let manageable = utils::compute_window_manageability(
                     server_id,
                     is_minimized,
                     is_ax_standard,
                     is_ax_root,
+                    &self.window_server_info_manager.window_server_info,
                 );
                 if let Some(window) = self.window_manager.windows.get_mut(&wid) {
                     window.is_manageable = manageable;
@@ -1148,45 +1149,6 @@ impl Reactor {
                 .list_workspaces(space);
             self.send_layout_event(LayoutEvent::SpaceExposed(space, screen.frame.size));
         }
-    }
-
-    fn compute_window_manageability(&self, window: &WindowState) -> bool {
-        self.compute_manageability_from_parts(
-            window.window_server_id,
-            window.is_minimized,
-            window.is_ax_standard,
-            window.is_ax_root,
-        )
-    }
-
-    fn compute_manageability_from_parts(
-        &self,
-        window_server_id: Option<WindowServerId>,
-        is_minimized: bool,
-        is_ax_standard: bool,
-        is_ax_root: bool,
-    ) -> bool {
-        if is_minimized {
-            return false;
-        }
-
-        if let Some(wsid) = window_server_id {
-            if let Some(info) = self.window_server_info_manager.window_server_info.get(&wsid) {
-                if info.layer != 0 {
-                    return false;
-                }
-            }
-            if window_server::window_is_sticky(wsid) {
-                return false;
-            }
-
-            if let Some(level) = window_server::window_level(wsid.0) {
-                if level != NSNormalWindowLevel {
-                    return false;
-                }
-            }
-        }
-        is_ax_standard && is_ax_root
     }
 
     fn window_is_standard(&self, id: WindowId) -> bool {

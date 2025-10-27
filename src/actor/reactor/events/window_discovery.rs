@@ -1,7 +1,7 @@
 use tracing::{trace, warn};
 
 use crate::actor::app::{AppInfo, WindowId, WindowInfo, pid_t};
-use crate::actor::reactor::{Event, LayoutEvent, Reactor, WindowState};
+use crate::actor::reactor::{Event, LayoutEvent, Reactor, WindowState, utils};
 use crate::common::collections::{BTreeMap, HashSet};
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server;
@@ -187,11 +187,12 @@ impl WindowDiscoveryHandler {
             // without reapplying app rules.
             for (wid, info) in &new {
                 if reactor.window_manager.windows.contains_key(wid) {
-                    let manageable = reactor.compute_manageability_from_parts(
+                    let manageable = utils::compute_window_manageability(
                         info.sys_id,
                         info.is_minimized,
                         info.is_standard,
                         info.is_root,
+                        &reactor.window_server_info_manager.window_server_info,
                     );
                     if let Some(existing) = reactor.window_manager.windows.get_mut(wid) {
                         existing.title = info.title.clone();
@@ -222,7 +223,13 @@ impl WindowDiscoveryHandler {
                         ax_role: info.ax_role.clone(),
                         ax_subrole: info.ax_subrole.clone(),
                     };
-                    let manageable = reactor.compute_window_manageability(&state);
+                    let manageable = utils::compute_window_manageability(
+                        state.window_server_id,
+                        state.is_minimized,
+                        state.is_ax_standard,
+                        state.is_ax_root,
+                        &reactor.window_server_info_manager.window_server_info,
+                    );
                     state.is_manageable = manageable;
                     reactor.window_manager.windows.insert(*wid, state);
                 }
@@ -268,17 +275,24 @@ impl WindowDiscoveryHandler {
         // Update or insert window states
         for (wid, info) in new_windows {
             let mut state: WindowState = info.into();
-            let manageable = reactor.compute_window_manageability(&state);
+            let manageable = utils::compute_window_manageability(
+                state.window_server_id,
+                state.is_minimized,
+                state.is_ax_standard,
+                state.is_ax_root,
+                &reactor.window_server_info_manager.window_server_info,
+            );
             state.is_manageable = manageable;
             reactor.window_manager.windows.insert(wid, state);
         }
 
         for (wid, info) in updated_windows {
-            let manageable = reactor.compute_manageability_from_parts(
+            let manageable = utils::compute_window_manageability(
                 info.sys_id,
                 info.is_minimized,
                 info.is_standard,
                 info.is_root,
+                &reactor.window_server_info_manager.window_server_info,
             );
             if let Some(existing) = reactor.window_manager.windows.get_mut(&wid) {
                 existing.title = info.title.clone();

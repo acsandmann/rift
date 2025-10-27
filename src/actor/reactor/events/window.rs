@@ -3,7 +3,7 @@ use tracing::{debug, trace, warn};
 
 use crate::actor::app::WindowId;
 use crate::actor::reactor::{
-    DragState, MissionControlState, Quiet, Reactor, Requested, TransactionId, WindowState,
+    DragState, MissionControlState, Quiet, Reactor, Requested, TransactionId, WindowState, utils,
 };
 use crate::layout_engine::LayoutEvent;
 use crate::sys::app::WindowInfo as Window;
@@ -33,7 +33,13 @@ impl WindowEventHandler {
 
         let frame = window.frame;
         let mut window_state: WindowState = window.into();
-        let is_manageable = reactor.compute_window_manageability(&window_state);
+        let is_manageable = utils::compute_window_manageability(
+            window_state.window_server_id,
+            window_state.is_minimized,
+            window_state.is_ax_standard,
+            window_state.is_ax_root,
+            &reactor.window_server_info_manager.window_server_info,
+        );
         window_state.is_manageable = is_manageable;
         if let Some(wsid) = window_state.window_server_id {
             reactor.transaction_manager.store_txid(
@@ -137,8 +143,13 @@ impl WindowEventHandler {
                     return;
                 }
             };
-        let is_manageable =
-            reactor.compute_manageability_from_parts(server_id, false, is_ax_standard, is_ax_root);
+        let is_manageable = utils::compute_window_manageability(
+            server_id,
+            false,
+            is_ax_standard,
+            is_ax_root,
+            &reactor.window_server_info_manager.window_server_info,
+        );
         if let Some(window) = reactor.window_manager.windows.get_mut(&wid) {
             window.is_manageable = is_manageable;
         }
