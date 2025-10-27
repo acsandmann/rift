@@ -35,11 +35,14 @@ impl WindowEventHandler {
         let mut window_state: WindowState = window.into();
         let is_manageable = reactor.compute_window_manageability(&window_state);
         window_state.is_manageable = is_manageable;
-        reactor.store_txid(
-            window_state.window_server_id,
-            window_state.last_sent_txid,
-            window_state.frame_monotonic,
-        );
+        if let Some(wsid) = window_state.window_server_id {
+            reactor.transaction_manager.store_txid(
+                wsid,
+                reactor.transaction_manager.get_last_sent_txid(wsid),
+                window_state.frame_monotonic,
+            );
+        }
+
         reactor.window_manager.windows.insert(wid, window_state);
 
         if is_manageable {
@@ -59,8 +62,8 @@ impl WindowEventHandler {
         }
         let window_server_id =
             reactor.window_manager.windows.get(&wid).and_then(|w| w.window_server_id);
-        reactor.remove_txid_for_window(window_server_id);
         if let Some(ws_id) = window_server_id {
+            reactor.transaction_manager.remove_for_window(ws_id);
             reactor.window_manager.window_ids.remove(&ws_id);
             reactor.window_server_info_manager.window_server_info.remove(&ws_id);
             reactor.window_manager.visible_windows.remove(&ws_id);
@@ -165,14 +168,18 @@ impl WindowEventHandler {
             {
                 return false;
             }
-            let triggered_by_rift = last_seen.is_some_and(|seen| seen == window.last_sent_txid);
+            let last_sent_txid = window
+                .window_server_id
+                .map(|wsid| reactor.transaction_manager.get_last_sent_txid(wsid))
+                .unwrap_or_default();
+            let triggered_by_rift = last_seen.is_some_and(|seen| seen == last_sent_txid);
             if let Some(last_seen) = last_seen
-                && last_seen != window.last_sent_txid
+                && last_seen != last_sent_txid
             {
                 // Ignore events that happened before the last time we
                 // changed the size or position of this window. Otherwise
                 // we would update the layout model incorrectly.
-                debug!(?last_seen, ?window.last_sent_txid, "Ignoring frame change");
+                debug!(?last_seen, ?last_sent_txid, "Ignoring frame change");
                 return false;
             }
             if requested.0 {
@@ -182,31 +189,32 @@ impl WindowEventHandler {
                 return false;
             }
             if triggered_by_rift {
-                if let Some(store) = reactor.notification_manager.window_tx_store.as_ref()
-                    && let Some(wsid) = window.window_server_id
+                if let Some(wsid) = window.window_server_id
+                    && let Some(target) = reactor.transaction_manager.get_target_frame(wsid)
                 {
-                    if let Some(record) = store.get(&wsid) {
-                        if new_frame.same_as(record.target) {
-                            if !window.frame_monotonic.same_as(new_frame) {
-                                debug!(?wid, ?new_frame, "Final frame matches Rift request");
-                                window.frame_monotonic = new_frame;
-                            }
-                            store.remove(&wsid);
-                        } else {
-                            trace!(
-                                ?wid,
-                                ?new_frame,
-                                ?record.target,
-                                "Skipping intermediate frame from Rift request"
-                            );
+                    if new_frame.same_as(target) {
+                        if !window.frame_monotonic.same_as(new_frame) {
+                            debug!(?wid, ?new_frame, "Final frame matches Rift request");
+                            window.frame_monotonic = new_frame;
                         }
-                    } else if !window.frame_monotonic.same_as(new_frame) {
-                        debug!(
+                        reactor.transaction_manager.remove_for_window(wsid);
+                    } else {
+                        trace!(
                             ?wid,
                             ?new_frame,
-                            "Rift frame event missing tx record; updating state"
+                            ?target,
+                            "Skipping intermediate frame from Rift request"
                         );
-                        window.frame_monotonic = new_frame;
+                    }
+                } else if !window.frame_monotonic.same_as(new_frame) {
+                    debug!(
+                        ?wid,
+                        ?new_frame,
+                        "Rift frame event missing tx record; updating state"
+                    );
+                    window.frame_monotonic = new_frame;
+                    if let Some(wsid) = window.window_server_id {
+                        reactor.transaction_manager.remove_for_window(wsid);
                     }
                 } else if !window.frame_monotonic.same_as(new_frame) {
                     debug!(

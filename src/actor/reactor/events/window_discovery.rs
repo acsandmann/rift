@@ -216,7 +216,6 @@ impl WindowDiscoveryHandler {
                         is_ax_root: info.is_root,
                         is_minimized: info.is_minimized,
                         is_manageable: false,
-                        last_sent_txid: Default::default(),
                         window_server_id: info.sys_id,
                         bundle_id: info.bundle_id.clone(),
                         bundle_path: info.path.clone(),

@@ -1,7 +1,7 @@
 use std::time::Instant;
-use tracing::trace;
 
 use objc2_core_foundation::{CGRect, CGSize};
+use tracing::trace;
 
 use super::main_window::MainWindowTracker;
 use super::replay::Record;
@@ -18,7 +18,6 @@ use crate::actor::{event_tap, menu_bar, raise_manager, stack_line, window_notify
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{Config, WindowSnappingSettings};
 use crate::layout_engine::LayoutEngine;
-use crate::model::tx_store::WindowTxStore;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 
@@ -51,32 +50,23 @@ pub struct DragManager {
 }
 
 impl DragManager {
-    pub fn reset(&mut self) {
-        self.drag_swap_manager.reset();
-    }
+    pub fn reset(&mut self) { self.drag_swap_manager.reset(); }
 
-    pub fn last_target(&self) -> Option<WindowId> {
-        self.drag_swap_manager.last_target()
-    }
+    pub fn last_target(&self) -> Option<WindowId> { self.drag_swap_manager.last_target() }
 
-    pub fn dragged(&self) -> Option<WindowId> {
-        self.drag_swap_manager.dragged()
-    }
+    pub fn dragged(&self) -> Option<WindowId> { self.drag_swap_manager.dragged() }
 
-    pub fn origin_frame(&self) -> Option<CGRect> {
-        self.drag_swap_manager.origin_frame()
-    }
+    pub fn origin_frame(&self) -> Option<CGRect> { self.drag_swap_manager.origin_frame() }
 
     pub fn update_config(&mut self, config: WindowSnappingSettings) {
         self.drag_swap_manager.update_config(config);
     }
 }
 
-/// Manages window notifications and transaction store
+/// Manages window notifications
 pub struct NotificationManager {
     pub last_sls_notification_ids: Vec<u32>,
     pub window_notify_tx: Option<window_notify::Sender>,
-    pub window_tx_store: Option<WindowTxStore>,
 }
 
 /// Manages menu state and interactions

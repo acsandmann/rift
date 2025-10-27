@@ -183,9 +183,9 @@ impl AnimationManager {
                             continue;
                         }
                         any_frame_changed = true;
-                        let txid = window.next_txid();
-                        let wsid = window.window_server_id;
-                        (current_frame, wsid, txid)
+                        let wsid = window.window_server_id.unwrap();
+                        let txid = reactor.transaction_manager.generate_next_txid(wsid);
+                        (current_frame, Some(wsid), txid)
                     }
                     None => {
                         debug!(?wid, "Skipping - window no longer exists");
@@ -211,7 +211,7 @@ impl AnimationManager {
                 anim.add_window(&app_state.handle, wid, current_frame, target_frame, false, txid);
                 animated_count += 1;
                 if let Some(wsid) = window_server_id {
-                    reactor.update_txid_entries([(wsid, txid, target_frame)]);
+                    reactor.transaction_manager.update_txid_entries([(wsid, txid, target_frame)]);
                 }
             } else {
                 trace!(
@@ -221,7 +221,7 @@ impl AnimationManager {
                     "Direct positioning hidden window"
                 );
                 if let Some(wsid) = window_server_id {
-                    reactor.update_txid_entries([(wsid, txid, target_frame)]);
+                    reactor.transaction_manager.update_txid_entries([(wsid, txid, target_frame)]);
                 }
                 if let Err(e) =
                     app_state.handle.send(Request::SetWindowFrame(wid, target_frame, txid, true))
@@ -333,9 +333,9 @@ impl AnimationManager {
             let mut has_txid = false;
             let mut txid_entries: Vec<(WindowServerId, TransactionId, CGRect)> = Vec::new();
             if let Some(window) = reactor.window_manager.windows.get_mut(&first_wid) {
-                txid = window.next_txid();
-                has_txid = true;
                 if let Some(wsid) = window.window_server_id {
+                    txid = reactor.transaction_manager.generate_next_txid(wsid);
+                    has_txid = true;
                     txid_entries.push((wsid, txid, first_target));
                 }
             }
@@ -343,13 +343,13 @@ impl AnimationManager {
             if has_txid {
                 for (wid, frame) in frames.iter().skip(1) {
                     if let Some(w) = reactor.window_manager.windows.get_mut(wid) {
-                        w.last_sent_txid = txid;
                         if let Some(wsid) = w.window_server_id {
+                            reactor.transaction_manager.set_last_sent_txid(wsid, txid);
                             txid_entries.push((wsid, txid, *frame));
                         }
                     }
                 }
-                reactor.update_txid_entries(txid_entries);
+                reactor.transaction_manager.update_txid_entries(txid_entries);
             }
 
             let frames_to_send = frames.clone();

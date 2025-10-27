@@ -10,6 +10,7 @@ mod main_window;
 mod managers;
 mod query;
 mod replay;
+pub mod transaction_manager;
 
 #[cfg(test)]
 mod testing;
@@ -35,6 +36,7 @@ use serde::{Deserialize, Serialize};
 use serde_json;
 use serde_with::serde_as;
 use tracing::{debug, instrument, trace, warn};
+use transaction_manager::TransactionId;
 
 use super::event_tap;
 use crate::actor::app::{AppInfo, AppThreadHandle, Quiet, Request, WindowId, WindowInfo, pid_t};
@@ -310,6 +312,7 @@ pub struct Reactor {
     recording_manager: managers::RecordingManager,
     communication_manager: managers::CommunicationManager,
     notification_manager: managers::NotificationManager,
+    transaction_manager: transaction_manager::TransactionManager,
     menu_manager: managers::MenuManager,
     mission_control_manager: managers::MissionControlManager,
     refocus_manager: managers::RefocusManager,
@@ -343,11 +346,6 @@ struct AutoWorkspaceSwitch {
     to_workspace: VirtualWorkspaceId,
 }
 
-/// A per-window counter that tracks the last time the reactor sent a request to
-/// change the window frame.
-#[derive(Default, Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TransactionId(u32);
-
 #[derive(Debug)]
 struct WindowState {
     #[allow(unused)]
@@ -361,7 +359,6 @@ struct WindowState {
     is_ax_root: bool,
     is_minimized: bool,
     is_manageable: bool,
-    last_sent_txid: TransactionId,
     window_server_id: Option<WindowServerId>,
     #[allow(unused)]
     bundle_id: Option<String>,
@@ -369,14 +366,6 @@ struct WindowState {
     bundle_path: Option<PathBuf>,
     ax_role: Option<String>,
     ax_subrole: Option<String>,
-}
-
-impl WindowState {
-    #[must_use]
-    fn next_txid(&mut self) -> TransactionId {
-        self.last_sent_txid.0 += 1;
-        self.last_sent_txid
-    }
 }
 
 impl From<WindowInfo> for WindowState {
@@ -388,7 +377,6 @@ impl From<WindowInfo> for WindowState {
             is_ax_root: info.is_root,
             is_minimized: info.is_minimized,
             is_manageable: false,
-            last_sent_txid: TransactionId::default(),
             window_server_id: info.sys_id,
             bundle_id: info.bundle_id,
             bundle_path: info.path,
@@ -489,7 +477,10 @@ impl Reactor {
             notification_manager: managers::NotificationManager {
                 last_sls_notification_ids: Vec::new(),
                 window_notify_tx,
-                window_tx_store,
+            },
+            transaction_manager: transaction_manager::TransactionManager {
+                store: window_tx_store,
+                last_sent_txids: HashMap::default(),
             },
             menu_manager: managers::MenuManager {
                 menu_state: MenuState::Closed,
@@ -509,30 +500,20 @@ impl Reactor {
         }
     }
 
-    fn store_txid(&self, wsid: Option<WindowServerId>, txid: TransactionId, target: CGRect) {
-        if let (Some(store), Some(id)) = (self.notification_manager.window_tx_store.as_ref(), wsid)
-        {
-            store.insert(id, txid, target);
-        }
-    }
-
-    fn update_txid_entries<I>(&self, entries: I)
-    where
-        I: IntoIterator<Item = (WindowServerId, TransactionId, CGRect)>,
-    {
-        if let Some(store) = self.notification_manager.window_tx_store.as_ref() {
-            for (wsid, txid, target) in entries {
-                store.insert(wsid, txid, target);
-            }
-        }
-    }
-
-    fn remove_txid_for_window(&self, wsid: Option<WindowServerId>) {
-        if let (Some(store), Some(id)) = (self.notification_manager.window_tx_store.as_ref(), wsid)
-        {
-            store.remove(&id);
-        }
-    }
+    // fn store_txid(&self, wsid: Option<WindowServerId>, txid: TransactionId, target: CGRect) {
+    //     self.transaction_manager.store_txid(wsid, txid, target);
+    // }
+    //
+    // fn update_txid_entries<I>(&self, entries: I)
+    // where
+    //     I: IntoIterator<Item = (WindowServerId, TransactionId, CGRect)>,
+    // {
+    //     self.transaction_manager.update_entries(entries);
+    // }
+    //
+    // fn remove_txid_for_window(&self, wsid: Option<WindowServerId>) {
+    //     self.transaction_manager.remove_for_window(wsid);
+    // }
 
     fn is_in_drag(&self) -> bool {
         matches!(self.drag_manager.drag_state, DragState::Active { .. })
