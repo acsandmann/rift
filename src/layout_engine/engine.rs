@@ -403,57 +403,48 @@ impl LayoutEngine {
                     Vec<WindowId>,
                 > = HashMap::default();
 
+                let (app_bundle_id, app_name) = match app_info.as_ref() {
+                    Some(info) => (info.bundle_id.as_deref(), info.localized_name.as_deref()),
+                    None => (None, None),
+                };
+
                 for (wid, title_opt, ax_role_opt, ax_subrole_opt) in windows_with_titles {
-                    let assigned_workspace = if let Some(workspace_id) =
-                        self.virtual_workspace_manager.workspace_for_window(space, wid)
-                    {
-                        workspace_id
-                    } else if let Some(ref app_info) = app_info {
-                        match self.virtual_workspace_manager.assign_window_with_app_info(
+                    let title_ref = title_opt.as_deref();
+                    let ax_role_ref = ax_role_opt.as_deref();
+                    let ax_subrole_ref = ax_subrole_opt.as_deref();
+
+                    let (assigned_workspace, should_float) = match self
+                        .virtual_workspace_manager
+                        .assign_window_with_app_info(
                             wid,
                             space,
-                            app_info.bundle_id.as_deref(),
-                            app_info.localized_name.as_deref(),
-                            title_opt.as_deref(),
-                            ax_role_opt.as_deref(),
-                            ax_subrole_opt.as_deref(),
+                            app_bundle_id,
+                            app_name,
+                            title_ref,
+                            ax_role_ref,
+                            ax_subrole_ref,
                         ) {
-                            Ok((workspace_id, should_float)) => {
-                                if should_float {
-                                    self.floating.add_floating(wid);
-                                    self.floating.add_active(space, pid, wid);
+                        Ok((workspace_id, should_float)) => (workspace_id, should_float),
+                        Err(_) => {
+                            match self.virtual_workspace_manager.auto_assign_window(wid, space) {
+                                Ok(ws) => (ws, false),
+                                Err(_) => {
+                                    tracing::warn!(
+                                        "Could not determine workspace for window {:?} on space {:?}; skipping assignment",
+                                        wid,
+                                        space
+                                    );
+                                    continue;
                                 }
-                                workspace_id
-                            }
-                            Err(_) => {
-                                match self.virtual_workspace_manager.auto_assign_window(wid, space)
-                                {
-                                    Ok(ws) => ws,
-                                    Err(_) => {
-                                        tracing::warn!(
-                                            "Could not determine workspace for window {:?} on space {:?}; skipping assignment",
-                                            wid,
-                                            space
-                                        );
-                                        // Skip this window - no active workspace available.
-                                        continue;
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        match self.virtual_workspace_manager.auto_assign_window(wid, space) {
-                            Ok(ws) => ws,
-                            Err(_) => {
-                                tracing::warn!(
-                                    "Could not auto-assign window {:?} on space {:?}; skipping assignment",
-                                    wid,
-                                    space
-                                );
-                                continue;
                             }
                         }
                     };
+
+                    if should_float {
+                        self.floating.add_floating(wid);
+                        self.floating.add_active(space, pid, wid);
+                    }
+
                     windows_by_workspace.entry(assigned_workspace).or_default().push(wid);
                 }
 
