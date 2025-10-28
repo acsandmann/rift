@@ -880,6 +880,11 @@ impl TraditionalLayoutSystem {
         let mut rect = tiling_area;
 
         loop {
+            if self.tree.data.layout.is_effectively_fullscreen(node) {
+                out.clear();
+                break;
+            }
+
             let kind = self.tree.data.layout.kind(node);
             let children: Vec<_> = node.children(map).collect();
 
@@ -891,6 +896,11 @@ impl TraditionalLayoutSystem {
                 let local_sel =
                     self.tree.data.selection.local_selection(map, node).unwrap_or(children[0]);
                 let selected_index = children.iter().position(|&c| c == local_sel).unwrap_or(0);
+
+                if self.tree.data.layout.is_effectively_fullscreen(local_sel) {
+                    out.clear();
+                    break;
+                }
 
                 let ui_selected_index = if matches!(kind, VerticalStack) {
                     children.len().saturating_sub(1).saturating_sub(selected_index)
@@ -1841,6 +1851,11 @@ impl Layout {
             self.info[node].is_fullscreen = false;
         }
         self.info[node].is_fullscreen_within_gaps
+    }
+
+    fn is_effectively_fullscreen(&self, node: NodeId) -> bool {
+        let info = &self.info[node];
+        info.is_fullscreen || info.is_fullscreen_within_gaps
     }
 
     fn debug(&self, node: NodeId, is_container: bool) -> String {

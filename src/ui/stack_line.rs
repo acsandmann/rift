@@ -3,7 +3,7 @@ use std::ptr;
 use std::rc::Rc;
 
 use objc2::rc::Retained;
-use objc2_app_kit::NSPopUpMenuWindowLevel;
+use objc2_app_kit::NSNormalWindowLevel;
 use objc2_core_foundation::{CFType, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::CGContext;
 use objc2_quartz_core::{CALayer, CATransaction};
@@ -147,7 +147,7 @@ impl GroupIndicatorWindow {
         if let Err(err) = cgs_window.set_alpha(1.0) {
             warn!(error=?err, "failed to set stack line window alpha");
         }
-        if let Err(err) = cgs_window.set_level(NSPopUpMenuWindowLevel as i32) {
+        if let Err(err) = cgs_window.set_level(NSNormalWindowLevel as i32) {
             warn!(error=?err, "failed to set stack line window level");
         }
 
