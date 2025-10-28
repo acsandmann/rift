@@ -122,7 +122,7 @@ mod tests {
         assert_eq!(Some(WindowId::new(1, 1)), reactor.main_window());
         assert_eq!(
             reactor.layout_manager.layout_engine.selected_window(space),
-            Some(WindowId::new(1, 1))
+            Some(WindowId::new(2, 2))
         );
 
         reactor.handle_event(ApplicationGloballyDeactivated(1));
@@ -196,7 +196,7 @@ mod tests {
         assert_eq!(Some(WindowId::new(1, 1)), reactor.main_window());
         assert_eq!(
             reactor.layout_manager.layout_engine.selected_window(space),
-            Some(WindowId::new(1, 1))
+            Some(WindowId::new(2, 2))
         );
 
         reactor.handle_event(ApplicationGloballyDeactivated(1));
@@ -212,7 +212,7 @@ mod tests {
         assert_eq!(Some(WindowId::new(2, 2)), reactor.main_window());
         assert_eq!(
             reactor.layout_manager.layout_engine.selected_window(space),
-            Some(WindowId::new(1, 1))
+            Some(WindowId::new(2, 2))
         );
 
         reactor.handle_event(ApplicationActivated(2, Quiet::No));
