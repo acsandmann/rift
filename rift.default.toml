@@ -310,7 +310,7 @@ comb1 = "Alt + Shift"
 "Alt + Comma" = "stack_windows"
 "Alt + Shift + Comma" = "toggle_tile_orientation"
 "Alt + Slash" = "unstack_windows"
-"Alt + Ctrl + E" = "unjoin_windows" # FIXME: doesnt work
+"Alt + Ctrl + E" = "unjoin_windows"
 
 "Alt + Shift + Space" = "toggle_window_floating"
 "Alt + F" = "toggle_fullscreen"

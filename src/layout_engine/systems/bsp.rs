@@ -1000,7 +1000,48 @@ impl LayoutSystem for BspLayoutSystem {
         vec![]
     }
 
-    fn unjoin_selection(&mut self, _layout: LayoutId) {}
+    fn unjoin_selection(&mut self, layout: LayoutId) {
+        let Some(sel) = self.selection_of_layout(layout) else {
+            return;
+        };
+        let sel_leaf = self.descend_to_leaf(sel);
+        let map = &self.tree.map;
+
+        let Some(parent) = sel_leaf.parent(map) else {
+            return;
+        };
+
+        let Some(grandparent) = parent.parent(map) else {
+            return;
+        };
+
+        let mut windows: Vec<WindowId> = Vec::new();
+        self.collect_windows_under(parent, &mut windows);
+        if windows.is_empty() {
+            return;
+        }
+
+        let _ = parent.detach(&mut self.tree);
+
+        let ids: Vec<_> = parent.traverse_preorder(&self.tree.map).collect();
+        for id in ids {
+            self.kind.remove(id);
+        }
+
+        let mut first_new_leaf: Option<NodeId> = None;
+        for w in windows {
+            let new_leaf = self.make_leaf(Some(w));
+            new_leaf.detach(&mut self.tree).push_back(grandparent);
+            self.window_to_node.insert(w, new_leaf);
+            if first_new_leaf.is_none() {
+                first_new_leaf = Some(new_leaf);
+            }
+        }
+
+        if let Some(n) = first_new_leaf {
+            self.tree.data.selection.select(&self.tree.map, n);
+        }
+    }
 
     fn resize_selection_by(&mut self, layout: LayoutId, amount: f64) {
         let sel_snapshot = self.selection_of_layout(layout);

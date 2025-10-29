@@ -734,10 +734,33 @@ impl LayoutSystem for TraditionalLayoutSystem {
 
     fn unjoin_selection(&mut self, layout: LayoutId) {
         let selection = self.selection(layout);
-        if let Some(parent) = selection.parent(self.map()) {
-            let children: Vec<_> = parent.children(self.map()).collect();
-            if children.len() == 2 {
-                self.remove_unnecessary_container_internal(parent);
+
+        if let Some(parent) = selection.parent(&self.tree.map) {
+            if let Some(grandparent) = parent.parent(&self.tree.map) {
+                let children: Vec<_> = parent.children(&self.tree.map).collect();
+                if children.is_empty() {
+                    return;
+                }
+
+                let local_selected_child =
+                    self.tree.data.selection.local_selection(&self.tree.map, parent);
+
+                for child in children.iter() {
+                    child.detach(&mut self.tree).push_back(grandparent);
+                }
+
+                parent.detach(&mut self.tree).remove();
+
+                if let Some(sel_child) = local_selected_child {
+                    self.select(sel_child);
+                } else if let Some(first_child) = grandparent.first_child(&self.tree.map) {
+                    self.select(first_child);
+                }
+            } else {
+                let children: Vec<_> = parent.children(&self.tree.map).collect();
+                if children.len() == 2 {
+                    self.remove_unnecessary_container_internal(parent);
+                }
             }
         }
     }
