@@ -2,6 +2,8 @@ use std::ffi::{c_int, c_void};
 use std::ptr::NonNull;
 use std::time::Duration;
 
+use dispatchr::queue;
+use dispatchr::time::Time;
 use objc2_app_kit::NSWindowLevel;
 use objc2_application_services::AXError;
 use objc2_core_foundation::{
@@ -22,6 +24,7 @@ use crate::layout_engine::Direction;
 use crate::sys::app::pid_t;
 use crate::sys::axuielement::{AXUIElement, Error as AxError};
 use crate::sys::cg_ok;
+use crate::sys::dispatch::DispatchExt;
 use crate::sys::process::ProcessSerialNumber;
 use crate::sys::skylight::*;
 use crate::sys::timer::Timer;
@@ -723,7 +726,6 @@ pub unsafe fn switch_space(direction: Direction) {
         Direction::Right => 2.25,
         _ => return,
     };
-    let gesture = 200.0 * magnitude;
 
     let event1a = CGEventCreate(std::ptr::null_mut());
 
@@ -753,32 +755,40 @@ pub unsafe fn switch_space(direction: Direction) {
     CFRelease(event1a);
     CFRelease(event1b);
 
-    crate::sys::timer::Timer::sleep(Duration::from_millis(15)); //(0x3A98); // 15ms
+    queue::main().after_f_s(
+        Time::new_after(Time::NOW, 15 * 1000000),
+        (magnitude, magnitude_bits),
+        |(magnitude, magnitude_bits)| {
+            unsafe {
+                let gesture = 200.0 * magnitude;
 
-    let event2a = CGEventCreate(std::ptr::null_mut());
-    CGEventSetIntegerValueField(event2a, 0x37, 29);
-    CGEventSetIntegerValueField(event2a, 0x29, 33231);
+                let event2a = CGEventCreate(std::ptr::null_mut());
+                CGEventSetIntegerValueField(event2a, 0x37, 29);
+                CGEventSetIntegerValueField(event2a, 0x29, 33231);
 
-    let event2b = CGEventCreate(std::ptr::null_mut());
-    CGEventSetIntegerValueField(event2b, 0x37, 30);
-    CGEventSetIntegerValueField(event2b, 0x6E, 23);
-    CGEventSetIntegerValueField(event2b, 0x84, 4);
-    CGEventSetIntegerValueField(event2b, 0x86, 4);
-    CGEventSetDoubleValueField(event2b, 0x7C, magnitude);
-    CGEventSetIntegerValueField(event2b, 0x87, magnitude_bits);
-    CGEventSetIntegerValueField(event2b, 0x7B, 1);
-    CGEventSetIntegerValueField(event2b, 0xA5, 1);
-    CGEventSetDoubleValueField(event2b, 0x77, 1.401298464324817e-45);
-    CGEventSetDoubleValueField(event2b, 0x8B, 1.401298464324817e-45);
-    CGEventSetIntegerValueField(event2b, 0x29, 33231);
-    CGEventSetIntegerValueField(event2b, 0x88, 0);
+                let event2b = CGEventCreate(std::ptr::null_mut());
+                CGEventSetIntegerValueField(event2b, 0x37, 30);
+                CGEventSetIntegerValueField(event2b, 0x6E, 23);
+                CGEventSetIntegerValueField(event2b, 0x84, 4);
+                CGEventSetIntegerValueField(event2b, 0x86, 4);
+                CGEventSetDoubleValueField(event2b, 0x7C, magnitude);
+                CGEventSetIntegerValueField(event2b, 0x87, magnitude_bits);
+                CGEventSetIntegerValueField(event2b, 0x7B, 1);
+                CGEventSetIntegerValueField(event2b, 0xA5, 1);
+                CGEventSetDoubleValueField(event2b, 0x77, 1.401298464324817e-45);
+                CGEventSetDoubleValueField(event2b, 0x8B, 1.401298464324817e-45);
+                CGEventSetIntegerValueField(event2b, 0x29, 33231);
+                CGEventSetIntegerValueField(event2b, 0x88, 0);
 
-    CGEventSetDoubleValueField(event2b, 0x81, gesture);
-    CGEventSetDoubleValueField(event2b, 0x82, gesture);
+                CGEventSetDoubleValueField(event2b, 0x81, gesture);
+                CGEventSetDoubleValueField(event2b, 0x82, gesture);
 
-    CGEventPost(CGEventTapLocation::HID, event2b);
-    CGEventPost(CGEventTapLocation::HID, event2a);
+                CGEventPost(CGEventTapLocation::HID, event2b);
+                CGEventPost(CGEventTapLocation::HID, event2a);
 
-    CFRelease(event2a);
-    CFRelease(event2b);
+                CFRelease(event2a);
+                CFRelease(event2b);
+            };
+        },
+    );
 }
