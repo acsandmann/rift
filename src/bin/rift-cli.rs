@@ -1,4 +1,4 @@
-use std::process;
+use std::process::{self};
 
 use clap::{Parser, Subcommand};
 use rift_wm::actor::reactor;
@@ -153,10 +153,10 @@ enum LayoutCommands {
     MoveNode { direction: String },
     /// Join the selected window with neighbor in a direction
     JoinWindow { direction: String },
-    /// Stack the selected windows
-    Stack,
-    /// Unstack the selected windows
-    Unstack,
+    /// Toggle stacked state for the selected container
+    ToggleStack,
+    /// Global orientation toggle that works consistently across layout modes (and between splits/stacks)
+    ToggleOrientation,
     /// Unjoin previously joined windows
     Unjoin,
     /// Toggle floating on the focused selection (tree focus)
@@ -477,11 +477,11 @@ fn map_layout_command(cmd: LayoutCommands) -> Result<RiftCommand, String> {
         LayoutCommands::JoinWindow { direction } => Ok(RiftCommand::Reactor(
             reactor::Command::Layout(LC::JoinWindow(direction.into())),
         )),
-        LayoutCommands::Stack => {
-            Ok(RiftCommand::Reactor(reactor::Command::Layout(LC::StackWindows)))
+        LayoutCommands::ToggleStack => {
+            Ok(RiftCommand::Reactor(reactor::Command::Layout(LC::ToggleStack)))
         }
-        LayoutCommands::Unstack => Ok(RiftCommand::Reactor(reactor::Command::Layout(
-            LC::UnstackWindows,
+        LayoutCommands::ToggleOrientation => Ok(RiftCommand::Reactor(reactor::Command::Layout(
+            LC::ToggleOrientation,
         ))),
         LayoutCommands::Unjoin => {
             Ok(RiftCommand::Reactor(reactor::Command::Layout(LC::UnjoinWindows)))

@@ -732,6 +732,25 @@ impl LayoutSystem for TraditionalLayoutSystem {
         vec![]
     }
 
+    fn parent_of_selection_is_stacked(&self, layout: LayoutId) -> bool {
+        let selection = self.selection(layout);
+
+        if self.tree.data.window.at(selection).is_some() {
+            let map = self.map();
+            return selection
+                .ancestors(map)
+                .skip(1)
+                .any(|ancestor| self.layout(ancestor).is_stacked());
+        }
+
+        if self.layout(selection).is_stacked() {
+            return true;
+        }
+
+        let map = self.map();
+        selection.children(map).any(|child| self.layout(child).is_stacked())
+    }
+
     fn unjoin_selection(&mut self, layout: LayoutId) {
         let selection = self.selection(layout);
 

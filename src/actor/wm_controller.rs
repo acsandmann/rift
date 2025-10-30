@@ -10,8 +10,10 @@ use dispatchr::time::Time;
 use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication, NSScreen};
 use objc2_core_foundation::CGRect;
 use objc2_foundation::MainThreadMarker;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json;
+use strum::VariantNames;
 use tracing::{debug, error, info, instrument};
 
 use crate::common::config::WorkspaceSelector;
@@ -59,7 +61,7 @@ pub enum WmCommand {
     ReactorCommand(reactor::Command),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, strum_macros::VariantNames)]
 #[serde(rename_all = "snake_case")]
 pub enum WmCmd {
     ToggleSpaceActivated,
@@ -81,6 +83,36 @@ pub enum WmCmd {
 pub enum ExecCmd {
     String(String),
     Array(Vec<String>),
+}
+
+static BUILTIN_WM_CMD_VARIANTS: Lazy<Vec<String>> = Lazy::new(|| {
+    WmCmd::VARIANTS
+        .iter()
+        .map(|v| {
+            let mut out = String::with_capacity(v.len());
+            for (i, ch) in v.chars().enumerate() {
+                if ch.is_uppercase() {
+                    if i != 0 {
+                        out.push('_');
+                    }
+                    for lc in ch.to_lowercase() {
+                        out.push(lc);
+                    }
+                } else {
+                    out.push(ch);
+                }
+            }
+            out
+        })
+        .collect()
+});
+
+impl WmCmd {
+    pub fn snake_case_variants() -> &'static [String] { &BUILTIN_WM_CMD_VARIANTS }
+}
+
+impl WmCommand {
+    pub fn builtin_candidates() -> &'static [String] { WmCmd::snake_case_variants() }
 }
 
 pub struct Config {

@@ -36,10 +36,9 @@ pub enum LayoutCommand {
     MoveNode(Direction),
 
     JoinWindow(Direction),
-    StackWindows,
-    UnstackWindows,
+    ToggleStack,
+    ToggleOrientation,
     UnjoinWindows,
-    ToggleTileOrientation,
     ToggleFocusFloating,
     ToggleWindowFloating,
     ToggleFullscreen,
@@ -769,26 +768,37 @@ impl LayoutEngine {
                 self.tree.join_selection_with_direction(layout, direction);
                 EventResponse::default()
             }
-            LayoutCommand::StackWindows => {
-                self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
-                let default_orientation: crate::common::config::StackDefaultOrientation =
-                    self.layout_settings.stack.default_orientation;
-                let stacked_windows =
-                    self.tree.apply_stacking_to_parent_of_selection(layout, default_orientation);
-                EventResponse {
-                    raise_windows: stacked_windows,
-                    focus_window: None,
-                }
-            }
-            LayoutCommand::UnstackWindows => {
+            LayoutCommand::ToggleStack => {
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
                 let default_orientation: crate::common::config::StackDefaultOrientation =
                     self.layout_settings.stack.default_orientation;
                 let unstacked_windows =
                     self.tree.unstack_parent_of_selection(layout, default_orientation);
-                EventResponse {
-                    raise_windows: unstacked_windows,
-                    focus_window: None,
+
+                if !unstacked_windows.is_empty() {
+                    return EventResponse {
+                        raise_windows: unstacked_windows,
+                        focus_window: None,
+                    };
+                }
+
+                let stacked_windows =
+                    self.tree.apply_stacking_to_parent_of_selection(layout, default_orientation);
+                if !stacked_windows.is_empty() {
+                    return EventResponse {
+                        raise_windows: stacked_windows,
+                        focus_window: None,
+                    };
+                }
+
+                let visible_windows = self.tree.visible_windows_in_layout(layout);
+                if !visible_windows.is_empty() {
+                    EventResponse {
+                        raise_windows: visible_windows,
+                        focus_window: None,
+                    }
+                } else {
+                    EventResponse::default()
                 }
             }
             LayoutCommand::UnjoinWindows => {
@@ -796,15 +806,36 @@ impl LayoutEngine {
                 self.tree.unjoin_selection(layout);
                 EventResponse::default()
             }
-            LayoutCommand::ToggleTileOrientation => {
+            LayoutCommand::ToggleOrientation => {
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
 
-                match &mut self.tree {
-                    LayoutSystemKind::Traditional(s) => s.toggle_tile_orientation(layout),
-                    LayoutSystemKind::Bsp(s) => s.toggle_tile_orientation(layout),
-                }
+                let resp = match &mut self.tree {
+                    LayoutSystemKind::Traditional(s) => {
+                        if s.parent_of_selection_is_stacked(layout) {
+                            let default_orientation: crate::common::config::StackDefaultOrientation =
+                                self.layout_settings.stack.default_orientation;
+                            let toggled_windows = s
+                                .apply_stacking_to_parent_of_selection(layout, default_orientation);
+                            if !toggled_windows.is_empty() {
+                                EventResponse {
+                                    raise_windows: toggled_windows,
+                                    focus_window: None,
+                                }
+                            } else {
+                                EventResponse::default()
+                            }
+                        } else {
+                            s.toggle_tile_orientation(layout);
+                            EventResponse::default()
+                        }
+                    }
+                    LayoutSystemKind::Bsp(s) => {
+                        s.toggle_tile_orientation(layout);
+                        EventResponse::default()
+                    }
+                };
 
-                EventResponse::default()
+                resp
             }
             LayoutCommand::ResizeWindowGrow => {
                 if is_floating {

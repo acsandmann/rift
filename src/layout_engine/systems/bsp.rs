@@ -986,16 +986,18 @@ impl LayoutSystem for BspLayoutSystem {
 
     fn apply_stacking_to_parent_of_selection(
         &mut self,
-        _layout: LayoutId,
-        _default_orientation: crate::common::config::StackDefaultOrientation,
+        _: LayoutId,
+        _: crate::common::config::StackDefaultOrientation,
     ) -> Vec<WindowId> {
         vec![]
     }
 
+    fn parent_of_selection_is_stacked(&self, _layout: LayoutId) -> bool { false }
+
     fn unstack_parent_of_selection(
         &mut self,
-        _layout: LayoutId,
-        _default_orientation: crate::common::config::StackDefaultOrientation,
+        _: LayoutId,
+        _: crate::common::config::StackDefaultOrientation,
     ) -> Vec<WindowId> {
         vec![]
     }

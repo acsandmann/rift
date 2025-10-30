@@ -307,9 +307,8 @@ comb1 = "Alt + Shift"
 "Alt + Shift + Right" = { join_window = "right" }
 "Alt + Shift + Up" = { join_window = "up" }
 "Alt + Shift + Down" = { join_window = "down" }
-"Alt + Comma" = "stack_windows"
-"Alt + Shift + Comma" = "toggle_tile_orientation"
-"Alt + Slash" = "unstack_windows"
+"Alt + Comma" = "toggle_stack"
+"Alt + Slash" = "toggle_orientation"
 "Alt + Ctrl + E" = "unjoin_windows"
 
 "Alt + Shift + Space" = "toggle_window_floating"

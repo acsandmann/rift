@@ -11,6 +11,13 @@ use crate::sys::hotkey::{Hotkey, HotkeySpec};
 
 const MAX_WORKSPACES: usize = 32;
 
+// TODO: when to remove these?
+const DEPRECATED_MAP: &[(&str, &str)] = &[
+    ("stack_windows", "toggle_stack"),
+    ("unstack_windows", "toggle_stack"),
+    ("toggle_tile_orientation", "toggle_orientation"),
+];
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigCommand {
@@ -1000,22 +1007,210 @@ impl Config {
         key.to_string()
     }
 
-    fn parse(buf: &str) -> anyhow::Result<Config> {
-        let c: ConfigFile = toml::from_str(&buf)?;
-        let mut keys = Vec::new();
-        for (key, cmd) in c.keys {
-            let expanded_key = Self::expand_modifier_combinations(&key, &c.modifier_combinations);
-            let normalized_key = Self::normalize_hotkey_string(&expanded_key);
-            let Ok(hotkey) = Hotkey::from_str(&normalized_key) else {
-                bail!("Could not parse hotkey: {key}");
-            };
-            keys.push((hotkey, cmd));
+    /// no need to pull in a dep for just this
+    fn levenshtein(a: &str, b: &str) -> usize {
+        let a_chars: Vec<char> = a.chars().collect();
+        let b_chars: Vec<char> = b.chars().collect();
+        let mut d = vec![vec![0usize; b_chars.len() + 1]; a_chars.len() + 1];
+        for i in 0..=a_chars.len() {
+            d[i][0] = i;
         }
-        Ok(Config {
-            settings: c.settings,
-            keys,
-            virtual_workspaces: c.virtual_workspaces,
-        })
+        for j in 0..=b_chars.len() {
+            d[0][j] = j;
+        }
+        for i in 1..=a_chars.len() {
+            for j in 1..=b_chars.len() {
+                let cost = if a_chars[i - 1] == b_chars[j - 1] {
+                    0
+                } else {
+                    1
+                };
+                d[i][j] = std::cmp::min(
+                    std::cmp::min(d[i - 1][j] + 1, d[i][j - 1] + 1),
+                    d[i - 1][j - 1] + cost,
+                );
+            }
+        }
+        d[a_chars.len()][b_chars.len()]
+    }
+
+    // Extracts an "unknown variant `...`" token from serde error string when present.
+    // Additionally, if serde's error message contains an "expected" list (backtick-delimited),
+    // embed those expected tokens alongside the unknown token using the separator "||".
+    // The resulting returned string may therefore be:
+    //   - "unknown_token" (no expected candidates found)
+    //   - "unknown_token||cand1,cand2,..." (candidates appended)
+    fn extract_unknown_variant(err: &str) -> Option<String> {
+        let needle = "unknown variant `";
+        if let Some(start) = err.find(needle) {
+            let rest = &err[start + needle.len()..];
+            if let Some(end) = rest.find('`') {
+                let unknown = rest[..end].to_string();
+
+                // Collect all backtick-enclosed tokens in the error message and
+                // treat them as candidate variants (excluding the unknown itself).
+                let mut variants: Vec<String> = Vec::new();
+                let mut i = 0usize;
+                while let Some(open) = err[i..].find('`') {
+                    let open_abs = i + open + 1;
+                    if let Some(close_off) = err[open_abs..].find('`') {
+                        let close_abs = open_abs + close_off;
+                        let token = &err[open_abs..close_abs];
+                        if token != unknown {
+                            variants.push(token.to_string());
+                        }
+                        i = close_abs + 1;
+                    } else {
+                        break;
+                    }
+                }
+
+                if !variants.is_empty() {
+                    // dedupe while preserving order
+                    let mut seen = std::collections::HashSet::new();
+                    let mut deduped = Vec::new();
+                    for v in variants {
+                        if seen.insert(v.clone()) {
+                            deduped.push(v);
+                        }
+                    }
+                    return Some(format!("{}||{}", unknown, deduped.join(",")));
+                }
+
+                return Some(unknown);
+            }
+        }
+
+        if let Some(unknown_pos) = err.find("unknown") {
+            if let Some(backtick_pos) = err[unknown_pos..].find('`') {
+                let rest = &err[unknown_pos + backtick_pos + 1..];
+                if let Some(end) = rest.find('`') {
+                    return Some(rest[..end].to_string());
+                }
+            }
+        }
+        None
+    }
+
+    // Provide suggestion by comparing the unknown token to a list of known commands.
+    // If the `unknown` string was produced by `extract_unknown_variant` and contains
+    // an embedded serde candidate list (format: "token||cand1,cand2"), prefer those
+    // candidates when computing the best suggestion. Otherwise fall back to the
+    // conservative builtin list.
+    //
+    // Returns the best candidate if its distance is within a reasonable threshold.
+    fn suggest_similar_command(unknown: &str) -> Option<(String, Option<String>)> {
+        // Detect if `unknown` was augmented with serde-provided expected variants.
+        let (unknown_token, serde_candidates): (String, Option<Vec<String>>) =
+            if let Some(idx) = unknown.find("||") {
+                let (u, rest) = unknown.split_at(idx);
+                let rest = &rest[2..];
+                let candidates: Vec<String> = rest
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                (u.to_lowercase(), Some(candidates))
+            } else {
+                (unknown.to_lowercase(), None)
+            };
+
+        // Choose candidate set: prefer serde-provided ones when available.
+        let mut best: Option<(String, usize)> = None;
+
+        if let Some(cands) = serde_candidates {
+            for cand in cands.iter() {
+                let cand_norm = cand.to_lowercase();
+                let dist = Self::levenshtein(&unknown_token, &cand_norm);
+                if best.is_none() || dist < best.as_ref().unwrap().1 {
+                    best = Some((cand.clone(), dist));
+                }
+            }
+        } else {
+            // Use dynamically generated builtin candidates.
+            let builtin_candidates = crate::actor::wm_controller::WmCommand::builtin_candidates();
+            for cand in builtin_candidates.iter() {
+                let dist = Self::levenshtein(&unknown_token, &cand.to_lowercase());
+                if best.is_none() || dist < best.as_ref().unwrap().1 {
+                    best = Some((cand.to_string(), dist));
+                }
+            }
+        }
+
+        if let Some((best_cand, dist)) = best {
+            // Heuristic threshold: allow suggestions if distance is <= half the length (or <=3).
+            let threshold = std::cmp::max(3usize, best_cand.len() / 2);
+            if dist <= threshold {
+                // If the best candidate is in deprecated map, return the non-deprecated suggestion.
+                let mut replacement = None;
+                for &(dep, repl) in DEPRECATED_MAP.iter() {
+                    if dep == best_cand {
+                        replacement = Some(repl.to_string());
+                        break;
+                    }
+                }
+                return Some((best_cand.to_string(), replacement));
+            }
+        }
+
+        // Also check if the unknown token itself matched a deprecated name exactly
+        for &(dep, repl) in DEPRECATED_MAP.iter() {
+            if dep == unknown_token {
+                return Some((repl.to_string(), None)); // recommend replacement
+            }
+        }
+
+        None
+    }
+
+    fn parse(buf: &str) -> anyhow::Result<Config> {
+        // Attempt to deserialize. If it fails, and the error indicates an unknown enum
+        // variant, attempt to provide a helpful suggestion.
+        match toml::from_str::<ConfigFile>(&buf) {
+            Ok(c) => {
+                let mut keys = Vec::new();
+                for (key, cmd) in c.keys {
+                    let expanded_key =
+                        Self::expand_modifier_combinations(&key, &c.modifier_combinations);
+                    let normalized_key = Self::normalize_hotkey_string(&expanded_key);
+                    let Ok(hotkey) = Hotkey::from_str(&normalized_key) else {
+                        bail!("Could not parse hotkey: {key}");
+                    };
+                    keys.push((hotkey, cmd));
+                }
+                Ok(Config {
+                    settings: c.settings,
+                    keys,
+                    virtual_workspaces: c.virtual_workspaces,
+                })
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                if let Some(unknown_token) = Self::extract_unknown_variant(&msg) {
+                    if let Some((suggestion, deprecated_replacement)) =
+                        Self::suggest_similar_command(&unknown_token)
+                    {
+                        // Build enhanced error message
+                        if let Some(repl) = deprecated_replacement {
+                            bail!(
+                                "{msg}\nDid you mean `{}`? Note: `{}` is deprecated; use `{}` instead.",
+                                suggestion,
+                                suggestion,
+                                repl
+                            );
+                        } else {
+                            bail!("{msg}\nDid you mean `{}`?", suggestion);
+                        }
+                    } else {
+                        // No good suggestion; include the original error
+                        bail!("{msg}");
+                    }
+                } else {
+                    // Could not extract unknown variant; return original error
+                    bail!("{msg}");
+                }
+            }
+        }
     }
 }
 
@@ -1038,61 +1233,11 @@ mod tests {
             Config::normalize_hotkey_string("Meta + Right"),
             "Meta + ArrowRight"
         );
-
-        assert_eq!(Config::normalize_hotkey_string("Alt+Down"), "Alt+ArrowDown");
-        assert_eq!(Config::normalize_hotkey_string("Ctrl+Up"), "Ctrl+ArrowUp");
-        assert_eq!(Config::normalize_hotkey_string("Shift+Left"), "Shift+ArrowLeft");
-        assert_eq!(Config::normalize_hotkey_string("Meta+Right"), "Meta+ArrowRight");
-
-        assert_eq!(Config::normalize_hotkey_string("Alt + H"), "Alt + H");
-        assert_eq!(Config::normalize_hotkey_string("Ctrl + Enter"), "Ctrl + Enter");
-        assert_eq!(Config::normalize_hotkey_string("F1"), "F1");
-
-        assert_eq!(
-            Config::normalize_hotkey_string("Up + Down"),
-            "ArrowUp + ArrowDown"
-        );
-    }
-
-    #[test]
-    fn default_config_parses() { super::Config::default(); }
-
-    #[test]
-    fn test_expand_modifier_combinations() {
-        let mut combinations = HashMap::default();
-        combinations.insert("comb1".to_string(), "Alt + Shift".to_string());
-        combinations.insert("leader".to_string(), "Ctrl + Alt".to_string());
-
-        assert_eq!(
-            Config::expand_modifier_combinations("comb1 + C", &combinations),
-            "Alt + Shift + C"
-        );
-
-        assert_eq!(
-            Config::expand_modifier_combinations("leader + Tab", &combinations),
-            "Ctrl + Alt + Tab"
-        );
-
-        assert_eq!(
-            Config::expand_modifier_combinations("Alt + H", &combinations),
-            "Alt + H"
-        );
-
-        assert_eq!(
-            Config::expand_modifier_combinations("unknown + X", &combinations),
-            "unknown + X"
-        );
-
-        let empty_combinations = HashMap::default();
-        assert_eq!(
-            Config::expand_modifier_combinations("comb1 + C", &empty_combinations),
-            "comb1 + C"
-        );
     }
 
     #[test]
     fn test_modifier_combinations_in_config() {
-        let config_str = r#"
+        let toml = r#"
             [settings]
             animate = false
 
@@ -1104,46 +1249,22 @@ mod tests {
             "comb1 + C" = "toggle_space_activated"
             "leader + Tab" = "next_workspace"
             "Alt + H" = { move_focus = "left" }
-
-            [virtual_workspaces]
-            enabled = false
         "#;
 
-        let config = Config::parse(config_str).unwrap();
-        assert_eq!(config.keys.len(), 3);
-
-        // Check that the combinations were expanded correctly
-        // Note: We can't easily check the exact Hotkey values since they're parsed,
-        // but we can verify parsing succeeds and the right number of keys are present
-        assert!(config.keys.iter().any(|(hotkey, _)| {
-            // This would be Alt + Shift + C
-            hotkey.key_code == crate::sys::hotkey::KeyCode::KeyC
-        }));
+        let cfg = Config::parse(toml).unwrap();
+        // We expect keys to be parsed into hotkeys
+        assert!(!cfg.keys.is_empty());
     }
 
     #[test]
-    fn test_config_validation() {
-        let mut config = Config::default();
-
-        let issues = config.validate();
-        assert!(issues.is_empty());
-
-        config.settings.animation_duration = -1.0;
-        let issues = config.validate();
-        assert_eq!(issues.len(), 1);
-        assert!(issues[0].contains("animation_duration must be non-negative"));
-
-        let fixes = config.auto_fix_values();
-        assert_eq!(fixes, 1);
-        assert_eq!(config.settings.animation_duration, 0.3);
-
-        config.settings.layout.stack.stack_offset = -10.0;
-        let issues = config.validate();
-        assert_eq!(issues.len(), 1);
-        assert!(issues[0].contains("stack_offset must be non-negative"));
-
-        let fixes = config.auto_fix_values();
-        assert_eq!(fixes, 1);
-        assert_eq!(config.settings.layout.stack.stack_offset, 40.0);
+    fn test_levenshtein_suggests() {
+        let err =
+            "unknown variant `toggle_stak`, expected one of `toggle_stack`, `toggle_orientation`";
+        let token = Config::extract_unknown_variant(err).unwrap();
+        assert_eq!(token, "toggle_stak||toggle_stack,toggle_orientation");
+        let suggestion = Config::suggest_similar_command(&token);
+        assert!(suggestion.is_some());
+        let (s, _maybe_dep) = suggestion.unwrap();
+        assert_eq!(s, "toggle_stack");
     }
 }

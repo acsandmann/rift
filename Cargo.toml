@@ -32,10 +32,10 @@ anyhow = "1.0.83"
 ascii_tree = "0.1.1"
 thiserror = "2.0.17"
 bitflags = "2.4.1"
-clap = { version = "4.5.4", features = ["derive"] }
+clap = { version = "4.5.4", default-features = false, features = ["derive", "std"] }
 dirs = "6.0.0"
 dispatchr = { git = "https://github.com/drewcrawford/dispatchr" }
-nix = { version = "0.30.1", features = ["process", "user"] }
+nix = { version = "0.30.1", default-features = false, features = ["process", "user"] }
 objc2 = "0.6.2"
 objc2-app-kit = { version = "0.3.1", default-features = false, features = [
     "NSApplication",
@@ -118,17 +118,16 @@ rustc-hash = "2.0.0"
 serde = { version = "1.0.201", features = ["derive"] }
 serde_json = "1.0.145"
 serde_with = "3.9.0"
-shell-escape = "0.1.5"
 slotmap = { version = "1.0.7", features = ["serde"] }
 static_assertions = "1.1.0"
-tokio = { version = "1.35.1", features = [
+tokio = { version = "1.35.1", default-features = false, features = [
     "macros",
     "sync",
     "rt",
     "net",
     "io-util",
     "process",
-], default-features = false }
+] }
 tokio-stream = "0.1.16"
 tokio-util = "0.7.15"
 toml = "0.9.2"
@@ -142,6 +141,8 @@ regex = "1.11.0"
 enum_dispatch = "0.3.13"
 crossbeam-channel = "0.5"
 num_enum = "0.7.4"
+strum = { version = "0.27.2", default-features = false, features = ["derive"] }
+strum_macros = "0.27.2"
 notify = "8.2.0"
 notify-debouncer-mini = "0.7.0"
 dashmap = "6.1.0"
