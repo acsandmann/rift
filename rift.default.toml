@@ -131,6 +131,9 @@ fade_enabled = false
 # native macos mission control fade is about 180ms
 fade_duration_ms = 180.0
 
+[settings.ui.command_switcher]
+enabled = true
+
 # Trackpad gestures
 [settings.gestures]
 # Enable horizontal swipes to switch virtual workspaces
@@ -304,6 +307,9 @@ comb1 = "Alt + Shift"
 "comb1 + 3" = { move_window_to_workspace = 3 }
 
 "Alt + Tab" = "switch_to_last_workspace"
+
+"Ctrl + Right" = { switcher = "all_windows" }
+"Ctrl + Alt + Tab" = { switcher = "current_workspace" }
 
 "Alt + Shift + Left" = { join_window = "left" }
 "Alt + Shift + Right" = { join_window = "right" }

@@ -16,7 +16,7 @@ use serde_json;
 use strum::VariantNames;
 use tracing::{debug, error, info, instrument};
 
-use crate::common::config::WorkspaceSelector;
+use crate::common::config::{CommandSwitcherDisplayMode, WorkspaceSelector};
 use crate::sys::app::{NSRunningApplicationExt, pid_t};
 
 pub type Sender = actor::Sender<WmEvent>;
@@ -24,7 +24,7 @@ pub type Sender = actor::Sender<WmEvent>;
 type Receiver = actor::Receiver<WmEvent>;
 
 use crate::actor::app::AppInfo;
-use crate::actor::{self, event_tap, mission_control, reactor};
+use crate::actor::{self, command_switcher, event_tap, mission_control, reactor};
 use crate::common::collections::{HashMap, HashSet};
 use crate::sys::dispatch::DispatchExt;
 use crate::sys::event::Hotkey;
@@ -76,6 +76,8 @@ pub enum WmCmd {
 
     ShowMissionControlAll,
     ShowMissionControlCurrent,
+    Switcher(CommandSwitcherDisplayMode),
+    CommandSwitcherDismiss,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -127,6 +129,7 @@ pub struct WmController {
     event_tap_tx: event_tap::Sender,
     stack_line_tx: Option<crate::actor::stack_line::Sender>,
     mission_control_tx: Option<crate::actor::mission_control::Sender>,
+    command_switcher_tx: Option<command_switcher::Sender>,
     receiver: Receiver,
     sender: Sender,
     starting_space: Option<SpaceId>,
@@ -151,6 +154,7 @@ impl WmController {
         event_tap_tx: event_tap::Sender,
         stack_line_tx: crate::actor::stack_line::Sender,
         mission_control_tx: crate::actor::mission_control::Sender,
+        command_switcher_tx: command_switcher::Sender,
     ) -> (Self, actor::Sender<WmEvent>) {
         let (sender, receiver) = actor::channel();
         sys::app::set_activation_policy_callback({
@@ -167,6 +171,7 @@ impl WmController {
             event_tap_tx,
             stack_line_tx: Some(stack_line_tx),
             mission_control_tx: Some(mission_control_tx),
+            command_switcher_tx: Some(command_switcher_tx),
             receiver,
             sender: sender.clone(),
             starting_space: None,
@@ -281,6 +286,12 @@ impl WmController {
 
                 self.config.config = new_cfg;
 
+                if let Some(tx) = &self.command_switcher_tx {
+                    let _ = tx.try_send(command_switcher::Event::UpdateConfig(
+                        self.config.config.clone(),
+                    ));
+                }
+
                 if let Some(old_ser) = old_keys_ser {
                     if serde_json::to_string(&self.config.config.keys).ok().as_deref()
                         != Some(&old_ser)
@@ -353,12 +364,14 @@ impl WmController {
             }
             Command(Wm(NextWorkspace)) => {
                 self.dismiss_mission_control();
+                self.dismiss_command_switcher();
                 self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
                     layout::LayoutCommand::NextWorkspace(None),
                 )));
             }
             Command(Wm(PrevWorkspace)) => {
                 self.dismiss_mission_control();
+                self.dismiss_command_switcher();
                 self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
                     layout::LayoutCommand::PrevWorkspace(None),
                 )));
@@ -377,6 +390,7 @@ impl WmController {
 
                 if let Some(workspace_index) = maybe_index {
                     self.dismiss_mission_control();
+                    self.dismiss_command_switcher();
                     self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
                         layout::LayoutCommand::SwitchToWorkspace(workspace_index),
                     )));
@@ -400,6 +414,7 @@ impl WmController {
                 };
 
                 if let Some(workspace_index) = maybe_index {
+                    self.dismiss_command_switcher();
                     self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
                         layout::LayoutCommand::MoveWindowToWorkspace(workspace_index),
                     )));
@@ -417,18 +432,31 @@ impl WmController {
             }
             Command(Wm(SwitchToLastWorkspace)) => {
                 self.dismiss_mission_control();
+                self.dismiss_command_switcher();
                 self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
                     layout::LayoutCommand::SwitchToLastWorkspace,
                 )));
             }
             Command(Wm(ShowMissionControlAll)) => {
                 if let Some(tx) = &self.mission_control_tx {
+                    self.dismiss_command_switcher();
                     let _ = tx.try_send(mission_control::Event::ShowAll);
                 }
             }
             Command(Wm(ShowMissionControlCurrent)) => {
                 if let Some(tx) = &self.mission_control_tx {
+                    self.dismiss_command_switcher();
                     let _ = tx.try_send(mission_control::Event::ShowCurrent);
+                }
+            }
+            Command(Wm(Switcher(mode))) => {
+                if let Some(tx) = &self.command_switcher_tx {
+                    let _ = tx.try_send(command_switcher::Event::Show(mode));
+                }
+            }
+            Command(Wm(CommandSwitcherDismiss)) => {
+                if let Some(tx) = &self.command_switcher_tx {
+                    let _ = tx.try_send(command_switcher::Event::Dismiss);
                 }
             }
             Command(Wm(Exec(cmd))) => {
@@ -443,6 +471,12 @@ impl WmController {
     fn dismiss_mission_control(&self) {
         if let Some(tx) = &self.mission_control_tx {
             let _ = tx.try_send(mission_control::Event::Dismiss);
+        }
+    }
+
+    fn dismiss_command_switcher(&self) {
+        if let Some(tx) = &self.command_switcher_tx {
+            let _ = tx.try_send(command_switcher::Event::Dismiss);
         }
     }
 

@@ -6,7 +6,7 @@ use crate::actor::reactor::{Reactor, WorkspaceSwitchState};
 use crate::actor::stack_line::Event as StackLineEvent;
 use crate::actor::wm_controller::WmEvent;
 use crate::common::collections::HashMap;
-use crate::common::config::{self as config, Config};
+use crate::common::config::{self as config, CommandSwitcherDisplayMode, Config};
 use crate::common::log::{MetricsCommand, handle_command};
 use crate::layout_engine::{EventResponse, LayoutCommand, LayoutEvent};
 use crate::sys::window_server::{self as window_server, WindowServerId};
@@ -201,6 +201,29 @@ impl CommandEventHandler {
             ));
         } else {
             reactor.set_mission_control_active(false);
+        }
+    }
+
+    pub fn handle_command_reactor_show_command_switcher(
+        reactor: &mut Reactor,
+        mode: CommandSwitcherDisplayMode,
+    ) {
+        if let Some(wm) = reactor.communication_manager.wm_sender.as_ref() {
+            let _ = wm.send(crate::actor::wm_controller::WmEvent::Command(
+                crate::actor::wm_controller::WmCommand::Wm(
+                    crate::actor::wm_controller::WmCmd::Switcher(mode),
+                ),
+            ));
+        }
+    }
+
+    pub fn handle_command_reactor_command_switcher_dismiss(reactor: &mut Reactor) {
+        if let Some(wm) = reactor.communication_manager.wm_sender.as_ref() {
+            let _ = wm.send(crate::actor::wm_controller::WmEvent::Command(
+                crate::actor::wm_controller::WmCommand::Wm(
+                    crate::actor::wm_controller::WmCmd::CommandSwitcherDismiss,
+                ),
+            ));
         }
     }
 }

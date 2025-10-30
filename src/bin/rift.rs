@@ -4,6 +4,7 @@ use std::process;
 use clap::{Parser, Subcommand};
 use objc2::MainThreadMarker;
 use objc2_application_services::AXUIElement;
+use rift_wm::actor::command_switcher::CommandSwitcherActor;
 use rift_wm::actor::config::ConfigActor;
 use rift_wm::actor::config_watcher::ConfigWatcher;
 use rift_wm::actor::event_tap::EventTap;
@@ -212,12 +213,14 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
     };
     let (mc_tx, mc_rx) = rift_wm::actor::channel();
     let (_mc_native_tx, mc_native_rx) = rift_wm::actor::channel();
+    let (cs_tx, cs_rx) = rift_wm::actor::channel();
     let (wm_controller, wm_controller_sender) = WmController::new(
         wm_config,
         events_tx.clone(),
         event_tap_tx.clone(),
         stack_line_tx.clone(),
         mc_tx.clone(),
+        cs_tx.clone(),
     );
 
     let _ = events_tx.send(reactor::Event::RegisterWmSender(wm_controller_sender.clone()));
@@ -241,6 +244,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
 
     let mission_control = MissionControlActor::new(config.clone(), mc_rx, events_tx.clone(), mtm);
     let mission_control_native = NativeMissionControl::new(events_tx.clone(), mc_native_rx);
+    let command_switcher = CommandSwitcherActor::new(config.clone(), cs_rx, events_tx.clone(), mtm);
 
     println!(
         "NOTICE: by default rift starts in a deactivated state.
@@ -260,6 +264,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
             wn_actor.run(),
             mission_control_native.run(),
             mission_control.run(),
+            command_switcher.run(),
         );
     });
 

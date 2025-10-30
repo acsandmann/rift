@@ -46,7 +46,7 @@ use crate::actor::raise_manager::{self, RaiseManager, RaiseRequest};
 use crate::actor::reactor::events::window_discovery::WindowDiscoveryHandler;
 use crate::actor::{self, menu_bar, stack_line};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
-use crate::common::config::Config;
+use crate::common::config::{CommandSwitcherDisplayMode, Config};
 use crate::common::log::MetricsCommand;
 use crate::layout_engine::{self as layout, Direction, LayoutCommand, LayoutEngine, LayoutEvent};
 use crate::model::VirtualWorkspaceId;
@@ -247,6 +247,10 @@ pub enum ReactorCommand {
     ShowMissionControlAll,
     ShowMissionControlCurrent,
     DismissMissionControl,
+    ShowCommandSwitcher {
+        mode: CommandSwitcherDisplayMode,
+    },
+    CommandSwitcherDismiss,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -770,6 +774,12 @@ impl Reactor {
             }
             Event::Command(Command::Reactor(ReactorCommand::DismissMissionControl)) => {
                 CommandEventHandler::handle_command_reactor_dismiss_mission_control(self);
+            }
+            Event::Command(Command::Reactor(ReactorCommand::ShowCommandSwitcher { mode })) => {
+                CommandEventHandler::handle_command_reactor_show_command_switcher(self, mode);
+            }
+            Event::Command(Command::Reactor(ReactorCommand::CommandSwitcherDismiss)) => {
+                CommandEventHandler::handle_command_reactor_command_switcher_dismiss(self);
             }
             _ => (),
         }

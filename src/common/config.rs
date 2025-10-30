@@ -405,6 +405,8 @@ pub struct UiSettings {
     pub stack_line: StackLineSettings,
     #[serde(default)]
     pub mission_control: MissionControlSettings,
+    #[serde(default)]
+    pub command_switcher: CommandSwitcherSettings,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
@@ -493,6 +495,36 @@ pub struct MissionControlSettings {
     pub fade_enabled: bool,
     #[serde(default = "default_mission_control_fade_duration_ms")]
     pub fade_duration_ms: f64,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct CommandSwitcherSettings {
+    #[serde(default = "no")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub default_mode: Option<CommandSwitcherDisplayMode>,
+}
+
+impl Default for CommandSwitcherSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            default_mode: None,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandSwitcherDisplayMode {
+    CurrentWorkspace,
+    AllWindows,
+    Workspaces,
+}
+
+impl Default for CommandSwitcherDisplayMode {
+    fn default() -> Self { CommandSwitcherDisplayMode::CurrentWorkspace }
 }
 
 fn default_mission_control_fade_duration_ms() -> f64 { 180.0 }

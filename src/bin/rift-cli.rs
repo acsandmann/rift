@@ -2,6 +2,7 @@ use std::process::{self};
 
 use clap::{Parser, Subcommand};
 use rift_wm::actor::reactor;
+use rift_wm::common::config::CommandSwitcherDisplayMode;
 use rift_wm::ipc::{RiftCommand, RiftMachClient, RiftRequest, RiftResponse};
 use rift_wm::layout_engine as layout;
 use rift_wm::model::server::{ApplicationData, LayoutStateData, WindowData, WorkspaceData};
@@ -98,6 +99,11 @@ enum ExecuteCommands {
     MissionControl {
         #[command(subcommand)]
         mission_cmd: MissionControlCommands,
+    },
+    /// Command switcher commands
+    CommandSwitcher {
+        #[command(subcommand)]
+        switcher_cmd: CommandSwitcherCommands,
     },
     /// Save current state and exit rift
     SaveAndExit,
@@ -246,6 +252,17 @@ enum MissionControlCommands {
 }
 
 #[derive(Subcommand)]
+enum CommandSwitcherCommands {
+    /// Show the command switcher using a specific mode
+    Show {
+        #[arg(value_name = "mode")]
+        switcher: String,
+    },
+    /// Dismiss the command switcher
+    Dismiss,
+}
+
+#[derive(Subcommand)]
 enum SubscribeCommands {
     /// Subscribe to Mach IPC events
     Mach {
@@ -377,6 +394,9 @@ fn build_execute_request(execute: ExecuteCommands) -> Result<RiftRequest, String
         ExecuteCommands::Config { config_cmd } => map_config_command(config_cmd)?,
         ExecuteCommands::MissionControl { mission_cmd } => {
             map_mission_control_command(mission_cmd)?
+        }
+        ExecuteCommands::CommandSwitcher { switcher_cmd } => {
+            map_command_switcher_command(switcher_cmd)?
         }
         ExecuteCommands::SaveAndExit => {
             RiftCommand::Reactor(reactor::Command::Reactor(reactor::ReactorCommand::SaveAndExit))
@@ -585,6 +605,35 @@ fn map_mission_control_command(cmd: MissionControlCommands) -> Result<RiftComman
         MissionControlCommands::Dismiss => Ok(RiftCommand::Reactor(reactor::Command::Reactor(
             reactor::ReactorCommand::DismissMissionControl,
         ))),
+    }
+}
+
+fn map_command_switcher_command(cmd: CommandSwitcherCommands) -> Result<RiftCommand, String> {
+    use reactor::ReactorCommand;
+    match cmd {
+        CommandSwitcherCommands::Show { switcher } => {
+            let mode = parse_switcher_mode(&switcher)?;
+            Ok(RiftCommand::Reactor(reactor::Command::Reactor(
+                ReactorCommand::ShowCommandSwitcher { mode },
+            )))
+        }
+        CommandSwitcherCommands::Dismiss => Ok(RiftCommand::Reactor(reactor::Command::Reactor(
+            ReactorCommand::CommandSwitcherDismiss,
+        ))),
+    }
+}
+
+fn parse_switcher_mode(value: &str) -> Result<CommandSwitcherDisplayMode, String> {
+    match value.to_lowercase().as_str() {
+        "current_workspace" | "current" | "workspace" | "workspaces_current" => {
+            Ok(CommandSwitcherDisplayMode::CurrentWorkspace)
+        }
+        "all_windows" | "all" | "windows" => Ok(CommandSwitcherDisplayMode::AllWindows),
+        "workspaces" | "spaces" => Ok(CommandSwitcherDisplayMode::Workspaces),
+        other => Err(format!(
+            "Unknown switcher mode `{}`. Expected one of: current_workspace, all_windows, workspaces",
+            other
+        )),
     }
 }
 
