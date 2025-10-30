@@ -19,7 +19,7 @@
 animate = true
 animation_duration = 0.3
 animation_fps = 100.0
-animation_easing = "ease_in_out_cubic"
+animation_easing = "ease_in_out"
 
 # Space activation behavior
 # - If true, spaces start inactive (rift does not manage windows there)
@@ -33,7 +33,7 @@ animation_easing = "ease_in_out_cubic"
 # - mouse_follows_focus: when focus changes, move the mouse to the focused window
 # - mouse_hides_on_focus: hide the mouse cursor after focusing a window
 focus_follows_mouse = true
-mouse_follows_focus = false
+mouse_follows_focus = true
 mouse_hides_on_focus = true
 # focus_follows_mouse_disable_hotkey temporarily suspends focus-follows-mouse while held
 # e.g. "Fn"; omit or set to null to keep focus-follows-mouse always active
@@ -80,7 +80,7 @@ mode = "traditional"
 # How much of each stacked window sticks out (in pixels)
 # Set to 0.0 to have them directly on top of each other.
 # Recommended: 30-50 for clear edges while keeping focus visible.
-stack_offset = 30.0
+stack_offset = 40.0
 
 # Default stacking orientation when creating a new stack.
 # Options:
@@ -95,7 +95,7 @@ default_orientation = "perpendicular"
 # - inner: space between tiled windows
 
 [settings.layout.gaps.outer]
-top = 6
+top = 0
 left = 0
 bottom = 0
 right = 0
@@ -106,10 +106,11 @@ vertical = 0
 
 [settings.ui.menu_bar]
 # enable menu bar workspace indicators
-enabled = true
+enabled = false
 # if enabled, it will show all workspaces including empty ones. disabled because this
 # tends to take up too much room in the menubar and then is auto hidden by macos
 show_empty = false
+
 [settings.ui.stack_line]
 # experimental stack line indicator (defaults to off)
 enabled = false
@@ -117,10 +118,10 @@ enabled = false
 horiz_placement = "top"
 # in a vertical stack where the line will be (left/right)
 vert_placement = "left"
-# how thick the line indicator will be (in px)
-thickness = 4.0
+# how thick the line indicator will be (in px) -- default 0 when disabled
+thickness = 0.0
 # spacing between the stack line and window edges (in px)
-spacing = 2.0
+spacing = 0.0
 
 # experimental mission control
 [settings.ui.mission_control]
@@ -144,7 +145,7 @@ skip_empty = true
 # Number of fingers required for swipe
 fingers = 3
 # Normalized horizontal distance (0..1) to trigger swipe for NSTouch-based detection
-distance_pct = 0.12
+distance_pct = 0.08
 # Haptic feedback on commit (generic | alignment | level_change)
 haptics_enabled = true
 haptic_pattern = "level_change"
@@ -181,7 +182,8 @@ workspace_auto_back_and_forth = false
 # remaining workspaces are named "Workspace X".
 # Do not provide more names than default_workspace_count.
 workspace_names = [
-	"first"
+	"first",
+	"second"
 ]
 
 # App rules (automatic assignment)
