@@ -243,8 +243,6 @@ enum MissionControlCommands {
     ShowCurrent,
     /// Dismiss mission control
     Dismiss,
-    /// Explicitly set mission control active state
-    SetActive { active: bool },
 }
 
 #[derive(Subcommand)]
@@ -579,17 +577,14 @@ fn map_config_command(cmd: ConfigCommands) -> Result<RiftCommand, String> {
 fn map_mission_control_command(cmd: MissionControlCommands) -> Result<RiftCommand, String> {
     match cmd {
         MissionControlCommands::ShowAll => Ok(RiftCommand::Reactor(reactor::Command::Reactor(
-            reactor::ReactorCommand::SetMissionControlActive(true),
+            reactor::ReactorCommand::ShowMissionControlAll,
         ))),
         MissionControlCommands::ShowCurrent => Ok(RiftCommand::Reactor(reactor::Command::Reactor(
-            reactor::ReactorCommand::SetMissionControlActive(true),
+            reactor::ReactorCommand::ShowMissionControlCurrent,
         ))),
         MissionControlCommands::Dismiss => Ok(RiftCommand::Reactor(reactor::Command::Reactor(
-            reactor::ReactorCommand::SetMissionControlActive(false),
+            reactor::ReactorCommand::DismissMissionControl,
         ))),
-        MissionControlCommands::SetActive { active } => Ok(RiftCommand::Reactor(
-            reactor::Command::Reactor(reactor::ReactorCommand::SetMissionControlActive(active)),
-        )),
     }
 }
 

@@ -86,7 +86,7 @@ impl MissionControlActor {
         if let Some(overlay) = self.overlay.take() {
             overlay.hide();
         }
-        self.set_mission_control_active(false);
+        self.mission_control_active = false;
     }
 
     fn handle_overlay_action(&mut self, action: MissionControlAction) {
@@ -111,16 +111,6 @@ impl MissionControlActor {
         }
     }
 
-    fn set_mission_control_active(&mut self, active: bool) {
-        if self.mission_control_active == active {
-            return;
-        }
-        self.mission_control_active = active;
-        let _ = self.reactor_tx.try_send(reactor::Event::Command(reactor::Command::Reactor(
-            reactor::ReactorCommand::SetMissionControlActive(active),
-        )));
-    }
-
     #[instrument(skip(self))]
     fn handle_event(&mut self, event: Event) {
         match event {
@@ -143,7 +133,7 @@ impl MissionControlActor {
     }
 
     fn show_all_workspaces(&mut self) {
-        self.set_mission_control_active(true);
+        self.mission_control_active = true;
         {
             let overlay = self.ensure_overlay();
             overlay.update(MissionControlMode::AllWorkspaces(Vec::new()));
@@ -161,7 +151,7 @@ impl MissionControlActor {
     }
 
     fn show_current_workspace(&mut self) {
-        self.set_mission_control_active(true);
+        self.mission_control_active = true;
         {
             let overlay = self.ensure_overlay();
             overlay.update(MissionControlMode::CurrentWorkspace(Vec::new()));

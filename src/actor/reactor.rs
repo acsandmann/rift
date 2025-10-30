@@ -244,7 +244,9 @@ pub enum ReactorCommand {
         window_id: WindowId,
         window_server_id: Option<WindowServerId>,
     },
-    SetMissionControlActive(bool),
+    ShowMissionControlAll,
+    ShowMissionControlCurrent,
+    DismissMissionControl,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -760,10 +762,14 @@ impl Reactor {
                     window_server_id,
                 );
             }
-            Event::Command(Command::Reactor(ReactorCommand::SetMissionControlActive(active))) => {
-                CommandEventHandler::handle_command_reactor_set_mission_control_active(
-                    self, active,
-                );
+            Event::Command(Command::Reactor(ReactorCommand::ShowMissionControlAll)) => {
+                CommandEventHandler::handle_command_reactor_show_mission_control_all(self);
+            }
+            Event::Command(Command::Reactor(ReactorCommand::ShowMissionControlCurrent)) => {
+                CommandEventHandler::handle_command_reactor_show_mission_control_current(self);
+            }
+            Event::Command(Command::Reactor(ReactorCommand::DismissMissionControl)) => {
+                CommandEventHandler::handle_command_reactor_dismiss_mission_control(self);
             }
             _ => (),
         }

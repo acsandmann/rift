@@ -172,7 +172,35 @@ impl CommandEventHandler {
         }
     }
 
-    pub fn handle_command_reactor_set_mission_control_active(reactor: &mut Reactor, active: bool) {
-        reactor.set_mission_control_active(active);
+    pub fn handle_command_reactor_show_mission_control_all(reactor: &mut Reactor) {
+        if let Some(wm) = reactor.communication_manager.wm_sender.as_ref() {
+            let _ = wm.send(crate::actor::wm_controller::WmEvent::Command(
+                crate::actor::wm_controller::WmCommand::Wm(
+                    crate::actor::wm_controller::WmCmd::ShowMissionControlAll,
+                ),
+            ));
+        }
+    }
+
+    pub fn handle_command_reactor_show_mission_control_current(reactor: &mut Reactor) {
+        if let Some(wm) = reactor.communication_manager.wm_sender.as_ref() {
+            let _ = wm.send(crate::actor::wm_controller::WmEvent::Command(
+                crate::actor::wm_controller::WmCommand::Wm(
+                    crate::actor::wm_controller::WmCmd::ShowMissionControlCurrent,
+                ),
+            ));
+        }
+    }
+
+    pub fn handle_command_reactor_dismiss_mission_control(reactor: &mut Reactor) {
+        if let Some(wm) = reactor.communication_manager.wm_sender.as_ref() {
+            let _ = wm.send(crate::actor::wm_controller::WmEvent::Command(
+                crate::actor::wm_controller::WmCommand::Wm(
+                    crate::actor::wm_controller::WmCmd::ShowMissionControlAll,
+                ),
+            ));
+        } else {
+            reactor.set_mission_control_active(false);
+        }
     }
 }
