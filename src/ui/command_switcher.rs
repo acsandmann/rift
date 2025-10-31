@@ -258,6 +258,40 @@ impl CommandSwitcherState {
         self.ensure_selection();
     }
 
+    fn purge(&mut self) {
+        CAPTURE_MANAGER.bump_generation();
+
+        self.mode = None;
+        self.items.clear();
+        self.selection = None;
+        self.item_frames.clear();
+        self.item_styles.clear();
+        self.ready_previews.clear();
+        self.grid_columns = 0;
+        self.grid_rows = 0;
+
+        {
+            let mut cache = self.preview_cache.write();
+            cache.clear();
+        }
+
+        for layer in self.item_layers.values() {
+            layer.removeFromSuperlayer();
+        }
+        self.item_layers.clear();
+
+        for layer in self.label_layers.values() {
+            layer.removeFromSuperlayer();
+        }
+        self.label_layers.clear();
+        self.label_strings.clear();
+
+        for entry in self.preview_layers.values() {
+            entry.layer().removeFromSuperlayer();
+        }
+        self.preview_layers.clear();
+    }
+
     fn ensure_selection(&mut self) {
         if let Some(idx) = self.selection {
             if idx < self.items.len() {
@@ -486,14 +520,27 @@ impl CommandSwitcherOverlay {
     }
 
     pub fn hide(&self) {
-        if !*self.has_shown.borrow() {
-            return;
+        {
+            let mut state = self.state.borrow_mut();
+            state.purge();
         }
-        *self.has_shown.borrow_mut() = false;
-        let _ = self.cgs_window.set_alpha(0.0);
-        let _ = self.cgs_window.order_out();
+
+        self.refresh_pending.store(false, Ordering::Release);
+
+        let was_shown = {
+            let mut shown = self.has_shown.borrow_mut();
+            let prev = *shown;
+            *shown = false;
+            prev
+        };
+
         if let Some(tap) = self.key_tap.borrow_mut().take() {
             drop(tap);
+        }
+
+        if was_shown {
+            let _ = self.cgs_window.set_alpha(0.0);
+            let _ = self.cgs_window.order_out();
         }
     }
 
