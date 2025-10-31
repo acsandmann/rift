@@ -62,11 +62,11 @@ const ITEM_SPACING: f64 = 28.0;
 const CONTAINER_PADDING: f64 = 32.0;
 const LABEL_HEIGHT: f64 = 20.0;
 const MAX_CONTAINER_WIDTH_RATIO: f64 = 0.82;
+const WINDOW_TILE_INSET: f64 = 3.0;
+const WINDOW_TILE_GAP: f64 = 1.0;
 const WINDOW_TILE_MIN_SIZE: f64 = 2.0;
+const WINDOW_TILE_SCALE_FACTOR: f64 = 0.75;
 const WINDOW_TILE_MAX_SCALE: f64 = 1.0;
-const CURRENT_WS_TILE_PADDING: f64 = 12.0;
-const CURRENT_WS_TILE_SCALE_FACTOR: f64 = 0.88;
-const WORKSPACE_PREVIEW_SPACING: f64 = 24.0;
 const PREVIEW_MAX_EDGE: f64 = 420.0;
 const PREVIEW_MIN_EDGE: f64 = 96.0;
 // Do a small synchronous capture pass to reduce initial pop-in
@@ -1106,12 +1106,8 @@ impl CommandSwitcherOverlay {
         let container = container_entry.layer().clone();
         container.setFrame(frame);
         container.setCornerRadius(if selected { 9.0 } else { 8.0 });
-        container.setBorderWidth(if selected { 3.0 } else { 1.0 });
-        container.setBorderColor(Some(if selected {
-            &**SELECTED_BORDER_COLOR
-        } else {
-            &**WORKSPACE_BORDER_COLOR
-        }));
+        container.setBorderWidth(0.0);
+        container.setBorderColor(None);
         let bg_color = if selected {
             &**ITEM_SELECTED_BG_COLOR
         } else {
@@ -1491,61 +1487,99 @@ fn point_in_rect(pt: CGPoint, rect: CGRect) -> bool {
         && pt.y <= rect.origin.y + rect.size.height
 }
 
-fn compute_workspace_window_layout(windows: &[WindowData], frame: CGRect) -> Option<Vec<CGRect>> {
-    compute_exploded_layout(windows, frame)
+struct WorkspaceLayoutMetrics {
+    scale: f64,
+    x_offset: f64,
+    y_offset: f64,
+    min_x: f64,
+    min_y: f64,
+    disp_height: f64,
 }
 
-fn compute_exploded_layout(windows: &[WindowData], bounds: CGRect) -> Option<Vec<CGRect>> {
-    if windows.is_empty() {
-        return None;
-    }
-
-    let count = windows.len();
-    let columns = ((count as f64).sqrt().ceil() as usize).max(1);
-    let rows = ((count + columns - 1) / columns).max(1);
-    let spacing = WORKSPACE_PREVIEW_SPACING;
-
-    let total_spacing_x = spacing * ((columns + 1) as f64);
-    let total_spacing_y = spacing * ((rows + 1) as f64);
-
-    let available_width = (bounds.size.width - total_spacing_x).max(1.0);
-    let available_height = (bounds.size.height - total_spacing_y).max(1.0);
-    let cell_width = available_width / columns as f64;
-    let cell_height = available_height / rows as f64;
-
-    let mut rects = Vec::with_capacity(count);
-    for idx in 0..count {
-        let window = &windows[idx];
-        let row = idx / columns;
-        let col = idx % columns;
-
-        let cell_origin_x = bounds.origin.x + spacing + (cell_width + spacing) * (col as f64);
-        let cell_origin_y = bounds.origin.y + spacing + (cell_height + spacing) * (row as f64);
-
-        let inner_width = (cell_width - 2.0 * CURRENT_WS_TILE_PADDING).max(WINDOW_TILE_MIN_SIZE);
-        let inner_height = (cell_height - 2.0 * CURRENT_WS_TILE_PADDING).max(WINDOW_TILE_MIN_SIZE);
-
-        let original_width = window.frame.size.width.max(1.0);
-        let original_height = window.frame.size.height.max(1.0);
-
-        let mut scale = (inner_width / original_width).min(inner_height / original_height);
-        scale = scale.min(WINDOW_TILE_MAX_SCALE);
-        if scale > 0.5 {
-            scale *= CURRENT_WS_TILE_SCALE_FACTOR;
+impl WorkspaceLayoutMetrics {
+    fn new(windows: &[WindowData], bounds: CGRect) -> Option<Self> {
+        if windows.is_empty() {
+            return None;
         }
-        let scaled_width = (original_width * scale).max(WINDOW_TILE_MIN_SIZE);
-        let scaled_height = (original_height * scale).max(WINDOW_TILE_MIN_SIZE);
 
-        let origin_x = cell_origin_x + (cell_width - scaled_width) / 2.0;
-        let origin_y = cell_origin_y + (cell_height - scaled_height) / 2.0;
+        let mut min_x = f64::INFINITY;
+        let mut min_y = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        let mut max_y = f64::NEG_INFINITY;
 
-        rects.push(CGRect::new(
-            CGPoint::new(origin_x, origin_y),
-            CGSize::new(scaled_width, scaled_height),
-        ));
+        for window in windows {
+            let x0 = window.frame.origin.x;
+            let y0 = window.frame.origin.y;
+            let x1 = x0 + window.frame.size.width;
+            let y1 = y0 + window.frame.size.height;
+            if x0 < min_x {
+                min_x = x0;
+            }
+            if y0 < min_y {
+                min_y = y0;
+            }
+            if x1 > max_x {
+                max_x = x1;
+            }
+            if y1 > max_y {
+                max_y = y1;
+            }
+        }
+
+        let disp_w = (max_x - min_x).max(1.0);
+        let disp_h = (max_y - min_y).max(1.0);
+
+        let content_w = (bounds.size.width - 2.0 * WINDOW_TILE_INSET).max(1.0);
+        let content_h = (bounds.size.height - 2.0 * WINDOW_TILE_INSET).max(1.0);
+
+        let scale = (content_w / disp_w).min(content_h / disp_h).min(WINDOW_TILE_MAX_SCALE)
+            * WINDOW_TILE_SCALE_FACTOR;
+
+        if !scale.is_finite() || scale <= 0.0 {
+            return None;
+        }
+
+        let x_offset = bounds.origin.x + WINDOW_TILE_INSET + (content_w - disp_w * scale) / 2.0;
+        let y_offset = bounds.origin.y + WINDOW_TILE_INSET + (content_h - disp_h * scale) / 2.0;
+
+        Some(Self {
+            scale,
+            x_offset,
+            y_offset,
+            min_x,
+            min_y,
+            disp_height: disp_h,
+        })
     }
 
-    Some(rects)
+    fn rect_for(&self, window: &WindowData) -> CGRect {
+        let wx = window.frame.origin.x - self.min_x;
+        let wy_top = window.frame.origin.y - self.min_y + window.frame.size.height;
+        let wy = self.disp_height - wy_top;
+        let ww = window.frame.size.width;
+        let wh = window.frame.size.height;
+
+        let mut rx = self.x_offset + wx * self.scale;
+        let mut ry = self.y_offset + wy * self.scale;
+        let mut rw = (ww * self.scale).max(WINDOW_TILE_MIN_SIZE);
+        let mut rh = (wh * self.scale).max(WINDOW_TILE_MIN_SIZE);
+
+        if rw > (WINDOW_TILE_MIN_SIZE + WINDOW_TILE_GAP) {
+            rx += WINDOW_TILE_GAP / 2.0;
+            rw -= WINDOW_TILE_GAP;
+        }
+        if rh > (WINDOW_TILE_MIN_SIZE + WINDOW_TILE_GAP) {
+            ry += WINDOW_TILE_GAP / 2.0;
+            rh -= WINDOW_TILE_GAP;
+        }
+
+        CGRect::new(CGPoint::new(rx, ry), CGSize::new(rw, rh))
+    }
+}
+
+fn compute_workspace_window_layout(windows: &[WindowData], frame: CGRect) -> Option<Vec<CGRect>> {
+    let metrics = WorkspaceLayoutMetrics::new(windows, frame)?;
+    Some(windows.iter().map(|window| metrics.rect_for(window)).collect())
 }
 
 fn capture_target_for_window(window: &WindowData) -> (usize, usize) {
