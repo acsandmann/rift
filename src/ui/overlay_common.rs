@@ -11,7 +11,7 @@ use parking_lot::{Mutex, RwLock};
 
 use crate::actor::app::WindowId;
 use crate::common::collections::{HashMap, HashSet};
-use crate::sys::window_server::{capture_window_image, CapturedWindowImage, WindowServerId};
+use crate::sys::window_server::{CapturedWindowImage, WindowServerId, capture_window_image};
 
 #[derive(Debug, Clone)]
 pub struct CaptureTask {
@@ -29,7 +29,10 @@ pub struct RefreshCtx {
 
 impl RefreshCtx {
     pub fn new(overlay_ptr: *const c_void, callback: unsafe fn(usize)) -> Self {
-        Self { overlay_bits: overlay_ptr as usize, callback }
+        Self {
+            overlay_bits: overlay_ptr as usize,
+            callback,
+        }
     }
 
     pub fn call(&self) {
@@ -91,9 +94,7 @@ impl CaptureManager {
         self.current_generation.fetch_add(1, Ordering::AcqRel) + 1
     }
 
-    pub fn current_generation(&self) -> u64 {
-        self.current_generation.load(Ordering::Acquire)
-    }
+    pub fn current_generation(&self) -> u64 { self.current_generation.load(Ordering::Acquire) }
 
     pub fn try_mark_in_flight(&self, generation: u64, window_id: WindowId) -> bool {
         let mut set = self.in_flight.lock();
@@ -123,9 +124,7 @@ impl CaptureManager {
 }
 
 impl Default for CaptureManager {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 fn worker_loop(

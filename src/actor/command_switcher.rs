@@ -216,6 +216,6 @@ fn flatten_windows(workspaces: Vec<WorkspaceData>) -> Vec<WindowData> {
 fn filter_workspaces(workspaces: Vec<WorkspaceData>) -> Vec<WorkspaceData> {
     workspaces
         .into_iter()
-    .filter(|ws| ws.is_active || ws.is_last_active || !ws.windows.is_empty())
+        .filter(|ws| ws.is_active || ws.is_last_active || !ws.windows.is_empty())
         .collect()
 }

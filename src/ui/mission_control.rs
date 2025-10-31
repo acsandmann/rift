@@ -169,7 +169,7 @@ impl MissionControlState {
     fn set_mode(&mut self, mode: MissionControlMode) {
         self.mode = Some(mode);
         self.selection = None;
-    CAPTURE_MANAGER.bump_generation();
+        CAPTURE_MANAGER.bump_generation();
         self.ready_previews.clear();
         self.prune_preview_cache();
         self.ensure_selection();
@@ -182,7 +182,7 @@ impl MissionControlState {
         self.selection = None;
         self.on_action = None;
 
-    CAPTURE_MANAGER.bump_generation();
+        CAPTURE_MANAGER.bump_generation();
 
         let mut cache = self.preview_cache.write();
         cache.clear();
@@ -1012,9 +1012,7 @@ impl MissionControlOverlay {
                         .update_selected(is_selected);
                     let maybe_img_ptr = {
                         let cache = s.preview_cache.read();
-                        cache
-                            .get(&window.id)
-                            .map(|img| img.as_ptr() as *mut AnyObject)
+                        cache.get(&window.id).map(|img| img.as_ptr() as *mut AnyObject)
                     };
                     let mut had_image = false;
                     if let Some(img_ptr) = maybe_img_ptr {
