@@ -62,6 +62,7 @@ const ITEM_SPACING: f64 = 28.0;
 const CONTAINER_PADDING: f64 = 32.0;
 const LABEL_HEIGHT: f64 = 20.0;
 const MAX_CONTAINER_WIDTH_RATIO: f64 = 0.82;
+const MAX_CONTAINER_HEIGHT_RATIO: f64 = 0.88;
 const WINDOW_TILE_INSET: f64 = 3.0;
 const WINDOW_TILE_GAP: f64 = 1.0;
 const WINDOW_TILE_MIN_SIZE: f64 = 2.0;
@@ -209,6 +210,8 @@ struct CommandSwitcherState {
     item_styles: HashMap<ItemKey, ItemLayerStyle>,
     ready_previews: HashSet<WindowId>,
     item_frames: Vec<(ItemKey, CGRect)>,
+    grid_columns: usize,
+    grid_rows: usize,
 }
 
 impl Default for CommandSwitcherState {
@@ -226,6 +229,8 @@ impl Default for CommandSwitcherState {
             item_styles: HashMap::default(),
             ready_previews: HashSet::default(),
             item_frames: Vec::new(),
+            grid_columns: 0,
+            grid_rows: 0,
         }
     }
 }
@@ -268,6 +273,8 @@ impl CommandSwitcherState {
             false
         });
         self.item_styles.clear();
+        self.grid_columns = 0;
+        self.grid_rows = 0;
 
         match mode {
             CommandSwitcherMode::CurrentWorkspace(windows)
@@ -558,38 +565,93 @@ impl CommandSwitcherOverlay {
     pub fn dismiss(&self) { self.emit_action(CommandSwitcherAction::Dismiss); }
 
     fn adjust_selection(&self, delta: isize) -> bool {
-        // Determine old/new indices without re-rendering everything
-        let (old_idx, new_idx, old_key, new_key) = {
-            let mut state = match self.state.try_borrow_mut() {
+        let (len, current) = {
+            let state = match self.state.try_borrow() {
                 Ok(s) => s,
                 Err(_) => return false,
             };
             if state.items.is_empty() {
                 return false;
             }
-            let len = state.items.len();
-            let current = state.selection().unwrap_or(0);
-            let mut idx = current as isize + delta;
-            if idx < 0 {
-                idx += len as isize * ((-idx / len as isize) + 1);
-            }
-            let new_idx = (idx as usize) % len;
-            if new_idx == current {
-                return false;
-            }
-            state.set_selection(new_idx);
-            let old_key = state.items[current].key.clone();
-            let new_key = state.items[new_idx].key.clone();
-            (Some(current), Some(new_idx), Some(old_key), Some(new_key))
+            (state.items.len(), state.selection().unwrap_or(0))
         };
 
-        // Update only the styles for old and new selection
-        if let (Some(_oi), Some(_ni), Some(ok), Some(nk)) = (old_idx, new_idx, old_key, new_key) {
-            self.update_item_selected_style(&ok, false);
-            self.update_item_selected_style(&nk, true);
-            return true;
+        let len_isize = len as isize;
+        if len_isize == 0 {
+            return false;
         }
-        false
+
+        let mut idx = (current as isize + delta) % len_isize;
+        if idx < 0 {
+            idx += len_isize;
+        }
+
+        self.set_selection_index(idx as usize)
+    }
+
+    fn adjust_selection_vertical(&self, delta_rows: isize) -> bool {
+        let (len, current, columns, rows) = {
+            let state = match self.state.try_borrow() {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+            if state.items.is_empty() || state.grid_columns == 0 {
+                return false;
+            }
+            (
+                state.items.len(),
+                state.selection().unwrap_or(0),
+                state.grid_columns,
+                state.grid_rows.max(1),
+            )
+        };
+
+        if columns == 0 {
+            return false;
+        }
+
+        let current_row = current / columns;
+        let current_col = current % columns;
+        let mut target_row = current_row as isize + delta_rows;
+        if target_row < 0 || target_row as usize >= rows {
+            return false;
+        }
+
+        let target_row_usize = target_row as usize;
+        let row_start = target_row_usize * columns;
+        if row_start >= len {
+            return false;
+        }
+        let row_end = ((target_row_usize + 1) * columns).min(len);
+        let target_idx = (row_start + current_col).min(row_end.saturating_sub(1));
+
+        self.set_selection_index(target_idx)
+    }
+
+    fn set_selection_index(&self, new_idx: usize) -> bool {
+        let (old_key, new_key) = {
+            let mut state = match self.state.try_borrow_mut() {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+            if state.items.is_empty() || new_idx >= state.items.len() {
+                return false;
+            }
+            let previous = state.selection();
+            if previous == Some(new_idx) {
+                return false;
+            }
+            let new_key = state.items[new_idx].key.clone();
+            let old_key = previous.and_then(|idx| state.items.get(idx).map(|it| it.key.clone()));
+            state.set_selection(new_idx);
+            (old_key, new_key)
+        };
+
+        if let Some(ok) = old_key {
+            self.update_item_selected_style(&ok, false);
+        }
+        self.update_item_selected_style(&new_key, true);
+        true
     }
 
     fn emit_action(&self, action: CommandSwitcherAction) {
@@ -865,6 +927,8 @@ impl CommandSwitcherOverlay {
         let mut state = self.state.borrow_mut();
         let item_count = state.items.len();
         let layout = compute_layout(item_count, self.frame.size);
+        state.grid_columns = layout.columns;
+        state.grid_rows = layout.rows;
         self.container_layer.setFrame(layout.container_frame);
         // follow mission_control style: subtle tinted backdrop card with light border & gentle shadow
         self.container_layer.setBackgroundColor(Some(&**WORKSPACE_BACKGROUND_COLOR));
@@ -1328,14 +1392,22 @@ impl CommandSwitcherOverlay {
                     self.present_root_layer();
                 }
             }
+            126 => {
+                if self.adjust_selection_vertical(-1) {
+                    self.present_root_layer();
+                }
+            }
+            125 => {
+                if self.adjust_selection_vertical(1) {
+                    self.present_root_layer();
+                }
+            }
             _ => {}
         }
     }
 
     fn handle_click_global(&self, g_pt: CGPoint) {
-        let lx = g_pt.x - self.frame.origin.x;
-        let ly = g_pt.y - self.frame.origin.y;
-        let pt = CGPoint::new(lx, ly);
+        let pt = self.global_to_local_point(g_pt);
         let mut state = match self.state.try_borrow_mut() {
             Ok(s) => s,
             Err(_) => return,
@@ -1357,9 +1429,7 @@ impl CommandSwitcherOverlay {
     }
 
     fn handle_move_global(&self, g_pt: CGPoint) {
-        let lx = g_pt.x - self.frame.origin.x;
-        let ly = g_pt.y - self.frame.origin.y;
-        let pt = CGPoint::new(lx, ly);
+        let pt = self.global_to_local_point(g_pt);
         let mut state = match self.state.try_borrow_mut() {
             Ok(s) => s,
             Err(_) => return,
@@ -1385,6 +1455,12 @@ impl CommandSwitcherOverlay {
             }
         }
     }
+
+    fn global_to_local_point(&self, g_pt: CGPoint) -> CGPoint {
+        let lx = g_pt.x - self.frame.origin.x;
+        let ly = (self.frame.origin.y + self.frame.size.height) - g_pt.y;
+        CGPoint::new(lx, ly)
+    }
 }
 
 #[derive(Clone)]
@@ -1398,6 +1474,8 @@ struct LayoutResult {
     container_frame: CGRect,
     item_frames: Vec<LayoutFrame>,
     scale: f64,
+    columns: usize,
+    rows: usize,
 }
 
 fn compute_layout(count: usize, bounds: CGSize) -> LayoutResult {
@@ -1409,41 +1487,109 @@ fn compute_layout(count: usize, bounds: CGSize) -> LayoutResult {
             ),
             item_frames: Vec::new(),
             scale: 1.0,
+            columns: 0,
+            rows: 0,
         };
     }
     let max_container_width = (bounds.width * MAX_CONTAINER_WIDTH_RATIO).max(420.0);
-    let base_total =
-        (BASE_ITEM_WIDTH * count as f64) + (ITEM_SPACING * (count.saturating_sub(1) as f64));
-    let mut scale = if base_total + 2.0 * CONTAINER_PADDING > max_container_width {
-        (max_container_width - 2.0 * CONTAINER_PADDING).max(BASE_ITEM_WIDTH) / base_total.max(1.0)
+    let max_container_height = (bounds.height * MAX_CONTAINER_HEIGHT_RATIO)
+        .max(BASE_ITEM_HEIGHT + 2.0 * CONTAINER_PADDING);
+    let available_width = (max_container_width - 2.0 * CONTAINER_PADDING).max(1.0);
+    let available_height = (max_container_height - 2.0 * CONTAINER_PADDING).max(1.0);
+
+    struct Candidate {
+        scale: f64,
+        columns: usize,
+        rows: usize,
+        container_width: f64,
+        container_height: f64,
+    }
+
+    let mut best: Option<Candidate> = None;
+    for columns in 1..=count {
+        let rows = (count + columns - 1) / columns;
+        let spacing_cols = (columns.saturating_sub(1)) as f64;
+        let spacing_rows = (rows.saturating_sub(1)) as f64;
+        let content_width = columns as f64 * BASE_ITEM_WIDTH + spacing_cols * ITEM_SPACING;
+        let content_height = rows as f64 * BASE_ITEM_HEIGHT + spacing_rows * ITEM_SPACING;
+        if content_width <= 0.0 || content_height <= 0.0 {
+            continue;
+        }
+
+        let width_scale = (available_width / content_width).min(1.0);
+        let height_scale = (available_height / content_height).min(1.0);
+        let scale = width_scale.min(height_scale);
+        if scale <= 0.0 {
+            continue;
+        }
+
+        let container_width = content_width * scale + 2.0 * CONTAINER_PADDING;
+        let container_height = content_height * scale + 2.0 * CONTAINER_PADDING;
+
+        let better = match &best {
+            None => true,
+            Some(current) => {
+                if (scale - current.scale).abs() > f64::EPSILON {
+                    scale > current.scale
+                } else if (container_height - current.container_height).abs() > f64::EPSILON {
+                    container_height < current.container_height
+                } else {
+                    container_width < current.container_width
+                }
+            }
+        };
+
+        if better {
+            best = Some(Candidate {
+                scale,
+                columns,
+                rows,
+                container_width,
+                container_height,
+            });
+        }
+    }
+
+    let best = best.unwrap_or_else(|| Candidate {
+        scale: 1.0,
+        columns: count,
+        rows: 1,
+        container_width: (BASE_ITEM_WIDTH * count as f64)
+            + (ITEM_SPACING * (count.saturating_sub(1) as f64))
+            + 2.0 * CONTAINER_PADDING,
+        container_height: BASE_ITEM_HEIGHT + 2.0 * CONTAINER_PADDING,
+    });
+
+    let item_width = BASE_ITEM_WIDTH * best.scale;
+    let item_height = BASE_ITEM_HEIGHT * best.scale;
+    let h_spacing = if best.columns > 1 {
+        ITEM_SPACING * best.scale
     } else {
-        1.0
+        0.0
     };
-    scale = scale.clamp(0.55, 1.0);
-    let item_width = BASE_ITEM_WIDTH * scale;
-    let item_height = BASE_ITEM_HEIGHT * scale;
-    let spacing = if count > 1 { ITEM_SPACING * scale } else { 0.0 };
+    let v_spacing = if best.rows > 1 {
+        ITEM_SPACING * best.scale
+    } else {
+        0.0
+    };
+    let preview_width = (item_width - 16.0 * best.scale).max(40.0);
+    let preview_height = (item_height - LABEL_HEIGHT * best.scale - 18.0 * best.scale).max(48.0);
+    let label_height = LABEL_HEIGHT * best.scale;
 
-    let preview_width = (item_width - 16.0 * scale).max(40.0);
-    let preview_height = (item_height - LABEL_HEIGHT * scale - 18.0 * scale).max(48.0);
-    let label_height = LABEL_HEIGHT * scale;
-
-    let container_width = item_width * count as f64
-        + spacing * (count.saturating_sub(1) as f64)
-        + 2.0 * CONTAINER_PADDING;
-    let container_height = item_height + 2.0 * CONTAINER_PADDING;
-    let origin_x = (bounds.width - container_width).max(0.0) / 2.0;
-    let origin_y = (bounds.height - container_height).max(0.0) / 2.0;
+    let origin_x = (bounds.width - best.container_width).max(0.0) / 2.0;
+    let origin_y = (bounds.height - best.container_height).max(0.0) / 2.0;
 
     let container_frame = CGRect::new(
         CGPoint::new(origin_x, origin_y),
-        CGSize::new(container_width, container_height),
+        CGSize::new(best.container_width, best.container_height),
     );
 
     let mut item_frames = Vec::with_capacity(count);
     for idx in 0..count {
-        let offset_x = CONTAINER_PADDING + idx as f64 * (item_width + spacing);
-        let offset_y = CONTAINER_PADDING;
+        let row = idx / best.columns;
+        let col = idx % best.columns;
+        let offset_x = CONTAINER_PADDING + col as f64 * (item_width + h_spacing);
+        let offset_y = CONTAINER_PADDING + row as f64 * (item_height + v_spacing);
 
         let item_frame = CGRect::new(
             CGPoint::new(offset_x, offset_y),
@@ -1453,17 +1599,17 @@ fn compute_layout(count: usize, bounds: CGSize) -> LayoutResult {
         let preview_frame = CGRect::new(
             CGPoint::new(
                 offset_x + (item_width - preview_width) / 2.0,
-                offset_y + 8.0 * scale,
+                offset_y + 8.0 * best.scale,
             ),
             CGSize::new(preview_width, preview_height),
         );
 
         let label_frame = CGRect::new(
             CGPoint::new(
-                offset_x + 8.0 * scale,
-                preview_frame.origin.y + preview_frame.size.height + 6.0 * scale,
+                offset_x + 8.0 * best.scale,
+                preview_frame.origin.y + preview_frame.size.height + 6.0 * best.scale,
             ),
-            CGSize::new(item_width - 16.0 * scale, label_height),
+            CGSize::new(item_width - 16.0 * best.scale, label_height),
         );
 
         item_frames.push(LayoutFrame {
@@ -1476,7 +1622,9 @@ fn compute_layout(count: usize, bounds: CGSize) -> LayoutResult {
     LayoutResult {
         container_frame,
         item_frames,
-        scale,
+        scale: best.scale,
+        columns: best.columns,
+        rows: best.rows,
     }
 }
 
