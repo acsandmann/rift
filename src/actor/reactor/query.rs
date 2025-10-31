@@ -81,6 +81,13 @@ impl Reactor {
                 Vec::new()
             };
 
+        let last_workspace_id = space_id.and_then(|space| {
+            self.layout_manager
+                .layout_engine
+                .virtual_workspace_manager()
+                .last_workspace(space)
+        });
+
         for (index, (workspace_id, workspace_name)) in workspace_list.iter().enumerate() {
             let is_active = if let Some(space) = space_id {
                 self.layout_manager.layout_engine.active_workspace(space) == Some(*workspace_id)
@@ -148,10 +155,13 @@ impl Reactor {
                 }
             }
 
+            let is_last_active = last_workspace_id == Some(*workspace_id);
+
             workspaces.push(WorkspaceData {
                 id: format!("{:?}", workspace_id),
                 name: workspace_name.to_string(),
                 is_active,
+                is_last_active,
                 window_count: windows.len(),
                 windows,
                 index,

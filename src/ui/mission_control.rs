@@ -4,21 +4,20 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use crossbeam_channel::{Sender, unbounded};
 use dispatchr::queue;
 use dispatchr::time::Time;
 use objc2::msg_send;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::AnyObject;
 use objc2_app_kit::{NSApplication, NSColor, NSPopUpMenuWindowLevel};
-use objc2_core_foundation::{CFRetained, CFString, CFType, CGPoint, CGRect, CGSize};
+use objc2_core_foundation::{CFType, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
     CGColor, CGContext, CGEvent, CGEventField, CGEventTapOptions, CGEventTapProxy, CGEventType,
 };
 use objc2_foundation::MainThreadMarker;
 use objc2_quartz_core::{CALayer, CATextLayer, CATransaction};
 use once_cell::sync::Lazy;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 use tracing::info;
 
 use crate::actor::app::WindowId;
@@ -31,6 +30,9 @@ use crate::sys::skylight::{
     CFRelease, G_CONNECTION, SLSFlushWindowContentRegion, SLWindowContextCreate,
 };
 use crate::sys::window_server::{CapturedWindowImage, WindowServerId};
+use crate::ui::overlay_common::{
+    CachedText, CaptureJob, CaptureManager, CaptureTask, EnqueueResult, ItemLayerStyle, RefreshCtx,
+};
 
 unsafe extern "C" {
     fn CGContextFlush(ctx: *mut CGContext);
@@ -41,78 +43,15 @@ unsafe extern "C" {
     fn CGContextScaleCTM(ctx: *mut CGContext, sx: f64, sy: f64);
 }
 
-#[derive(Debug, Clone)]
-struct CaptureTask {
-    window_id: WindowId,
-    window_server_id: u32,
-    target_w: usize,
-    target_h: usize,
-}
+static CAPTURE_MANAGER: Lazy<CaptureManager> = Lazy::new(CaptureManager::default);
 
-struct CaptureJob {
-    task: CaptureTask,
-    cache: Arc<RwLock<HashMap<WindowId, CapturedWindowImage>>>,
-    generation: u64,
-    overlay_ptr_bits: usize,
-}
-
-struct CapturePool {
-    sender: Sender<CaptureJob>,
-}
-
-static CURRENT_GENERATION: AtomicU64 = AtomicU64::new(1);
-static IN_FLIGHT: Lazy<Mutex<HashSet<(u64, WindowId)>>> =
-    Lazy::new(|| Mutex::new(HashSet::default()));
-
-static CAPTURE_POOL: Lazy<CapturePool> = Lazy::new(|| {
-    use std::thread;
-    let (tx, rx) = unbounded::<CaptureJob>();
-
-    let mut worker_count = std::thread::available_parallelism()
-        .map(|n| n.get().saturating_sub(1))
-        .unwrap_or(2);
-    worker_count = worker_count.max(2).min(6);
-    for _ in 0..worker_count {
-        let rx = rx.clone();
-        thread::spawn(move || {
-            while let Ok(job) = rx.recv() {
-                if job.generation != CURRENT_GENERATION.load(Ordering::Acquire) {
-                    if let Some(mut set) = IN_FLIGHT.try_lock() {
-                        set.remove(&(job.generation, job.task.window_id));
-                    } else {
-                        // best-effort; skip if contended
-                    }
-                    continue;
-                }
-
-                if let Some(img) = crate::sys::window_server::capture_window_image(
-                    WindowServerId::new(job.task.window_server_id),
-                    job.task.target_w,
-                    job.task.target_h,
-                ) {
-                    {
-                        let mut cache_lock = job.cache.write();
-                        cache_lock.insert(job.task.window_id, img);
-                    }
-                    if let Some(mut set) = IN_FLIGHT.try_lock() {
-                        set.remove(&(job.generation, job.task.window_id));
-                    }
-                    if let Some(overlay) =
-                        unsafe { (job.overlay_ptr_bits as *const MissionControlOverlay).as_ref() }
-                    {
-                        overlay.request_refresh();
-                    }
-                } else {
-                    if let Some(mut set) = IN_FLIGHT.try_lock() {
-                        set.remove(&(job.generation, job.task.window_id));
-                    }
-                }
-            }
-        });
+unsafe fn mission_control_refresh(bits: usize) {
+    if bits == 0 {
+        return;
     }
-
-    CapturePool { sender: tx }
-});
+    let overlay = unsafe { &*(bits as *const MissionControlOverlay) };
+    overlay.request_refresh();
+}
 
 extern "C" fn refresh_coalesced_cb(ctx: *mut c_void) {
     if ctx.is_null() {
@@ -187,65 +126,16 @@ pub enum MissionControlAction {
     Dismiss,
 }
 
-struct WorkspaceLabelText {
-    text: String,
-    attributed: CFRetained<CFString>,
-}
-
-impl WorkspaceLabelText {
-    fn new(text: &str) -> Self {
-        let cf_string = CFString::from_str(text);
-        Self {
-            text: text.to_owned(),
-            attributed: cf_string,
-        }
-    }
-
-    fn update(&mut self, text: &str) -> bool {
-        if self.text == text {
-            return false;
-        }
-
-        self.text.clear();
-        self.text.push_str(text);
-        self.attributed = CFString::from_str(text);
-        true
-    }
-
-    unsafe fn apply_to(&self, layer: &CATextLayer) {
-        let raw = self.attributed.as_ref() as *const AnyObject;
-        unsafe {
-            layer.setString(Some(&*raw));
-        }
-    }
-}
-
-#[derive(Default)]
-struct PreviewLayerStyle {
-    is_selected: Option<bool>,
-}
-
-impl PreviewLayerStyle {
-    fn update_selected(&mut self, selected: bool) -> bool {
-        if self.is_selected == Some(selected) {
-            false
-        } else {
-            self.is_selected = Some(selected);
-            true
-        }
-    }
-}
-
 pub struct MissionControlState {
     mode: Option<MissionControlMode>,
     on_action: Option<Rc<dyn Fn(MissionControlAction)>>,
     selection: Option<Selection>,
     preview_cache: Arc<RwLock<HashMap<WindowId, CapturedWindowImage>>>,
     preview_layers: HashMap<WindowId, Retained<CALayer>>,
-    preview_layer_styles: HashMap<WindowId, PreviewLayerStyle>,
+    preview_layer_styles: HashMap<WindowId, ItemLayerStyle>,
     workspace_layers: HashMap<String, Retained<CALayer>>,
     workspace_label_layers: HashMap<String, Retained<CATextLayer>>,
-    workspace_label_strings: HashMap<String, WorkspaceLabelText>,
+    workspace_label_strings: HashMap<String, CachedText>,
     ready_previews: HashSet<WindowId>,
     render_root: Option<Retained<CALayer>>,
     render_window_id: Option<u32>,
@@ -279,7 +169,7 @@ impl MissionControlState {
     fn set_mode(&mut self, mode: MissionControlMode) {
         self.mode = Some(mode);
         self.selection = None;
-        let _new_gen = CURRENT_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+    CAPTURE_MANAGER.bump_generation();
         self.ready_previews.clear();
         self.prune_preview_cache();
         self.ensure_selection();
@@ -292,7 +182,7 @@ impl MissionControlState {
         self.selection = None;
         self.on_action = None;
 
-        let _new_gen = CURRENT_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+    CAPTURE_MANAGER.bump_generation();
 
         let mut cache = self.preview_cache.write();
         cache.clear();
@@ -1002,16 +892,12 @@ impl MissionControlOverlay {
                     match st.workspace_label_strings.entry(ws.id.clone()) {
                         hash_map::Entry::Occupied(mut occ) => {
                             if occ.get_mut().update(&ws.name) {
-                                unsafe {
-                                    occ.get().apply_to(&label_layer);
-                                }
+                                occ.get().apply_to(&label_layer);
                             }
                         }
                         hash_map::Entry::Vacant(vac) => {
-                            let cache = WorkspaceLabelText::new(&ws.name);
-                            unsafe {
-                                cache.apply_to(&label_layer);
-                            }
+                            let cache = CachedText::new(&ws.name);
+                            cache.apply_to(&label_layer);
                             vac.insert(cache);
                         }
                     }
@@ -1128,7 +1014,7 @@ impl MissionControlOverlay {
                         let cache = s.preview_cache.read();
                         cache
                             .get(&window.id)
-                            .map(|img| img.as_ptr() as *mut objc2::runtime::AnyObject)
+                            .map(|img| img.as_ptr() as *mut AnyObject)
                     };
                     let mut had_image = false;
                     if let Some(img_ptr) = maybe_img_ptr {
@@ -1200,13 +1086,8 @@ impl MissionControlOverlay {
                 return;
             }
         }
-        let generation = CURRENT_GENERATION.load(Ordering::Acquire);
-        {
-            let mut set = IN_FLIGHT.lock();
-            if !set.insert((generation, window.id)) {
-                return;
-            }
-        }
+        let generation = CAPTURE_MANAGER.current_generation();
+        let refresh = RefreshCtx::new(self as *const _ as *const c_void, mission_control_refresh);
         let job = CaptureJob {
             task: CaptureTask {
                 window_id: window.id,
@@ -1216,9 +1097,9 @@ impl MissionControlOverlay {
             },
             cache: st.preview_cache.clone(),
             generation,
-            overlay_ptr_bits: self as *const _ as usize,
+            refresh,
         };
-        let _ = CAPTURE_POOL.sender.send(job);
+        let _ = CAPTURE_MANAGER.enqueue(job);
     }
 
     fn prewarm_previews(&self) {
@@ -1275,11 +1156,14 @@ impl MissionControlOverlay {
             return;
         }
 
-        let generation = CURRENT_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+        let generation = CAPTURE_MANAGER.bump_generation();
 
-        let (preview_cache, overlay_ptr_bits) = {
+        let (preview_cache, refresh_ctx) = {
             let st = state_cell.borrow();
-            (st.preview_cache.clone(), self as *const _ as usize)
+            (
+                st.preview_cache.clone(),
+                RefreshCtx::new(self as *const _ as *const c_void, mission_control_refresh),
+            )
         };
 
         let sync_limit = SYNC_PREWARM_LIMIT.min(tasks.len());
@@ -1293,11 +1177,8 @@ impl MissionControlOverlay {
                     continue;
                 }
             }
-            {
-                let mut set = IN_FLIGHT.lock();
-                if !set.insert((generation, task.window_id)) {
-                    continue;
-                }
+            if !CAPTURE_MANAGER.try_mark_in_flight(generation, task.window_id) {
+                continue;
             }
 
             let result = crate::sys::window_server::capture_window_image(
@@ -1312,22 +1193,14 @@ impl MissionControlOverlay {
                         let mut cache = preview_cache.write();
                         cache.insert(task.window_id, img);
                     }
-                    {
-                        let mut set = IN_FLIGHT.lock();
-                        set.remove(&(generation, task.window_id));
-                    }
+                    CAPTURE_MANAGER.clear_in_flight(generation, task.window_id);
                     if let Ok(mut st) = state_cell.try_borrow_mut() {
                         st.ready_previews.insert(task.window_id);
                     }
-                    if let Some(overlay) =
-                        unsafe { (overlay_ptr_bits as *const MissionControlOverlay).as_ref() }
-                    {
-                        overlay.request_refresh();
-                    }
+                    refresh_ctx.call();
                 }
                 None => {
-                    let mut set = IN_FLIGHT.lock();
-                    set.remove(&(generation, task.window_id));
+                    CAPTURE_MANAGER.clear_in_flight(generation, task.window_id);
                 }
             }
         }
@@ -1339,21 +1212,15 @@ impl MissionControlOverlay {
                     continue;
                 }
             }
-            {
-                let mut set = IN_FLIGHT.lock();
-                if !set.insert((generation, task.window_id)) {
-                    continue;
-                }
-            }
-
             let job = CaptureJob {
                 task,
                 cache: preview_cache.clone(),
                 generation,
-                overlay_ptr_bits,
+                refresh: refresh_ctx,
             };
-            if CAPTURE_POOL.sender.send(job).is_err() {
-                break;
+            match CAPTURE_MANAGER.enqueue(job) {
+                EnqueueResult::Enqueued | EnqueueResult::Duplicate => {}
+                EnqueueResult::ChannelClosed => break,
             }
         }
     }
@@ -1381,7 +1248,7 @@ impl MissionControlOverlay {
             for (wid, layer) in layers.iter() {
                 if let Some(img) = cache.get(wid) {
                     unsafe {
-                        let img_ptr = img.as_ptr() as *mut objc2::runtime::AnyObject;
+                        let img_ptr = img.as_ptr() as *mut AnyObject;
                         let _: () = msg_send![&**layer, setContents: img_ptr];
                     }
                     ready_ids.push(*wid);

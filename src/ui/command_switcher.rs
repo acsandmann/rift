@@ -2,23 +2,22 @@ use core::ffi::c_void;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use crossbeam_channel::{Sender, unbounded};
 use dispatchr::queue;
 use dispatchr::time::Time;
 use objc2::msg_send;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::AnyObject;
 use objc2_app_kit::{NSApplication, NSColor, NSPopUpMenuWindowLevel};
-use objc2_core_foundation::{CFRetained, CFString, CFType, CGPoint, CGRect, CGSize};
+use objc2_core_foundation::{CFString, CFType, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
     CGColor, CGContext, CGEvent, CGEventField, CGEventTapOptions, CGEventTapProxy, CGEventType,
 };
 use objc2_foundation::MainThreadMarker;
 use objc2_quartz_core::{CALayer, CATextLayer, CATransaction};
 use once_cell::sync::Lazy;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 
 use crate::actor::app::WindowId;
 use crate::common::collections::{HashMap, HashSet};
@@ -30,6 +29,9 @@ use crate::sys::skylight::{
     CFRelease, G_CONNECTION, SLSFlushWindowContentRegion, SLWindowContextCreate,
 };
 use crate::sys::window_server::{CapturedWindowImage, WindowServerId};
+use crate::ui::overlay_common::{
+    CachedText, CaptureJob, CaptureManager, CaptureTask, EnqueueResult, ItemLayerStyle, RefreshCtx,
+};
 
 unsafe extern "C" {
     fn CGContextFlush(ctx: *mut CGContext);
@@ -40,8 +42,7 @@ unsafe extern "C" {
     fn CGContextScaleCTM(ctx: *mut CGContext, sx: f64, sy: f64);
 }
 
-// Colors aligned with Mission Control overlay for consistent design language.
-static WORKSPACE_BACKGROUND_COLOR: Lazy<Retained<CGColor>> =
+static OVERLAY_BACKGROUND_COLOR: Lazy<Retained<CGColor>> =
     Lazy::new(|| CGColor::new_generic_gray(0.0, 0.25).into());
 static SELECTED_BORDER_COLOR: Lazy<Retained<CGColor>> =
     Lazy::new(|| CGColor::new_generic_rgb(0.2, 0.45, 1.0, 0.85).into());
@@ -53,8 +54,6 @@ static WINDOW_BORDER_COLOR: Lazy<Retained<CGColor>> =
 // Switcher-specific aliases (kept for clarity)
 static ITEM_BG_COLOR: Lazy<Retained<CGColor>> =
     Lazy::new(|| CGColor::new_generic_gray(1.0, 0.03).into());
-static ITEM_SELECTED_BG_COLOR: Lazy<Retained<CGColor>> =
-    Lazy::new(|| CGColor::new_generic_gray(1.0, 0.03).into());
 static ITEM_LABEL_COLOR: Lazy<Retained<CGColor>> = Lazy::new(|| NSColor::labelColor().CGColor());
 const BASE_ITEM_WIDTH: f64 = 240.0;
 const BASE_ITEM_HEIGHT: f64 = 170.0;
@@ -63,81 +62,24 @@ const CONTAINER_PADDING: f64 = 32.0;
 const LABEL_HEIGHT: f64 = 20.0;
 const MAX_CONTAINER_WIDTH_RATIO: f64 = 0.82;
 const MAX_CONTAINER_HEIGHT_RATIO: f64 = 0.88;
-const WINDOW_TILE_INSET: f64 = 3.0;
+const WINDOW_TILE_INSET: f64 = 5.0;
 const WINDOW_TILE_GAP: f64 = 1.0;
 const WINDOW_TILE_MIN_SIZE: f64 = 2.0;
-const WINDOW_TILE_SCALE_FACTOR: f64 = 0.75;
+const WINDOW_TILE_SCALE_FACTOR: f64 = 1.0; // 0.75;
 const WINDOW_TILE_MAX_SCALE: f64 = 1.0;
 const PREVIEW_MAX_EDGE: f64 = 420.0;
 const PREVIEW_MIN_EDGE: f64 = 96.0;
-// Do a small synchronous capture pass to reduce initial pop-in
+
 const SYNC_PREWARM_LIMIT: usize = 3;
-#[derive(Debug, Clone)]
-struct CaptureTask {
-    window_id: WindowId,
-    window_server_id: u32,
-    target_w: usize,
-    target_h: usize,
-}
+static CAPTURE_MANAGER: Lazy<CaptureManager> = Lazy::new(CaptureManager::default);
 
-struct CaptureJob {
-    task: CaptureTask,
-    cache: Arc<RwLock<HashMap<WindowId, CapturedWindowImage>>>,
-    generation: u64,
-    overlay_ptr_bits: usize,
-}
-
-struct CapturePool {
-    sender: Sender<CaptureJob>,
-}
-
-static CURRENT_GENERATION: AtomicU64 = AtomicU64::new(1);
-static IN_FLIGHT: Lazy<Mutex<HashSet<(u64, WindowId)>>> =
-    Lazy::new(|| Mutex::new(HashSet::default()));
-
-static CAPTURE_POOL: Lazy<CapturePool> = Lazy::new(|| {
-    let (tx, rx) = unbounded::<CaptureJob>();
-    let mut worker_count = std::thread::available_parallelism()
-        .map(|n| n.get().saturating_sub(1))
-        .unwrap_or(2);
-    worker_count = worker_count.max(2).min(6);
-    for _ in 0..worker_count {
-        let rx = rx.clone();
-        std::thread::spawn(move || {
-            while let Ok(job) = rx.recv() {
-                if job.generation != CURRENT_GENERATION.load(Ordering::Acquire) {
-                    if let Some(mut set) = IN_FLIGHT.try_lock() {
-                        set.remove(&(job.generation, job.task.window_id.clone()));
-                    }
-                    continue;
-                }
-
-                if let Some(img) = crate::sys::window_server::capture_window_image(
-                    WindowServerId::new(job.task.window_server_id),
-                    job.task.target_w,
-                    job.task.target_h,
-                ) {
-                    {
-                        let mut cache = job.cache.write();
-                        cache.insert(job.task.window_id.clone(), img);
-                    }
-                    if let Some(mut set) = IN_FLIGHT.try_lock() {
-                        set.remove(&(job.generation, job.task.window_id.clone()));
-                    }
-                    if let Some(overlay) =
-                        unsafe { (job.overlay_ptr_bits as *const CommandSwitcherOverlay).as_ref() }
-                    {
-                        overlay.request_refresh();
-                    }
-                } else if let Some(mut set) = IN_FLIGHT.try_lock() {
-                    set.remove(&(job.generation, job.task.window_id.clone()));
-                }
-            }
-        });
+unsafe fn command_switcher_refresh(bits: usize) {
+    if bits == 0 {
+        return;
     }
-
-    CapturePool { sender: tx }
-});
+    let overlay = unsafe { &*(bits as *const CommandSwitcherOverlay) };
+    overlay.request_refresh();
+}
 
 #[derive(Clone)]
 enum SwitcherItemKind {
@@ -203,10 +145,10 @@ struct CommandSwitcherState {
     preview_cache: Arc<RwLock<HashMap<WindowId, CapturedWindowImage>>>,
     preview_layers: HashMap<PreviewLayerKey, PreviewLayerEntry>,
     label_layers: HashMap<ItemKey, Retained<CATextLayer>>,
-    // Cache CFStrings to avoid reallocating on every draw
+
     label_strings: HashMap<ItemKey, CachedText>,
     item_layers: HashMap<ItemKey, Retained<CALayer>>,
-    // Track selection style to avoid redundant layer property updates
+
     item_styles: HashMap<ItemKey, ItemLayerStyle>,
     ready_previews: HashSet<WindowId>,
     item_frames: Vec<(ItemKey, CGRect)>,
@@ -257,7 +199,8 @@ impl CommandSwitcherState {
         self.selection = None;
         self.item_frames.clear();
         self.ready_previews.clear();
-        CURRENT_GENERATION.fetch_add(1, Ordering::AcqRel);
+        CAPTURE_MANAGER.bump_generation();
+        let mut preselection: Option<usize> = None;
 
         self.item_layers.retain(|_, layer| {
             layer.removeFromSuperlayer();
@@ -293,35 +236,61 @@ impl CommandSwitcherState {
             }
             CommandSwitcherMode::Workspaces(workspaces) => {
                 for workspace in workspaces {
+                    let idx = self.items.len();
                     let key = ItemKey::Workspace(workspace.id.clone());
                     let label = format_workspace_label(&workspace);
                     let is_primary = workspace.is_active;
+                    let is_last_active = workspace.is_last_active;
                     self.items.push(SwitcherItem {
                         key,
                         label,
                         kind: SwitcherItemKind::Workspace(workspace),
                         is_primary,
                     });
+                    if is_last_active && !is_primary {
+                        preselection = Some(idx);
+                    }
                 }
             }
         }
+        self.selection = preselection;
         self.prune_preview_cache();
         self.ensure_selection();
     }
 
     fn ensure_selection(&mut self) {
-        if self.selection.is_some() {
-            let idx = self.selection.unwrap();
+        if let Some(idx) = self.selection {
             if idx < self.items.len() {
                 return;
             }
         }
+
+        let count = self.items.len();
+        if count == 0 {
+            self.selection = None;
+            return;
+        }
+
         let desired = self
             .items
             .iter()
             .enumerate()
             .find_map(|(idx, item)| item.is_primary.then_some(idx))
-            .or_else(|| if self.items.is_empty() { None } else { Some(0) });
+            .and_then(|primary_idx| {
+                if count == 1 {
+                    return Some(primary_idx);
+                }
+                let next_idx = primary_idx + 1;
+                if next_idx < count {
+                    Some(next_idx)
+                } else if primary_idx > 0 {
+                    Some(0)
+                } else {
+                    Some(primary_idx)
+                }
+            })
+            .or(Some(0));
+
         self.selection = desired;
     }
 
@@ -420,8 +389,8 @@ impl CommandSwitcherOverlay {
 
         container.setCornerRadius(10.0);
         container.setMasksToBounds(false);
-        container.setBackgroundColor(Some(&**WORKSPACE_BACKGROUND_COLOR));
-        container.setBorderWidth(0.6);
+        container.setBackgroundColor(Some(&**OVERLAY_BACKGROUND_COLOR));
+        container.setBorderWidth(1.2);
         container.setBorderColor(Some(&**WINDOW_BORDER_COLOR));
         root_layer.addSublayer(&container);
 
@@ -612,7 +581,7 @@ impl CommandSwitcherOverlay {
 
         let current_row = current / columns;
         let current_col = current % columns;
-        let mut target_row = current_row as isize + delta_rows;
+        let target_row = current_row as isize + delta_rows;
         if target_row < 0 || target_row as usize >= rows {
             return false;
         }
@@ -846,11 +815,14 @@ impl CommandSwitcherOverlay {
         // Prioritize lower priority value first, then larger area first
         tasks.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
 
-        let generation = CURRENT_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+        let generation = CAPTURE_MANAGER.bump_generation();
 
-        let (cache, overlay_ptr_bits) = {
+        let (cache, refresh_ctx) = {
             let state = self.state.borrow();
-            (state.preview_cache.clone(), self as *const _ as usize)
+            (
+                state.preview_cache.clone(),
+                RefreshCtx::new(self as *const _ as *const c_void, command_switcher_refresh),
+            )
         };
 
         let sync_limit = SYNC_PREWARM_LIMIT.min(tasks.len());
@@ -865,11 +837,8 @@ impl CommandSwitcherOverlay {
                     continue;
                 }
             }
-            {
-                let mut set = IN_FLIGHT.lock();
-                if !set.insert((generation, task.window_id)) {
-                    continue;
-                }
+            if !CAPTURE_MANAGER.try_mark_in_flight(generation, task.window_id) {
+                continue;
             }
 
             let result = crate::sys::window_server::capture_window_image(
@@ -884,18 +853,14 @@ impl CommandSwitcherOverlay {
                         let mut cache_write = cache.write();
                         cache_write.insert(task.window_id, img);
                     }
-                    {
-                        let mut set = IN_FLIGHT.lock();
-                        set.remove(&(generation, task.window_id));
-                    }
+                    CAPTURE_MANAGER.clear_in_flight(generation, task.window_id);
                     if let Ok(mut state) = self.state.try_borrow_mut() {
                         state.ready_previews.insert(task.window_id);
                     }
                     self.request_refresh();
                 }
                 None => {
-                    let mut set = IN_FLIGHT.lock();
-                    set.remove(&(generation, task.window_id));
+                    CAPTURE_MANAGER.clear_in_flight(generation, task.window_id);
                 }
             }
         }
@@ -908,18 +873,16 @@ impl CommandSwitcherOverlay {
                     continue;
                 }
             }
-            let mut guard = IN_FLIGHT.lock();
-            if !guard.insert((generation, task.window_id)) {
-                continue;
-            }
-            drop(guard);
             let job = CaptureJob {
                 task,
                 cache: cache.clone(),
                 generation,
-                overlay_ptr_bits,
+                refresh: refresh_ctx,
             };
-            let _ = CAPTURE_POOL.sender.send(job);
+            match CAPTURE_MANAGER.enqueue(job) {
+                EnqueueResult::Enqueued | EnqueueResult::Duplicate => {}
+                EnqueueResult::ChannelClosed => break,
+            }
         }
     }
 
@@ -931,8 +894,8 @@ impl CommandSwitcherOverlay {
         state.grid_rows = layout.rows;
         self.container_layer.setFrame(layout.container_frame);
         // follow mission_control style: subtle tinted backdrop card with light border & gentle shadow
-        self.container_layer.setBackgroundColor(Some(&**WORKSPACE_BACKGROUND_COLOR));
-        self.container_layer.setBorderWidth(0.6);
+        self.container_layer.setBackgroundColor(Some(&**OVERLAY_BACKGROUND_COLOR));
+        self.container_layer.setBorderWidth(1.2);
         self.container_layer.setBorderColor(Some(&**WORKSPACE_BORDER_COLOR));
         self.container_layer.setMasksToBounds(false);
         self.container_layer.setContentsScale(self.scale);
@@ -980,12 +943,7 @@ impl CommandSwitcherOverlay {
                     .or_insert_with(Default::default)
                     .update_selected(is_selected);
                 if style_changed {
-                    let bg_color = if is_selected {
-                        &**ITEM_SELECTED_BG_COLOR
-                    } else {
-                        &**ITEM_BG_COLOR
-                    };
-                    item_layer.setBackgroundColor(Some(bg_color));
+                    item_layer.setBackgroundColor(Some(&**ITEM_BG_COLOR));
                     item_layer.setBorderWidth(if is_selected { 3.0 } else { 1.0 });
                     item_layer.setBorderColor(Some(if is_selected {
                         &**SELECTED_BORDER_COLOR
@@ -1172,12 +1130,8 @@ impl CommandSwitcherOverlay {
         container.setCornerRadius(if selected { 9.0 } else { 8.0 });
         container.setBorderWidth(0.0);
         container.setBorderColor(None);
-        let bg_color = if selected {
-            &**ITEM_SELECTED_BG_COLOR
-        } else {
-            &**ITEM_BG_COLOR
-        };
-        container.setBackgroundColor(Some(bg_color));
+
+        container.setBackgroundColor(Some(&**ITEM_BG_COLOR));
         container.setContentsScale(self.scale);
         container.setZPosition(1.0);
 
@@ -1252,13 +1206,8 @@ impl CommandSwitcherOverlay {
                 return;
             }
         }
-        let generation = CURRENT_GENERATION.load(Ordering::Acquire);
-        {
-            let mut set = IN_FLIGHT.lock();
-            if !set.insert((generation, window.id)) {
-                return;
-            }
-        }
+        let generation = CAPTURE_MANAGER.current_generation();
+        let refresh = RefreshCtx::new(self as *const _ as *const c_void, command_switcher_refresh);
         let job = CaptureJob {
             task: CaptureTask {
                 window_id: window.id,
@@ -1268,9 +1217,9 @@ impl CommandSwitcherOverlay {
             },
             cache: state.preview_cache.clone(),
             generation,
-            overlay_ptr_bits: self as *const _ as usize,
+            refresh,
         };
-        let _ = CAPTURE_POOL.sender.send(job);
+        let _ = CAPTURE_MANAGER.enqueue(job);
     }
 
     fn ensure_key_tap(&self) {
@@ -1589,7 +1538,12 @@ fn compute_layout(count: usize, bounds: CGSize) -> LayoutResult {
         let row = idx / best.columns;
         let col = idx % best.columns;
         let offset_x = CONTAINER_PADDING + col as f64 * (item_width + h_spacing);
-        let offset_y = CONTAINER_PADDING + row as f64 * (item_height + v_spacing);
+        let visual_row = if best.rows > 0 {
+            best.rows - 1 - row
+        } else {
+            0
+        };
+        let offset_y = CONTAINER_PADDING + visual_row as f64 * (item_height + v_spacing);
 
         let item_frame = CGRect::new(
             CGPoint::new(offset_x, offset_y),
@@ -1641,7 +1595,7 @@ struct WorkspaceLayoutMetrics {
     y_offset: f64,
     min_x: f64,
     min_y: f64,
-    disp_height: f64,
+    span_h: f64,
 }
 
 impl WorkspaceLayoutMetrics {
@@ -1696,20 +1650,22 @@ impl WorkspaceLayoutMetrics {
             y_offset,
             min_x,
             min_y,
-            disp_height: disp_h,
+            span_h: disp_h,
         })
     }
 
     fn rect_for(&self, window: &WindowData) -> CGRect {
         let wx = window.frame.origin.x - self.min_x;
-        let wy_top = window.frame.origin.y - self.min_y + window.frame.size.height;
-        let wy = self.disp_height - wy_top;
         let ww = window.frame.size.width;
         let wh = window.frame.size.height;
 
         let mut rx = self.x_offset + wx * self.scale;
-        let mut ry = self.y_offset + wy * self.scale;
         let mut rw = (ww * self.scale).max(WINDOW_TILE_MIN_SIZE);
+
+        let bottom_rel = window.frame.origin.y - self.min_y;
+        let top_rel = bottom_rel + wh;
+        let inverted_y = (self.span_h - top_rel).max(0.0);
+        let mut ry = self.y_offset + inverted_y * self.scale;
         let mut rh = (wh * self.scale).max(WINDOW_TILE_MIN_SIZE);
 
         if rw > (WINDOW_TILE_MIN_SIZE + WINDOW_TILE_GAP) {
@@ -1750,53 +1706,6 @@ fn capture_target_for_dims(width: f64, height: f64) -> (usize, usize) {
     (scaled_w.round() as usize, scaled_h.round() as usize)
 }
 
-// Mirror mission_control.rs: cache attributed strings and style diffs
-struct CachedText {
-    text: String,
-    attributed: CFRetained<CFString>,
-}
-
-impl CachedText {
-    fn new(text: &str) -> Self {
-        let cf = CFString::from_str(text);
-        Self {
-            text: text.to_owned(),
-            attributed: cf,
-        }
-    }
-
-    fn update(&mut self, text: &str) -> bool {
-        if self.text == text {
-            return false;
-        }
-        self.text.clear();
-        self.text.push_str(text);
-        self.attributed = CFString::from_str(text);
-        true
-    }
-
-    fn apply_to(&self, layer: &CATextLayer) {
-        let raw = self.attributed.as_ref() as *const AnyObject;
-        unsafe { layer.setString(Some(&*raw)) };
-    }
-}
-
-#[derive(Default)]
-struct ItemLayerStyle {
-    is_selected: Option<bool>,
-}
-
-impl ItemLayerStyle {
-    fn update_selected(&mut self, sel: bool) -> bool {
-        if self.is_selected == Some(sel) {
-            false
-        } else {
-            self.is_selected = Some(sel);
-            true
-        }
-    }
-}
-
 impl CommandSwitcherOverlay {
     fn update_item_selected_style(&self, key: &ItemKey, selected: bool) {
         if let Ok(mut state) = self.state.try_borrow_mut() {
@@ -1807,12 +1716,7 @@ impl CommandSwitcherOverlay {
                     .or_insert_with(Default::default)
                     .update_selected(selected);
                 if style_changed {
-                    let bg_color = if selected {
-                        &**ITEM_SELECTED_BG_COLOR
-                    } else {
-                        &**ITEM_BG_COLOR
-                    };
-                    layer.setBackgroundColor(Some(bg_color));
+                    layer.setBackgroundColor(Some(&**ITEM_BG_COLOR));
                     layer.setBorderWidth(if selected { 3.0 } else { 1.0 });
                     layer.setBorderColor(Some(if selected {
                         &**SELECTED_BORDER_COLOR

@@ -16,6 +16,8 @@ pub struct WorkspaceData {
     pub index: usize,
     pub name: String,
     pub is_active: bool,
+    #[serde(default)]
+    pub is_last_active: bool,
     pub window_count: usize,
     pub windows: Vec<WindowData>,
 }
