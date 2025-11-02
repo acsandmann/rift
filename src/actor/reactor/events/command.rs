@@ -44,7 +44,7 @@ impl CommandEventHandler {
             LayoutCommand::NextWorkspace(_)
             | LayoutCommand::PrevWorkspace(_)
             | LayoutCommand::SwitchToWorkspace(_)
-            | LayoutCommand::MoveWindowToWorkspace(_)
+            | LayoutCommand::MoveWindowToWorkspace { .. }
             | LayoutCommand::CreateWorkspace
             | LayoutCommand::SwitchToLastWorkspace => {
                 if let Some(space) = reactor.workspace_command_space() {

@@ -50,7 +50,10 @@ pub enum LayoutCommand {
     NextWorkspace(Option<bool>),
     PrevWorkspace(Option<bool>),
     SwitchToWorkspace(usize),
-    MoveWindowToWorkspace(usize),
+    MoveWindowToWorkspace {
+        workspace: usize,
+        window_id: Option<u32>,
+    },
     CreateWorkspace,
     SwitchToLastWorkspace,
 
@@ -760,7 +763,7 @@ impl LayoutEngine {
             LayoutCommand::NextWorkspace(_)
             | LayoutCommand::PrevWorkspace(_)
             | LayoutCommand::SwitchToWorkspace(_)
-            | LayoutCommand::MoveWindowToWorkspace(_)
+            | LayoutCommand::MoveWindowToWorkspace { .. }
             | LayoutCommand::CreateWorkspace
             | LayoutCommand::SwitchToLastWorkspace => EventResponse::default(),
             LayoutCommand::JoinWindow(direction) => {
@@ -1161,10 +1164,20 @@ impl LayoutEngine {
                 }
                 EventResponse::default()
             }
-            LayoutCommand::MoveWindowToWorkspace(workspace_index) => {
-                let focused_window = match self.focused_window {
-                    Some(wid) => wid,
-                    None => return EventResponse::default(),
+            LayoutCommand::MoveWindowToWorkspace {
+                workspace: workspace_index,
+                window_id: maybe_id,
+            } => {
+                let focused_window = if let Some(spec_u32) = maybe_id {
+                    match self.virtual_workspace_manager.find_window_by_idx(space, *spec_u32) {
+                        Some(w) => w,
+                        None => return EventResponse::default(),
+                    }
+                } else {
+                    match self.focused_window {
+                        Some(wid) => wid,
+                        None => return EventResponse::default(),
+                    }
                 };
 
                 let inferred_space = self.space_with_window(focused_window);

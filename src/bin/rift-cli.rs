@@ -136,7 +136,10 @@ enum WorkspaceCommands {
     /// Switch to specific workspace
     Switch { workspace_id: usize },
     /// Move current window to workspace
-    MoveWindow { workspace_id: usize },
+    MoveWindow {
+        workspace_id: usize,
+        window_id: Option<u32>,
+    },
     /// Create a new workspace
     Create,
     /// Switch to the last workspace
@@ -452,8 +455,11 @@ fn map_workspace_command(cmd: WorkspaceCommands) -> Result<RiftCommand, String> 
         WorkspaceCommands::Switch { workspace_id } => Ok(RiftCommand::Reactor(
             reactor::Command::Layout(LC::SwitchToWorkspace(workspace_id)),
         )),
-        WorkspaceCommands::MoveWindow { workspace_id } => Ok(RiftCommand::Reactor(
-            reactor::Command::Layout(LC::MoveWindowToWorkspace(workspace_id)),
+        WorkspaceCommands::MoveWindow { workspace_id, window_id } => Ok(RiftCommand::Reactor(
+            reactor::Command::Layout(LC::MoveWindowToWorkspace {
+                workspace: workspace_id,
+                window_id,
+            }),
         )),
         WorkspaceCommands::Create => Ok(RiftCommand::Reactor(reactor::Command::Layout(
             LC::CreateWorkspace,

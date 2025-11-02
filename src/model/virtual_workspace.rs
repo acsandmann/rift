@@ -438,6 +438,34 @@ impl VirtualWorkspaceManager {
             .collect()
     }
 
+    pub fn find_window_by_idx(&self, space: SpaceId, idx: u32) -> Option<WindowId> {
+        self.window_to_workspace
+            .keys()
+            .filter_map(|(s, wid)| {
+                if *s == space && wid.idx.get() == idx {
+                    Some(*wid)
+                } else {
+                    None
+                }
+            })
+            .next()
+    }
+
+    pub fn find_window_in_workspace_by_idx(
+        &self,
+        space: SpaceId,
+        workspace_id: VirtualWorkspaceId,
+        idx: u32,
+    ) -> Option<WindowId> {
+        if self.workspaces.get(workspace_id).map(|w| w.space) != Some(space) {
+            return None;
+        }
+
+        self.workspaces
+            .get(workspace_id)
+            .and_then(|ws| ws.windows().find(|wid| wid.idx.get() == idx))
+    }
+
     pub fn calculate_hidden_position(
         &self,
         screen_frame: CGRect,

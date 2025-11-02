@@ -401,7 +401,10 @@ impl WmController {
 
                 if let Some(workspace_index) = maybe_index {
                     self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
-                        layout::LayoutCommand::MoveWindowToWorkspace(workspace_index),
+                        layout::LayoutCommand::MoveWindowToWorkspace {
+                            workspace: workspace_index,
+                            window_id: None,
+                        },
                     )));
                 } else {
                     tracing::warn!(
