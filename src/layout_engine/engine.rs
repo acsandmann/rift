@@ -46,7 +46,10 @@ pub enum LayoutCommand {
 
     ResizeWindowGrow,
     ResizeWindowShrink,
-    ScrollWorkspace { delta: f64, finalize: bool },
+    ScrollWorkspace {
+        delta: f64,
+        finalize: bool,
+    },
 
     NextWorkspace(Option<bool>),
     PrevWorkspace(Option<bool>),
