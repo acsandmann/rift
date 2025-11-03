@@ -445,13 +445,14 @@ impl LayoutSystem for ScrollLayoutSystem {
 
     fn on_window_resized(
         &mut self,
-        layout: LayoutId,
-        wid: WindowId,
-        old_frame: CGRect,
-        new_frame: CGRect,
-        screen: CGRect,
-        gaps: &crate::common::config::GapSettings,
+        _layout: LayoutId,
+        _wid: WindowId,
+        _old_frame: CGRect,
+        _new_frame: CGRect,
+        _screen: CGRect,
+        _gaps: &crate::common::config::GapSettings,
     ) {
+        // Scroll layout doesn't need to react to individual window resize events for layout state.
     }
 
     fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
@@ -557,7 +558,10 @@ impl LayoutSystem for ScrollLayoutSystem {
 
     fn split_selection(&mut self, _layout: LayoutId, _kind: LayoutKind) {}
 
-    fn toggle_fullscreen_of_selection(&mut self, _layout: LayoutId) -> Vec<WindowId> { Vec::new() }
+    fn toggle_fullscreen_of_selection(&mut self, _layout: LayoutId) -> Vec<WindowId> {
+        // Scroll layout does not have special stacking/fullscreen semantics.
+        Vec::new()
+    }
 
     fn join_selection_with_direction(&mut self, _layout: LayoutId, _direction: Direction) {}
 
@@ -600,5 +604,13 @@ impl LayoutSystem for ScrollLayoutSystem {
         if let Some(state) = self.layout_state(layout) {
             state.ensure_selection();
         }
+    }
+
+    fn toggle_tile_orientation(&mut self, _layout: LayoutId) {}
+
+    fn parent_of_selection_is_stacked(&self, _layout: LayoutId) -> bool { false }
+
+    fn toggle_fullscreen_within_gaps_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
+        self.toggle_fullscreen_of_selection(layout)
     }
 }
