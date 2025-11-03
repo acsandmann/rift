@@ -224,8 +224,10 @@ impl LayoutManager {
                 }
             }
 
+            let is_scroll_layout = matches!(self.config.settings.layout.mode, LayoutMode::Scroll);
             let suppress_animation = is_workspace_switch
-                || reactor.workspace_switch_manager.active_workspace_switch.is_some();
+                || reactor.workspace_switch_manager.active_workspace_switch.is_some()
+                || is_scroll_layout;
             if suppress_animation {
                 any_frame_changed |= AnimationManager::instant_layout(reactor, &layout, skip_wid);
             } else {

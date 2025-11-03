@@ -225,7 +225,7 @@ pub enum Event {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Requested(pub bool);
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(untagged)]
 pub enum Command {
     Layout(LayoutCommand),
@@ -1888,8 +1888,10 @@ impl Reactor {
     }
 
     fn update_focus_follows_mouse_state(&self) {
+        let is_scroll_layout = matches!(self.config.settings.layout.mode, LayoutMode::Scroll);
         let should_enable = matches!(self.menu_manager.menu_state, MenuState::Closed)
-            && !self.is_mission_control_active();
+            && !self.is_mission_control_active()
+            && !is_scroll_layout;
         self.set_focus_follows_mouse_enabled(should_enable);
     }
 
