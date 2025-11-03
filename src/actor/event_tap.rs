@@ -8,8 +8,7 @@ use objc2_app_kit::{
 };
 use objc2_core_foundation::{CGPoint, CGRect};
 use objc2_core_graphics::{
-    CGEvent, CGEventField, CGEventFlags, CGEventMask, CGEventTapOptions as CGTapOpt,
-    CGEventTapProxy, CGEventType, CGMomentumScrollPhase, CGScrollPhase,
+    CGEvent, CGEventFlags, CGEventMask, CGEventTapOptions as CGTapOpt, CGEventTapProxy, CGEventType,
 };
 use tracing::{debug, error, trace, warn};
 
@@ -324,11 +323,6 @@ impl EventTap {
             state.hidden = false;
         }
         match event_type {
-            CGEventType::ScrollWheel => {
-                drop(state);
-                self.handle_scroll_event(event);
-                return true;
-            }
             CGEventType::LeftMouseUp => {
                 _ = self.events_tx.send(Event::MouseUp);
             }
@@ -346,52 +340,6 @@ impl EventTap {
         }
 
         true
-    }
-
-    fn handle_scroll_event(&self, event: &CGEvent) {
-        if self.config.settings.layout.mode != LayoutMode::Scroll {
-            return;
-        }
-
-        let Some(wm_sender) = &self.wm_sender else { return };
-        let scroll_cfg = &self.config.settings.layout.scroll;
-
-        let horizontal =
-            CGEvent::double_value_field(Some(event), CGEventField::ScrollWheelEventPointDeltaAxis2);
-        let vertical =
-            CGEvent::double_value_field(Some(event), CGEventField::ScrollWheelEventPointDeltaAxis1);
-
-        let phase_raw =
-            CGEvent::integer_value_field(Some(event), CGEventField::ScrollWheelEventScrollPhase);
-        let momentum_raw =
-            CGEvent::integer_value_field(Some(event), CGEventField::ScrollWheelEventMomentumPhase);
-        let phase = CGScrollPhase(phase_raw.max(0) as u32);
-        let momentum = CGMomentumScrollPhase(momentum_raw.max(0) as u32);
-
-        let finalize = phase == CGScrollPhase::Ended
-            || phase == CGScrollPhase::Cancelled
-            || momentum == CGMomentumScrollPhase::End;
-
-        let divisor = scroll_cfg.wheel_pixels_per_window.max(1.0);
-        let sensitivity = scroll_cfg.wheel_sensitivity;
-        let mut delta_units = (horizontal / divisor) * sensitivity;
-        if self.config.settings.gestures.invert_horizontal_swipe {
-            delta_units = -delta_units;
-        }
-
-        let dominant_horizontal = horizontal.abs() >= vertical.abs();
-
-        if delta_units.abs() < MIN_SCROLL_DELTA && !finalize {
-            return;
-        }
-        if !dominant_horizontal && !finalize {
-            return;
-        }
-
-        let cmd = LC::ScrollWorkspace { delta: delta_units, finalize };
-        wm_sender.send(WmEvent::Command(WmCommand::ReactorCommand(
-            reactor::Command::Layout(cmd),
-        )));
     }
 
     fn handle_gesture_event(&self, handler: &SwipeHandler, nsevent: &NSEvent) {
