@@ -25,7 +25,7 @@ pub struct GroupContainerInfo {
 }
 
 #[non_exhaustive]
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Copy)]
 #[serde(rename_all = "snake_case")]
 pub enum LayoutCommand {
     NextWindow,
@@ -869,6 +869,10 @@ impl LayoutEngine {
                         }
                     }
                     LayoutSystemKind::Bsp(s) => {
+                        s.toggle_tile_orientation(layout);
+                        EventResponse::default()
+                    }
+                    LayoutSystemKind::Scroll(s) => {
                         s.toggle_tile_orientation(layout);
                         EventResponse::default()
                     }

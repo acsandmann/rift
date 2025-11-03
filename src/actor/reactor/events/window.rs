@@ -5,6 +5,7 @@ use crate::actor::app::WindowId;
 use crate::actor::reactor::{
     DragState, MissionControlState, Quiet, Reactor, Requested, TransactionId, WindowState, utils,
 };
+use crate::common::config::LayoutMode;
 use crate::layout_engine::LayoutEvent;
 use crate::sys::app::WindowInfo as Window;
 use crate::sys::event::MouseState;
@@ -327,10 +328,15 @@ impl WindowEventHandler {
     }
 
     pub fn handle_mouse_moved_over_window(reactor: &mut Reactor, wsid: WindowServerId) {
-        if !matches!(self.config.settings.layout.mode, LayoutMode::Scroll) {
-            let Some(&wid) = self.window_ids.get(&wsid) else { return };
-            if self.should_raise_on_mouse_over(wid) {
-                self.raise_window(wid, Quiet::No, None);
+        if !matches!(
+            reactor.config_manager.config.settings.layout.mode,
+            LayoutMode::Scroll
+        ) {
+            let Some(&wid) = reactor.window_manager.window_ids.get(&wsid) else {
+                return;
+            };
+            if reactor.should_raise_on_mouse_over(wid) {
+                reactor.raise_window(wid, Quiet::No, None);
             }
         }
     }

@@ -71,7 +71,7 @@ impl CommandEventHandler {
         reactor.handle_layout_response(response);
 
         if matches!(cmd, LayoutCommand::ScrollWorkspace { .. }) {
-            let _ = self.update_layout(false, false);
+            let _ = reactor.update_layout(false, false);
         }
     }
 

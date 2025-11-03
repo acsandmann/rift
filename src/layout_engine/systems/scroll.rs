@@ -445,11 +445,12 @@ impl LayoutSystem for ScrollLayoutSystem {
 
     fn on_window_resized(
         &mut self,
-        _layout: LayoutId,
-        _wid: WindowId,
-        _old_frame: CGRect,
-        _new_frame: CGRect,
-        _screen: CGRect,
+        layout: LayoutId,
+        wid: WindowId,
+        old_frame: CGRect,
+        new_frame: CGRect,
+        screen: CGRect,
+        gaps: &crate::common::config::GapSettings,
     ) {
     }
 
@@ -560,11 +561,21 @@ impl LayoutSystem for ScrollLayoutSystem {
 
     fn join_selection_with_direction(&mut self, _layout: LayoutId, _direction: Direction) {}
 
-    fn apply_stacking_to_parent_of_selection(&mut self, _layout: LayoutId) -> Vec<WindowId> {
-        Vec::new()
+    fn apply_stacking_to_parent_of_selection(
+        &mut self,
+        _: LayoutId,
+        _: crate::common::config::StackDefaultOrientation,
+    ) -> Vec<WindowId> {
+        vec![]
     }
 
-    fn unstack_parent_of_selection(&mut self, _layout: LayoutId) -> Vec<WindowId> { Vec::new() }
+    fn unstack_parent_of_selection(
+        &mut self,
+        _layout: LayoutId,
+        _: crate::common::config::StackDefaultOrientation,
+    ) -> Vec<WindowId> {
+        vec![]
+    }
 
     fn unjoin_selection(&mut self, _layout: LayoutId) {}
 

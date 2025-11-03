@@ -46,7 +46,7 @@ use crate::actor::raise_manager::{self, RaiseManager, RaiseRequest};
 use crate::actor::reactor::events::window_discovery::WindowDiscoveryHandler;
 use crate::actor::{self, menu_bar, stack_line};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
-use crate::common::config::Config;
+use crate::common::config::{Config, LayoutMode};
 use crate::common::log::MetricsCommand;
 use crate::layout_engine::{self as layout, Direction, LayoutCommand, LayoutEngine, LayoutEvent};
 use crate::model::VirtualWorkspaceId;
@@ -1888,7 +1888,10 @@ impl Reactor {
     }
 
     fn update_focus_follows_mouse_state(&self) {
-        let is_scroll_layout = matches!(self.config.settings.layout.mode, LayoutMode::Scroll);
+        let is_scroll_layout = matches!(
+            self.config_manager.config.settings.layout.mode,
+            LayoutMode::Scroll
+        );
         let should_enable = matches!(self.menu_manager.menu_state, MenuState::Closed)
             && !self.is_mission_control_active()
             && !is_scroll_layout;
