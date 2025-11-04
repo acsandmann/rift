@@ -34,29 +34,101 @@ impl Default for ScrollLayoutState {
 }
 
 impl ScrollLayoutState {
-    fn max_offset(&self) -> f64 {
-        if self.windows.len() > 1 {
-            (self.windows.len() - 1) as f64
-        } else {
+    fn viewport_units(&self) -> f64 { 1.0 }
+
+    fn width_unit(&self, idx: usize) -> f64 {
+        self.widths.get(idx).copied().unwrap_or(1.0).max(MIN_WIDTH_UNITS)
+    }
+
+    fn total_units(&self) -> f64 {
+        if self.windows.is_empty() {
             0.0
+        } else {
+            self.windows.iter().enumerate().map(|(idx, _)| self.width_unit(idx)).sum()
+        }
+    }
+
+    fn max_offset(&self) -> f64 {
+        let viewport = self.viewport_units();
+        let total = self.total_units();
+        if total <= viewport {
+            0.0
+        } else {
+            total - viewport
         }
     }
 
     fn clamp_offset(&mut self) {
+        self.ensure_widths();
         if !self.scroll_offset.is_finite() {
             self.scroll_offset = 0.0;
         }
         let max = self.max_offset();
-        if max == 0.0 {
-            self.scroll_offset = 0.0;
-        } else {
-            self.scroll_offset = self.scroll_offset.clamp(0.0, max);
-        }
+        self.scroll_offset = self.scroll_offset.clamp(0.0, max);
     }
 
     fn selected_index(&self) -> Option<usize> {
         let selected = self.selected?;
         self.windows.iter().position(|w| *w == selected)
+    }
+
+    fn ensure_visible_index(&mut self, idx: usize) {
+        self.ensure_widths();
+        self.clamp_offset();
+
+        let viewport = self.viewport_units();
+        let mut start = 0.0;
+        for current in 0..self.windows.len() {
+            let width = self.width_unit(current);
+            let end = start + width;
+            if current == idx {
+                let view_start = self.scroll_offset;
+                let view_end = view_start + viewport;
+                if start < view_start {
+                    self.scroll_offset = start.max(0.0);
+                } else if end > view_end {
+                    self.scroll_offset = (end - viewport).max(0.0);
+                }
+                break;
+            }
+            start = end;
+        }
+
+        self.clamp_offset();
+    }
+
+    fn ensure_selected_visible(&mut self) {
+        if let Some(idx) = self.selected_index() {
+            self.ensure_visible_index(idx);
+        } else {
+            self.clamp_offset();
+        }
+    }
+
+    fn focus_point(&self) -> f64 { self.scroll_offset + self.viewport_units() * 0.5 }
+
+    fn index_nearest_focus(&self) -> Option<usize> {
+        if self.windows.is_empty() {
+            return None;
+        }
+
+        let focus = self.focus_point();
+        let mut acc = 0.0;
+        let mut best_idx = 0;
+        let mut best_dist = f64::MAX;
+
+        for (idx, _) in self.windows.iter().enumerate() {
+            let width = self.width_unit(idx);
+            let center = acc + width * 0.5;
+            let dist = (center - focus).abs();
+            if dist < best_dist {
+                best_dist = dist;
+                best_idx = idx;
+            }
+            acc += width;
+        }
+
+        Some(best_idx)
     }
 
     fn ensure_selection(&mut self) {
@@ -73,7 +145,7 @@ impl ScrollLayoutState {
         }
 
         self.clamp_offset();
-        self.scroll_offset = self.scroll_offset.clamp(0.0, self.max_offset());
+        self.ensure_selected_visible();
     }
 
     fn remove_window(&mut self, wid: WindowId) -> bool {
@@ -92,9 +164,6 @@ impl ScrollLayoutState {
                     idx
                 };
                 self.selected = Some(self.windows[new_idx]);
-                self.scroll_offset = new_idx as f64;
-            } else if let Some(sel_idx) = self.selected_index() {
-                self.scroll_offset = sel_idx as f64;
             }
 
             if self.fullscreen == Some(wid) {
@@ -105,6 +174,8 @@ impl ScrollLayoutState {
                 self.full_width = None;
             }
             self.ensure_widths();
+            self.clamp_offset();
+            self.ensure_selected_visible();
             true
         } else {
             false
@@ -147,12 +218,12 @@ impl ScrollLayoutSystem {
         let prev_index = state.selected_index().unwrap_or(0);
 
         state.scroll_offset = (state.scroll_offset + delta).clamp(0.0, state.max_offset());
-
-        let target_idx = state.scroll_offset.round().clamp(0.0, state.max_offset()) as usize;
+        let target_idx = state.index_nearest_focus().unwrap_or(prev_index);
 
         if target_idx != prev_index {
             let wid = state.windows[target_idx];
             state.selected = Some(wid);
+            state.ensure_visible_index(target_idx);
             Some(wid)
         } else {
             None
@@ -170,16 +241,17 @@ impl ScrollLayoutSystem {
         state.ensure_selection();
         state.scroll_offset = state.scroll_offset.clamp(0.0, state.max_offset());
 
-        let idx = state.scroll_offset.round().clamp(0.0, state.max_offset()) as usize;
-
-        if idx < state.windows.len() {
-            let wid = state.windows[idx];
-            state.selected = Some(wid);
-            state.scroll_offset = idx as f64;
-            Some(wid)
-        } else {
-            None
+        if let Some(idx) = state.index_nearest_focus() {
+            if idx < state.windows.len() {
+                let wid = state.windows[idx];
+                state.selected = Some(wid);
+                state.ensure_visible_index(idx);
+                return Some(wid);
+            }
         }
+
+        state.ensure_selected_visible();
+        state.selected
     }
 
     fn layout_state(&mut self, layout: LayoutId) -> Option<&mut ScrollLayoutState> {
@@ -295,32 +367,19 @@ impl LayoutSystem for ScrollLayoutSystem {
         let available_content_width =
             (available_width - gap * (len.saturating_sub(1) as f64)).max(MIN_WINDOW_DIMENSION);
 
-        let mut weights: Vec<f64> =
-            state.widths.iter().take(len).map(|w| w.max(MIN_WIDTH_UNITS)).collect();
-        if weights.len() < len {
-            weights.resize(len, 1.0);
-        }
-        let total_units = weights.iter().sum::<f64>().max(MIN_WIDTH_UNITS * len as f64);
-        let unit_scale = if total_units <= f64::EPSILON {
-            available_content_width / len as f64
-        } else {
-            available_content_width / total_units
-        };
-
-        let mut pixel_widths = Vec::with_capacity(len);
-        for w in &weights {
-            pixel_widths.push(w * unit_scale);
-        }
+        let mut width_units: Vec<f64> =
+            state.windows.iter().enumerate().map(|(idx, _)| state.width_unit(idx)).collect();
 
         if let Some(fw) = state.full_width {
             if let Some(idx) = state.windows.iter().position(|w| *w == fw) {
-                for (i, pw) in pixel_widths.iter_mut().enumerate() {
-                    if i == idx {
-                        *pw = available_content_width;
-                    }
+                if idx < width_units.len() {
+                    width_units[idx] = 1.0;
                 }
             }
         }
+
+        let pixel_widths: Vec<f64> =
+            width_units.iter().map(|units| units * available_content_width).collect();
 
         let mut prefix = Vec::with_capacity(len);
         let mut acc = 0.0;
@@ -334,15 +393,28 @@ impl LayoutSystem for ScrollLayoutSystem {
         let base_y =
             screen.origin.y + outer.top + (available_height - window_height).max(0.0) / 2.0;
 
-        let offset = state.scroll_offset.clamp(0.0, state.max_offset());
-        let idx_floor = offset.floor() as usize;
-        let frac = offset - idx_floor as f64;
+        let offset_units = state.scroll_offset.clamp(0.0, state.max_offset());
+        let mut remaining = offset_units;
         let mut shift = 0.0;
-        for i in 0..idx_floor.min(len) {
-            shift += pixel_widths[i] + gap;
-        }
-        if idx_floor < len {
-            shift += frac * (pixel_widths[idx_floor] + gap);
+        for (idx, width_unit) in width_units.iter().enumerate() {
+            if remaining <= 0.0 {
+                break;
+            }
+
+            let width_px = pixel_widths[idx];
+            if remaining < *width_unit {
+                if *width_unit > f64::EPSILON {
+                    let fraction = remaining / *width_unit;
+                    shift += fraction * width_px;
+                }
+                break;
+            } else {
+                shift += width_px;
+                remaining -= *width_unit;
+                if idx + 1 < len {
+                    shift += gap;
+                }
+            }
         }
 
         state
@@ -407,7 +479,7 @@ impl LayoutSystem for ScrollLayoutSystem {
         } else {
             let wid = state.windows[target];
             state.selected = Some(wid);
-            state.scroll_offset = target as f64;
+            state.ensure_visible_index(target);
             (Some(wid), vec![wid])
         }
     }
@@ -419,8 +491,9 @@ impl LayoutSystem for ScrollLayoutSystem {
         state.windows.insert(insert_idx, wid);
         state.widths.insert(insert_idx, 1.0);
         state.selected = Some(wid);
-        state.scroll_offset = state.scroll_offset.clamp(0.0, state.max_offset());
         state.ensure_widths();
+        state.clamp_offset();
+        state.ensure_selected_visible();
     }
 
     fn remove_window(&mut self, wid: WindowId) {
@@ -460,6 +533,7 @@ impl LayoutSystem for ScrollLayoutSystem {
                 state.ensure_selection();
             } else {
                 state.clamp_offset();
+                state.ensure_selected_visible();
             }
         }
     }
@@ -513,7 +587,6 @@ impl LayoutSystem for ScrollLayoutSystem {
 
         if removed_selected {
             state.selected = Some(desired[0]);
-            state.scroll_offset = (insert_idx as f64).min(state.max_offset());
         }
 
         state.ensure_selection();
@@ -570,11 +643,7 @@ impl LayoutSystem for ScrollLayoutSystem {
         if a_idx < state.widths.len() && b_idx < state.widths.len() {
             state.widths.swap(a_idx, b_idx);
         }
-        if state.selected == Some(a) {
-            state.scroll_offset = b_idx as f64;
-        } else if state.selected == Some(b) {
-            state.scroll_offset = a_idx as f64;
-        }
+        state.ensure_selected_visible();
         true
     }
 
@@ -607,7 +676,7 @@ impl LayoutSystem for ScrollLayoutSystem {
             if idx < state.widths.len() && target_idx < state.widths.len() {
                 state.widths.swap(idx, target_idx);
             }
-            state.scroll_offset = target_idx as f64;
+            state.ensure_selected_visible();
             true
         } else {
             false
@@ -645,9 +714,10 @@ impl LayoutSystem for ScrollLayoutSystem {
             } else {
                 let new_idx = idx.min(from_state.windows.len() - 1);
                 from_state.selected = Some(from_state.windows[new_idx]);
-                from_state.scroll_offset = new_idx as f64;
             }
             from_state.ensure_widths();
+            from_state.clamp_offset();
+            from_state.ensure_selected_visible();
             Some((wid, width))
         };
 
@@ -660,8 +730,9 @@ impl LayoutSystem for ScrollLayoutSystem {
             to_state.windows.insert(insert_idx, wid);
             to_state.widths.insert(insert_idx, width.max(MIN_WIDTH_UNITS));
             to_state.selected = Some(wid);
-            to_state.scroll_offset = to_state.scroll_offset.clamp(0.0, to_state.max_offset());
             to_state.ensure_widths();
+            to_state.clamp_offset();
+            to_state.ensure_selected_visible();
         }
     }
 
@@ -756,7 +827,8 @@ impl LayoutSystem for ScrollLayoutSystem {
 
         state.widths[idx] = (state.widths[idx] + amount).max(MIN_WIDTH_UNITS);
         state.ensure_widths();
-        state.scroll_offset = state.scroll_offset.clamp(0.0, state.max_offset());
+        state.clamp_offset();
+        state.ensure_selected_visible();
     }
 
     fn rebalance(&mut self, layout: LayoutId) {
