@@ -624,14 +624,38 @@ impl LayoutSystem for ScrollLayoutSystem {
 
     fn on_window_resized(
         &mut self,
-        _layout: LayoutId,
-        _wid: WindowId,
+        layout: LayoutId,
+        wid: WindowId,
         _old_frame: CGRect,
-        _new_frame: CGRect,
+        new_frame: CGRect,
         _screen: CGRect,
         _gaps: &crate::common::config::GapSettings,
     ) {
-        // Scroll layout doesn't need to react to individual window resize events for layout state.
+        let Some(state) = self.layout_state(layout) else { return };
+        let Some(idx) = state.windows.iter().position(|w| *w == wid) else { return };
+
+        if state.fullscreen == Some(wid) || state.full_width == Some(wid) {
+            return;
+        }
+
+        state.ensure_widths();
+
+        let base_unit = new_frame.size.height.max(MIN_WINDOW_DIMENSION);
+        if base_unit <= f64::EPSILON {
+            return;
+        }
+
+        let mut new_units = new_frame.size.width / base_unit;
+        if !new_units.is_finite() {
+            return;
+        }
+        new_units = new_units.max(MIN_WIDTH_UNITS);
+
+        if idx < state.widths.len() && (state.widths[idx] - new_units).abs() > f64::EPSILON {
+            state.widths[idx] = new_units;
+            state.clamp_offset();
+            state.ensure_selected_visible();
+        }
     }
 
     fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
