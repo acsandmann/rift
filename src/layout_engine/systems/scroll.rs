@@ -364,22 +364,24 @@ impl LayoutSystem for ScrollLayoutSystem {
             (screen.size.width - outer.left - outer.right).max(MIN_WINDOW_DIMENSION);
         let available_height =
             (screen.size.height - outer.top - outer.bottom).max(MIN_WINDOW_DIMENSION);
-        let available_content_width =
-            (available_width - gap * (len.saturating_sub(1) as f64)).max(MIN_WINDOW_DIMENSION);
-
-        let mut width_units: Vec<f64> =
+        let width_units: Vec<f64> =
             state.windows.iter().enumerate().map(|(idx, _)| state.width_unit(idx)).collect();
+
+        let window_height = (available_height - inner.vertical).max(MIN_WINDOW_DIMENSION);
+        let base_unit = window_height.max(MIN_WINDOW_DIMENSION);
+
+        let mut pixel_widths: Vec<f64> = width_units
+            .iter()
+            .map(|units| (*units * base_unit).max(MIN_WINDOW_DIMENSION))
+            .collect();
 
         if let Some(fw) = state.full_width {
             if let Some(idx) = state.windows.iter().position(|w| *w == fw) {
-                if idx < width_units.len() {
-                    width_units[idx] = 1.0;
+                if idx < pixel_widths.len() {
+                    pixel_widths[idx] = available_width;
                 }
             }
         }
-
-        let pixel_widths: Vec<f64> =
-            width_units.iter().map(|units| units * available_content_width).collect();
 
         let mut prefix = Vec::with_capacity(len);
         let mut acc = 0.0;
@@ -388,7 +390,6 @@ impl LayoutSystem for ScrollLayoutSystem {
             acc += *width + gap;
         }
 
-        let window_height = (available_height - inner.vertical).max(MIN_WINDOW_DIMENSION);
         let base_x = screen.origin.x + outer.left;
         let base_y =
             screen.origin.y + outer.top + (available_height - window_height).max(0.0) / 2.0;
@@ -405,7 +406,9 @@ impl LayoutSystem for ScrollLayoutSystem {
             if remaining < *width_unit {
                 if *width_unit > f64::EPSILON {
                     let fraction = remaining / *width_unit;
-                    shift += fraction * width_px;
+                    let slot_gap = if idx + 1 < len { gap } else { 0.0 };
+                    let slot_width = width_px + slot_gap;
+                    shift += fraction * slot_width;
                 }
                 break;
             } else {
@@ -575,6 +578,7 @@ impl LayoutSystem for ScrollLayoutSystem {
                 state.ensure_selection();
             } else {
                 state.clamp_offset();
+                state.ensure_selected_visible();
             }
             return;
         }
@@ -613,7 +617,8 @@ impl LayoutSystem for ScrollLayoutSystem {
         }
 
         state.selected = Some(wid);
-        state.scroll_offset = state.scroll_offset.clamp(0.0, state.max_offset());
+        state.clamp_offset();
+        state.ensure_selected_visible();
         true
     }
 
