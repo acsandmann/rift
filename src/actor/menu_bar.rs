@@ -1,8 +1,8 @@
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
+use gxhash::GxHasher;
 use objc2::MainThreadMarker;
-use rustc_hash::FxHasher;
 use tracing::instrument;
 
 use crate::actor;
@@ -97,7 +97,7 @@ impl Menu {
             windows,
         } = event;
 
-        let mut hasher = FxHasher::default();
+        let mut hasher = GxHasher::default();
         active_space.get().hash(&mut hasher);
         if let Some(ws) = active_workspace {
             ws.hash(&mut hasher);
