@@ -16,7 +16,7 @@ use super::reactor::{self, Event};
 use crate::actor;
 use crate::actor::wm_controller::{self, WmCommand, WmEvent};
 use crate::common::collections::{HashMap, HashSet};
-use crate::common::config::{Config, HapticPattern, LayoutMode};
+use crate::common::config::{Config, HapticPattern, LayoutMode, ScrollGestureMode};
 use crate::common::log::trace_misc;
 use crate::layout_engine::LayoutCommand as LC;
 use crate::sys::event::{self, Hotkey, KeyCode};
@@ -464,7 +464,7 @@ impl EventTap {
         let phase = nsevent.phase();
         if phase.contains(NSEventPhase::Ended) || phase.contains(NSEventPhase::Cancelled) {
             wm_sender.send(WmEvent::Command(WmCommand::ReactorCommand(
-                reactor::Command::Layout(LC::ScrollWorkspace { delta: 0.0, finalize: true }),
+                reactor::Command::Layout(LC::ShiftViewport { delta: 0.0, finalize: true }),
             )));
             state.borrow_mut().reset();
             return;
@@ -541,12 +541,28 @@ impl EventTap {
 
                 st.phase = GesturePhase::Committed;
 
-                wm_sender.send(WmEvent::Command(WmCommand::ReactorCommand(
-                    reactor::Command::Layout(LC::ScrollWorkspace {
-                        delta: delta_units,
-                        finalize: false,
-                    }),
-                )));
+                let mode = scroll_cfg.gesture_mode;
+                let use_immediate = match mode {
+                    ScrollGestureMode::Immediate => true,
+                    ScrollGestureMode::Preview => false,
+                    ScrollGestureMode::Hybrid => (dx.abs() * sensitivity) >= 0.5,
+                };
+
+                if use_immediate {
+                    wm_sender.send(WmEvent::Command(WmCommand::ReactorCommand(
+                        reactor::Command::Layout(LC::ScrollWorkspace {
+                            delta: delta_units,
+                            finalize: false,
+                        }),
+                    )));
+                } else {
+                    wm_sender.send(WmEvent::Command(WmCommand::ReactorCommand(
+                        reactor::Command::Layout(LC::ShiftViewport {
+                            delta: delta_units,
+                            finalize: false,
+                        }),
+                    )));
+                }
             }
         }
     }

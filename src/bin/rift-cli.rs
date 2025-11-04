@@ -121,6 +121,8 @@ enum WindowCommands {
     ToggleFullscreen,
     /// Toggle fullscreen within configured outer gaps (respects outer gaps / fills tiling area)
     ToggleFullscreenWithinGaps,
+    /// Toggle full-width mode for selected window (scroll layout only)
+    ToggleFullWidth,
     /// Grow the current window size
     ResizeGrow,
     /// Shrink the current window size
@@ -164,6 +166,9 @@ enum LayoutCommands {
     Unjoin,
     /// Toggle floating on the focused selection (tree focus)
     ToggleFocusFloat,
+    /// !ONLY FOR SCROLL LAYOUT!
+    /// Nudge the scroll layout viewport left/right without changing selection. delta is a float (negative=left, positive=right). Use finalize to snap focus.
+    ShiftViewport { delta: f64, finalize: Option<bool> },
 }
 
 #[derive(Subcommand)]
@@ -434,6 +439,9 @@ fn map_window_command(cmd: WindowCommands) -> Result<RiftCommand, String> {
         WindowCommands::ToggleFullscreenWithinGaps => Ok(RiftCommand::Reactor(
             reactor::Command::Layout(LC::ToggleFullscreenWithinGaps),
         )),
+        WindowCommands::ToggleFullWidth => Ok(RiftCommand::Reactor(reactor::Command::Layout(
+            LC::ToggleFullWidth,
+        ))),
         WindowCommands::ResizeGrow => Ok(RiftCommand::Reactor(reactor::Command::Layout(
             LC::ResizeWindowGrow,
         ))),
@@ -493,6 +501,12 @@ fn map_layout_command(cmd: LayoutCommands) -> Result<RiftCommand, String> {
         LayoutCommands::ToggleFocusFloat => Ok(RiftCommand::Reactor(reactor::Command::Layout(
             LC::ToggleFocusFloating,
         ))),
+        LayoutCommands::ShiftViewport { delta, finalize } => Ok(RiftCommand::Reactor(
+            reactor::Command::Layout(LC::ShiftViewport {
+                delta,
+                finalize: finalize.unwrap_or(false),
+            }),
+        )),
     }
 }
 

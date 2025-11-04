@@ -906,44 +906,41 @@ impl LayoutSystem for BspLayoutSystem {
         }
     }
 
-    fn toggle_fullscreen_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
-        if let Some(sel) = self.selection_of_layout(layout) {
-            let sel_leaf = self.descend_to_leaf(sel);
-            if let Some(NodeKind::Leaf {
-                window: Some(w),
-                fullscreen,
-                fullscreen_within_gaps,
-                ..
-            }) = self.kind.get_mut(sel_leaf)
-            {
-                *fullscreen = !*fullscreen;
-                if *fullscreen {
-                    *fullscreen_within_gaps = false;
+    fn toggle_action(
+        &mut self,
+        layout: LayoutId,
+        action: crate::layout_engine::systems::ToggleAction,
+    ) -> Vec<WindowId> {
+        match action {
+            crate::layout_engine::systems::ToggleAction::Fullscreen { within_gaps } => {
+                if let Some(sel) = self.selection_of_layout(layout) {
+                    let sel_leaf = self.descend_to_leaf(sel);
+                    if let Some(NodeKind::Leaf {
+                        window: Some(w),
+                        fullscreen,
+                        fullscreen_within_gaps,
+                        ..
+                    }) = self.kind.get_mut(sel_leaf)
+                    {
+                        if within_gaps {
+                            *fullscreen_within_gaps = !*fullscreen_within_gaps;
+                            if *fullscreen_within_gaps {
+                                *fullscreen = false;
+                            }
+                            return vec![*w];
+                        } else {
+                            *fullscreen = !*fullscreen;
+                            if *fullscreen {
+                                *fullscreen_within_gaps = false;
+                            }
+                            return vec![*w];
+                        }
+                    }
                 }
-                return vec![*w];
+                vec![]
             }
+            crate::layout_engine::systems::ToggleAction::FullWidth => vec![],
         }
-        vec![]
-    }
-
-    fn toggle_fullscreen_within_gaps_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
-        if let Some(sel) = self.selection_of_layout(layout) {
-            let sel_leaf = self.descend_to_leaf(sel);
-            if let Some(NodeKind::Leaf {
-                window: Some(w),
-                fullscreen_within_gaps,
-                fullscreen,
-                ..
-            }) = self.kind.get_mut(sel_leaf)
-            {
-                *fullscreen_within_gaps = !*fullscreen_within_gaps;
-                if *fullscreen_within_gaps {
-                    *fullscreen = false;
-                }
-                return vec![*w];
-            }
-        }
-        vec![]
     }
 
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) {

@@ -2,7 +2,7 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use serde::{Deserialize, Serialize};
 
 use crate::actor::app::{WindowId, pid_t};
-use crate::layout_engine::systems::LayoutSystem;
+use crate::layout_engine::systems::{LayoutSystem, ToggleAction};
 use crate::layout_engine::{Direction, LayoutId, LayoutKind};
 
 const MIN_WINDOW_DIMENSION: f64 = 32.0;
@@ -14,6 +14,9 @@ struct ScrollLayoutState {
     selected: Option<WindowId>,
     widths: Vec<f64>,
     scroll_offset: f64,
+    fullscreen: Option<WindowId>,
+    fullscreen_within_gaps: bool,
+    full_width: Option<WindowId>,
 }
 
 impl Default for ScrollLayoutState {
@@ -23,6 +26,9 @@ impl Default for ScrollLayoutState {
             selected: None,
             scroll_offset: 0.0,
             widths: Vec::new(),
+            fullscreen: None,
+            fullscreen_within_gaps: false,
+            full_width: None,
         }
     }
 }
@@ -90,6 +96,14 @@ impl ScrollLayoutState {
             } else if let Some(sel_idx) = self.selected_index() {
                 self.scroll_offset = sel_idx as f64;
             }
+
+            if self.fullscreen == Some(wid) {
+                self.fullscreen = None;
+                self.fullscreen_within_gaps = false;
+            }
+            if self.full_width == Some(wid) {
+                self.full_width = None;
+            }
             self.ensure_widths();
             true
         } else {
@@ -147,9 +161,25 @@ impl ScrollLayoutSystem {
 
     pub fn finalize_scroll(&mut self, layout: LayoutId) -> Option<WindowId> {
         let state = self.layouts.get_mut(layout)?;
+        if state.windows.is_empty() {
+            state.selected = None;
+            state.scroll_offset = 0.0;
+            return None;
+        }
+
         state.ensure_selection();
         state.scroll_offset = state.scroll_offset.clamp(0.0, state.max_offset());
-        None
+
+        let idx = state.scroll_offset.round().clamp(0.0, state.max_offset()) as usize;
+
+        if idx < state.windows.len() {
+            let wid = state.windows[idx];
+            state.selected = Some(wid);
+            state.scroll_offset = idx as f64;
+            Some(wid)
+        } else {
+            None
+        }
     }
 
     fn layout_state(&mut self, layout: LayoutId) -> Option<&mut ScrollLayoutState> {
@@ -158,6 +188,18 @@ impl ScrollLayoutSystem {
 
     fn layout_state_ref(&self, layout: LayoutId) -> Option<&ScrollLayoutState> {
         self.layouts.get(layout)
+    }
+
+    pub fn shift_view_by(&mut self, layout: LayoutId, delta: f64) {
+        if let Some(state) = self.layouts.get_mut(layout) {
+            if state.windows.is_empty() {
+                state.selected = None;
+                state.scroll_offset = 0.0;
+                return;
+            }
+            state.ensure_selection();
+            state.scroll_offset = (state.scroll_offset + delta).clamp(0.0, state.max_offset());
+        }
     }
 }
 
@@ -176,12 +218,25 @@ impl LayoutSystem for ScrollLayoutSystem {
             Some(state) => {
                 let mut buf = String::from("scroll\n");
                 for (idx, wid) in state.windows.iter().enumerate() {
-                    let marker = if state.selected == Some(*wid) {
+                    let sel_marker = if state.selected == Some(*wid) {
                         '>'
                     } else {
                         ' '
                     };
-                    buf.push_str(&format!("{marker} [{idx}] {wid:?}\n"));
+                    let fs_marker = if state.fullscreen == Some(*wid) {
+                        'F'
+                    } else {
+                        ' '
+                    };
+                    let fw_marker = if state.full_width == Some(*wid) {
+                        'W'
+                    } else {
+                        ' '
+                    };
+                    buf.push_str(&format!(
+                        "{}{}{} [{idx}] {wid:?}\n",
+                        sel_marker, fs_marker, fw_marker
+                    ));
                 }
                 buf
             }
@@ -204,6 +259,28 @@ impl LayoutSystem for ScrollLayoutSystem {
         };
         if state.windows.is_empty() {
             return Vec::new();
+        }
+
+        if let Some(fs_wid) = state.fullscreen {
+            if state.windows.iter().any(|w| *w == fs_wid) {
+                if state.fullscreen_within_gaps {
+                    let outer = &gaps.outer;
+                    let available_width =
+                        (screen.size.width - outer.left - outer.right).max(MIN_WINDOW_DIMENSION);
+                    let available_height =
+                        (screen.size.height - outer.top - outer.bottom).max(MIN_WINDOW_DIMENSION);
+                    let base_x = screen.origin.x + outer.left;
+                    let base_y = screen.origin.y + outer.top;
+                    let frame = CGRect::new(
+                        CGPoint::new(base_x, base_y),
+                        CGSize::new(available_width, available_height),
+                    );
+                    return vec![(fs_wid, frame)];
+                } else {
+                    let frame = CGRect::new(screen.origin, screen.size);
+                    return vec![(fs_wid, frame)];
+                }
+            }
         }
 
         let outer = &gaps.outer;
@@ -233,6 +310,16 @@ impl LayoutSystem for ScrollLayoutSystem {
         let mut pixel_widths = Vec::with_capacity(len);
         for w in &weights {
             pixel_widths.push(w * unit_scale);
+        }
+
+        if let Some(fw) = state.full_width {
+            if let Some(idx) = state.windows.iter().position(|w| *w == fw) {
+                for (i, pw) in pixel_widths.iter_mut().enumerate() {
+                    if i == idx {
+                        *pw = available_content_width;
+                    }
+                }
+            }
         }
 
         let mut prefix = Vec::with_capacity(len);
@@ -353,6 +440,13 @@ impl LayoutSystem for ScrollLayoutSystem {
                     if state.selected == Some(state.windows[idx]) {
                         removed_selected = true;
                     }
+                    if state.fullscreen == Some(state.windows[idx]) {
+                        state.fullscreen = None;
+                        state.fullscreen_within_gaps = false;
+                    }
+                    if state.full_width == Some(state.windows[idx]) {
+                        state.full_width = None;
+                    }
                     state.windows.remove(idx);
                     if idx < state.widths.len() {
                         state.widths.remove(idx);
@@ -384,6 +478,13 @@ impl LayoutSystem for ScrollLayoutSystem {
                 }
                 if state.selected == Some(state.windows[i]) {
                     removed_selected = true;
+                }
+                if state.fullscreen == Some(state.windows[i]) {
+                    state.fullscreen = None;
+                    state.fullscreen_within_gaps = false;
+                }
+                if state.full_width == Some(state.windows[i]) {
+                    state.full_width = None;
                 }
                 state.windows.remove(i);
                 if i < state.widths.len() {
@@ -530,6 +631,14 @@ impl LayoutSystem for ScrollLayoutSystem {
             } else {
                 1.0
             };
+            if from_state.fullscreen == Some(wid) {
+                from_state.fullscreen = None;
+                from_state.fullscreen_within_gaps = false;
+            }
+            if from_state.full_width == Some(wid) {
+                from_state.full_width = None;
+            }
+
             if from_state.windows.is_empty() {
                 from_state.selected = None;
                 from_state.scroll_offset = 0.0;
@@ -558,9 +667,59 @@ impl LayoutSystem for ScrollLayoutSystem {
 
     fn split_selection(&mut self, _layout: LayoutId, _kind: LayoutKind) {}
 
-    fn toggle_fullscreen_of_selection(&mut self, _layout: LayoutId) -> Vec<WindowId> {
-        // Scroll layout does not have special stacking/fullscreen semantics.
-        Vec::new()
+    fn toggle_action(&mut self, layout: LayoutId, action: ToggleAction) -> Vec<WindowId> {
+        let Some(state) = self.layout_state(layout) else {
+            return vec![];
+        };
+
+        match action {
+            ToggleAction::Fullscreen { within_gaps } => {
+                state.ensure_selection();
+                let Some(wid) = state.selected else {
+                    return vec![];
+                };
+
+                if within_gaps {
+                    if state.fullscreen == Some(wid) {
+                        state.fullscreen_within_gaps = !state.fullscreen_within_gaps;
+                        vec![wid]
+                    } else {
+                        state.fullscreen = Some(wid);
+                        state.fullscreen_within_gaps = true;
+                        state.full_width = None;
+                        vec![wid]
+                    }
+                } else {
+                    if state.fullscreen == Some(wid) {
+                        state.fullscreen = None;
+                        state.fullscreen_within_gaps = false;
+                        Vec::new()
+                    } else {
+                        state.fullscreen = Some(wid);
+                        state.fullscreen_within_gaps = false;
+                        state.full_width = None;
+                        vec![wid]
+                    }
+                }
+            }
+            ToggleAction::FullWidth => {
+                state.ensure_selection();
+                let Some(idx) = state.selected_index() else {
+                    return vec![];
+                };
+                let wid = state.windows[idx];
+
+                if state.full_width == Some(wid) {
+                    state.full_width = None;
+                    Vec::new()
+                } else {
+                    state.full_width = Some(wid);
+                    state.fullscreen = None;
+                    state.fullscreen_within_gaps = false;
+                    vec![wid]
+                }
+            }
+        }
     }
 
     fn join_selection_with_direction(&mut self, _layout: LayoutId, _direction: Direction) {}
@@ -609,8 +768,4 @@ impl LayoutSystem for ScrollLayoutSystem {
     fn toggle_tile_orientation(&mut self, _layout: LayoutId) {}
 
     fn parent_of_selection_is_stacked(&self, _layout: LayoutId) -> bool { false }
-
-    fn toggle_fullscreen_within_gaps_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
-        self.toggle_fullscreen_of_selection(layout)
-    }
 }

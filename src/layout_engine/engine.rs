@@ -43,6 +43,11 @@ pub enum LayoutCommand {
     ToggleWindowFloating,
     ToggleFullscreen,
     ToggleFullscreenWithinGaps,
+    ToggleFullWidth,
+    ShiftViewport {
+        delta: f64,
+        finalize: bool,
+    },
 
     ResizeWindowGrow,
     ResizeWindowShrink,
@@ -695,6 +700,17 @@ impl LayoutEngine {
             Some(visible_spaces[idx as usize])
         };
 
+        let make_response = |raise_windows: Vec<WindowId>| {
+            if raise_windows.is_empty() {
+                EventResponse::default()
+            } else {
+                EventResponse {
+                    raise_windows,
+                    focus_window: None,
+                }
+            }
+        };
+
         match command {
             LayoutCommand::ToggleWindowFloating => unreachable!(),
             LayoutCommand::ToggleFocusFloating => unreachable!(),
@@ -732,6 +748,30 @@ impl LayoutEngine {
                     }
                 }
 
+                EventResponse::default()
+            }
+
+            LayoutCommand::ShiftViewport { delta, finalize } => {
+                if let LayoutSystemKind::Scroll(system) = &mut self.tree {
+                    if delta.abs() > f64::EPSILON {
+                        system.shift_view_by(layout, delta);
+                    }
+                    if finalize {
+                        let _ = system.finalize_scroll(layout);
+                        if let Some(wid) = system.selected_window(layout) {
+                            self.focused_window = Some(wid);
+                            self.virtual_workspace_manager.set_last_focused_window(
+                                space,
+                                workspace_id,
+                                Some(wid),
+                            );
+                            return EventResponse {
+                                focus_window: Some(wid),
+                                raise_windows: vec![wid],
+                            };
+                        }
+                    }
+                }
                 EventResponse::default()
             }
 
@@ -774,26 +814,24 @@ impl LayoutEngine {
                 EventResponse::default()
             }
             LayoutCommand::ToggleFullscreen => {
-                let raise_windows = self.tree.toggle_fullscreen_of_selection(layout);
-                if raise_windows.is_empty() {
-                    EventResponse::default()
-                } else {
-                    EventResponse {
-                        raise_windows,
-                        focus_window: None,
-                    }
-                }
+                let raise_windows = self.tree.toggle_action(
+                    layout,
+                    crate::layout_engine::systems::ToggleAction::Fullscreen { within_gaps: false },
+                );
+                make_response(raise_windows)
             }
             LayoutCommand::ToggleFullscreenWithinGaps => {
-                let raise_windows = self.tree.toggle_fullscreen_within_gaps_of_selection(layout);
-                if raise_windows.is_empty() {
-                    EventResponse::default()
-                } else {
-                    EventResponse {
-                        raise_windows,
-                        focus_window: None,
-                    }
-                }
+                let raise_windows = self.tree.toggle_action(
+                    layout,
+                    crate::layout_engine::systems::ToggleAction::Fullscreen { within_gaps: true },
+                );
+                make_response(raise_windows)
+            }
+            LayoutCommand::ToggleFullWidth => {
+                let raise_windows = self
+                    .tree
+                    .toggle_action(layout, crate::layout_engine::systems::ToggleAction::FullWidth);
+                make_response(raise_windows)
             }
             // handled by upper reactor
             LayoutCommand::NextWorkspace(_)

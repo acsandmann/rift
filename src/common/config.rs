@@ -553,6 +553,22 @@ fn default_scroll_gesture_fingers() -> usize { 3 }
 fn default_scroll_gesture_sensitivity() -> f64 { 1.25 }
 fn default_scroll_wheel_divisor() -> f64 { 600.0 }
 fn default_scroll_wheel_sensitivity() -> f64 { 1.0 }
+fn default_scroll_gesture_mode() -> ScrollGestureMode { ScrollGestureMode::Preview }
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum ScrollGestureMode {
+    /// Pan the viewport during the gesture, but only change selection on finalize.
+    Preview,
+    /// Immediately change the selection as the viewport crosses indices.
+    Immediate,
+    /// Hybrid mode: prefer preview behavior, but allow immediate selection under stronger crossing thresholds.
+    Hybrid,
+}
+
+impl Default for ScrollGestureMode {
+    fn default() -> Self { ScrollGestureMode::Preview }
+}
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
@@ -569,6 +585,12 @@ pub struct ScrollLayoutSettings {
     /// Additional sensitivity multiplier applied to scroll-wheel deltas
     #[serde(default = "default_scroll_wheel_sensitivity")]
     pub wheel_sensitivity: f64,
+    /// Mode used for gesture scrolling:
+    /// - "preview": gestures pan the viewport but do not change selection until finalize (default)
+    /// - "immediate": selection changes as the viewport crosses indices during the gesture
+    /// - "hybrid": generally preview, but allow immediate selection in stronger crossing cases
+    #[serde(default = "default_scroll_gesture_mode")]
+    pub gesture_mode: ScrollGestureMode,
 }
 
 impl Default for ScrollLayoutSettings {
@@ -578,6 +600,7 @@ impl Default for ScrollLayoutSettings {
             gesture_sensitivity: default_scroll_gesture_sensitivity(),
             wheel_pixels_per_window: default_scroll_wheel_divisor(),
             wheel_sensitivity: default_scroll_wheel_sensitivity(),
+            gesture_mode: default_scroll_gesture_mode(),
         }
     }
 }
