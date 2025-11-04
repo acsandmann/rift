@@ -632,7 +632,9 @@ impl LayoutSystem for ScrollLayoutSystem {
         _gaps: &crate::common::config::GapSettings,
     ) {
         let Some(state) = self.layout_state(layout) else { return };
-        let Some(idx) = state.windows.iter().position(|w| *w == wid) else { return };
+        let Some(idx) = state.windows.iter().position(|w| *w == wid) else {
+            return;
+        };
 
         if state.fullscreen == Some(wid) || state.full_width == Some(wid) {
             return;
