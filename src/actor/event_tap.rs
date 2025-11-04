@@ -171,7 +171,8 @@ impl EventTap {
             .clone()
             .and_then(|spec| spec.to_hotkey());
         let swipe_cfg = SwipeConfig::from_config(&config);
-        let swipe = if swipe_cfg.enabled && wm_sender.is_some() {
+        let layout_is_scroll = config.settings.layout.mode == LayoutMode::Scroll;
+        let swipe = if (swipe_cfg.enabled || layout_is_scroll) && wm_sender.is_some() {
             Some(SwipeHandler {
                 cfg: swipe_cfg,
                 state: RefCell::new(SwipeState::default()),
