@@ -83,12 +83,18 @@ impl ScrollLayoutState {
             let end = start + width;
             if current == idx {
                 let view_start = self.scroll_offset;
-                let view_end = view_start + viewport;
-                if start < view_start {
-                    self.scroll_offset = start.max(0.0);
-                } else if end > view_end {
-                    self.scroll_offset = (end - viewport).max(0.0);
+                let end_minus_view = (end - viewport).max(0.0);
+                let min_offset = start.min(end_minus_view);
+                let max_offset = start.max(end_minus_view);
+                let mut desired = view_start.clamp(min_offset, max_offset);
+                let window_width = end - start;
+                if window_width > viewport && view_start > max_offset {
+                    desired = min_offset;
                 }
+                if desired < 0.0 {
+                    desired = 0.0;
+                }
+                self.scroll_offset = desired;
                 break;
             }
             start = end;
@@ -406,9 +412,7 @@ impl LayoutSystem for ScrollLayoutSystem {
             if remaining < *width_unit {
                 if *width_unit > f64::EPSILON {
                     let fraction = remaining / *width_unit;
-                    let slot_gap = if idx + 1 < len { gap } else { 0.0 };
-                    let slot_width = width_px + slot_gap;
-                    shift += fraction * slot_width;
+                    shift += fraction * width_px;
                 }
                 break;
             } else {
