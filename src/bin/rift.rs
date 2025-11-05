@@ -11,7 +11,7 @@ use rift_wm::actor::menu_bar::Menu;
 use rift_wm::actor::mission_control::MissionControlActor;
 use rift_wm::actor::mission_control_observer::NativeMissionControl;
 use rift_wm::actor::notification_center::NotificationCenter;
-use rift_wm::actor::process_actor::ProcessActor;
+use rift_wm::actor::process::ProcessActor;
 use rift_wm::actor::reactor::{self, Reactor};
 use rift_wm::actor::stack_line::StackLine;
 use rift_wm::actor::window_notify as window_notify_actor;
