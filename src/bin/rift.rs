@@ -225,8 +225,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
 
     let notification_center = NotificationCenter::new(wm_controller_sender.clone());
 
-    // Keep ProcessActor alive via RAII; no task or println noise needed.
-    let process_actor = ProcessActor::new(wm_controller_sender.clone()).ok();
+    let process_actor = ProcessActor::new(wm_controller_sender.clone());
 
     let event_tap = EventTap::new(
         config.clone(),
@@ -264,7 +263,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
             wn_actor.run(),
             mission_control_native.run(),
             mission_control.run(),
-            process_actor.map(|pa| pa.run())
+            process_actor.run()
         );
     });
 

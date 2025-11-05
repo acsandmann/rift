@@ -1,15 +1,13 @@
 use std::collections::hash_map::Entry;
 
-use objc2_app_kit::NSRunningApplication;
 use objc2_core_foundation::CGRect;
 use tracing::{debug, info, trace, warn};
 
-use crate::actor::app::{AppInfo, Request};
+use crate::actor::app::Request;
 use crate::actor::reactor::{
     DragState, Event, FullscreenTrack, MissionControlState, PendingSpaceChange, Reactor, Screen,
     StaleCleanupState,
 };
-use crate::actor::wm_controller::WmEvent;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 

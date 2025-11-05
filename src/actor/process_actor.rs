@@ -60,7 +60,7 @@ pub struct ProcessActor {
 }
 
 impl ProcessActor {
-    pub fn new(sender: wm_controller::Sender) -> Result<Self, String> {
+    pub fn new(sender: wm_controller::Sender) -> Self {
         let types = [
             event_type(K_EVENT_CLASS_APPLICATION, K_EVENT_APP_LAUNCHED),
             event_type(K_EVENT_CLASS_APPLICATION, K_EVENT_APP_TERMINATED),
@@ -102,13 +102,14 @@ impl ProcessActor {
             }
 
             NO_ERR
-        })?;
+        })
+        .expect("Failed to create Carbon application event listener");
 
         debug!("ProcessActor: Carbon listener installed");
-        Ok(Self {
+        Self {
             _listener: listener,
             _sender: sender,
-        })
+        }
     }
 
     pub async fn run(self) { future::pending::<()>().await; }
