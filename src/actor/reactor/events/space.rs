@@ -189,23 +189,11 @@ impl SpaceEventHandler {
 
             reactor.update_partial_window_server_info(vec![window_server_info]);
 
-            if !reactor.app_manager.apps.contains_key(&window_server_info.pid) {
-                if let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(
-                    window_server_info.pid,
-                ) {
-                    debug!(
-                        ?app,
-                        "Received WindowServerAppeared for unknown app - synthesizing AppLaunch"
-                    );
-                    reactor.communication_manager.wm_sender.as_ref().map(|wm| {
-                        wm.send(WmEvent::AppLaunch(window_server_info.pid, AppInfo::from(&*app)))
-                    });
-                }
-            } else if let Some(app) = reactor.app_manager.apps.get(&window_server_info.pid) {
+            if let Some(app) = reactor.app_manager.apps.get(&window_server_info.pid) {
                 if let Err(err) =
                     app.handle.send(Request::GetVisibleWindows { force_refresh: false })
                 {
-                    debug!(
+                    warn!(
                         pid = window_server_info.pid,
                         ?wsid,
                         ?err,

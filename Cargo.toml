@@ -148,6 +148,7 @@ dashmap = "6.1.0"
 sigpipe = "0.1.3"
 embed_plist = "1.2.2"
 gxhash = "3.5.0"
+futures = "0.3.31"
 
 [dev-dependencies]
 pretty_assertions = "1.4.0"
