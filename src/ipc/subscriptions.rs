@@ -1,17 +1,16 @@
-use std::ffi::{CString, c_void};
+use std::ffi::CString;
 use std::os::raw::c_char;
 use std::sync::Arc;
 
-use objc2_core_foundation::{
-    CFAbsoluteTimeGetCurrent, CFRetained, CFRunLoop, CFRunLoopTimer, CFRunLoopTimerContext,
-    kCFRunLoopDefaultMode,
-};
+use dispatchr::queue;
+use dispatchr::time::Time;
 use parking_lot::{Mutex, RwLock};
 use serde_json::Value;
 use tracing::{debug, error, info, warn};
 
 use crate::actor::broadcast::BroadcastEvent;
 use crate::common::collections::HashMap;
+use crate::sys::dispatch::DispatchExt;
 use crate::sys::mach::mach_send_message;
 
 pub type ClientPort = u32;
@@ -22,22 +21,9 @@ pub struct CliSubscription {
     pub args: Vec<String>,
 }
 
-#[derive(Clone)]
-struct RunLoopHandle(CFRetained<CFRunLoop>);
-
-unsafe impl Send for RunLoopHandle {}
-unsafe impl Sync for RunLoopHandle {}
-
-impl RunLoopHandle {
-    fn new(runloop: CFRetained<CFRunLoop>) -> Self { Self(runloop) }
-
-    fn as_ref(&self) -> &CFRunLoop { &self.0 }
-}
-
 pub struct ServerState {
     subscriptions: Mutex<HashMap<ClientPort, Vec<String>>>,
     cli_subscriptions: Mutex<HashMap<String, Vec<CliSubscription>>>,
-    runloop: Mutex<Option<RunLoopHandle>>,
 }
 
 pub type SharedServerState = Arc<RwLock<ServerState>>;
@@ -47,13 +33,7 @@ impl ServerState {
         Self {
             subscriptions: Mutex::new(HashMap::default()),
             cli_subscriptions: Mutex::new(HashMap::default()),
-            runloop: Mutex::new(None),
         }
-    }
-
-    pub fn set_runloop(&self, rl: Option<CFRetained<CFRunLoop>>) {
-        let mut guard = self.runloop.lock();
-        *guard = rl.map(RunLoopHandle::new);
     }
 
     pub fn subscribe_client(&self, client_port: ClientPort, event: String) {
@@ -149,16 +129,7 @@ impl ServerState {
                     }
                 };
 
-                let maybe_runloop = {
-                    let rl_guard = self.runloop.lock();
-                    rl_guard.clone()
-                };
-
-                if let Some(runloop) = maybe_runloop.as_ref() {
-                    schedule_event_send(runloop, client_port, event_json.clone());
-                } else {
-                    Self::send_event_to_client(client_port, &event_json);
-                }
+                schedule_event_send(client_port, event_json.clone());
             }
         }
     }
@@ -209,70 +180,13 @@ impl ServerState {
     }
 }
 
-struct EventInfo {
-    client_port: ClientPort,
-    event_json: String,
-}
-
-unsafe extern "C-unwind" fn perform_send(_timer: *mut CFRunLoopTimer, info: *mut c_void) {
-    if info.is_null() {
-        return;
+fn schedule_event_send(client_port: ClientPort, event_json: String) {
+    match queue::global(dispatchr::QoS::Utility) {
+        Some(q) => q.after_f_s(
+            Time::new_after(Time::NOW, (0.1 * 1000000.0) as i64),
+            (client_port, event_json),
+            |(client_port, event_json)| ServerState::send_event_to_client(client_port, &event_json),
+        ),
+        None => ServerState::send_event_to_client(client_port, &event_json),
     }
-
-    let info = unsafe { &*(info as *mut EventInfo) };
-    ServerState::send_event_to_client(info.client_port, &info.event_json);
-}
-
-unsafe extern "C-unwind" fn release_info(info: *const c_void) {
-    if info.is_null() {
-        return;
-    }
-
-    unsafe {
-        drop(Box::from_raw(info as *mut EventInfo));
-    }
-}
-
-fn schedule_event_send(runloop: &RunLoopHandle, client_port: ClientPort, event_json: String) {
-    let info = Box::new(EventInfo {
-        client_port,
-        event_json: event_json.clone(),
-    });
-    let info_ptr = Box::into_raw(info);
-
-    let mut context = CFRunLoopTimerContext {
-        version: 0,
-        info: info_ptr.cast(),
-        retain: None,
-        release: Some(release_info),
-        copyDescription: None,
-    };
-
-    let timer = unsafe {
-        CFRunLoopTimer::new(
-            None,
-            CFAbsoluteTimeGetCurrent(),
-            0.0,
-            0,
-            0,
-            Some(perform_send),
-            &mut context,
-        )
-    };
-
-    let Some(timer) = timer else {
-        unsafe {
-            drop(Box::from_raw(info_ptr));
-        }
-        ServerState::send_event_to_client(client_port, &event_json);
-        return;
-    };
-
-    let Some(mode) = (unsafe { kCFRunLoopDefaultMode }) else {
-        drop(timer);
-        ServerState::send_event_to_client(client_port, &event_json);
-        return;
-    };
-
-    runloop.as_ref().add_timer(Some(&timer), Some(mode));
 }
