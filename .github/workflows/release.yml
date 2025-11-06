@@ -37,9 +37,9 @@ jobs:
         run: |
           set -euxo pipefail
           # Build arm64
-          cargo build --release --locked --bins --target aarch64-apple-darwin
+          RUSTFLAGS="-C target-cpu=native" cargo build --release --locked --bins --target aarch64-apple-darwin
           # Build x86_64
-          cargo build --release --locked --bins --target x86_64-apple-darwin
+          RUSTFLAGS="-C target-cpu=native" cargo build --release --locked --bins --target x86_64-apple-darwin
 
       - name: Create universal binaries with lipo
         run: |
