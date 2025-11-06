@@ -8,6 +8,8 @@ use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake};
 
+use objc2::MainThreadMarker;
+use objc2_app_kit::NSApp;
 use objc2_core_foundation::CFRunLoop;
 use parking_lot::Mutex;
 
@@ -30,39 +32,44 @@ impl Drop for Session {
 }
 
 impl Executor {
-    pub fn start(task: impl Future<Output = ()>) -> Session {
+    pub fn run(task: impl Future<Output = ()>) { Self::run_with_loop_fn(task, CFRunLoop::run); }
+
+    pub fn run_main(mtm: MainThreadMarker, task: impl Future<Output = ()>) {
+        // In macOS some events do not fire unless we call this function.
+        // https://github.com/koekeishiya/yabai/issues/2680
+        Self::run_with_loop_fn(task, || NSApp(mtm).run());
+    }
+
+    fn run_with_loop_fn(task: impl Future<Output = ()>, loop_fn: impl Fn()) {
         let task: Pin<Box<dyn Future<Output = ()> + '_>> = Box::pin(task);
         // Extend the lifetime.
         // Safety: We only poll the task within this function, then it is dropped.
         let task: Pin<Box<dyn Future<Output = ()> + 'static>> = unsafe { mem::transmute(task) };
 
         HANDLE.with(move |handle| {
-            if handle.0.borrow().main_task.is_some() {
-                panic!("executor main task already running");
+            struct Guard;
+            impl Drop for Guard {
+                fn drop(&mut self) {
+                    HANDLE.with(|handle| {
+                        handle.0.borrow_mut().main_task.take();
+                    })
+                }
             }
+            let _guard = Guard;
+
             {
                 let mut state = handle.0.borrow_mut();
                 state.main_task.replace(task);
                 state.wakeup.wake_by_ref();
             }
-        });
 
-        Session
-    }
-
-    pub fn run(task: impl Future<Output = ()>) {
-        let session = Self::start(task);
-
-        HANDLE.with(|handle| {
             while handle.0.borrow().main_task.is_some() {
                 // Run the loop until it is stopped by process_tasks below.
                 // We do this in a loop just in case there were "spurious"
                 // stops by some other code.
-                CFRunLoop::run();
+                loop_fn();
             }
-        });
-
-        drop(session);
+        })
     }
 }
 
