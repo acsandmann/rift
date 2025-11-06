@@ -467,6 +467,10 @@ impl LayoutSystem for ScrollLayoutSystem {
             None => return (None, Vec::new()),
         };
 
+        if state.fullscreen.is_some() {
+            return (state.selected, Vec::new());
+        }
+
         if state.windows.is_empty() {
             state.selected = None;
             state.scroll_offset = 0.0;
@@ -616,6 +620,13 @@ impl LayoutSystem for ScrollLayoutSystem {
         let Some(state) = self.layout_state(layout) else {
             return false;
         };
+
+        if let Some(fs_wid) = state.fullscreen {
+            state.selected = Some(fs_wid);
+            state.ensure_selected_visible();
+            return fs_wid == wid;
+        }
+
         if !state.windows.iter().any(|w| *w == wid) {
             return false;
         }
