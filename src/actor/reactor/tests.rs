@@ -16,7 +16,7 @@ fn it_ignores_stale_resize_events() {
         &crate::common::config::LayoutSettings::default(),
         None,
     ));
-    reactor.handle_event(Event::ScreenParametersChanged(
+    reactor.handle_event(screen_params_event(
         vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
         vec![Some(SpaceId::new(1))],
         vec![],
@@ -48,7 +48,7 @@ fn it_sends_writes_when_stale_read_state_looks_same_as_written_state() {
         &crate::common::config::LayoutSettings::default(),
         None,
     ));
-    reactor.handle_event(Event::ScreenParametersChanged(
+    reactor.handle_event(screen_params_event(
         vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
         vec![Some(SpaceId::new(1))],
         vec![],
@@ -89,7 +89,7 @@ fn it_manages_windows_on_enabled_spaces() {
         None,
     ));
     let full_screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
-    reactor.handle_event(Event::ScreenParametersChanged(
+    reactor.handle_event(screen_params_event(
         vec![full_screen],
         vec![Some(SpaceId::new(1))],
         vec![],
@@ -113,20 +113,20 @@ fn it_clears_screen_state_when_no_displays_are_reported() {
     ));
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
 
-    reactor.handle_event(Event::ScreenParametersChanged(
+    reactor.handle_event(screen_params_event(
         vec![screen],
         vec![Some(SpaceId::new(1))],
         vec![],
     ));
     assert_eq!(1, reactor.space_manager.screens.len());
 
-    reactor.handle_event(Event::ScreenParametersChanged(vec![], vec![], vec![]));
+    reactor.handle_event(screen_params_event(vec![], vec![], vec![]));
     assert!(reactor.space_manager.screens.is_empty());
 
     reactor.handle_event(Event::SpaceChanged(vec![], vec![]));
     assert!(reactor.space_manager.screens.is_empty());
 
-    reactor.handle_event(Event::ScreenParametersChanged(
+    reactor.handle_event(screen_params_event(
         vec![screen],
         vec![Some(SpaceId::new(1))],
         vec![],
@@ -143,11 +143,7 @@ fn it_ignores_windows_on_disabled_spaces() {
         None,
     ));
     let full_screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
-    reactor.handle_event(Event::ScreenParametersChanged(
-        vec![full_screen],
-        vec![None],
-        vec![],
-    ));
+    reactor.handle_event(screen_params_event(vec![full_screen], vec![None], vec![]));
 
     reactor.handle_events(apps.make_app(1, make_windows(1)));
 
@@ -176,7 +172,7 @@ fn it_keeps_discovered_windows_on_their_initial_screen() {
     ));
     let screen1 = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
     let screen2 = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
-    reactor.handle_event(Event::ScreenParametersChanged(
+    reactor.handle_event(screen_params_event(
         vec![screen1, screen2],
         vec![Some(SpaceId::new(1)), Some(SpaceId::new(2))],
         vec![],
@@ -206,7 +202,7 @@ fn it_ignores_windows_on_nonzero_layers() {
         None,
     ));
     let full_screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
-    reactor.handle_event(Event::ScreenParametersChanged(
+    reactor.handle_event(screen_params_event(
         vec![full_screen],
         vec![Some(SpaceId::new(1))],
         vec![WindowServerInfo {
@@ -246,7 +242,7 @@ fn handle_layout_response_groups_windows_by_app_and_screen() {
     reactor.communication_manager.raise_manager_tx = raise_manager_tx;
     let screen1 = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
     let screen2 = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
-    reactor.handle_event(Event::ScreenParametersChanged(
+    reactor.handle_event(screen_params_event(
         vec![screen1, screen2],
         vec![Some(SpaceId::new(1)), Some(SpaceId::new(2))],
         vec![],
@@ -333,11 +329,7 @@ fn it_preserves_layout_after_login_screen() {
     ));
     let space = SpaceId::new(1);
     let full_screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
-    reactor.handle_event(Event::ScreenParametersChanged(
-        vec![full_screen],
-        vec![Some(space)],
-        vec![],
-    ));
+    reactor.handle_event(screen_params_event(vec![full_screen], vec![Some(space)], vec![]));
 
     reactor.handle_events(apps.make_app_with_opts(
         1,
@@ -351,6 +343,7 @@ fn it_preserves_layout_after_login_screen() {
     let default = reactor.layout_manager.layout_engine.calculate_layout(
         space,
         full_screen,
+        &reactor.config_manager.config.settings.layout.gaps,
         0.0,
         crate::common::config::HorizontalPlacement::Top,
         crate::common::config::VerticalPlacement::Right,
@@ -364,18 +357,15 @@ fn it_preserves_layout_after_login_screen() {
     let modified = reactor.layout_manager.layout_engine.calculate_layout(
         space,
         full_screen,
+        &reactor.config_manager.config.settings.layout.gaps,
         0.0,
         crate::common::config::HorizontalPlacement::Top,
         crate::common::config::VerticalPlacement::Right,
     );
     assert_ne!(default, modified);
 
-    reactor.handle_event(Event::ScreenParametersChanged(
-        vec![CGRect::ZERO],
-        vec![None],
-        vec![],
-    ));
-    reactor.handle_event(Event::ScreenParametersChanged(
+    reactor.handle_event(screen_params_event(vec![CGRect::ZERO], vec![None], vec![]));
+    reactor.handle_event(screen_params_event(
         vec![full_screen],
         vec![Some(space)],
         (1..=3)
@@ -414,6 +404,7 @@ fn it_preserves_layout_after_login_screen() {
         reactor.layout_manager.layout_engine.calculate_layout(
             space,
             full_screen,
+            &reactor.config_manager.config.settings.layout.gaps,
             0.0,
             crate::common::config::HorizontalPlacement::Top,
             crate::common::config::VerticalPlacement::Right,
@@ -432,11 +423,7 @@ fn it_retains_windows_without_server_ids_after_login_visibility_failure() {
     ));
     let space = SpaceId::new(1);
     let full_screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
-    reactor.handle_event(Event::ScreenParametersChanged(
-        vec![full_screen],
-        vec![Some(space)],
-        vec![],
-    ));
+    reactor.handle_event(screen_params_event(vec![full_screen], vec![Some(space)], vec![]));
 
     let window = WindowInfo {
         is_standard: true,
@@ -505,7 +492,7 @@ fn it_fixes_window_sizes_after_screen_config_changes() {
         None,
     ));
     let full_screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
-    reactor.handle_event(Event::ScreenParametersChanged(
+    reactor.handle_event(screen_params_event(
         vec![full_screen],
         vec![Some(SpaceId::new(1))],
         vec![],
@@ -521,7 +508,7 @@ fn it_fixes_window_sizes_after_screen_config_changes() {
 
     // Simulate the system resizing a window after it recognizes an old
     // configurations. Resize events are not sent in this case.
-    reactor.handle_event(Event::ScreenParametersChanged(
+    reactor.handle_event(screen_params_event(
         vec![
             full_screen,
             CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.)),
@@ -557,7 +544,7 @@ fn it_doesnt_crash_after_main_window_closes() {
         None,
     ));
     let space = SpaceId::new(1);
-    reactor.handle_event(ScreenParametersChanged(
+    reactor.handle_event(screen_params_event(
         vec![CGRect::ZERO],
         vec![Some(space)],
         vec![],

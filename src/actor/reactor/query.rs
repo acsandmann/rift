@@ -5,7 +5,8 @@ use crate::actor::menu_bar;
 use crate::actor::reactor::{Event, Reactor};
 use crate::common::collections::HashSet;
 use crate::model::server::{
-    ApplicationData, LayoutStateData, WindowData, WorkspaceData, WorkspaceQueryResponse,
+    ApplicationData, DisplayData, LayoutStateData, WindowData, WorkspaceData,
+    WorkspaceQueryResponse,
 };
 use crate::sys::screen::{SpaceId, get_active_space_number};
 
@@ -35,6 +36,10 @@ impl Reactor {
             Event::QueryMetrics(response) => {
                 let metrics = self.handle_metrics_query();
                 response.send(metrics);
+            }
+            Event::QueryDisplays(response) => {
+                let displays = self.handle_displays_query();
+                response.send(displays);
             }
             _ => {}
         }
@@ -106,19 +111,32 @@ impl Reactor {
 
             let predicted_positions = if !is_active {
                 if let Some(space) = space_id {
-                    let screen_frame = self
+                    let screen_info = self
                         .space_manager
                         .screens
                         .iter()
                         .find(|s| s.space == Some(space))
-                        .map(|s| s.frame)
-                        .or_else(|| self.space_manager.screens.first().map(|s| s.frame));
+                        .cloned()
+                        .or_else(|| self.space_manager.screens.first().cloned());
 
-                    if let Some(frame) = screen_frame {
+                    if let Some(screen) = screen_info {
+                        let display_uuid = if screen.display_uuid.is_empty() {
+                            None
+                        } else {
+                            Some(screen.display_uuid.as_str())
+                        };
+                        let gaps = self
+                            .config_manager
+                            .config
+                            .settings
+                            .layout
+                            .gaps
+                            .effective_for_display(display_uuid);
                         self.layout_manager.layout_engine.calculate_layout_for_workspace(
                             space,
                             *workspace_id,
-                            frame,
+                            screen.frame,
+                            &gaps,
                             self.config_manager.config.settings.ui.stack_line.thickness(),
                             self.config_manager.config.settings.ui.stack_line.horiz_placement,
                             self.config_manager.config.settings.ui.stack_line.vert_placement,
@@ -159,6 +177,20 @@ impl Reactor {
         }
 
         WorkspaceQueryResponse { workspaces }
+    }
+
+    fn handle_displays_query(&self) -> Vec<DisplayData> {
+        self.space_manager
+            .screens
+            .iter()
+            .map(|screen| DisplayData {
+                uuid: screen.display_uuid.clone(),
+                name: screen.name.clone(),
+                screen_id: screen.screen_id.as_u32(),
+                frame: screen.frame,
+                space: screen.space.map(|s: SpaceId| s.get()),
+            })
+            .collect()
     }
 
     fn handle_windows_query(&self, space_id: Option<SpaceId>) -> Vec<WindowData> {

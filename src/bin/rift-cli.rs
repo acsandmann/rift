@@ -62,6 +62,8 @@ enum QueryCommands {
         #[arg(long)]
         space_id: Option<u64>,
     },
+    /// List connected displays
+    Displays,
     /// Get information about a specific window
     Window { window_id: String },
     /// List running applications
@@ -353,6 +355,7 @@ fn build_query_request(query: QueryCommands) -> Result<RiftRequest, String> {
     match query {
         QueryCommands::Workspaces => Ok(RiftRequest::GetWorkspaces),
         QueryCommands::Windows { space_id } => Ok(RiftRequest::GetWindows { space_id }),
+        QueryCommands::Displays => Ok(RiftRequest::GetDisplays),
         QueryCommands::Window { window_id } => Ok(RiftRequest::GetWindowInfo { window_id }),
         QueryCommands::Applications => Ok(RiftRequest::GetApplications),
         QueryCommands::Layout { space_id } => Ok(RiftRequest::GetLayoutState { space_id }),
