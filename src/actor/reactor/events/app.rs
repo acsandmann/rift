@@ -29,8 +29,6 @@ impl AppEventHandler {
         app_info: AppInfo,
         windows: Vec<WindowServerInfo>,
     ) {
-        reactor.app_manager.app_rules_recently_applied = std::time::Instant::now();
-
         reactor.update_partial_window_server_info(windows.clone());
 
         let all_windows: Vec<WindowId> = windows
@@ -40,6 +38,8 @@ impl AppEventHandler {
             .collect();
 
         if !all_windows.is_empty() {
+            let wsids: Vec<WindowServerId> = windows.iter().map(|w| w.id).collect();
+            reactor.app_manager.mark_wsids_recent(wsids);
             reactor.process_windows_for_app_rules(pid, all_windows, app_info);
         }
     }

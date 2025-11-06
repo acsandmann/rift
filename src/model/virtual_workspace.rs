@@ -1185,4 +1185,216 @@ mod tests {
             .unwrap();
         assert!(floats_again);
     }
+
+    #[test]
+    fn test_app_rule_match_by_app_name() {
+        let mut settings = VirtualWorkspaceSettings::default();
+        settings.app_rules = vec![AppWorkspaceRule {
+            app_id: None,
+            workspace: Some(WorkspaceSelector::Index(1)),
+            floating: false,
+            app_name: Some("Calendar".to_string()),
+            title_regex: None,
+            title_substring: None,
+            ax_role: None,
+            ax_subrole: None,
+        }];
+
+        let mut manager = VirtualWorkspaceManager::new_with_config(&settings);
+        let space = SpaceId::new(1);
+        let window = WindowId::new(100, 1);
+
+        let (ws, _) = manager
+            .assign_window_with_app_info(
+                window,
+                space,
+                None,
+                Some("MyCalendarApp"),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let workspaces = manager.list_workspaces(space);
+        let expected_ws = workspaces.get(1).unwrap().0;
+        assert_eq!(ws, expected_ws);
+    }
+
+    #[test]
+    fn test_app_rule_title_substring_and_regex() {
+        let mut settings = VirtualWorkspaceSettings::default();
+        settings.app_rules = vec![
+            AppWorkspaceRule {
+                app_id: Some("com.example.foo".to_string()),
+                workspace: Some(WorkspaceSelector::Index(0)),
+                floating: false,
+                app_name: None,
+                title_regex: None,
+                title_substring: Some("Preferences".to_string()),
+                ax_role: None,
+                ax_subrole: None,
+            },
+            AppWorkspaceRule {
+                app_id: Some("com.example.foo".to_string()),
+                workspace: Some(WorkspaceSelector::Index(2)),
+                floating: false,
+                app_name: None,
+                title_regex: Some(r"Dialog\s+\d+".to_string()),
+                title_substring: None,
+                ax_role: None,
+                ax_subrole: None,
+            },
+        ];
+
+        let mut manager = VirtualWorkspaceManager::new_with_config(&settings);
+        let space = SpaceId::new(1);
+        let w_pref = WindowId::new(11, 1);
+        let w_dialog = WindowId::new(11, 2);
+
+        let (ws_pref, _) = manager
+            .assign_window_with_app_info(
+                w_pref,
+                space,
+                Some("com.example.foo"),
+                None,
+                Some("App Preferences"),
+                None,
+                None,
+            )
+            .unwrap();
+        let (ws_dialog, _) = manager
+            .assign_window_with_app_info(
+                w_dialog,
+                space,
+                Some("com.example.foo"),
+                None,
+                Some("Dialog 42"),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let workspaces = manager.list_workspaces(space);
+        let expected_pref = workspaces.get(0).unwrap().0;
+        let expected_dialog = workspaces.get(2).unwrap().0;
+
+        assert_eq!(ws_pref, expected_pref);
+        assert_eq!(ws_dialog, expected_dialog);
+    }
+
+    #[test]
+    fn test_app_rule_ax_role_and_subrole() {
+        let mut settings = VirtualWorkspaceSettings::default();
+        settings.app_rules = vec![AppWorkspaceRule {
+            app_id: Some("com.example.special".to_string()),
+            workspace: None,
+            floating: true,
+            app_name: None,
+            title_regex: None,
+            title_substring: None,
+            ax_role: Some("AXWindow".to_string()),
+            ax_subrole: Some("AXDialog".to_string()),
+        }];
+
+        let mut manager = VirtualWorkspaceManager::new_with_config(&settings);
+        let space = SpaceId::new(1);
+        let w = WindowId::new(77, 3);
+
+        // Matches both role and subrole
+        let (ws, floating) = manager
+            .assign_window_with_app_info(
+                w,
+                space,
+                Some("com.example.special"),
+                None,
+                None,
+                Some("AXWindow"),
+                Some("AXDialog"),
+            )
+            .unwrap();
+        assert!(floating);
+        assert_eq!(manager.window_rule_floating.get(&(space, w)), Some(&true));
+    }
+
+    #[test]
+    fn test_workspace_name_resolution_and_fallback() {
+        let mut settings = VirtualWorkspaceSettings::default();
+        let mut vm_names = settings.workspace_names.clone();
+        if vm_names.len() < 3 {
+            vm_names.resize(3, String::from("Workspace"));
+        }
+        vm_names[1] = "coding".to_string();
+        settings.workspace_names = vm_names;
+        settings.app_rules = vec![AppWorkspaceRule {
+            app_id: Some("com.example.name".to_string()),
+            workspace: Some(WorkspaceSelector::Name("coding".to_string())),
+            floating: false,
+            app_name: None,
+            title_regex: None,
+            title_substring: None,
+            ax_role: None,
+            ax_subrole: None,
+        }];
+
+        let mut manager = VirtualWorkspaceManager::new_with_config(&settings);
+        let space = SpaceId::new(1);
+        let w = WindowId::new(90, 10);
+
+        let (ws_assigned, _) = manager
+            .assign_window_with_app_info(w, space, Some("com.example.name"), None, None, None, None)
+            .unwrap();
+
+        let workspaces = manager.list_workspaces(space);
+        let expected = workspaces.iter().position(|(_, n)| n == "coding").unwrap();
+        assert_eq!(ws_assigned, workspaces.get(expected).unwrap().0);
+    }
+
+    #[test]
+    fn test_rule_specificity_and_tie_breaking() {
+        // Two rules for same app_id: one generic, one with title_substring -> more specific should win
+        let mut settings = VirtualWorkspaceSettings::default();
+        settings.app_rules = vec![
+            AppWorkspaceRule {
+                app_id: Some("com.example.tie".to_string()),
+                workspace: Some(WorkspaceSelector::Index(0)),
+                floating: false,
+                app_name: None,
+                title_regex: None,
+                title_substring: None,
+                ax_role: None,
+                ax_subrole: None,
+            },
+            AppWorkspaceRule {
+                app_id: Some("com.example.tie".to_string()),
+                workspace: Some(WorkspaceSelector::Index(2)),
+                floating: false,
+                app_name: None,
+                title_regex: None,
+                title_substring: Some("Editor".to_string()),
+                ax_role: None,
+                ax_subrole: None,
+            },
+        ];
+
+        let mut manager = VirtualWorkspaceManager::new_with_config(&settings);
+        let space = SpaceId::new(1);
+        let w = WindowId::new(200, 5);
+
+        let (ws_assigned, _) = manager
+            .assign_window_with_app_info(
+                w,
+                space,
+                Some("com.example.tie"),
+                None,
+                Some("Editor - Untitled"),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let workspaces = manager.list_workspaces(space);
+        let expected = workspaces.get(2).unwrap().0;
+        assert_eq!(ws_assigned, expected);
+    }
 }
