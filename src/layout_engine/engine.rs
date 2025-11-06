@@ -339,6 +339,9 @@ impl LayoutEngine {
             crate::common::config::LayoutMode::Bsp => {
                 LayoutSystemKind::Bsp(crate::layout_engine::BspLayoutSystem::default())
             }
+            crate::common::config::LayoutMode::Dwindle => {
+                LayoutSystemKind::Dwindle(crate::layout_engine::DwindleLayoutSystem::default())
+            }
         };
 
         LayoutEngine {

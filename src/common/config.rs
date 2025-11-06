@@ -542,6 +542,8 @@ pub enum LayoutMode {
     Traditional,
     /// Binary space partitioning tiling
     Bsp,
+    /// Dwindle layout (Fibonacci spiral tiling)
+    Dwindle,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]

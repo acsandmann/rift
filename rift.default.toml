@@ -72,7 +72,8 @@ hot_reload = true
 
 [settings.layout]
 # Layout system
-# - mode: "traditional" (i3/sway-like containers) or "bsp" (binary space partitioning)
+# - mode: "traditional" (i3/sway-like containers), "bsp" (binary space partitioning),
+#   or "dwindle" (Fibonacci spiral tiling)
 #   defaults to "traditional" if omitted
 mode = "traditional"
 
