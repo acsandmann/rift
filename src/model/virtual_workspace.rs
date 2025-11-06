@@ -805,7 +805,9 @@ impl VirtualWorkspaceManager {
             if let Some(ref rule_name) = rule.app_name {
                 match app_name {
                     Some(name) => {
-                        if !(name.contains(rule_name) || rule_name.contains(name)) {
+                        let name_l = name.to_lowercase();
+                        let rule_name_l = rule_name.to_lowercase();
+                        if !(name_l.contains(&rule_name_l) || rule_name_l.contains(&name_l)) {
                             continue;
                         }
                     }
@@ -818,28 +820,33 @@ impl VirtualWorkspaceManager {
                     continue;
                 }
                 match window_title {
-                    Some(title) => match Regex::new(rule_re) {
-                        Ok(re) => {
-                            if !re.is_match(title) {
+                    Some(title) => {
+                        match regex::RegexBuilder::new(rule_re).case_insensitive(true).build() {
+                            Ok(re) => {
+                                if !re.is_match(title) {
+                                    continue;
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Invalid title_regex '{}' in app rule: {}", rule_re, e);
                                 continue;
                             }
                         }
-                        Err(e) => {
-                            warn!("Invalid title_regex '{}' in app rule: {}", rule_re, e);
-                            continue;
-                        }
-                    },
+                    }
                     None => continue,
                 }
             }
 
+            // Case-insensitive substring matching for title_substring
             if let Some(ref title_sub) = rule.title_substring {
                 if title_sub.is_empty() {
                     continue;
                 }
                 match window_title {
                     Some(title) => {
-                        if !title.contains(title_sub) {
+                        let title_l = title.to_lowercase();
+                        let sub_l = title_sub.to_lowercase();
+                        if !title_l.contains(&sub_l) {
                             continue;
                         }
                     }
