@@ -1,5 +1,4 @@
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use slotmap::{SlotMap, new_key_type};
