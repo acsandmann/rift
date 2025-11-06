@@ -673,15 +673,16 @@ impl VirtualWorkspaceManager {
             return Err(WorkspaceError::NoWorkspacesAvailable);
         }
 
-        if let Some(existing_ws) = self.window_to_workspace.get(&(space, window_id)).copied() {
-            let should_float =
-                self.window_rule_floating.get(&(space, window_id)).copied().unwrap_or(false);
-            return Ok((existing_ws, should_float));
-        }
-
         let rule_match = self
             .find_matching_app_rule(app_bundle_id, app_name, window_title, ax_role, ax_subrole)
             .cloned();
+
+        let existing_assignment = self.window_to_workspace.get(&(space, window_id)).copied();
+        let existing_floating = self
+            .window_rule_floating
+            .get(&(space, window_id))
+            .copied()
+            .unwrap_or(false);
 
         if let Some(rule) = rule_match {
             let target_workspace_id = if let Some(ref ws_sel) = rule.workspace {
@@ -723,12 +724,29 @@ impl VirtualWorkspaceManager {
                             self.get_default_workspace(space)?
                         }
                     }
+                } else if let Some(existing_ws) = existing_assignment {
+                    existing_ws
                 } else {
                     self.get_default_workspace(space)?
                 }
             } else {
-                self.get_default_workspace(space)?
+                if let Some(existing_ws) = existing_assignment {
+                    existing_ws
+                } else {
+                    self.get_default_workspace(space)?
+                }
             };
+
+            if let Some(existing_ws) = existing_assignment {
+                if existing_ws == target_workspace_id {
+                    if rule.floating {
+                        self.window_rule_floating.insert((space, window_id), true);
+                    } else {
+                        self.window_rule_floating.remove(&(space, window_id));
+                    }
+                    return Ok((existing_ws, rule.floating));
+                }
+            }
 
             if self.assign_window_to_workspace(space, window_id, target_workspace_id) {
                 if rule.floating {
@@ -740,6 +758,10 @@ impl VirtualWorkspaceManager {
             } else {
                 error!("Failed to assign window to workspace from app rule");
             }
+        }
+
+        if let Some(existing_ws) = existing_assignment {
+            return Ok((existing_ws, existing_floating));
         }
 
         let default_workspace_id = self.get_default_workspace(space)?;
@@ -1311,7 +1333,7 @@ mod tests {
         let w = WindowId::new(77, 3);
 
         // Matches both role and subrole
-        let (ws, floating) = manager
+        let (_ws, floating) = manager
             .assign_window_with_app_info(
                 w,
                 space,
@@ -1405,5 +1427,120 @@ mod tests {
         let workspaces = manager.list_workspaces(space);
         let expected = workspaces.get(2).unwrap().0;
         assert_eq!(ws_assigned, expected);
+    }
+
+    #[test]
+    fn test_app_rule_reapplication_updates_existing_window() {
+        let mut settings = VirtualWorkspaceSettings::default();
+        settings.app_rules = vec![
+            AppWorkspaceRule {
+                app_id: Some("app.zen-browser.zen".to_string()),
+                workspace: None,
+                floating: true,
+                app_name: None,
+                title_regex: None,
+                title_substring: Some("Bitwarden".to_string()),
+                ax_role: None,
+                ax_subrole: None,
+            },
+            AppWorkspaceRule {
+                app_id: Some("app.zen-browser.zen".to_string()),
+                workspace: Some(WorkspaceSelector::Index(2)),
+                floating: false,
+                app_name: None,
+                title_regex: None,
+                title_substring: None,
+                ax_role: None,
+                ax_subrole: None,
+            },
+        ];
+
+        let mut manager = VirtualWorkspaceManager::new_with_config(&settings);
+        let space = SpaceId::new(1);
+        let window = WindowId::new(321, 9);
+
+        // Initial assignment without a title should fall back to the generic app rule.
+        let (initial_ws, initial_floating) = manager
+            .assign_window_with_app_info(window, space, Some("app.zen-browser.zen"), None, None, None, None)
+            .unwrap();
+        assert!(!initial_floating);
+
+        // Re-run the assignment once a title exists and ensure the more specific rule is applied.
+        let (updated_ws, updated_floating) = manager
+            .assign_window_with_app_info(
+                window,
+                space,
+                Some("app.zen-browser.zen"),
+                None,
+                Some("Bitwarden Login"),
+                None,
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(initial_ws, updated_ws, "workspace should remain stable when reapplying rules");
+        assert!(updated_floating, "window should become floating after the specific rule matches");
+        assert_eq!(
+            manager
+                .window_rule_floating
+                .get(&(space, window))
+                .copied(),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn test_specific_rule_with_workspace_overrides_existing_assignment() {
+        let mut settings = VirtualWorkspaceSettings::default();
+        settings.app_rules = vec![
+            AppWorkspaceRule {
+                app_id: Some("app.zen-browser.zen".to_string()),
+                workspace: Some(WorkspaceSelector::Index(1)),
+                floating: false,
+                app_name: None,
+                title_regex: None,
+                title_substring: None,
+                ax_role: None,
+                ax_subrole: None,
+            },
+            AppWorkspaceRule {
+                app_id: Some("app.zen-browser.zen".to_string()),
+                workspace: Some(WorkspaceSelector::Index(3)),
+                floating: true,
+                app_name: None,
+                title_regex: None,
+                title_substring: Some("bitwarden".to_string()),
+                ax_role: None,
+                ax_subrole: None,
+            },
+        ];
+
+        let mut manager = VirtualWorkspaceManager::new_with_config(&settings);
+        let space = SpaceId::new(2);
+        let window = WindowId::new(333, 11);
+
+        let (initial_ws, initial_floating) = manager
+            .assign_window_with_app_info(window, space, Some("app.zen-browser.zen"), None, None, None, None)
+            .unwrap();
+        assert!(!initial_floating);
+
+        let (updated_ws, updated_floating) = manager
+            .assign_window_with_app_info(
+                window,
+                space,
+                Some("app.zen-browser.zen"),
+                None,
+                Some("Bitwarden Vault"),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let workspaces = manager.list_workspaces(space);
+        let expected_initial = workspaces.get(1).unwrap().0;
+        let expected_updated = workspaces.get(3).unwrap().0;
+        assert_eq!(initial_ws, expected_initial);
+        assert_eq!(updated_ws, expected_updated);
+        assert!(updated_floating, "window should become floating for the specific rule");
     }
 }
