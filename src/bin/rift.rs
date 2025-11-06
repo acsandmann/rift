@@ -253,7 +253,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
 
     unsafe { AXUIElement::new_system_wide().set_messaging_timeout(1.0) };
 
-    let _executor_session = Executor::start(async move {
+    let _executor_session = Executor::run_main(mtm, async move {
         join!(
             wm_controller.run(),
             notification_center.watch_for_notifications(),
@@ -266,8 +266,6 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
             process_actor.run()
         );
     });
-
-    objc2_app_kit::NSApplication::sharedApplication(mtm).run();
 }
 
 #[cfg(panic = "unwind")]
