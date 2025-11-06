@@ -473,7 +473,12 @@ impl WmController {
                 bundle = ?info.bundle_id,
                 "App not yet regular; deferring spawn until activation policy changes"
             );
-            return;
+
+            if running_app.activationPolicy() == NSApplicationActivationPolicy::Regular {
+                sys::app::remove_activation_policy_observer(pid);
+            } else {
+                return;
+            }
         }
 
         if !running_app.isFinishedLaunching() {
@@ -483,7 +488,12 @@ impl WmController {
                 bundle = ?info.bundle_id,
                 "App has not finished launching; deferring spawn until finished"
             );
-            return;
+
+            if running_app.isFinishedLaunching() {
+                sys::app::remove_finished_launching_observer(pid);
+            } else {
+                return;
+            }
         }
 
         self.spawning_apps.insert(pid);
