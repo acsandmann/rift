@@ -678,11 +678,8 @@ impl VirtualWorkspaceManager {
             .cloned();
 
         let existing_assignment = self.window_to_workspace.get(&(space, window_id)).copied();
-        let existing_floating = self
-            .window_rule_floating
-            .get(&(space, window_id))
-            .copied()
-            .unwrap_or(false);
+        let existing_floating =
+            self.window_rule_floating.get(&(space, window_id)).copied().unwrap_or(false);
 
         if let Some(rule) = rule_match {
             let target_workspace_id = if let Some(ref ws_sel) = rule.workspace {
@@ -1461,7 +1458,15 @@ mod tests {
 
         // Initial assignment without a title should fall back to the generic app rule.
         let (initial_ws, initial_floating) = manager
-            .assign_window_with_app_info(window, space, Some("app.zen-browser.zen"), None, None, None, None)
+            .assign_window_with_app_info(
+                window,
+                space,
+                Some("app.zen-browser.zen"),
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert!(!initial_floating);
 
@@ -1478,13 +1483,16 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(initial_ws, updated_ws, "workspace should remain stable when reapplying rules");
-        assert!(updated_floating, "window should become floating after the specific rule matches");
         assert_eq!(
-            manager
-                .window_rule_floating
-                .get(&(space, window))
-                .copied(),
+            initial_ws, updated_ws,
+            "workspace should remain stable when reapplying rules"
+        );
+        assert!(
+            updated_floating,
+            "window should become floating after the specific rule matches"
+        );
+        assert_eq!(
+            manager.window_rule_floating.get(&(space, window)).copied(),
             Some(true)
         );
     }
@@ -1520,7 +1528,15 @@ mod tests {
         let window = WindowId::new(333, 11);
 
         let (initial_ws, initial_floating) = manager
-            .assign_window_with_app_info(window, space, Some("app.zen-browser.zen"), None, None, None, None)
+            .assign_window_with_app_info(
+                window,
+                space,
+                Some("app.zen-browser.zen"),
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert!(!initial_floating);
 
@@ -1541,6 +1557,9 @@ mod tests {
         let expected_updated = workspaces.get(3).unwrap().0;
         assert_eq!(initial_ws, expected_initial);
         assert_eq!(updated_ws, expected_updated);
-        assert!(updated_floating, "window should become floating for the specific rule");
+        assert!(
+            updated_floating,
+            "window should become floating for the specific rule"
+        );
     }
 }
