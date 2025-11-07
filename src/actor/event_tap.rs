@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use objc2_app_kit::{
     NSEvent, NSEventPhase, NSEventType, NSMainMenuWindowLevel, NSPopUpMenuWindowLevel,
-    NSTouchPhase, NSWindowLevel,
+    NSTouchPhase, NSTouchType, NSWindowLevel,
 };
 use objc2_core_foundation::{CGPoint, CGRect};
 use objc2_core_graphics::{
@@ -380,10 +380,12 @@ impl EventTap {
             let ended =
                 phase.contains(NSTouchPhase::Ended) || phase.contains(NSTouchPhase::Cancelled);
             if !ended {
-                let pos = t.normalizedPosition();
-                sum_x += pos.x as f64;
-                sum_y += pos.y as f64;
-                active_count += 1;
+                if t.r#type() == NSTouchType::Direct {
+                    let pos = t.normalizedPosition();
+                    sum_x += pos.x as f64;
+                    sum_y += pos.y as f64;
+                    active_count += 1;
+                }
             }
         }
 

@@ -108,6 +108,13 @@ impl LayoutEngine {
         self.layout_settings = settings.clone();
     }
 
+    pub fn update_virtual_workspace_settings(
+        &mut self,
+        settings: &crate::common::config::VirtualWorkspaceSettings,
+    ) {
+        self.virtual_workspace_manager.update_settings(settings);
+    }
+
     fn active_floating_windows_flat(&self, space: SpaceId) -> Vec<WindowId> {
         self.floating.active_flat(space)
     }
@@ -490,7 +497,7 @@ impl LayoutEngine {
             LayoutEvent::WindowAdded(space, wid) => {
                 self.debug_tree(space);
 
-                let assigned_workspace =
+                let _assigned_workspace =
                     match self.virtual_workspace_manager.auto_assign_window(wid, space) {
                         Ok(workspace_id) => workspace_id,
                         Err(e) => {
@@ -503,14 +510,7 @@ impl LayoutEngine {
 
                 let should_be_floating = self.floating.is_floating(wid);
 
-                if !should_be_floating {
-                    if let Some(layout) = self.workspace_layouts.active(space, assigned_workspace) {
-                        self.tree.add_window_after_selection(layout, wid);
-                    } else {
-                        tracing::error!("No layout found for workspace {:?}", assigned_workspace);
-                    }
-                    tracing::debug!("Added tiled window {:?} to layout tree", wid);
-                } else {
+                if should_be_floating {
                     self.floating.add_active(space, wid.pid, wid);
                     tracing::debug!("Window {:?} is floating, excluded from layout tree", wid);
                 }

@@ -562,15 +562,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gxhash"
-version = "3.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3ce1bab7aa741d4e7042b2aae415b78741f267a98a7271ea226cd5ba6c43d7d"
-dependencies = [
- "rustversion",
-]
-
-[[package]]
 name = "hashbrown"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1285,7 +1276,6 @@ dependencies = [
  "embed_plist",
  "enum_dispatch",
  "futures-task",
- "gxhash",
  "nix",
  "notify",
  "notify-debouncer-mini",
@@ -1302,6 +1292,7 @@ dependencies = [
  "pretty_assertions",
  "regex",
  "ron",
+ "rustc-hash",
  "serde",
  "serde_json",
  "serde_with",
@@ -1336,6 +1327,12 @@ dependencies = [
  "serde_derive",
  "unicode-ident",
 ]
+
+[[package]]
+name = "rustc-hash"
+version = "2.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "357703d41365b4b27c590e3ed91eabb1b663f07c4c084095e60cbed4362dff0d"
 
 [[package]]
 name = "rustix"

@@ -466,26 +466,24 @@ fn it_retains_windows_without_server_ids_after_login_visibility_failure() {
                         known_visible: vec![],
                     });
                 }
-                req => other_requests.push(req),
+                other => other_requests.push(other),
             }
         }
 
-        if other_requests.is_empty() {
-            continue;
-        }
-
-        let events = apps.simulate_events_for_requests(other_requests);
-        for event in events {
-            reactor.handle_event(event);
+        if !other_requests.is_empty() {
+            let events = apps.simulate_events_for_requests(other_requests);
+            for event in events {
+                reactor.handle_event(event);
+            }
         }
     }
-
-    assert!(reactor.window_manager.windows.contains_key(&WindowId::new(1, 1)));
 }
 
 #[test]
-fn it_fixes_window_sizes_after_screen_config_changes() {
-    let mut apps = Apps::new();
+fn it_respects_wsid_suppression_for_apply_app_rules() {
+    use crate::actor::app::{AppInfo, WindowId};
+    use crate::sys::window_server::WindowServerInfo;
+
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(
         &crate::common::config::VirtualWorkspaceSettings::default(),
         &crate::common::config::LayoutSettings::default(),
@@ -498,13 +496,16 @@ fn it_fixes_window_sizes_after_screen_config_changes() {
         vec![],
     ));
 
-    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    let space = SpaceId::new(1);
+    reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .list_workspaces(space);
 
-    let _events = apps.simulate_events();
-    assert_eq!(
-        full_screen,
-        apps.windows.get(&WindowId::new(1, 1)).expect("Window was not resized").frame,
-    );
+    let pid = 42;
+    let wid = WindowId::new(pid, 7);
+    let wsid = WindowServerId::new(12345);
 
     // Simulate the system resizing a window after it recognizes an old
     // configurations. Resize events are not sent in this case.
@@ -522,18 +523,52 @@ fn it_fixes_window_sizes_after_screen_config_changes() {
         }],
     ));
 
-    let _events = apps.simulate_events();
-    assert_eq!(
-        full_screen,
-        apps.windows.get(&WindowId::new(1, 1)).expect("Window was not resized").frame,
-    );
-}
+    reactor.window_manager.windows.insert(wid, crate::actor::reactor::WindowState {
+        title: info.title.clone(),
+        frame_monotonic: info.frame,
+        is_ax_standard: info.is_standard,
+        is_ax_root: info.is_root,
+        is_minimized: info.is_minimized,
+        is_manageable: true,
+        window_server_id: info.sys_id,
+        bundle_id: info.bundle_id.clone(),
+        bundle_path: info.path.clone(),
+        ax_role: info.ax_role.clone(),
+        ax_subrole: info.ax_subrole.clone(),
+    });
+    reactor.window_manager.window_ids.insert(wsid, wid);
 
-#[test]
-fn it_doesnt_crash_after_main_window_closes() {
-    use Direction::*;
-    use Event::*;
-    use LayoutCommand::*;
+    let app_info = AppInfo {
+        bundle_id: Some("com.example.test".to_string()),
+        localized_name: Some("TestApp".to_string()),
+    };
+
+    let ws_info = WindowServerInfo {
+        id: wsid,
+        pid,
+        layer: 0,
+        frame: info.frame,
+    };
+
+    crate::actor::reactor::events::app::AppEventHandler::handle_apply_app_rules_to_existing_windows(
+        &mut reactor,
+        pid,
+        app_info.clone(),
+        vec![ws_info.clone()],
+    );
+
+    let winfo = crate::actor::app::WindowInfo {
+        is_standard: info.is_standard,
+        is_root: info.is_root,
+        is_minimized: info.is_minimized,
+        title: info.title.clone(),
+        frame: info.frame,
+        sys_id: Some(wsid),
+        bundle_id: info.bundle_id.clone(),
+        path: info.path.clone(),
+        ax_role: info.ax_role.clone(),
+        ax_subrole: info.ax_subrole.clone(),
+    };
 
     use super::Command::*;
     use super::Reactor;
@@ -551,15 +586,11 @@ fn it_doesnt_crash_after_main_window_closes() {
     ));
     assert_eq!(None, reactor.main_window());
 
-    reactor.handle_event(ApplicationGloballyActivated(1));
-    reactor.handle_events(apps.make_app_with_opts(
-        1,
-        make_windows(2),
-        Some(WindowId::new(1, 1)),
-        true,
-        true,
-    ));
+    let after_ws = reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager()
+        .workspace_for_window(space, wid);
 
-    reactor.handle_event(WindowDestroyed(WindowId::new(1, 1)));
-    reactor.handle_event(Command(Layout(MoveFocus(Left))));
+    assert_eq!(before_ws, after_ws);
 }

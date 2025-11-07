@@ -446,10 +446,7 @@ impl Reactor {
         };
         Reactor {
             config_manager: managers::ConfigManager { config: config.clone() },
-            app_manager: managers::AppManager {
-                apps: HashMap::default(),
-                app_rules_recently_applied: std::time::Instant::now(),
-            },
+            app_manager: managers::AppManager::new(),
             layout_manager: managers::LayoutManager { layout_engine },
             window_manager: managers::WindowManager {
                 windows: HashMap::default(),
