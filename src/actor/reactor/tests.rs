@@ -523,6 +523,19 @@ fn it_respects_wsid_suppression_for_apply_app_rules() {
         }],
     ));
 
+    let info = crate::actor::app::WindowInfo {
+        is_standard: true,
+        is_root: true,
+        is_minimized: false,
+        title: "NoServerId".to_string(),
+        frame: CGRect::new(CGPoint::new(50., 50.), CGSize::new(400., 400.)),
+        sys_id: None,
+        bundle_id: None,
+        path: None,
+        ax_role: None,
+        ax_subrole: None,
+    };
+
     reactor.window_manager.windows.insert(wid, crate::actor::reactor::WindowState {
         title: info.title.clone(),
         frame_monotonic: info.frame,
@@ -537,6 +550,14 @@ fn it_respects_wsid_suppression_for_apply_app_rules() {
         ax_subrole: info.ax_subrole.clone(),
     });
     reactor.window_manager.window_ids.insert(wsid, wid);
+
+    // Capture the workspace for this window before applying app rules so we can
+    // verify that apply_app_rules does not change the workspace assignment.
+    let before_ws = reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager()
+        .workspace_for_window(space, wid);
 
     let app_info = AppInfo {
         bundle_id: Some("com.example.test".to_string()),
@@ -557,22 +578,7 @@ fn it_respects_wsid_suppression_for_apply_app_rules() {
         vec![ws_info.clone()],
     );
 
-    let winfo = crate::actor::app::WindowInfo {
-        is_standard: info.is_standard,
-        is_root: info.is_root,
-        is_minimized: info.is_minimized,
-        title: info.title.clone(),
-        frame: info.frame,
-        sys_id: Some(wsid),
-        bundle_id: info.bundle_id.clone(),
-        path: info.path.clone(),
-        ax_role: info.ax_role.clone(),
-        ax_subrole: info.ax_subrole.clone(),
-    };
-
-    use super::Command::*;
     use super::Reactor;
-    let mut apps = Apps::new();
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(
         &crate::common::config::VirtualWorkspaceSettings::default(),
         &crate::common::config::LayoutSettings::default(),
