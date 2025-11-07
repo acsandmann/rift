@@ -1,7 +1,6 @@
 use std::collections::hash_map::Entry;
 
 use objc2_app_kit::NSRunningApplication;
-use objc2_core_foundation::CGRect;
 use tracing::{debug, info, trace, warn};
 
 use crate::actor::app::{AppInfo, Request};
