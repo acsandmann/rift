@@ -108,6 +108,13 @@ impl LayoutEngine {
         self.layout_settings = settings.clone();
     }
 
+    pub fn update_virtual_workspace_settings(
+        &mut self,
+        settings: &crate::common::config::VirtualWorkspaceSettings,
+    ) {
+        self.virtual_workspace_manager.update_settings(settings);
+    }
+
     fn active_floating_windows_flat(&self, space: SpaceId) -> Vec<WindowId> {
         self.floating.active_flat(space)
     }

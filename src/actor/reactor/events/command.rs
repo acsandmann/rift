@@ -83,6 +83,12 @@ impl CommandEventHandler {
             .layout_manager
             .layout_engine
             .set_layout_settings(&reactor.config_manager.config.settings.layout);
+
+        reactor
+            .layout_manager
+            .layout_engine
+            .update_virtual_workspace_settings(&reactor.config_manager.config.virtual_workspaces);
+
         reactor
             .drag_manager
             .update_config(reactor.config_manager.config.settings.window_snapping);

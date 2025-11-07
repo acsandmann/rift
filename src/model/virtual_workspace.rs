@@ -141,6 +141,30 @@ impl VirtualWorkspaceManager {
         }
     }
 
+    pub fn update_settings(&mut self, config: &VirtualWorkspaceSettings) {
+        self.app_rules = config.app_rules.clone();
+        self.default_workspace_count = config.default_workspace_count;
+        self.default_workspace_names = config.workspace_names.clone();
+        self.workspace_auto_back_and_forth = config.workspace_auto_back_and_forth;
+
+        let target_count = self.default_workspace_count.max(1).min(self.max_workspaces);
+        for (space, ids) in self.workspaces_by_space.iter_mut() {
+            while ids.len() < target_count {
+                let idx = ids.len();
+                let name = if let Some(n) = self.default_workspace_names.get(idx) {
+                    n.clone()
+                } else {
+                    let name = format!("Workspace {}", self.workspace_counter);
+                    self.workspace_counter += 1;
+                    name
+                };
+                let ws = VirtualWorkspace::new(name, *space);
+                let id = self.workspaces.insert(ws);
+                ids.push(id);
+            }
+        }
+    }
+
     fn ensure_space_initialized(&mut self, space: SpaceId) {
         if self.workspaces_by_space.contains_key(&space) {
             return;
