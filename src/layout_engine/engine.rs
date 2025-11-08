@@ -77,7 +77,7 @@ pub enum LayoutEvent {
         wid: WindowId,
         old_frame: CGRect,
         new_frame: CGRect,
-        screens: Vec<(SpaceId, CGRect)>,
+        screens: Vec<(SpaceId, CGRect, Option<String>)>,
     },
     SpaceExposed(SpaceId, CGSize),
 }
@@ -562,10 +562,18 @@ impl LayoutEngine {
                 new_frame,
                 screens,
             } => {
-                for (space, screen) in screens {
+                for (space, screen_frame, display_uuid) in screens {
                     let layout = self.layout(space);
-                    let gaps = &self.layout_settings.gaps;
-                    self.tree.on_window_resized(layout, wid, old_frame, new_frame, screen, gaps);
+                    let gaps =
+                        self.layout_settings.gaps.effective_for_display(display_uuid.as_deref());
+                    self.tree.on_window_resized(
+                        layout,
+                        wid,
+                        old_frame,
+                        new_frame,
+                        screen_frame,
+                        &gaps,
+                    );
 
                     if let Some(ws) = self.virtual_workspace_manager.active_workspace(space) {
                         self.workspace_layouts.mark_last_saved(space, ws, layout);
@@ -867,6 +875,7 @@ impl LayoutEngine {
         &mut self,
         space: SpaceId,
         screen: CGRect,
+        gaps: &crate::common::config::GapSettings,
         stack_line_thickness: f64,
         stack_line_horiz: crate::common::config::HorizontalPlacement,
         stack_line_vert: crate::common::config::VerticalPlacement,
@@ -876,7 +885,7 @@ impl LayoutEngine {
             layout,
             screen,
             self.layout_settings.stack.stack_offset,
-            &self.layout_settings.gaps,
+            gaps,
             stack_line_thickness,
             stack_line_horiz,
             stack_line_vert,
@@ -887,6 +896,7 @@ impl LayoutEngine {
         &self,
         space: SpaceId,
         screen: CGRect,
+        gaps: &crate::common::config::GapSettings,
         stack_line_thickness: f64,
         stack_line_horiz: crate::common::config::HorizontalPlacement,
         stack_line_vert: crate::common::config::VerticalPlacement,
@@ -905,7 +915,7 @@ impl LayoutEngine {
                     layout,
                     screen,
                     self.layout_settings.stack.stack_offset,
-                    &self.layout_settings.gaps,
+                    gaps,
                     stack_line_thickness,
                     stack_line_horiz,
                     stack_line_vert,
@@ -946,6 +956,7 @@ impl LayoutEngine {
         &mut self,
         space: SpaceId,
         screen: CGRect,
+        gaps: &crate::common::config::GapSettings,
         stack_line_thickness: f64,
         stack_line_horiz: crate::common::config::HorizontalPlacement,
         stack_line_vert: crate::common::config::VerticalPlacement,
@@ -956,7 +967,7 @@ impl LayoutEngine {
                 layout_id,
                 screen,
                 self.layout_settings.stack.stack_offset,
-                &self.layout_settings.gaps,
+                gaps,
                 stack_line_thickness,
                 stack_line_horiz,
                 stack_line_vert,
@@ -970,6 +981,7 @@ impl LayoutEngine {
         space: SpaceId,
         workspace_id: crate::model::VirtualWorkspaceId,
         screen: CGRect,
+        gaps: &crate::common::config::GapSettings,
         stack_line_thickness: f64,
         stack_line_horiz: crate::common::config::HorizontalPlacement,
         stack_line_vert: crate::common::config::VerticalPlacement,
@@ -981,7 +993,7 @@ impl LayoutEngine {
                 layout,
                 screen,
                 self.layout_settings.stack.stack_offset,
-                &self.layout_settings.gaps,
+                gaps,
                 stack_line_thickness,
                 stack_line_horiz,
                 stack_line_vert,

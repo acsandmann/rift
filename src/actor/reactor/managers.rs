@@ -181,10 +181,23 @@ impl LayoutManager {
 
         for screen in screens {
             let Some(space) = screen.space else { continue };
+            let display_uuid = if screen.display_uuid.is_empty() {
+                None
+            } else {
+                Some(screen.display_uuid.as_str())
+            };
+            let gaps = reactor
+                .config_manager
+                .config
+                .settings
+                .layout
+                .gaps
+                .effective_for_display(display_uuid);
             let layout =
                 reactor.layout_manager.layout_engine.calculate_layout_with_virtual_workspaces(
                     space,
                     screen.frame.clone(),
+                    &gaps,
                     reactor.config_manager.config.settings.ui.stack_line.thickness(),
                     reactor.config_manager.config.settings.ui.stack_line.horiz_placement,
                     reactor.config_manager.config.settings.ui.stack_line.vert_placement,
@@ -225,12 +238,25 @@ impl LayoutManager {
                     let screen =
                         reactor.space_manager.screens.iter().find(|s| s.space == Some(space));
                     if let Some(screen) = screen {
+                        let display_uuid = if screen.display_uuid.is_empty() {
+                            None
+                        } else {
+                            Some(screen.display_uuid.as_str())
+                        };
+                        let gaps = reactor
+                            .config_manager
+                            .config
+                            .settings
+                            .layout
+                            .gaps
+                            .effective_for_display(display_uuid);
                         let group_infos = reactor
                             .layout_manager
                             .layout_engine
                             .collect_group_containers_in_selection_path(
                                 space,
                                 screen.frame,
+                                &gaps,
                                 reactor.config_manager.config.settings.ui.stack_line.thickness(),
                                 reactor
                                     .config_manager

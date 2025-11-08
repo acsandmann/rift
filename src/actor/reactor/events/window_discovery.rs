@@ -372,9 +372,7 @@ impl WindowDiscoveryHandler {
             .filter(|wid| wid.pid == pid)
             .filter(|wid| reactor.window_is_standard(*wid))
         {
-            let Some(space) = reactor
-                .best_space_for_window(&reactor.window_manager.windows[&wid].frame_monotonic)
-            else {
+            let Some(space) = reactor.best_space_for_window_id(wid) else {
                 continue;
             };
             included.insert(wid);
@@ -390,7 +388,9 @@ impl WindowDiscoveryHandler {
             let Some(state) = reactor.window_manager.windows.get(&wid) else {
                 continue;
             };
-            let Some(space) = reactor.best_space_for_window(&state.frame_monotonic) else {
+            let Some(space) =
+                reactor.best_space_for_window(&state.frame_monotonic, state.window_server_id)
+            else {
                 continue;
             };
             included.insert(wid);

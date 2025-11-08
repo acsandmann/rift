@@ -150,11 +150,10 @@ impl CommandEventHandler {
         window_server_id: Option<WindowServerId>,
     ) {
         if reactor.window_manager.windows.contains_key(&window_id) {
-            if let Some(space) = reactor
-                .window_manager
-                .windows
-                .get(&window_id)
-                .and_then(|w| reactor.best_space_for_window(&w.frame_monotonic))
+            if let Some(space) =
+                reactor.window_manager.windows.get(&window_id).and_then(|w| {
+                    reactor.best_space_for_window(&w.frame_monotonic, w.window_server_id)
+                })
             {
                 reactor.send_layout_event(LayoutEvent::WindowFocused(space, window_id));
             }

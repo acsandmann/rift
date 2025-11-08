@@ -9,7 +9,6 @@ use objc2::{AnyThread, ClassType, DeclaredClass, Encode, Encoding, define_class,
 use objc2_app_kit::{
     self, NSApplication, NSRunningApplication, NSWorkspace, NSWorkspaceApplicationKey,
 };
-use objc2_core_foundation::CGRect;
 use objc2_foundation::{
     MainThreadMarker, NSNotification, NSNotificationCenter, NSObject, NSProcessInfo, NSString,
 };
@@ -19,13 +18,13 @@ use super::wm_controller::{self, WmEvent};
 use crate::actor::app::AppInfo;
 use crate::sys::app::NSRunningApplicationExt;
 use crate::sys::power::{init_power_state, set_low_power_mode_state};
-use crate::sys::screen::{ScreenCache, ScreenId};
+use crate::sys::screen::{ScreenCache, ScreenDescriptor};
 
 #[repr(C)]
 struct Instance {
     screen_cache: RefCell<ScreenCache>,
     events_tx: wm_controller::Sender,
-    last_screen_state: RefCell<Option<(Vec<CGRect>, Vec<ScreenId>)>>,
+    last_screen_state: RefCell<Option<Vec<ScreenDescriptor>>>,
 }
 
 unsafe impl Encode for Instance {
@@ -122,19 +121,19 @@ impl NotificationCenterInner {
 
     fn send_screen_parameters(&self) {
         let mut screen_cache = self.ivars().screen_cache.borrow_mut();
-        let (frames, ids, converter) = screen_cache.update_screen_config();
+        let (descriptors, converter) = screen_cache.update_screen_config();
         let spaces = screen_cache.get_screen_spaces();
 
         // If the system reports no screens (common immediately after wake),
         // ignore this transient state to avoid clearing WM screen state.
-        if frames.is_empty() {
+        if descriptors.is_empty() {
             trace!("Screen parameters empty after update; suppressing transient update");
             return;
         }
 
         let mut last_state = self.ivars().last_screen_state.borrow_mut();
         let is_unchanged = match &*last_state {
-            Some((prev_frames, prev_ids)) => *prev_frames == frames && *prev_ids == ids,
+            Some(prev) => *prev == descriptors,
             None => false,
         };
 
@@ -143,8 +142,8 @@ impl NotificationCenterInner {
             return;
         }
 
-        *last_state = Some((frames.clone(), ids.clone()));
-        self.send_event(WmEvent::ScreenParametersChanged(frames, ids, converter, spaces));
+        *last_state = Some(descriptors.clone());
+        self.send_event(WmEvent::ScreenParametersChanged(descriptors, converter, spaces));
     }
 
     fn send_current_space(&self) {

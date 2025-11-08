@@ -49,10 +49,11 @@ impl WindowEventHandler {
             );
         }
 
+        let server_id = window_state.window_server_id;
         reactor.window_manager.windows.insert(wid, window_state);
 
         if is_manageable {
-            if let Some(space) = reactor.best_space_for_window(&frame) {
+            if let Some(space) = reactor.best_space_for_window(&frame, server_id) {
                 reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
             }
         }
@@ -155,7 +156,7 @@ impl WindowEventHandler {
         }
 
         if is_manageable {
-            if let Some(space) = reactor.best_space_for_window(&frame) {
+            if let Some(space) = reactor.best_space_for_window(&frame, server_id) {
                 reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
             }
         }
@@ -260,11 +261,19 @@ impl WindowEventHandler {
                     .space_manager
                     .screens
                     .iter()
-                    .flat_map(|screen| Some((screen.space?, screen.frame)))
+                    .flat_map(|screen| {
+                        let display_uuid = if screen.display_uuid.is_empty() {
+                            None
+                        } else {
+                            Some(screen.display_uuid.clone())
+                        };
+                        Some((screen.space?, screen.frame, display_uuid))
+                    })
                     .collect::<Vec<_>>();
 
-                let old_space = reactor.best_space_for_window(&old_frame);
-                let new_space = reactor.best_space_for_window(&new_frame);
+                let server_id = window.window_server_id;
+                let old_space = reactor.best_space_for_window(&old_frame, server_id);
+                let new_space = reactor.best_space_for_window(&new_frame, server_id);
 
                 if old_space != new_space {
                     if matches!(
@@ -330,8 +339,18 @@ impl WindowEventHandler {
         let Some(&wid) = reactor.window_manager.window_ids.get(&wsid) else {
             return;
         };
-        if reactor.should_raise_on_mouse_over(wid) {
-            reactor.raise_window(wid, Quiet::No, None);
+        if !reactor.should_raise_on_mouse_over(wid) {
+            return;
+        }
+
+        reactor.raise_window(wid, Quiet::No, None);
+
+        let space = reactor.window_manager.windows.get(&wid).and_then(|window| {
+            reactor.best_space_for_window(&window.frame_monotonic, window.window_server_id)
+        });
+
+        if let Some(space) = space {
+            reactor.send_layout_event(LayoutEvent::WindowFocused(space, wid));
         }
     }
 }

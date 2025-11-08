@@ -89,7 +89,7 @@ mod tests {
     use objc2_core_foundation::CGRect;
     use test_log::test;
 
-    use super::super::testing::{Apps, make_windows};
+    use super::super::testing::{Apps, make_windows, screen_params_event};
     use super::super::{Event, Quiet, Reactor, SpaceId, WindowId};
     use crate::layout_engine::LayoutEngine;
 
@@ -103,7 +103,7 @@ mod tests {
             None,
         ));
         let space = SpaceId::new(1);
-        reactor.handle_event(ScreenParametersChanged(
+        reactor.handle_event(screen_params_event(
             vec![CGRect::ZERO],
             vec![Some(space)],
             vec![],
@@ -178,7 +178,7 @@ mod tests {
             None,
         ));
         let space = SpaceId::new(1);
-        reactor.handle_event(ScreenParametersChanged(
+        reactor.handle_event(screen_params_event(
             vec![CGRect::ZERO],
             vec![Some(space)],
             vec![],
@@ -264,7 +264,7 @@ mod tests {
         let pid = 3;
         let windows = make_windows(2);
         let space = SpaceId::new(1);
-        reactor.handle_event(ScreenParametersChanged(
+        reactor.handle_event(screen_params_event(
             vec![CGRect::ZERO],
             vec![Some(space)],
             vec![],
