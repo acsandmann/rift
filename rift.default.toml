@@ -110,16 +110,15 @@ vertical = 0
 
 # Example per-display overrides:
 # Replace the quoted key with your display's UUID. Only specify values you want to override.
-[settings.layout.gaps.per_display."11111111-2222-3333-4444-555555555555".outer]
-top = 20
-left = 20
-bottom = 20
-right = 20
-
-[settings.layout.gaps.per_display."11111111-2222-3333-4444-555555555555".inner]
-horizontal = 8
-vertical = 8
-
+# [settings.layout.gaps.per_display."11111111-2222-3333-4444-555555555555".outer]
+# top = 20
+# left = 20
+# bottom = 20
+# right = 20
+#
+# [settings.layout.gaps.per_display."11111111-2222-3333-4444-555555555555".inner]
+# horizontal = 8
+# vertical = 8
 [settings.ui.menu_bar]
 # enable menu bar workspace indicators
 enabled = false

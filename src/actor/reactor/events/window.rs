@@ -261,7 +261,14 @@ impl WindowEventHandler {
                     .space_manager
                     .screens
                     .iter()
-                    .flat_map(|screen| Some((screen.space?, screen.frame)))
+                    .flat_map(|screen| {
+                        let display_uuid = if screen.display_uuid.is_empty() {
+                            None
+                        } else {
+                            Some(screen.display_uuid.clone())
+                        };
+                        Some((screen.space?, screen.frame, display_uuid))
+                    })
                     .collect::<Vec<_>>();
 
                 let server_id = window.window_server_id;
