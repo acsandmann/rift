@@ -235,7 +235,7 @@ pub enum Event {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Requested(pub bool);
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(untagged)]
 pub enum Command {
     Layout(LayoutCommand),

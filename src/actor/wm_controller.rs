@@ -49,7 +49,7 @@ pub enum WmEvent {
     Command(WmCommand),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
 pub enum WmCommand {
     Wm(WmCmd),
