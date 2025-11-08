@@ -1,15 +1,15 @@
-name: Release - Nix Build & Binary Cache
+name: Release - Update Nix Package
 
 on:
   release:
     types: [published]
 
 concurrency:
-  group: build-rift-nix
+  group: update-nix-rift
   cancel-in-progress: false
 
 jobs:
-  update-flake:
+  update-nix:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -25,27 +25,58 @@ jobs:
       - name: Install Nix
         uses: nixbuild/nix-quick-install-action@v34
 
-      - name: Update flake inputs
+      - name: Find universal binary release asset
+        id: find_asset
         run: |
-          nix flake update
+          ASSETS=$(gh api repos/${{ github.repository }}/releases/tags/${{ github.ref_name }} --jq '.assets[].name')
+          BINARY=$(echo "$ASSETS" | grep -i "universal" | head -1)
+          if [ -z "$BINARY" ]; then
+            echo "No universal binary found in release assets"
+            exit 1
+          fi
+          echo "binary=${BINARY}" >> "$GITHUB_OUTPUT"
+          echo "Found binary: ${BINARY}"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Download and calculate hash
+        id: hash
+        run: |
+          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ steps.find_asset.outputs.binary }}"
+          echo "Downloading from: ${DOWNLOAD_URL}"
+
+          HASH=$(nix-prefetch-url --type sha256 --unpack "${DOWNLOAD_URL}")
+          echo "hash=${HASH}" >> "$GITHUB_OUTPUT"
+          echo "Calculated hash: ${HASH}"
+
+      - name: Update package.nix
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          BINARY="${{ steps.find_asset.outputs.binary }}"
+          HASH="${{ steps.hash.outputs.hash }}"
+
+          sed -i "s|version = \"[^\"]*\"|version = \"${VERSION}\"|g" nix/package.nix
+          sed -i "s|url = \"https://github.com/acsandmann/rift/releases/download/v[^/]*/[^\"]*\"|url = \"https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${BINARY}\"|g" nix/package.nix
+          sed -i "s|sha256 = \"[^\"]*\"|sha256 = \"${HASH}\"|g" nix/package.nix
 
       - name: Check for changes
         id: check_changes
         run: |
-          if git diff --quiet flake.lock; then
+          if git diff --quiet nix/package.nix; then
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
           else
             echo "has_changes=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Commit flake lock updates
+      - name: Commit package updates
         if: steps.check_changes.outputs.has_changes == 'true'
         id: commit
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add flake.lock
-          git commit -m "chore(nix): update flake inputs after release ${{ github.ref_name }}"
+          git add nix/package.nix
+          git commit -m "chore(nix): update rift-bin package after release ${{ github.ref_name }}"
           COMMIT_SHA=$(git rev-parse HEAD)
           echo "sha=${COMMIT_SHA}" >> "$GITHUB_OUTPUT"
           git push origin HEAD:main
@@ -56,71 +87,3 @@ jobs:
         run: |
           COMMIT_SHA=$(git rev-parse HEAD)
           echo "sha=${COMMIT_SHA}" >> "$GITHUB_OUTPUT"
-
-  build-nix:
-    needs: [update-flake]
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - system: aarch64-darwin
-            runner: macos-15
-          - system: x86_64-darwin
-            runner: macos-15-intel
-    steps:
-      - name: Determine commit SHA
-        id: get_sha
-        run: |
-          # Use commit SHA from update-flake if available, otherwise use main
-          COMMIT_SHA="${{ needs.update-flake.outputs.commit_sha }}"
-          if [ -z "$COMMIT_SHA" ]; then
-            COMMIT_SHA="${{ needs.update-flake.outputs.no_commit_sha }}"
-          fi
-          echo "sha=${COMMIT_SHA}" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout exact commit from update-flake
-        uses: actions/checkout@v5
-        with:
-          ref: ${{ steps.get_sha.outputs.sha }}
-          fetch-depth: 0
-
-      - uses: nixbuild/nix-quick-install-action@v34
-        with:
-          nix_conf: |
-            substituters = https://cache.nixos.org/ https://nix-community.cachix.org https://cache.garnix.io
-            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs= cache.garnix.io:CTFPyKSLcx5RMJKfLo5EEPUObbA78b0YQ2DTCJXqr9g=
-            cores = 0
-
-      # To use a binary cache, uncomment and configure:
-      #    - Create a Cachix account at https://cachix.org
-      #    - Create a new binary cache in your Cachix account dashboard
-      #    - Generate an auth token from your Cachix profile settings
-      #    - Add the following secrets to your GitHub repository:
-      #      * CACHIX_CACHE_NAME: your-cache-name
-      #      * CACHIX_AUTH_TOKEN: your-auth-token
-      #    - Uncomment the Cachix setup step below
-
-      # Uncomment this section to enable Cachix binary cache pushing
-      # - uses: cachix/cachix-action@v15
-      #   with:
-      #     name: ${{ secrets.CACHIX_CACHE_NAME }}
-      #     authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-      #     skipPush: true
-      - uses: DeterminateSystems/magic-nix-cache-action@main # keep this, it speeds up builds.
-
-      - name: Build rift for ${{ matrix.system }}
-        run: |
-          nix build .#default -L
-
-      # Uncomment this section to enable Cachix binary cache pushing
-      # - name: Push to Cachix
-      #   run: |
-      #     # Get the store path
-      #     STORE_PATH=$(nix eval --raw .#packages.${{ matrix.system }}.default.outPath 2>/dev/null || nix eval --raw .#default.outPath)
-      #     PIN_NAME="rift-${{ matrix.system }}"
-      #     echo "Pushing to Cachix: $STORE_PATH"
-
-      #     nix path-info --recursive "$STORE_PATH" | cachix push ${{ secrets.CACHIX_CACHE_NAME }}
-
-      #     cachix pin ${{ secrets.CACHIX_CACHE_NAME }} "$PIN_NAME" "$STORE_PATH" --keep-revisions 3

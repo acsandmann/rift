@@ -35,7 +35,8 @@
             motd = "";
           };
         };
-    } // {
+    }
+    // {
       overlays.default = import ./nix/overlay.nix inputs;
     };
 }
