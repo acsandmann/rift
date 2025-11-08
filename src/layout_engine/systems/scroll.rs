@@ -82,18 +82,20 @@ impl ScrollLayoutState {
             let width = self.width_unit(current);
             let end = start + width;
             if current == idx {
-                let view_start = self.scroll_offset;
+                let window_center = start + width * 0.5;
+
+                let desired_center_offset = window_center - viewport * 0.5;
+
                 let end_minus_view = (end - viewport).max(0.0);
                 let min_offset = start.min(end_minus_view);
                 let max_offset = start.max(end_minus_view);
-                let mut desired = view_start.clamp(min_offset, max_offset);
-                let window_width = end - start;
-                if window_width > viewport && view_start > max_offset {
-                    desired = min_offset;
-                }
+
+                let mut desired = desired_center_offset.clamp(min_offset, max_offset);
+
                 if desired < 0.0 {
                     desired = 0.0;
                 }
+
                 self.scroll_offset = desired;
                 break;
             }
@@ -105,7 +107,30 @@ impl ScrollLayoutState {
 
     fn ensure_selected_visible(&mut self) {
         if let Some(idx) = self.selected_index() {
-            self.ensure_visible_index(idx);
+            let viewport = self.viewport_units();
+            let viewport_start = self.scroll_offset;
+            let viewport_end = viewport_start + viewport;
+
+            let mut start = 0.0;
+            let mut window_start = 0.0;
+            let mut window_end = 0.0;
+
+            for current in 0..self.windows.len() {
+                let width = self.width_unit(current);
+                let end = start + width;
+                if current == idx {
+                    window_start = start;
+                    window_end = end;
+                    break;
+                }
+                start = end;
+            }
+
+            if window_end <= viewport_start || window_start >= viewport_end {
+                self.ensure_visible_index(idx);
+            } else {
+                self.clamp_offset();
+            }
         } else {
             self.clamp_offset();
         }
@@ -220,6 +245,7 @@ impl ScrollLayoutSystem {
         }
 
         state.ensure_selection();
+        state.ensure_widths();
 
         let prev_index = state.selected_index().unwrap_or(0);
 
@@ -229,7 +255,6 @@ impl ScrollLayoutSystem {
         if target_idx != prev_index {
             let wid = state.windows[target_idx];
             state.selected = Some(wid);
-            state.ensure_visible_index(target_idx);
             Some(wid)
         } else {
             None
@@ -245,7 +270,8 @@ impl ScrollLayoutSystem {
         }
 
         state.ensure_selection();
-        state.scroll_offset = state.scroll_offset.clamp(0.0, state.max_offset());
+        state.ensure_widths();
+        state.clamp_offset();
 
         if let Some(idx) = state.index_nearest_focus() {
             if idx < state.windows.len() {
@@ -276,6 +302,7 @@ impl ScrollLayoutSystem {
                 return;
             }
             state.ensure_selection();
+            state.ensure_widths();
             state.scroll_offset = (state.scroll_offset + delta).clamp(0.0, state.max_offset());
         }
     }

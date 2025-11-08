@@ -460,12 +460,12 @@ impl EventTap {
 
         let scroll_cfg = &self.config.settings.layout.scroll;
         let required_fingers = scroll_cfg.gesture_fingers;
-        let sensitivity = scroll_cfg.gesture_sensitivity.max(0.01);
+        let sensitivity = scroll_cfg.gesture_sensitivity.max(0.01) * 0.5;
 
         let phase = nsevent.phase();
         if phase.contains(NSEventPhase::Ended) || phase.contains(NSEventPhase::Cancelled) {
             wm_sender.send(WmEvent::Command(WmCommand::ReactorCommand(
-                reactor::Command::Layout(LC::ShiftViewport { delta: 0.0, finalize: true }),
+                reactor::Command::Layout(LC::ScrollWorkspace { delta: 0.0, finalize: true }),
             )));
             state.borrow_mut().reset();
             return;
@@ -527,10 +527,11 @@ impl EventTap {
                     return;
                 }
 
-                let delta_norm = dx - st.last_dx;
-                st.last_dx = dx;
+                let current_dx = dx;
+                let delta_norm = current_dx - st.last_dx;
+                st.last_dx = current_dx;
 
-                let mut delta_units = -(delta_norm) * sensitivity;
+                let mut delta_units = -delta_norm * sensitivity;
                 if cfg.invert_horizontal {
                     delta_units = -delta_units;
                 }
@@ -543,10 +544,15 @@ impl EventTap {
                 st.phase = GesturePhase::Committed;
 
                 let mode = scroll_cfg.gesture_mode;
+                let gesture_magnitude = dx.abs();
+                let gesture_velocity = delta_norm.abs();
+
                 let use_immediate = match mode {
                     ScrollGestureMode::Immediate => true,
                     ScrollGestureMode::Preview => false,
-                    ScrollGestureMode::Hybrid => (dx.abs() * sensitivity) >= 0.5,
+                    ScrollGestureMode::Hybrid => {
+                        gesture_magnitude > 0.15 || gesture_velocity > 0.01
+                    }
                 };
 
                 if use_immediate {

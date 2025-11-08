@@ -728,10 +728,8 @@ impl LayoutEngine {
                         focus_window = system.scroll_by(layout, delta);
                     }
                     if finalize {
-                        let _ = system.finalize_scroll(layout);
-                        if focus_window.is_none() {
-                            focus_window = system.selected_window(layout);
-                        }
+                        let finalized_window = system.finalize_scroll(layout);
+                        focus_window = finalized_window.or(focus_window);
                     }
 
                     if let Some(wid) = focus_window {
@@ -757,8 +755,7 @@ impl LayoutEngine {
                         system.shift_view_by(layout, delta);
                     }
                     if finalize {
-                        let _ = system.finalize_scroll(layout);
-                        if let Some(wid) = system.selected_window(layout) {
+                        if let Some(wid) = system.finalize_scroll(layout) {
                             self.focused_window = Some(wid);
                             self.virtual_workspace_manager.set_last_focused_window(
                                 space,
