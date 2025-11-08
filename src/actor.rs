@@ -12,6 +12,7 @@ pub mod menu_bar;
 pub mod mission_control;
 pub mod mission_control_observer;
 pub mod notification_center;
+pub mod process;
 pub mod raise_manager;
 pub mod reactor;
 pub mod stack_line;

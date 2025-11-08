@@ -11,6 +11,7 @@ use rift_wm::actor::menu_bar::Menu;
 use rift_wm::actor::mission_control::MissionControlActor;
 use rift_wm::actor::mission_control_observer::NativeMissionControl;
 use rift_wm::actor::notification_center::NotificationCenter;
+use rift_wm::actor::process::ProcessActor;
 use rift_wm::actor::reactor::{self, Reactor};
 use rift_wm::actor::stack_line::StackLine;
 use rift_wm::actor::window_notify as window_notify_actor;
@@ -224,6 +225,8 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
 
     let notification_center = NotificationCenter::new(wm_controller_sender.clone());
 
+    let process_actor = ProcessActor::new(wm_controller_sender.clone());
+
     let event_tap = EventTap::new(
         config.clone(),
         events_tx.clone(),
@@ -260,6 +263,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
             wn_actor.run(),
             mission_control_native.run(),
             mission_control.run(),
+            process_actor.run()
         );
     });
 }

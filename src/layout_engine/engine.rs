@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use objc2_core_foundation::{CGRect, CGSize};
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 use super::{Direction, FloatingManager, LayoutId, LayoutSystemKind, WorkspaceLayouts};
 use crate::actor::app::{AppInfo, WindowId, pid_t};
@@ -438,10 +438,9 @@ impl LayoutEngine {
                             match self.virtual_workspace_manager.auto_assign_window(wid, space) {
                                 Ok(ws) => (ws, false),
                                 Err(_) => {
-                                    tracing::warn!(
+                                    warn!(
                                         "Could not determine workspace for window {:?} on space {:?}; skipping assignment",
-                                        wid,
-                                        space
+                                        wid, space
                                     );
                                     continue;
                                 }
@@ -497,11 +496,11 @@ impl LayoutEngine {
             LayoutEvent::WindowAdded(space, wid) => {
                 self.debug_tree(space);
 
-                let _assigned_workspace =
+                let assigned_workspace =
                     match self.virtual_workspace_manager.auto_assign_window(wid, space) {
                         Ok(workspace_id) => workspace_id,
                         Err(e) => {
-                            tracing::warn!("Failed to auto-assign window to workspace: {:?}", e);
+                            warn!("Failed to auto-assign window to workspace: {:?}", e);
                             self.virtual_workspace_manager
                                 .active_workspace(space)
                                 .expect("No active workspace available")
@@ -512,7 +511,15 @@ impl LayoutEngine {
 
                 if should_be_floating {
                     self.floating.add_active(space, wid.pid, wid);
-                    tracing::debug!("Window {:?} is floating, excluded from layout tree", wid);
+                } else {
+                    if let Some(layout) = self.workspace_layouts.active(space, assigned_workspace) {
+                        self.tree.add_window_after_selection(layout, wid);
+                    } else {
+                        warn!(
+                            "No active layout for workspace {:?} on space {:?}; window {:?} not added to tree",
+                            assigned_workspace, space, wid
+                        );
+                    }
                 }
 
                 self.broadcast_windows_changed(space);
@@ -619,10 +626,9 @@ impl LayoutEngine {
 
                     if let Some(layout) = self.workspace_layouts.active(space, assigned_workspace) {
                         self.tree.add_window_after_selection(layout, wid);
-                        tracing::debug!(
+                        debug!(
                             "Re-added floating window {:?} to tiling tree in workspace {:?}",
-                            wid,
-                            assigned_workspace
+                            wid, assigned_workspace
                         );
                     }
 
@@ -637,7 +643,7 @@ impl LayoutEngine {
                 self.tree.remove_window(wid);
                 self.floating.add_floating(wid);
                 self.floating.set_last_focus(Some(wid));
-                tracing::debug!("Removed window {:?} from tiling tree, now floating", wid);
+                debug!("Removed window {:?} from tiling tree, now floating", wid);
             }
             return EventResponse::default();
         }
@@ -648,17 +654,16 @@ impl LayoutEngine {
         let workspace_id = match self.virtual_workspace_manager.active_workspace(space) {
             Some(id) => id,
             None => {
-                tracing::warn!("No active virtual workspace for space {:?}", space);
+                warn!("No active virtual workspace for space {:?}", space);
                 return EventResponse::default();
             }
         };
         let layout = match self.workspace_layouts.active(space, workspace_id) {
             Some(id) => id,
             None => {
-                tracing::warn!(
+                warn!(
                     "No active layout for workspace {:?} on space {:?}; command ignored",
-                    workspace_id,
-                    space
+                    workspace_id, space
                 );
                 return EventResponse::default();
             }
@@ -1292,7 +1297,7 @@ impl LayoutEngine {
                         self.broadcast_workspace_changed(space);
                     }
                     Err(e) => {
-                        tracing::warn!("Failed to create new workspace: {:?}", e);
+                        warn!("Failed to create new workspace: {:?}", e);
                     }
                 }
                 EventResponse::default()
@@ -1402,15 +1407,13 @@ impl LayoutEngine {
 
     pub fn debug_log_workspace_stats(&self) {
         let stats = self.virtual_workspace_manager.get_stats();
-        tracing::info!(
+        info!(
             "Workspace Stats: {} workspaces, {} windows, {} active spaces",
-            stats.total_workspaces,
-            stats.total_windows,
-            stats.active_spaces
+            stats.total_workspaces, stats.total_windows, stats.active_spaces
         );
 
         for (workspace_id, window_count) in &stats.workspace_window_counts {
-            tracing::info!("  - '{:?}': {} windows", workspace_id, window_count);
+            info!("  - '{:?}': {} windows", workspace_id, window_count);
         }
     }
 
@@ -1424,20 +1427,20 @@ impl LayoutEngine {
                 let inactive_windows =
                     self.virtual_workspace_manager.windows_in_inactive_workspaces(space);
 
-                tracing::info!(
+                info!(
                     "Space {:?}: Active workspace '{}' with {} windows",
                     space,
                     workspace.name,
                     active_windows.len()
                 );
-                tracing::info!("  Active windows: {:?}", active_windows);
-                tracing::info!("  Inactive windows: {} total", inactive_windows.len());
+                info!("  Active windows: {:?}", active_windows);
+                info!("  Inactive windows: {} total", inactive_windows.len());
                 if !inactive_windows.is_empty() {
-                    tracing::info!("  Inactive window IDs: {:?}", inactive_windows);
+                    info!("  Inactive window IDs: {:?}", inactive_windows);
                 }
             }
         } else {
-            tracing::warn!("Space {:?}: No active workspace set", space);
+            warn!("Space {:?}: No active workspace set", space);
         }
     }
 

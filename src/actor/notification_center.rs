@@ -15,7 +15,6 @@ use objc2_foundation::{
 use tracing::{debug, info_span, trace, warn};
 
 use super::wm_controller::{self, WmEvent};
-use crate::actor::app::AppInfo;
 use crate::sys::app::NSRunningApplicationExt;
 use crate::sys::power::{init_power_state, set_low_power_mode_state};
 use crate::sys::screen::{ScreenCache, ScreenDescriptor};
@@ -160,18 +159,8 @@ impl NotificationCenterInner {
         let name = &*notif.name();
         let span = info_span!("notification_center::handle_app_event", ?name);
         let _guard = span.enter();
-        if unsafe { NSWorkspaceDidLaunchApplicationNotification } == name {
-            self.send_event(WmEvent::AppLaunch(pid, AppInfo::from(&*app)));
-        } else if unsafe { NSWorkspaceDidActivateApplicationNotification } == name {
-            self.send_event(WmEvent::AppGloballyActivated(pid));
-        } else if unsafe { NSWorkspaceDidDeactivateApplicationNotification } == name {
+        if unsafe { NSWorkspaceDidDeactivateApplicationNotification } == name {
             self.send_event(WmEvent::AppGloballyDeactivated(pid));
-        } else if unsafe { NSWorkspaceDidTerminateApplicationNotification } == name {
-            self.send_event(WmEvent::AppTerminated(pid));
-        } else if unsafe { NSWorkspaceActiveSpaceDidChangeNotification } == name {
-            self.send_current_space();
-        } else {
-            panic!("Unexpected application event: {notif:?}");
         }
     }
 
@@ -203,7 +192,7 @@ pub struct NotificationCenter {
 
 impl NotificationCenter {
     pub fn new(events_tx: wm_controller::Sender) -> Self {
-        let handler = NotificationCenterInner::new(events_tx);
+        let handler = NotificationCenterInner::new(events_tx.clone());
 
         // SAFETY: Selector must have signature fn(&self, &NSNotification)
         let register_unsafe =
@@ -242,37 +231,7 @@ impl NotificationCenter {
             );
             register_unsafe(
                 sel!(recvAppEvent:),
-                NSWorkspaceDidLaunchApplicationNotification,
-                workspace_center,
-                workspace,
-            );
-            register_unsafe(
-                sel!(recvAppEvent:),
-                NSWorkspaceDidActivateApplicationNotification,
-                workspace_center,
-                workspace,
-            );
-            register_unsafe(
-                sel!(recvAppEvent:),
                 NSWorkspaceDidDeactivateApplicationNotification,
-                workspace_center,
-                workspace,
-            );
-            register_unsafe(
-                sel!(recvAppEvent:),
-                NSWorkspaceDidTerminateApplicationNotification,
-                workspace_center,
-                workspace,
-            );
-            register_unsafe(
-                sel!(recvSessionActivatedEvent:),
-                NSWorkspaceSessionDidBecomeActiveNotification,
-                workspace_center,
-                workspace,
-            );
-            register_unsafe(
-                sel!(recvSessionDeactivatedEvent:),
-                NSWorkspaceSessionDidResignActiveNotification,
                 workspace_center,
                 workspace,
             );

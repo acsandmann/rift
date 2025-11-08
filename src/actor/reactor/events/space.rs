@@ -3,12 +3,13 @@ use std::collections::hash_map::Entry;
 use objc2_app_kit::NSRunningApplication;
 use tracing::{debug, info, trace, warn};
 
-use crate::actor::app::{AppInfo, Request};
+use crate::actor::app::Request;
 use crate::actor::reactor::{
     DragState, Event, FullscreenTrack, MissionControlState, PendingSpaceChange, Reactor, Screen,
     ScreenSnapshot, StaleCleanupState,
 };
 use crate::actor::wm_controller::WmEvent;
+use crate::sys::app::AppInfo;
 use crate::sys::screen::{ScreenId, SpaceId};
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 
@@ -204,7 +205,7 @@ impl SpaceEventHandler {
                 if let Err(err) =
                     app.handle.send(Request::GetVisibleWindows { force_refresh: false })
                 {
-                    debug!(
+                    warn!(
                         pid = window_server_info.pid,
                         ?wsid,
                         ?err,
