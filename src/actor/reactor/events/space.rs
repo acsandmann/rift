@@ -1,5 +1,6 @@
 use std::collections::hash_map::Entry;
 
+use objc2_app_kit::NSRunningApplication;
 use tracing::{debug, info, trace, warn};
 
 use crate::actor::app::Request;
@@ -7,6 +8,8 @@ use crate::actor::reactor::{
     DragState, Event, FullscreenTrack, MissionControlState, PendingSpaceChange, Reactor, Screen,
     ScreenSnapshot, StaleCleanupState,
 };
+use crate::actor::wm_controller::WmEvent;
+use crate::sys::app::AppInfo;
 use crate::sys::screen::{ScreenId, SpaceId};
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 
@@ -186,7 +189,19 @@ impl SpaceEventHandler {
 
             reactor.update_partial_window_server_info(vec![window_server_info]);
 
-            if let Some(app) = reactor.app_manager.apps.get(&window_server_info.pid) {
+            if !reactor.app_manager.apps.contains_key(&window_server_info.pid) {
+                if let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(
+                    window_server_info.pid,
+                ) {
+                    debug!(
+                        ?app,
+                        "Received WindowServerAppeared for unknown app - synthesizing AppLaunch"
+                    );
+                    reactor.communication_manager.wm_sender.as_ref().map(|wm| {
+                        wm.send(WmEvent::AppLaunch(window_server_info.pid, AppInfo::from(&*app)))
+                    });
+                }
+            } else if let Some(app) = reactor.app_manager.apps.get(&window_server_info.pid) {
                 if let Err(err) =
                     app.handle.send(Request::GetVisibleWindows { force_refresh: false })
                 {
