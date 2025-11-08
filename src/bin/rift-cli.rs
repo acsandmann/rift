@@ -123,10 +123,17 @@ enum WindowCommands {
     ToggleFullscreen,
     /// Toggle fullscreen within configured outer gaps (respects outer gaps / fills tiling area)
     ToggleFullscreenWithinGaps,
-    /// Grow the current window size
+    /// Grow the current window size (increments by ~5%).
     ResizeGrow,
-    /// Shrink the current window size
+    /// Shrink the current window size (decrements by ~5%).
     ResizeShrink,
+    /// Resize the selected window by a fractional amount.
+    /// - Pass a signed floating value: positive to grow, negative to shrink.
+    /// - The value is a fraction of the current size (e.g. `0.05` = 5%).
+    /// Examples:
+    ///   rift-cli execute window resize-by --amount 0.05    # grow by 5%
+    ///   rift-cli execute window resize-by --amount -0.10   # shrink by 10%
+    ResizeBy { amount: f64 },
 }
 
 #[derive(Subcommand)]
@@ -442,6 +449,9 @@ fn map_window_command(cmd: WindowCommands) -> Result<RiftCommand, String> {
         ))),
         WindowCommands::ResizeShrink => Ok(RiftCommand::Reactor(reactor::Command::Layout(
             LC::ResizeWindowShrink,
+        ))),
+        WindowCommands::ResizeBy { amount } => Ok(RiftCommand::Reactor(reactor::Command::Layout(
+            LC::ResizeWindowBy { amount },
         ))),
     }
 }

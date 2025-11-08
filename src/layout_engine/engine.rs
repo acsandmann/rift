@@ -25,7 +25,7 @@ pub struct GroupContainerInfo {
 }
 
 #[non_exhaustive]
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum LayoutCommand {
     NextWindow,
@@ -46,6 +46,9 @@ pub enum LayoutCommand {
 
     ResizeWindowGrow,
     ResizeWindowShrink,
+    ResizeWindowBy {
+        amount: f64,
+    },
 
     NextWorkspace(Option<bool>),
     PrevWorkspace(Option<bool>),
@@ -171,8 +174,7 @@ impl LayoutEngine {
         }
     }
 
-    #[allow(dead_code)]
-    fn resize_selection(&mut self, layout: LayoutId, resize_amount: f64) {
+    pub fn resize_selection(&mut self, layout: LayoutId, resize_amount: f64) {
         self.tree.resize_selection_by(layout, resize_amount);
     }
 
@@ -871,6 +873,15 @@ impl LayoutEngine {
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
                 let resize_amount = -0.05;
                 self.tree.resize_selection_by(layout, resize_amount);
+                EventResponse::default()
+            }
+            LayoutCommand::ResizeWindowBy { amount } => {
+                if is_floating {
+                    return EventResponse::default();
+                }
+
+                self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
+                self.tree.resize_selection_by(layout, amount);
                 EventResponse::default()
             }
         }
