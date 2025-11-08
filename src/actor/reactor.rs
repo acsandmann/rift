@@ -54,7 +54,7 @@ use crate::model::tx_store::WindowTxStore;
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt, SameAs};
-use crate::sys::screen::{SpaceId, get_active_space_number};
+use crate::sys::screen::{ScreenId, SpaceId, get_active_space_number};
 use crate::sys::timer::Timer;
 use crate::sys::window_server::{
     self, WindowServerId, WindowServerInfo, space_is_fullscreen,
@@ -66,7 +66,19 @@ type Receiver = actor::Receiver<Event>;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
-use crate::model::server::{ApplicationData, LayoutStateData, WindowData, WorkspaceQueryResponse};
+use crate::model::server::{
+    ApplicationData, DisplayData, LayoutStateData, WindowData, WorkspaceQueryResponse,
+};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScreenSnapshot {
+    #[serde(with = "CGRectDef")]
+    pub frame: CGRect,
+    pub space: Option<SpaceId>,
+    pub display_uuid: String,
+    pub name: Option<String>,
+    pub screen_id: u32,
+}
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
@@ -78,11 +90,7 @@ pub enum Event {
     /// first in the list.
     ///
     /// See the `SpaceChanged` event for an explanation of the other parameters.
-    ScreenParametersChanged(
-        #[serde_as(as = "Vec<CGRectDef>")] Vec<CGRect>,
-        Vec<Option<SpaceId>>,
-        Vec<WindowServerInfo>,
-    ),
+    ScreenParametersChanged(Vec<ScreenSnapshot>, Vec<WindowServerInfo>),
 
     /// The current space changed.
     ///
@@ -194,6 +202,8 @@ pub enum Event {
         #[serde(skip)]
         response: r#continue::Sender<Vec<WindowData>>,
     },
+    #[serde(skip)]
+    QueryDisplays(r#continue::Sender<Vec<DisplayData>>),
     #[serde(skip)]
     QueryWindowInfo {
         window_id: WindowId,
@@ -335,10 +345,13 @@ struct PendingSpaceChange {
     ws_info: Vec<WindowServerInfo>,
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 struct Screen {
     frame: CGRect,
     space: Option<SpaceId>,
+    display_uuid: String,
+    name: Option<String>,
+    screen_id: ScreenId,
 }
 
 #[derive(Clone, Debug)]
@@ -433,10 +446,7 @@ impl Reactor {
         };
         Reactor {
             config_manager: managers::ConfigManager { config: config.clone() },
-            app_manager: managers::AppManager {
-                apps: HashMap::default(),
-                app_rules_recently_applied: std::time::Instant::now(),
-            },
+            app_manager: managers::AppManager::new(),
             layout_manager: managers::LayoutManager { layout_engine },
             window_manager: managers::WindowManager {
                 windows: HashMap::default(),
@@ -602,6 +612,7 @@ impl Reactor {
                 | Event::QueryWindowInfo { .. }
                 | Event::QueryWindows { .. }
                 | Event::QueryWorkspaces(..)
+                | Event::QueryDisplays(..)
         ) {
             return self.handle_query(event);
         }
@@ -704,8 +715,8 @@ impl Reactor {
                     mouse_state,
                 );
             }
-            Event::ScreenParametersChanged(frames, spaces, ws_info) => {
-                SpaceEventHandler::handle_screen_parameters_changed(self, frames, spaces, ws_info);
+            Event::ScreenParametersChanged(screens, ws_info) => {
+                SpaceEventHandler::handle_screen_parameters_changed(self, screens, ws_info);
             }
             Event::SpaceChanged(spaces, ws_info) => {
                 SpaceEventHandler::handle_space_changed(self, spaces, ws_info);
@@ -774,11 +785,10 @@ impl Reactor {
             _ => (),
         }
         if let Some(raised_window) = raised_window {
-            if let Some(space) = self
-                .window_manager
-                .windows
-                .get(&raised_window)
-                .and_then(|w| self.best_space_for_window(&w.frame_monotonic))
+            if let Some(space) =
+                self.window_manager.windows.get(&raised_window).and_then(|w| {
+                    self.best_space_for_window(&w.frame_monotonic, w.window_server_id)
+                })
             {
                 self.send_layout_event(LayoutEvent::WindowFocused(space, raised_window));
             }
@@ -1026,7 +1036,23 @@ impl Reactor {
         WindowDiscoveryHandler::handle_discovery(self, pid, new, known_visible, app_info);
     }
 
-    fn best_space_for_window(&self, frame: &CGRect) -> Option<SpaceId> {
+    fn best_space_for_window(
+        &self,
+        frame: &CGRect,
+        window_server_id: Option<WindowServerId>,
+    ) -> Option<SpaceId> {
+        if let Some(server_id) = window_server_id {
+            if let Some(space) = crate::sys::window_server::window_space(server_id) {
+                if self.space_manager.screens.iter().any(|screen| screen.space == Some(space)) {
+                    return Some(space);
+                }
+            }
+        }
+
+        self.best_space_for_frame(frame)
+    }
+
+    fn best_space_for_frame(&self, frame: &CGRect) -> Option<SpaceId> {
         let center = frame.mid();
         self.space_manager
             .screens
@@ -1052,7 +1078,9 @@ impl Reactor {
         let needs_new_session =
             self.get_active_drag_session().map_or(true, |session| session.window != wid);
         if needs_new_session {
-            let origin_space = self.best_space_for_window(frame);
+            let server_id =
+                self.window_manager.windows.get(&wid).and_then(|window| window.window_server_id);
+            let origin_space = self.best_space_for_window(frame, server_id);
             let session = DragSession {
                 window: wid,
                 last_frame: *frame,
@@ -1110,13 +1138,24 @@ impl Reactor {
     }
 
     fn resolve_drag_space(&self, session: &DragSession, frame: &CGRect) -> Option<SpaceId> {
+        let server_id = self
+            .window_manager
+            .windows
+            .get(&session.window)
+            .and_then(|window| window.window_server_id);
         if frame.area() <= 0.0 {
-            return session.settled_space.or_else(|| self.best_space_for_window(frame));
+            return session.settled_space.or_else(|| self.best_space_for_window(frame, server_id));
         }
 
         self.drag_space_candidate(frame)
-            .or_else(|| self.best_space_for_window(frame))
+            .or_else(|| self.best_space_for_window(frame, server_id))
             .or(session.settled_space)
+    }
+
+    fn best_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
+        self.window_manager.windows.get(&wid).and_then(|window| {
+            self.best_space_for_window(&window.frame_monotonic, window.window_server_id)
+        })
     }
 
     fn finalize_active_drag(&mut self) -> bool {
@@ -1125,11 +1164,7 @@ impl Reactor {
         };
         let wid = session.window;
 
-        let final_space = self
-            .window_manager
-            .windows
-            .get(&wid)
-            .and_then(|window| self.best_space_for_window(&window.frame_monotonic));
+        let final_space = self.best_space_for_window_id(wid);
 
         if session.origin_space != final_space {
             if session.origin_space.is_some() {
@@ -1222,7 +1257,8 @@ impl Reactor {
             return false;
         }
 
-        let Some(space) = self.best_space_for_window(&candidate_frame) else {
+        let Some(space) = self.best_space_for_window(&candidate_frame, window.window_server_id)
+        else {
             return false;
         };
 
@@ -1277,7 +1313,9 @@ impl Reactor {
             let Some(state) = self.window_manager.windows.get(&wid) else {
                 continue;
             };
-            let Some(space) = self.best_space_for_window(&state.frame_monotonic) else {
+            let Some(space) =
+                self.best_space_for_window(&state.frame_monotonic, state.window_server_id)
+            else {
                 continue;
             };
             windows_by_space.entry(space).or_default().push(wid);
@@ -1350,7 +1388,10 @@ impl Reactor {
                 if wid.pid != pid {
                     return false;
                 }
-                if let Some(space) = self.best_space_for_window(&window_state.frame_monotonic) {
+                if let Some(space) = self.best_space_for_window(
+                    &window_state.frame_monotonic,
+                    window_state.window_server_id,
+                ) {
                     if visible_spaces.contains(&space) {
                         if let Some(active_workspace) =
                             self.layout_manager.layout_engine.active_workspace(space)
@@ -1412,9 +1453,12 @@ impl Reactor {
             return;
         };
 
-        let Some(window_space) = self.best_space_for_window(
-            &self.window_manager.windows.get(&app_window_id).unwrap().frame_monotonic,
-        ) else {
+        let Some(window_state) = self.window_manager.windows.get(&app_window_id) else {
+            return;
+        };
+        let Some(window_space) = self
+            .best_space_for_window(&window_state.frame_monotonic, window_state.window_server_id)
+        else {
             return;
         };
 
@@ -1538,7 +1582,9 @@ impl Reactor {
                         || !self.window_manager.visible_windows.contains(&wsid)
                     {
                         focus_window = None;
-                    } else if let Some(space) = self.best_space_for_window(&state.frame_monotonic) {
+                    } else if let Some(space) =
+                        self.best_space_for_window(&state.frame_monotonic, state.window_server_id)
+                    {
                         if let Some(active_space) =
                             self.space_manager.screens.iter().flat_map(|s| s.space).next()
                         {
@@ -1594,7 +1640,10 @@ impl Reactor {
                 continue;
             };
             windows_by_app_and_screen
-                .entry((wid.pid, self.best_space_for_window(&window.frame_monotonic)))
+                .entry((
+                    wid.pid,
+                    self.best_space_for_window(&window.frame_monotonic, window.window_server_id),
+                ))
                 .or_insert(vec![])
                 .push(wid);
         }
@@ -1647,7 +1696,7 @@ impl Reactor {
             return;
         }
 
-        {
+        let server_id = {
             let Some(window) = self.window_manager.windows.get(&wid) else {
                 return;
             };
@@ -1659,14 +1708,16 @@ impl Reactor {
                 trace!(?wid, "Skipping swap: window is changing screens");
                 return;
             }
-        }
+
+            window.window_server_id
+        };
 
         let Some(space) = (if self.is_in_drag() {
             self.get_active_drag_session()
                 .and_then(|session| session.settled_space)
-                .or_else(|| self.best_space_for_window(&new_frame))
+                .or_else(|| self.best_space_for_window(&new_frame, server_id))
         } else {
-            self.best_space_for_window(&new_frame)
+            self.best_space_for_window(&new_frame, server_id)
         }) else {
             return;
         };
@@ -1677,7 +1728,7 @@ impl Reactor {
             .or_else(|| {
                 self.drag_manager
                     .origin_frame()
-                    .and_then(|frame| self.best_space_for_window(&frame))
+                    .and_then(|frame| self.best_space_for_window(&frame, server_id))
             });
 
         if let Some(origin_space) = origin_space_hint {
@@ -1715,7 +1766,9 @@ impl Reactor {
                 continue;
             }
 
-            let Some(other_space) = self.best_space_for_window(&other_state.frame_monotonic) else {
+            let Some(other_space) = self
+                .best_space_for_window(&other_state.frame_monotonic, other_state.window_server_id)
+            else {
                 continue;
             };
             if other_space != space
@@ -1803,7 +1856,9 @@ impl Reactor {
             .last_focused_window(space, active_workspace)?;
         let window = self.window_manager.windows.get(&wid)?;
 
-        if let Some(actual_space) = self.best_space_for_window(&window.frame_monotonic) {
+        if let Some(actual_space) =
+            self.best_space_for_window(&window.frame_monotonic, window.window_server_id)
+        {
             if actual_space != space {
                 return None;
             }
@@ -1938,9 +1993,8 @@ impl Reactor {
 
     fn main_window_space(&self) -> Option<SpaceId> {
         // TODO: Optimize this with a cache or something.
-        self.best_space_for_window(
-            &self.window_manager.windows.get(&self.main_window()?)?.frame_monotonic,
-        )
+        let wid = self.main_window()?;
+        self.best_space_for_window_id(wid)
     }
 
     fn workspace_command_space(&self) -> Option<SpaceId> {

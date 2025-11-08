@@ -204,13 +204,20 @@ impl WindowDiscoveryHandler {
         _known_visible: &[WindowId],
         app_info: &Option<AppInfo>,
     ) -> (Vec<(WindowId, WindowInfo)>, Vec<(WindowId, WindowInfo)>) {
-        let time_since_app_rules = reactor.app_manager.app_rules_recently_applied.elapsed();
-        let app_rules_recently_applied = time_since_app_rules.as_secs() < 1;
+        const APP_RULE_TTL_MS: u64 = 1000;
 
         let mut new_windows = Vec::new();
         let mut updated_windows = Vec::new();
 
-        if app_rules_recently_applied && app_info.is_none() && !new.is_empty() {
+        reactor.app_manager.purge_expired(APP_RULE_TTL_MS);
+
+        let any_recent = new.iter().any(|(_, info)| {
+            info.sys_id.map_or(false, |wsid| {
+                reactor.app_manager.is_wsid_recent(wsid, APP_RULE_TTL_MS)
+            })
+        });
+
+        if any_recent && app_info.is_none() && !new.is_empty() {
             // Update state for any newly reported windows, but do not early-return;
             // proceed to emit WindowsOnScreenUpdated so existing mappings are respected
             // without reapplying app rules.
@@ -365,9 +372,7 @@ impl WindowDiscoveryHandler {
             .filter(|wid| wid.pid == pid)
             .filter(|wid| reactor.window_is_standard(*wid))
         {
-            let Some(space) = reactor
-                .best_space_for_window(&reactor.window_manager.windows[&wid].frame_monotonic)
-            else {
+            let Some(space) = reactor.best_space_for_window_id(wid) else {
                 continue;
             };
             included.insert(wid);
@@ -383,7 +388,9 @@ impl WindowDiscoveryHandler {
             let Some(state) = reactor.window_manager.windows.get(&wid) else {
                 continue;
             };
-            let Some(space) = reactor.best_space_for_window(&state.frame_monotonic) else {
+            let Some(space) =
+                reactor.best_space_for_window(&state.frame_monotonic, state.window_server_id)
+            else {
                 continue;
             };
             included.insert(wid);

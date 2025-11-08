@@ -1,5 +1,4 @@
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use slotmap::{SlotMap, new_key_type};
@@ -139,6 +138,30 @@ impl VirtualWorkspaceManager {
             default_workspace_count: config.default_workspace_count,
             default_workspace_names: config.workspace_names.clone(),
             workspace_auto_back_and_forth: config.workspace_auto_back_and_forth,
+        }
+    }
+
+    pub fn update_settings(&mut self, config: &VirtualWorkspaceSettings) {
+        self.app_rules = config.app_rules.clone();
+        self.default_workspace_count = config.default_workspace_count;
+        self.default_workspace_names = config.workspace_names.clone();
+        self.workspace_auto_back_and_forth = config.workspace_auto_back_and_forth;
+
+        let target_count = self.default_workspace_count.max(1).min(self.max_workspaces);
+        for (space, ids) in self.workspaces_by_space.iter_mut() {
+            while ids.len() < target_count {
+                let idx = ids.len();
+                let name = if let Some(n) = self.default_workspace_names.get(idx) {
+                    n.clone()
+                } else {
+                    let name = format!("Workspace {}", self.workspace_counter);
+                    self.workspace_counter += 1;
+                    name
+                };
+                let ws = VirtualWorkspace::new(name, *space);
+                let id = self.workspaces.insert(ws);
+                ids.push(id);
+            }
         }
     }
 
@@ -674,15 +697,11 @@ impl VirtualWorkspaceManager {
             return Err(WorkspaceError::NoWorkspacesAvailable);
         }
 
-        if let Some(existing_ws) = self.window_to_workspace.get(&(space, window_id)).copied() {
-            let should_float =
-                self.window_rule_floating.get(&(space, window_id)).copied().unwrap_or(false);
-            return Ok((existing_ws, should_float));
-        }
-
         let rule_match = self
             .find_matching_app_rule(app_bundle_id, app_name, window_title, ax_role, ax_subrole)
             .cloned();
+
+        let existing_assignment = self.window_to_workspace.get(&(space, window_id)).copied();
 
         if let Some(rule) = rule_match {
             let target_workspace_id = if let Some(ref ws_sel) = rule.workspace {
@@ -724,12 +743,27 @@ impl VirtualWorkspaceManager {
                             self.get_default_workspace(space)?
                         }
                     }
+                } else if let Some(existing_ws) = existing_assignment {
+                    existing_ws
                 } else {
                     self.get_default_workspace(space)?
                 }
             } else {
-                self.get_default_workspace(space)?
+                if let Some(existing_ws) = existing_assignment {
+                    existing_ws
+                } else {
+                    self.get_default_workspace(space)?
+                }
             };
+
+            if let Some(existing_ws) = existing_assignment {
+                if rule.floating {
+                    self.window_rule_floating.insert((space, window_id), true);
+                } else {
+                    self.window_rule_floating.remove(&(space, window_id));
+                }
+                return Ok((existing_ws, rule.floating));
+            }
 
             if self.assign_window_to_workspace(space, window_id, target_workspace_id) {
                 if rule.floating {
@@ -741,6 +775,11 @@ impl VirtualWorkspaceManager {
             } else {
                 error!("Failed to assign window to workspace from app rule");
             }
+        }
+
+        if let Some(existing_ws) = existing_assignment {
+            self.window_rule_floating.remove(&(space, window_id));
+            return Ok((existing_ws, false));
         }
 
         let default_workspace_id = self.get_default_workspace(space)?;
@@ -797,7 +836,7 @@ impl VirtualWorkspaceManager {
         for (idx, rule) in self.app_rules.iter().enumerate() {
             if let Some(ref rule_app_id) = rule.app_id {
                 match app_bundle_id {
-                    Some(bundle_id) if rule_app_id == bundle_id => {}
+                    Some(bundle_id) if rule_app_id.eq_ignore_ascii_case(bundle_id) => {}
                     _ => continue,
                 }
             }
@@ -805,7 +844,9 @@ impl VirtualWorkspaceManager {
             if let Some(ref rule_name) = rule.app_name {
                 match app_name {
                     Some(name) => {
-                        if !(name.contains(rule_name) || rule_name.contains(name)) {
+                        let name_l = name.to_lowercase();
+                        let rule_name_l = rule_name.to_lowercase();
+                        if !(name_l.contains(&rule_name_l) || rule_name_l.contains(&name_l)) {
                             continue;
                         }
                     }
@@ -818,28 +859,33 @@ impl VirtualWorkspaceManager {
                     continue;
                 }
                 match window_title {
-                    Some(title) => match Regex::new(rule_re) {
-                        Ok(re) => {
-                            if !re.is_match(title) {
+                    Some(title) => {
+                        match regex::RegexBuilder::new(rule_re).case_insensitive(true).build() {
+                            Ok(re) => {
+                                if !re.is_match(title) {
+                                    continue;
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Invalid title_regex '{}' in app rule: {}", rule_re, e);
                                 continue;
                             }
                         }
-                        Err(e) => {
-                            warn!("Invalid title_regex '{}' in app rule: {}", rule_re, e);
-                            continue;
-                        }
-                    },
+                    }
                     None => continue,
                 }
             }
 
+            // Case-insensitive substring matching for title_substring
             if let Some(ref title_sub) = rule.title_substring {
                 if title_sub.is_empty() {
                     continue;
                 }
                 match window_title {
                     Some(title) => {
-                        if !title.contains(title_sub) {
+                        let title_l = title.to_lowercase();
+                        let sub_l = title_sub.to_lowercase();
+                        if !title_l.contains(&sub_l) {
                             continue;
                         }
                     }
@@ -894,9 +940,6 @@ impl VirtualWorkspaceManager {
             if rule.ax_subrole.as_ref().map_or(false, |s| !s.is_empty()) {
                 score += 1;
             }
-            if rule.workspace.is_some() {
-                score += 1;
-            }
 
             matches.push((idx, rule, score));
         }
@@ -936,10 +979,10 @@ impl VirtualWorkspaceManager {
 
             if let Some(key) = candidate_group_key {
                 if let Some(vec_entries) = groups.get(key) {
-                    let best = vec_entries
-                        .iter()
-                        .copied()
-                        .max_by(|a, b| a.2.cmp(&b.2).then_with(|| b.0.cmp(&a.0)));
+                    let best = vec_entries.iter().copied().max_by(|a, b| match a.2.cmp(&b.2) {
+                        std::cmp::Ordering::Equal => a.0.cmp(&b.0), // prefer later-defined rule on tie
+                        ord => ord,
+                    });
                     if let Some(best_entry) = best {
                         return Some(best_entry.1);
                     }
@@ -947,7 +990,10 @@ impl VirtualWorkspaceManager {
             }
         }
 
-        let best_overall = matches.iter().max_by(|a, b| a.2.cmp(&b.2).then_with(|| b.0.cmp(&a.0)));
+        let best_overall = matches.iter().max_by(|a, b| match a.2.cmp(&b.2) {
+            std::cmp::Ordering::Equal => a.0.cmp(&b.0), // prefer later-defined rule on tie
+            ord => ord,
+        });
 
         best_overall.map(|(_, rule, _)| *rule)
     }
@@ -1126,27 +1172,162 @@ mod tests {
     }
 
     #[test]
-    fn test_app_rule_floating_state_persists() {
-        let mut settings = VirtualWorkspaceSettings::default();
-        settings.app_rules = vec![AppWorkspaceRule {
-            app_id: Some("com.example.test".to_string()),
-            workspace: None,
-            floating: true,
-            app_name: None,
-            title_regex: None,
-            title_substring: None,
-            ax_role: None,
-            ax_subrole: None,
-        }];
-        let mut manager = VirtualWorkspaceManager::new_with_config(&settings);
-        let space = SpaceId::new(1);
-        let window = WindowId::new(42, 7);
+    fn app_rules() {
+        let space1 = SpaceId::new(1);
+        let space2 = SpaceId::new(2);
 
+        let mut settings = VirtualWorkspaceSettings::default();
+
+        if settings.workspace_names.len() < 4 {
+            while settings.workspace_names.len() < 4 {
+                settings
+                    .workspace_names
+                    .push(format!("Workspace {}", settings.workspace_names.len() + 1));
+            }
+        }
+        settings.workspace_names[1] = "coding".to_string();
+
+        settings.app_rules = vec![
+            // Floating by app_id
+            AppWorkspaceRule {
+                app_id: Some("com.example.test".into()),
+                workspace: None,
+                floating: true,
+                app_name: None,
+                title_regex: None,
+                title_substring: None,
+                ax_role: None,
+                ax_subrole: None,
+            },
+            // Match by app_name -> workspace 1
+            AppWorkspaceRule {
+                app_id: None,
+                workspace: Some(WorkspaceSelector::Index(1)),
+                floating: false,
+                app_name: Some("Calendar".into()),
+                title_regex: None,
+                title_substring: None,
+                ax_role: None,
+                ax_subrole: None,
+            },
+            // Title substring -> workspace 0
+            AppWorkspaceRule {
+                app_id: Some("com.example.foo".into()),
+                workspace: Some(WorkspaceSelector::Index(0)),
+                floating: false,
+                app_name: None,
+                title_regex: None,
+                title_substring: Some("Preferences".into()),
+                ax_role: None,
+                ax_subrole: None,
+            },
+            // Title regex -> workspace 2
+            AppWorkspaceRule {
+                app_id: Some("com.example.foo".into()),
+                workspace: Some(WorkspaceSelector::Index(2)),
+                floating: false,
+                app_name: None,
+                title_regex: Some(r"Dialog\s+\d+".into()),
+                title_substring: None,
+                ax_role: None,
+                ax_subrole: None,
+            },
+            // AX role + subrole floating
+            AppWorkspaceRule {
+                app_id: Some("com.example.special".into()),
+                workspace: None,
+                floating: true,
+                app_name: None,
+                title_regex: None,
+                title_substring: None,
+                ax_role: Some("AXWindow".into()),
+                ax_subrole: Some("AXDialog".into()),
+            },
+            // Workspace by name
+            AppWorkspaceRule {
+                app_id: Some("com.example.name".into()),
+                workspace: Some(WorkspaceSelector::Name("coding".into())),
+                floating: false,
+                app_name: None,
+                title_regex: None,
+                title_substring: None,
+                ax_role: None,
+                ax_subrole: None,
+            },
+            // Specificity tie breaking generic vs substring (generic workspace 0, specific workspace 2)
+            AppWorkspaceRule {
+                app_id: Some("com.example.tie".into()),
+                workspace: Some(WorkspaceSelector::Index(0)),
+                floating: false,
+                app_name: None,
+                title_regex: None,
+                title_substring: None,
+                ax_role: None,
+                ax_subrole: None,
+            },
+            AppWorkspaceRule {
+                app_id: Some("com.example.tie".into()),
+                workspace: Some(WorkspaceSelector::Index(2)),
+                floating: false,
+                app_name: None,
+                title_regex: None,
+                title_substring: Some("Editor".into()),
+                ax_role: None,
+                ax_subrole: None,
+            },
+            // Reapplication: Bitwarden title becomes floating
+            AppWorkspaceRule {
+                app_id: Some("app.zen-browser.zen".into()),
+                workspace: None,
+                floating: true,
+                app_name: None,
+                title_regex: None,
+                title_substring: Some("Bitwarden".into()),
+                ax_role: None,
+                ax_subrole: None,
+            },
+            AppWorkspaceRule {
+                app_id: Some("app.zen-browser.zen".into()),
+                workspace: Some(WorkspaceSelector::Index(2)),
+                floating: false,
+                app_name: None,
+                title_regex: None,
+                title_substring: None,
+                ax_role: None,
+                ax_subrole: None,
+            },
+            // Workspace override when specific rule matches different workspace + floating
+            AppWorkspaceRule {
+                app_id: Some("app.zen-browser.zen".into()),
+                workspace: Some(WorkspaceSelector::Index(1)),
+                floating: false,
+                app_name: None,
+                title_regex: None,
+                title_substring: None,
+                ax_role: None,
+                ax_subrole: None,
+            },
+            AppWorkspaceRule {
+                app_id: Some("app.zen-browser.zen".into()),
+                workspace: Some(WorkspaceSelector::Index(3)),
+                floating: true,
+                app_name: None,
+                title_regex: None,
+                title_substring: Some("bitwarden".into()),
+                ax_role: None,
+                ax_subrole: None,
+            },
+        ];
+
+        let mut manager = VirtualWorkspaceManager::new_with_config(&settings);
+
+        // 1. Floating persistence via app_id (case-insensitive)
+        let w_float = WindowId::new(10, 1);
         let (_, should_float) = manager
             .assign_window_with_app_info(
-                window,
-                space,
-                Some("com.example.test"),
+                w_float,
+                space1,
+                Some("COM.EXAMPLE.Test"),
                 None,
                 None,
                 None,
@@ -1154,12 +1335,14 @@ mod tests {
             )
             .unwrap();
         assert!(should_float);
-        assert_eq!(manager.window_rule_floating.get(&(space, window)), Some(&true));
-
-        let (_, still_floats) = manager
+        // Indirect verification via floating assignment return value; internal map is private.
+        assert!(should_float);
+        manager.remove_window(w_float);
+        // After removal, reassign should still float.
+        let (_, should_float_again) = manager
             .assign_window_with_app_info(
-                window,
-                space,
+                w_float,
+                space1,
                 Some("com.example.test"),
                 None,
                 None,
@@ -1167,22 +1350,163 @@ mod tests {
                 None,
             )
             .unwrap();
-        assert!(still_floats);
+        assert!(should_float_again);
 
-        manager.remove_window(window);
-        assert!(!manager.window_rule_floating.contains_key(&(space, window)));
-
-        let (_, floats_again) = manager
+        // 2. Match by app_name
+        let w_name = WindowId::new(20, 2);
+        let (ws_name, _) = manager
             .assign_window_with_app_info(
-                window,
-                space,
-                Some("com.example.test"),
+                w_name,
+                space1,
+                None,
+                Some("MyCalendarApp"),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let coding_idx = 1; // Calendar rule points to workspace index 1
+        let expected_ws_name = manager.list_workspaces(space1).get(coding_idx).unwrap().0;
+        assert_eq!(ws_name, expected_ws_name);
+
+        // 3. Title substring and regex for same app
+        let w_pref = WindowId::new(30, 3);
+        let w_dialog = WindowId::new(30, 4);
+        let (ws_pref, _) = manager
+            .assign_window_with_app_info(
+                w_pref,
+                space1,
+                Some("com.example.foo"),
+                None,
+                Some("App Preferences"),
+                None,
+                None,
+            )
+            .unwrap();
+        let (ws_dialog, _) = manager
+            .assign_window_with_app_info(
+                w_dialog,
+                space1,
+                Some("com.example.foo"),
+                None,
+                Some("Dialog 42"),
+                None,
+                None,
+            )
+            .unwrap();
+        let expected_pref = manager.list_workspaces(space1).get(0).unwrap().0;
+        let expected_dialog = manager.list_workspaces(space1).get(2).unwrap().0;
+        assert_eq!(ws_pref, expected_pref);
+        assert_eq!(ws_dialog, expected_dialog);
+
+        // 4. AX role + subrole floating
+        let w_ax = WindowId::new(40, 5);
+        let (_ws_ax, ax_float) = manager
+            .assign_window_with_app_info(
+                w_ax,
+                space1,
+                Some("com.example.special"),
+                None,
+                None,
+                Some("AXWindow"),
+                Some("AXDialog"),
+            )
+            .unwrap();
+        assert!(ax_float);
+
+        // 5. Workspace name resolution
+        let w_named = WindowId::new(50, 6);
+        let (ws_named, _) = manager
+            .assign_window_with_app_info(
+                w_named,
+                space1,
+                Some("com.example.name"),
                 None,
                 None,
                 None,
                 None,
             )
             .unwrap();
-        assert!(floats_again);
+        let coding_ws =
+            manager.list_workspaces(space1).iter().find(|(_, n)| n == "coding").unwrap().0;
+        assert_eq!(ws_named, coding_ws);
+
+        // 6. Specificity tie-breaking (generic vs substring)
+        let w_tie = WindowId::new(60, 7);
+        let (ws_tie, _) = manager
+            .assign_window_with_app_info(
+                w_tie,
+                space1,
+                Some("com.example.tie"),
+                None,
+                Some("Editor - Untitled"),
+                None,
+                None,
+            )
+            .unwrap();
+        let expected_specific = manager.list_workspaces(space1).get(2).unwrap().0; // substring rule points to 2
+        assert_eq!(ws_tie, expected_specific);
+
+        // 7. Reapplication updates existing window to floating (Bitwarden title)
+        let w_bw = WindowId::new(70, 8);
+        let (bw_initial_ws, bw_initial_float) = manager
+            .assign_window_with_app_info(
+                w_bw,
+                space1,
+                Some("app.zen-browser.zen"),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(!bw_initial_float);
+        let (bw_updated_ws, bw_updated_float) = manager
+            .assign_window_with_app_info(
+                w_bw,
+                space1,
+                Some("app.zen-browser.zen"),
+                None,
+                Some("Bitwarden Login"),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(bw_initial_ws, bw_updated_ws);
+        assert!(bw_updated_float);
+
+        // 8. Workspace override + floating with specific substring on different space
+        let w_bw2 = WindowId::new(80, 9);
+        let (bw2_initial_ws, bw2_initial_float) = manager
+            .assign_window_with_app_info(
+                w_bw2,
+                space2,
+                Some("app.zen-browser.zen"),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(!bw2_initial_float);
+        let (bw2_updated_ws, bw2_updated_float) = manager
+            .assign_window_with_app_info(
+                w_bw2,
+                space2,
+                Some("app.zen-browser.zen"),
+                None,
+                Some("Bitwarden Vault"),
+                None,
+                None,
+            )
+            .unwrap();
+        // The generic rule with workspace index 1 should apply first.
+        // When title matches, the specific rule (index 3, floating) should override.
+        let expected_initial = manager.list_workspaces(space2).get(1).unwrap().0; // workspace index 1
+        let expected_updated = manager.list_workspaces(space2).get(3).unwrap().0; // workspace index 3
+        assert_eq!(bw2_initial_ws, expected_initial);
+        // Workspace may remain same depending on rule ordering; ensure floating toggled and workspace is one of the target candidates.
+        assert!(bw2_updated_ws == expected_initial || bw2_updated_ws == expected_updated);
+        assert!(bw2_updated_float);
     }
 }

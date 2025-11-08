@@ -1,7 +1,7 @@
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use tracing::debug;
 
-use super::{Event, Reactor, Record, Requested, TransactionId};
+use super::{Event, Reactor, Record, Requested, ScreenSnapshot, TransactionId};
 use crate::actor;
 use crate::actor::app::{AppThreadHandle, Request, WindowId};
 use crate::common::collections::BTreeMap;
@@ -9,6 +9,7 @@ use crate::common::config::Config;
 use crate::layout_engine::LayoutEngine;
 use crate::sys::app::{AppInfo, WindowInfo, pid_t};
 use crate::sys::geometry::SameAs;
+use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 
 impl Reactor {
@@ -26,6 +27,33 @@ impl Reactor {
             self.handle_event(event);
         }
     }
+}
+
+pub fn make_screen_snapshots(
+    frames: Vec<CGRect>,
+    spaces: Vec<Option<SpaceId>>,
+) -> Vec<ScreenSnapshot> {
+    assert_eq!(frames.len(), spaces.len());
+    frames
+        .into_iter()
+        .zip(spaces.into_iter())
+        .enumerate()
+        .map(|(idx, (frame, space))| ScreenSnapshot {
+            frame,
+            space,
+            display_uuid: format!("test-display-{idx}"),
+            name: None,
+            screen_id: idx as u32,
+        })
+        .collect()
+}
+
+pub fn screen_params_event(
+    frames: Vec<CGRect>,
+    spaces: Vec<Option<SpaceId>>,
+    ws_info: Vec<WindowServerInfo>,
+) -> Event {
+    Event::ScreenParametersChanged(make_screen_snapshots(frames, spaces), ws_info)
 }
 
 /*impl Drop for Reactor {

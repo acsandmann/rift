@@ -199,6 +199,18 @@ impl MachHandler {
                 }
             },
 
+            RiftRequest::GetDisplays => match self.perform_query(|tx| Event::QueryDisplays(tx)) {
+                Ok(displays) => RiftResponse::Success {
+                    data: serde_json::to_value(displays).unwrap(),
+                },
+                Err(e) => {
+                    error!("{}", e);
+                    RiftResponse::Error {
+                        error: serde_json::json!({ "message": "Failed to get displays response", "details": format!("{}", e) }),
+                    }
+                }
+            },
+
             RiftRequest::GetWindows { space_id } => {
                 let space_id = space_id.map(|id| crate::sys::screen::SpaceId::new(id));
 

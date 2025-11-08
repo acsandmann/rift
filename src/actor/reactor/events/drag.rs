@@ -38,13 +38,15 @@ impl DragEventHandler {
                     .window_manager
                     .windows
                     .get(&dragged_wid)
-                    .and_then(|w| reactor.best_space_for_window(&w.frame_monotonic))
+                    .and_then(|w| {
+                        reactor.best_space_for_window(&w.frame_monotonic, w.window_server_id)
+                    })
                     .or_else(|| {
                         reactor
                             .drag_manager
                             .drag_swap_manager
                             .origin_frame()
-                            .and_then(|f| reactor.best_space_for_window(&f))
+                            .and_then(|f| reactor.best_space_for_frame(&f))
                     })
                     .or_else(|| reactor.space_manager.screens.iter().find_map(|s| s.space));
                 let response = reactor.layout_manager.layout_engine.handle_command(

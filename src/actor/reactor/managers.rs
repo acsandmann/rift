@@ -32,7 +32,48 @@ pub struct WindowManager {
 /// Manages application state and rules
 pub struct AppManager {
     pub apps: HashMap<pid_t, AppState>,
-    pub app_rules_recently_applied: Instant,
+    pub app_rules_recent_targets: HashMap<crate::sys::window_server::WindowServerId, Instant>,
+}
+
+impl AppManager {
+    pub fn new() -> Self {
+        AppManager {
+            apps: HashMap::default(),
+            app_rules_recent_targets: HashMap::default(),
+        }
+    }
+
+    pub fn mark_wsids_recent<I>(&mut self, wsids: I)
+    where I: IntoIterator<Item = crate::sys::window_server::WindowServerId> {
+        let now = std::time::Instant::now();
+        for ws in wsids {
+            self.app_rules_recent_targets.insert(ws, now);
+        }
+    }
+
+    pub fn is_wsid_recent(
+        &self,
+        wsid: crate::sys::window_server::WindowServerId,
+        ttl_ms: u64,
+    ) -> bool {
+        if let Some(&ts) = self.app_rules_recent_targets.get(&wsid) {
+            return ts.elapsed().as_millis() < (ttl_ms as u128);
+        }
+        false
+    }
+
+    pub fn purge_expired(&mut self, ttl_ms: u64) {
+        let now = std::time::Instant::now();
+        let mut to_remove = Vec::new();
+        for (k, &v) in self.app_rules_recent_targets.iter() {
+            if now.duration_since(v).as_millis() >= (ttl_ms as u128) {
+                to_remove.push(*k);
+            }
+        }
+        for k in to_remove {
+            self.app_rules_recent_targets.remove(&k);
+        }
+    }
 }
 
 /// Manages space and screen state
@@ -140,10 +181,23 @@ impl LayoutManager {
 
         for screen in screens {
             let Some(space) = screen.space else { continue };
+            let display_uuid = if screen.display_uuid.is_empty() {
+                None
+            } else {
+                Some(screen.display_uuid.as_str())
+            };
+            let gaps = reactor
+                .config_manager
+                .config
+                .settings
+                .layout
+                .gaps
+                .effective_for_display(display_uuid);
             let layout =
                 reactor.layout_manager.layout_engine.calculate_layout_with_virtual_workspaces(
                     space,
                     screen.frame.clone(),
+                    &gaps,
                     reactor.config_manager.config.settings.ui.stack_line.thickness(),
                     reactor.config_manager.config.settings.ui.stack_line.horiz_placement,
                     reactor.config_manager.config.settings.ui.stack_line.vert_placement,
@@ -184,12 +238,25 @@ impl LayoutManager {
                     let screen =
                         reactor.space_manager.screens.iter().find(|s| s.space == Some(space));
                     if let Some(screen) = screen {
+                        let display_uuid = if screen.display_uuid.is_empty() {
+                            None
+                        } else {
+                            Some(screen.display_uuid.as_str())
+                        };
+                        let gaps = reactor
+                            .config_manager
+                            .config
+                            .settings
+                            .layout
+                            .gaps
+                            .effective_for_display(display_uuid);
                         let group_infos = reactor
                             .layout_manager
                             .layout_engine
                             .collect_group_containers_in_selection_path(
                                 space,
                                 screen.frame,
+                                &gaps,
                                 reactor.config_manager.config.settings.ui.stack_line.thickness(),
                                 reactor
                                     .config_manager

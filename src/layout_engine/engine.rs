@@ -77,7 +77,7 @@ pub enum LayoutEvent {
         wid: WindowId,
         old_frame: CGRect,
         new_frame: CGRect,
-        screens: Vec<(SpaceId, CGRect)>,
+        screens: Vec<(SpaceId, CGRect, Option<String>)>,
     },
     SpaceExposed(SpaceId, CGSize),
 }
@@ -106,6 +106,13 @@ pub struct LayoutEngine {
 impl LayoutEngine {
     pub fn set_layout_settings(&mut self, settings: &LayoutSettings) {
         self.layout_settings = settings.clone();
+    }
+
+    pub fn update_virtual_workspace_settings(
+        &mut self,
+        settings: &crate::common::config::VirtualWorkspaceSettings,
+    ) {
+        self.virtual_workspace_manager.update_settings(settings);
     }
 
     fn active_floating_windows_flat(&self, space: SpaceId) -> Vec<WindowId> {
@@ -490,7 +497,7 @@ impl LayoutEngine {
             LayoutEvent::WindowAdded(space, wid) => {
                 self.debug_tree(space);
 
-                let assigned_workspace =
+                let _assigned_workspace =
                     match self.virtual_workspace_manager.auto_assign_window(wid, space) {
                         Ok(workspace_id) => workspace_id,
                         Err(e) => {
@@ -503,14 +510,7 @@ impl LayoutEngine {
 
                 let should_be_floating = self.floating.is_floating(wid);
 
-                if !should_be_floating {
-                    if let Some(layout) = self.workspace_layouts.active(space, assigned_workspace) {
-                        self.tree.add_window_after_selection(layout, wid);
-                    } else {
-                        tracing::error!("No layout found for workspace {:?}", assigned_workspace);
-                    }
-                    tracing::debug!("Added tiled window {:?} to layout tree", wid);
-                } else {
+                if should_be_floating {
                     self.floating.add_active(space, wid.pid, wid);
                     tracing::debug!("Window {:?} is floating, excluded from layout tree", wid);
                 }
@@ -562,10 +562,18 @@ impl LayoutEngine {
                 new_frame,
                 screens,
             } => {
-                for (space, screen) in screens {
+                for (space, screen_frame, display_uuid) in screens {
                     let layout = self.layout(space);
-                    let gaps = &self.layout_settings.gaps;
-                    self.tree.on_window_resized(layout, wid, old_frame, new_frame, screen, gaps);
+                    let gaps =
+                        self.layout_settings.gaps.effective_for_display(display_uuid.as_deref());
+                    self.tree.on_window_resized(
+                        layout,
+                        wid,
+                        old_frame,
+                        new_frame,
+                        screen_frame,
+                        &gaps,
+                    );
 
                     if let Some(ws) = self.virtual_workspace_manager.active_workspace(space) {
                         self.workspace_layouts.mark_last_saved(space, ws, layout);
@@ -867,6 +875,7 @@ impl LayoutEngine {
         &mut self,
         space: SpaceId,
         screen: CGRect,
+        gaps: &crate::common::config::GapSettings,
         stack_line_thickness: f64,
         stack_line_horiz: crate::common::config::HorizontalPlacement,
         stack_line_vert: crate::common::config::VerticalPlacement,
@@ -876,7 +885,7 @@ impl LayoutEngine {
             layout,
             screen,
             self.layout_settings.stack.stack_offset,
-            &self.layout_settings.gaps,
+            gaps,
             stack_line_thickness,
             stack_line_horiz,
             stack_line_vert,
@@ -887,6 +896,7 @@ impl LayoutEngine {
         &self,
         space: SpaceId,
         screen: CGRect,
+        gaps: &crate::common::config::GapSettings,
         stack_line_thickness: f64,
         stack_line_horiz: crate::common::config::HorizontalPlacement,
         stack_line_vert: crate::common::config::VerticalPlacement,
@@ -905,7 +915,7 @@ impl LayoutEngine {
                     layout,
                     screen,
                     self.layout_settings.stack.stack_offset,
-                    &self.layout_settings.gaps,
+                    gaps,
                     stack_line_thickness,
                     stack_line_horiz,
                     stack_line_vert,
@@ -946,6 +956,7 @@ impl LayoutEngine {
         &mut self,
         space: SpaceId,
         screen: CGRect,
+        gaps: &crate::common::config::GapSettings,
         stack_line_thickness: f64,
         stack_line_horiz: crate::common::config::HorizontalPlacement,
         stack_line_vert: crate::common::config::VerticalPlacement,
@@ -956,7 +967,7 @@ impl LayoutEngine {
                 layout_id,
                 screen,
                 self.layout_settings.stack.stack_offset,
-                &self.layout_settings.gaps,
+                gaps,
                 stack_line_thickness,
                 stack_line_horiz,
                 stack_line_vert,
@@ -970,6 +981,7 @@ impl LayoutEngine {
         space: SpaceId,
         workspace_id: crate::model::VirtualWorkspaceId,
         screen: CGRect,
+        gaps: &crate::common::config::GapSettings,
         stack_line_thickness: f64,
         stack_line_horiz: crate::common::config::HorizontalPlacement,
         stack_line_vert: crate::common::config::VerticalPlacement,
@@ -981,7 +993,7 @@ impl LayoutEngine {
                 layout,
                 screen,
                 self.layout_settings.stack.stack_offset,
-                &self.layout_settings.gaps,
+                gaps,
                 stack_line_thickness,
                 stack_line_horiz,
                 stack_line_vert,

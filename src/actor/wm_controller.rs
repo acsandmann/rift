@@ -28,7 +28,7 @@ use crate::actor::{self, event_tap, mission_control, reactor};
 use crate::common::collections::{HashMap, HashSet};
 use crate::sys::dispatch::DispatchExt;
 use crate::sys::event::Hotkey;
-use crate::sys::screen::{CoordinateConverter, NSScreenExt, ScreenId, SpaceId};
+use crate::sys::screen::{CoordinateConverter, NSScreenExt, ScreenDescriptor, ScreenId, SpaceId};
 use crate::sys::window_server::WindowServerInfo;
 use crate::{layout_engine as layout, sys};
 
@@ -42,12 +42,7 @@ pub enum WmEvent {
     AppGloballyDeactivated(pid_t),
     AppTerminated(pid_t),
     SpaceChanged(Vec<Option<SpaceId>>),
-    ScreenParametersChanged(
-        Vec<CGRect>,
-        Vec<ScreenId>,
-        CoordinateConverter,
-        Vec<Option<SpaceId>>,
-    ),
+    ScreenParametersChanged(Vec<ScreenDescriptor>, CoordinateConverter, Vec<Option<SpaceId>>),
     SystemWoke,
     PowerStateChanged(bool),
     ConfigUpdated(crate::common::config::Config),
@@ -132,6 +127,7 @@ pub struct WmController {
     starting_space: Option<SpaceId>,
     cur_space: Vec<Option<SpaceId>>,
     cur_screen_id: Vec<ScreenId>,
+    cur_display_uuid: Vec<String>,
     disabled_spaces: HashSet<SpaceId>,
     enabled_spaces: HashSet<SpaceId>,
     last_known_space_by_screen: HashMap<ScreenId, SpaceId>,
@@ -172,6 +168,7 @@ impl WmController {
             starting_space: None,
             cur_space: Vec::new(),
             cur_screen_id: Vec::new(),
+            cur_display_uuid: Vec::new(),
             disabled_spaces: HashSet::default(),
             enabled_spaces: HashSet::default(),
             last_known_space_by_screen: HashMap::default(),
@@ -297,15 +294,26 @@ impl WmController {
                     self.register_hotkeys();
                 }
             }
-            ScreenParametersChanged(frames, ids, converter, spaces) => {
+            ScreenParametersChanged(screens, converter, spaces) => {
                 self.screen_params_received = true;
-                self.cur_screen_id = ids;
+                self.cur_screen_id = screens.iter().map(|s| s.id).collect();
+                self.cur_display_uuid = screens.iter().map(|s| s.display_uuid.clone()).collect();
                 self.handle_space_changed(spaces);
-                self.events_tx.send(Event::ScreenParametersChanged(
-                    frames.clone(),
-                    self.active_spaces(),
-                    self.get_windows(),
-                ));
+                let active_spaces = self.active_spaces();
+                let frames: Vec<CGRect> = screens.iter().map(|s| s.frame).collect();
+                let snapshots: Vec<reactor::ScreenSnapshot> = screens
+                    .into_iter()
+                    .zip(active_spaces.iter().copied())
+                    .map(|(descriptor, space)| reactor::ScreenSnapshot {
+                        screen_id: descriptor.id.as_u32(),
+                        frame: descriptor.frame,
+                        space,
+                        display_uuid: descriptor.display_uuid,
+                        name: descriptor.name,
+                    })
+                    .collect();
+                self.events_tx
+                    .send(Event::ScreenParametersChanged(snapshots, self.get_windows()));
                 _ = self
                     .event_tap_tx
                     .send(event_tap::Request::ScreenParametersChanged(frames, converter));

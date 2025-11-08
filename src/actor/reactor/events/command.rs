@@ -83,6 +83,12 @@ impl CommandEventHandler {
             .layout_manager
             .layout_engine
             .set_layout_settings(&reactor.config_manager.config.settings.layout);
+
+        reactor
+            .layout_manager
+            .layout_engine
+            .update_virtual_workspace_settings(&reactor.config_manager.config.virtual_workspaces);
+
         reactor
             .drag_manager
             .update_config(reactor.config_manager.config.settings.window_snapping);
@@ -144,11 +150,10 @@ impl CommandEventHandler {
         window_server_id: Option<WindowServerId>,
     ) {
         if reactor.window_manager.windows.contains_key(&window_id) {
-            if let Some(space) = reactor
-                .window_manager
-                .windows
-                .get(&window_id)
-                .and_then(|w| reactor.best_space_for_window(&w.frame_monotonic))
+            if let Some(space) =
+                reactor.window_manager.windows.get(&window_id).and_then(|w| {
+                    reactor.best_space_for_window(&w.frame_monotonic, w.window_server_id)
+                })
             {
                 reactor.send_layout_event(LayoutEvent::WindowFocused(space, window_id));
             }
