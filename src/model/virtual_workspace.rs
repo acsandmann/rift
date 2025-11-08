@@ -702,8 +702,6 @@ impl VirtualWorkspaceManager {
             .cloned();
 
         let existing_assignment = self.window_to_workspace.get(&(space, window_id)).copied();
-        let existing_floating =
-            self.window_rule_floating.get(&(space, window_id)).copied().unwrap_or(false);
 
         if let Some(rule) = rule_match {
             let target_workspace_id = if let Some(ref ws_sel) = rule.workspace {
@@ -780,7 +778,8 @@ impl VirtualWorkspaceManager {
         }
 
         if let Some(existing_ws) = existing_assignment {
-            return Ok((existing_ws, existing_floating));
+            self.window_rule_floating.remove(&(space, window_id));
+            return Ok((existing_ws, false));
         }
 
         let default_workspace_id = self.get_default_workspace(space)?;
