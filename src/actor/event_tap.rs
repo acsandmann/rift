@@ -380,7 +380,7 @@ impl EventTap {
             let ended =
                 phase.contains(NSTouchPhase::Ended) || phase.contains(NSTouchPhase::Cancelled);
             if !ended {
-                if t.r#type() == NSTouchType::Direct {
+                if t.r#type() == NSTouchType::Indirect {
                     let pos = t.normalizedPosition();
                     sum_x += pos.x as f64;
                     sum_y += pos.y as f64;
