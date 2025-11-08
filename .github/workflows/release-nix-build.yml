@@ -1,0 +1,126 @@
+name: Release - Nix Build & Binary Cache
+
+on:
+  release:
+    types: [published]
+
+concurrency:
+  group: build-rift-nix
+  cancel-in-progress: false
+
+jobs:
+  update-flake:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      commit_sha: ${{ steps.commit.outputs.sha }}
+      no_commit_sha: ${{ steps.no_commit.outputs.sha }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install Nix
+        uses: nixbuild/nix-quick-install-action@v34
+
+      - name: Update flake inputs
+        run: |
+          nix flake update
+
+      - name: Check for changes
+        id: check_changes
+        run: |
+          if git diff --quiet flake.lock; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit flake lock updates
+        if: steps.check_changes.outputs.has_changes == 'true'
+        id: commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add flake.lock
+          git commit -m "chore(nix): update flake inputs after release ${{ github.ref_name }}"
+          COMMIT_SHA=$(git rev-parse HEAD)
+          echo "sha=${COMMIT_SHA}" >> "$GITHUB_OUTPUT"
+          git push origin HEAD:main
+
+      - name: Output commit SHA (no changes case)
+        if: steps.check_changes.outputs.has_changes == 'false'
+        id: no_commit
+        run: |
+          COMMIT_SHA=$(git rev-parse HEAD)
+          echo "sha=${COMMIT_SHA}" >> "$GITHUB_OUTPUT"
+
+  build-nix:
+    needs: [update-flake]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: aarch64-darwin
+            runner: macos-15
+          - system: x86_64-darwin
+            runner: macos-15-intel
+    steps:
+      - name: Determine commit SHA
+        id: get_sha
+        run: |
+          # Use commit SHA from update-flake if available, otherwise use main
+          COMMIT_SHA="${{ needs.update-flake.outputs.commit_sha }}"
+          if [ -z "$COMMIT_SHA" ]; then
+            COMMIT_SHA="${{ needs.update-flake.outputs.no_commit_sha }}"
+          fi
+          echo "sha=${COMMIT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout exact commit from update-flake
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.get_sha.outputs.sha }}
+          fetch-depth: 0
+
+      - uses: nixbuild/nix-quick-install-action@v34
+        with:
+          nix_conf: |
+            substituters = https://cache.nixos.org/ https://nix-community.cachix.org https://cache.garnix.io
+            trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs= cache.garnix.io:CTFPyKSLcx5RMJKfLo5EEPUObbA78b0YQ2DTCJXqr9g=
+            cores = 0
+
+      # To use a binary cache, uncomment and configure:
+      #    - Create a Cachix account at https://cachix.org
+      #    - Create a new binary cache in your Cachix account dashboard
+      #    - Generate an auth token from your Cachix profile settings
+      #    - Add the following secrets to your GitHub repository:
+      #      * CACHIX_CACHE_NAME: your-cache-name
+      #      * CACHIX_AUTH_TOKEN: your-auth-token
+      #    - Uncomment the Cachix setup step below
+
+      # Uncomment this section to enable Cachix binary cache pushing
+      # - uses: cachix/cachix-action@v15
+      #   with:
+      #     name: ${{ secrets.CACHIX_CACHE_NAME }}
+      #     authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      #     skipPush: true
+      - uses: DeterminateSystems/magic-nix-cache-action@main # keep this, it speeds up builds.
+
+      - name: Build rift for ${{ matrix.system }}
+        run: |
+          nix build .#default -L
+
+      # Uncomment this section to enable Cachix binary cache pushing
+      # - name: Push to Cachix
+      #   run: |
+      #     # Get the store path
+      #     STORE_PATH=$(nix eval --raw .#packages.${{ matrix.system }}.default.outPath 2>/dev/null || nix eval --raw .#default.outPath)
+      #     PIN_NAME="rift-${{ matrix.system }}"
+      #     echo "Pushing to Cachix: $STORE_PATH"
+
+      #     nix path-info --recursive "$STORE_PATH" | cachix push ${{ secrets.CACHIX_CACHE_NAME }}
+
+      #     cachix pin ${{ secrets.CACHIX_CACHE_NAME }} "$PIN_NAME" "$STORE_PATH" --keep-revisions 3
