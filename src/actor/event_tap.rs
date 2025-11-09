@@ -371,21 +371,34 @@ impl EventTap {
                 continue;
             }
 
+            let ended =
+                phase.contains(NSTouchPhase::Ended) || phase.contains(NSTouchPhase::Cancelled);
+            if t.r#type() != NSTouchType::Indirect {
+                if !ended {
+                    trace!("gesture aborted: unsupported touch type {:?}", t.r#type());
+                    state.borrow_mut().reset();
+                    return;
+                }
+                continue;
+            }
+
             touch_count += 1;
             if touch_count > cfg.fingers {
                 too_many_touches = true;
                 break;
             }
 
-            let ended =
-                phase.contains(NSTouchPhase::Ended) || phase.contains(NSTouchPhase::Cancelled);
             if !ended {
-                if t.r#type() == NSTouchType::Indirect {
-                    let pos = t.normalizedPosition();
-                    sum_x += pos.x as f64;
-                    sum_y += pos.y as f64;
-                    active_count += 1;
+                if t.device().is_none() {
+                    trace!("gesture aborted: touch missing device info for {:?}", t.r#type());
+                    state.borrow_mut().reset();
+                    return;
                 }
+
+                let pos = t.normalizedPosition();
+                sum_x += pos.x as f64;
+                sum_y += pos.y as f64;
+                active_count += 1;
             }
         }
 
