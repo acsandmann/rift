@@ -122,6 +122,10 @@ impl Menu {
         }
         for w in windows.iter() {
             w.id.hash(&mut hasher);
+            hasher.write_u64(w.frame.origin.x.to_bits());
+            hasher.write_u64(w.frame.origin.y.to_bits());
+            hasher.write_u64(w.frame.size.width.to_bits());
+            hasher.write_u64(w.frame.size.height.to_bits());
         }
         let sig = hasher.finish();
         if self.last_signature == Some(sig) {
