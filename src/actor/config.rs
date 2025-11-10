@@ -264,12 +264,9 @@ impl ConfigActor {
         }
 
         if config_changed {
-            let fixes = new_config.auto_fix_values();
-            if fixes > 0 {
-                let more_issues = new_config.validate();
-                if !more_issues.is_empty() {
-                    return Err(more_issues.join("; "));
-                }
+            let validation_issues = new_config.validate();
+            if !validation_issues.is_empty() {
+                return Err(validation_issues.join("; "));
             }
 
             self.config = new_config;
