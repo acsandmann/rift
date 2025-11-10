@@ -41,6 +41,8 @@ use crate::sys::window_server::{self, WindowServerId, WindowServerInfo};
 
 const kAXApplicationActivatedNotification: &str = "AXApplicationActivated";
 const kAXApplicationDeactivatedNotification: &str = "AXApplicationDeactivated";
+const kAXApplicationHiddenNotification: &str = "AXApplicationHidden";
+const kAXApplicationShownNotification: &str = "AXApplicationShown";
 const kAXMainWindowChangedNotification: &str = "AXMainWindowChanged";
 const kAXWindowCreatedNotification: &str = "AXWindowCreated";
 const kAXMenuOpenedNotification: &str = "AXMenuOpened";
@@ -242,6 +244,7 @@ struct State {
     last_window_idx: u32,
     main_window: Option<WindowId>,
     last_activated: Option<(Instant, Quiet, r#continue::Sender<()>)>,
+    is_hidden: bool,
     is_frontmost: bool,
     raises_tx: actor::Sender<RaiseRequest>,
 }
@@ -249,11 +252,14 @@ struct State {
 struct WindowState {
     pub elem: AXUIElement,
     last_seen_txid: TransactionId,
+    hidden_by_app: bool,
 }
 
 const APP_NOTIFICATIONS: &[&str] = &[
     kAXApplicationActivatedNotification,
     kAXApplicationDeactivatedNotification,
+    kAXApplicationHiddenNotification,
+    kAXApplicationShownNotification,
     kAXMainWindowChangedNotification,
     kAXWindowCreatedNotification,
     kAXMenuOpenedNotification,
@@ -687,6 +693,8 @@ impl State {
         trace!(?notif, ?elem, "Got notification");
         #[allow(non_upper_case_globals)]
         match notif {
+            kAXApplicationHiddenNotification => self.on_application_hidden(),
+            kAXApplicationShownNotification => self.on_application_shown(),
             kAXApplicationActivatedNotification | kAXApplicationDeactivatedNotification => {
                 _ = self.on_activation_changed();
             }
@@ -760,12 +768,18 @@ impl State {
                 let Ok(wid) = self.id(&elem) else {
                     return;
                 };
+                if let Some(window) = self.windows.get_mut(&wid) {
+                    window.hidden_by_app = false;
+                }
                 self.send_event(Event::WindowMinimized(wid));
             }
             kAXWindowDeminiaturizedNotification => {
                 let Ok(wid) = self.id(&elem) else {
                     return;
                 };
+                if let Some(window) = self.windows.get_mut(&wid) {
+                    window.hidden_by_app = false;
+                }
                 self.send_event(Event::WindowDeminiaturized(wid));
             }
             // TODO: track titles and send them to sketchybar since people seem to care about that
@@ -971,6 +985,58 @@ impl State {
         Ok(())
     }
 
+    fn on_application_hidden(&mut self) {
+        if self.is_hidden {
+            return;
+        }
+
+        self.is_hidden = true;
+        let mut to_minimize = Vec::new();
+        for (wid, window) in self.windows.iter_mut() {
+            if window.hidden_by_app {
+                continue;
+            }
+            window.hidden_by_app = true;
+            to_minimize.push(*wid);
+        }
+
+        for wid in to_minimize {
+            self.send_event(Event::WindowMinimized(wid));
+        }
+    }
+
+    fn on_application_shown(&mut self) {
+        if !self.is_hidden {
+            return;
+        }
+
+        self.is_hidden = false;
+        let mut to_restore = Vec::new();
+        for (wid, window) in self.windows.iter_mut() {
+            if !window.hidden_by_app {
+                continue;
+            }
+            window.hidden_by_app = false;
+            let minimized = match trace("minimized", &window.elem, || window.elem.minimized()) {
+                Ok(minimized) => minimized,
+                Err(err) => {
+                    debug!(?wid, ?err, "Failed to read minimized state after app shown");
+                    false
+                }
+            };
+            if minimized {
+                continue;
+            }
+            let wid = *wid;
+            self.needs_resync.insert(wid);
+            to_restore.push(wid);
+        }
+
+        for wid in to_restore {
+            self.send_event(Event::WindowDeminiaturized(wid));
+        }
+    }
+
     #[must_use]
     fn register_window(
         &mut self,
@@ -1047,11 +1113,16 @@ impl State {
         if !register_notifs(&elem, self) {
             return None;
         }
+        let hidden_by_app = self.is_hidden;
         let old = self.windows.insert(wid, WindowState {
             elem,
             last_seen_txid: TransactionId::default(),
+            hidden_by_app,
         });
         debug_assert!(old.is_none(), "Duplicate window id {wid:?}");
+        if hidden_by_app {
+            self.send_event(Event::WindowMinimized(wid));
+        }
         return Some((info, wid, server_info));
 
         fn register_notifs(win: &AXUIElement, state: &State) -> bool {
@@ -1211,6 +1282,7 @@ fn app_thread_main(pid: pid_t, info: AppInfo, events_tx: reactor::Sender) {
         last_window_idx: 0,
         main_window: None,
         last_activated: None,
+        is_hidden: false,
         is_frontmost: false,
         raises_tx,
     };

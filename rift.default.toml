@@ -93,6 +93,10 @@ default_orientation = "perpendicular"
 # Gap configuration
 # - outer: space between windows and screen edges
 # - inner: space between tiled windows
+# - per_display: optional display-specific overrides keyed by display UUID.
+#   When present, the values in a per-display override replace the defaults
+#   (you may override only `outer`, only `inner`, or both for a display).
+#   Use the display's UUID as the key (for example, from system profiler or via rift CLI).
 
 [settings.layout.gaps.outer]
 top = 0
@@ -104,6 +108,17 @@ right = 0
 horizontal = 0
 vertical = 0
 
+# Example per-display overrides:
+# Replace the quoted key with your display's UUID. Only specify values you want to override.
+# [settings.layout.gaps.per_display."11111111-2222-3333-4444-555555555555".outer]
+# top = 20
+# left = 20
+# bottom = 20
+# right = 20
+#
+# [settings.layout.gaps.per_display."11111111-2222-3333-4444-555555555555".inner]
+# horizontal = 8
+# vertical = 8
 [settings.ui.menu_bar]
 # enable menu bar workspace indicators
 enabled = false

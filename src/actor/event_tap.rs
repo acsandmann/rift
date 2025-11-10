@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use objc2_app_kit::{
     NSEvent, NSEventPhase, NSEventType, NSMainMenuWindowLevel, NSPopUpMenuWindowLevel,
-    NSTouchPhase, NSWindowLevel,
+    NSTouchPhase, NSTouchType, NSWindowLevel,
 };
 use objc2_core_foundation::{CGPoint, CGRect};
 use objc2_core_graphics::{
@@ -346,6 +346,8 @@ impl EventTap {
             return;
         };
 
+        let mut st = state.borrow_mut();
+
         let phase = nsevent.phase();
         if [
             NSEventPhase::Ended,
@@ -354,7 +356,7 @@ impl EventTap {
         ]
         .contains(&phase)
         {
-            state.borrow_mut().reset();
+            st.reset();
             return;
         }
 
@@ -371,15 +373,16 @@ impl EventTap {
                 continue;
             }
 
+            let ended =
+                phase.contains(NSTouchPhase::Ended) || phase.contains(NSTouchPhase::Cancelled);
+
             touch_count += 1;
             if touch_count > cfg.fingers {
                 too_many_touches = true;
                 break;
             }
 
-            let ended =
-                phase.contains(NSTouchPhase::Ended) || phase.contains(NSTouchPhase::Cancelled);
-            if !ended {
+            if !ended && t.r#type() == NSTouchType::Indirect {
                 let pos = t.normalizedPosition();
                 sum_x += pos.x as f64;
                 sum_y += pos.y as f64;
@@ -388,14 +391,13 @@ impl EventTap {
         }
 
         if too_many_touches || touch_count != cfg.fingers || active_count == 0 {
-            state.borrow_mut().reset();
+            st.reset();
             return;
         }
 
         let avg_x = sum_x / active_count as f64;
         let avg_y = sum_y / active_count as f64;
 
-        let mut st = state.borrow_mut();
         match st.phase {
             GesturePhase::Idle => {
                 st.start_x = avg_x;

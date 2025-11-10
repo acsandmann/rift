@@ -12,6 +12,7 @@ use rift_wm::actor::menu_bar::Menu;
 use rift_wm::actor::mission_control::MissionControlActor;
 use rift_wm::actor::mission_control_observer::NativeMissionControl;
 use rift_wm::actor::notification_center::NotificationCenter;
+use rift_wm::actor::process::ProcessActor;
 use rift_wm::actor::reactor::{self, Reactor};
 use rift_wm::actor::stack_line::StackLine;
 use rift_wm::actor::window_notify as window_notify_actor;
@@ -227,6 +228,8 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
 
     let notification_center = NotificationCenter::new(wm_controller_sender.clone());
 
+    let process_actor = ProcessActor::new(wm_controller_sender.clone());
+
     let event_tap = EventTap::new(
         config.clone(),
         events_tx.clone(),
@@ -254,7 +257,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
 
     unsafe { AXUIElement::new_system_wide().set_messaging_timeout(1.0) };
 
-    let _executor_session = Executor::start(async move {
+    let _executor_session = Executor::run_main(mtm, async move {
         join!(
             wm_controller.run(),
             notification_center.watch_for_notifications(),
@@ -265,10 +268,9 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
             mission_control_native.run(),
             mission_control.run(),
             command_switcher.run(),
+            process_actor.run()
         );
     });
-
-    objc2_app_kit::NSApplication::sharedApplication(mtm).run();
 }
 
 #[cfg(panic = "unwind")]

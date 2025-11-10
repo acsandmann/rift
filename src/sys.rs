@@ -5,6 +5,8 @@ use objc2_core_graphics::CGError;
 pub mod accessibility;
 pub mod app;
 pub mod axuielement;
+pub mod carbon;
+
 pub mod cgs_window;
 pub mod dispatch;
 pub mod display_link;

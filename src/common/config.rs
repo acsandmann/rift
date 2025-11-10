@@ -614,6 +614,9 @@ pub struct GapSettings {
     /// Inner gaps (space between windows)
     #[serde(default)]
     pub inner: InnerGaps,
+    /// Display-specific gap overrides keyed by display UUID
+    #[serde(default)]
+    pub per_display: HashMap<String, GapOverride>,
 }
 
 /// Outer gap configuration (space between windows and screen edges)
@@ -644,6 +647,18 @@ pub struct InnerGaps {
     /// Vertical gap between windows
     #[serde(default)]
     pub vertical: f64,
+}
+
+/// Overrides for gaps on a per-display basis
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct GapOverride {
+    /// Override outer gaps completely for the display
+    #[serde(default)]
+    pub outer: Option<OuterGaps>,
+    /// Override inner gaps completely for the display
+    #[serde(default)]
+    pub inner: Option<InnerGaps>,
 }
 
 impl Default for StackSettings {
@@ -764,6 +779,19 @@ impl GapSettings {
         // Validate inner gaps
         issues.extend(self.inner.validate());
 
+        for (uuid, overrides) in &self.per_display {
+            if let Some(outer) = &overrides.outer {
+                for issue in outer.validate() {
+                    issues.push(format!("per_display[{uuid}] {issue}"));
+                }
+            }
+            if let Some(inner) = &overrides.inner {
+                for issue in inner.validate() {
+                    issues.push(format!("per_display[{uuid}] {issue}"));
+                }
+            }
+        }
+
         issues
     }
 
@@ -774,7 +802,29 @@ impl GapSettings {
         // Fix inner gaps
         let inner_fixes = self.inner.auto_fix_values();
 
-        outer_fixes + inner_fixes
+        let display_fixes =
+            self.per_display.values_mut().map(GapOverride::auto_fix_values).sum::<usize>();
+
+        outer_fixes + inner_fixes + display_fixes
+    }
+
+    pub fn effective_for_display(&self, display_uuid: Option<&str>) -> GapSettings {
+        let mut resolved = GapSettings {
+            outer: self.outer.clone(),
+            inner: self.inner.clone(),
+            per_display: HashMap::default(),
+        };
+        if let Some(uuid) = display_uuid {
+            if let Some(overrides) = self.per_display.get(uuid) {
+                if let Some(outer_override) = &overrides.outer {
+                    resolved.outer = outer_override.clone();
+                }
+                if let Some(inner_override) = &overrides.inner {
+                    resolved.inner = inner_override.clone();
+                }
+            }
+        }
+        resolved
     }
 }
 
@@ -874,6 +924,19 @@ impl InnerGaps {
             fixes += 1;
         }
 
+        fixes
+    }
+}
+
+impl GapOverride {
+    pub fn auto_fix_values(&mut self) -> usize {
+        let mut fixes = 0;
+        if let Some(outer) = &mut self.outer {
+            fixes += outer.auto_fix_values();
+        }
+        if let Some(inner) = &mut self.inner {
+            fixes += inner.auto_fix_values();
+        }
         fixes
     }
 }

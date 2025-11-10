@@ -270,6 +270,7 @@ pub fn ensure_activation_policy_observer(pid: pid_t, info: AppInfo) {
         return;
     }
     let Some(app) = NSRunningApplication::with_process_id(pid) else {
+        callback(pid, info);
         return;
     };
     observe_activation_policy(app, info, callback);
@@ -287,6 +288,7 @@ pub fn ensure_finished_launching_observer(pid: pid_t, info: AppInfo) {
         return;
     };
     if app.isFinishedLaunching() {
+        callback(pid, info);
         return;
     }
 

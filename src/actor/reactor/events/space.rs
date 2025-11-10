@@ -1,16 +1,16 @@
 use std::collections::hash_map::Entry;
 
 use objc2_app_kit::NSRunningApplication;
-use objc2_core_foundation::CGRect;
 use tracing::{debug, info, trace, warn};
 
-use crate::actor::app::{AppInfo, Request};
+use crate::actor::app::Request;
 use crate::actor::reactor::{
     DragState, Event, FullscreenTrack, MissionControlState, PendingSpaceChange, Reactor, Screen,
-    StaleCleanupState,
+    ScreenSnapshot, StaleCleanupState,
 };
 use crate::actor::wm_controller::WmEvent;
-use crate::sys::screen::SpaceId;
+use crate::sys::app::AppInfo;
+use crate::sys::screen::{ScreenId, SpaceId};
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 
 pub struct SpaceEventHandler;
@@ -205,7 +205,7 @@ impl SpaceEventHandler {
                 if let Err(err) =
                     app.handle.send(Request::GetVisibleWindows { force_refresh: false })
                 {
-                    debug!(
+                    warn!(
                         pid = window_server_info.pid,
                         ?wsid,
                         ?err,
@@ -218,11 +218,11 @@ impl SpaceEventHandler {
 
     pub fn handle_screen_parameters_changed(
         reactor: &mut Reactor,
-        frames: Vec<CGRect>,
-        spaces: Vec<Option<SpaceId>>,
+        screens: Vec<ScreenSnapshot>,
         ws_info: Vec<WindowServerInfo>,
     ) {
         info!("screen parameters changed");
+        let spaces: Vec<Option<SpaceId>> = screens.iter().map(|s| s.space).collect();
         let spaces_all_none = spaces.iter().all(|space| space.is_none());
         reactor.refocus_manager.stale_cleanup_state = if spaces_all_none {
             StaleCleanupState::Suppressed
@@ -230,39 +230,24 @@ impl SpaceEventHandler {
             StaleCleanupState::Enabled
         };
         let mut ws_info_opt = Some(ws_info);
-        if frames.is_empty() {
-            if spaces.is_empty() {
-                if !reactor.space_manager.screens.is_empty() {
-                    reactor.space_manager.screens.clear();
-                    reactor.expose_all_spaces();
-                }
-            } else if spaces.len() == reactor.space_manager.screens.len() {
-                reactor.set_screen_spaces(&spaces);
-                if let Some(info) = ws_info_opt.take() {
-                    reactor.finalize_space_change(&spaces, info);
-                }
-            } else {
-                warn!(
-                    "Ignoring empty screen update: we have {} screens, but {} spaces",
-                    reactor.space_manager.screens.len(),
-                    spaces.len()
-                );
+        if screens.is_empty() {
+            if !reactor.space_manager.screens.is_empty() {
+                reactor.space_manager.screens.clear();
+                reactor.expose_all_spaces();
             }
-        } else if frames.len() != spaces.len() {
-            warn!(
-                "Ignoring screen update: got {} frames but {} spaces",
-                frames.len(),
-                spaces.len()
-            );
         } else {
-            let spaces_clone = spaces.clone();
-            reactor.space_manager.screens = frames
+            reactor.space_manager.screens = screens
                 .into_iter()
-                .zip(spaces.into_iter())
-                .map(|(frame, space)| Screen { frame, space })
+                .map(|snapshot| Screen {
+                    frame: snapshot.frame,
+                    space: snapshot.space,
+                    display_uuid: snapshot.display_uuid,
+                    name: snapshot.name,
+                    screen_id: ScreenId::new(snapshot.screen_id),
+                })
                 .collect();
             if let Some(info) = ws_info_opt.take() {
-                reactor.finalize_space_change(&spaces_clone, info);
+                reactor.finalize_space_change(&spaces, info);
             }
         }
         if let Some(info) = ws_info_opt.take() {

@@ -195,6 +195,28 @@ pub fn window_is_sticky(id: WindowServerId) -> bool {
     spaces_cf.len() > 1
 }
 
+pub fn window_spaces(id: WindowServerId) -> Vec<crate::sys::screen::SpaceId> {
+    let cf_windows = cf_array_from_ids(&[id]);
+    let space_list_ref = unsafe {
+        SLSCopySpacesForWindows(*G_CONNECTION, 0x7, CFRetained::as_ptr(&cf_windows).as_ptr())
+    };
+    let Some(space_list_ref) = NonNull::new(space_list_ref) else {
+        return Vec::new();
+    };
+
+    let spaces_cf: CFRetained<CFArray<CFNumber>> = unsafe { CFRetained::from_raw(space_list_ref) };
+    spaces_cf
+        .iter()
+        .filter_map(|num| num.as_i64())
+        .filter_map(|value| u64::try_from(value).ok())
+        .filter_map(|value| (value != 0).then(|| crate::sys::screen::SpaceId::new(value)))
+        .collect()
+}
+
+pub fn window_space(id: WindowServerId) -> Option<crate::sys::screen::SpaceId> {
+    window_spaces(id).into_iter().next()
+}
+
 pub fn window_is_ordered_in(id: WindowServerId) -> bool {
     let mut ordered: u8 = 0;
     if let Ok(_) = cg_ok(unsafe { SLSWindowIsOrderedIn(*G_CONNECTION, id.as_u32(), &mut ordered) })

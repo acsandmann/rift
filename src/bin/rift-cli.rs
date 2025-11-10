@@ -63,6 +63,8 @@ enum QueryCommands {
         #[arg(long)]
         space_id: Option<u64>,
     },
+    /// List connected displays
+    Displays,
     /// Get information about a specific window
     Window { window_id: String },
     /// List running applications
@@ -127,10 +129,17 @@ enum WindowCommands {
     ToggleFullscreen,
     /// Toggle fullscreen within configured outer gaps (respects outer gaps / fills tiling area)
     ToggleFullscreenWithinGaps,
-    /// Grow the current window size
+    /// Grow the current window size (increments by ~5%).
     ResizeGrow,
-    /// Shrink the current window size
+    /// Shrink the current window size (decrements by ~5%).
     ResizeShrink,
+    /// Resize the selected window by a fractional amount.
+    /// - Pass a signed floating value: positive to grow, negative to shrink.
+    /// - The value is a fraction of the current size (e.g. `0.05` = 5%).
+    /// Examples:
+    ///   rift-cli execute window resize-by --amount 0.05    # grow by 5%
+    ///   rift-cli execute window resize-by --amount -0.10   # shrink by 10%
+    ResizeBy { amount: f64 },
 }
 
 #[derive(Subcommand)]
@@ -142,7 +151,10 @@ enum WorkspaceCommands {
     /// Switch to specific workspace
     Switch { workspace_id: usize },
     /// Move current window to workspace
-    MoveWindow { workspace_id: usize },
+    MoveWindow {
+        workspace_id: usize,
+        window_id: Option<u32>,
+    },
     /// Create a new workspace
     Create,
     /// Switch to the last workspace
@@ -367,6 +379,7 @@ fn build_query_request(query: QueryCommands) -> Result<RiftRequest, String> {
     match query {
         QueryCommands::Workspaces => Ok(RiftRequest::GetWorkspaces),
         QueryCommands::Windows { space_id } => Ok(RiftRequest::GetWindows { space_id }),
+        QueryCommands::Displays => Ok(RiftRequest::GetDisplays),
         QueryCommands::Window { window_id } => Ok(RiftRequest::GetWindowInfo { window_id }),
         QueryCommands::Applications => Ok(RiftRequest::GetApplications),
         QueryCommands::Layout { space_id } => Ok(RiftRequest::GetLayoutState { space_id }),
@@ -457,6 +470,9 @@ fn map_window_command(cmd: WindowCommands) -> Result<RiftCommand, String> {
         WindowCommands::ResizeShrink => Ok(RiftCommand::Reactor(reactor::Command::Layout(
             LC::ResizeWindowShrink,
         ))),
+        WindowCommands::ResizeBy { amount } => Ok(RiftCommand::Reactor(reactor::Command::Layout(
+            LC::ResizeWindowBy { amount },
+        ))),
     }
 }
 
@@ -472,8 +488,11 @@ fn map_workspace_command(cmd: WorkspaceCommands) -> Result<RiftCommand, String> 
         WorkspaceCommands::Switch { workspace_id } => Ok(RiftCommand::Reactor(
             reactor::Command::Layout(LC::SwitchToWorkspace(workspace_id)),
         )),
-        WorkspaceCommands::MoveWindow { workspace_id } => Ok(RiftCommand::Reactor(
-            reactor::Command::Layout(LC::MoveWindowToWorkspace(workspace_id)),
+        WorkspaceCommands::MoveWindow { workspace_id, window_id } => Ok(RiftCommand::Reactor(
+            reactor::Command::Layout(LC::MoveWindowToWorkspace {
+                workspace: workspace_id,
+                window_id,
+            }),
         )),
         WorkspaceCommands::Create => Ok(RiftCommand::Reactor(reactor::Command::Layout(
             LC::CreateWorkspace,

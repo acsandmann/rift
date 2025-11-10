@@ -2,7 +2,6 @@ use std::ffi::{CString, c_char};
 use std::time::Duration;
 
 use r#continue::continuation;
-use objc2_core_foundation::CFRunLoop;
 use tracing::{debug, error, info};
 
 pub mod cli_exec;
@@ -34,9 +33,6 @@ pub fn run_mach_server(
 
     let thread_state = shared_state.clone();
     std::thread::spawn(move || {
-        let s = thread_state.write();
-        s.set_runloop(CFRunLoop::current());
-
         let handler = MachHandler::new(reactor_tx, config_tx, thread_state.clone());
         unsafe {
             mach_server_run(Box::into_raw(Box::new(handler)) as *mut _, handle_mach_request_c);
@@ -199,6 +195,18 @@ impl MachHandler {
                     error!("{}", e);
                     RiftResponse::Error {
                         error: serde_json::json!({ "message": "Failed to get workspace response", "details": format!("{}", e) }),
+                    }
+                }
+            },
+
+            RiftRequest::GetDisplays => match self.perform_query(|tx| Event::QueryDisplays(tx)) {
+                Ok(displays) => RiftResponse::Success {
+                    data: serde_json::to_value(displays).unwrap(),
+                },
+                Err(e) => {
+                    error!("{}", e);
+                    RiftResponse::Error {
+                        error: serde_json::json!({ "message": "Failed to get displays response", "details": format!("{}", e) }),
                     }
                 }
             },
