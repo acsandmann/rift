@@ -36,4 +36,4 @@ jobs:
       - name: Compile
         run: cargo check --locked
       - name: Test
-        run: cargo nextest
+        run: cargo nextest  run
