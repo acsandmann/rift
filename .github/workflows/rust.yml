@@ -16,16 +16,24 @@ env:
   RUSTFLAGS: "-C debuginfo=0"
 
 jobs:
-  format_and_test:
+  format:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - name: Format Check
+        run: cargo +nightly fmt --all --check --verbose
+
+  test:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
-      - name: Format
-        run: cargo fmt --all -- --check --unstable-features --verbose
       - name: Compile
         run: cargo check --locked
       - name: Test
-        run: cargo nextest  run
+        run: cargo nextest run
