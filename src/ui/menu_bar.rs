@@ -102,21 +102,19 @@ impl Drop for MenuIcon {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 struct MenuIconLayout {
     total_width: f64,
     total_height: f64,
     workspaces: Vec<WorkspaceRenderData>,
 }
 
-#[derive(Clone)]
 struct WorkspaceRenderData {
     bg_rect: CGRect,
     fill_alpha: f64,
     windows: Vec<WindowRenderRect>,
 }
 
-#[derive(Clone)]
 struct WindowRenderRect {
     x: f64,
     y: f64,
@@ -243,7 +241,7 @@ define_class!(
     impl MenuIconView {
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty_rect: NSRect) {
-            let layout = self.ivars().layout.borrow().clone();
+            let layout = self.ivars().layout.borrow();
             let bounds = self.bounds();
 
             if let Some(context) = NSGraphicsContext::currentContext() {
@@ -269,9 +267,9 @@ define_class!(
                     if workspace.fill_alpha > 0.0 {
                         CGContext::set_rgb_fill_color(
                             Some(cg),
-                            0.0,
-                            0.0,
-                            0.0,
+                            1.0,
+                            1.0,
+                            1.0,
                             workspace.fill_alpha as f64,
                         );
                         CGContext::fill_path(Some(cg));
@@ -285,7 +283,7 @@ define_class!(
                         rect.size.height,
                         CORNER_RADIUS,
                     );
-                    CGContext::set_rgb_stroke_color(Some(cg), 0.0, 0.0, 0.0, 1.0);
+                    CGContext::set_rgb_stroke_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
                     CGContext::set_line_width(Some(cg), BORDER_WIDTH);
                     CGContext::stroke_path(Some(cg));
 
@@ -298,12 +296,12 @@ define_class!(
                             window.height,
                             1.5,
                         );
-                        CGContext::set_rgb_fill_color(Some(cg), 0.0, 0.0, 0.0, 1.0);
+                        CGContext::set_rgb_fill_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
                         CGContext::fill_path(Some(cg));
 
                         CGContext::save_g_state(Some(cg));
                         CGContext::set_blend_mode(Some(cg), CGBlendMode::DestinationOut);
-                        CGContext::set_rgb_stroke_color(Some(cg), 0.0, 0.0, 0.0, 1.0);
+                        CGContext::set_rgb_stroke_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
                         CGContext::set_line_width(Some(cg), 1.5);
                         add_rounded_rect(cg, window.x, window.y, window.width, window.height, 1.5);
                         CGContext::stroke_path(Some(cg));
