@@ -52,7 +52,6 @@ objc2-app-kit = { version = "0.3.1", default-features = false, features = [
     "NSBezierPath",
     "NSColor",
     "NSImage",
-    "NSGraphicsContext",
     "NSFont",
     "NSText",
     "NSStringDrawing",

@@ -1,18 +1,20 @@
 use std::hash::{Hash, Hasher};
-use std::time::Duration;
+use std::sync::Arc;
 
+use dispatchr::qos::QoS;
+use dispatchr::queue::{self, Unmanaged};
 use objc2::MainThreadMarker;
 use rustc_hash::FxHasher;
+use tokio::sync::Notify;
 use tracing::instrument;
 
 use crate::actor;
 use crate::common::config::Config;
 use crate::model::VirtualWorkspaceId;
 use crate::model::server::{WindowData, WorkspaceData};
+use crate::sys::dispatch::{NamedQueueExt, TimerSource};
 use crate::sys::screen::SpaceId;
-use crate::sys::timer::Timer;
 use crate::ui::menu_bar::MenuIcon;
-
 #[derive(Debug, Clone)]
 pub enum Event {
     Update {
@@ -51,36 +53,53 @@ impl Menu {
         const DEBOUNCE_MS: u64 = 150;
 
         let mut pending: Option<Event> = None;
+        let notify = Arc::new(Notify::new());
+
+        let q = Unmanaged::named("git.acsandmann.rift.menu_bar")
+            .unwrap_or_else(|| queue::global(QoS::Utility).unwrap_or_else(|| queue::main()));
+
+        let mut timer = TimerSource::new(q);
+
+        let notify_for_handler = Arc::clone(&notify);
+        timer.set_handler(move || {
+            notify_for_handler.notify_one();
+        });
+        timer.resume();
+
+        let schedule_timer = |t: &mut TimerSource| {
+            t.schedule_after_ms(DEBOUNCE_MS);
+        };
 
         loop {
-            if pending.is_none() {
-                match self.rx.recv().await {
-                    Some((span, event)) => {
-                        let _ = span.enter();
-                        pending = Some(event);
-                    }
-                    None => break,
+            let notify_future = async {
+                if pending.is_some() {
+                    notify.notified().await;
+                } else {
+                    std::future::pending::<()>().await;
                 }
-            } else {
-                tokio::select! {
-                    maybe_msg = self.rx.recv() => {
-                        match maybe_msg {
-                            Some((span, event)) => {
-                                let _ = span.enter();
-                                pending = Some(event);
+            };
+
+            tokio::select! {
+                maybe_msg = self.rx.recv() => {
+                    match maybe_msg {
+                        Some((span, event)) => {
+                            let _ = span.enter();
+                            pending = Some(event);
+
+                            schedule_timer(&mut timer);
+                        }
+                        None => {
+                            if let Some(ev) = pending.take() {
+                                self.handle_event(ev);
                             }
-                            None => {
-                                if let Some(ev) = pending.take() {
-                                    self.handle_event(ev);
-                                }
-                                break;
-                            }
+                            drop(timer);
+                            break;
                         }
                     }
-                    _ = Timer::sleep(Duration::from_millis(DEBOUNCE_MS)) => {
-                        if let Some(ev) = pending.take() {
-                            self.handle_event(ev);
-                        }
+                }
+                _ = notify_future => {
+                    if let Some(ev) = pending.take() {
+                        self.handle_event(ev);
                     }
                 }
             }
