@@ -678,7 +678,7 @@ impl Reactor {
                 AppEventHandler::handle_resync_app_for_window(self, wsid);
             }
             // we know rely on axapp's activation event (https://github.com/acsandmann/rift/issues/108)
-            Event::ApplicationGloballyActivated(pid) => {}
+            Event::ApplicationGloballyActivated(_) => {}
             Event::RegisterWmSender(sender) => {
                 SystemEventHandler::handle_register_wm_sender(self, sender)
             }
