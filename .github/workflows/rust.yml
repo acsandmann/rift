@@ -23,6 +23,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
+          minimal: true
       - name: Format Check
         run: cargo +nightly fmt --all --check --verbose
 
