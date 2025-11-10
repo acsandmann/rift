@@ -668,16 +668,17 @@ impl Reactor {
             Event::ApplicationThreadTerminated(pid) => {
                 AppEventHandler::handle_application_thread_terminated(self, pid);
             }
-            Event::ApplicationActivated(..)
-            | Event::ApplicationDeactivated(..)
+            Event::ApplicationActivated(pid, _) => {
+                AppEventHandler::handle_application_activated(self, pid);
+            }
+            Event::ApplicationDeactivated(..)
             | Event::ApplicationGloballyDeactivated(..)
             | Event::ApplicationMainWindowChanged(..) => {}
             Event::ResyncAppForWindow(wsid) => {
                 AppEventHandler::handle_resync_app_for_window(self, wsid);
             }
-            Event::ApplicationGloballyActivated(pid) => {
-                AppEventHandler::handle_application_globally_activated(self, pid);
-            }
+            // we know rely on axapp's activation event (https://github.com/acsandmann/rift/issues/108)
+            Event::ApplicationGloballyActivated(pid) => {}
             Event::RegisterWmSender(sender) => {
                 SystemEventHandler::handle_register_wm_sender(self, sender)
             }
@@ -1443,11 +1444,15 @@ impl Reactor {
         );
 
         let app_window = self
-            .window_manager
-            .windows
-            .keys()
-            .find(|wid| wid.pid == pid && self.window_is_standard(**wid))
-            .copied();
+            .main_window()
+            .filter(|wid| wid.pid == pid && self.window_is_standard(*wid))
+            .or_else(|| {
+                self.window_manager
+                    .windows
+                    .keys()
+                    .find(|wid| wid.pid == pid && self.window_is_standard(**wid))
+                    .copied()
+            });
 
         let Some(app_window_id) = app_window else {
             return;
