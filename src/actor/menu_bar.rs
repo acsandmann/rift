@@ -1,5 +1,6 @@
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use dispatchr::qos::QoS;
 use dispatchr::queue::{self, Unmanaged};
@@ -54,39 +55,37 @@ impl Menu {
 
         let mut pending: Option<Event> = None;
         let notify = Arc::new(Notify::new());
+        let armed = Arc::new(AtomicBool::new(false));
 
         let q = Unmanaged::named("git.acsandmann.rift.menu_bar")
             .unwrap_or_else(|| queue::global(QoS::Utility).unwrap_or_else(|| queue::main()));
 
         let mut timer = TimerSource::new(q);
 
-        let notify_for_handler = Arc::clone(&notify);
-        timer.set_handler(move || {
-            notify_for_handler.notify_one();
-        });
+        {
+            let notify_cl = Arc::clone(&notify);
+            let armed_cl = Arc::clone(&armed);
+            timer.set_handler(move || {
+                armed_cl.store(false, Ordering::Release);
+                notify_cl.notify_one();
+            });
+        }
         timer.resume();
 
-        let schedule_timer = |t: &mut TimerSource| {
-            t.schedule_after_ms(DEBOUNCE_MS);
+        let schedule_timer = |t: &mut TimerSource, armed: &AtomicBool| {
+            if !armed.swap(true, Ordering::AcqRel) {
+                t.schedule_after_ms(DEBOUNCE_MS);
+            }
         };
 
         loop {
-            let notify_future = async {
-                if pending.is_some() {
-                    notify.notified().await;
-                } else {
-                    std::future::pending::<()>().await;
-                }
-            };
-
             tokio::select! {
-                maybe_msg = self.rx.recv() => {
-                    match maybe_msg {
+                maybe = self.rx.recv() => {
+                    match maybe {
                         Some((span, event)) => {
-                            let _ = span.enter();
+                            let _enter = span.enter();
                             pending = Some(event);
-
-                            schedule_timer(&mut timer);
+                            schedule_timer(&mut timer, &armed);
                         }
                         None => {
                             if let Some(ev) = pending.take() {
@@ -97,7 +96,7 @@ impl Menu {
                         }
                     }
                 }
-                _ = notify_future => {
+                _ = notify.notified(), if pending.is_some() => {
                     if let Some(ev) = pending.take() {
                         self.handle_event(ev);
                     }

@@ -258,9 +258,7 @@ impl TimerSource {
     pub fn set_handler<F>(&mut self, handler: F)
     where F: Fn() + Send + Sync + 'static {
         if let Some(ptr) = self.ctx_ptr.take() {
-            unsafe {
-                let _ = Box::from_raw(ptr as *mut Callback);
-            }
+            let _ = unsafe { Box::from_raw(ptr as *mut Callback) };
             self.src.set_context(std::ptr::null_mut());
         }
 
@@ -276,9 +274,7 @@ impl TimerSource {
         if let Some(ptr) = self.ctx_ptr.take() {
             self.src.set_event_handler_f(noop_trampoline);
             self.src.set_context(std::ptr::null_mut());
-            unsafe {
-                let _ = Box::from_raw(ptr as *mut Callback);
-            }
+            let _ = unsafe { Box::from_raw(ptr as *mut Callback) };
         }
     }
 
