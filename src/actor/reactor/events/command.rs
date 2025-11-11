@@ -9,6 +9,7 @@ use crate::common::collections::HashMap;
 use crate::common::config::{self as config, Config};
 use crate::common::log::{MetricsCommand, handle_command};
 use crate::layout_engine::{EventResponse, LayoutCommand, LayoutEvent};
+use crate::sys::screen::order_visible_spaces_by_position;
 use crate::sys::window_server::{self as window_server, WindowServerId};
 
 pub struct CommandEventHandler;
@@ -16,12 +17,13 @@ pub struct CommandEventHandler;
 impl CommandEventHandler {
     pub fn handle_command_layout(reactor: &mut Reactor, cmd: LayoutCommand) {
         info!(?cmd);
-        let visible_spaces = reactor
-            .space_manager
-            .screens
-            .iter()
-            .flat_map(|screen| screen.space)
-            .collect::<Vec<_>>();
+        let visible_spaces = order_visible_spaces_by_position(
+            reactor.space_manager.screens.iter().filter_map(|screen| {
+                let space = screen.space?;
+                let center = screen.frame.mid();
+                Some((space, center))
+            }),
+        );
 
         let is_workspace_switch = matches!(
             cmd,

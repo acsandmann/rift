@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::f64;
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
@@ -347,6 +348,24 @@ pub mod diagnostic {
     }
 }
 
+pub fn order_visible_spaces_by_position(
+    spaces: impl IntoIterator<Item = (SpaceId, CGPoint)>,
+) -> Vec<SpaceId> {
+    let mut spaces: Vec<_> = spaces.into_iter().collect();
+
+    // order spaces by the physical screen coordinates (left-to-right, then bottom-to-top).
+    spaces.sort_by(|(_, a_center), (_, b_center)| {
+        let x_order = a_center.x.total_cmp(&b_center.x);
+        if x_order == Ordering::Equal {
+            a_center.y.total_cmp(&b_center.y)
+        } else {
+            x_order
+        }
+    });
+
+    spaces.into_iter().map(|(space, _)| space).collect()
+}
+
 #[cfg(test)]
 mod test {
     use std::cell::RefCell;
@@ -356,6 +375,7 @@ mod test {
     use objc2_core_graphics::CGError;
 
     use super::{CGScreenInfo, NSScreenInfo, ScreenCache, ScreenId, System};
+    use crate::sys::screen::{SpaceId, order_visible_spaces_by_position};
 
     struct Stub {
         cg_screens: Vec<CGScreenInfo>,
@@ -483,5 +503,28 @@ mod test {
         assert!(descriptors.is_empty());
         assert!(cache.uuids.is_empty());
         assert!(converter.convert_point(CGPoint::new(0.0, 0.0)).is_none());
+    }
+
+    #[test]
+    fn orders_spaces_by_horizontal_position() {
+        let spaces = vec![
+            (SpaceId::new(1), CGPoint::new(-500.0, 0.0)),
+            (SpaceId::new(2), CGPoint::new(0.0, 0.0)),
+            (SpaceId::new(3), CGPoint::new(500.0, 100.0)),
+        ];
+
+        let ordered = order_visible_spaces_by_position(spaces);
+        assert_eq!(ordered, vec![SpaceId::new(1), SpaceId::new(2), SpaceId::new(3)]);
+    }
+
+    #[test]
+    fn orders_spaces_by_vertical_position_when_aligned() {
+        let spaces = vec![
+            (SpaceId::new(10), CGPoint::new(0.0, -200.0)),
+            (SpaceId::new(11), CGPoint::new(0.0, 150.0)),
+        ];
+
+        let ordered = order_visible_spaces_by_position(spaces);
+        assert_eq!(ordered, vec![SpaceId::new(10), SpaceId::new(11)]);
     }
 }
