@@ -57,7 +57,7 @@ use crate::sys::geometry::{CGRectDef, CGRectExt, SameAs};
 use crate::sys::screen::{ScreenId, SpaceId, get_active_space_number};
 use crate::sys::timer::Timer;
 use crate::sys::window_server::{
-    self, WindowServerId, WindowServerInfo, space_is_fullscreen,
+    self, WindowServerId, WindowServerInfo, current_cursor_location, space_is_fullscreen,
     wait_for_native_fullscreen_transition,
 };
 
@@ -461,6 +461,7 @@ impl Reactor {
                 screens: vec![],
                 fullscreen_by_space: HashMap::default(),
                 changing_screens: HashSet::default(),
+                screen_space_by_id: HashMap::default(),
             },
             main_window_tracker_manager: managers::MainWindowTrackerManager {
                 main_window_tracker: MainWindowTracker::default(),
@@ -974,6 +975,20 @@ impl Reactor {
         for (space, screen) in spaces.iter().copied().zip(&mut self.space_manager.screens) {
             screen.space = space;
         }
+        self.update_screen_space_map();
+    }
+
+    fn update_screen_space_map(&mut self) {
+        let valid_screen_ids: HashSet<ScreenId> =
+            self.space_manager.screens.iter().map(|screen| screen.screen_id).collect();
+        for screen in &self.space_manager.screens {
+            if let Some(space) = screen.space {
+                self.space_manager.screen_space_by_id.insert(screen.screen_id, space);
+            }
+        }
+        self.space_manager
+            .screen_space_by_id
+            .retain(|screen_id, _| valid_screen_ids.contains(screen_id));
     }
 
     fn finalize_space_change(
@@ -1044,7 +1059,7 @@ impl Reactor {
     ) -> Option<SpaceId> {
         if let Some(server_id) = window_server_id {
             if let Some(space) = crate::sys::window_server::window_space(server_id) {
-                if self.space_manager.screens.iter().any(|screen| screen.space == Some(space)) {
+                if self.space_manager.screen_by_space(space).is_some() {
                     return Some(space);
                 }
             }
@@ -1058,9 +1073,9 @@ impl Reactor {
         self.space_manager
             .screens
             .iter()
-            .find_map(|s| {
-                let space = s.space?;
-                if s.frame.contains(center) {
+            .find_map(|screen| {
+                let space = self.space_manager.space_for_screen(screen)?;
+                if screen.frame.contains(center) {
                     Some(space)
                 } else {
                     None
@@ -1070,8 +1085,13 @@ impl Reactor {
                 self.space_manager
                     .screens
                     .iter()
-                    .max_by_key(|s| s.frame.intersection(frame).area() as i64)?
-                    .space
+                    .filter_map(|screen| {
+                        let space = self.space_manager.space_for_screen(screen)?;
+                        let area = screen.frame.intersection(frame).area() as i64;
+                        Some((area, space))
+                    })
+                    .max_by_key(|(area, _)| *area)
+                    .map(|(_, space)| space)
             })
     }
 
@@ -1129,7 +1149,7 @@ impl Reactor {
     fn drag_space_candidate(&self, frame: &CGRect) -> Option<SpaceId> {
         let center = frame.mid();
         self.space_manager.screens.iter().find_map(|screen| {
-            let space = screen.space?;
+            let space = self.space_manager.space_for_screen(screen)?;
             if screen.frame.contains(center) {
                 Some(space)
             } else {
@@ -1218,7 +1238,9 @@ impl Reactor {
     fn expose_all_spaces(&mut self) {
         let screens = self.space_manager.screens.clone();
         for screen in screens {
-            let Some(space) = screen.space else { continue };
+            let Some(space) = self.space_manager.space_for_screen(&screen) else {
+                continue;
+            };
             self.layout_manager
                 .layout_engine
                 .virtual_workspace_manager_mut()
@@ -1239,7 +1261,7 @@ impl Reactor {
         let response = self.layout_manager.layout_engine.handle_event(event);
         self.prepare_refocus_after_layout_event(&event_clone);
         self.handle_layout_response(response);
-        for space in self.space_manager.screens.iter().flat_map(|screen| screen.space) {
+        for space in self.space_manager.iter_known_spaces() {
             self.layout_manager.layout_engine.debug_tree_desc(space, "after event", false);
         }
     }
@@ -2003,9 +2025,27 @@ impl Reactor {
     }
 
     fn workspace_command_space(&self) -> Option<SpaceId> {
-        self.main_window_space()
-            .or_else(|| get_active_space_number())
-            .or_else(|| self.space_manager.screens.iter().find_map(|screen| screen.space))
+        if let Some(space) = self.main_window_space() {
+            return Some(space);
+        }
+
+        if let Ok(point) = current_cursor_location() {
+            if let Some(screen) =
+                self.space_manager.screens.iter().find(|screen| screen.frame.contains(point))
+            {
+                if let Some(space) = screen.space.or_else(|| {
+                    self.space_manager.screen_space_by_id.get(&screen.screen_id).copied()
+                }) {
+                    return Some(space);
+                }
+            }
+        }
+
+        if let Some(space) = get_active_space_number() {
+            return Some(space);
+        }
+
+        self.space_manager.first_known_space()
     }
 
     fn store_current_floating_positions(&mut self, space: SpaceId) {

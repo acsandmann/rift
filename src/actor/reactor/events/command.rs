@@ -19,7 +19,7 @@ impl CommandEventHandler {
         info!(?cmd);
         let visible_spaces = order_visible_spaces_by_position(
             reactor.space_manager.screens.iter().filter_map(|screen| {
-                let space = screen.space?;
+                let space = reactor.space_manager.space_for_screen(screen)?;
                 let center = screen.frame.mid();
                 Some((space, center))
             }),
@@ -117,7 +117,7 @@ impl CommandEventHandler {
 
     pub fn handle_command_reactor_debug(reactor: &mut Reactor) {
         for screen in &reactor.space_manager.screens {
-            if let Some(space) = screen.space {
+            if let Some(space) = reactor.space_manager.space_for_screen(screen) {
                 reactor.layout_manager.layout_engine.debug_tree_desc(space, "", true);
             }
         }

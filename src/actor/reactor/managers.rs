@@ -18,7 +18,7 @@ use crate::actor::{event_tap, menu_bar, raise_manager, stack_line, window_notify
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{Config, WindowSnappingSettings};
 use crate::layout_engine::LayoutEngine;
-use crate::sys::screen::SpaceId;
+use crate::sys::screen::{ScreenId, SpaceId};
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 
 /// Manages window state and lifecycle
@@ -81,6 +81,23 @@ pub struct SpaceManager {
     pub screens: Vec<Screen>,
     pub fullscreen_by_space: HashMap<u64, FullscreenTrack>,
     pub changing_screens: HashSet<WindowServerId>,
+    pub screen_space_by_id: HashMap<ScreenId, SpaceId>,
+}
+
+impl SpaceManager {
+    pub fn space_for_screen(&self, screen: &Screen) -> Option<SpaceId> {
+        screen.space.or_else(|| self.screen_space_by_id.get(&screen.screen_id).copied())
+    }
+
+    pub fn screen_by_space(&self, space: SpaceId) -> Option<&Screen> {
+        self.screens.iter().find(|screen| self.space_for_screen(screen) == Some(space))
+    }
+
+    pub fn iter_known_spaces(&self) -> impl Iterator<Item = SpaceId> + '_ {
+        self.screens.iter().filter_map(|screen| self.space_for_screen(screen))
+    }
+
+    pub fn first_known_space(&self) -> Option<SpaceId> { self.iter_known_spaces().next() }
 }
 
 /// Manages drag operations and window swapping
@@ -180,7 +197,9 @@ impl LayoutManager {
         let mut layout_result = LayoutResult::new();
 
         for screen in screens {
-            let Some(space) = screen.space else { continue };
+            let Some(space) = reactor.space_manager.space_for_screen(&screen) else {
+                continue;
+            };
             let display_uuid = if screen.display_uuid.is_empty() {
                 None
             } else {
@@ -235,8 +254,7 @@ impl LayoutManager {
             // Handle stack_line
             if reactor.config_manager.config.settings.ui.stack_line.enabled {
                 if let Some(tx) = &reactor.communication_manager.stack_line_tx {
-                    let screen =
-                        reactor.space_manager.screens.iter().find(|s| s.space == Some(space));
+                    let screen = reactor.space_manager.screen_by_space(space);
                     if let Some(screen) = screen {
                         let display_uuid = if screen.display_uuid.is_empty() {
                             None

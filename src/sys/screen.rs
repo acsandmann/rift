@@ -151,9 +151,7 @@ impl Default for CoordinateConverter {
 }
 
 impl CoordinateConverter {
-    pub fn from_height(height: f64) -> Self {
-        Self { screen_height: height }
-    }
+    pub fn from_height(height: f64) -> Self { Self { screen_height: height } }
 
     pub fn from_screen(screen: &NSScreen) -> Option<Self> {
         let screen_id = screen.get_number().ok()?;
