@@ -29,7 +29,7 @@ impl SpaceId {
 }
 
 impl Into<u64> for SpaceId {
-	fn into(self) -> u64 { self.get() }
+    fn into(self) -> u64 { self.get() }
 }
 
 impl ToString for SpaceId {
@@ -315,9 +315,7 @@ pub mod diagnostic {
 
     use super::*;
 
-    pub fn cur_space() -> SpaceId {
-        SpaceId(unsafe { CGSGetActiveSpace(SLSMainConnectionID()) })
-    }
+    pub fn cur_space() -> SpaceId { SpaceId(unsafe { CGSGetActiveSpace(SLSMainConnectionID()) }) }
 
     pub fn visible_spaces() -> CFRetained<CFArray<SpaceId>> {
         unsafe {
