@@ -426,6 +426,10 @@ impl LayoutSystem for TraditionalLayoutSystem {
         }
     }
 
+    fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
+        self.window_in_direction_from(self.root(layout), direction)
+    }
+
     fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId) {
         let selection = self.selection(layout);
         let node = if selection.parent(self.map()).is_none() {
@@ -1122,6 +1126,26 @@ impl TraditionalLayoutSystem {
     }
 
     fn window_at(&self, node: NodeId) -> Option<WindowId> { self.tree.data.window.at(node) }
+
+    fn window_in_direction_from(&self, node: NodeId, direction: Direction) -> Option<WindowId> {
+        if let Some(window) = self.window_at(node) {
+            return Some(window);
+        }
+
+        let mut children: Vec<_> = node.children(self.map()).collect();
+        match direction {
+            Direction::Left | Direction::Up => children.reverse(),
+            Direction::Right | Direction::Down => {}
+        }
+
+        for child in children {
+            if let Some(window) = self.window_in_direction_from(child, direction) {
+                return Some(window);
+            }
+        }
+
+        None
+    }
 
     fn rebalance_node(&mut self, node: NodeId) {
         let map = &self.tree.map;
@@ -2181,6 +2205,35 @@ mod tests {
 
     use super::*;
     use crate::layout_engine::{Direction, LayoutKind};
+
+    fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
+
+    #[test]
+    fn window_in_direction_prefers_leftmost_when_moving_right() {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+
+        assert_eq!(system.window_in_direction(layout, Direction::Right), Some(w(1)));
+        assert_eq!(system.window_in_direction(layout, Direction::Left), Some(w(2)));
+    }
+
+    #[test]
+    fn window_in_direction_prefers_top_for_down_direction_after_orientation_toggle() {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+        system.toggle_tile_orientation(layout);
+
+        assert_eq!(system.window_in_direction(layout, Direction::Down), Some(w(1)));
+        assert_eq!(system.window_in_direction(layout, Direction::Up), Some(w(2)));
+    }
 
     struct TestTraditionalLayoutSystem {
         system: TraditionalLayoutSystem,
