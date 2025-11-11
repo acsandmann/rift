@@ -8,5 +8,6 @@ let
   };
 in
 {
-  rift = packageModule.packages.default;
+  rift = packageModule.packages.rift;
+  rift-bin = packageModule.packages.rift-bin;
 }
