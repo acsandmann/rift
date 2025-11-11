@@ -2,3 +2,5 @@ dev
 target
 rift.toml
 src/bin/dev.rs
+# Jetbrains IDE files
+.idea

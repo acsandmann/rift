@@ -1,6 +1,12 @@
 // many ideas for how this works were taken from https://github.com/xiamaz/YabaiIndicator
 use std::cell::RefCell;
+use std::ffi::c_void;
 
+use core_foundation::attributed_string::CFMutableAttributedString;
+use core_foundation::base::TCFType;
+use core_foundation::string::CFString;
+use core_text::line::CTLine;
+use core_text::string_attributes::kCTFontAttributeName;
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
@@ -56,6 +62,7 @@ impl MenuIcon {
         _active_workspace: Option<VirtualWorkspaceId>,
         _windows: Vec<WindowData>,
         show_all_workspaces: bool,
+        show_workspace_numbers: bool,
     ) {
         let ws_to_render: Vec<&WorkspaceData> = if show_all_workspaces {
             workspaces.iter().collect()
@@ -69,7 +76,7 @@ impl MenuIcon {
             return;
         }
 
-        let layout = build_layout(&ws_to_render);
+        let layout = build_layout(&ws_to_render, show_workspace_numbers);
         let size = NSSize::new(layout.total_width, layout.total_height);
         self.view.set_layout(layout);
 
@@ -113,6 +120,7 @@ struct WorkspaceRenderData {
     bg_rect: CGRect,
     fill_alpha: f64,
     windows: Vec<WindowRenderRect>,
+    workspace_number: Option<usize>,
 }
 
 struct WindowRenderRect {
@@ -122,7 +130,7 @@ struct WindowRenderRect {
     height: f64,
 }
 
-fn build_layout(ws_to_render: &[&WorkspaceData]) -> MenuIconLayout {
+fn build_layout(ws_to_render: &[&WorkspaceData], show_workspace_numbers: bool) -> MenuIconLayout {
     let count = ws_to_render.len();
     let total_width =
         (CELL_WIDTH * count as f64) + (CELL_SPACING * (count.saturating_sub(1) as f64));
@@ -142,7 +150,13 @@ fn build_layout(ws_to_render: &[&WorkspaceData]) -> MenuIconLayout {
             0.0
         };
 
-        let windows = if ws.windows.is_empty() {
+        let workspace_number = if show_workspace_numbers {
+            Some(ws.index + 1) // Use 1-based indexing for display
+        } else {
+            None
+        };
+
+        let windows = if show_workspace_numbers || ws.windows.is_empty() {
             Vec::new()
         } else {
             let min_x = ws.windows.iter().map(|w| w.frame.origin.x).fold(f64::INFINITY, f64::min);
@@ -217,7 +231,12 @@ fn build_layout(ws_to_render: &[&WorkspaceData]) -> MenuIconLayout {
             rects
         };
 
-        workspaces.push(WorkspaceRenderData { bg_rect, fill_alpha, windows });
+        workspaces.push(WorkspaceRenderData {
+            bg_rect,
+            fill_alpha,
+            windows,
+            workspace_number,
+        });
     }
 
     MenuIconLayout {
@@ -287,25 +306,73 @@ define_class!(
                     CGContext::set_line_width(Some(cg), BORDER_WIDTH);
                     CGContext::stroke_path(Some(cg));
 
-                    for window in workspace.windows.iter() {
-                        add_rounded_rect(
-                            cg,
-                            window.x,
-                            window.y + y_offset,
-                            window.width,
-                            window.height,
-                            1.5,
-                        );
-                        CGContext::set_rgb_fill_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
-                        CGContext::fill_path(Some(cg));
-
+                    if let Some(num) = workspace.workspace_number {
                         CGContext::save_g_state(Some(cg));
-                        CGContext::set_blend_mode(Some(cg), CGBlendMode::DestinationOut);
-                        CGContext::set_rgb_stroke_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
-                        CGContext::set_line_width(Some(cg), 1.5);
-                        add_rounded_rect(cg, window.x, window.y, window.width, window.height, 1.5);
-                        CGContext::stroke_path(Some(cg));
+
+                        // Create attributed string with Core Text
+                        let num_str = num.to_string();
+                        let cf_string = CFString::new(&num_str);
+
+                        // Create font (using system font)
+                        let font_size = 10.0;
+                        let font = core_text::font::new_from_name("Helvetica", font_size).unwrap();
+
+                        // Create mutable attributed string
+                        let mut attr_string = CFMutableAttributedString::new();
+                        attr_string.replace_str(&cf_string, core_foundation::base::CFRange::init(0, 0));
+
+                        // Set font attribute
+                        let str_len = attr_string.char_len();
+                        unsafe {
+                            attr_string.set_attribute(
+                                core_foundation::base::CFRange::init(0, str_len),
+                                kCTFontAttributeName as *const c_void as *const _,
+                                &font,
+                            );
+                        }
+
+                        // Create line from attributed string
+                        let line = CTLine::new_with_attributed_string(attr_string.as_concrete_TypeRef());
+
+                        // Get text bounds for centering
+                        let bounds = line.get_typographic_bounds();
+                        let text_width = bounds.width;
+                        let text_height = bounds.ascent + bounds.descent;
+
+                        // Calculate centered position
+                        let text_x = rect.origin.x + (rect.size.width - text_width) / 2.0;
+                        let text_y = bg_y + (rect.size.height - text_height) / 2.0 + bounds.descent;
+
+                        // Draw the text - convert to core_graphics::CGContext
+                        CGContext::set_text_position(Some(cg), text_x, text_y);
+                        unsafe {
+                            let cg_ptr = cg as *const _ as *mut core_graphics::sys::CGContext;
+                            let cg_context = core_graphics::context::CGContext::from_existing_context_ptr(cg_ptr);
+                            line.draw(&cg_context);
+                        }
+
                         CGContext::restore_g_state(Some(cg));
+                    } else {
+                        for window in workspace.windows.iter() {
+                            add_rounded_rect(
+                                cg,
+                                window.x,
+                                window.y + y_offset,
+                                window.width,
+                                window.height,
+                                1.5,
+                            );
+                            CGContext::set_rgb_fill_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
+                            CGContext::fill_path(Some(cg));
+
+                            CGContext::save_g_state(Some(cg));
+                            CGContext::set_blend_mode(Some(cg), CGBlendMode::DestinationOut);
+                            CGContext::set_rgb_stroke_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
+                            CGContext::set_line_width(Some(cg), 1.5);
+                            add_rounded_rect(cg, window.x, window.y, window.width, window.height, 1.5);
+                            CGContext::stroke_path(Some(cg));
+                            CGContext::restore_g_state(Some(cg));
+                        }
                     }
                 }
 

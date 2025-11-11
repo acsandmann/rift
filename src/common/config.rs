@@ -422,6 +422,9 @@ pub struct MenuBarSettings {
     pub enabled: bool,
     #[serde(default = "no")]
     pub show_empty: bool,
+    /// If true, show workspace numbers instead of window layout previews
+    #[serde(default = "no")]
+    pub show_workspace_numbers: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]

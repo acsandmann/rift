@@ -134,6 +134,14 @@ impl Menu {
         self.last_signature = Some(sig);
 
         let show_all = self.config.settings.ui.menu_bar.show_empty;
-        icon.update(active_space, workspaces, active_workspace, windows, show_all);
+        let show_numbers = self.config.settings.ui.menu_bar.show_workspace_numbers;
+        icon.update(
+            active_space,
+            workspaces,
+            active_workspace,
+            windows,
+            show_all,
+            show_numbers,
+        );
     }
 }
