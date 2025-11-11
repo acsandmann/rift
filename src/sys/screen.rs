@@ -151,6 +151,24 @@ impl Default for CoordinateConverter {
 }
 
 impl CoordinateConverter {
+    pub fn from_height(height: f64) -> Self {
+        Self { screen_height: height }
+    }
+
+    pub fn from_screen(screen: &NSScreen) -> Option<Self> {
+        let screen_id = screen.get_number().ok()?;
+        let bounds = CGDisplayBounds(screen_id.as_u32());
+        Some(Self::from_height(bounds.origin.y + bounds.size.height))
+    }
+
+    pub fn screen_height(&self) -> Option<f64> {
+        if self.screen_height.is_nan() {
+            None
+        } else {
+            Some(self.screen_height)
+        }
+    }
+
     pub fn convert_point(&self, point: CGPoint) -> Option<CGPoint> {
         if self.screen_height.is_nan() {
             return None;
