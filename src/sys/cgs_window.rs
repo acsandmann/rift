@@ -1,7 +1,7 @@
 use std::fmt;
 use std::ptr::{self, NonNull};
 
-use objc2_core_foundation::{CFNumber, CFRetained, CFString, CFType, CGRect, Type};
+use objc2_core_foundation::{CFNumber, CFRetained, CFString, CFType, CGPoint, CGRect, Type};
 use objc2_core_graphics::CGError;
 
 use super::skylight::{
@@ -174,12 +174,14 @@ impl CgsWindow {
     #[inline]
     pub fn set_shape(&self, frame: CGRect) -> Result<(), CgsWindowError> {
         unsafe {
-            let region = CFRegion::from_rect(&frame).map_err(CgsWindowError::Region)?;
+            let offset = frame.origin;
+            let size_rect = CGRect::new(CGPoint::new(0.0, 0.0), frame.size);
+            let region = CFRegion::from_rect(&size_rect).map_err(CgsWindowError::Region)?;
             cg_ok(SLSSetWindowShape(
                 self.connection,
                 self.id,
-                0.0,
-                0.0,
+                offset.x as f32,
+                offset.y as f32,
                 region.as_ptr(),
             ))
             .map_err(CgsWindowError::Shape)
