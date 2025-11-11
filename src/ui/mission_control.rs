@@ -10,7 +10,7 @@ use dispatchr::time::Time;
 use objc2::msg_send;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::AnyObject;
-use objc2_app_kit::{NSApplication, NSColor, NSPopUpMenuWindowLevel};
+use objc2_app_kit::{NSApplication, NSColor, NSEvent, NSPopUpMenuWindowLevel, NSScreen};
 use objc2_core_foundation::{CFRetained, CFString, CFType, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
     CGColor, CGContext, CGEvent, CGEventField, CGEventTapOptions, CGEventTapProxy, CGEventType,
@@ -27,6 +27,7 @@ use crate::common::config::Config;
 use crate::model::server::{WindowData, WorkspaceData};
 use crate::sys::cgs_window::CgsWindow;
 use crate::sys::dispatch::DispatchExt;
+use crate::sys::geometry::CGRectExt;
 use crate::sys::skylight::{
     CFRelease, G_CONNECTION, SLSFlushWindowContentRegion, SLWindowContextCreate,
 };
@@ -1536,17 +1537,34 @@ impl MissionControlOverlay {
 
     pub fn set_fade_duration_ms(&mut self, ms: f64) { self.fade_duration_ms = ms.max(0.0); }
 
+    fn screen_under_cursor(&self) -> Option<(CGRect, f64)> {
+        let cursor = NSEvent::mouseLocation();
+        let screens = NSScreen::screens(self.mtm);
+        for screen in screens.iter() {
+            let frame = screen.frame();
+            if frame.contains(cursor) {
+                return Some((frame, screen.backingScaleFactor()));
+            }
+        }
+        None
+    }
+
+    fn main_screen_geometry(&self) -> Option<(CGRect, f64)> {
+        NSScreen::mainScreen(self.mtm).map(|screen| (screen.frame(), screen.backingScaleFactor()))
+    }
+
+    fn current_screen_geometry(&self) -> (CGRect, f64) {
+        self.screen_under_cursor()
+            .or_else(|| self.main_screen_geometry())
+            .unwrap_or((self.frame, self.scale))
+    }
+
     pub fn update(&self, mode: MissionControlMode) {
         self.stop_active_fade();
         *self.pending_hide.borrow_mut() = false;
 
         {
-            let (new_frame, new_scale) =
-                if let Some(screen) = objc2_app_kit::NSScreen::mainScreen(self.mtm) {
-                    (screen.frame(), screen.backingScaleFactor())
-                } else {
-                    (self.frame, self.scale)
-                };
+            let (new_frame, new_scale) = self.current_screen_geometry();
 
             let frame_changed = new_frame.origin.x != self.frame.origin.x
                 || new_frame.origin.y != self.frame.origin.y
