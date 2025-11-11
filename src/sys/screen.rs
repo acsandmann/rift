@@ -1,6 +1,5 @@
 use std::f64;
 use std::mem::MaybeUninit;
-use std::num::NonZeroU64;
 use std::ptr::NonNull;
 
 use objc2::rc::Retained;
@@ -21,12 +20,16 @@ use super::skylight::{
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[repr(transparent)]
-pub struct SpaceId(NonZeroU64);
+pub struct SpaceId(u64);
 
 impl SpaceId {
-    pub fn new(id: u64) -> SpaceId { SpaceId(NonZeroU64::new(id).unwrap()) }
+    pub fn new(id: u64) -> SpaceId { SpaceId(id) }
 
-    pub fn get(&self) -> u64 { self.0.get() }
+    pub fn get(&self) -> u64 { self.0 }
+}
+
+impl Into<u64> for SpaceId {
+	fn into(self) -> u64 { self.get() }
 }
 
 impl ToString for SpaceId {
@@ -127,7 +130,7 @@ impl<S: System> ScreenCache<S> {
                     CFRetained::<objc2_core_foundation::CFString>::as_ptr(&screen).as_ptr(),
                 )
             })
-            .map(|id| Some(SpaceId(NonZeroU64::new(id)?)))
+            .map(|id| Some(SpaceId(id)))
             .collect()
     }
 }
@@ -313,7 +316,7 @@ pub mod diagnostic {
     use super::*;
 
     pub fn cur_space() -> SpaceId {
-        SpaceId(NonZeroU64::new(unsafe { CGSGetActiveSpace(SLSMainConnectionID()) }).unwrap())
+        SpaceId(unsafe { CGSGetActiveSpace(SLSMainConnectionID()) })
     }
 
     pub fn visible_spaces() -> CFRetained<CFArray<SpaceId>> {
