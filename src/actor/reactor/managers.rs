@@ -191,19 +191,18 @@ impl LayoutManager {
         Self::apply_layout(reactor, layout_result, is_resize, is_workspace_switch)
     }
 
-    fn calculate_layout(reactor: &Reactor) -> LayoutResult {
+    fn calculate_layout(reactor: &mut Reactor) -> LayoutResult {
         let screens = reactor.space_manager.screens.clone();
-        // let mut layout_result = Vec::new();
         let mut layout_result = LayoutResult::new();
 
         for screen in screens {
             let Some(space) = reactor.space_manager.space_for_screen(&screen) else {
                 continue;
             };
-            let display_uuid = if screen.display_uuid.is_empty() {
+            let display_uuid_opt = if screen.display_uuid.is_empty() {
                 None
             } else {
-                Some(screen.display_uuid.as_str())
+                Some(screen.display_uuid.clone())
             };
             let gaps = reactor
                 .config_manager
@@ -211,7 +210,11 @@ impl LayoutManager {
                 .settings
                 .layout
                 .gaps
-                .effective_for_display(display_uuid);
+                .effective_for_display(display_uuid_opt.as_deref());
+            reactor
+                .layout_manager
+                .layout_engine
+                .update_space_display(space, display_uuid_opt.clone());
             let layout =
                 reactor.layout_manager.layout_engine.calculate_layout_with_virtual_workspaces(
                     space,

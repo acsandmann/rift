@@ -1,8 +1,9 @@
+use std::cmp::Ordering;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
-use objc2_core_foundation::{CGRect, CGSize};
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
@@ -104,6 +105,8 @@ pub struct LayoutEngine {
     layout_settings: LayoutSettings,
     #[serde(skip)]
     broadcast_tx: Option<BroadcastSender>,
+    #[serde(skip)]
+    space_display_map: HashMap<SpaceId, Option<String>>,
 }
 
 impl LayoutEngine {
@@ -182,23 +185,11 @@ impl LayoutEngine {
         &mut self,
         space: SpaceId,
         visible_spaces: &[SpaceId],
+        visible_space_centers: &HashMap<SpaceId, CGPoint>,
         direction: Direction,
         is_floating: bool,
     ) -> EventResponse {
         let layout = self.layout(space);
-
-        let next_space = |direction| {
-            if visible_spaces.len() <= 1 {
-                return None;
-            }
-            let idx = visible_spaces.iter().enumerate().find(|(_, s)| **s == space)?.0;
-            let idx = match direction {
-                Direction::Left | Direction::Up => idx as i32 - 1,
-                Direction::Right | Direction::Down => idx as i32 + 1,
-            };
-            let idx = idx.rem_euclid(visible_spaces.len() as i32);
-            Some(visible_spaces[idx as usize])
-        };
 
         if is_floating {
             let floating_windows = self.active_floating_windows_flat(space);
@@ -277,7 +268,12 @@ impl LayoutEngine {
         if focus_window.is_some() {
             EventResponse { focus_window, raise_windows }
         } else {
-            if let Some(new_space) = next_space(direction) {
+            if let Some(new_space) = self.next_space_for_direction(
+                space,
+                direction,
+                visible_spaces,
+                visible_space_centers,
+            ) {
                 let new_layout = self.layout(new_space);
                 let windows_in_new_space = self.tree.visible_windows_in_layout(new_layout);
                 if let Some(target_window) = self
@@ -304,6 +300,73 @@ impl LayoutEngine {
             }
 
             EventResponse::default()
+        }
+    }
+
+    fn next_space_for_direction(
+        &self,
+        current_space: SpaceId,
+        direction: Direction,
+        visible_spaces: &[SpaceId],
+        space_centers: &HashMap<SpaceId, CGPoint>,
+    ) -> Option<SpaceId> {
+        if visible_spaces.len() <= 1 {
+            return None;
+        }
+
+        let current_center = space_centers.get(&current_space)?;
+        let mut candidates = Vec::new();
+        for &candidate_space in visible_spaces {
+            if candidate_space == current_space {
+                continue;
+            }
+            if let Some(candidate_center) = space_centers.get(&candidate_space) {
+                if let Some(delta) =
+                    Self::directional_delta(direction, current_center, candidate_center)
+                {
+                    candidates.push((candidate_space, delta));
+                }
+            }
+        }
+
+        if !candidates.is_empty() {
+            candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
+            return Some(candidates[0].0);
+        }
+
+        match direction {
+            Direction::Left => {
+                visible_spaces.iter().rev().copied().find(|&space| space != current_space)
+            }
+            Direction::Right => {
+                visible_spaces.iter().copied().find(|&space| space != current_space)
+            }
+            Direction::Up | Direction::Down => None,
+        }
+    }
+
+    fn directional_delta(
+        direction: Direction,
+        current: &CGPoint,
+        candidate: &CGPoint,
+    ) -> Option<f64> {
+        match direction {
+            Direction::Left => {
+                let delta = current.x - candidate.x;
+                if delta > 0.0 { Some(delta) } else { None }
+            }
+            Direction::Right => {
+                let delta = candidate.x - current.x;
+                if delta > 0.0 { Some(delta) } else { None }
+            }
+            Direction::Up => {
+                let delta = candidate.y - current.y;
+                if delta > 0.0 { Some(delta) } else { None }
+            }
+            Direction::Down => {
+                let delta = current.y - candidate.y;
+                if delta > 0.0 { Some(delta) } else { None }
+            }
         }
     }
 
@@ -337,6 +400,18 @@ impl LayoutEngine {
         Some((workspace_id, workspace_name))
     }
 
+    pub fn update_space_display(&mut self, space: SpaceId, display_uuid: Option<String>) {
+        if let Some(uuid) = display_uuid {
+            self.space_display_map.insert(space, Some(uuid));
+        } else {
+            self.space_display_map.remove(&space);
+        }
+    }
+
+    fn display_uuid_for_space(&self, space: SpaceId) -> Option<String> {
+        self.space_display_map.get(&space).and_then(|uuid| uuid.clone())
+    }
+
     pub fn new(
         virtual_workspace_config: &crate::common::config::VirtualWorkspaceSettings,
         layout_settings: &LayoutSettings,
@@ -362,6 +437,7 @@ impl LayoutEngine {
             virtual_workspace_manager,
             layout_settings: layout_settings.clone(),
             broadcast_tx,
+            space_display_map: HashMap::default(),
         }
     }
 
@@ -601,6 +677,7 @@ impl LayoutEngine {
         &mut self,
         space: Option<SpaceId>,
         visible_spaces: &[SpaceId],
+        visible_space_centers: &HashMap<SpaceId, CGPoint>,
         command: LayoutCommand,
     ) -> EventResponse {
         if let Some(space) = space {
@@ -694,19 +771,6 @@ impl LayoutEngine {
             }
         }
 
-        let next_space = |direction| {
-            if visible_spaces.len() <= 1 {
-                return None;
-            }
-            let idx = visible_spaces.iter().enumerate().find(|(_, s)| **s == space)?.0;
-            let idx = match direction {
-                Direction::Left | Direction::Up => idx as i32 - 1,
-                Direction::Right | Direction::Down => idx as i32 + 1,
-            };
-            let idx = idx.rem_euclid(visible_spaces.len() as i32);
-            Some(visible_spaces[idx as usize])
-        };
-
         match command {
             LayoutCommand::ToggleWindowFloating => unreachable!(),
             LayoutCommand::ToggleFocusFloating => unreachable!(),
@@ -718,22 +782,32 @@ impl LayoutEngine {
                 EventResponse::default()
             }
 
-            LayoutCommand::NextWindow => {
-                self.move_focus_internal(space, visible_spaces, Direction::Left, is_floating)
-            }
-            LayoutCommand::PrevWindow => {
-                self.move_focus_internal(space, visible_spaces, Direction::Right, is_floating)
-            }
+            LayoutCommand::NextWindow => self.move_focus_internal(
+                space,
+                visible_spaces,
+                visible_space_centers,
+                Direction::Left,
+                is_floating,
+            ),
+            LayoutCommand::PrevWindow => self.move_focus_internal(
+                space,
+                visible_spaces,
+                visible_space_centers,
+                Direction::Right,
+                is_floating,
+            ),
             LayoutCommand::MoveFocus(direction) => {
                 debug!(
                     "MoveFocus command received, direction: {:?}, is_floating: {}",
                     direction, is_floating
                 );
-                if is_floating {
-                    return self.move_focus_internal(space, visible_spaces, direction, true);
-                } else {
-                    return self.move_focus_internal(space, visible_spaces, direction, false);
-                }
+                return self.move_focus_internal(
+                    space,
+                    visible_spaces,
+                    visible_space_centers,
+                    direction,
+                    is_floating,
+                );
             }
             LayoutCommand::Ascend => {
                 if is_floating {
@@ -749,7 +823,12 @@ impl LayoutEngine {
             LayoutCommand::MoveNode(direction) => {
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
                 if !self.tree.move_selection(layout, direction) {
-                    if let Some(new_space) = next_space(direction) {
+                    if let Some(new_space) = self.next_space_for_direction(
+                        space,
+                        direction,
+                        visible_spaces,
+                        visible_space_centers,
+                    ) {
                         let new_layout = self.layout(new_space);
                         self.tree.move_selection_to_layout_after_selection(layout, new_layout);
                     }
@@ -1485,5 +1564,60 @@ impl LayoutEngine {
         } else {
             true
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use objc2_core_foundation::CGPoint;
+
+    use super::*;
+    use crate::common::collections::HashMap;
+    use crate::common::config::{LayoutSettings, VirtualWorkspaceSettings};
+
+    fn test_engine() -> LayoutEngine {
+        LayoutEngine::new(
+            &VirtualWorkspaceSettings::default(),
+            &LayoutSettings::default(),
+            None,
+        )
+    }
+
+    fn build_three_spaces() -> (
+        Vec<SpaceId>,
+        HashMap<SpaceId, CGPoint>,
+        SpaceId,
+        SpaceId,
+        SpaceId,
+    ) {
+        let left = SpaceId::new(1);
+        let right = SpaceId::new(2);
+        let middle = SpaceId::new(3);
+
+        let mut centers = HashMap::default();
+        centers.insert(left, CGPoint::new(0.0, 0.0));
+        centers.insert(right, CGPoint::new(4000.0, 0.0));
+        centers.insert(middle, CGPoint::new(2000.0, 0.0));
+
+        (vec![left, right, middle], centers, left, middle, right)
+    }
+
+    #[test]
+    fn next_space_for_direction_respects_physical_layout() {
+        let engine = test_engine();
+        let (visible_spaces, centers, left, middle, right) = build_three_spaces();
+
+        assert_eq!(
+            engine.next_space_for_direction(middle, Direction::Right, &visible_spaces, &centers),
+            Some(right)
+        );
+        assert_eq!(
+            engine.next_space_for_direction(middle, Direction::Left, &visible_spaces, &centers),
+            Some(left)
+        );
+        assert_eq!(
+            engine.next_space_for_direction(middle, Direction::Up, &visible_spaces, &centers),
+            None
+        );
     }
 }
