@@ -282,6 +282,10 @@ impl SpaceEventHandler {
         } else {
             StaleCleanupState::Enabled
         };
+        if spaces_all_none {
+            trace!("Space change has no active screens; skipping");
+            return;
+        }
         if spaces.len() != reactor.space_manager.screens.len() {
             warn!(
                 "Deferring space change: have {} screens but {} spaces",
