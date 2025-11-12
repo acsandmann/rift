@@ -2025,10 +2025,6 @@ impl Reactor {
     }
 
     fn workspace_command_space(&self) -> Option<SpaceId> {
-        if let Some(space) = self.main_window_space() {
-            return Some(space);
-        }
-
         if let Ok(point) = current_cursor_location() {
             if let Some(screen) =
                 self.space_manager.screens.iter().find(|screen| screen.frame.contains(point))
@@ -2039,6 +2035,10 @@ impl Reactor {
                     return Some(space);
                 }
             }
+        }
+
+        if let Some(space) = self.main_window_space() {
+            return Some(space);
         }
 
         if let Some(space) = get_active_space_number() {
