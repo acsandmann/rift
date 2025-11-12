@@ -1585,6 +1585,18 @@ impl Reactor {
                     }
                 } else if self.focus_untracked_window_under_cursor() {
                     handled_without_raise = true;
+                } else {
+                    if let Some(space) = self.workspace_command_space() {
+                        if let Some(screen) = self.space_manager.screen_by_space(space) {
+                            let center = screen.frame.mid();
+                            if let Some(event_tap_tx) =
+                                self.communication_manager.event_tap_tx.as_ref()
+                            {
+                                event_tap_tx.send(crate::actor::event_tap::Request::Warp(center));
+                                handled_without_raise = true;
+                            }
+                        }
+                    }
                 }
             } else if let Some(space) = pending_refocus_space.take() {
                 if let Some(wid) = self.last_focused_window_in_space(space) {
@@ -1594,6 +1606,13 @@ impl Reactor {
                         focus_window = Some(wid);
                     } else if self.focus_untracked_window_under_cursor() {
                         handled_without_raise = true;
+                    } else if let Some(screen) = self.space_manager.screen_by_space(space) {
+                        let center = screen.frame.mid();
+                        if let Some(event_tap_tx) = self.communication_manager.event_tap_tx.as_ref()
+                        {
+                            event_tap_tx.send(crate::actor::event_tap::Request::Warp(center));
+                            handled_without_raise = true;
+                        }
                     }
                 }
             }
