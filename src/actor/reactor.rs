@@ -1609,12 +1609,10 @@ impl Reactor {
                     } else if let Some(space) =
                         self.best_space_for_window(&state.frame_monotonic, state.window_server_id)
                     {
-                        if let Some(active_space) =
-                            self.space_manager.screens.iter().flat_map(|s| s.space).next()
-                        {
-                            if space != active_space {
-                                focus_window = None;
-                            }
+                        let active_spaces: std::collections::HashSet<_> =
+                            self.space_manager.screens.iter().filter_map(|s| s.space).collect();
+                        if !active_spaces.contains(&space) {
+                            focus_window = None;
                         }
                     } else {
                         focus_window = None;
