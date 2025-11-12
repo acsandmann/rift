@@ -61,11 +61,14 @@ impl Reactor {
 
         let workspaces = self.handle_workspace_query().workspaces;
         let active_workspace = self.layout_manager.layout_engine.active_workspace(active_space);
+        let active_workspace_idx =
+            self.layout_manager.layout_engine.active_workspace_idx(active_space);
         let windows = self.handle_windows_query(Some(active_space));
 
         let _ = menu_tx.send(menu_bar::Event::Update {
             active_space,
             workspaces,
+            active_workspace_idx,
             active_workspace,
             windows,
         });

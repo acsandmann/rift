@@ -1346,6 +1346,10 @@ impl LayoutEngine {
         self.virtual_workspace_manager.active_workspace(space)
     }
 
+    pub fn active_workspace_idx(&self, space: SpaceId) -> Option<u64> {
+        self.virtual_workspace_manager.active_workspace_idx(space)
+    }
+
     pub fn workspace_name(
         &self,
         space: SpaceId,
