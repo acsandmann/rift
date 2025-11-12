@@ -125,6 +125,13 @@ enabled = false
 # if enabled, it will show all workspaces including empty ones. disabled because this
 # tends to take up too much room in the menubar and then is auto hidden by macos
 show_empty = false
+# display mode for workspace indicators
+# - "layout": show window layout previews (default)
+# For workspace numbers without offset (defaults to 0):
+# display_mode = { workspace_numbers = {} }
+# For workspace numbers with offset:
+# display_mode = { workspace_numbers = { offset = 1 } }
+display_mode = "layout"
 
 [settings.ui.stack_line]
 # experimental stack line indicator (defaults to off)

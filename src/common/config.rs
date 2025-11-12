@@ -416,12 +416,26 @@ pub struct WindowSnappingSettings {
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MenuBarDisplayMode {
+    #[default]
+    Layout,
+    #[serde(rename_all = "snake_case")]
+    WorkspaceNumbers {
+        #[serde(default)]
+        offset: usize,
+    },
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct MenuBarSettings {
     #[serde(default = "no")]
     pub enabled: bool,
     #[serde(default = "no")]
     pub show_empty: bool,
+    #[serde(default)]
+    pub display_mode: MenuBarDisplayMode,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]

@@ -93,7 +93,15 @@ impl Menu {
         self.last_signature = Some(sig);
 
         let show_all = self.config.settings.ui.menu_bar.show_empty;
-        icon.update(active_space, workspaces, active_workspace, windows, show_all);
+        let display_mode = &self.config.settings.ui.menu_bar.display_mode;
+        icon.update(
+            active_space,
+            workspaces,
+            active_workspace,
+            windows,
+            show_all,
+            display_mode,
+        );
     }
 }
 

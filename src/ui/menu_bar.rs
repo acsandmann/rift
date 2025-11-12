@@ -2,15 +2,17 @@
 use std::cell::RefCell;
 
 use objc2::rc::Retained;
-use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send};
+use objc2::runtime::AnyObject;
+use objc2::{DefinedClass, MainThreadOnly, class, define_class, msg_send};
 use objc2_app_kit::{
-    NSGraphicsContext, NSStatusBar, NSStatusItem, NSVariableStatusItemLength, NSView,
+    NSFont, NSGraphicsContext, NSStatusBar, NSStatusItem, NSVariableStatusItemLength, NSView,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGBlendMode, CGContext};
-use objc2_foundation::{MainThreadMarker, NSRect, NSSize};
+use objc2_foundation::{MainThreadMarker, NSRect, NSSize, NSString, ns_string};
 use tracing::debug;
 
+use crate::common::config::MenuBarDisplayMode;
 use crate::model::VirtualWorkspaceId;
 use crate::model::server::{WindowData, WorkspaceData};
 use crate::sys::screen::SpaceId;
@@ -56,6 +58,7 @@ impl MenuIcon {
         _active_workspace: Option<VirtualWorkspaceId>,
         _windows: Vec<WindowData>,
         show_all_workspaces: bool,
+        display_mode: &MenuBarDisplayMode,
     ) {
         let ws_to_render: Vec<&WorkspaceData> = if show_all_workspaces {
             workspaces.iter().collect()
@@ -69,7 +72,7 @@ impl MenuIcon {
             return;
         }
 
-        let layout = build_layout(&ws_to_render);
+        let layout = build_layout(&ws_to_render, display_mode);
         let size = NSSize::new(layout.total_width, layout.total_height);
         self.view.set_layout(layout);
 
@@ -102,6 +105,12 @@ impl Drop for MenuIcon {
     }
 }
 
+#[derive(PartialEq)]
+enum WorkspaceRenderMode {
+    WorkspaceNumber(usize),
+    Layout(Vec<WindowRenderRect>),
+}
+
 #[derive(Default)]
 struct MenuIconLayout {
     total_width: f64,
@@ -112,9 +121,10 @@ struct MenuIconLayout {
 struct WorkspaceRenderData {
     bg_rect: CGRect,
     fill_alpha: f64,
-    windows: Vec<WindowRenderRect>,
+    mode: WorkspaceRenderMode,
 }
 
+#[derive(PartialEq)]
 struct WindowRenderRect {
     x: f64,
     y: f64,
@@ -122,7 +132,7 @@ struct WindowRenderRect {
     height: f64,
 }
 
-fn build_layout(ws_to_render: &[&WorkspaceData]) -> MenuIconLayout {
+fn build_layout(ws_to_render: &[&WorkspaceData], mode: &MenuBarDisplayMode) -> MenuIconLayout {
     let count = ws_to_render.len();
     let total_width =
         (CELL_WIDTH * count as f64) + (CELL_SPACING * (count.saturating_sub(1) as f64));
@@ -142,7 +152,7 @@ fn build_layout(ws_to_render: &[&WorkspaceData]) -> MenuIconLayout {
             0.0
         };
 
-        let windows = if ws.windows.is_empty() {
+        let windows = if mode != &MenuBarDisplayMode::Layout || ws.windows.is_empty() {
             Vec::new()
         } else {
             let min_x = ws.windows.iter().map(|w| w.frame.origin.x).fold(f64::INFINITY, f64::min);
@@ -217,7 +227,16 @@ fn build_layout(ws_to_render: &[&WorkspaceData]) -> MenuIconLayout {
             rects
         };
 
-        workspaces.push(WorkspaceRenderData { bg_rect, fill_alpha, windows });
+        workspaces.push(WorkspaceRenderData {
+            bg_rect,
+            fill_alpha,
+            mode: match mode {
+                MenuBarDisplayMode::WorkspaceNumbers { offset } => {
+                    WorkspaceRenderMode::WorkspaceNumber(ws.index + offset)
+                }
+                MenuBarDisplayMode::Layout => WorkspaceRenderMode::Layout(windows),
+            },
+        });
     }
 
     MenuIconLayout {
@@ -287,25 +306,69 @@ define_class!(
                     CGContext::set_line_width(Some(cg), BORDER_WIDTH);
                     CGContext::stroke_path(Some(cg));
 
-                    for window in workspace.windows.iter() {
-                        add_rounded_rect(
-                            cg,
-                            window.x,
-                            window.y + y_offset,
-                            window.width,
-                            window.height,
-                            1.5,
-                        );
-                        CGContext::set_rgb_fill_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
-                        CGContext::fill_path(Some(cg));
+                    match &workspace.mode {
+                        WorkspaceRenderMode::WorkspaceNumber(num) => {
+                            CGContext::save_g_state(Some(cg));
 
-                        CGContext::save_g_state(Some(cg));
-                        CGContext::set_blend_mode(Some(cg), CGBlendMode::DestinationOut);
-                        CGContext::set_rgb_stroke_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
-                        CGContext::set_line_width(Some(cg), 1.5);
-                        add_rounded_rect(cg, window.x, window.y, window.width, window.height, 1.5);
-                        CGContext::stroke_path(Some(cg));
-                        CGContext::restore_g_state(Some(cg));
+                            let ns_string = NSString::from_str(&num.to_string());
+                            let font = NSFont::fontWithName_size(ns_string!("Helvetica"), 10.0);
+
+                            if let Some(font) = font {
+                                let font_key = ns_string!("NSFont");
+                                let color_key = ns_string!("NSColor");
+                                let text_color = unsafe {
+                                    let cls = class!(NSColor);
+                                    let color: *mut AnyObject = msg_send![cls, blackColor];
+                                    color
+                                };
+
+                                let keys = vec![font_key.as_ref() as *const AnyObject, color_key.as_ref() as *const AnyObject];
+                                let values = vec![&*font as *const NSFont as *const AnyObject, text_color as *const AnyObject];
+
+                                let dict: *mut AnyObject = unsafe {
+                                    let cls = class!(NSDictionary);
+                                    msg_send![cls, dictionaryWithObjects: values.as_ptr(), forKeys: keys.as_ptr(), count: 2usize]
+                                };
+
+                                let text_size: NSSize = unsafe {
+                                    msg_send![&*ns_string, sizeWithAttributes: dict]
+                                };
+
+                                let text_x = rect.origin.x + (rect.size.width - text_size.width) / 2.0;
+                                // 1.5 y offset necessary to better account for text height.
+                                // dividing by 2 instead looks off-center.
+                                let text_y = bg_y + (rect.size.height - text_size.height) / 1.5;
+
+                                let point = CGPoint::new(text_x, text_y);
+                                unsafe {
+                                    let _: () = msg_send![&*ns_string, drawAtPoint: point, withAttributes: dict];
+                                }
+                            }
+
+                            CGContext::restore_g_state(Some(cg));
+                        }
+                        WorkspaceRenderMode::Layout(windows) => {
+                            for window in windows.iter() {
+                                add_rounded_rect(
+                                    cg,
+                                    window.x,
+                                    window.y + y_offset,
+                                    window.width,
+                                    window.height,
+                                    1.5,
+                                );
+                                CGContext::set_rgb_fill_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
+                                CGContext::fill_path(Some(cg));
+
+                                CGContext::save_g_state(Some(cg));
+                                CGContext::set_blend_mode(Some(cg), CGBlendMode::DestinationOut);
+                                CGContext::set_rgb_stroke_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
+                                CGContext::set_line_width(Some(cg), 1.5);
+                                add_rounded_rect(cg, window.x, window.y, window.width, window.height, 1.5);
+                                CGContext::stroke_path(Some(cg));
+                                CGContext::restore_g_state(Some(cg));
+                            }
+                        }
                     }
                 }
 
