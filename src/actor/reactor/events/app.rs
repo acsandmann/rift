@@ -97,7 +97,7 @@ impl AppEventHandler {
         }
     }
 
-    pub fn handle_application_globally_activated(reactor: &mut Reactor, pid: i32) {
+    pub fn handle_application_activated(reactor: &mut Reactor, pid: i32) {
         reactor.handle_app_activation_workspace_switch(pid);
     }
 

@@ -73,12 +73,8 @@ impl WindowDiscoveryHandler {
         let active_space_windows: Option<HashSet<WindowServerId>> = if skip_stale_cleanup {
             None
         } else {
-            let active_space_ids: Vec<u64> = reactor
-                .space_manager
-                .screens
-                .iter()
-                .flat_map(|screen| screen.space.map(|space| space.get()))
-                .collect();
+            let active_space_ids: Vec<u64> =
+                reactor.space_manager.iter_known_spaces().map(|space| space.get()).collect();
 
             if active_space_ids.is_empty() {
                 None
@@ -403,7 +399,9 @@ impl WindowDiscoveryHandler {
 
         let screens = reactor.space_manager.screens.clone();
         for screen in screens {
-            let Some(space) = screen.space else { continue };
+            let Some(space) = reactor.space_manager.space_for_screen(&screen) else {
+                continue;
+            };
             let windows_for_space = app_windows.remove(&space).unwrap_or_default();
 
             if !windows_for_space.is_empty() {

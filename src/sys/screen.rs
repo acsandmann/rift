@@ -1,6 +1,6 @@
+use std::cmp::Ordering;
 use std::f64;
 use std::mem::MaybeUninit;
-use std::num::NonZeroU64;
 use std::ptr::NonNull;
 
 use objc2::rc::Retained;
@@ -21,12 +21,16 @@ use super::skylight::{
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[repr(transparent)]
-pub struct SpaceId(NonZeroU64);
+pub struct SpaceId(u64);
 
 impl SpaceId {
-    pub fn new(id: u64) -> SpaceId { SpaceId(NonZeroU64::new(id).unwrap()) }
+    pub fn new(id: u64) -> SpaceId { SpaceId(id) }
 
-    pub fn get(&self) -> u64 { self.0.get() }
+    pub fn get(&self) -> u64 { self.0 }
+}
+
+impl Into<u64> for SpaceId {
+    fn into(self) -> u64 { self.get() }
 }
 
 impl ToString for SpaceId {
@@ -127,7 +131,7 @@ impl<S: System> ScreenCache<S> {
                     CFRetained::<objc2_core_foundation::CFString>::as_ptr(&screen).as_ptr(),
                 )
             })
-            .map(|id| Some(SpaceId(NonZeroU64::new(id)?)))
+            .map(|id| Some(SpaceId(id)))
             .collect()
     }
 }
@@ -147,6 +151,22 @@ impl Default for CoordinateConverter {
 }
 
 impl CoordinateConverter {
+    pub fn from_height(height: f64) -> Self { Self { screen_height: height } }
+
+    pub fn from_screen(screen: &NSScreen) -> Option<Self> {
+        let screen_id = screen.get_number().ok()?;
+        let bounds = CGDisplayBounds(screen_id.as_u32());
+        Some(Self::from_height(bounds.origin.y + bounds.size.height))
+    }
+
+    pub fn screen_height(&self) -> Option<f64> {
+        if self.screen_height.is_nan() {
+            None
+        } else {
+            Some(self.screen_height)
+        }
+    }
+
     pub fn convert_point(&self, point: CGPoint) -> Option<CGPoint> {
         if self.screen_height.is_nan() {
             return None;
@@ -312,9 +332,7 @@ pub mod diagnostic {
 
     use super::*;
 
-    pub fn cur_space() -> SpaceId {
-        SpaceId(NonZeroU64::new(unsafe { CGSGetActiveSpace(SLSMainConnectionID()) }).unwrap())
-    }
+    pub fn cur_space() -> SpaceId { SpaceId(unsafe { CGSGetActiveSpace(SLSMainConnectionID()) }) }
 
     pub fn visible_spaces() -> CFRetained<CFArray<SpaceId>> {
         unsafe {
@@ -346,6 +364,24 @@ pub mod diagnostic {
     }
 }
 
+pub fn order_visible_spaces_by_position(
+    spaces: impl IntoIterator<Item = (SpaceId, CGPoint)>,
+) -> Vec<SpaceId> {
+    let mut spaces: Vec<_> = spaces.into_iter().collect();
+
+    // order spaces by the physical screen coordinates (left-to-right, then bottom-to-top).
+    spaces.sort_by(|(_, a_center), (_, b_center)| {
+        let x_order = a_center.x.total_cmp(&b_center.x);
+        if x_order == Ordering::Equal {
+            a_center.y.total_cmp(&b_center.y)
+        } else {
+            x_order
+        }
+    });
+
+    spaces.into_iter().map(|(space, _)| space).collect()
+}
+
 #[cfg(test)]
 mod test {
     use std::cell::RefCell;
@@ -355,6 +391,7 @@ mod test {
     use objc2_core_graphics::CGError;
 
     use super::{CGScreenInfo, NSScreenInfo, ScreenCache, ScreenId, System};
+    use crate::sys::screen::{SpaceId, order_visible_spaces_by_position};
 
     struct Stub {
         cg_screens: Vec<CGScreenInfo>,
@@ -482,5 +519,28 @@ mod test {
         assert!(descriptors.is_empty());
         assert!(cache.uuids.is_empty());
         assert!(converter.convert_point(CGPoint::new(0.0, 0.0)).is_none());
+    }
+
+    #[test]
+    fn orders_spaces_by_horizontal_position() {
+        let spaces = vec![
+            (SpaceId::new(1), CGPoint::new(-500.0, 0.0)),
+            (SpaceId::new(2), CGPoint::new(0.0, 0.0)),
+            (SpaceId::new(3), CGPoint::new(500.0, 100.0)),
+        ];
+
+        let ordered = order_visible_spaces_by_position(spaces);
+        assert_eq!(ordered, vec![SpaceId::new(1), SpaceId::new(2), SpaceId::new(3)]);
+    }
+
+    #[test]
+    fn orders_spaces_by_vertical_position_when_aligned() {
+        let spaces = vec![
+            (SpaceId::new(10), CGPoint::new(0.0, -200.0)),
+            (SpaceId::new(11), CGPoint::new(0.0, 150.0)),
+        ];
+
+        let ordered = order_visible_spaces_by_position(spaces);
+        assert_eq!(ordered, vec![SpaceId::new(10), SpaceId::new(11)]);
     }
 }

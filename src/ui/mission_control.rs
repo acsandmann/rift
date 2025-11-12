@@ -9,10 +9,11 @@ use dispatchr::time::Time;
 use objc2::msg_send;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::AnyObject;
-use objc2_app_kit::{NSApplication, NSColor, NSPopUpMenuWindowLevel};
-use objc2_core_foundation::{CFType, CGPoint, CGRect, CGSize};
+use objc2_app_kit::{NSApplication, NSColor, NSEvent, NSPopUpMenuWindowLevel, NSScreen};
+use objc2_core_foundation::{CFRetained, CFString, CFType, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
-    CGColor, CGContext, CGEvent, CGEventField, CGEventTapOptions, CGEventTapProxy, CGEventType,
+    CGColor, CGContext, CGDisplayBounds, CGEvent, CGEventField, CGEventTapOptions, CGEventTapProxy,
+    CGEventType,
 };
 use objc2_foundation::MainThreadMarker;
 use objc2_quartz_core::{CALayer, CATextLayer, CATransaction};
@@ -26,6 +27,8 @@ use crate::common::config::Config;
 use crate::model::server::{WindowData, WorkspaceData};
 use crate::sys::cgs_window::CgsWindow;
 use crate::sys::dispatch::DispatchExt;
+use crate::sys::geometry::CGRectExt;
+use crate::sys::screen::{CoordinateConverter, NSScreenExt, ScreenCache, ScreenId};
 use crate::sys::skylight::{
     CFRelease, G_CONNECTION, SLSFlushWindowContentRegion, SLWindowContextCreate,
 };
@@ -428,7 +431,55 @@ struct FadeState {
     id: u64,
 }
 
+#[derive(Clone, Copy)]
+struct ScreenMetrics {
+    id: Option<ScreenId>,
+    frame: CGRect,
+    scale: f64,
+    converter: CoordinateConverter,
+}
+
 impl MissionControlOverlay {
+    fn gather_screen_metrics(&self) -> Option<(Vec<ScreenMetrics>, CoordinateConverter)> {
+        let mut cache = ScreenCache::new(self.mtm);
+        let (_descriptors, converter) = cache.update_screen_config();
+
+        let screens = NSScreen::screens(self.mtm);
+        let mut metrics = Vec::new();
+        for screen in screens.iter() {
+            if let Ok(screen_id) = screen.get_number() {
+                let frame = CGDisplayBounds(screen_id.as_u32());
+                metrics.push(ScreenMetrics {
+                    id: Some(screen_id),
+                    frame,
+                    scale: screen.backingScaleFactor(),
+                    converter,
+                });
+            }
+        }
+
+        if metrics.is_empty() {
+            None
+        } else {
+            Some((metrics, converter))
+        }
+    }
+
+    fn screen_under_cursor_with(
+        &self,
+        metrics: &[ScreenMetrics],
+        converter: CoordinateConverter,
+    ) -> Option<ScreenMetrics> {
+        let cursor = converter.convert_point(NSEvent::mouseLocation())?;
+        metrics.iter().find(|m| m.frame.contains(cursor)).copied()
+    }
+
+    fn main_screen_metric(&self, metrics: &[ScreenMetrics]) -> Option<ScreenMetrics> {
+        let screen = NSScreen::mainScreen(self.mtm)?;
+        let screen_id = screen.get_number().ok()?;
+        metrics.iter().find(|m| m.id == Some(screen_id)).copied()
+    }
+
     fn rect_contains_point(rect: CGRect, point: CGPoint) -> bool {
         point.x >= rect.origin.x
             && point.x <= rect.origin.x + rect.size.width
@@ -1347,10 +1398,25 @@ pub struct MissionControlOverlay {
     pending_hide: RefCell<bool>,
     refresh_pending: AtomicBool,
     scale: f64,
+    coordinate_converter: CoordinateConverter,
 }
 
 impl MissionControlOverlay {
     pub fn new(config: Config, mtm: MainThreadMarker, frame: CGRect, scale: f64) -> Self {
+        let mut frame = frame;
+        let mut scale = scale;
+        let mut coordinate_converter = CoordinateConverter::default();
+
+        if let Some(screen) = NSScreen::mainScreen(mtm) {
+            let mut cache = ScreenCache::new(mtm);
+            let (_descriptors, converter) = cache.update_screen_config();
+            coordinate_converter = converter;
+            scale = screen.backingScaleFactor();
+            if let Ok(screen_id) = screen.get_number() {
+                frame = CGDisplayBounds(screen_id.as_u32());
+            }
+        }
+
         let root_layer = CALayer::layer();
         root_layer.setGeometryFlipped(true);
 
@@ -1379,6 +1445,7 @@ impl MissionControlOverlay {
             pending_hide: RefCell::new(false),
             refresh_pending: AtomicBool::new(false),
             scale,
+            coordinate_converter,
         }
     }
 
@@ -1401,17 +1468,33 @@ impl MissionControlOverlay {
 
     pub fn set_fade_duration_ms(&mut self, ms: f64) { self.fade_duration_ms = ms.max(0.0); }
 
+    fn current_screen_metrics(&self) -> ScreenMetrics {
+        if let Some((metrics, converter)) = self.gather_screen_metrics() {
+            if let Some(cursor_metric) = self.screen_under_cursor_with(&metrics, converter) {
+                return cursor_metric;
+            }
+
+            if let Some(main_metric) = self.main_screen_metric(&metrics) {
+                return main_metric;
+            }
+        }
+
+        ScreenMetrics {
+            id: None,
+            frame: self.frame,
+            scale: self.scale,
+            converter: self.coordinate_converter,
+        }
+    }
+
     pub fn update(&self, mode: MissionControlMode) {
         self.stop_active_fade();
         *self.pending_hide.borrow_mut() = false;
 
         {
-            let (new_frame, new_scale) =
-                if let Some(screen) = objc2_app_kit::NSScreen::mainScreen(self.mtm) {
-                    (screen.frame(), screen.backingScaleFactor())
-                } else {
-                    (self.frame, self.scale)
-                };
+            let metrics = self.current_screen_metrics();
+            let new_frame = metrics.frame;
+            let new_scale = metrics.scale;
 
             let frame_changed = new_frame.origin.x != self.frame.origin.x
                 || new_frame.origin.y != self.frame.origin.y
@@ -1431,6 +1514,10 @@ impl MissionControlOverlay {
 
                 self.root_layer.setFrame(CGRect::new(CGPoint::new(0.0, 0.0), self.frame.size));
                 self.root_layer.setContentsScale(self.scale);
+            }
+            unsafe {
+                let me = self as *const _ as *mut MissionControlOverlay;
+                (*me).coordinate_converter = metrics.converter;
             }
         }
 

@@ -41,22 +41,32 @@ impl CliExecutor for DefaultCliExecutor {
                 workspace_id,
                 workspace_name,
                 space_id,
+                display_uuid,
             } => {
                 env_vars.insert("RIFT_EVENT_TYPE".into(), "workspace_changed".into());
                 env_vars.insert("RIFT_WORKSPACE_ID".into(), workspace_id.to_string());
                 env_vars.insert("RIFT_WORKSPACE_NAME".into(), workspace_name.clone());
                 env_vars.insert("RIFT_SPACE_ID".into(), space_id.to_string());
+                if let Some(display_uuid) = display_uuid.as_ref() {
+                    env_vars.insert("RIFT_DISPLAY_UUID".into(), display_uuid.clone());
+                }
             }
             BroadcastEvent::WindowsChanged {
                 workspace_id,
                 workspace_name,
                 windows,
+                space_id,
+                display_uuid,
             } => {
                 env_vars.insert("RIFT_EVENT_TYPE".into(), "windows_changed".into());
                 env_vars.insert("RIFT_WORKSPACE_ID".into(), workspace_id.to_string());
                 env_vars.insert("RIFT_WORKSPACE_NAME".into(), workspace_name.clone());
                 env_vars.insert("RIFT_WINDOW_COUNT".into(), windows.len().to_string());
                 env_vars.insert("RIFT_WINDOWS".into(), windows.join(","));
+                env_vars.insert("RIFT_SPACE_ID".into(), space_id.to_string());
+                if let Some(display_uuid) = display_uuid.as_ref() {
+                    env_vars.insert("RIFT_DISPLAY_UUID".into(), display_uuid.clone());
+                }
             }
         }
 

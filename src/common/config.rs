@@ -251,49 +251,6 @@ impl VirtualWorkspaceSettings {
 
         issues
     }
-
-    pub fn auto_fix(&mut self) -> usize {
-        let mut fixes = 0;
-
-        if self.default_workspace_count == 0 {
-            self.default_workspace_count = 1;
-            fixes += 1;
-        }
-        if self.default_workspace_count > MAX_WORKSPACES {
-            self.default_workspace_count = MAX_WORKSPACES;
-            fixes += 1;
-        }
-
-        for rule in &mut self.app_rules {
-            if let Some(ref workspace) = rule.workspace {
-                if let WorkspaceSelector::Index(idx) = workspace {
-                    if *idx >= self.default_workspace_count {
-                        rule.workspace = None;
-                        fixes += 1;
-                    }
-                }
-            }
-        }
-
-        let initial_rule_count = self.app_rules.len();
-        self.app_rules.retain(|rule| {
-            let app_id_valid = rule.app_id.as_ref().map_or(false, |id| !id.is_empty());
-            app_id_valid
-                || rule.app_name.is_some()
-                || rule.title_regex.is_some()
-                || rule.title_substring.is_some()
-                || rule.ax_role.is_some()
-                || rule.ax_subrole.is_some()
-        });
-        fixes += initial_rule_count - self.app_rules.len();
-
-        fixes
-    }
-
-    pub fn auto_fix_values(&mut self) -> usize {
-        // for now, the VirtualWorkspaceSettings doesn't have invalid values that need fixing
-        0
-    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -699,29 +656,6 @@ impl Settings {
 
         issues
     }
-
-    pub fn auto_fix_values(&mut self) -> usize {
-        let mut fixes = 0;
-
-        if self.animation_duration < 0.0 {
-            self.animation_duration = default_animation_duration();
-            fixes += 1;
-        }
-
-        if self.animation_fps <= 0.0 {
-            self.animation_fps = default_animation_fps();
-            fixes += 1;
-        }
-
-        fixes += self.layout.auto_fix_values();
-
-        if self.gestures.swipe_vertical_tolerance < 0.0 {
-            self.gestures.swipe_vertical_tolerance = default_swipe_vertical_tolerance();
-            fixes += 1;
-        }
-
-        fixes
-    }
 }
 
 impl LayoutSettings {
@@ -733,13 +667,6 @@ impl LayoutSettings {
         issues.extend(self.gaps.validate());
 
         issues
-    }
-
-    pub fn auto_fix_values(&mut self) -> usize {
-        let stack_fixes = self.stack.auto_fix_values();
-        let gap_fixes = self.gaps.auto_fix_values();
-
-        stack_fixes + gap_fixes
     }
 }
 
@@ -755,17 +682,6 @@ impl StackSettings {
         }
 
         issues
-    }
-
-    pub fn auto_fix_values(&mut self) -> usize {
-        let mut fixes = 0;
-
-        if self.stack_offset < 0.0 {
-            self.stack_offset = default_stack_offset();
-            fixes += 1;
-        }
-
-        fixes
     }
 }
 
@@ -793,19 +709,6 @@ impl GapSettings {
         }
 
         issues
-    }
-
-    pub fn auto_fix_values(&mut self) -> usize {
-        // Fix outer gaps
-        let outer_fixes = self.outer.auto_fix_values();
-
-        // Fix inner gaps
-        let inner_fixes = self.inner.auto_fix_values();
-
-        let display_fixes =
-            self.per_display.values_mut().map(GapOverride::auto_fix_values).sum::<usize>();
-
-        outer_fixes + inner_fixes + display_fixes
     }
 
     pub fn effective_for_display(&self, display_uuid: Option<&str>) -> GapSettings {
@@ -857,34 +760,6 @@ impl OuterGaps {
 
         issues
     }
-
-    /// Attempts to fix outer gap configuration values automatically.
-    /// Returns the number of fixes applied.
-    pub fn auto_fix_values(&mut self) -> usize {
-        let mut fixes = 0;
-
-        if self.top < 0.0 {
-            self.top = 0.0;
-            fixes += 1;
-        }
-
-        if self.left < 0.0 {
-            self.left = 0.0;
-            fixes += 1;
-        }
-
-        if self.bottom < 0.0 {
-            self.bottom = 0.0;
-            fixes += 1;
-        }
-
-        if self.right < 0.0 {
-            self.right = 0.0;
-            fixes += 1;
-        }
-
-        fixes
-    }
 }
 
 impl InnerGaps {
@@ -908,40 +783,7 @@ impl InnerGaps {
 
         issues
     }
-
-    /// Attempts to fix inner gap configuration values automatically.
-    /// Returns the number of fixes applied.
-    pub fn auto_fix_values(&mut self) -> usize {
-        let mut fixes = 0;
-
-        if self.horizontal < 0.0 {
-            self.horizontal = 0.0;
-            fixes += 1;
-        }
-
-        if self.vertical < 0.0 {
-            self.vertical = 0.0;
-            fixes += 1;
-        }
-
-        fixes
-    }
 }
-
-impl GapOverride {
-    pub fn auto_fix_values(&mut self) -> usize {
-        let mut fixes = 0;
-        if let Some(outer) = &mut self.outer {
-            fixes += outer.auto_fix_values();
-        }
-        if let Some(inner) = &mut self.inner {
-            fixes += inner.auto_fix_values();
-        }
-        fixes
-    }
-}
-
-// Default for OuterGaps/InnerGaps now derived
 
 fn yes() -> bool { true }
 
@@ -1030,20 +872,6 @@ impl Config {
         issues.extend(self.virtual_workspaces.validate());
 
         issues
-    }
-
-    /// Attempts to fix configuration values automatically.
-    /// Returns the number of fixes applied.
-    pub fn auto_fix_values(&mut self) -> usize {
-        let mut fixes = 0;
-
-        // Fix settings
-        fixes += self.settings.auto_fix_values();
-
-        // Fix virtual workspace settings
-        fixes += self.virtual_workspaces.auto_fix_values();
-
-        fixes
     }
 
     fn normalize_hotkey_string(key: &str) -> String {
@@ -1285,7 +1113,6 @@ impl Config {
                     if let Some((suggestion, deprecated_replacement)) =
                         Self::suggest_similar_command(&unknown_token)
                     {
-                        // Build enhanced error message
                         if let Some(repl) = deprecated_replacement {
                             bail!(
                                 "{msg}\nDid you mean `{}`? Note: `{}` is deprecated; use `{}` instead.",
@@ -1297,11 +1124,9 @@ impl Config {
                             bail!("{msg}\nDid you mean `{}`?", suggestion);
                         }
                     } else {
-                        // No good suggestion; include the original error
                         bail!("{msg}");
                     }
                 } else {
-                    // Could not extract unknown variant; return original error
                     bail!("{msg}");
                 }
             }

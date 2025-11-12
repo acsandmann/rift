@@ -233,6 +233,7 @@ impl SpaceEventHandler {
         if screens.is_empty() {
             if !reactor.space_manager.screens.is_empty() {
                 reactor.space_manager.screens.clear();
+                reactor.space_manager.screen_space_by_id.clear();
                 reactor.expose_all_spaces();
             }
         } else {
@@ -246,6 +247,7 @@ impl SpaceEventHandler {
                     screen_id: ScreenId::new(snapshot.screen_id),
                 })
                 .collect();
+            reactor.update_screen_space_map();
             if let Some(info) = ws_info_opt.take() {
                 reactor.finalize_space_change(&spaces, info);
             }
@@ -280,6 +282,10 @@ impl SpaceEventHandler {
         } else {
             StaleCleanupState::Enabled
         };
+        if spaces_all_none {
+            trace!("Space change has no active screens; skipping");
+            return;
+        }
         if spaces.len() != reactor.space_manager.screens.len() {
             warn!(
                 "Deferring space change: have {} screens but {} spaces",

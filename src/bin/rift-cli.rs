@@ -56,8 +56,11 @@ enum ServiceCommands {
 
 #[derive(Subcommand)]
 enum QueryCommands {
-    /// List all virtual workspaces
-    Workspaces,
+    /// List virtual workspaces (optionally for a specific MacOS space)
+    Workspaces {
+        #[arg(long)]
+        space_id: Option<u64>,
+    },
     /// List windows (optionally filtered by space)
     Windows {
         #[arg(long)]
@@ -377,7 +380,7 @@ fn build_request(command: Commands) -> Result<RiftRequest, String> {
 
 fn build_query_request(query: QueryCommands) -> Result<RiftRequest, String> {
     match query {
-        QueryCommands::Workspaces => Ok(RiftRequest::GetWorkspaces),
+        QueryCommands::Workspaces { space_id } => Ok(RiftRequest::GetWorkspaces { space_id }),
         QueryCommands::Windows { space_id } => Ok(RiftRequest::GetWindows { space_id }),
         QueryCommands::Displays => Ok(RiftRequest::GetDisplays),
         QueryCommands::Window { window_id } => Ok(RiftRequest::GetWindowInfo { window_id }),
@@ -658,7 +661,7 @@ fn parse_switcher_mode(value: &str) -> Result<CommandSwitcherDisplayMode, String
 
 fn handle_success_response(request: &RiftRequest, data: serde_json::Value) -> Result<(), String> {
     match request {
-        RiftRequest::GetWorkspaces => {
+        RiftRequest::GetWorkspaces { .. } => {
             let typed: Vec<WorkspaceData> = serde_json::from_value(data)
                 .map_err(|e| format!("Deserialization error: {}", e))?;
             println!(

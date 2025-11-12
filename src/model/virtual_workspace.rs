@@ -224,6 +224,16 @@ impl VirtualWorkspaceManager {
         self.active_workspace_per_space.get(&space).map(|tuple| tuple.1)
     }
 
+    pub fn active_workspace_idx(&self, space: SpaceId) -> Option<u64> {
+        self.active_workspace(space).and_then(|active_ws_id| {
+            self.workspaces_by_space
+                .get(&space)?
+                .iter()
+                .position(|id| *id == active_ws_id)
+                .map(|idx| idx as u64)
+        })
+    }
+
     pub fn workspace_auto_back_and_forth(&self) -> bool { self.workspace_auto_back_and_forth }
 
     pub fn set_active_workspace(

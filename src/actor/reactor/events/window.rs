@@ -261,13 +261,14 @@ impl WindowEventHandler {
                     .space_manager
                     .screens
                     .iter()
-                    .flat_map(|screen| {
+                    .filter_map(|screen| {
+                        let space = reactor.space_manager.space_for_screen(screen)?;
                         let display_uuid = if screen.display_uuid.is_empty() {
                             None
                         } else {
                             Some(screen.display_uuid.clone())
                         };
-                        Some((screen.space?, screen.frame, display_uuid))
+                        Some((space, screen.frame, display_uuid))
                     })
                     .collect::<Vec<_>>();
 

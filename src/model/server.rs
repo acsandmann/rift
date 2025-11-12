@@ -6,11 +6,6 @@ use crate::actor::app::{WindowId, pid_t};
 use crate::sys::geometry::CGRectDef;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkspaceQueryResponse {
-    pub workspaces: Vec<WorkspaceData>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceData {
     pub id: String,
     pub index: usize,
@@ -62,4 +57,6 @@ pub struct DisplayData {
     #[serde_as(as = "CGRectDef")]
     pub frame: CGRect,
     pub space: Option<u64>,
+    /// True if this display corresponds to the context Rift uses when no space_id is provided
+    pub is_active_context: bool,
 }

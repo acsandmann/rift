@@ -1,7 +1,9 @@
 use tracing::{trace, warn};
 
 use crate::actor::reactor::{DragState, Reactor};
+use crate::common::collections::HashMap;
 use crate::layout_engine::LayoutCommand;
+use crate::sys::screen::{SpaceId, order_visible_spaces_by_position};
 
 pub struct DragEventHandler;
 
@@ -31,8 +33,24 @@ impl DragEventHandler {
                     "Skipping deferred swap; one of the windows no longer exists"
                 );
             } else {
+                let visible_spaces_input: Vec<(SpaceId, _)> = reactor
+                    .space_manager
+                    .screens
+                    .iter()
+                    .filter_map(|screen| {
+                        let space = reactor.space_manager.space_for_screen(screen)?;
+                        let center = screen.frame.mid();
+                        Some((space, center))
+                    })
+                    .collect();
+
+                let mut visible_space_centers = HashMap::default();
+                for (space, center) in &visible_spaces_input {
+                    visible_space_centers.insert(*space, *center);
+                }
+
                 let visible_spaces =
-                    reactor.space_manager.screens.iter().flat_map(|s| s.space).collect::<Vec<_>>();
+                    order_visible_spaces_by_position(visible_spaces_input.iter().cloned());
 
                 let swap_space = reactor
                     .window_manager
@@ -52,6 +70,7 @@ impl DragEventHandler {
                 let response = reactor.layout_manager.layout_engine.handle_command(
                     swap_space,
                     &visible_spaces,
+                    &visible_space_centers,
                     LayoutCommand::SwapWindows(dragged_wid, target_wid),
                 );
                 reactor.handle_layout_response(response);

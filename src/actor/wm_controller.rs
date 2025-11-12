@@ -28,8 +28,9 @@ use crate::actor::{self, command_switcher, event_tap, mission_control, reactor};
 use crate::common::collections::{HashMap, HashSet};
 use crate::sys::dispatch::DispatchExt;
 use crate::sys::event::Hotkey;
+use crate::sys::geometry::CGRectExt;
 use crate::sys::screen::{CoordinateConverter, NSScreenExt, ScreenDescriptor, ScreenId, SpaceId};
-use crate::sys::window_server::WindowServerInfo;
+use crate::sys::window_server::{WindowServerInfo, current_cursor_location};
 use crate::{layout_engine as layout, sys};
 
 #[derive(Debug)]
@@ -131,6 +132,7 @@ pub struct WmController {
     cur_space: Vec<Option<SpaceId>>,
     cur_screen_id: Vec<ScreenId>,
     cur_display_uuid: Vec<String>,
+    cur_frames: Vec<CGRect>,
     disabled_spaces: HashSet<SpaceId>,
     enabled_spaces: HashSet<SpaceId>,
     last_known_space_by_screen: HashMap<ScreenId, SpaceId>,
@@ -174,6 +176,7 @@ impl WmController {
             cur_space: Vec::new(),
             cur_screen_id: Vec::new(),
             cur_display_uuid: Vec::new(),
+            cur_frames: Vec::new(),
             disabled_spaces: HashSet::default(),
             enabled_spaces: HashSet::default(),
             last_known_space_by_screen: HashMap::default(),
@@ -312,6 +315,7 @@ impl WmController {
                 self.handle_space_changed(spaces);
                 let active_spaces = self.active_spaces();
                 let frames: Vec<CGRect> = screens.iter().map(|s| s.frame).collect();
+                self.cur_frames = frames.clone();
                 let snapshots: Vec<reactor::ScreenSnapshot> = screens
                     .into_iter()
                     .zip(active_spaces.iter().copied())
@@ -547,6 +551,23 @@ impl WmController {
     }
 
     fn get_focused_space(&self) -> Option<SpaceId> {
+        if let Ok(point) = current_cursor_location() {
+            if let Some((idx, _)) =
+                self.cur_frames.iter().enumerate().find(|(_, f)| f.contains(point))
+            {
+                if let Some(space_opt) = self.cur_space.get(idx) {
+                    if let Some(space) = space_opt {
+                        return Some(*space);
+                    }
+                }
+                if let Some(screen_id) = self.cur_screen_id.get(idx) {
+                    if let Some(space) = self.last_known_space_by_screen.get(screen_id).copied() {
+                        return Some(space);
+                    }
+                }
+            }
+        }
+
         let screen = NSScreen::mainScreen(self.mtm)?;
         let number = screen.get_number().ok()?;
         *self.cur_screen_id.iter().zip(&self.cur_space).find(|(id, _)| **id == number)?.1

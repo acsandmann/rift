@@ -103,6 +103,27 @@ impl BspLayoutSystem {
         }
     }
 
+    fn window_in_direction_from(&self, node: NodeId, direction: Direction) -> Option<WindowId> {
+        match self.kind.get(node) {
+            Some(NodeKind::Leaf { window: Some(w), .. }) => Some(*w),
+            Some(NodeKind::Leaf { .. }) => None,
+            Some(NodeKind::Split { .. }) => {
+                let mut children: Vec<_> = node.children(&self.tree.map).collect();
+                match direction {
+                    Direction::Left | Direction::Up => children.reverse(),
+                    Direction::Right | Direction::Down => {}
+                }
+                for child in children {
+                    if let Some(window) = self.window_in_direction_from(child, direction) {
+                        return Some(window);
+                    }
+                }
+                None
+            }
+            None => None,
+        }
+    }
+
     fn smart_insert_window(&mut self, layout: LayoutId, window: WindowId) -> bool {
         if let Some(sel) = self.selection_of_layout(layout) {
             let leaf = self.descend_to_leaf(sel);
@@ -478,6 +499,36 @@ impl Components {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
+
+    #[test]
+    fn window_in_direction_prefers_leftmost_when_moving_right() {
+        let mut system = BspLayoutSystem::default();
+        let layout = system.create_layout();
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+
+        assert_eq!(system.window_in_direction(layout, Direction::Right), Some(w(1)));
+        assert_eq!(system.window_in_direction(layout, Direction::Left), Some(w(2)));
+    }
+
+    #[test]
+    fn window_in_direction_prefers_top_for_down_direction_after_orientation_toggle() {
+        let mut system = BspLayoutSystem::default();
+        let layout = system.create_layout();
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+        system.toggle_tile_orientation(layout);
+
+        assert_eq!(system.window_in_direction(layout, Direction::Down), Some(w(1)));
+        assert_eq!(system.window_in_direction(layout, Direction::Up), Some(w(2)));
+    }
+}
+
 impl LayoutSystem for BspLayoutSystem {
     fn create_layout(&mut self) -> LayoutId {
         let leaf = self.make_leaf(None);
@@ -635,6 +686,12 @@ impl LayoutSystem for BspLayoutSystem {
             _ => None,
         };
         (focus, raise_windows)
+    }
+
+    fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
+        self.layouts
+            .get(layout)
+            .and_then(|state| self.window_in_direction_from(state.root, direction))
     }
 
     fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId) {

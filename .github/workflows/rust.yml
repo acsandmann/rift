@@ -16,75 +16,24 @@ env:
   RUSTFLAGS: "-C debuginfo=0"
 
 jobs:
-  ci:
+  format:
     runs-on: macos-14
     steps:
-      - name: Checkout (shallow)
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Setup Rust (nightly for fmt)
-        uses: dtolnay/rust-toolchain@nightly
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
-
-      - name: Setup Rust (stable default)
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Prepare sccache dir
-        run: |
-          echo "SCCACHE_DIR=${HOME}/.cache/sccache" >> "$GITHUB_ENV"
-          mkdir -p "${HOME}/.cache/sccache"
-          ls -ld "${HOME}/.cache/sccache"
-
-      - name: Cache sccache (filesystem backend)
-        uses: actions/cache@v4
-        continue-on-error: true
-        with:
-          path: ${{ env.SCCACHE_DIR }}
-          key: ${{ runner.os }}-sccache-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml', 'rust-toolchain') }}
-          restore-keys: |
-            ${{ runner.os }}-sccache-
-
-      - name: Rust build cache
-        uses: Swatinem/rust-cache@v2
-        continue-on-error: true
-        with:
-          shared-key: macos14
-          cache-on-failure: true
-
-      - name: Install sccache
-        uses: taiki-e/install-action@v2
-        with:
-          tool: sccache
-
-      - name: Configure sccache (force filesystem; enable only if healthy)
-        shell: bash
-        run: |
-          set -euxo pipefail
-          # Force FS backend; explicitly disable GH artifact cache backend
-          echo "SCCACHE_CACHE_TYPE=filesystem" >> "$GITHUB_ENV"
-          echo "SCCACHE_CACHE_SIZE=10G" >> "$GITHUB_ENV"
-          echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
-          sccache --start-server || true
-          if sccache --show-stats >/dev/null 2>&1; then
-            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-            echo "sccache OK (filesystem backend)."
-          else
-            echo "sccache unhealthy; building without wrapper."
-          fi
-          sccache --show-stats || true
-
-      - name: Formatting (nightly)
+      - name: Format Check
         run: cargo +nightly fmt --all --check --verbose
 
-      - name: Check
-        run: cargo check --workspace --all-targets --locked --verbose
-
+  test:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@nextest
+      - uses: Swatinem/rust-cache@v2
+      - name: Compile
+        run: cargo check --locked
       - name: Test
-        run: cargo test --workspace --locked --verbose
-
-      - name: sccache stats
-        if: always()
-        run: sccache --show-stats || true
+        run: cargo nextest run
