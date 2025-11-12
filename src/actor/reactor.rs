@@ -67,7 +67,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 
 use crate::model::server::{
-    ApplicationData, DisplayData, LayoutStateData, WindowData, WorkspaceQueryResponse,
+    ApplicationData, DisplayData, LayoutStateData, WindowData, WorkspaceData,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -195,7 +195,11 @@ pub enum Event {
 
     // Query events with response channels (not serialized)
     #[serde(skip)]
-    QueryWorkspaces(r#continue::Sender<WorkspaceQueryResponse>),
+    QueryWorkspaces {
+        space_id: Option<SpaceId>,
+        #[serde(skip)]
+        response: r#continue::Sender<Vec<WorkspaceData>>,
+    },
     #[serde(skip)]
     QueryWindows {
         space_id: Option<SpaceId>,
@@ -612,7 +616,7 @@ impl Reactor {
                 | Event::QueryMetrics(..)
                 | Event::QueryWindowInfo { .. }
                 | Event::QueryWindows { .. }
-                | Event::QueryWorkspaces(..)
+                | Event::QueryWorkspaces { .. }
                 | Event::QueryDisplays(..)
         ) {
             return self.handle_query(event);
@@ -1015,10 +1019,18 @@ impl Reactor {
                     .layout_engine
                     .workspace_name(space, workspace_id)
                     .unwrap_or_else(|| format!("Workspace {:?}", workspace_id));
+                let display_uuid = self.space_manager.screen_by_space(space).and_then(|screen| {
+                    if screen.display_uuid.is_empty() {
+                        None
+                    } else {
+                        Some(screen.display_uuid.clone())
+                    }
+                });
                 let broadcast_event = BroadcastEvent::WorkspaceChanged {
                     workspace_id,
                     workspace_name,
                     space_id: space,
+                    display_uuid,
                 };
                 _ = self.communication_manager.event_broadcaster.send(broadcast_event);
             }

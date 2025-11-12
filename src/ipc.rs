@@ -13,7 +13,6 @@ pub use protocol::{RiftCommand, RiftRequest, RiftResponse};
 use crate::actor::config as config_actor;
 use crate::actor::reactor::{self, Event};
 use crate::ipc::subscriptions::SharedServerState;
-use crate::model::server::WorkspaceQueryResponse;
 use crate::sys::dispatch::block_on;
 use crate::sys::mach::{
     mach_free_response, mach_msg_header_t, mach_send_request, mach_server_run, send_mach_reply,
@@ -186,18 +185,22 @@ impl MachHandler {
                 RiftResponse::Success { data }
             }
 
-            RiftRequest::GetWorkspaces => match self.perform_query(|tx| Event::QueryWorkspaces(tx))
-            {
-                Ok(WorkspaceQueryResponse { workspaces }) => RiftResponse::Success {
-                    data: serde_json::to_value(workspaces).unwrap(),
-                },
-                Err(e) => {
-                    error!("{}", e);
-                    RiftResponse::Error {
-                        error: serde_json::json!({ "message": "Failed to get workspace response", "details": format!("{}", e) }),
+            RiftRequest::GetWorkspaces { space_id } => {
+                match self.perform_query(|tx| Event::QueryWorkspaces {
+                    space_id: space_id.map(crate::sys::screen::SpaceId::new),
+                    response: tx,
+                }) {
+                    Ok(workspaces) => RiftResponse::Success {
+                        data: serde_json::to_value(workspaces).unwrap(),
+                    },
+                    Err(e) => {
+                        error!("{}", e);
+                        RiftResponse::Error {
+                            error: serde_json::json!({ "message": "Failed to get workspace response", "details": format!("{}", e) }),
+                        }
                     }
                 }
-            },
+            }
 
             RiftRequest::GetDisplays => match self.perform_query(|tx| Event::QueryDisplays(tx)) {
                 Ok(displays) => RiftResponse::Success {

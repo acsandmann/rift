@@ -9,7 +9,7 @@ use crate::common::collections::HashMap;
 use crate::common::config::{self as config, Config};
 use crate::common::log::{MetricsCommand, handle_command};
 use crate::layout_engine::{EventResponse, LayoutCommand, LayoutEvent};
-use crate::sys::screen::order_visible_spaces_by_position;
+use crate::sys::screen::{SpaceId, order_visible_spaces_by_position};
 use crate::sys::window_server::{self as window_server, WindowServerId};
 
 pub struct CommandEventHandler;
@@ -17,13 +17,23 @@ pub struct CommandEventHandler;
 impl CommandEventHandler {
     pub fn handle_command_layout(reactor: &mut Reactor, cmd: LayoutCommand) {
         info!(?cmd);
-        let visible_spaces = order_visible_spaces_by_position(
-            reactor.space_manager.screens.iter().filter_map(|screen| {
+        let visible_spaces_input: Vec<(SpaceId, _)> = reactor
+            .space_manager
+            .screens
+            .iter()
+            .filter_map(|screen| {
                 let space = reactor.space_manager.space_for_screen(screen)?;
                 let center = screen.frame.mid();
                 Some((space, center))
-            }),
-        );
+            })
+            .collect();
+
+        let mut visible_space_centers = HashMap::default();
+        for (space, center) in &visible_spaces_input {
+            visible_space_centers.insert(*space, *center);
+        }
+
+        let visible_spaces = order_visible_spaces_by_position(visible_spaces_input.iter().cloned());
 
         let is_workspace_switch = matches!(
             cmd,
@@ -61,6 +71,7 @@ impl CommandEventHandler {
             _ => reactor.layout_manager.layout_engine.handle_command(
                 reactor.workspace_command_space(),
                 &visible_spaces,
+                &visible_space_centers,
                 cmd,
             ),
         };

@@ -8,7 +8,7 @@ use tracing::instrument;
 
 use crate::actor::{self, reactor};
 use crate::common::config::Config;
-use crate::model::server::{WindowData, WorkspaceQueryResponse};
+use crate::model::server::{WindowData, WorkspaceData};
 use crate::sys::dispatch::block_on;
 use crate::ui::mission_control::{MissionControlAction, MissionControlMode, MissionControlOverlay};
 
@@ -139,12 +139,14 @@ impl MissionControlActor {
             overlay.update(MissionControlMode::AllWorkspaces(Vec::new()));
         }
 
-        let (tx, fut) = continuation::<WorkspaceQueryResponse>();
-        let _ = self.reactor_tx.try_send(reactor::Event::QueryWorkspaces(tx));
+        let (tx, fut) = continuation::<Vec<WorkspaceData>>();
+        let _ = self
+            .reactor_tx
+            .try_send(reactor::Event::QueryWorkspaces { space_id: None, response: tx });
         match block_on(fut, std::time::Duration::from_secs_f32(0.75)) {
             Ok(resp) => {
                 let overlay = self.ensure_overlay();
-                overlay.update(MissionControlMode::AllWorkspaces(resp.workspaces));
+                overlay.update(MissionControlMode::AllWorkspaces(resp));
             }
             Err(_) => tracing::warn!("workspace query timed out"),
         }

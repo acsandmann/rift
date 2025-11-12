@@ -1392,10 +1392,12 @@ impl LayoutEngine {
             if let Some((active_workspace_id, active_workspace_name)) =
                 self.active_workspace_id_and_name(space_id)
             {
+                let display_uuid = self.display_uuid_for_space(space_id);
                 let _ = broadcast_tx.send(BroadcastEvent::WorkspaceChanged {
                     workspace_id: active_workspace_id,
                     workspace_name: active_workspace_name.clone(),
                     space_id,
+                    display_uuid,
                 });
             }
         }
@@ -1413,10 +1415,13 @@ impl LayoutEngine {
                     .map(|window_id| window_id.to_debug_string())
                     .collect();
 
+                let display_uuid = self.display_uuid_for_space(space_id);
                 let event = BroadcastEvent::WindowsChanged {
                     workspace_id,
                     workspace_name,
                     windows,
+                    space_id,
+                    display_uuid,
                 };
 
                 let _ = broadcast_tx.send(event);
