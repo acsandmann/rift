@@ -956,15 +956,12 @@ impl Reactor {
                         }
                     }
                 }
-                if let Some(space) = self.space_manager.screens.iter().flat_map(|s| s.space).next()
-                {
-                    self.refocus_manager.refocus_state = RefocusState::Pending(space);
-                    self.update_layout(false, false).unwrap_or_else(|e| {
-                        warn!("Layout update failed: {}", e);
-                        false
-                    });
-                    self.update_focus_follows_mouse_state();
-                }
+                self.refocus_manager.refocus_state = RefocusState::Pending(space);
+                self.update_layout(false, false).unwrap_or_else(|e| {
+                    warn!("Layout update failed: {}", e);
+                    false
+                });
+                self.update_focus_follows_mouse_state();
             }
         }
 
