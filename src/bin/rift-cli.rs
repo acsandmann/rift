@@ -483,8 +483,8 @@ fn map_window_command(cmd: WindowCommands) -> Result<RiftCommand, String> {
         WindowCommands::ResizeBy { amount } => Ok(RiftCommand::Reactor(reactor::Command::Layout(
             LC::ResizeWindowBy { amount },
         ))),
-        WindowCommands::Close { window_server_id } => {
-            let wsid = parse_window_server_id(&window_server_id)?;
+        WindowCommands::Close { window_id } => {
+            let wsid = parse_window_server_id(&window_id)?;
             Ok(RiftCommand::Reactor(reactor::Command::Reactor(
                 reactor::ReactorCommand::CloseWindow { window_server_id: Some(wsid) },
             )))
