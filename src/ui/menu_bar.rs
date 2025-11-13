@@ -6,10 +6,13 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
     NSColor, NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSGraphicsContext,
-    NSStatusBar, NSStatusItem, NSStringDrawing, NSVariableStatusItemLength, NSView,
+    NSStatusBar, NSStatusItem, NSVariableStatusItemLength, NSView,
 };
-use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_core_foundation::{
+    CFAttributedString, CFDictionary, CFRetained, CFString, CGFloat, CGPoint, CGRect, CGSize,
+};
 use objc2_core_graphics::{CGBlendMode, CGContext};
+use objc2_core_text::CTLine;
 use objc2_foundation::{
     MainThreadMarker, NSAttributedStringKey, NSDictionary, NSMutableDictionary, NSRect, NSSize,
     NSString,
@@ -141,7 +144,12 @@ impl MenuIcon {
             return;
         }
 
-        let layout = build_layout(&render_inputs);
+        let layout = {
+            let view_ivars = self.view.ivars();
+            let active_attrs = view_ivars.active_text_attrs.as_ref();
+            let inactive_attrs = view_ivars.inactive_text_attrs.as_ref();
+            build_layout(&render_inputs, active_attrs, inactive_attrs)
+        };
         if layout.workspaces.is_empty() {
             self.status_item.setVisible(false);
             self.prev_width = 0.0;
@@ -191,7 +199,7 @@ struct WorkspaceRenderData {
     bg_rect: CGRect,
     fill_alpha: f64,
     windows: Vec<WindowRenderRect>,
-    label: String,
+    label_line: Option<CachedTextLine>,
     show_windows: bool,
 }
 
@@ -206,6 +214,13 @@ struct WindowRenderRect {
     y: f64,
     width: f64,
     height: f64,
+}
+
+struct CachedTextLine {
+    line: CFRetained<CTLine>,
+    width: f64,
+    ascent: f64,
+    descent: f64,
 }
 
 struct MenuIconViewIvars {
@@ -236,6 +251,35 @@ fn build_text_attrs(
     unsafe { Retained::cast_unchecked(dict) }
 }
 
+fn build_cached_text_line(
+    label: &str,
+    attrs: &NSDictionary<NSAttributedStringKey, AnyObject>,
+) -> Option<CachedTextLine> {
+    if label.is_empty() {
+        return None;
+    }
+
+    let label_ns = NSString::from_str(label);
+    let cf_string: &CFString = label_ns.as_ref();
+    let cf_dict_ref: &CFDictionary<NSAttributedStringKey, AnyObject> = attrs.as_ref();
+    let cf_dict: &CFDictionary = cf_dict_ref.as_opaque();
+    let attr_string = unsafe { CFAttributedString::new(None, Some(cf_string), Some(cf_dict)) }?;
+    let line: CFRetained<CTLine> = unsafe { CTLine::with_attributed_string(attr_string.as_ref()) };
+
+    let mut ascent: CGFloat = 0.0;
+    let mut descent: CGFloat = 0.0;
+    let mut leading: CGFloat = 0.0;
+    let line_ref: &CTLine = line.as_ref();
+    let width = unsafe { line_ref.typographic_bounds(&mut ascent, &mut descent, &mut leading) };
+
+    Some(CachedTextLine {
+        line,
+        width: width as f64,
+        ascent: ascent as f64,
+        descent: descent as f64,
+    })
+}
+
 impl MenuIconView {
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let font = NSFont::menuBarFontOfSize(FONT_SIZE);
@@ -259,7 +303,11 @@ impl MenuIconView {
     }
 }
 
-fn build_layout(inputs: &[WorkspaceRenderInput]) -> MenuIconLayout {
+fn build_layout(
+    inputs: &[WorkspaceRenderInput],
+    active_attrs: &NSDictionary<NSAttributedStringKey, AnyObject>,
+    inactive_attrs: &NSDictionary<NSAttributedStringKey, AnyObject>,
+) -> MenuIconLayout {
     let count = inputs.len();
     let total_width =
         (CELL_WIDTH * count as f64) + (CELL_SPACING * (count.saturating_sub(1) as f64));
@@ -363,13 +411,22 @@ fn build_layout(inputs: &[WorkspaceRenderInput]) -> MenuIconLayout {
             Vec::new()
         };
 
-        let label = input.label.clone();
+        let label_line = if !input.label.is_empty() {
+            let attrs = if fill_alpha > 0.0 {
+                active_attrs
+            } else {
+                inactive_attrs
+            };
+            build_cached_text_line(&input.label, attrs)
+        } else {
+            None
+        };
 
         workspaces.push(WorkspaceRenderData {
             bg_rect,
             fill_alpha,
             windows,
-            label,
+            label_line,
             show_windows: input.show_windows,
         });
     }
@@ -483,21 +540,22 @@ define_class!(
                         }
                     }
 
-                    if !workspace.label.is_empty() {
-                        let label = NSString::from_str(&workspace.label);
-                        let label_ref: &NSString = label.as_ref();
-                        let attr = if workspace.fill_alpha > 0.0 {
-                            self.ivars().active_text_attrs.as_ref()
+                    if let Some(label_line) = &workspace.label_line {
+                        let text_width = label_line.width;
+                        let text_center_y = bg_y + rect.size.height / 2.0;
+                        let baseline_y = text_center_y - (label_line.ascent - label_line.descent) / 2.0;
+                        let text_x = rect.origin.x + (rect.size.width - text_width) / 2.0;
+
+                        CGContext::save_g_state(Some(cg));
+                        if workspace.fill_alpha > 0.0 {
+                            CGContext::set_rgb_fill_color(Some(cg), 0.0, 0.0, 0.0, 1.0);
                         } else {
-                            self.ivars().inactive_text_attrs.as_ref()
-                        };
-                        let text_size = unsafe { label_ref.sizeWithAttributes(Some(attr)) };
-                        let text_x = rect.origin.x + (rect.size.width - text_size.width) / 2.0;
-                        let text_y = bg_y + (rect.size.height - text_size.height) / 2.0;
-                        let text_rect = CGRect::new(CGPoint::new(text_x, text_y), text_size);
-                        unsafe {
-                            label_ref.drawInRect_withAttributes(text_rect, Some(attr));
+                            CGContext::set_rgb_fill_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
                         }
+                        CGContext::set_text_position(Some(cg), text_x as CGFloat, baseline_y as CGFloat);
+                        let line_ref: &CTLine = label_line.line.as_ref();
+                        unsafe { line_ref.draw(cg) };
+                        CGContext::restore_g_state(Some(cg));
                     }
                 }
 
