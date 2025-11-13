@@ -287,7 +287,7 @@ comb1 = "Alt + Shift"
 # - Spacing is flexible: "Alt+Down" and "Alt + Down" are equivalent
 # - Key values map to commands (see list below)
 
-# ommands
+# Commands
 # - toggle_space_activated
 # - next_workspace / prev_workspace
 # - switch_to_workspace = N
@@ -300,6 +300,7 @@ comb1 = "Alt + Shift"
 # - stack_windows / unstack_windows / unjoin_windows
 # - toggle_focus_floating / toggle_window_floating / toggle_fullscreen
 # - resize_window_grow / resize_window_shrink
+# - move_mouse_to_display = N or UUID
 # - debug / serialize / save_and_exit
 # - show_timing
 
@@ -343,6 +344,12 @@ comb1 = "Alt + Shift"
 # smartly resize windows
 "Alt + Shift + Equal" = "resize_window_grow"
 "Alt + Shift + Minus" = "resize_window_shrink"
+
+# Move mouse cursor to display by index (0-based) or UUID
+# Examples:
+# "Alt + Shift + A" = { move_mouse_to_display = 0 }
+# "Alt + Shift + S" = { move_mouse_to_display = 1 }
+# "Alt + Shift + D" = { move_mouse_to_display = "e9a4f5a1-2f8b-45c1-9f4e-5a6b7c8d9e0f" }
 
 # if mission control is enabled
 # this will show an exploded view of the windows in the active workspace

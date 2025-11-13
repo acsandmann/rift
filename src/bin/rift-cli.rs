@@ -104,6 +104,11 @@ enum ExecuteCommands {
         #[command(subcommand)]
         mission_cmd: MissionControlCommands,
     },
+    /// Display/mouse commands
+    Display {
+        #[command(subcommand)]
+        display_cmd: DisplayCommands,
+    },
     /// Save current state and exit rift
     SaveAndExit,
     /// Show timing metrics
@@ -261,6 +266,20 @@ enum MissionControlCommands {
 }
 
 #[derive(Subcommand)]
+enum DisplayCommands {
+    /// Move mouse cursor to a display by index (0-based)
+    MoveMouseToIndex {
+        /// Display index (0-based)
+        index: usize,
+    },
+    /// Move mouse cursor to a display by UUID
+    MoveMouseToUuid {
+        /// Display UUID
+        uuid: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum SubscribeCommands {
     /// Subscribe to Mach IPC events
     Mach {
@@ -393,6 +412,9 @@ fn build_execute_request(execute: ExecuteCommands) -> Result<RiftRequest, String
         ExecuteCommands::Config { config_cmd } => map_config_command(config_cmd)?,
         ExecuteCommands::MissionControl { mission_cmd } => {
             map_mission_control_command(mission_cmd)?
+        }
+        ExecuteCommands::Display { display_cmd } => {
+            map_display_command(display_cmd)?
         }
         ExecuteCommands::SaveAndExit => {
             RiftCommand::Reactor(reactor::Command::Reactor(reactor::ReactorCommand::SaveAndExit))
@@ -607,6 +629,22 @@ fn map_mission_control_command(cmd: MissionControlCommands) -> Result<RiftComman
         MissionControlCommands::Dismiss => Ok(RiftCommand::Reactor(reactor::Command::Reactor(
             reactor::ReactorCommand::DismissMissionControl,
         ))),
+    }
+}
+
+fn map_display_command(cmd: DisplayCommands) -> Result<RiftCommand, String> {
+    use rift_wm::actor::reactor::DisplaySelector;
+    match cmd {
+        DisplayCommands::MoveMouseToIndex { index } => Ok(RiftCommand::Reactor(
+            reactor::Command::Reactor(reactor::ReactorCommand::MoveMouseToDisplay(
+                DisplaySelector::Index(index),
+            )),
+        )),
+        DisplayCommands::MoveMouseToUuid { uuid } => Ok(RiftCommand::Reactor(
+            reactor::Command::Reactor(reactor::ReactorCommand::MoveMouseToDisplay(
+                DisplaySelector::Uuid(uuid),
+            )),
+        )),
     }
 }
 

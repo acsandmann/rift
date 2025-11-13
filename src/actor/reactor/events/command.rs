@@ -229,4 +229,27 @@ impl CommandEventHandler {
             reactor.set_mission_control_active(false);
         }
     }
+
+    pub fn handle_command_reactor_move_mouse_to_display(
+        reactor: &mut Reactor,
+        selector: &crate::actor::reactor::DisplaySelector,
+    ) {
+        let target_screen = match selector {
+            crate::actor::reactor::DisplaySelector::Index(idx) => {
+                reactor.space_manager.screens.get(*idx)
+            }
+            crate::actor::reactor::DisplaySelector::Uuid(uuid) => reactor
+                .space_manager
+                .screens
+                .iter()
+                .find(|s| s.display_uuid == *uuid),
+        };
+
+        if let Some(screen) = target_screen {
+            let center = screen.frame.mid();
+            if let Some(event_tap_tx) = reactor.communication_manager.event_tap_tx.as_ref() {
+                event_tap_tx.send(crate::actor::event_tap::Request::Warp(center));
+            }
+        }
+    }
 }
