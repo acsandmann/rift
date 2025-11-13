@@ -123,7 +123,7 @@ fn it_clears_screen_state_when_no_displays_are_reported() {
     reactor.handle_event(screen_params_event(vec![], vec![], vec![]));
     assert!(reactor.space_manager.screens.is_empty());
 
-    reactor.handle_event(Event::SpaceChanged(vec![], vec![]));
+    reactor.handle_event(Event::SpaceChanged(screen_space_list(vec![]), vec![]));
     assert!(reactor.space_manager.screens.is_empty());
 
     reactor.handle_event(screen_params_event(
@@ -447,8 +447,8 @@ fn it_retains_windows_without_server_ids_after_login_visibility_failure() {
     ));
     apps.simulate_until_quiet(&mut reactor);
 
-    reactor.handle_event(Event::SpaceChanged(vec![None], vec![]));
-    reactor.handle_event(Event::SpaceChanged(vec![Some(space)], vec![]));
+    reactor.handle_event(Event::SpaceChanged(screen_space_list(vec![None]), vec![]));
+    reactor.handle_event(Event::SpaceChanged(screen_space_list(vec![Some(space)]), vec![]));
 
     loop {
         let requests = apps.requests();

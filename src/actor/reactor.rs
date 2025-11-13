@@ -54,7 +54,7 @@ use crate::model::tx_store::WindowTxStore;
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt, SameAs};
-use crate::sys::screen::{ScreenId, SpaceId, get_active_space_number};
+use crate::sys::screen::{ScreenId, ScreenSpace, SpaceId, get_active_space_number};
 use crate::sys::timer::Timer;
 use crate::sys::window_server::{
     self, WindowServerId, WindowServerInfo, current_cursor_location, space_is_fullscreen,
@@ -95,14 +95,13 @@ pub enum Event {
     /// The current space changed.
     ///
     /// There is one SpaceId per screen in the last ScreenParametersChanged
-    /// event. `None` in the SpaceId vec disables managing windows on that
-    /// screen until the next space change.
+    /// event. `None` for a screen disables managing windows on that screen until the next space change.
     ///
     /// A snapshot of visible windows from the window server is also taken and
     /// sent with this message. This allows us to determine more precisely which
     /// windows are visible on a given space, since app actor events like
     /// WindowsDiscovered are not ordered with respect to space events.
-    SpaceChanged(Vec<Option<SpaceId>>, Vec<WindowServerInfo>),
+    SpaceChanged(Vec<ScreenSpace>, Vec<WindowServerInfo>),
 
     /// An application was launched. This event is also sent for every running
     /// application on startup.
@@ -353,7 +352,7 @@ struct AppState {
 
 #[derive(Debug, Clone)]
 struct PendingSpaceChange {
-    spaces: Vec<Option<SpaceId>>,
+    spaces: Vec<ScreenSpace>,
     ws_info: Vec<WindowServerInfo>,
 }
 
@@ -932,20 +931,20 @@ impl Reactor {
         }
     }
 
-    fn handle_fullscreen_space_transition(&mut self, spaces: &mut Vec<Option<SpaceId>>) -> bool {
+    fn handle_fullscreen_space_transition(&mut self, spaces: &mut Vec<ScreenSpace>) -> bool {
         let mut saw_fullscreen = false;
         let mut all_fullscreen = !spaces.is_empty();
         let mut refresh_spaces = Vec::new();
 
         for slot in spaces.iter_mut() {
-            match slot {
+            match slot.space {
                 Some(space) if space_is_fullscreen(space.get()) => {
                     saw_fullscreen = true;
-                    *slot = None;
+                    slot.space = None;
                 }
                 Some(space) => {
                     all_fullscreen = false;
-                    refresh_spaces.push(*space);
+                    refresh_spaces.push(space);
                 }
                 None => {
                     all_fullscreen = false;
@@ -982,9 +981,12 @@ impl Reactor {
         false
     }
 
-    fn set_screen_spaces(&mut self, spaces: &[Option<SpaceId>]) {
-        for (space, screen) in spaces.iter().copied().zip(&mut self.space_manager.screens) {
-            screen.space = space;
+    fn set_screen_spaces(&mut self, spaces: &[ScreenSpace]) {
+        for screen in &mut self.space_manager.screens {
+            if let Some(space_info) = spaces.iter().find(|info| info.screen_id == screen.screen_id)
+            {
+                screen.space = space_info.space;
+            }
         }
         self.update_screen_space_map();
     }
@@ -1002,16 +1004,13 @@ impl Reactor {
             .retain(|screen_id, _| valid_screen_ids.contains(screen_id));
     }
 
-    fn finalize_space_change(
-        &mut self,
-        spaces: &[Option<SpaceId>],
-        ws_info: Vec<WindowServerInfo>,
-    ) {
-        self.refocus_manager.stale_cleanup_state = if spaces.iter().all(|space| space.is_none()) {
-            StaleCleanupState::Suppressed
-        } else {
-            StaleCleanupState::Enabled
-        };
+    fn finalize_space_change(&mut self, spaces: &[ScreenSpace], ws_info: Vec<WindowServerInfo>) {
+        self.refocus_manager.stale_cleanup_state =
+            if spaces.iter().all(|space| space.space.is_none()) {
+                StaleCleanupState::Suppressed
+            } else {
+                StaleCleanupState::Enabled
+            };
         self.expose_all_spaces();
         self.space_manager.changing_screens.clear();
         if let Some(main_window) = self.main_window() {
@@ -1022,7 +1021,7 @@ impl Reactor {
         self.update_complete_window_server_info(ws_info);
         self.check_for_new_windows();
 
-        if let Some(space) = spaces.iter().copied().flatten().next() {
+        if let Some(space) = spaces.iter().find_map(|screen_space| screen_space.space) {
             if let Some(workspace_id) = self.layout_manager.layout_engine.active_workspace(space) {
                 let workspace_name = self
                     .layout_manager

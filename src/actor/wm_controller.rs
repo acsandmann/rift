@@ -29,7 +29,9 @@ use crate::common::collections::{HashMap, HashSet};
 use crate::sys::dispatch::DispatchExt;
 use crate::sys::event::Hotkey;
 use crate::sys::geometry::CGRectExt;
-use crate::sys::screen::{CoordinateConverter, NSScreenExt, ScreenDescriptor, ScreenId, SpaceId};
+use crate::sys::screen::{
+    CoordinateConverter, NSScreenExt, ScreenDescriptor, ScreenId, ScreenSpace, SpaceId,
+};
 use crate::sys::window_server::{WindowServerInfo, current_cursor_location};
 use crate::{layout_engine as layout, sys};
 
@@ -42,8 +44,8 @@ pub enum WmEvent {
     AppGloballyActivated(pid_t),
     AppGloballyDeactivated(pid_t),
     AppTerminated(pid_t),
-    SpaceChanged(Vec<Option<SpaceId>>),
-    ScreenParametersChanged(Vec<ScreenDescriptor>, CoordinateConverter, Vec<Option<SpaceId>>),
+    SpaceChanged(Vec<ScreenSpace>),
+    ScreenParametersChanged(Vec<ScreenDescriptor>, CoordinateConverter, Vec<ScreenSpace>),
     SystemWoke,
     PowerStateChanged(bool),
     ConfigUpdated(crate::common::config::Config),
@@ -307,7 +309,7 @@ impl WmController {
                 self.cur_frames = frames.clone();
                 let snapshots: Vec<reactor::ScreenSnapshot> = screens
                     .into_iter()
-                    .zip(active_spaces.iter().copied())
+                    .zip(active_spaces.iter().map(|screen_space| screen_space.space))
                     .map(|(descriptor, space)| reactor::ScreenSnapshot {
                         screen_id: descriptor.id.as_u32(),
                         frame: descriptor.frame,
@@ -542,9 +544,18 @@ impl WmController {
         *self.cur_screen_id.iter().zip(&self.cur_space).find(|(id, _)| **id == number)?.1
     }
 
-    fn handle_space_changed(&mut self, spaces: Vec<Option<SpaceId>>) {
+    fn handle_space_changed(&mut self, spaces: Vec<ScreenSpace>) {
+        self.cur_space.resize(self.cur_screen_id.len(), None);
         let previous_spaces = self.cur_space.clone();
-        self.cur_space = spaces;
+        let mut merged_spaces = self.cur_space.clone();
+        for screen_space in spaces {
+            if let Some(idx) =
+                self.cur_screen_id.iter().position(|id| *id == screen_space.screen_id)
+            {
+                merged_spaces[idx] = screen_space.space;
+            }
+        }
+        self.cur_space = merged_spaces;
         let pairs: Vec<(ScreenId, Option<SpaceId>)> =
             self.cur_screen_id.iter().copied().zip(self.cur_space.iter().copied()).collect();
 
@@ -595,22 +606,29 @@ impl WmController {
         }
     }
 
-    fn active_spaces(&self) -> Vec<Option<SpaceId>> {
+    fn active_spaces(&self) -> Vec<ScreenSpace> {
         let mut spaces = self.cur_space.clone();
-        for space in &mut spaces {
-            let enabled = match space {
-                _ if self.login_window_active => false,
-                Some(_) if self.config.one_space && *space != self.starting_space => false,
-                Some(sp) if self.disabled_spaces.contains(sp) => false,
-                Some(sp) if self.enabled_spaces.contains(sp) => true,
-                _ if self.config.config.settings.default_disable => false,
-                _ => true,
-            };
-            if !enabled {
-                *space = None;
-            }
-        }
-        spaces
+        spaces.resize(self.cur_screen_id.len(), None);
+        self.cur_screen_id
+            .iter()
+            .copied()
+            .zip(spaces.iter_mut())
+            .map(|(screen_id, space)| {
+                let space_value = *space;
+                let enabled = match space_value {
+                    _ if self.login_window_active => false,
+                    Some(sp) if self.config.one_space && Some(sp) != self.starting_space => false,
+                    Some(sp) if self.disabled_spaces.contains(&sp) => false,
+                    Some(sp) if self.enabled_spaces.contains(&sp) => true,
+                    _ if self.config.config.settings.default_disable => false,
+                    _ => true,
+                };
+                if !enabled {
+                    *space = None;
+                }
+                ScreenSpace { screen_id, space: *space }
+            })
+            .collect()
     }
 
     fn register_hotkeys(&mut self) {
@@ -642,7 +660,7 @@ impl WmController {
             let space_ids: Vec<u64> = self
                 .active_spaces()
                 .into_iter()
-                .filter_map(|opt| opt.map(|s| s.get()))
+                .filter_map(|screen_space| screen_space.space.map(|s| s.get()))
                 .collect();
 
             if space_ids.is_empty() {

@@ -9,7 +9,7 @@ use crate::common::config::Config;
 use crate::layout_engine::LayoutEngine;
 use crate::sys::app::{AppInfo, WindowInfo, pid_t};
 use crate::sys::geometry::SameAs;
-use crate::sys::screen::SpaceId;
+use crate::sys::screen::{ScreenId, ScreenSpace, SpaceId};
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 
 impl Reactor {
@@ -31,19 +31,29 @@ impl Reactor {
 
 pub fn make_screen_snapshots(
     frames: Vec<CGRect>,
-    spaces: Vec<Option<SpaceId>>,
+    screen_spaces: Vec<ScreenSpace>,
 ) -> Vec<ScreenSnapshot> {
-    assert_eq!(frames.len(), spaces.len());
+    assert_eq!(frames.len(), screen_spaces.len());
     frames
         .into_iter()
-        .zip(spaces.into_iter())
-        .enumerate()
-        .map(|(idx, (frame, space))| ScreenSnapshot {
+        .zip(screen_spaces.into_iter())
+        .map(|(frame, screen_space)| ScreenSnapshot {
             frame,
-            space,
-            display_uuid: format!("test-display-{idx}"),
+            space: screen_space.space,
+            display_uuid: format!("test-display-{}", screen_space.screen_id.as_u32()),
             name: None,
-            screen_id: idx as u32,
+            screen_id: screen_space.screen_id.as_u32(),
+        })
+        .collect()
+}
+
+pub fn screen_space_list(spaces: Vec<Option<SpaceId>>) -> Vec<ScreenSpace> {
+    spaces
+        .into_iter()
+        .enumerate()
+        .map(|(idx, space)| ScreenSpace {
+            screen_id: ScreenId::new(idx as u32),
+            space,
         })
         .collect()
 }
@@ -53,7 +63,8 @@ pub fn screen_params_event(
     spaces: Vec<Option<SpaceId>>,
     ws_info: Vec<WindowServerInfo>,
 ) -> Event {
-    Event::ScreenParametersChanged(make_screen_snapshots(frames, spaces), ws_info)
+    let screen_spaces = screen_space_list(spaces);
+    Event::ScreenParametersChanged(make_screen_snapshots(frames, screen_spaces.clone()), ws_info)
 }
 
 /*impl Drop for Reactor {
