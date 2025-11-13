@@ -5,6 +5,7 @@ use rift_wm::actor::reactor;
 use rift_wm::ipc::{RiftCommand, RiftMachClient, RiftRequest, RiftResponse};
 use rift_wm::layout_engine as layout;
 use rift_wm::model::server::{ApplicationData, LayoutStateData, WindowData, WorkspaceData};
+use rift_wm::sys::window_server::WindowServerId;
 use serde_json::Value;
 
 #[derive(Parser)]
@@ -142,6 +143,12 @@ enum WindowCommands {
     ///   rift-cli execute window resize-by --amount 0.05    # grow by 5%
     ///   rift-cli execute window resize-by --amount -0.10   # shrink by 10%
     ResizeBy { amount: f64 },
+    /// Close a window by window server identifier
+    Close {
+        /// Window Id (window server id or idx from window id)
+        #[arg(long)]
+        window_id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -476,7 +483,28 @@ fn map_window_command(cmd: WindowCommands) -> Result<RiftCommand, String> {
         WindowCommands::ResizeBy { amount } => Ok(RiftCommand::Reactor(reactor::Command::Layout(
             LC::ResizeWindowBy { amount },
         ))),
+        WindowCommands::Close { window_server_id } => {
+            let wsid = parse_window_server_id(&window_server_id)?;
+            Ok(RiftCommand::Reactor(reactor::Command::Reactor(
+                reactor::ReactorCommand::CloseWindow { window_server_id: Some(wsid) },
+            )))
+        }
     }
+}
+
+fn parse_window_server_id(input: &str) -> Result<WindowServerId, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("window_server_id cannot be empty".to_string());
+    }
+
+    let value = if trimmed.starts_with("0x") {
+        u32::from_str_radix(trimmed.trim_start_matches("0x"), 16)
+            .map_err(|_| format!("Invalid hexadecimal window server id: {}", trimmed))?
+    } else {
+        trimmed.parse().map_err(|_| format!("Invalid window server id: {}", trimmed))?
+    };
+    Ok(WindowServerId::new(value))
 }
 
 fn map_workspace_command(cmd: WorkspaceCommands) -> Result<RiftCommand, String> {

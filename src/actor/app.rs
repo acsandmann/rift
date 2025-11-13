@@ -199,6 +199,7 @@ pub enum Request {
         force_refresh: bool,
     },
     MarkWindowsNeedingInfo(Vec<WindowId>),
+    CloseWindow(WindowId),
 
     SetWindowFrame(WindowId, CGRect, TransactionId, bool),
     SetBatchWindowFrame(Vec<(WindowId, CGRect)>, TransactionId),
@@ -429,6 +430,13 @@ impl State {
                     if wid.pid == self.pid && self.windows.contains_key(&wid) {
                         self.needs_resync.insert(wid);
                     }
+                }
+            }
+            Request::CloseWindow(wid) => {
+                if let Some(window) = self.windows.get(wid)
+                    && let Err(err) = window.elem.close()
+                {
+                    warn!(?wid, error = ?err, "Failed to close window");
                 }
             }
             Request::GetVisibleWindows { force_refresh } => {

@@ -250,4 +250,18 @@ impl CommandEventHandler {
             }
         }
     }
+
+    pub fn handle_command_reactor_close_window(
+        reactor: &mut Reactor,
+        window_server_id: Option<WindowServerId>,
+    ) {
+        let target = window_server_id
+            .and_then(|wsid| reactor.window_manager.window_ids.get(&wsid).copied())
+            .or_else(|| reactor.main_window());
+        if let Some(wid) = target {
+            reactor.request_close_window(wid);
+        } else {
+            warn!("Close window command ignored because no window is tracked");
+        }
+    }
 }

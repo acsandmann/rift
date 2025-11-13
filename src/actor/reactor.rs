@@ -268,6 +268,9 @@ pub enum ReactorCommand {
     ShowMissionControlCurrent,
     DismissMissionControl,
     MoveMouseToDisplay(DisplaySelector),
+    CloseWindow {
+        window_server_id: Option<WindowServerId>,
+    },
 }
 
 #[derive(Default, Debug, Clone)]
@@ -797,6 +800,9 @@ impl Reactor {
             }
             Event::Command(Command::Reactor(ReactorCommand::MoveMouseToDisplay(selector))) => {
                 CommandEventHandler::handle_command_reactor_move_mouse_to_display(self, &selector);
+            }
+            Event::Command(Command::Reactor(ReactorCommand::CloseWindow { window_server_id })) => {
+                CommandEventHandler::handle_command_reactor_close_window(self, window_server_id)
             }
             _ => (),
         }
@@ -2048,6 +2054,14 @@ impl Reactor {
         for (&pid, app) in &self.app_manager.apps {
             if app.handle.send(Request::GetVisibleWindows { force_refresh: true }).is_ok() {
                 self.mission_control_manager.pending_mission_control_refresh.insert(pid);
+            }
+        }
+    }
+
+    fn request_close_window(&mut self, wid: WindowId) {
+        if let Some(app) = self.app_manager.apps.get(&wid.pid) {
+            if let Err(err) = app.handle.send(Request::CloseWindow(wid)) {
+                warn!(?wid, "Failed to send close window request: {}", err);
             }
         }
     }

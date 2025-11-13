@@ -290,6 +290,7 @@ impl Apps {
                     ));
                 }
                 Request::Raise(..) => todo!(),
+                Request::CloseWindow(..) => todo!(),
             }
         }
         debug!(?events);

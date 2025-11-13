@@ -270,6 +270,21 @@ impl AXUIElement {
         }
     }
 
+    pub fn close(&self) -> Result<()> {
+        if let Some(value) = self.copy_attribute("AXCloseButton")? {
+            let button = self.downcast::<RawAXUIElement>(value)?;
+            let action = CFString::from_static_str("AXPress");
+            let status = unsafe { button.perform_action(action.as_ref()) };
+            if status == AXError::Success {
+                return Ok(());
+            } else {
+                return Err(Error::Ax(status));
+            }
+        }
+
+        Err(Error::NotFound)
+    }
+
     fn set_attribute_value(&self, name: &CFString, value: &CFType) -> Result<()> {
         let status = unsafe { self.inner.set_attribute_value(name, value) };
         if status == AXError::Success {
