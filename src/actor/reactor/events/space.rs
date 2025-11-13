@@ -10,7 +10,7 @@ use crate::actor::reactor::{
 };
 use crate::actor::wm_controller::WmEvent;
 use crate::sys::app::AppInfo;
-use crate::sys::screen::{ScreenId, ScreenSpace, SpaceId};
+use crate::sys::screen::{ScreenId, SpaceId};
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 
 pub struct SpaceEventHandler;
@@ -222,14 +222,8 @@ impl SpaceEventHandler {
         ws_info: Vec<WindowServerInfo>,
     ) {
         info!("screen parameters changed");
-        let spaces: Vec<ScreenSpace> = screens
-            .iter()
-            .map(|snapshot| ScreenSpace {
-                screen_id: ScreenId::new(snapshot.screen_id),
-                space: snapshot.space,
-            })
-            .collect();
-        let spaces_all_none = spaces.iter().all(|space| space.space.is_none());
+        let spaces: Vec<Option<SpaceId>> = screens.iter().map(|s| s.space).collect();
+        let spaces_all_none = spaces.iter().all(|space| space.is_none());
         reactor.refocus_manager.stale_cleanup_state = if spaces_all_none {
             StaleCleanupState::Suppressed
         } else {
@@ -266,7 +260,7 @@ impl SpaceEventHandler {
 
     pub fn handle_space_changed(
         reactor: &mut Reactor,
-        mut spaces: Vec<ScreenSpace>,
+        mut spaces: Vec<Option<SpaceId>>,
         ws_info: Vec<WindowServerInfo>,
     ) {
         // TODO: this logic is flawed if multiple spaces are changing at once
@@ -282,7 +276,7 @@ impl SpaceEventHandler {
                 Some(PendingSpaceChange { spaces, ws_info });
             return;
         }
-        let spaces_all_none = spaces.iter().all(|space| space.space.is_none());
+        let spaces_all_none = spaces.iter().all(|space| space.is_none());
         reactor.refocus_manager.stale_cleanup_state = if spaces_all_none {
             StaleCleanupState::Suppressed
         } else {

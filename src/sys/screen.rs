@@ -39,7 +39,7 @@ impl ToString for SpaceId {
 
 pub struct ScreenCache<S: System = Actual> {
     system: S,
-    cached_displays: Vec<(ScreenId, CFRetained<CFString>)>,
+    uuids: Vec<CFRetained<CFString>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -55,12 +55,7 @@ impl ScreenCache<Actual> {
 }
 
 impl<S: System> ScreenCache<S> {
-    fn new_with(system: S) -> ScreenCache<S> {
-        ScreenCache {
-            cached_displays: Vec::new(),
-            system,
-        }
-    }
+    fn new_with(system: S) -> ScreenCache<S> { ScreenCache { uuids: vec![], system } }
 
     /// Returns a list containing the usable frame for each screen.
     ///
@@ -75,10 +70,10 @@ impl<S: System> ScreenCache<S> {
         let mut cg_screens = self.system.cg_screens().unwrap();
         debug!("cg_screens={cg_screens:?}");
         if cg_screens.is_empty() {
-            // When no screens are reported, make sure we clear the cached display data so
+            // When no screens are reported, make sure we clear the cached UUIDs so
             // subsequent space queries don't pretend the previous screens still
             // exist.
-            self.cached_displays.clear();
+            self.uuids.clear();
             return (vec![], CoordinateConverter::default());
         };
 
@@ -90,12 +85,8 @@ impl<S: System> ScreenCache<S> {
             warn!("Could not find main screen. cg_screens={cg_screens:?}");
         }
 
-        self.cached_displays = cg_screens
-            .iter()
-            .map(|screen| (screen.cg_id, self.system.display_uuid(screen)))
-            .collect();
-        let uuid_strings: Vec<String> =
-            self.cached_displays.iter().map(|(_, uuid)| uuid.to_string()).collect();
+        self.uuids = cg_screens.iter().map(|screen| self.system.display_uuid(screen)).collect();
+        let uuid_strings: Vec<String> = self.uuids.iter().map(|uuid| uuid.to_string()).collect();
 
         let ns_screens = self.system.ns_screens();
         debug!("ns_screens={ns_screens:?}");
@@ -112,24 +103,7 @@ impl<S: System> ScreenCache<S> {
                     warn!("Can't find NSScreen corresponding to {cg_id:?}");
                     return None;
                 };
-                let per_screen_height =
-                    cg_screens[idx].bounds.origin.y + cg_screens[idx].bounds.size.height;
-                let converted = CoordinateConverter::from_height(per_screen_height)
-                    .convert_rect(ns_screen.visible_frame)
-                    .or_else(|| {
-                        warn!(
-                            "Falling back to main-screen converter for NSScreen {:?}",
-                            ns_screen.name
-                        );
-                        converter.convert_rect(ns_screen.visible_frame)
-                    })
-                    .unwrap_or_else(|| {
-                        warn!(
-                            "Failed to convert NSScreen frame for {:?}; using fallback rect",
-                            ns_screen.name
-                        );
-                        ns_screen.visible_frame
-                    });
+                let converted = converter.convert_rect(ns_screen.visible_frame).unwrap();
                 let display_uuid = uuid_strings.get(idx).cloned();
                 let descriptor = ScreenDescriptor {
                     id: cg_id,
@@ -148,23 +122,16 @@ impl<S: System> ScreenCache<S> {
 
     /// Returns a list of the active spaces on each screen. The order
     /// corresponds to the screens returned by `screen_frames`.
-    /// Returns the most recently observed space for each cached screen.
-    /// Screen order matches the descriptor order returned by `screen_frames`.
-    pub fn get_screen_spaces(&self) -> Vec<ScreenSpace> {
-        self.cached_displays
+    pub fn get_screen_spaces(&self) -> Vec<Option<SpaceId>> {
+        self.uuids
             .iter()
-            .map(|(screen_id, uuid)| {
-                let space_id = unsafe {
-                    CGSManagedDisplayGetCurrentSpace(
-                        SLSMainConnectionID(),
-                        CFRetained::<objc2_core_foundation::CFString>::as_ptr(uuid).as_ptr(),
-                    )
-                };
-                ScreenSpace {
-                    screen_id: *screen_id,
-                    space: Some(SpaceId(space_id)),
-                }
+            .map(|screen| unsafe {
+                CGSManagedDisplayGetCurrentSpace(
+                    SLSMainConnectionID(),
+                    CFRetained::<objc2_core_foundation::CFString>::as_ptr(&screen).as_ptr(),
+                )
             })
+            .map(|id| Some(SpaceId(id)))
             .collect()
     }
 }
@@ -313,19 +280,13 @@ impl System for Actual {
 
 type CGDirectDisplayID = u32;
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Clone, Copy)]
 pub struct ScreenId(CGDirectDisplayID);
 
 impl ScreenId {
     pub fn new(id: u32) -> Self { ScreenId(id) }
 
     pub fn as_u32(&self) -> u32 { self.0 }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
-pub struct ScreenSpace {
-    pub screen_id: ScreenId,
-    pub space: Option<SpaceId>,
 }
 
 pub trait NSScreenExt {
@@ -523,7 +484,7 @@ mod test {
         assert_eq!(
             vec![
                 CGRect::new(CGPoint::new(0.0, 25.0), CGSize::new(3840.0, 2059.0)),
-                CGRect::new(CGPoint::new(3840.0, 1014.0), CGSize::new(1512.0, 950.0)),
+                CGRect::new(CGPoint::new(3840.0, 1112.0), CGSize::new(1512.0, 950.0)),
             ],
             frames
         );
@@ -552,11 +513,11 @@ mod test {
 
         let (descriptors, _) = cache.update_screen_config();
         assert_eq!(descriptors.len(), 1);
-        assert_eq!(cache.cached_displays.len(), 1);
+        assert_eq!(cache.uuids.len(), 1);
 
         let (descriptors, converter) = cache.update_screen_config();
         assert!(descriptors.is_empty());
-        assert!(cache.cached_displays.is_empty());
+        assert!(cache.uuids.is_empty());
         assert!(converter.convert_point(CGPoint::new(0.0, 0.0)).is_none());
     }
 

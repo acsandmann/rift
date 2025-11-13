@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use nix::libc;
 use objc2::MainThreadMarker;
 use tokio::sync::mpsc::UnboundedSender;
