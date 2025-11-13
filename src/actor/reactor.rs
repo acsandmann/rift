@@ -827,10 +827,9 @@ impl Reactor {
         if let Some(wid) = self.workspace_switch_manager.pending_workspace_mouse_warp.take() {
             if let Some(window) = self.window_manager.windows.get(&wid) {
                 let window_center = window.frame_monotonic.mid();
-                // Only warp if the window is now positioned on-screen
                 if self.space_manager.screens.iter().any(|s| s.frame.contains(window_center)) {
-                    if let Err(e) = crate::sys::event::warp_mouse(window_center) {
-                        warn!("Failed to execute deferred mouse warp: {e:?}");
+                    if let Some(event_tap_tx) = self.communication_manager.event_tap_tx.as_ref() {
+                        event_tap_tx.send(crate::actor::event_tap::Request::Warp(window_center));
                     }
                 }
             }
