@@ -1,13 +1,16 @@
+use std::time::Duration;
+
+use nix::libc;
 use objc2::MainThreadMarker;
-use tokio::time::Duration;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::actor;
 use crate::common::config::Config;
 use crate::model::VirtualWorkspaceId;
 use crate::model::server::{WindowData, WorkspaceData};
 use crate::sys::screen::SpaceId;
-use crate::sys::timer::Timer;
 use crate::ui::menu_bar::MenuIcon;
+
 #[derive(Debug, Clone)]
 pub struct Update {
     pub active_space: SpaceId,
@@ -47,14 +50,24 @@ impl Menu {
     }
 
     pub async fn run(mut self) {
-        const DEBOUNCE: Duration = Duration::from_millis(150);
+        const DEBOUNCE_MS: u64 = 150;
 
         let mut pending: Option<Event> = None;
-        let mut timer = Timer::manual();
+
+        let (tick_tx, mut tick_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+
+        Self::spawn_kqueue_timer(DEBOUNCE_MS as i64, tick_tx);
 
         loop {
             tokio::select! {
-                _ = &mut timer, if pending.is_some() => {
+                maybe_tick = tick_rx.recv() => {
+                    if maybe_tick.is_none() {
+                        if let Some(ev) = pending.take() {
+                            self.handle_event(ev);
+                        }
+                        break;
+                    }
+
                     if let Some(ev) = pending.take() {
                         self.handle_event(ev);
                     }
@@ -65,10 +78,7 @@ impl Menu {
                         Some((span, event)) => {
                             let _enter = span.enter();
                             match event {
-                                Event::Update(_) => {
-                                    pending = Some(event);
-                                    timer.set_next_fire(DEBOUNCE);
-                                }
+                                Event::Update(_) => pending = Some(event),
                                 Event::ConfigUpdated(cfg) => self.handle_config_updated(cfg),
                             }
                         }
@@ -134,6 +144,59 @@ impl Menu {
         if let Some(update) = self.last_update.take() {
             self.handle_update(update);
         }
+    }
+
+    fn spawn_kqueue_timer(period_ms: i64, tx: UnboundedSender<()>) {
+        std::thread::spawn(move || unsafe {
+            let kq = libc::kqueue();
+            if kq < 0 {
+                return;
+            }
+
+            let mut change: libc::kevent = std::mem::zeroed();
+            change.ident = 1 as libc::uintptr_t;
+            change.filter = libc::EVFILT_TIMER as i16;
+            change.flags = (libc::EV_ADD | libc::EV_ENABLE) as u16;
+            change.fflags = 0;
+            change.data = period_ms as libc::intptr_t;
+            change.udata = std::ptr::null_mut();
+
+            let reg = libc::kevent(
+                kq,
+                &change as *const libc::kevent,
+                1,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null(),
+            );
+            if reg < 0 {
+                let _ = libc::close(kq);
+                return;
+            }
+
+            let mut event: libc::kevent = std::mem::zeroed();
+
+            loop {
+                let n = libc::kevent(
+                    kq,
+                    std::ptr::null(),
+                    0,
+                    &mut event as *mut libc::kevent,
+                    1,
+                    std::ptr::null(),
+                );
+
+                if n <= 0 {
+                    break;
+                }
+
+                if tx.send(()).is_err() {
+                    break;
+                }
+            }
+
+            let _ = libc::close(kq);
+        });
     }
 }
 

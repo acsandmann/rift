@@ -98,15 +98,6 @@ fn dispatch_source_type_proc() -> DSrcTy {
     }
 }
 
-#[inline]
-fn dispatch_source_type_timer() -> DSrcTy {
-    // SAFETY: dispatchr::source::dispatch_source_type_t is repr(transparent) over a pointer
-    unsafe {
-        let p = &_dispatch_source_type_timer as *const _ as *const c_void;
-        std::mem::transmute::<*const c_void, DSrcTy>(p)
-    }
-}
-
 pub trait DispatchExt {
     fn after_f(&self, when: Time, context: *mut c_void, work: extern "C" fn(*mut c_void));
     fn after_f_s<T>(&self, when: Time, context: T, work: fn(T));
@@ -240,86 +231,3 @@ pub fn reap_on_exit_proc(pid: pid_t) {
     src.resume();
     sources_map().lock().insert(pid, src);
 }
-
-type Callback = Arc<dyn Fn() + Send + Sync + 'static>;
-
-pub struct TimerSource {
-    src: DSource,
-    ctx_ptr: Option<*mut c_void>,
-}
-
-impl TimerSource {
-    pub fn new(q: &Unmanaged) -> Self {
-        let tipe = dispatch_source_type_timer();
-        let src = DSource::create(tipe, 0, 0, q);
-        Self { src, ctx_ptr: None }
-    }
-
-    pub fn set_handler<F>(&mut self, handler: F)
-    where F: Fn() + Send + Sync + 'static {
-        if let Some(ptr) = self.ctx_ptr.take() {
-            let _ = unsafe { Box::from_raw(ptr as *mut Callback) };
-            self.src.set_context(std::ptr::null_mut());
-        }
-
-        let arc_cb: Callback = Arc::new(handler);
-        let boxed = Box::new(arc_cb);
-        let raw = Box::into_raw(boxed) as *mut c_void;
-        self.src.set_context(raw);
-        self.src.set_event_handler_f(timer_trampoline);
-        self.ctx_ptr = Some(raw);
-    }
-
-    pub fn clear_handler(&mut self) {
-        if let Some(ptr) = self.ctx_ptr.take() {
-            self.src.set_event_handler_f(noop_trampoline);
-            self.src.set_context(std::ptr::null_mut());
-            let _ = unsafe { Box::from_raw(ptr as *mut Callback) };
-        }
-    }
-
-    pub fn set_timer(&mut self, start: Time, interval: i64, leeway: i64) {
-        self.src.set_timer(start, interval, leeway);
-    }
-
-    pub fn schedule_after_ms(&mut self, ms: u64) {
-        let micros = (ms as f64 * 1000.0) as i64;
-        let when = Time::new_after(Time::NOW, micros);
-        // interval = 0 -> one-shot; leeway = 0
-        self.src.set_timer(when, 0, 0);
-    }
-
-    pub fn resume(&self) { self.src.resume(); }
-
-    pub fn suspend(&self) { self.src.suspend(); }
-
-    pub fn inner(&self) -> &DSource { &self.src }
-
-    pub fn inner_mut(&mut self) -> &mut DSource { &mut self.src }
-}
-
-impl Drop for TimerSource {
-    fn drop(&mut self) {
-        self.src.set_event_handler_f(noop_trampoline);
-        self.src.set_context(std::ptr::null_mut());
-
-        if let Some(ptr) = self.ctx_ptr.take() {
-            unsafe {
-                let _ = Box::from_raw(ptr as *mut Callback);
-            }
-        }
-    }
-}
-
-extern "C" fn timer_trampoline(ctx: *mut c_void) {
-    if ctx.is_null() {
-        return;
-    }
-
-    let arc_ptr = ctx as *const Callback;
-    let arc_ref = unsafe { &*arc_ptr };
-
-    (arc_ref)();
-}
-
-extern "C" fn noop_trampoline(_ctx: *mut c_void) {}
