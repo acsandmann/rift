@@ -340,28 +340,31 @@ impl WmController {
                     return;
                 };
 
-                let space_currently_enabled = if self.config.config.settings.default_disable {
+                let default_disable = self.config.config.settings.default_disable;
+                let space_currently_enabled = if default_disable {
                     self.enabled_spaces.contains(&space)
                 } else {
                     !self.disabled_spaces.contains(&space)
                 };
 
-                if !space_currently_enabled {
-                    if self.config.config.settings.default_disable {
-                        self.enabled_spaces.insert(space);
+                if space_currently_enabled {
+                    if default_disable {
+                        self.enabled_spaces.remove(&space);
                     } else {
-                        self.disabled_spaces.remove(&space);
+                        self.disabled_spaces.insert(space);
                     }
-
-                    self.events_tx.send(reactor::Event::SpaceChanged(
-                        self.active_spaces(),
-                        self.get_windows(),
-                    ));
-
-                    self.apply_app_rules_to_existing_windows();
+                } else if default_disable {
+                    self.enabled_spaces.insert(space);
                 } else {
-                    self.apply_app_rules_to_existing_windows();
+                    self.disabled_spaces.remove(&space);
                 }
+
+                self.events_tx.send(reactor::Event::SpaceChanged(
+                    self.active_spaces(),
+                    self.get_windows(),
+                ));
+
+                self.apply_app_rules_to_existing_windows();
             }
             Command(Wm(NextWorkspace)) => {
                 self.dismiss_mission_control();
@@ -540,21 +543,25 @@ impl WmController {
     }
 
     fn handle_space_changed(&mut self, spaces: Vec<Option<SpaceId>>) {
+        let previous_spaces = self.cur_space.clone();
         self.cur_space = spaces;
-
-        // Preserve activation state when macOS assigns a new SpaceId to the same screen
-        // (common during display reconfiguration) by migrating the stored state.
-        let screen_space_pairs: Vec<(ScreenId, Option<SpaceId>)> =
+        let pairs: Vec<(ScreenId, Option<SpaceId>)> =
             self.cur_screen_id.iter().copied().zip(self.cur_space.iter().copied()).collect();
-        for (screen_id, space_opt) in screen_space_pairs {
+
+        for (idx, (screen_id, space_opt)) in pairs.into_iter().enumerate() {
             if let Some(new_space) = space_opt {
-                if let Some(previous_space) =
-                    self.last_known_space_by_screen.get(&screen_id).copied()
-                {
+                let previous_space = previous_spaces
+                    .get(idx)
+                    .copied()
+                    .flatten()
+                    .or_else(|| self.last_known_space_by_screen.get(&screen_id).copied());
+
+                if let Some(previous_space) = previous_space {
                     if previous_space != new_space {
                         self.transfer_space_activation(previous_space, new_space);
                     }
                 }
+
                 self.last_known_space_by_screen.insert(screen_id, new_space);
             }
         }
