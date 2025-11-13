@@ -160,6 +160,13 @@ impl VirtualWorkspaceSettings {
             issues.push("More workspace names provided than default_workspace_count".to_string());
         }
 
+        if self.default_workspace >= self.default_workspace_count {
+            issues.push(format!(
+                "default_workspace ({}) must be less than default_workspace_count ({})",
+                self.default_workspace, self.default_workspace_count
+            ));
+        }
+
         // Validate rules and check duplicates in a single pass
         let mut seen_app_ids = crate::common::collections::HashSet::default();
         let mut seen_app_names = crate::common::collections::HashSet::default();

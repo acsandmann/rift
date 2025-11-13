@@ -108,6 +108,8 @@ pub struct VirtualWorkspaceManager {
     #[serde(skip)]
     default_workspace_names: Vec<String>,
     #[serde(skip)]
+    default_workspace: usize,
+    #[serde(skip)]
     workspace_auto_back_and_forth: bool,
 }
 
@@ -125,6 +127,10 @@ impl VirtualWorkspaceManager {
     }
 
     pub fn new_with_config(config: &VirtualWorkspaceSettings) -> Self {
+        let max_workspaces = 32;
+        let target_count = config.default_workspace_count.max(1).min(max_workspaces);
+        let default_workspace = config.default_workspace.min(target_count - 1);
+
         Self {
             workspaces: SlotMap::default(),
             workspaces_by_space: HashMap::default(),
@@ -134,9 +140,10 @@ impl VirtualWorkspaceManager {
             floating_positions: HashMap::default(),
             workspace_counter: 1,
             app_rules: config.app_rules.clone(),
-            max_workspaces: 32,
+            max_workspaces,
             default_workspace_count: config.default_workspace_count,
             default_workspace_names: config.workspace_names.clone(),
+            default_workspace,
             workspace_auto_back_and_forth: config.workspace_auto_back_and_forth,
         }
     }
@@ -148,6 +155,8 @@ impl VirtualWorkspaceManager {
         self.workspace_auto_back_and_forth = config.workspace_auto_back_and_forth;
 
         let target_count = self.default_workspace_count.max(1).min(self.max_workspaces);
+        self.default_workspace = config.default_workspace.min(target_count - 1);
+
         for (space, ids) in self.workspaces_by_space.iter_mut() {
             while ids.len() < target_count {
                 let idx = ids.len();
@@ -184,8 +193,9 @@ impl VirtualWorkspaceManager {
         }
         self.workspaces_by_space.insert(space, ids.clone());
 
-        if let Some(&first_id) = ids.first() {
-            self.active_workspace_per_space.insert(space, (None, first_id));
+        let default_idx = self.default_workspace.min(ids.len() - 1);
+        if let Some(&default_id) = ids.get(default_idx) {
+            self.active_workspace_per_space.insert(space, (None, default_id));
         }
     }
 
@@ -1164,6 +1174,20 @@ mod tests {
         manager.set_active_workspace(space, ws2_id);
         assert!(!is_window_visible(&manager, window1, space));
         assert!(is_window_visible(&manager, window2, space));
+    }
+
+    #[test]
+    fn default_workspace_setting_applied() {
+        let mut settings = VirtualWorkspaceSettings::default();
+        settings.default_workspace_count = 5;
+        settings.default_workspace = 3;
+
+        let mut manager = VirtualWorkspaceManager::new_with_config(&settings);
+        let space = SpaceId::new(42);
+        let workspaces = manager.list_workspaces(space);
+        let expected_ws = workspaces.get(settings.default_workspace).unwrap().0;
+
+        assert_eq!(manager.active_workspace(space), Some(expected_ws));
     }
 
     #[test]
