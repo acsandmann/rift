@@ -125,6 +125,13 @@ enabled = false
 # if enabled, it will show all workspaces including empty ones. disabled because this
 # tends to take up too much room in the menubar and then is auto hidden by macos
 show_empty = false
+# choose between drawing every workspace or only the active workspace
+mode = "all"
+# when showing workspaces as labels ("index" or "name"), choose which label to render
+active_label = "index"
+# when displaying workspaces, choose whether to draw the layout preview or a set of labels
+# options are "layout" or "label"
+display_style = "layout"
 
 [settings.ui.stack_line]
 # experimental stack line indicator (defaults to off)

@@ -9,21 +9,26 @@ use crate::sys::screen::SpaceId;
 use crate::sys::timer::Timer;
 use crate::ui::menu_bar::MenuIcon;
 #[derive(Debug, Clone)]
+pub struct Update {
+    pub active_space: SpaceId,
+    pub workspaces: Vec<WorkspaceData>,
+    pub active_workspace_idx: Option<u64>,
+    pub active_workspace: Option<VirtualWorkspaceId>,
+    pub windows: Vec<WindowData>,
+}
+
 pub enum Event {
-    Update {
-        active_space: SpaceId,
-        workspaces: Vec<WorkspaceData>,
-        active_workspace_idx: Option<u64>,
-        active_workspace: Option<VirtualWorkspaceId>,
-        windows: Vec<WindowData>,
-    },
+    Update(Update),
+    ConfigUpdated(Config),
 }
 
 pub struct Menu {
     config: Config,
     rx: Receiver,
     icon: Option<MenuIcon>,
+    mtm: MainThreadMarker,
     last_signature: Option<u64>,
+    last_update: Option<Update>,
 }
 
 pub type Sender = actor::Sender<Event>;
@@ -35,15 +40,13 @@ impl Menu {
             icon: config.settings.ui.menu_bar.enabled.then(|| MenuIcon::new(mtm)),
             config,
             rx,
+            mtm,
             last_signature: None,
+            last_update: None,
         }
     }
 
     pub async fn run(mut self) {
-        if self.icon.is_none() {
-            return;
-        }
-
         const DEBOUNCE: Duration = Duration::from_millis(150);
 
         let mut pending: Option<Event> = None;
@@ -61,8 +64,13 @@ impl Menu {
                     match maybe {
                         Some((span, event)) => {
                             let _enter = span.enter();
-                            pending = Some(event);
-                            timer.set_next_fire(DEBOUNCE);
+                            match event {
+                                Event::Update(_) => {
+                                    pending = Some(event);
+                                    timer.set_next_fire(DEBOUNCE);
+                                }
+                                Event::ConfigUpdated(cfg) => self.handle_config_updated(cfg),
+                            }
                         }
                         None => {
                             if let Some(ev) = pending.take() {
@@ -77,23 +85,55 @@ impl Menu {
     }
 
     fn handle_event(&mut self, event: Event) {
-        let Some(icon) = &mut self.icon else { return };
-        let Event::Update {
-            active_space,
-            workspaces,
-            active_workspace_idx,
-            active_workspace,
-            windows,
-        } = event;
+        match event {
+            Event::Update(update) => self.handle_update(update),
+            Event::ConfigUpdated(cfg) => self.handle_config_updated(cfg),
+        }
+    }
 
-        let sig = sig(active_space.get() as u64, active_workspace_idx, &windows);
+    fn handle_update(&mut self, update: Update) {
+        self.apply_update(&update);
+        self.last_update = Some(update);
+    }
+
+    fn apply_update(&mut self, update: &Update) {
+        let Some(icon) = &mut self.icon else { return };
+
+        let sig = sig(
+            update.active_space.get() as u64,
+            update.active_workspace_idx,
+            &update.windows,
+        );
         if self.last_signature == Some(sig) {
             return;
         }
         self.last_signature = Some(sig);
 
-        let show_all = self.config.settings.ui.menu_bar.show_empty;
-        icon.update(active_space, workspaces, active_workspace, windows, show_all);
+        let menu_bar_settings = &self.config.settings.ui.menu_bar;
+        icon.update(
+            update.active_space,
+            update.workspaces.clone(),
+            update.active_workspace,
+            update.windows.clone(),
+            menu_bar_settings,
+        );
+    }
+
+    fn handle_config_updated(&mut self, new_config: Config) {
+        let should_enable = new_config.settings.ui.menu_bar.enabled;
+
+        self.config = new_config;
+
+        if should_enable && self.icon.is_none() {
+            self.icon = Some(MenuIcon::new(self.mtm));
+        } else if !should_enable && self.icon.is_some() {
+            self.icon = None;
+        }
+
+        self.last_signature = None;
+        if let Some(update) = self.last_update.take() {
+            self.handle_update(update);
+        }
     }
 }
 

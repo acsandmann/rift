@@ -415,6 +415,30 @@ pub struct WindowSnappingSettings {
     pub drag_swap_fraction: f64,
 }
 
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MenuBarDisplayMode {
+    #[default]
+    All,
+    Active,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ActiveWorkspaceLabel {
+    #[default] 
+    Index,
+    Name,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceDisplayStyle {
+    #[default]
+    Layout,
+    Label,
+}
+
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct MenuBarSettings {
@@ -422,6 +446,12 @@ pub struct MenuBarSettings {
     pub enabled: bool,
     #[serde(default = "no")]
     pub show_empty: bool,
+    #[serde(default)]
+    pub mode: MenuBarDisplayMode,
+    #[serde(default)]
+    pub active_label: ActiveWorkspaceLabel,
+    #[serde(default)]
+    pub display_style: WorkspaceDisplayStyle,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]

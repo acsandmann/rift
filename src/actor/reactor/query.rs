@@ -64,13 +64,13 @@ impl Reactor {
             self.layout_manager.layout_engine.active_workspace_idx(active_space);
         let windows = self.handle_windows_query(Some(active_space));
 
-        let _ = menu_tx.send(menu_bar::Event::Update {
+        menu_tx.send(menu_bar::Event::Update(menu_bar::Update {
             active_space,
             workspaces,
             active_workspace_idx,
             active_workspace,
             windows,
-        });
+        }));
     }
 
     fn handle_workspace_query(&mut self, space_id_param: Option<SpaceId>) -> Vec<WorkspaceData> {

@@ -1,10 +1,10 @@
 use tracing::{error, info, warn};
 
 use crate::actor::app::{AppThreadHandle, WindowId};
-use crate::actor::raise_manager;
 use crate::actor::reactor::{Reactor, WorkspaceSwitchState};
 use crate::actor::stack_line::Event as StackLineEvent;
 use crate::actor::wm_controller::WmEvent;
+use crate::actor::{menu_bar, raise_manager};
 use crate::common::collections::HashMap;
 use crate::common::config::{self as config, Config};
 use crate::common::log::{MetricsCommand, handle_command};
@@ -111,6 +111,14 @@ impl CommandEventHandler {
                 reactor.config_manager.config.clone(),
             )) {
                 warn!("Failed to send config update to stack line: {}", e);
+            }
+        }
+
+        if let Some(tx) = &reactor.menu_manager.menu_tx {
+            if let Err(e) = tx.try_send(menu_bar::Event::ConfigUpdated(
+                reactor.config_manager.config.clone(),
+            )) {
+                warn!("Failed to send config update to menu bar: {}", e);
             }
         }
 
