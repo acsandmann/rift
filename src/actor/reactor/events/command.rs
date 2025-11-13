@@ -238,11 +238,9 @@ impl CommandEventHandler {
             crate::actor::reactor::DisplaySelector::Index(idx) => {
                 reactor.space_manager.screens.get(*idx)
             }
-            crate::actor::reactor::DisplaySelector::Uuid(uuid) => reactor
-                .space_manager
-                .screens
-                .iter()
-                .find(|s| s.display_uuid == *uuid),
+            crate::actor::reactor::DisplaySelector::Uuid(uuid) => {
+                reactor.space_manager.screens.iter().find(|s| s.display_uuid == *uuid)
+            }
         };
 
         if let Some(screen) = target_screen {

@@ -413,9 +413,7 @@ fn build_execute_request(execute: ExecuteCommands) -> Result<RiftRequest, String
         ExecuteCommands::MissionControl { mission_cmd } => {
             map_mission_control_command(mission_cmd)?
         }
-        ExecuteCommands::Display { display_cmd } => {
-            map_display_command(display_cmd)?
-        }
+        ExecuteCommands::Display { display_cmd } => map_display_command(display_cmd)?,
         ExecuteCommands::SaveAndExit => {
             RiftCommand::Reactor(reactor::Command::Reactor(reactor::ReactorCommand::SaveAndExit))
         }
@@ -635,16 +633,16 @@ fn map_mission_control_command(cmd: MissionControlCommands) -> Result<RiftComman
 fn map_display_command(cmd: DisplayCommands) -> Result<RiftCommand, String> {
     use rift_wm::actor::reactor::DisplaySelector;
     match cmd {
-        DisplayCommands::MoveMouseToIndex { index } => Ok(RiftCommand::Reactor(
-            reactor::Command::Reactor(reactor::ReactorCommand::MoveMouseToDisplay(
-                DisplaySelector::Index(index),
-            )),
-        )),
-        DisplayCommands::MoveMouseToUuid { uuid } => Ok(RiftCommand::Reactor(
-            reactor::Command::Reactor(reactor::ReactorCommand::MoveMouseToDisplay(
-                DisplaySelector::Uuid(uuid),
-            )),
-        )),
+        DisplayCommands::MoveMouseToIndex { index } => {
+            Ok(RiftCommand::Reactor(reactor::Command::Reactor(
+                reactor::ReactorCommand::MoveMouseToDisplay(DisplaySelector::Index(index)),
+            )))
+        }
+        DisplayCommands::MoveMouseToUuid { uuid } => {
+            Ok(RiftCommand::Reactor(reactor::Command::Reactor(
+                reactor::ReactorCommand::MoveMouseToDisplay(DisplaySelector::Uuid(uuid)),
+            )))
+        }
     }
 }
 
