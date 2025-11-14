@@ -545,17 +545,11 @@ impl State {
                     },
                 };
 
-                let position_result = if eui {
-                    with_enhanced_ui_disabled(&elem, || {
-                        trace("set_position", &elem, || elem.set_position(pos))
-                    })
+                if eui {
+                    let _ = with_enhanced_ui_disabled(&elem, || elem.set_position(pos));
                 } else {
-                    trace("set_position", &elem, || elem.set_position(pos))
+                    let _ = elem.set_position(pos);
                 };
-
-                if self.handle_ax_result(wid, position_result)?.is_none() {
-                    return Ok(false);
-                }
 
                 let frame =
                     match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
@@ -589,34 +583,13 @@ impl State {
                 };
 
                 if eui {
-                    let result = with_enhanced_ui_disabled(&elem, || {
-                        trace("set_position", &elem, || elem.set_position(desired.origin))?;
-                        trace("set_size", &elem, || elem.set_size(desired.size))?;
-                        Ok::<(), AxError>(())
+                    with_enhanced_ui_disabled(&elem, || {
+                        let _ = elem.set_position(desired.origin);
+                        let _ = elem.set_size(desired.size);
                     });
-                    if self.handle_ax_result(wid, result)?.is_none() {
-                        return Ok(false);
-                    }
                 } else {
-                    if self
-                        .handle_ax_result(
-                            wid,
-                            trace("set_position", &elem, || elem.set_position(desired.origin)),
-                        )?
-                        .is_none()
-                    {
-                        return Ok(false);
-                    }
-
-                    if self
-                        .handle_ax_result(
-                            wid,
-                            trace("set_size", &elem, || elem.set_size(desired.size)),
-                        )?
-                        .is_none()
-                    {
-                        return Ok(false);
-                    }
+                    let _ = elem.set_position(desired.origin);
+                    let _ = elem.set_size(desired.size);
                 }
 
                 let frame =
