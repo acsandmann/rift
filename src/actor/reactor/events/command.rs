@@ -42,10 +42,16 @@ impl CommandEventHandler {
                 | LayoutCommand::SwitchToWorkspace(_)
                 | LayoutCommand::SwitchToLastWorkspace
         );
-        if is_workspace_switch {
-            if let Some(space) = reactor.workspace_command_space() {
+        let workspace_space = if is_workspace_switch {
+            let space = reactor.workspace_command_space();
+            if let Some(space) = space {
                 reactor.store_current_floating_positions(space);
             }
+            space
+        } else {
+            None
+        };
+        if is_workspace_switch {
             reactor.workspace_switch_manager.workspace_switch_generation =
                 reactor.workspace_switch_manager.workspace_switch_generation.wrapping_add(1);
             reactor.workspace_switch_manager.active_workspace_switch =
@@ -56,9 +62,18 @@ impl CommandEventHandler {
             LayoutCommand::NextWorkspace(_)
             | LayoutCommand::PrevWorkspace(_)
             | LayoutCommand::SwitchToWorkspace(_)
-            | LayoutCommand::MoveWindowToWorkspace { .. }
             | LayoutCommand::CreateWorkspace
             | LayoutCommand::SwitchToLastWorkspace => {
+                if let Some(space) = workspace_space {
+                    reactor
+                        .layout_manager
+                        .layout_engine
+                        .handle_virtual_workspace_command(space, &cmd)
+                } else {
+                    EventResponse::default()
+                }
+            }
+            LayoutCommand::MoveWindowToWorkspace { .. } => {
                 if let Some(space) = reactor.workspace_command_space() {
                     reactor
                         .layout_manager
@@ -81,7 +96,7 @@ impl CommandEventHandler {
         } else {
             WorkspaceSwitchState::Inactive
         };
-        reactor.handle_layout_response(response);
+        reactor.handle_layout_response(response, workspace_space);
     }
 
     pub fn handle_command_metrics(_reactor: &mut Reactor, cmd: MetricsCommand) {

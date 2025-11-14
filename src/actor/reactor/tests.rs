@@ -257,15 +257,18 @@ fn handle_layout_response_groups_windows_by_app_and_screen() {
     let _events = apps.simulate_events();
     while raise_manager_rx.try_recv().is_ok() {}
 
-    reactor.handle_layout_response(layout::EventResponse {
-        raise_windows: vec![
-            WindowId::new(1, 1),
-            WindowId::new(1, 2),
-            WindowId::new(2, 1),
-            WindowId::new(2, 2),
-        ],
-        focus_window: None,
-    });
+    reactor.handle_layout_response(
+        layout::EventResponse {
+            raise_windows: vec![
+                WindowId::new(1, 1),
+                WindowId::new(1, 2),
+                WindowId::new(2, 1),
+                WindowId::new(2, 2),
+            ],
+            focus_window: None,
+        },
+        None,
+    );
     let msg = raise_manager_rx.try_recv().expect("Should have sent an event").1;
     match msg {
         raise_manager::Event::RaiseRequest(RaiseRequest {
@@ -304,10 +307,13 @@ fn handle_layout_response_includes_handles_for_raise_and_focus_windows() {
 
     let _events = apps.simulate_events();
     while raise_manager_rx.try_recv().is_ok() {}
-    reactor.handle_layout_response(layout::EventResponse {
-        raise_windows: vec![WindowId::new(1, 1)],
-        focus_window: Some(WindowId::new(2, 1)),
-    });
+    reactor.handle_layout_response(
+        layout::EventResponse {
+            raise_windows: vec![WindowId::new(1, 1)],
+            focus_window: Some(WindowId::new(2, 1)),
+        },
+        None,
+    );
     let msg = raise_manager_rx.try_recv().expect("Should have sent an event").1;
     match msg {
         raise_manager::Event::RaiseRequest(RaiseRequest { app_handles, .. }) => {

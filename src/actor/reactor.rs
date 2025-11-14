@@ -1282,7 +1282,7 @@ impl Reactor {
         let event_clone = event.clone();
         let response = self.layout_manager.layout_engine.handle_event(event);
         self.prepare_refocus_after_layout_event(&event_clone);
-        self.handle_layout_response(response);
+        self.handle_layout_response(response, None);
         for space in self.space_manager.iter_known_spaces() {
             self.layout_manager.layout_engine.debug_tree_desc(space, "after event", false);
         }
@@ -1573,12 +1573,16 @@ impl Reactor {
                     window_space,
                     &layout::LayoutCommand::SwitchToWorkspace(workspace_index),
                 );
-                self.handle_layout_response(response);
+                self.handle_layout_response(response, Some(window_space));
             }
         }
     }
 
-    fn handle_layout_response(&mut self, response: layout::EventResponse) {
+    fn handle_layout_response(
+        &mut self,
+        response: layout::EventResponse,
+        workspace_switch_space: Option<SpaceId>,
+    ) {
         if self.is_in_drag() {
             self.workspace_switch_manager.workspace_switch_state = WorkspaceSwitchState::Inactive;
             return;
@@ -1611,14 +1615,31 @@ impl Reactor {
                 } else if self.focus_untracked_window_under_cursor() {
                     handled_without_raise = true;
                 } else if self.config_manager.config.settings.mouse_follows_focus {
-                    if let Some(space) = self.workspace_command_space() {
-                        if let Some(screen) = self.space_manager.screen_by_space(space) {
-                            let center = screen.frame.mid();
-                            if let Some(event_tap_tx) =
-                                self.communication_manager.event_tap_tx.as_ref()
-                            {
-                                event_tap_tx.send(crate::actor::event_tap::Request::Warp(center));
-                                handled_without_raise = true;
+                    let skip_center_warp = workspace_switch_space
+                        .map(|space| {
+                            self.layout_manager
+                                .layout_engine
+                                .windows_in_active_workspace(space)
+                                .is_empty()
+                        })
+                        .unwrap_or(false);
+
+                    if !skip_center_warp {
+                        let mut center_space = workspace_switch_space;
+                        if center_space.is_none() {
+                            center_space = self.workspace_command_space();
+                        }
+
+                        if let Some(space) = center_space {
+                            if let Some(screen) = self.space_manager.screen_by_space(space) {
+                                let center = screen.frame.mid();
+                                if let Some(event_tap_tx) =
+                                    self.communication_manager.event_tap_tx.as_ref()
+                                {
+                                    event_tap_tx
+                                        .send(crate::actor::event_tap::Request::Warp(center));
+                                    handled_without_raise = true;
+                                }
                             }
                         }
                     }
