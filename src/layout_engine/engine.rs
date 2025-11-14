@@ -276,18 +276,11 @@ impl LayoutEngine {
             ) {
                 let new_layout = self.layout(new_space);
                 let windows_in_new_space = self.tree.visible_windows_in_layout(new_layout);
-                let workspace_focus = self
-                    .virtual_workspace_manager
-                    .active_workspace(new_space)
-                    .and_then(|workspace_id| {
-                        self.virtual_workspace_manager
-                            .last_focused_window(new_space, workspace_id)
-                    })
-                    .filter(|wid| self.tree.contains_window(new_layout, *wid));
-                let target_window = workspace_focus
-                    .or_else(|| self.tree.window_in_direction(new_layout, direction))
-                    .or_else(|| windows_in_new_space.first().copied());
-                if let Some(target_window) = target_window {
+                if let Some(target_window) = self
+                    .tree
+                    .window_in_direction(new_layout, direction)
+                    .or_else(|| windows_in_new_space.first().copied())
+                {
                     let _ = self.tree.select_window(new_layout, target_window);
                     return EventResponse {
                         focus_window: Some(target_window),
