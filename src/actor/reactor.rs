@@ -426,7 +426,7 @@ impl Reactor {
         broadcast_tx: BroadcastSender,
         menu_tx: menu_bar::Sender,
         stack_line_tx: stack_line::Sender,
-        window_notify: Option<(crate::actor::window_notify::Sender, WindowTxStore)>,
+    window_notify: Option<(crate::actor::window_notify::Sender, WindowTxStore)>,
     ) -> Sender {
         let (events_tx, events) = actor::channel();
         let events_tx_clone = events_tx.clone();
@@ -456,8 +456,8 @@ impl Reactor {
         record.start(&config, &layout_engine);
         let (raise_manager_tx, _rx) = actor::channel();
         let (window_notify_tx, window_tx_store) = match window_notify {
-            Some((tx, store)) => (Some(tx), Some(store)),
-            None => (None, None),
+            Some((tx, store)) => (Some(tx), store),
+            None => (None, WindowTxStore::new()),
         };
         Reactor {
             config_manager: managers::ConfigManager { config: config.clone() },
@@ -508,10 +508,7 @@ impl Reactor {
                 last_sls_notification_ids: Vec::new(),
                 window_notify_tx,
             },
-            transaction_manager: transaction_manager::TransactionManager {
-                store: window_tx_store,
-                last_sent_txids: HashMap::default(),
-            },
+            transaction_manager: transaction_manager::TransactionManager::new(window_tx_store),
             menu_manager: managers::MenuManager {
                 menu_state: MenuState::Closed,
                 menu_tx: None,

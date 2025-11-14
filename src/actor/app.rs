@@ -26,6 +26,7 @@ use crate::actor;
 use crate::actor::reactor::transaction_manager::TransactionId;
 use crate::actor::reactor::{self, Event, Requested};
 use crate::common::collections::{HashMap, HashSet};
+use crate::model::tx_store::WindowTxStore;
 use crate::sys::app::NSRunningApplicationExt;
 pub use crate::sys::app::{AppInfo, WindowInfo, pid_t};
 use crate::sys::axuielement::{
@@ -226,10 +227,15 @@ pub enum Quiet {
     No,
 }
 
-pub fn spawn_app_thread(pid: pid_t, info: AppInfo, events_tx: reactor::Sender) {
+pub fn spawn_app_thread(
+    pid: pid_t,
+    info: AppInfo,
+    events_tx: reactor::Sender,
+    tx_store: Option<WindowTxStore>,
+) {
     thread::Builder::new()
         .name(format!("{}({pid})", info.bundle_id.as_deref().unwrap_or("")))
-        .spawn(move || app_thread_main(pid, info, events_tx))
+        .spawn(move || app_thread_main(pid, info, events_tx, tx_store))
         .unwrap();
 }
 
@@ -248,12 +254,14 @@ struct State {
     is_hidden: bool,
     is_frontmost: bool,
     raises_tx: actor::Sender<RaiseRequest>,
+    tx_store: Option<WindowTxStore>,
 }
 
 struct WindowState {
     pub elem: AXUIElement,
     last_seen_txid: TransactionId,
     hidden_by_app: bool,
+    window_server_id: Option<WindowServerId>,
 }
 
 const APP_NOTIFICATIONS: &[&str] = &[
@@ -269,17 +277,36 @@ const APP_NOTIFICATIONS: &[&str] = &[
 
 const WINDOW_NOTIFICATIONS: &[&str] = &[
     kAXUIElementDestroyedNotification,
-    //kAXWindowMovedNotification,
-    //kAXWindowResizedNotification,
+    kAXWindowMovedNotification,
+    kAXWindowResizedNotification,
     kAXWindowMiniaturizedNotification,
     kAXWindowDeminiaturizedNotification,
     kAXTitleChangedNotification,
 ];
 
-const WINDOW_ANIMATION_NOTIFICATIONS: &[&str] = &[];
-//&[kAXWindowMovedNotification, kAXWindowResizedNotification];
+const WINDOW_ANIMATION_NOTIFICATIONS: &[&str] = //&[];
+    &[kAXWindowMovedNotification, kAXWindowResizedNotification];
 
 impl State {
+    fn txid_from_store(&self, wsid: Option<WindowServerId>) -> Option<TransactionId> {
+        let store = self.tx_store.as_ref()?;
+        let wsid = wsid?;
+        store.get(&wsid).map(|record| record.txid)
+    }
+
+    fn txid_for_window_state(&self, window: &WindowState) -> Option<TransactionId> {
+        self.txid_from_store(window.window_server_id)
+            .or_else(|| Self::some_txid(window.last_seen_txid))
+    }
+
+    fn some_txid(txid: TransactionId) -> Option<TransactionId> {
+        if txid == TransactionId::default() {
+            None
+        } else {
+            Some(txid)
+        }
+    }
+
     async fn run(
         mut self,
         info: AppInfo,
@@ -662,8 +689,8 @@ impl State {
                 self.stop_notifications_for_animation(&window.elem);
             }
             &mut Request::EndWindowAnimation(wid) => {
-                let (elem, last_seen_txid) = match self.window(wid) {
-                    Ok(window) => (window.elem.clone(), window.last_seen_txid),
+                let (elem, txid) = match self.window(wid) {
+                    Ok(window) => (window.elem.clone(), self.txid_for_window_state(window)),
                     Err(err) => match err {
                         AxError::Ax(code) => {
                             if self.handle_ax_error(wid, &code) {
@@ -683,7 +710,7 @@ impl State {
                 self.send_event(Event::WindowFrameChanged(
                     wid,
                     frame,
-                    Some(last_seen_txid),
+                    txid,
                     Requested(true),
                     None,
                 ));
@@ -742,8 +769,8 @@ impl State {
                 let Ok(wid) = self.id(&elem) else {
                     return;
                 };
-                let last_seen = match self.window(wid) {
-                    Ok(window) => window.last_seen_txid,
+                let txid = match self.window(wid) {
+                    Ok(window) => self.txid_for_window_state(window),
                     Err(err) => {
                         match err {
                             AxError::Ax(code) => {
@@ -767,7 +794,7 @@ impl State {
                 self.send_event(Event::WindowFrameChanged(
                     wid,
                     frame,
-                    Some(last_seen),
+                    txid,
                     Requested(false),
                     Some(event::get_mouse_state()),
                 ));
@@ -1096,18 +1123,17 @@ impl State {
             info.is_root = true;
         }
 
-        let idx = info
-            .sys_id
+        let window_server_id = info.sys_id.or_else(|| {
+            WindowServerId::try_from(&elem)
+                .or_else(|e| {
+                    info!("Could not get window server id for {elem:?}: {e}");
+                    Err(e)
+                })
+                .ok()
+        });
+
+        let idx = window_server_id
             .map(|sid| NonZeroU32::new(sid.as_u32()).expect("Window server id was 0"))
-            .or_else(|| {
-                WindowServerId::try_from(&elem)
-                    .or_else(|e| {
-                        info!("Could not get window server id for {elem:?}: {e}");
-                        Err(e)
-                    })
-                    .ok()
-                    .map(|id| NonZeroU32::new(id.as_u32()).expect("Window server id was 0"))
-            })
             .unwrap_or_else(|| {
                 self.last_window_idx += 1;
                 NonZeroU32::new(self.last_window_idx).unwrap()
@@ -1122,10 +1148,15 @@ impl State {
             return None;
         }
         let hidden_by_app = self.is_hidden;
+        let last_seen_txid = self
+            .txid_from_store(window_server_id)
+            .unwrap_or_default();
+
         let old = self.windows.insert(wid, WindowState {
             elem,
-            last_seen_txid: TransactionId::default(),
+            last_seen_txid,
             hidden_by_app,
+            window_server_id,
         });
         debug_assert!(old.is_none(), "Duplicate window id {wid:?}");
         if hidden_by_app {
@@ -1247,7 +1278,12 @@ impl Drop for State {
     }
 }
 
-fn app_thread_main(pid: pid_t, info: AppInfo, events_tx: reactor::Sender) {
+fn app_thread_main(
+    pid: pid_t,
+    info: AppInfo,
+    events_tx: reactor::Sender,
+    tx_store: Option<WindowTxStore>,
+) {
     let app = AXUIElement::application(pid);
     let Some(running_app) = NSRunningApplication::with_process_id(pid) else {
         info!(?pid, "Making NSRunningApplication failed; exiting app thread");
@@ -1293,6 +1329,7 @@ fn app_thread_main(pid: pid_t, info: AppInfo, events_tx: reactor::Sender) {
         is_hidden: false,
         is_frontmost: false,
         raises_tx,
+        tx_store,
     };
 
     let (requests_tx, requests_rx) = actor::channel();
