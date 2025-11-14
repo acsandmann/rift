@@ -2,6 +2,7 @@ use objc2_core_foundation::CGRect;
 use tracing::{debug, trace, warn};
 
 use crate::actor::app::WindowId;
+use crate::actor::reactor::events::drag::DragEventHandler;
 use crate::actor::reactor::{
     DragState, MissionControlState, Quiet, Reactor, Requested, TransactionId, WindowState, utils,
 };
@@ -180,7 +181,10 @@ impl WindowEventHandler {
             "WindowFrameChanged event"
         );
 
-        if let Some(window) = reactor.window_manager.windows.get_mut(&wid) {
+        let result = (|| -> bool {
+            let Some(window) = reactor.window_manager.windows.get_mut(&wid) else {
+                return false;
+            };
             if matches!(
                 reactor.mission_control_manager.mission_control_state,
                 MissionControlState::Active
@@ -296,8 +300,10 @@ impl WindowEventHandler {
                     if matches!(
                         reactor.drag_manager.drag_state,
                         DragState::Active { .. } | DragState::PendingSwap { .. }
-                    ) || matches!(&reactor.drag_manager.drag_state, DragState::Active { session } if session.window == wid)
-                    {
+                    ) || matches!(
+                        &reactor.drag_manager.drag_state,
+                        DragState::Active { session } if session.window == wid
+                    ) {
                         if let Some(space) = new_space {
                             if let DragState::Active { session } =
                                 &mut reactor.drag_manager.drag_state
@@ -348,8 +354,10 @@ impl WindowEventHandler {
                     return true;
                 }
             }
-        }
-        false
+            false
+        })();
+        handle_mouse_up_if_needed(reactor, mouse_state);
+        result
     }
 
     pub fn handle_mouse_moved_over_window(reactor: &mut Reactor, wsid: WindowServerId) {
@@ -369,5 +377,13 @@ impl WindowEventHandler {
         if let Some(space) = space {
             reactor.send_layout_event(LayoutEvent::WindowFocused(space, wid));
         }
+    }
+}
+
+fn handle_mouse_up_if_needed(reactor: &mut Reactor, mouse_state: Option<MouseState>) {
+    if mouse_state == Some(MouseState::Up)
+        && matches!(reactor.drag_manager.drag_state, DragState::Active { .. })
+    {
+        DragEventHandler::handle_mouse_up(reactor);
     }
 }
