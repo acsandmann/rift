@@ -2239,8 +2239,7 @@ impl Reactor {
         }
 
         if let Some(space) = get_active_space_number() {
-            let space_id = SpaceId::new(space);
-            if let Some(screen) = self.space_manager.screen_by_space(space_id) {
+            if let Some(screen) = self.space_manager.screen_by_space(space) {
                 return Some(screen.frame.mid());
             }
         }
