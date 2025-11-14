@@ -2155,16 +2155,8 @@ impl Reactor {
     }
 
     fn workspace_command_space(&self) -> Option<SpaceId> {
-        if let Ok(point) = current_cursor_location() {
-            if let Some(screen) =
-                self.space_manager.screens.iter().find(|screen| screen.frame.contains(point))
-            {
-                if let Some(space) = screen.space.or_else(|| {
-                    self.space_manager.screen_space_by_id.get(&screen.screen_id).copied()
-                }) {
-                    return Some(space);
-                }
-            }
+        if let Some(space) = self.space_for_cursor_screen() {
+            return Some(space);
         }
 
         if let Some(space) = self.main_window_space() {
@@ -2176,6 +2168,59 @@ impl Reactor {
         }
 
         self.space_manager.first_known_space()
+    }
+
+    fn space_for_cursor_screen(&self) -> Option<SpaceId> {
+        current_cursor_location().ok().and_then(|point| self.space_for_point(point))
+    }
+
+    fn space_for_point(&self, point: CGPoint) -> Option<SpaceId> {
+        self.screen_for_point(point)
+            .or_else(|| self.closest_screen_to_point(point))
+            .and_then(|screen| self.space_for_screen(screen))
+    }
+
+    fn screen_for_point(&self, point: CGPoint) -> Option<&Screen> {
+        self.space_manager.screens.iter().find(|screen| screen.frame.contains(point))
+    }
+
+    fn closest_screen_to_point(&self, point: CGPoint) -> Option<&Screen> {
+        self.space_manager.screens.iter().min_by(|a, b| {
+            let da = Self::rectangle_distance_sq(a.frame, point);
+            let db = Self::rectangle_distance_sq(b.frame, point);
+            da.total_cmp(&db)
+        })
+    }
+
+    fn space_for_screen(&self, screen: &Screen) -> Option<SpaceId> {
+        screen
+            .space
+            .or_else(|| self.space_manager.screen_space_by_id.get(&screen.screen_id).copied())
+    }
+
+    fn rectangle_distance_sq(frame: CGRect, point: CGPoint) -> f64 {
+        let min_x = frame.origin.x;
+        let max_x = frame.origin.x + frame.size.width;
+        let min_y = frame.origin.y;
+        let max_y = frame.origin.y + frame.size.height;
+
+        let dx = if point.x < min_x {
+            min_x - point.x
+        } else if point.x > max_x {
+            point.x - max_x
+        } else {
+            0.0
+        };
+
+        let dy = if point.y < min_y {
+            min_y - point.y
+        } else if point.y > max_y {
+            point.y - max_y
+        } else {
+            0.0
+        };
+
+        dx * dx + dy * dy
     }
 
     fn current_screen_center(&self) -> Option<CGPoint> {
