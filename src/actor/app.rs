@@ -1148,9 +1148,7 @@ impl State {
             return None;
         }
         let hidden_by_app = self.is_hidden;
-        let last_seen_txid = self
-            .txid_from_store(window_server_id)
-            .unwrap_or_default();
+        let last_seen_txid = self.txid_from_store(window_server_id).unwrap_or_default();
 
         let old = self.windows.insert(wid, WindowState {
             elem,

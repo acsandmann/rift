@@ -426,7 +426,7 @@ impl Reactor {
         broadcast_tx: BroadcastSender,
         menu_tx: menu_bar::Sender,
         stack_line_tx: stack_line::Sender,
-    window_notify: Option<(crate::actor::window_notify::Sender, WindowTxStore)>,
+        window_notify: Option<(crate::actor::window_notify::Sender, WindowTxStore)>,
     ) -> Sender {
         let (events_tx, events) = actor::channel();
         let events_tx_clone = events_tx.clone();

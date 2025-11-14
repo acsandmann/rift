@@ -170,6 +170,16 @@ impl WindowEventHandler {
         requested: Requested,
         mouse_state: Option<MouseState>,
     ) -> bool {
+        debug!(
+            ?wid,
+            ?new_frame,
+            last_seen=?last_seen,
+            requested=?requested,
+            mouse_state=?mouse_state,
+            window_known=reactor.window_manager.windows.contains_key(&wid),
+            "WindowFrameChanged event"
+        );
+
         if let Some(window) = reactor.window_manager.windows.get_mut(&wid) {
             if matches!(
                 reactor.mission_control_manager.mission_control_state,

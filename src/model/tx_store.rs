@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
 use objc2_core_foundation::CGRect;
 
 use crate::actor::reactor::transaction_manager::TransactionId;

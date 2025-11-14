@@ -11,13 +11,11 @@ impl DragEventHandler {
     pub fn handle_mouse_up(reactor: &mut Reactor) {
         let mut need_layout_refresh = false;
 
-        let pending_swap = if let DragState::PendingSwap { dragged, target } =
-            std::mem::replace(&mut reactor.drag_manager.drag_state, DragState::Inactive)
-        {
-            Some((dragged, target))
-        } else {
-            None
-        };
+        let pending_swap = reactor.get_pending_drag_swap();
+
+        if pending_swap.is_some() {
+            reactor.drag_manager.drag_state = DragState::Inactive;
+        }
 
         if let Some((dragged_wid, target_wid)) = pending_swap {
             trace!(?dragged_wid, ?target_wid, "Performing deferred swap on MouseUp");
@@ -82,16 +80,24 @@ impl DragEventHandler {
         let finalize_needs_layout = reactor.finalize_active_drag();
 
         reactor.drag_manager.reset();
+        reactor.drag_manager.drag_state = DragState::Inactive;
 
         if finalize_needs_layout {
             need_layout_refresh = true;
         }
 
         if need_layout_refresh {
+            let skip_layout_occurred = reactor.drag_manager.skip_layout_for_window.is_some();
             let _ = reactor.update_layout(false, false).unwrap_or_else(|e| {
                 warn!("Layout update failed: {}", e);
                 false
             });
+            if skip_layout_occurred {
+                let _ = reactor.update_layout(false, false).unwrap_or_else(|e| {
+                    warn!("Layout update failed: {}", e);
+                    false
+                });
+            }
         }
 
         reactor.drag_manager.skip_layout_for_window = None;
