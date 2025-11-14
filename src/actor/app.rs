@@ -246,7 +246,6 @@ struct State {
     app: AXUIElement,
     observer: Observer,
     events_tx: reactor::Sender,
-    handle: Option<AppThreadHandle>,
     windows: HashMap<WindowId, WindowState>,
     needs_resync: HashSet<WindowId>,
     last_window_idx: u32,
@@ -317,8 +316,7 @@ impl State {
         raises_rx: actor::Receiver<RaiseRequest>,
     ) {
         let handle = AppThreadHandle { requests_tx };
-        self.handle = Some(handle.clone());
-        if !self.init(info) {
+        if !self.init(handle, info) {
             return;
         }
 
@@ -391,7 +389,7 @@ impl State {
 
     #[instrument(skip_all, fields(?info))]
     #[must_use]
-    fn init(&mut self, info: AppInfo) -> bool {
+    fn init(&mut self, handle: AppThreadHandle, info: AppInfo) -> bool {
         for notif in APP_NOTIFICATIONS {
             let res = self.observer.add_notification(&self.app, notif);
             if let Err(err) = res {
@@ -433,7 +431,6 @@ impl State {
         self.main_window = self.app.main_window().ok().and_then(|w| self.id(&w).ok());
         self.is_frontmost = self.app.frontmost().unwrap_or(false);
 
-        let handle = self.handle.clone().expect("missing handle");
         self.events_tx.send(Event::ApplicationLaunched {
             pid: self.pid,
             handle,
@@ -650,35 +647,35 @@ impl State {
                                     if self.handle_ax_error(*wid, &code) {
                                         continue;
                                     }
-                                    // Couldn't access the element; enqueue a single-window
-                                    // SetWindowFrame fallback and continue.
-                                    if let Some(h) = &self.handle {
-                                        let _ = h.send(Request::SetWindowFrame(
-                                            *wid, *desired, txid, true,
-                                        ));
-                                    }
-                                    continue;
+                                    return Err(AxError::Ax(code));
                                 }
                                 AxError::NotFound => continue,
                             },
                         };
 
-                        // Use the consolidated helper that performs the batch AX ops
-                        // (size, position, size, frame). It will enqueue a single-window
-                        // fallback on AX errors and return Ok(None) to indicate skipping.
-                        match self.apply_batch_frame(*wid, &elem, *desired, txid) {
-                            Ok(Some(frame)) => {
-                                self.send_event(Event::WindowFrameChanged(
-                                    *wid,
-                                    frame,
-                                    Some(txid),
-                                    Requested(true),
-                                    None,
-                                ));
-                            }
-                            Ok(None) => continue,
-                            Err(err) => return Err(err),
+                        if self.handle_ax_result(*wid, elem.set_size(desired.size))?.is_none() {
+                            continue;
                         }
+                        if self.handle_ax_result(*wid, elem.set_position(desired.origin))?.is_none()
+                        {
+                            continue;
+                        }
+                        if self.handle_ax_result(*wid, elem.set_size(desired.size))?.is_none() {
+                            continue;
+                        }
+
+                        let frame = match self.handle_ax_result(*wid, elem.frame())? {
+                            Some(frame) => frame,
+                            None => continue,
+                        };
+
+                        self.send_event(Event::WindowFrameChanged(
+                            *wid,
+                            frame,
+                            Some(txid),
+                            Requested(true),
+                            None,
+                        ));
                     }
                     Ok(())
                 });
@@ -1225,46 +1222,6 @@ impl State {
         }
     }
 
-    fn apply_batch_frame(
-        &mut self,
-        wid: WindowId,
-        elem: &AXUIElement,
-        desired: CGRect,
-        txid: TransactionId,
-    ) -> Result<Option<CGRect>, AxError> {
-        match self.handle_ax_result(wid, elem.set_size(desired.size)) {
-            Ok(Some(_)) => {}
-            Ok(None) => return Ok(None),
-            Err(AxError::Ax(_)) => {
-                if let Some(h) = &self.handle {
-                    let _ = h.send(Request::SetWindowFrame(wid, desired, txid, true));
-                }
-                return Ok(None);
-            }
-            Err(e) => return Err(e),
-        }
-
-        match self.handle_ax_result(wid, elem.set_position(desired.origin)) {
-            Ok(Some(_)) => {}
-            Ok(None) => return Ok(None),
-            Err(e) => return Err(e),
-        }
-
-        match self.handle_ax_result(wid, elem.set_size(desired.size)) {
-            Ok(Some(_)) => {}
-            Ok(None) => return Ok(None),
-            Err(AxError::Ax(_)) => {
-                if let Some(h) = &self.handle {
-                    let _ = h.send(Request::SetWindowFrame(wid, desired, txid, true));
-                }
-                return Ok(None);
-            }
-            Err(e) => return Err(e),
-        }
-
-        Ok(self.handle_ax_result(wid, elem.frame())?)
-    }
-
     fn send_event(&self, event: Event) { self.events_tx.send(event); }
 
     fn window(&self, wid: WindowId) -> Result<&WindowState, AxError> {
@@ -1362,7 +1319,6 @@ fn app_thread_main(
         app: app.clone(),
         observer,
         events_tx,
-        handle: None,
         windows: HashMap::default(),
         needs_resync: HashSet::default(),
         last_window_idx: 0,
