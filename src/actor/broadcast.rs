@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::actor::app::WindowId;
 use crate::layout_engine::VirtualWorkspaceId;
 use crate::sys::screen::SpaceId;
 
@@ -17,6 +18,16 @@ pub enum BroadcastEvent {
         workspace_id: VirtualWorkspaceId,
         workspace_name: String,
         windows: Vec<String>,
+        space_id: SpaceId,
+        display_uuid: Option<String>,
+    },
+    WindowTitleChanged {
+        window_id: WindowId,
+        workspace_id: VirtualWorkspaceId,
+        workspace_index: Option<u64>,
+        workspace_name: String,
+        previous_title: String,
+        new_title: String,
         space_id: SpaceId,
         display_uuid: Option<String>,
     },

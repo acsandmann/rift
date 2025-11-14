@@ -290,12 +290,12 @@ enum DisplayCommands {
 enum SubscribeCommands {
     /// Subscribe to Mach IPC events
     Mach {
-        /// Event to subscribe to (workspace_changed, windows_changed, *)
+        /// Event to subscribe to (workspace_changed, windows_changed, window_title_changed, *)
         event: String,
     },
     /// Subscribe to events via CLI command execution
     Cli {
-        /// Event to subscribe to (workspace_changed, windows_changed, *)
+        /// Event to subscribe to (workspace_changed, windows_changed, window_title_changed, *)
         #[arg(long)]
         event: String,
         /// Command to execute when event occurs

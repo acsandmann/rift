@@ -1050,6 +1050,53 @@ impl Reactor {
         }
     }
 
+    fn broadcast_window_title_changed(
+        &mut self,
+        window_id: WindowId,
+        previous_title: String,
+        new_title: String,
+    ) {
+        if previous_title == new_title {
+            return;
+        }
+
+        let Some(space) = self.best_space_for_window_id(window_id) else {
+            return;
+        };
+
+        let Some(workspace_id) = self.layout_manager.layout_engine.active_workspace(space) else {
+            return;
+        };
+
+        let workspace_index = self.layout_manager.layout_engine.active_workspace_idx(space);
+
+        let workspace_name = self
+            .layout_manager
+            .layout_engine
+            .workspace_name(space, workspace_id)
+            .unwrap_or_else(|| format!("Workspace {:?}", workspace_id));
+
+        let display_uuid = self.space_manager.screen_by_space(space).and_then(|screen| {
+            if screen.display_uuid.is_empty() {
+                None
+            } else {
+                Some(screen.display_uuid.clone())
+            }
+        });
+
+        let event = BroadcastEvent::WindowTitleChanged {
+            window_id,
+            workspace_id,
+            workspace_index,
+            workspace_name,
+            previous_title,
+            new_title,
+            space_id: space,
+            display_uuid,
+        };
+        let _ = self.communication_manager.event_broadcaster.send(event);
+    }
+
     fn try_apply_pending_space_change(&mut self) {
         if let Some(mut pending) = self.pending_space_change_manager.pending_space_change.take() {
             if pending.spaces.len() == self.space_manager.screens.len() {

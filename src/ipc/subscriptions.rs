@@ -112,6 +112,7 @@ impl ServerState {
         let event_name = match &event {
             BroadcastEvent::WorkspaceChanged { .. } => "workspace_changed",
             BroadcastEvent::WindowsChanged { .. } => "windows_changed",
+            BroadcastEvent::WindowTitleChanged { .. } => "window_title_changed",
         };
 
         let subscriptions_snapshot = {
@@ -138,6 +139,7 @@ impl ServerState {
         let event_name = match &event {
             BroadcastEvent::WorkspaceChanged { .. } => "workspace_changed",
             BroadcastEvent::WindowsChanged { .. } => "windows_changed",
+            BroadcastEvent::WindowTitleChanged { .. } => "window_title_changed",
         };
 
         // Collect relevant subscriptions without full HashMap clone

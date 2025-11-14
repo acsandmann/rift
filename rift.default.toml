@@ -50,11 +50,15 @@ auto_focus_blacklist = []
 #
 # Tip: You can subscribe to rift events and trigger your own scripts. The command will
 # receive environment variables with context:
-#   RIFT_EVENT_TYPE            # "workspace_changed" | "windows_changed"
+#   RIFT_EVENT_TYPE            # "workspace_changed" | "windows_changed" | "window_title_changed"
 #   RIFT_WORKSPACE_ID          # workspace id
 #   RIFT_WORKSPACE_NAME        # workspace name
+#   RIFT_WORKSPACE_INDEX       # workspace index (window_title_changed only)
 #   RIFT_WINDOW_COUNT          # number of windows (windows_changed only)
 #   RIFT_WINDOWS               # comma-separated window ids (windows_changed only)
+#   RIFT_WINDOW_ID             # window id (window_title_changed only)
+#   RIFT_PREVIOUS_WINDOW_TITLE # previous title (window_title_changed only)
+#   RIFT_WINDOW_TITLE          # new title (window_title_changed only)
 #   RIFT_EVENT_JSON            # full JSON payload of the event
 #
 # Example (sketchybar integration):
