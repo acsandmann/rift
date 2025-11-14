@@ -290,7 +290,9 @@ impl EventTap {
     fn on_event(self: &Rc<Self>, event_type: CGEventType, event: &CGEvent) -> bool {
         if event_type.0 == NSEventType::Gesture.0 as u32 {
             if let Some(handler) = &self.swipe {
-                if let Some(nsevent) = NSEvent::eventWithCGEvent(event) {
+                if let Some(nsevent) = NSEvent::eventWithCGEvent(event)
+                    && nsevent.r#type() == NSEventType::Gesture
+                {
                     self.handle_gesture_event(handler, &nsevent);
                 }
             }
