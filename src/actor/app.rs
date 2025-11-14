@@ -653,16 +653,9 @@ impl State {
                             },
                         };
 
-                        if self.handle_ax_result(*wid, elem.set_size(desired.size))?.is_none() {
-                            continue;
-                        }
-                        if self.handle_ax_result(*wid, elem.set_position(desired.origin))?.is_none()
-                        {
-                            continue;
-                        }
-                        if self.handle_ax_result(*wid, elem.set_size(desired.size))?.is_none() {
-                            continue;
-                        }
+                        let _ = elem.set_size(desired.size);
+                        let _ = elem.set_position(desired.origin);
+                        let _ = elem.set_size(desired.size);
 
                         let frame = match self.handle_ax_result(*wid, elem.frame())? {
                             Some(frame) => frame,
