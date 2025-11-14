@@ -305,6 +305,9 @@ comb1 = "Alt + Shift"
 # - toggle_focus_floating / toggle_window_floating / toggle_fullscreen
 # - resize_window_grow / resize_window_shrink
 # - move_mouse_to_display = N or UUID
+# - focus_display = { direction = "left"|"right"|"up"|"down" }
+# - focus_display = { index = N }
+# - focus_display = { uuid = "<display_uuid>" }
 # - debug / serialize / save_and_exit
 # - show_timing
 
@@ -354,6 +357,8 @@ comb1 = "Alt + Shift"
 # "Alt + Shift + A" = { move_mouse_to_display = 0 }
 # "Alt + Shift + S" = { move_mouse_to_display = 1 }
 # "Alt + Shift + D" = { move_mouse_to_display = "e9a4f5a1-2f8b-45c1-9f4e-5a6b7c8d9e0f" }
+# Focus another display (direction/index/uuid)
+# "Alt + Shift + F" = { focus_display = { direction = "right" } }
 
 # if mission control is enabled
 # this will show an exploded view of the windows in the active workspace

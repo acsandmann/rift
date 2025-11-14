@@ -255,6 +255,14 @@ pub enum DisplaySelector {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum FocusDisplaySelector {
+    Direction { direction: Direction },
+    Index { index: usize },
+    Uuid { uuid: String },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReactorCommand {
     Debug,
@@ -269,6 +277,7 @@ pub enum ReactorCommand {
     ShowMissionControlCurrent,
     DismissMissionControl,
     MoveMouseToDisplay(DisplaySelector),
+    FocusDisplay(FocusDisplaySelector),
     CloseWindow {
         window_server_id: Option<WindowServerId>,
     },
@@ -798,6 +807,9 @@ impl Reactor {
             }
             Event::Command(Command::Reactor(ReactorCommand::MoveMouseToDisplay(selector))) => {
                 CommandEventHandler::handle_command_reactor_move_mouse_to_display(self, &selector);
+            }
+            Event::Command(Command::Reactor(ReactorCommand::FocusDisplay(selector))) => {
+                CommandEventHandler::handle_command_reactor_focus_display(self, &selector);
             }
             Event::Command(Command::Reactor(ReactorCommand::CloseWindow { window_server_id })) => {
                 CommandEventHandler::handle_command_reactor_close_window(self, window_server_id)
@@ -2164,6 +2176,76 @@ impl Reactor {
         }
 
         self.space_manager.first_known_space()
+    }
+
+    fn current_screen_center(&self) -> Option<CGPoint> {
+        if let Ok(point) = current_cursor_location() {
+            if let Some(screen) =
+                self.space_manager.screens.iter().find(|screen| screen.frame.contains(point))
+            {
+                return Some(screen.frame.mid());
+            }
+        }
+
+        if let Some(space) = self.main_window_space() {
+            if let Some(screen) = self.space_manager.screen_by_space(space) {
+                return Some(screen.frame.mid());
+            }
+        }
+
+        if let Some(space) = get_active_space_number() {
+            let space_id = SpaceId::new(space);
+            if let Some(screen) = self.space_manager.screen_by_space(space_id) {
+                return Some(screen.frame.mid());
+            }
+        }
+
+        self.space_manager.screens.first().map(|screen| screen.frame.mid())
+    }
+
+    fn screen_for_focus_direction(&self, direction: Direction) -> Option<&Screen> {
+        let origin = self.current_screen_center()?;
+        let mut best: Option<(f64, f64, &Screen)> = None;
+
+        for screen in &self.space_manager.screens {
+            let center = screen.frame.mid();
+            let delta = match direction {
+                Direction::Left => origin.x - center.x,
+                Direction::Right => center.x - origin.x,
+                Direction::Up => center.y - origin.y,
+                Direction::Down => origin.y - center.y,
+            };
+            if delta <= 0.0 {
+                continue;
+            }
+
+            let orthogonal = match direction {
+                Direction::Left | Direction::Right => (center.y - origin.y).abs(),
+                Direction::Up | Direction::Down => (center.x - origin.x).abs(),
+            };
+
+            let should_replace = best.as_ref().map_or(true, |(best_delta, best_ortho, _)| {
+                delta < *best_delta || (delta == *best_delta && orthogonal < *best_ortho)
+            });
+
+            if should_replace {
+                best = Some((delta, orthogonal, screen));
+            }
+        }
+
+        best.map(|(_, _, screen)| screen)
+    }
+
+    fn screen_for_focus_selector(&self, selector: &FocusDisplaySelector) -> Option<&Screen> {
+        match selector {
+            FocusDisplaySelector::Direction { direction } => {
+                self.screen_for_focus_direction(*direction)
+            }
+            FocusDisplaySelector::Index { index } => self.space_manager.screens.get(*index),
+            FocusDisplaySelector::Uuid { uuid } => {
+                self.space_manager.screens.iter().find(|screen| screen.display_uuid == *uuid)
+            }
+        }
     }
 
     fn store_current_floating_positions(&mut self, space: SpaceId) {

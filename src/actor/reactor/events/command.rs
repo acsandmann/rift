@@ -266,6 +266,34 @@ impl CommandEventHandler {
         }
     }
 
+    pub fn handle_command_reactor_focus_display(
+        reactor: &mut Reactor,
+        selector: &crate::actor::reactor::FocusDisplaySelector,
+    ) {
+        let Some(screen) = reactor.screen_for_focus_selector(selector) else {
+            return;
+        };
+
+        if let Some(space) = reactor.space_manager.space_for_screen(screen) {
+            let focus_target = reactor.last_focused_window_in_space(space).or_else(|| {
+                reactor
+                    .layout_manager
+                    .layout_engine
+                    .windows_in_active_workspace(space)
+                    .into_iter()
+                    .next()
+            });
+            if let Some(window_id) = focus_target {
+                reactor.send_layout_event(LayoutEvent::WindowFocused(space, window_id));
+                return;
+            }
+        }
+
+        if let Some(event_tap_tx) = reactor.communication_manager.event_tap_tx.as_ref() {
+            event_tap_tx.send(crate::actor::event_tap::Request::Warp(screen.frame.mid()));
+        }
+    }
+
     pub fn handle_command_reactor_close_window(
         reactor: &mut Reactor,
         window_server_id: Option<WindowServerId>,

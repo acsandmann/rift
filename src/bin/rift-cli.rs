@@ -1,7 +1,7 @@
 use std::process::{self};
 
 use clap::{Parser, Subcommand};
-use rift_wm::actor::reactor;
+use rift_wm::actor::reactor::{self, DisplaySelector, FocusDisplaySelector};
 use rift_wm::ipc::{RiftCommand, RiftMachClient, RiftRequest, RiftResponse};
 use rift_wm::layout_engine as layout;
 use rift_wm::model::server::{ApplicationData, LayoutStateData, WindowData, WorkspaceData};
@@ -274,6 +274,18 @@ enum MissionControlCommands {
 
 #[derive(Subcommand)]
 enum DisplayCommands {
+    /// Focus a display by direction, index, or UUID.
+    Focus {
+        /// Direction relative to the current display (left, right, up, down).
+        #[arg(long)]
+        direction: Option<String>,
+        /// Display index (0-based).
+        #[arg(long)]
+        index: Option<usize>,
+        /// Display UUID.
+        #[arg(long)]
+        uuid: Option<String>,
+    },
     /// Move mouse cursor to a display by index (0-based)
     MoveMouseToIndex {
         /// Display index (0-based)
@@ -659,8 +671,13 @@ fn map_mission_control_command(cmd: MissionControlCommands) -> Result<RiftComman
 }
 
 fn map_display_command(cmd: DisplayCommands) -> Result<RiftCommand, String> {
-    use rift_wm::actor::reactor::DisplaySelector;
     match cmd {
+        DisplayCommands::Focus { direction, index, uuid } => {
+            let selector = build_focus_display_selector(direction, index, uuid)?;
+            Ok(RiftCommand::Reactor(reactor::Command::Reactor(
+                reactor::ReactorCommand::FocusDisplay(selector),
+            )))
+        }
         DisplayCommands::MoveMouseToIndex { index } => {
             Ok(RiftCommand::Reactor(reactor::Command::Reactor(
                 reactor::ReactorCommand::MoveMouseToDisplay(DisplaySelector::Index(index)),
@@ -671,6 +688,44 @@ fn map_display_command(cmd: DisplayCommands) -> Result<RiftCommand, String> {
                 reactor::ReactorCommand::MoveMouseToDisplay(DisplaySelector::Uuid(uuid)),
             )))
         }
+    }
+}
+
+fn build_focus_display_selector(
+    direction: Option<String>,
+    index: Option<usize>,
+    uuid: Option<String>,
+) -> Result<FocusDisplaySelector, String> {
+    let provided =
+        direction.is_some() as usize + index.is_some() as usize + uuid.is_some() as usize;
+    if provided != 1 {
+        return Err(
+            "focus display requires exactly one of --direction, --index, or --uuid".to_string(),
+        );
+    }
+
+    if let Some(direction) = direction {
+        let parsed_direction = parse_focus_direction(&direction)?;
+        Ok(FocusDisplaySelector::Direction { direction: parsed_direction })
+    } else if let Some(index) = index {
+        Ok(FocusDisplaySelector::Index { index })
+    } else if let Some(uuid) = uuid {
+        Ok(FocusDisplaySelector::Uuid { uuid })
+    } else {
+        unreachable!("At least one selector value is guaranteed to be provided")
+    }
+}
+
+fn parse_focus_direction(value: &str) -> Result<layout::Direction, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "left" => Ok(layout::Direction::Left),
+        "right" => Ok(layout::Direction::Right),
+        "up" => Ok(layout::Direction::Up),
+        "down" => Ok(layout::Direction::Down),
+        other => Err(format!(
+            "Invalid focus direction '{}'; must be left, right, up, or down",
+            other
+        )),
     }
 }
 
