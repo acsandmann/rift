@@ -192,6 +192,15 @@ fn spawn_launchctl(args: &[&str]) -> io::Result<()> {
     Ok(())
 }
 
+fn service_is_running() -> io::Result<bool> {
+    let uid = getuid();
+    let service_target = format!("gui/{}/{}", uid, RIFT_PLIST);
+    match run_launchctl(&["print", &service_target], true) {
+        Ok(code) => Ok(code == 0),
+        Err(_) => Ok(false),
+    }
+}
+
 pub fn service_install_internal(plist_path: &Path) -> io::Result<()> {
     let plist = plist_contents()?;
     write_file_atomic(plist_path, &plist)?;
@@ -215,6 +224,12 @@ pub fn service_uninstall() -> io::Result<()> {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!("service file '{}' is not installed", plist_path.display()),
+        ));
+    }
+    if service_is_running()? {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "service is still running; stop it first with `rift service stop` before uninstalling",
         ));
     }
     fs::remove_file(plist_path)?;
