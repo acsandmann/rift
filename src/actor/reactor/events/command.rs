@@ -269,9 +269,9 @@ impl CommandEventHandler {
         selector: &DisplaySelector,
     ) {
         let target_screen = match selector {
-            DisplaySelector::Index(idx) => reactor.space_manager.screens.get(*idx),
+            DisplaySelector::Index(idx) => reactor.space_manager.screens.get(*idx).cloned(),
             DisplaySelector::Uuid(uuid) => {
-                reactor.space_manager.screens.iter().find(|s| s.display_uuid == *uuid)
+                reactor.space_manager.screens.iter().find(|s| s.display_uuid == *uuid).cloned()
             }
         };
 
@@ -280,7 +280,7 @@ impl CommandEventHandler {
             if let Some(event_tap_tx) = reactor.communication_manager.event_tap_tx.as_ref() {
                 event_tap_tx.send(crate::actor::event_tap::Request::Warp(center));
             }
-            let _ = focus_first_window_on_screen(reactor, screen);
+            let _ = Self::focus_first_window_on_screen(reactor, &screen);
         }
     }
 
@@ -288,11 +288,12 @@ impl CommandEventHandler {
         reactor: &mut Reactor,
         selector: &FocusDisplaySelector,
     ) {
-        let Some(screen) = reactor.screen_for_focus_selector(selector) else {
-            return;
+        let screen = match reactor.screen_for_focus_selector(selector).cloned() {
+            Some(s) => s,
+            None => return,
         };
 
-        if focus_first_window_on_screen(reactor, screen) {
+        if Self::focus_first_window_on_screen(reactor, &screen) {
             return;
         }
 
