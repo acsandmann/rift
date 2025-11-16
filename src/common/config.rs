@@ -331,6 +331,10 @@ pub struct Settings {
     #[serde(default)]
     pub run_on_start: Vec<String>,
 
+    /// Whether to reapply app rules when a window title changes.
+    #[serde(default = "no")]
+    pub reapply_app_rules_on_title_change: bool,
+
     /// Enable hot-reloading of the config file when it changes
     #[serde(default = "yes")]
     pub hot_reload: bool,

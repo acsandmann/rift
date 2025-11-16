@@ -185,6 +185,10 @@ haptic_pattern = "level_change"
 # to require greater overlap before a swap occurs.
 drag_swap_fraction = 0.3
 
+# Controls whether app rules are re-evaluated whenever a window title changes (useful for
+# title-based matching). Disable to avoid additional rule runs.
+# reapply_app_rules_on_title_change = false
+
 [virtual_workspaces]
 # Virtual workspaces
 # - enabled: if false, rift behaves like a simple tiling WM with a single space

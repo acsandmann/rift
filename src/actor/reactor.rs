@@ -1107,6 +1107,33 @@ impl Reactor {
             display_uuid,
         };
         let _ = self.communication_manager.event_broadcaster.send(event);
+        self.maybe_reapply_app_rules_for_window(window_id);
+    }
+
+    fn maybe_reapply_app_rules_for_window(&mut self, window_id: WindowId) {
+        if !self.config_manager.config.settings.reapply_app_rules_on_title_change {
+            return;
+        }
+
+        let (is_manageable, wsid) = match self.window_manager.windows.get(&window_id) {
+            Some(window_state) => (window_state.is_manageable, window_state.window_server_id),
+            None => return,
+        };
+
+        if !is_manageable {
+            return;
+        }
+
+        let app_info = match self.app_manager.apps.get(&window_id.pid) {
+            Some(app_state) => app_state.info.clone(),
+            None => return,
+        };
+
+        if let Some(window_server_id) = wsid {
+            self.app_manager.mark_wsids_recent(std::iter::once(window_server_id));
+        }
+
+        self.process_windows_for_app_rules(window_id.pid, vec![window_id], app_info);
     }
 
     fn try_apply_pending_space_change(&mut self) {

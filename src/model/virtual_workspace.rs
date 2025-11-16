@@ -1009,7 +1009,7 @@ impl VirtualWorkspaceManager {
             if let Some(key) = candidate_group_key {
                 if let Some(vec_entries) = groups.get(key) {
                     let best = vec_entries.iter().copied().max_by(|a, b| match a.2.cmp(&b.2) {
-                        std::cmp::Ordering::Equal => a.0.cmp(&b.0), // prefer later-defined rule on tie
+                        std::cmp::Ordering::Equal => b.0.cmp(&a.0), // prefer earlier-defined rule on tie
                         ord => ord,
                     });
                     if let Some(best_entry) = best {
@@ -1020,7 +1020,7 @@ impl VirtualWorkspaceManager {
         }
 
         let best_overall = matches.iter().max_by(|a, b| match a.2.cmp(&b.2) {
-            std::cmp::Ordering::Equal => a.0.cmp(&b.0), // prefer later-defined rule on tie
+            std::cmp::Ordering::Equal => b.0.cmp(&a.0), // prefer earlier-defined rule on tie
             ord => ord,
         });
 
