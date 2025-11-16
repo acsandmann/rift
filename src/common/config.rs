@@ -209,7 +209,12 @@ impl VirtualWorkspaceSettings {
                     ));
                 }
 
-                if !app_id.is_empty() && !seen_app_ids.insert(app_id) {
+                let has_specific_match = rule.app_name.is_some()
+                    || rule.title_regex.is_some()
+                    || rule.title_substring.is_some()
+                    || rule.ax_role.is_some()
+                    || rule.ax_subrole.is_some();
+                if !app_id.is_empty() && !has_specific_match && !seen_app_ids.insert(app_id) {
                     issues.push(format!("Duplicate app_id '{}' in rule {}", app_id, index));
                 }
             }
