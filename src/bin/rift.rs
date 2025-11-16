@@ -185,7 +185,13 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
     );
 
     let events_tx_mach = events_tx.clone();
-    let server_state = ipc::run_mach_server(events_tx_mach, config_tx.clone());
+    let server_state = match ipc::run_mach_server(events_tx_mach, config_tx.clone()) {
+        Ok(state) => state,
+        Err(err) => {
+            eprintln!("{}", err);
+            process::exit(1);
+        }
+    };
 
     let mach_bridge_rx = broadcast_rx;
 

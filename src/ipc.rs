@@ -15,7 +15,8 @@ use crate::actor::reactor::{self, Event};
 use crate::ipc::subscriptions::SharedServerState;
 use crate::sys::dispatch::block_on;
 use crate::sys::mach::{
-    mach_free_response, mach_msg_header_t, mach_send_request, mach_server_run, send_mach_reply,
+    is_mach_server_registered, mach_free_response, mach_msg_header_t, mach_send_request,
+    mach_server_run, send_mach_reply,
 };
 
 type ClientPort = u32;
@@ -23,7 +24,12 @@ type ClientPort = u32;
 pub fn run_mach_server(
     reactor_tx: reactor::Sender,
     config_tx: config_actor::Sender,
-) -> SharedServerState {
+) -> Result<SharedServerState, String> {
+    if is_mach_server_registered() {
+        return Err(
+            "Another Rift instance is already running; quit it before starting another.".into(),
+        );
+    }
     info!("Spawning background Mach server thread and returning SharedServerState");
 
     let shared_state: SharedServerState = std::sync::Arc::new(parking_lot::RwLock::new(
@@ -38,7 +44,7 @@ pub fn run_mach_server(
         }
     });
 
-    shared_state
+    Ok(shared_state)
 }
 
 pub struct RiftMachClient {

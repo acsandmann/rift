@@ -25,6 +25,11 @@ fn bs_name() -> CString {
     CString::new(format!("{}{}", MACH_BS_NAME_FMT_PREFIX, G_NAME)).unwrap()
 }
 
+pub fn is_mach_server_registered() -> bool {
+    let bs_name = bs_name();
+    unsafe { mach_get_bs_port(&bs_name) != 0 }
+}
+
 type kern_return_t = c_int;
 type mach_port_t = u32;
 type mach_port_name_t = u32;
@@ -264,11 +269,19 @@ unsafe fn mach_get_bs_port(bs_name: &CStr) -> mach_port_t {
     let mut service_port: mach_port_t = 0;
     let result = bootstrap_look_up(bs_port, bs_name.as_ptr(), &mut service_port);
     if result != KERN_SUCCESS {
-        error!(
-            "mach_get_bs_port: bootstrap_look_up failed for {} (kr={})",
-            bs_name.to_string_lossy(),
-            result
-        );
+        if result != BOOTSTRAP_UNKNOWN_SERVICE {
+            error!(
+                "mach_get_bs_port: bootstrap_look_up failed for {} (kr={})",
+                bs_name.to_string_lossy(),
+                result
+            );
+        } else {
+            debug!(
+                "mach_get_bs_port: {} is not registered yet (kr={})",
+                bs_name.to_string_lossy(),
+                result
+            );
+        }
         return 0;
     }
     service_port
@@ -433,12 +446,12 @@ pub unsafe fn mach_send_request(message: *const c_char, len: u32) -> *mut c_char
         return null_mut();
     }
 
-    let bs_name = CString::new(format!("{}{}", MACH_BS_NAME_FMT_PREFIX, G_NAME)).unwrap();
+    let service_name = bs_name();
 
     let mut service_port: mach_port_t = 0;
     let mut attempt = 0;
     while attempt < 5 {
-        service_port = mach_get_bs_port(&bs_name);
+        service_port = mach_get_bs_port(&service_name);
         if service_port != 0 {
             break;
         }
@@ -450,7 +463,7 @@ pub unsafe fn mach_send_request(message: *const c_char, len: u32) -> *mut c_char
     if service_port == 0 {
         error!(
             "mach_send_request: mach_get_bs_port returned 0 for {} after {} attempts",
-            bs_name.to_string_lossy(),
+            service_name.to_string_lossy(),
             attempt
         );
         return null_mut();
@@ -562,7 +575,7 @@ pub unsafe fn mach_server_begin(
         return false;
     }
 
-    let bs_name = CString::new(format!("{}{}", MACH_BS_NAME_FMT_PREFIX, G_NAME)).unwrap();
+    let service_name = bs_name();
 
     let ar = mach_port_allocate(mach_server.task, MACH_PORT_RIGHT_RECEIVE, &mut mach_server.port);
     if ar != KERN_SUCCESS {
@@ -584,12 +597,12 @@ pub unsafe fn mach_server_begin(
         return false;
     }
 
-    let rr = bootstrap_register(mach_server.bs_port, bs_name.as_ptr(), mach_server.port);
+    let rr = bootstrap_register(mach_server.bs_port, service_name.as_ptr(), mach_server.port);
     if rr != KERN_SUCCESS {
         match rr {
             BOOTSTRAP_NAME_IN_USE => error!(
                 "mach_server_begin: bootstrap_register: name in use: {}.",
-                bs_name.to_string_lossy()
+                service_name.to_string_lossy()
             ),
             BOOTSTRAP_NOT_PRIVILEGED => error!(
                 "mach_server_begin: bootstrap_register: not privileged for domain (kr={}).",
@@ -598,7 +611,7 @@ pub unsafe fn mach_server_begin(
             _ => error!(
                 "mach_server_begin: bootstrap_register failed (kr={}) for {}",
                 rr,
-                bs_name.to_string_lossy()
+                service_name.to_string_lossy()
             ),
         }
         return false;
@@ -652,7 +665,7 @@ pub unsafe fn mach_server_begin(
 
     info!(
         "mach_server_begin: registered '{}' in current bootstrap domain (port={}, bs_port={})",
-        bs_name.to_string_lossy(),
+        bs_name().to_string_lossy(),
         mach_server.port,
         mach_server.bs_port
     );
