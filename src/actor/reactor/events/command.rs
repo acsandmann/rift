@@ -1,7 +1,8 @@
 use tracing::{error, info, warn};
 
+use super::super::Screen;
 use crate::actor::app::{AppThreadHandle, WindowId};
-use crate::actor::reactor::{Reactor, WorkspaceSwitchState};
+use crate::actor::reactor::{DisplaySelector, FocusDisplaySelector, Reactor, WorkspaceSwitchState};
 use crate::actor::stack_line::Event as StackLineEvent;
 use crate::actor::wm_controller::WmEvent;
 use crate::actor::{menu_bar, raise_manager};
@@ -245,35 +246,7 @@ impl CommandEventHandler {
         }
     }
 
-    pub fn handle_command_reactor_move_mouse_to_display(
-        reactor: &mut Reactor,
-        selector: &crate::actor::reactor::DisplaySelector,
-    ) {
-        let target_screen = match selector {
-            crate::actor::reactor::DisplaySelector::Index(idx) => {
-                reactor.space_manager.screens.get(*idx)
-            }
-            crate::actor::reactor::DisplaySelector::Uuid(uuid) => {
-                reactor.space_manager.screens.iter().find(|s| s.display_uuid == *uuid)
-            }
-        };
-
-        if let Some(screen) = target_screen {
-            let center = screen.frame.mid();
-            if let Some(event_tap_tx) = reactor.communication_manager.event_tap_tx.as_ref() {
-                event_tap_tx.send(crate::actor::event_tap::Request::Warp(center));
-            }
-        }
-    }
-
-    pub fn handle_command_reactor_focus_display(
-        reactor: &mut Reactor,
-        selector: &crate::actor::reactor::FocusDisplaySelector,
-    ) {
-        let Some(screen) = reactor.screen_for_focus_selector(selector) else {
-            return;
-        };
-
+    fn focus_first_window_on_screen(reactor: &mut Reactor, screen: &Screen) -> bool {
         if let Some(space) = reactor.space_manager.space_for_screen(screen) {
             let focus_target = reactor.last_focused_window_in_space(space).or_else(|| {
                 reactor
@@ -285,8 +258,42 @@ impl CommandEventHandler {
             });
             if let Some(window_id) = focus_target {
                 reactor.send_layout_event(LayoutEvent::WindowFocused(space, window_id));
-                return;
+                return true;
             }
+        }
+        false
+    }
+
+    pub fn handle_command_reactor_move_mouse_to_display(
+        reactor: &mut Reactor,
+        selector: &DisplaySelector,
+    ) {
+        let target_screen = match selector {
+            DisplaySelector::Index(idx) => reactor.space_manager.screens.get(*idx),
+            DisplaySelector::Uuid(uuid) => {
+                reactor.space_manager.screens.iter().find(|s| s.display_uuid == *uuid)
+            }
+        };
+
+        if let Some(screen) = target_screen {
+            let center = screen.frame.mid();
+            if let Some(event_tap_tx) = reactor.communication_manager.event_tap_tx.as_ref() {
+                event_tap_tx.send(crate::actor::event_tap::Request::Warp(center));
+            }
+            let _ = focus_first_window_on_screen(reactor, screen);
+        }
+    }
+
+    pub fn handle_command_reactor_focus_display(
+        reactor: &mut Reactor,
+        selector: &FocusDisplaySelector,
+    ) {
+        let Some(screen) = reactor.screen_for_focus_selector(selector) else {
+            return;
+        };
+
+        if focus_first_window_on_screen(reactor, screen) {
+            return;
         }
 
         if let Some(event_tap_tx) = reactor.communication_manager.event_tap_tx.as_ref() {
