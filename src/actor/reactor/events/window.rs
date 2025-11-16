@@ -55,6 +55,16 @@ impl WindowEventHandler {
 
         if is_manageable {
             if let Some(space) = reactor.best_space_for_window(&frame, server_id) {
+                if let Some(app_info) =
+                    reactor.app_manager.apps.get(&wid.pid).map(|app| app.info.clone())
+                {
+                    if let Some(wsid) = server_id {
+                        reactor
+                            .app_manager
+                            .mark_wsids_recent(std::iter::once(wsid));
+                    }
+                    reactor.process_windows_for_app_rules(wid.pid, vec![wid], app_info);
+                }
                 reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
             }
         }

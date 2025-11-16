@@ -578,8 +578,12 @@ impl LayoutEngine {
             LayoutEvent::WindowAdded(space, wid) => {
                 self.debug_tree(space);
 
-                let assigned_workspace =
-                    match self.virtual_workspace_manager.auto_assign_window(wid, space) {
+                let assigned_workspace = match self
+                    .virtual_workspace_manager
+                    .workspace_for_window(space, wid)
+                {
+                    Some(workspace_id) => workspace_id,
+                    None => match self.virtual_workspace_manager.auto_assign_window(wid, space) {
                         Ok(workspace_id) => workspace_id,
                         Err(e) => {
                             warn!("Failed to auto-assign window to workspace: {:?}", e);
@@ -587,7 +591,8 @@ impl LayoutEngine {
                                 .active_workspace(space)
                                 .expect("No active workspace available")
                         }
-                    };
+                    },
+                };
 
                 let should_be_floating = self.floating.is_floating(wid);
 
