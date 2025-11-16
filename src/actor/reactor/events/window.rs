@@ -59,9 +59,7 @@ impl WindowEventHandler {
                     reactor.app_manager.apps.get(&wid.pid).map(|app| app.info.clone())
                 {
                     if let Some(wsid) = server_id {
-                        reactor
-                            .app_manager
-                            .mark_wsids_recent(std::iter::once(wsid));
+                        reactor.app_manager.mark_wsids_recent(std::iter::once(wsid));
                     }
                     reactor.process_windows_for_app_rules(wid.pid, vec![wid], app_info);
                 }

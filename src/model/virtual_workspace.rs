@@ -471,6 +471,15 @@ impl VirtualWorkspaceManager {
         Vec::new()
     }
 
+    pub fn is_window_in_active_workspace(&self, space: SpaceId, window_id: WindowId) -> bool {
+        if let Some(active_workspace_id) = self.active_workspace(space) {
+            if let Some(window_workspace_id) = self.window_to_workspace.get(&(space, window_id)) {
+                return *window_workspace_id == active_workspace_id;
+            }
+        }
+        true
+    }
+
     pub fn windows_in_inactive_workspaces(&self, space: SpaceId) -> Vec<WindowId> {
         let active_workspace_id = self.active_workspace(space);
 

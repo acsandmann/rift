@@ -121,10 +121,6 @@ impl LayoutEngine {
         self.virtual_workspace_manager.update_settings(settings);
     }
 
-    fn active_floating_windows_flat(&self, space: SpaceId) -> Vec<WindowId> {
-        self.floating.active_flat(space)
-    }
-
     fn active_floating_windows_in_workspace(&self, space: SpaceId) -> Vec<WindowId> {
         self.floating
             .active_flat(space)
@@ -177,6 +173,25 @@ impl LayoutEngine {
         }
     }
 
+    fn filter_active_workspace_windows(
+        &self,
+        space: SpaceId,
+        windows: Vec<WindowId>,
+    ) -> Vec<WindowId> {
+        windows
+            .into_iter()
+            .filter(|wid| self.is_window_in_active_workspace(space, *wid))
+            .collect()
+    }
+
+    fn filter_active_workspace_window(
+        &self,
+        space: SpaceId,
+        window: Option<WindowId>,
+    ) -> Option<WindowId> {
+        window.filter(|wid| self.is_window_in_active_workspace(space, *wid))
+    }
+
     pub fn resize_selection(&mut self, layout: LayoutId, resize_amount: f64) {
         self.tree.resize_selection_by(layout, resize_amount);
     }
@@ -192,7 +207,7 @@ impl LayoutEngine {
         let layout = self.layout(space);
 
         if is_floating {
-            let floating_windows = self.active_floating_windows_flat(space);
+            let floating_windows = self.active_floating_windows_in_workspace(space);
             debug!(
                 "Floating navigation: found {} floating windows: {:?}",
                 floating_windows.len(),
@@ -246,7 +261,10 @@ impl LayoutEngine {
                 }
             }
 
-            let tiled_windows = self.tree.visible_windows_in_layout(layout);
+            let tiled_windows = self.filter_active_workspace_windows(
+                space,
+                self.tree.visible_windows_in_layout(layout),
+            );
             debug!("Trying tiled windows: {:?}", tiled_windows);
             if !tiled_windows.is_empty() {
                 let focus_window = tiled_windows.first().copied();
@@ -265,6 +283,8 @@ impl LayoutEngine {
         }
 
         let (focus_window, raise_windows) = self.tree.move_focus(layout, direction);
+        let focus_window = self.filter_active_workspace_window(space, focus_window);
+        let raise_windows = self.filter_active_workspace_windows(space, raise_windows);
         if focus_window.is_some() {
             EventResponse { focus_window, raise_windows }
         } else {
@@ -275,10 +295,15 @@ impl LayoutEngine {
                 visible_space_centers,
             ) {
                 let new_layout = self.layout(new_space);
-                let windows_in_new_space = self.tree.visible_windows_in_layout(new_layout);
+                let windows_in_new_space = self.filter_active_workspace_windows(
+                    new_space,
+                    self.tree.visible_windows_in_layout(new_layout),
+                );
                 if let Some(target_window) = self
-                    .tree
-                    .window_in_direction(new_layout, direction)
+                    .filter_active_workspace_window(
+                        new_space,
+                        self.tree.window_in_direction(new_layout, direction),
+                    )
                     .or_else(|| windows_in_new_space.first().copied())
                 {
                     let _ = self.tree.select_window(new_layout, target_window);
@@ -289,7 +314,7 @@ impl LayoutEngine {
                 }
             }
 
-            let floating_windows = self.active_floating_windows_flat(space);
+            let floating_windows = self.active_floating_windows_in_workspace(space);
 
             if let Some(&first_floating) = floating_windows.first() {
                 let focus_window = Some(first_floating);
@@ -578,21 +603,20 @@ impl LayoutEngine {
             LayoutEvent::WindowAdded(space, wid) => {
                 self.debug_tree(space);
 
-                let assigned_workspace = match self
-                    .virtual_workspace_manager
-                    .workspace_for_window(space, wid)
-                {
-                    Some(workspace_id) => workspace_id,
-                    None => match self.virtual_workspace_manager.auto_assign_window(wid, space) {
-                        Ok(workspace_id) => workspace_id,
-                        Err(e) => {
-                            warn!("Failed to auto-assign window to workspace: {:?}", e);
-                            self.virtual_workspace_manager
-                                .active_workspace(space)
-                                .expect("No active workspace available")
-                        }
-                    },
-                };
+                let assigned_workspace =
+                    match self.virtual_workspace_manager.workspace_for_window(space, wid) {
+                        Some(workspace_id) => workspace_id,
+                        None => match self.virtual_workspace_manager.auto_assign_window(wid, space)
+                        {
+                            Ok(workspace_id) => workspace_id,
+                            Err(e) => {
+                                warn!("Failed to auto-assign window to workspace: {:?}", e);
+                                self.virtual_workspace_manager
+                                    .active_workspace(space)
+                                    .expect("No active workspace available")
+                            }
+                        },
+                    };
 
                 let should_be_floating = self.floating.is_floating(wid);
 
@@ -1557,18 +1581,7 @@ impl LayoutEngine {
     }
 
     pub fn is_window_in_active_workspace(&self, space: SpaceId, window_id: WindowId) -> bool {
-        let Some(active_workspace_id) = self.virtual_workspace_manager.active_workspace(space)
-        else {
-            return true;
-        };
-
-        if let Some(workspace_id) =
-            self.virtual_workspace_manager.workspace_for_window(space, window_id)
-        {
-            workspace_id == active_workspace_id
-        } else {
-            true
-        }
+        self.virtual_workspace_manager.is_window_in_active_workspace(space, window_id)
     }
 }
 
