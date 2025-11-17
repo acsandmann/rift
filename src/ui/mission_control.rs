@@ -28,7 +28,7 @@ use crate::common::config::Config;
 use crate::model::server::{WindowData, WorkspaceData};
 use crate::sys::cgs_window::CgsWindow;
 use crate::sys::dispatch::DispatchExt;
-use crate::sys::event::get_mouse_pos;
+use crate::sys::event::current_cursor_location;
 use crate::sys::geometry::CGRectExt;
 use crate::sys::screen::{CoordinateConverter, NSScreenExt, ScreenCache, ScreenId};
 use crate::sys::skylight::{
@@ -577,7 +577,11 @@ impl MissionControlOverlay {
     }
 
     fn screen_under_cursor_with(&self, metrics: &[ScreenMetrics]) -> Option<ScreenMetrics> {
-        metrics.iter().find(|m| m.frame.contains(get_mouse_pos())).copied()
+        if let Ok(loc) = current_cursor_location() {
+            return metrics.iter().find(|m| m.frame.contains(loc)).copied();
+        }
+
+        None
     }
 
     fn main_screen_metric(&self, metrics: &[ScreenMetrics]) -> Option<ScreenMetrics> {

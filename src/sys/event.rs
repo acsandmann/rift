@@ -1,7 +1,7 @@
 use objc2_app_kit::NSEvent;
 use objc2_core_foundation::CGPoint;
 use objc2_core_graphics::{
-    CGDisplayHideCursor, CGDisplayShowCursor, CGError, CGEvent, kCGNullDirectDisplay,
+    CGDisplayHideCursor, CGDisplayShowCursor, CGError, kCGNullDirectDisplay,
 };
 use serde::{Deserialize, Serialize};
 
@@ -24,7 +24,7 @@ pub fn get_mouse_state() -> MouseState {
     }
 }
 
-pub fn get_mouse_pos() -> CGPoint { CGEvent::location(None) }
+pub use super::window_server::current_cursor_location;
 
 pub fn warp_mouse(point: CGPoint) -> Result<(), CGError> {
     cg_ok(unsafe { CGWarpMouseCursorPosition(point) })
