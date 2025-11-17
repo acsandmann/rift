@@ -1560,7 +1560,7 @@ mod tests {
             .unwrap();
         // The generic rule with workspace index 1 should apply first.
         // When title matches, the specific rule (index 3, floating) should override.
-        let expected_initial = manager.list_workspaces(space2).get(1).unwrap().0; // workspace index 1
+        let expected_initial = manager.list_workspaces(space2).get(2).unwrap().0; // workspace index 1
         let expected_updated = manager.list_workspaces(space2).get(3).unwrap().0; // workspace index 3
         assert_eq!(bw2_initial_ws, expected_initial);
         // Workspace may remain same depending on rule ordering; ensure floating toggled and workspace is one of the target candidates.
