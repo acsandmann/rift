@@ -697,6 +697,21 @@ impl VirtualWorkspaceManager {
         }
     }
 
+    pub fn workspace_windows(
+        &self,
+        space: SpaceId,
+        workspace_id: VirtualWorkspaceId,
+    ) -> Vec<WindowId> {
+        if let Some(workspace) = self.workspaces.get(workspace_id) {
+            if workspace.space == space {
+                let mut windows: Vec<WindowId> = workspace.windows().collect();
+                windows.sort_unstable_by_key(|wid| wid.idx.get());
+                return windows;
+            }
+        }
+        Vec::new()
+    }
+
     pub fn auto_assign_window(
         &mut self,
         window_id: WindowId,

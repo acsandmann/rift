@@ -578,7 +578,16 @@ impl LayoutEngine {
                 let total_tiled_count: usize = tiled_by_workspace.values().map(|v| v.len()).sum();
 
                 for (ws_id, layout) in self.workspace_layouts.active_layouts_for_space(space) {
-                    let desired = tiled_by_workspace.get(&ws_id).cloned().unwrap_or_default();
+                    let mut desired = tiled_by_workspace.get(&ws_id).cloned().unwrap_or_default();
+                    for wid in self.virtual_workspace_manager.workspace_windows(space, ws_id) {
+                        if wid.pid != pid
+                            || self.floating.is_floating(wid)
+                            || desired.contains(&wid)
+                        {
+                            continue;
+                        }
+                        desired.push(wid);
+                    }
 
                     if desired.is_empty() && total_tiled_count == 0 {
                         if self.tree.has_windows_for_app(layout, pid) {
@@ -622,15 +631,17 @@ impl LayoutEngine {
 
                 if should_be_floating {
                     self.floating.add_active(space, wid.pid, wid);
-                } else {
-                    if let Some(layout) = self.workspace_layouts.active(space, assigned_workspace) {
+                } else if let Some(layout) =
+                    self.workspace_layouts.active(space, assigned_workspace)
+                {
+                    if !self.tree.contains_window(layout, wid) {
                         self.tree.add_window_after_selection(layout, wid);
-                    } else {
-                        warn!(
-                            "No active layout for workspace {:?} on space {:?}; window {:?} not added to tree",
-                            assigned_workspace, space, wid
-                        );
                     }
+                } else {
+                    warn!(
+                        "No active layout for workspace {:?} on space {:?}; window {:?} not added to tree",
+                        assigned_workspace, space, wid
+                    );
                 }
 
                 self.broadcast_windows_changed(space);
