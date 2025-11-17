@@ -221,6 +221,25 @@ impl TraditionalLayoutSystem {
         let selection_parent = selection.parent(self.map());
         let target_parent = target.parent(self.map());
 
+        let selection_stack_parent = selection_parent
+            .filter(|&parent| self.layout(parent).is_stacked());
+        let target_stack_parent = target_parent
+            .filter(|&parent| self.layout(parent).is_stacked());
+
+        match (selection_stack_parent, target_stack_parent) {
+            (Some(stack_parent), None) => {
+                target.detach(&mut self.tree).push_back(stack_parent);
+                self.select(stack_parent);
+                return;
+            }
+            (None, Some(stack_parent)) => {
+                selection.detach(&mut self.tree).push_back(stack_parent);
+                self.select(stack_parent);
+                return;
+            }
+            _ => {}
+        }
+
         match (selection_parent, target_parent) {
             (Some(sp), Some(tp)) if sp == tp => {
                 if self.layout(sp).is_stacked() {
@@ -236,7 +255,12 @@ impl TraditionalLayoutSystem {
                 let common_parent =
                     self.find_or_create_smart_common_parent(layout, selection, target, direction);
                 let container_layout = LayoutKind::from(direction.orientation());
-                self.set_layout(common_parent, container_layout);
+                let new_layout = if self.layout(common_parent).is_stacked() {
+                    self.layout(common_parent)
+                } else {
+                    container_layout
+                };
+                self.set_layout(common_parent, new_layout);
                 self.select(common_parent);
             }
 
@@ -248,7 +272,12 @@ impl TraditionalLayoutSystem {
                 let common_parent =
                     self.find_or_create_smart_common_parent(layout, selection, target, direction);
                 let container_layout = LayoutKind::from(direction.orientation());
-                self.set_layout(common_parent, container_layout);
+                let new_layout = if self.layout(common_parent).is_stacked() {
+                    self.layout(common_parent)
+                } else {
+                    container_layout
+                };
+                self.set_layout(common_parent, new_layout);
                 self.select(common_parent);
             }
         }
@@ -2480,6 +2509,81 @@ mod tests {
                 );
             assert_eq!(system.system.layout(container), LayoutKind::VerticalStack);
         }
+    }
+
+    #[test]
+    fn stacked_container_survives_new_additions() {
+        use crate::common::config::StackDefaultOrientation;
+
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
+
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+        system.add_window_after_selection(layout, w(3));
+
+        system.select_window(layout, w(1));
+        system.join_selection_with_direction(layout, Direction::Right);
+        let _ = system.apply_stacking_to_parent_of_selection(
+            layout,
+            StackDefaultOrientation::Same,
+        );
+
+        let stacked_child = system.selection(layout);
+        let stacked_container = stacked_child.parent(system.map()).unwrap();
+        assert!(system.layout(stacked_container).is_stacked());
+
+        system.add_window_after_selection(layout, w(4));
+        assert!(
+            system.layout(stacked_container).is_stacked(),
+            "joined container lost stack while still focused"
+        );
+
+        system.select_window(layout, w(3));
+        system.add_window_after_selection(layout, w(5));
+
+        assert!(
+            system.layout(stacked_container).is_stacked(),
+            "the joined container lost its stacked layout after adding another window"
+        );
+    }
+
+    #[test]
+    fn joining_into_existing_stack_keeps_it_stacked() {
+        use crate::common::config::StackDefaultOrientation;
+
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
+
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+        system.add_window_after_selection(layout, w(3));
+
+        system.select_window(layout, w(1));
+        system.join_selection_with_direction(layout, Direction::Right);
+        let _ = system.apply_stacking_to_parent_of_selection(
+            layout,
+            StackDefaultOrientation::Same,
+        );
+
+        let stacked_child = system.selection(layout);
+        let stacked_container = stacked_child.parent(system.map()).unwrap();
+        assert!(system.layout(stacked_container).is_stacked());
+
+        system.add_window_after_selection(layout, w(3));
+        system.select_window(layout, w(3));
+        system.join_selection_with_direction(layout, Direction::Left);
+
+        assert!(system.layout(stacked_container).is_stacked());
+        assert_eq!(
+            stacked_container.children(system.map()).count(),
+            3,
+            "expected the joined stack to grow instead of being replaced"
+        );
     }
 
     // Tests for StackLayoutResult::get_focused_frame_for_index
