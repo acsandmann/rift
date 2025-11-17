@@ -10,7 +10,7 @@ use dispatchr::time::Time;
 use objc2::msg_send;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::AnyObject;
-use objc2_app_kit::{NSApplication, NSColor, NSEvent, NSPopUpMenuWindowLevel, NSScreen};
+use objc2_app_kit::{NSApplication, NSColor, NSPopUpMenuWindowLevel, NSScreen};
 use objc2_core_foundation::{CFRetained, CFString, CFType, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
     CGColor, CGContext, CGDisplayBounds, CGEvent, CGEventField, CGEventTapOptions, CGEventTapProxy,
@@ -28,6 +28,7 @@ use crate::common::config::Config;
 use crate::model::server::{WindowData, WorkspaceData};
 use crate::sys::cgs_window::CgsWindow;
 use crate::sys::dispatch::DispatchExt;
+use crate::sys::event::get_mouse_pos;
 use crate::sys::geometry::CGRectExt;
 use crate::sys::screen::{CoordinateConverter, NSScreenExt, ScreenCache, ScreenId};
 use crate::sys::skylight::{
@@ -575,13 +576,8 @@ impl MissionControlOverlay {
         }
     }
 
-    fn screen_under_cursor_with(
-        &self,
-        metrics: &[ScreenMetrics],
-        converter: CoordinateConverter,
-    ) -> Option<ScreenMetrics> {
-        let cursor = converter.convert_point(NSEvent::mouseLocation())?;
-        metrics.iter().find(|m| m.frame.contains(cursor)).copied()
+    fn screen_under_cursor_with(&self, metrics: &[ScreenMetrics]) -> Option<ScreenMetrics> {
+        metrics.iter().find(|m| m.frame.contains(get_mouse_pos())).copied()
     }
 
     fn main_screen_metric(&self, metrics: &[ScreenMetrics]) -> Option<ScreenMetrics> {
@@ -1604,8 +1600,8 @@ impl MissionControlOverlay {
     pub fn set_fade_duration_ms(&mut self, ms: f64) { self.fade_duration_ms = ms.max(0.0); }
 
     fn current_screen_metrics(&self) -> ScreenMetrics {
-        if let Some((metrics, converter)) = self.gather_screen_metrics() {
-            if let Some(cursor_metric) = self.screen_under_cursor_with(&metrics, converter) {
+        if let Some((metrics, _converter)) = self.gather_screen_metrics() {
+            if let Some(cursor_metric) = self.screen_under_cursor_with(&metrics) {
                 return cursor_metric;
             }
 

@@ -1,11 +1,10 @@
 use objc2_app_kit::NSEvent;
 use objc2_core_foundation::CGPoint;
 use objc2_core_graphics::{
-    CGDisplayHideCursor, CGDisplayShowCursor, CGError, kCGNullDirectDisplay,
+    CGDisplayHideCursor, CGDisplayShowCursor, CGError, CGEvent, kCGNullDirectDisplay,
 };
 use serde::{Deserialize, Serialize};
 
-use super::screen::CoordinateConverter;
 use crate::sys::cg_ok;
 pub use crate::sys::hotkey::{Hotkey, HotkeySpec, KeyCode, Modifiers};
 use crate::sys::skylight::CGWarpMouseCursorPosition;
@@ -25,10 +24,7 @@ pub fn get_mouse_state() -> MouseState {
     }
 }
 
-pub fn get_mouse_pos(converter: CoordinateConverter) -> Option<CGPoint> {
-    let ns_loc = NSEvent::mouseLocation();
-    converter.convert_point(ns_loc)
-}
+pub fn get_mouse_pos() -> CGPoint { CGEvent::location(None) }
 
 pub fn warp_mouse(point: CGPoint) -> Result<(), CGError> {
     cg_ok(unsafe { CGWarpMouseCursorPosition(point) })
