@@ -1508,6 +1508,16 @@ impl Reactor {
             return;
         }
 
+        if let Some(active_space) = get_active_space_number()
+            && space_is_fullscreen(active_space.get())
+        {
+            debug!(
+                "Skipping auto workspace switch for pid {} because the active space is fullscreen",
+                pid
+            );
+            return;
+        }
+
         let visible_spaces: HashSet<SpaceId> =
             self.space_manager.screens.iter().filter_map(|s| s.space).collect();
         let app_is_on_visible_workspace =
