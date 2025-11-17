@@ -221,10 +221,9 @@ impl TraditionalLayoutSystem {
         let selection_parent = selection.parent(self.map());
         let target_parent = target.parent(self.map());
 
-        let selection_stack_parent = selection_parent
-            .filter(|&parent| self.layout(parent).is_stacked());
-        let target_stack_parent = target_parent
-            .filter(|&parent| self.layout(parent).is_stacked());
+        let selection_stack_parent =
+            selection_parent.filter(|&parent| self.layout(parent).is_stacked());
+        let target_stack_parent = target_parent.filter(|&parent| self.layout(parent).is_stacked());
 
         match (selection_stack_parent, target_stack_parent) {
             (Some(stack_parent), None) => {
@@ -2526,10 +2525,7 @@ mod tests {
 
         system.select_window(layout, w(1));
         system.join_selection_with_direction(layout, Direction::Right);
-        let _ = system.apply_stacking_to_parent_of_selection(
-            layout,
-            StackDefaultOrientation::Same,
-        );
+        let _ = system.apply_stacking_to_parent_of_selection(layout, StackDefaultOrientation::Same);
 
         let stacked_child = system.selection(layout);
         let stacked_container = stacked_child.parent(system.map()).unwrap();
@@ -2565,10 +2561,7 @@ mod tests {
 
         system.select_window(layout, w(1));
         system.join_selection_with_direction(layout, Direction::Right);
-        let _ = system.apply_stacking_to_parent_of_selection(
-            layout,
-            StackDefaultOrientation::Same,
-        );
+        let _ = system.apply_stacking_to_parent_of_selection(layout, StackDefaultOrientation::Same);
 
         let stacked_child = system.selection(layout);
         let stacked_container = stacked_child.parent(system.map()).unwrap();
