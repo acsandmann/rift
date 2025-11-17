@@ -783,11 +783,24 @@ impl State {
                 }
                 self.send_event(Event::WindowDeminiaturized(wid));
             }
-            // TODO: track titles and send them to sketchybar since people seem to care about that
-            kAXTitleChangedNotification => {}
-            _ => {
-                error!("Unhandled notification {notif:?} on {elem:#?}");
+            kAXTitleChangedNotification => {
+                let Ok(wid) = self.id(&elem) else {
+                    return;
+                };
+                match WindowInfo::from_ax_element(&elem, None) {
+                    Ok((info, _)) => {
+                        self.send_event(Event::WindowTitleChanged(wid, info.title));
+                    }
+                    Err(err) => {
+                        trace!(
+                            ?wid,
+                            ?err,
+                            "Failed to refresh window info for WindowTitleChanged notification"
+                        );
+                    }
+                }
             }
+            _ => error!("Unhandled notification {notif:?} on {elem:#?}"),
         }
     }
 }

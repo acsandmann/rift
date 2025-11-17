@@ -150,6 +150,7 @@ pub enum Event {
         Requested,
         Option<MouseState>,
     ),
+    WindowTitleChanged(WindowId, String),
     ResyncAppForWindow(WindowServerId),
     MenuOpened,
     WindowIsChangingScreens(WindowServerId),
@@ -738,6 +739,9 @@ impl Reactor {
                     mouse_state,
                 );
             }
+            Event::WindowTitleChanged(wid, new_title) => {
+                WindowEventHandler::handle_window_title_changed(self, wid, new_title);
+            }
             Event::ScreenParametersChanged(screens, ws_info) => {
                 SpaceEventHandler::handle_screen_parameters_changed(self, screens, ws_info);
             }
@@ -1068,50 +1072,42 @@ impl Reactor {
         previous_title: String,
         new_title: String,
     ) {
-        if previous_title == new_title {
-            return;
+        if previous_title != new_title
+            && let Some(space) = self.best_space_for_window_id(window_id)
+            && let Some(workspace_id) = self.layout_manager.layout_engine.active_workspace(space)
+        {
+            let workspace_index = self.layout_manager.layout_engine.active_workspace_idx(space);
+
+            let workspace_name = self
+                .layout_manager
+                .layout_engine
+                .workspace_name(space, workspace_id)
+                .unwrap_or_else(|| format!("Workspace {:?}", workspace_id));
+
+            let display_uuid = self.space_manager.screen_by_space(space).and_then(|screen| {
+                if screen.display_uuid.is_empty() {
+                    None
+                } else {
+                    Some(screen.display_uuid.clone())
+                }
+            });
+
+            let event = BroadcastEvent::WindowTitleChanged {
+                window_id,
+                workspace_id,
+                workspace_index,
+                workspace_name,
+                previous_title,
+                new_title,
+                space_id: space,
+                display_uuid,
+            };
+            let _ = self.communication_manager.event_broadcaster.send(event);
         }
-
-        let Some(space) = self.best_space_for_window_id(window_id) else {
-            return;
-        };
-
-        let Some(workspace_id) = self.layout_manager.layout_engine.active_workspace(space) else {
-            return;
-        };
-
-        let workspace_index = self.layout_manager.layout_engine.active_workspace_idx(space);
-
-        let workspace_name = self
-            .layout_manager
-            .layout_engine
-            .workspace_name(space, workspace_id)
-            .unwrap_or_else(|| format!("Workspace {:?}", workspace_id));
-
-        let display_uuid = self.space_manager.screen_by_space(space).and_then(|screen| {
-            if screen.display_uuid.is_empty() {
-                None
-            } else {
-                Some(screen.display_uuid.clone())
-            }
-        });
-
-        let event = BroadcastEvent::WindowTitleChanged {
-            window_id,
-            workspace_id,
-            workspace_index,
-            workspace_name,
-            previous_title,
-            new_title,
-            space_id: space,
-            display_uuid,
-        };
-        let _ = self.communication_manager.event_broadcaster.send(event);
-        self.maybe_reapply_app_rules_for_window(window_id);
     }
 
     fn maybe_reapply_app_rules_for_window(&mut self, window_id: WindowId) {
-        if !self.config_manager.config.settings.reapply_app_rules_on_title_change {
+        if !self.config_manager.config.virtual_workspaces.reapply_app_rules_on_title_change {
             return;
         }
 

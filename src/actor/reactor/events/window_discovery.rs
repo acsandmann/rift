@@ -317,45 +317,6 @@ impl WindowDiscoveryHandler {
             state.is_manageable = manageable;
             reactor.window_manager.windows.insert(wid, state);
         }
-
-        for (wid, info) in updated_windows {
-            let manageable = utils::compute_window_manageability(
-                info.sys_id,
-                info.is_minimized,
-                info.is_standard,
-                info.is_root,
-                &reactor.window_server_info_manager.window_server_info,
-            );
-
-            let title_change = {
-                let mut change = None;
-                if let Some(existing) = reactor.window_manager.windows.get_mut(&wid) {
-                    let previous_title = existing.title.clone();
-                    existing.title = info.title.clone();
-                    if info.frame.size.width != 0.0 || info.frame.size.height != 0.0 {
-                        existing.frame_monotonic = info.frame;
-                    }
-                    existing.is_ax_standard = info.is_standard;
-                    existing.is_ax_root = info.is_root;
-                    existing.is_minimized = info.is_minimized;
-                    existing.window_server_id = info.sys_id;
-                    existing.bundle_id = info.bundle_id.clone();
-                    existing.bundle_path = info.path.clone();
-                    existing.ax_role = info.ax_role.clone();
-                    existing.ax_subrole = info.ax_subrole.clone();
-                    existing.is_manageable = manageable;
-                    let new_title = existing.title.clone();
-                    if previous_title != new_title {
-                        change = Some((wid, previous_title, new_title));
-                    }
-                }
-                change
-            };
-
-            if let Some((window_id, previous_title, new_title)) = title_change {
-                reactor.broadcast_window_title_changed(window_id, previous_title, new_title);
-            }
-        }
     }
 
     /// Send layout events for discovered windows.

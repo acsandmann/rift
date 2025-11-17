@@ -80,6 +80,8 @@ pub struct VirtualWorkspaceSettings {
     #[serde(default)]
     pub default_workspace: usize,
     #[serde(default)]
+    pub reapply_app_rules_on_title_change: bool,
+    #[serde(default)]
     pub app_rules: Vec<AppWorkspaceRule>,
 }
 
@@ -137,6 +139,7 @@ impl Default for VirtualWorkspaceSettings {
             workspace_auto_back_and_forth: false,
             workspace_names: default_workspace_names(),
             default_workspace: 0,
+            reapply_app_rules_on_title_change: false,
             app_rules: Vec::new(),
         }
     }
@@ -332,9 +335,6 @@ pub struct Settings {
     pub run_on_start: Vec<String>,
 
     /// Whether to reapply app rules when a window title changes.
-    #[serde(default = "no")]
-    pub reapply_app_rules_on_title_change: bool,
-
     /// Enable hot-reloading of the config file when it changes
     #[serde(default = "yes")]
     pub hot_reload: bool,

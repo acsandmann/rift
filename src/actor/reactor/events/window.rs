@@ -368,6 +368,18 @@ impl WindowEventHandler {
         result
     }
 
+    pub fn handle_window_title_changed(reactor: &mut Reactor, wid: WindowId, new_title: String) {
+        if let Some(window) = reactor.window_manager.windows.get_mut(&wid) {
+            let previous_title = window.title.clone();
+            if previous_title == new_title {
+                return;
+            }
+            window.title = new_title.clone();
+            reactor.broadcast_window_title_changed(wid, previous_title, new_title);
+            reactor.maybe_reapply_app_rules_for_window(wid);
+        }
+    }
+
     pub fn handle_mouse_moved_over_window(reactor: &mut Reactor, wsid: WindowServerId) {
         let Some(&wid) = reactor.window_manager.window_ids.get(&wsid) else {
             return;
