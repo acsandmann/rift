@@ -7,7 +7,6 @@ use super::reactor::{self, Event};
 use crate::actor::app::WindowId;
 use crate::actor::reactor::Requested;
 use crate::common::collections::{HashMap, HashSet};
-use crate::model::swaparc::SwapArc;
 use crate::model::tx_store::WindowTxStore;
 use crate::sys::screen::SpaceId;
 use crate::sys::skylight::{CGSEventType, KnownCGSEvent};
@@ -71,8 +70,6 @@ impl Clone for Ignored {
 pub enum Request {
     Subscribe(CGSEventType),
     UpdateWindowNotifications(Vec<u32>),
-    IgnoreWindowEvent(CGSEventType, u32),
-    UnignoreWindowEvent(CGSEventType, u32),
     Stop,
 }
 
@@ -84,7 +81,6 @@ pub struct WindowNotify {
     requests_rx: Option<Receiver>,
     subscribed: HashSet<CGSEventType>,
     initial_events: Vec<CGSEventType>,
-    ignored: Arc<SwapArc<Ignored>>,
     tx_store: Option<WindowTxStore>,
 }
 
@@ -100,7 +96,6 @@ impl WindowNotify {
             requests_rx: Some(requests_rx),
             subscribed: HashSet::default(),
             initial_events: initial_events.iter().copied().collect(),
-            ignored: Arc::new(SwapArc::from_value(Ignored::empty())),
             tx_store,
         }
     }
@@ -112,12 +107,7 @@ impl WindowNotify {
         };
 
         for event in self.initial_events.drain(..) {
-            match Self::subscribe(
-                event,
-                self.events_tx.clone(),
-                self.ignored.clone(),
-                self.tx_store.clone(),
-            ) {
+            match Self::subscribe(event, self.events_tx.clone(), self.tx_store.clone()) {
                 Ok(()) => {
                     self.subscribed.insert(event);
                     debug!("initial subscription succeeded for event {}", event);
@@ -147,12 +137,7 @@ impl WindowNotify {
                     debug!("already subscribed to event {}", event);
                     return;
                 }
-                match Self::subscribe(
-                    event,
-                    self.events_tx.clone(),
-                    self.ignored.clone(),
-                    self.tx_store.clone(),
-                ) {
+                match Self::subscribe(event, self.events_tx.clone(), self.tx_store.clone()) {
                     Ok(()) => {
                         self.subscribed.insert(event);
                         debug!("subscribed to event {}", event);
@@ -165,18 +150,7 @@ impl WindowNotify {
             Request::UpdateWindowNotifications(window_ids) => {
                 window_notify::update_window_notifications(&window_ids);
             }
-            Request::IgnoreWindowEvent(event, wsid) => {
-                let cur = self.ignored.load();
-                let next = cur.with_added(event, wsid);
-                self.ignored.store(next);
-                debug!(?event, ?wsid, "Ignoring event for window-server id");
-            }
-            Request::UnignoreWindowEvent(event, wsid) => {
-                let cur = self.ignored.load();
-                let next = cur.with_removed(event, wsid);
-                self.ignored.store(next);
-                debug!(?event, ?wsid, "Stopped ignoring event for window-server id");
-            }
+
             Request::Stop => {}
         }
     }
@@ -184,7 +158,6 @@ impl WindowNotify {
     fn subscribe(
         event: CGSEventType,
         events_tx: reactor::Sender,
-        ignored: Arc<SwapArc<Ignored>>,
         tx_store: Option<WindowTxStore>,
     ) -> Result<(), i32> {
         let res = window_notify::init(event);
@@ -197,10 +170,6 @@ impl WindowNotify {
         std::thread::spawn(move || {
             while let Some((_span, evt)) = rx.blocking_recv() {
                 if let Some(window_id) = evt.window_id {
-                    if ignored.load().is_ignored(event, window_id) {
-                        continue;
-                    }
-
                     match event {
                         CGSEventType::Known(KnownCGSEvent::SpaceWindowDestroyed) => {
                             events_tx.send(Event::WindowServerDestroyed(

@@ -516,7 +516,7 @@ impl Reactor {
             },
             notification_manager: managers::NotificationManager {
                 last_sls_notification_ids: Vec::new(),
-                window_notify_tx,
+                _window_notify_tx: window_notify_tx,
             },
             transaction_manager: transaction_manager::TransactionManager::new(window_tx_store),
             menu_manager: managers::MenuManager {

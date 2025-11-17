@@ -237,44 +237,11 @@ impl AnimationManager {
         }
 
         if animated_count > 0 {
-            if let Some(tx) = &reactor.notification_manager.window_notify_tx {
-                for wsid in &animated_wids_wsids {
-                    let _ = tx.send(crate::actor::window_notify::Request::IgnoreWindowEvent(
-                        crate::sys::skylight::CGSEventType::Known(
-                            crate::sys::skylight::KnownCGSEvent::WindowMoved,
-                        ),
-                        *wsid,
-                    ));
-                    let _ = tx.send(crate::actor::window_notify::Request::IgnoreWindowEvent(
-                        crate::sys::skylight::CGSEventType::Known(
-                            crate::sys::skylight::KnownCGSEvent::WindowResized,
-                        ),
-                        *wsid,
-                    ));
-                }
-            }
-
             let low_power = power::is_low_power_mode_enabled();
             if is_resize || !reactor.config_manager.config.settings.animate || low_power {
                 anim.skip_to_end();
             } else {
                 anim.run();
-            }
-            if let Some(tx) = &reactor.notification_manager.window_notify_tx {
-                for wsid in &animated_wids_wsids {
-                    let _ = tx.send(crate::actor::window_notify::Request::UnignoreWindowEvent(
-                        crate::sys::skylight::CGSEventType::Known(
-                            crate::sys::skylight::KnownCGSEvent::WindowMoved,
-                        ),
-                        *wsid,
-                    ));
-                    let _ = tx.send(crate::actor::window_notify::Request::UnignoreWindowEvent(
-                        crate::sys::skylight::CGSEventType::Known(
-                            crate::sys::skylight::KnownCGSEvent::WindowResized,
-                        ),
-                        *wsid,
-                    ));
-                }
             }
         }
 
