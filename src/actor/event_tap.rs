@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::mem::replace;
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 
 use objc2_app_kit::{
     NSEvent, NSEventPhase, NSEventType, NSMainMenuWindowLevel, NSPopUpMenuWindowLevel,
@@ -84,7 +84,7 @@ pub type Sender = actor::Sender<Request>;
 pub type Receiver = actor::Receiver<Request>;
 
 struct CallbackCtx {
-    this: Weak<EventTap>,
+    this: Rc<EventTap>,
 }
 
 #[derive(Debug, Clone)]
@@ -195,7 +195,7 @@ impl EventTap {
 
         let mask = build_event_mask(this.swipe.is_some());
 
-        let ctx = Box::new(CallbackCtx { this: Rc::downgrade(&this) });
+        let ctx = Box::new(CallbackCtx { this: Rc::clone(&this) });
         let ctx_ptr = Box::into_raw(ctx) as *mut std::ffi::c_void;
 
         let tap = unsafe {
@@ -509,8 +509,7 @@ unsafe extern "C-unwind" fn mouse_callback(
     let ctx = unsafe { &*(user_info as *const CallbackCtx) };
 
     let event = unsafe { event_ref.as_ref() };
-    let handled = ctx.this.upgrade().map_or(true, |this| this.on_event(event_type, event));
-    if handled {
+    if ctx.this.on_event(event_type, event) {
         event_ref.as_ptr()
     } else {
         core::ptr::null_mut()
