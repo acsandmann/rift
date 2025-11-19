@@ -552,7 +552,10 @@ impl Reactor {
     // }
 
     fn is_in_drag(&self) -> bool {
-        matches!(self.drag_manager.drag_state, DragState::Active { .. })
+        matches!(
+            self.drag_manager.drag_state,
+            DragState::Active { .. } | DragState::PendingSwap { .. }
+        )
     }
 
     fn is_mission_control_active(&self) -> bool {
@@ -1285,7 +1288,15 @@ impl Reactor {
         };
         let wid = session.window;
 
-        let final_space = self.best_space_for_window_id(wid);
+        // During a drag the window server can continue reporting the origin
+        // space even after the user has moved the window onto another display.
+        // Trust the drag session’s resolved space (or the final frame’s screen)
+        // before falling back to the server-reported space so that cross-display
+        // drags do not snap the window back to the original monitor.
+        let final_space = session
+            .settled_space
+            .or_else(|| self.best_space_for_frame(&session.last_frame))
+            .or_else(|| self.best_space_for_window_id(wid));
 
         if session.origin_space != final_space {
             if session.origin_space.is_some() {

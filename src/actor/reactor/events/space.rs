@@ -194,7 +194,6 @@ impl SpaceEventHandler {
         screens: Vec<ScreenSnapshot>,
         ws_info: Vec<WindowServerInfo>,
     ) {
-        info!("screen parameters changed");
         let spaces: Vec<Option<SpaceId>> = screens.iter().map(|s| s.space).collect();
         let spaces_all_none = spaces.iter().all(|space| space.is_none());
         reactor.refocus_manager.stale_cleanup_state = if spaces_all_none {
