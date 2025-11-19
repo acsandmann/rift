@@ -55,7 +55,6 @@ pub enum KnownCGSEvent {
     WindowUpdated = 723,
     // maybe loginwindow active? kCGSEventNotificationSystemDefined = 724,
     WindowClosed = 804,
-    WindowIsChangingScreens = 805,
     WindowMoved = 806,
     WindowResized = 807,
     WindowReordered = 808,

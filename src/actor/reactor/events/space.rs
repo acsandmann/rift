@@ -5,7 +5,7 @@ use tracing::{debug, info, trace, warn};
 
 use crate::actor::app::Request;
 use crate::actor::reactor::{
-    DragState, Event, FullscreenTrack, MissionControlState, PendingSpaceChange, Reactor, Screen,
+    Event, FullscreenTrack, MissionControlState, PendingSpaceChange, Reactor, Screen,
     ScreenSnapshot, StaleCleanupState,
 };
 use crate::actor::wm_controller::WmEvent;
@@ -16,33 +16,6 @@ use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 pub struct SpaceEventHandler;
 
 impl SpaceEventHandler {
-    pub fn handle_window_is_changing_screens(reactor: &mut Reactor, wsid: WindowServerId) {
-        reactor.space_manager.changing_screens.insert(wsid);
-        if let DragState::PendingSwap { dragged, target } =
-            std::mem::replace(&mut reactor.drag_manager.drag_state, DragState::Inactive)
-        {
-            trace!(
-                ?dragged,
-                ?target,
-                ?wsid,
-                "Clearing pending drag swap; window is moving between spaces"
-            );
-            if reactor.drag_manager.skip_layout_for_window == Some(dragged) {
-                reactor.drag_manager.skip_layout_for_window = None;
-            }
-        }
-        reactor.drag_manager.reset();
-        reactor.drag_manager.drag_state = DragState::Inactive;
-        // finalize_active_drag will set to Inactive, but since we're starting a new drag, ensure_active_drag will set to Active
-        if let Some(&wid) = reactor.window_manager.window_ids.get(&wsid) {
-            if let Some(frame) =
-                reactor.window_manager.windows.get(&wid).map(|window| window.frame_monotonic)
-            {
-                reactor.ensure_active_drag(wid, &frame);
-            }
-        }
-    }
-
     pub fn handle_window_server_destroyed(
         reactor: &mut Reactor,
         wsid: WindowServerId,

@@ -153,7 +153,6 @@ pub enum Event {
     WindowTitleChanged(WindowId, String),
     ResyncAppForWindow(WindowServerId),
     MenuOpened,
-    WindowIsChangingScreens(WindowServerId),
     MenuClosed,
 
     /// Left mouse button was released.
@@ -707,9 +706,6 @@ impl Reactor {
             }
             Event::WindowsDiscovered { pid, new, known_visible } => {
                 AppEventHandler::handle_windows_discovered(self, pid, new, known_visible);
-            }
-            Event::WindowIsChangingScreens(wsid) => {
-                SpaceEventHandler::handle_window_is_changing_screens(self, wsid);
             }
             Event::WindowCreated(wid, window, ws_info, mouse_state) => {
                 WindowEventHandler::handle_window_created(self, wid, window, ws_info, mouse_state);

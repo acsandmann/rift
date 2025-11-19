@@ -183,13 +183,6 @@ impl WindowNotify {
                                 SpaceId::new(evt.space_id.unwrap()),
                             ))
                         }
-                        CGSEventType::Known(KnownCGSEvent::WindowIsChangingScreens)
-                        | CGSEventType::Known(KnownCGSEvent::WorkspaceWindowDidMove) => {
-                            if let Some(wsid) = evt.window_id {
-                                events_tx
-                                    .send(Event::ResyncAppForWindow(WindowServerId::new(wsid)));
-                            }
-                        }
                         CGSEventType::Known(KnownCGSEvent::WorkspaceWindowIsViewable)
                         | CGSEventType::Known(KnownCGSEvent::WorkspaceWindowIsNotViewable)
                         | CGSEventType::Known(
