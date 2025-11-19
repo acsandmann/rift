@@ -93,6 +93,10 @@ stack_offset = 40.0
 # - "horizontal"/"vertical": force a specific orientation
 default_orientation = "perpendicular"
 
+[settings.layout.scroll]
+# Maximum number of columns displayed at once in the scroll layout (1-5)
+visible_columns = 3
+
 [settings.layout.gaps]
 # Gap configuration
 # - outer: space between windows and screen edges

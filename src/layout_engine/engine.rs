@@ -452,6 +452,11 @@ impl LayoutEngine {
             crate::common::config::LayoutMode::Bsp => {
                 LayoutSystemKind::Bsp(crate::layout_engine::BspLayoutSystem::default())
             }
+            crate::common::config::LayoutMode::Scroll => {
+                LayoutSystemKind::Scroll(crate::layout_engine::ScrollLayoutSystem::new(
+                    layout_settings.scroll.visible_columns,
+                ))
+            }
         };
 
         LayoutEngine {
@@ -974,6 +979,7 @@ impl LayoutEngine {
                         s.toggle_tile_orientation(layout);
                         EventResponse::default()
                     }
+                    LayoutSystemKind::Scroll(_) => EventResponse::default(),
                 };
 
                 resp

@@ -534,6 +534,9 @@ pub struct LayoutSettings {
     /// Gap configuration for window spacing
     #[serde(default)]
     pub gaps: GapSettings,
+    /// Scroll layout configuration
+    #[serde(default)]
+    pub scroll: ScrollSettings,
 }
 
 /// Layout mode enum
@@ -545,6 +548,23 @@ pub enum LayoutMode {
     Traditional,
     /// Binary space partitioning tiling
     Bsp,
+    /// Scroll columns/rows carousel layout
+    Scroll,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct ScrollSettings {
+    #[serde(default = "default_scroll_visible_columns")]
+    pub visible_columns: usize,
+}
+
+impl Default for ScrollSettings {
+    fn default() -> Self {
+        Self {
+            visible_columns: default_scroll_visible_columns(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
@@ -680,9 +700,26 @@ impl LayoutSettings {
 
         issues.extend(self.gaps.validate());
 
+        issues.extend(self.scroll.validate());
+
         issues
     }
 }
+
+impl ScrollSettings {
+    pub fn validate(&self) -> Vec<String> {
+        let mut issues = Vec::new();
+        if self.visible_columns == 0 {
+            issues.push("scroll.visible_columns must be at least 1".to_string());
+        }
+        if self.visible_columns > 5 {
+            issues.push("scroll.visible_columns must be at most 5".to_string());
+        }
+        issues
+    }
+}
+
+fn default_scroll_visible_columns() -> usize { 3 }
 
 impl StackSettings {
     pub fn validate(&self) -> Vec<String> {
