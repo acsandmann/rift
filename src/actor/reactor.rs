@@ -53,12 +53,12 @@ use crate::model::VirtualWorkspaceId;
 use crate::model::tx_store::WindowTxStore;
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
-use crate::sys::geometry::{CGRectDef, CGRectExt, SameAs};
+use crate::sys::geometry::{CGRectDef, CGRectExt};
 use crate::sys::screen::{ScreenId, SpaceId, get_active_space_number};
 use crate::sys::timer::Timer;
 use crate::sys::window_server::{
     self, WindowServerId, WindowServerInfo, current_cursor_location, space_is_fullscreen,
-    wait_for_native_fullscreen_transition,
+    wait_for_native_fullscreen_transition, window_level,
 };
 
 pub type Sender = actor::Sender<Event>;
@@ -1377,6 +1377,10 @@ impl Reactor {
             return false;
         };
 
+        if !window.is_manageable {
+            return false;
+        }
+
         let candidate_frame = window.frame_monotonic;
 
         if matches!(self.menu_manager.menu_state, MenuState::Open(_)) {
@@ -1397,11 +1401,29 @@ impl Reactor {
         let Some(candidate_wsid) = window.window_server_id else {
             return true;
         };
+
+        for child_wsid in window_server::associated_windows(candidate_wsid) {
+            if let Some(&child_wid) = self.window_manager.window_ids.get(&child_wsid)
+                && let Some(child_state) = self.window_manager.windows.get(&child_wid)
+                && matches!(
+                    child_state.ax_role.as_deref(),
+                    Some("AXSheet") | Some("AXDrawer")
+                )
+            {
+                trace!(
+                    ?candidate_wsid,
+                    "Skipping autoraise while child sheet/drawer exists"
+                );
+                return false;
+            }
+        }
+
         let order = {
             let space_id = space.get();
             crate::sys::window_server::space_window_list_for_connection(&[space_id], 0, false)
         };
         let candidate_u32 = candidate_wsid.as_u32();
+        let candidate_level = window_level(candidate_u32);
 
         for above_u32 in order {
             if above_u32 == candidate_u32 {
@@ -1413,11 +1435,20 @@ impl Reactor {
                 continue;
             };
 
+            if !self.layout_manager.layout_engine.is_window_floating(above_wid) {
+                continue;
+            }
+
             let Some(above_state) = self.window_manager.windows.get(&above_wid) else {
                 continue;
             };
             let above_frame = above_state.frame_monotonic;
-            if candidate_frame.intersection(&above_frame).same_as(above_frame) {
+            if !candidate_frame.contains_rect(above_frame) {
+                continue;
+            }
+
+            let above_level = window_level(above_u32);
+            if candidate_level == above_level {
                 return false;
             }
         }
@@ -1513,6 +1544,15 @@ impl Reactor {
         {
             debug!(
                 "Skipping auto workspace switch for pid {} because the active space is fullscreen",
+                pid
+            );
+            return;
+        }
+
+        if let Some(wsid) = self.activation_from_unmanageable_window(pid) {
+            debug!(
+                ?wsid,
+                "Skipping auto workspace switch for pid {} because the activated window is not manageable",
                 pid
             );
             return;
@@ -2008,6 +2048,19 @@ impl Reactor {
     fn window_id_under_cursor(&self) -> Option<WindowId> {
         let wsid = window_server::window_under_cursor()?;
         self.window_manager.window_ids.get(&wsid).copied()
+    }
+
+    fn activation_from_unmanageable_window(&self, pid: pid_t) -> Option<WindowServerId> {
+        let wsid = window_server::window_under_cursor()?;
+        let wid = *self.window_manager.window_ids.get(&wsid)?;
+        if wid.pid != pid {
+            return None;
+        }
+        let window = self.window_manager.windows.get(&wid)?;
+        if window.is_manageable {
+            return None;
+        }
+        Some(wsid)
     }
 
     fn focus_untracked_window_under_cursor(&mut self) -> bool {

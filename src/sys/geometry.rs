@@ -77,6 +77,7 @@ impl SameAs for ic::CGSize {}
 pub trait CGRectExt {
     fn intersection(&self, other: &Self) -> Self;
     fn contains(&self, point: ic::CGPoint) -> bool;
+    fn contains_rect(&self, other: Self) -> bool;
     fn area(&self) -> f64;
 }
 
@@ -95,6 +96,13 @@ impl CGRectExt for ic::CGRect {
     fn contains(&self, point: ic::CGPoint) -> bool {
         (self.min().x..=self.max().x).contains(&point.x)
             && (self.min().y..=self.max().y).contains(&point.y)
+    }
+
+    fn contains_rect(&self, other: Self) -> bool {
+        self.min().x <= other.min().x
+            && self.min().y <= other.min().y
+            && self.max().x >= other.max().x
+            && self.max().y >= other.max().y
     }
 
     fn area(&self) -> f64 { self.size.width * self.size.height }
