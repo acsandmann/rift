@@ -19,7 +19,7 @@ use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{Config, HapticPattern};
 use crate::common::log::trace_misc;
 use crate::layout_engine::LayoutCommand as LC;
-use crate::sys::event::{self, Hotkey, KeyCode};
+use crate::sys::event::{self, Hotkey, KeyCode, MouseState, set_mouse_state};
 use crate::sys::geometry::CGRectExt;
 use crate::sys::haptics;
 use crate::sys::hotkey::{
@@ -299,6 +299,17 @@ impl EventTap {
             return true;
         }
 
+        match event_type {
+            CGEventType::LeftMouseDown | CGEventType::RightMouseDown => {
+                set_mouse_state(MouseStat..e::Down);
+            }
+            CGEventType::LeftMouseDragged | CGEventType::RightMouseDragged => {
+                set_mouse_state(MouseState::Down);
+            }
+            CGEventType::LeftMouseUp | CGEventType::RightMouseUp => set_mouse_state(MouseState::Up),
+            _ => {}
+        }
+
         let mut state = self.state.borrow_mut();
 
         if matches!(
@@ -321,7 +332,7 @@ impl EventTap {
             state.hidden = false;
         }
         match event_type {
-            CGEventType::LeftMouseUp => {
+            CGEventType::RightMouseUp | CGEventType::LeftMouseUp => {
                 _ = self.events_tx.send(Event::MouseUp);
             }
             CGEventType::MouseMoved
