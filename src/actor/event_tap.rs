@@ -301,7 +301,7 @@ impl EventTap {
 
         match event_type {
             CGEventType::LeftMouseDown | CGEventType::RightMouseDown => {
-                set_mouse_state(MouseStat..e::Down);
+                set_mouse_state(MouseState::Down);
             }
             CGEventType::LeftMouseDragged | CGEventType::RightMouseDragged => {
                 set_mouse_state(MouseState::Down);
