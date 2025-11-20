@@ -82,7 +82,7 @@ impl DragEventHandler {
         reactor.drag_manager.reset();
         reactor.drag_manager.drag_state = DragState::Inactive;
 
-        if finalize_needs_layout {
+        if finalize_needs_layout || reactor.is_in_drag() {
             need_layout_refresh = true;
         }
 

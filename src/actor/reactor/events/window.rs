@@ -20,7 +20,7 @@ impl WindowEventHandler {
         wid: WindowId,
         window: Window,
         ws_info: Option<WindowServerInfo>,
-        _mouse_state: MouseState,
+        _mouse_state: Option<MouseState>,
     ) {
         // FIXME: We assume all windows are on the main screen.
         if let Some(wsid) = window.sys_id {

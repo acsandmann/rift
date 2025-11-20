@@ -1,7 +1,6 @@
 use std::convert::TryFrom;
 use std::sync::atomic::{AtomicU8, Ordering};
 
-use objc2_app_kit::NSEvent;
 use objc2_core_foundation::CGPoint;
 use objc2_core_graphics::{
     CGDisplayHideCursor, CGDisplayShowCursor, CGError, kCGNullDirectDisplay,
@@ -22,7 +21,7 @@ pub enum MouseState {
 
 const MOUSE_STATE_UNKNOWN: u8 = 0;
 
-static MOUSE_STATE_ATOM: AtomicU8 = AtomicU8::new(MOUSE_STATE_UNKNOWN);
+static MOUSE_STATE: AtomicU8 = AtomicU8::new(MOUSE_STATE_UNKNOWN);
 
 impl From<MouseState> for u8 {
     fn from(state: MouseState) -> u8 { state as u8 }
@@ -40,19 +39,13 @@ impl TryFrom<u8> for MouseState {
     }
 }
 
-pub fn set_mouse_state(state: MouseState) {
-    MOUSE_STATE_ATOM.store(state.into(), Ordering::Relaxed);
-}
+pub fn set_mouse_state(state: MouseState) { MOUSE_STATE.store(state.into(), Ordering::Relaxed); }
 
-pub fn get_mouse_state() -> MouseState {
-    let raw = MOUSE_STATE_ATOM.load(Ordering::Relaxed);
-    MouseState::try_from(raw).unwrap_or_else(|_| {
-        if NSEvent::pressedMouseButtons() & 0x1 != 0 {
-            MouseState::Down
-        } else {
-            MouseState::Up
-        }
-    })
+pub fn get_mouse_state() -> Option<MouseState> {
+    match MouseState::try_from(MOUSE_STATE.load(Ordering::Relaxed)) {
+        Ok(s) => Some(s),
+        Err(_) => None,
+    }
 }
 
 pub fn warp_mouse(point: CGPoint) -> Result<(), CGError> {

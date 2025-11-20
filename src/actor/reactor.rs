@@ -135,7 +135,12 @@ pub enum Event {
         new: Vec<(WindowId, WindowInfo)>,
         known_visible: Vec<WindowId>,
     },
-    WindowCreated(WindowId, WindowInfo, Option<WindowServerInfo>, MouseState),
+    WindowCreated(
+        WindowId,
+        WindowInfo,
+        Option<WindowServerInfo>,
+        Option<MouseState>,
+    ),
     WindowDestroyed(WindowId),
     #[serde(skip)]
     WindowServerDestroyed(crate::sys::window_server::WindowServerId, SpaceId),

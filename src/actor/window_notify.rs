@@ -215,7 +215,7 @@ impl WindowNotify {
                                         bounds,
                                         last_seen,
                                         Requested(false),
-                                        Some(mouse_state),
+                                        mouse_state,
                                     ));
                                 }
                             };

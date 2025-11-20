@@ -157,7 +157,7 @@ fn it_ignores_windows_on_disabled_spaces() {
         WindowId::new(1, 2),
         make_window(2),
         None,
-        MouseState::Up,
+        Some(MouseState::Up),
     ));
     reactor.handle_event(Event::WindowDestroyed(WindowId::new(1, 2)));
 }
@@ -225,7 +225,7 @@ fn it_ignores_windows_on_nonzero_layers() {
         WindowId::new(1, 2),
         make_window(2),
         None,
-        MouseState::Up,
+        Some(MouseState::Up),
     ));
     reactor.handle_event(Event::WindowDestroyed(WindowId::new(1, 2)));
 }

@@ -762,7 +762,7 @@ impl State {
                     frame,
                     txid,
                     Requested(false),
-                    Some(event::get_mouse_state()),
+                    event::get_mouse_state(),
                 ));
             }
             kAXWindowMiniaturizedNotification => {
