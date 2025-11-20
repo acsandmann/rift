@@ -18,23 +18,37 @@ struct ScrollLayoutState {
     first_visible_column: usize,
 }
 
+#[derive(Clone, Copy)]
+enum ScrollRevealEdge {
+    Left,
+    Right,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct ScrollLayoutSystem {
     tree: Tree<ScrollComponents>,
     layout_roots: slotmap::SlotMap<LayoutId, OwnedNode>,
     layout_state: slotmap::SecondaryMap<LayoutId, ScrollLayoutState>,
     max_visible_columns: usize,
+    #[serde(default)]
+    infinite_loop: bool,
 }
 
 impl ScrollLayoutSystem {
-    pub fn new(max_visible_columns: usize) -> Self {
+    pub fn new(max_visible_columns: usize, infinite_loop: bool) -> Self {
         let clamped = max_visible_columns.clamp(1, 5);
         Self {
             tree: Tree::with_observer(ScrollComponents::default()),
             layout_roots: Default::default(),
             layout_state: Default::default(),
             max_visible_columns: clamped,
+            infinite_loop,
         }
+    }
+
+    pub fn apply_settings(&mut self, settings: &crate::common::config::ScrollSettings) {
+        self.max_visible_columns = settings.visible_columns.clamp(1, 5);
+        self.infinite_loop = settings.infinite_loop;
     }
 
     fn root(&self, layout: LayoutId) -> NodeId { self.layout_roots[layout].id() }
@@ -93,7 +107,27 @@ impl ScrollLayoutSystem {
 
     fn column_row_count(&self, column: NodeId) -> usize { column.children(self.map()).count() }
 
+    fn normalized_first_visible(
+        &self,
+        state_first: usize,
+        total: usize,
+        visible_cap: usize,
+    ) -> usize {
+        if total == 0 || visible_cap >= total {
+            0
+        } else if self.infinite_loop {
+            state_first % total
+        } else {
+            let max_start = total.saturating_sub(visible_cap);
+            state_first.min(max_start)
+        }
+    }
+
     fn ensure_selection_visible(&mut self, layout: LayoutId) {
+        self.ensure_selection_visible_with(layout, ScrollRevealEdge::Left);
+    }
+
+    fn ensure_selection_visible_with(&mut self, layout: LayoutId, edge: ScrollRevealEdge) {
         let total_columns = self.columns(layout);
         if total_columns.is_empty() {
             if let Some(state) = self.layout_state.get_mut(layout) {
@@ -116,16 +150,49 @@ impl ScrollLayoutSystem {
         let Some(target_idx) = target_idx else { return };
 
         let len = total_columns.len();
-        let current_start = self
+        let current_state = self
             .layout_state
             .get(layout)
-            .map(|state| state.first_visible_column % len)
+            .map(|state| state.first_visible_column)
             .unwrap_or(0);
-        let visible: HashSet<usize> =
-            (0..visible_cap).map(|offset| (current_start + offset) % len).collect();
-        if !visible.contains(&target_idx) {
-            self.ensure_state(layout).first_visible_column = target_idx;
+        let current_start = self.normalized_first_visible(current_state, len, visible_cap);
+
+        let is_visible = if self.infinite_loop {
+            let visible: HashSet<usize> =
+                (0..visible_cap).map(|offset| (current_start + offset) % len).collect();
+            visible.contains(&target_idx)
+        } else {
+            target_idx >= current_start && target_idx < current_start + visible_cap
+        };
+
+        if is_visible {
+            return;
         }
+
+        let new_first = if self.infinite_loop {
+            match edge {
+                ScrollRevealEdge::Left => target_idx,
+                ScrollRevealEdge::Right => {
+                    let trailing = visible_cap.saturating_sub(1);
+                    if target_idx >= trailing {
+                        target_idx - trailing
+                    } else {
+                        len - (trailing - target_idx)
+                    }
+                }
+            }
+        } else {
+            let max_start = len - visible_cap;
+            match edge {
+                ScrollRevealEdge::Left => target_idx.min(max_start),
+                ScrollRevealEdge::Right => {
+                    let trailing = visible_cap.saturating_sub(1);
+                    let start = target_idx.saturating_sub(trailing);
+                    start.min(max_start)
+                }
+            }
+        };
+        self.ensure_state(layout).first_visible_column = new_first;
     }
 
     fn window_at(&self, node: NodeId) -> Option<WindowId> { self.tree.data.window.at(node) }
@@ -155,7 +222,13 @@ impl ScrollLayoutSystem {
         if columns.is_empty() {
             return None;
         }
-        let idx = column_idx % columns.len();
+        let idx = if self.infinite_loop {
+            column_idx % columns.len()
+        } else if column_idx < columns.len() {
+            column_idx
+        } else {
+            return None;
+        };
         let column = columns[idx];
         if let Some(first_row) = column.first_child(self.map()) {
             self.tree.data.selection.select(&self.tree.map, first_row);
@@ -191,15 +264,12 @@ impl ScrollLayoutSystem {
         let total = columns.len();
         let visible_cap = self.max_visible_columns.min(total).max(1);
         let state = self.layout_state.get(layout).copied().unwrap_or_default();
-        let first = if visible_cap >= total {
-            0
+        let first = self.normalized_first_visible(state.first_visible_column, total, visible_cap);
+        let visible_set: HashSet<usize> = if self.infinite_loop {
+            (0..visible_cap).map(|offset| (first + offset) % total).collect()
         } else {
-            state.first_visible_column % total
+            HashSet::default()
         };
-        let mut visible_set = HashSet::default();
-        for offset in 0..visible_cap {
-            visible_set.insert((first + offset) % total);
-        }
 
         let mut result = Vec::new();
         let horiz_gap = gaps.inner.horizontal;
@@ -212,7 +282,11 @@ impl ScrollLayoutSystem {
         let column_width = usable_width / visible_cap as f64;
         let mut x = tiling_area.origin.x;
         for offset in 0..visible_cap {
-            let idx = (first + offset) % total;
+            let idx = if self.infinite_loop {
+                (first + offset) % total
+            } else {
+                first + offset
+            };
             if let Some(column) = columns.get(idx) {
                 let rect = CGRect {
                     origin: CGPoint { x, y: tiling_area.origin.y },
@@ -232,7 +306,12 @@ impl ScrollLayoutSystem {
 
         if total > visible_cap {
             for (idx, column) in columns.iter().enumerate() {
-                if !visible_set.contains(&idx) {
+                let is_visible = if self.infinite_loop {
+                    visible_set.contains(&idx)
+                } else {
+                    idx >= first && idx < first + visible_cap
+                };
+                if !is_visible {
                     let hide_rect =
                         Self::hidden_column_rect(screen, column_width, tiling_area.size.height);
                     self.layout_column(*column, hide_rect, gaps.inner.vertical, &mut result);
@@ -411,13 +490,28 @@ impl LayoutSystem for ScrollLayoutSystem {
                 } else if let Some(column) = self.column_of(layout, current) {
                     let idx = self.column_index(layout, column).unwrap_or(0);
                     let len = columns.len();
-                    let delta = if matches!(direction, Direction::Right) {
-                        1
-                    } else {
-                        len - 1
+                    let next_idx = match direction {
+                        Direction::Right => {
+                            if idx + 1 < len {
+                                Some(idx + 1)
+                            } else if self.infinite_loop {
+                                Some(0)
+                            } else {
+                                None
+                            }
+                        }
+                        Direction::Left => {
+                            if idx > 0 {
+                                Some(idx - 1)
+                            } else if self.infinite_loop {
+                                Some(len - 1)
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
                     };
-                    let next_idx = (idx + delta) % len;
-                    self.focus_window_in_column(layout, next_idx)
+                    next_idx.and_then(|i| self.focus_window_in_column(layout, i))
                 } else {
                     None
                 }
@@ -426,7 +520,15 @@ impl LayoutSystem for ScrollLayoutSystem {
 
         if let Some(target) = target {
             self.tree.data.selection.select(&self.tree.map, target);
-            self.ensure_selection_visible(layout);
+            match direction {
+                Direction::Left => {
+                    self.ensure_selection_visible_with(layout, ScrollRevealEdge::Left);
+                }
+                Direction::Right => {
+                    self.ensure_selection_visible_with(layout, ScrollRevealEdge::Right);
+                }
+                _ => self.ensure_selection_visible(layout),
+            }
             let wid = self.window_at(target);
             let raise = self.visible_windows_under_selection(layout);
             (wid, raise)
@@ -448,14 +550,31 @@ impl LayoutSystem for ScrollLayoutSystem {
                     return None;
                 }
                 let len = columns.len();
-                let delta = if matches!(direction, Direction::Right) {
-                    1
-                } else {
-                    len - 1
+                let next_idx = match direction {
+                    Direction::Right => {
+                        if idx + 1 < len {
+                            Some(idx + 1)
+                        } else if self.infinite_loop {
+                            Some(0)
+                        } else {
+                            None
+                        }
+                    }
+                    Direction::Left => {
+                        if idx > 0 {
+                            Some(idx - 1)
+                        } else if self.infinite_loop {
+                            Some(len - 1)
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
                 };
-                let next_idx = (idx + delta) % len;
-                let target_column = columns[next_idx];
-                target_column.first_child(self.map()).and_then(|node| self.window_at(node))
+                let target_column = next_idx.and_then(|i| columns.get(i)).copied();
+                target_column
+                    .and_then(|col| col.first_child(self.map()))
+                    .and_then(|node| self.window_at(node))
             }
         }
     }
@@ -639,19 +758,47 @@ impl LayoutSystem for ScrollLayoutSystem {
                     None => return false,
                 };
                 let len = columns.len();
-                let delta = if matches!(direction, Direction::Right) {
-                    1
+                let reveal_edge = if matches!(direction, Direction::Right) {
+                    ScrollRevealEdge::Right
                 } else {
-                    len - 1
+                    ScrollRevealEdge::Left
                 };
-                let target_idx = (idx + delta) % len;
-                let target_column = columns[target_idx];
-                if self.column_row_count(target_column) < MAX_ROWS_PER_COLUMN {
-                    selection.detach(&mut self.tree).push_back(target_column);
-                    self.tree.data.selection.select(&self.tree.map, selection);
-                    self.ensure_column_constraints(layout, original_column);
-                    self.ensure_selection_visible(layout);
-                    true
+                let target_idx = if self.infinite_loop {
+                    Some(if matches!(direction, Direction::Right) {
+                        (idx + 1) % len
+                    } else {
+                        (idx + len - 1) % len
+                    })
+                } else if matches!(direction, Direction::Right) {
+                    if idx + 1 < len { Some(idx + 1) } else { None }
+                } else if idx > 0 {
+                    Some(idx - 1)
+                } else {
+                    None
+                };
+
+                if let Some(target_idx) = target_idx {
+                    let target_column = columns[target_idx];
+                    if self.column_row_count(target_column) < MAX_ROWS_PER_COLUMN {
+                        selection.detach(&mut self.tree).push_back(target_column);
+                        self.tree.data.selection.select(&self.tree.map, selection);
+                        self.ensure_column_constraints(layout, original_column);
+                        self.ensure_selection_visible_with(layout, reveal_edge);
+                        true
+                    } else if self.column_row_count(column) > 1 {
+                        let new_column = if matches!(direction, Direction::Right) {
+                            self.insert_column_after(layout, column)
+                        } else {
+                            self.insert_column_before(layout, column)
+                        };
+                        selection.detach(&mut self.tree).push_back(new_column);
+                        self.tree.data.selection.select(&self.tree.map, selection);
+                        self.ensure_column_constraints(layout, original_column);
+                        self.ensure_selection_visible_with(layout, reveal_edge);
+                        true
+                    } else {
+                        false
+                    }
                 } else if self.column_row_count(column) > 1 {
                     let new_column = if matches!(direction, Direction::Right) {
                         self.insert_column_after(layout, column)
@@ -661,7 +808,7 @@ impl LayoutSystem for ScrollLayoutSystem {
                     selection.detach(&mut self.tree).push_back(new_column);
                     self.tree.data.selection.select(&self.tree.map, selection);
                     self.ensure_column_constraints(layout, original_column);
-                    self.ensure_selection_visible(layout);
+                    self.ensure_selection_visible_with(layout, reveal_edge);
                     true
                 } else {
                     false

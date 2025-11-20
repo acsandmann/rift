@@ -112,6 +112,9 @@ pub struct LayoutEngine {
 impl LayoutEngine {
     pub fn set_layout_settings(&mut self, settings: &LayoutSettings) {
         self.layout_settings = settings.clone();
+        if let LayoutSystemKind::Scroll(scroll) = &mut self.tree {
+            scroll.apply_settings(&self.layout_settings.scroll);
+        }
     }
 
     pub fn update_virtual_workspace_settings(
@@ -455,6 +458,7 @@ impl LayoutEngine {
             crate::common::config::LayoutMode::Scroll => {
                 LayoutSystemKind::Scroll(crate::layout_engine::ScrollLayoutSystem::new(
                     layout_settings.scroll.visible_columns,
+                    layout_settings.scroll.infinite_loop,
                 ))
             }
         };

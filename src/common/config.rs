@@ -557,12 +557,16 @@ pub enum LayoutMode {
 pub struct ScrollSettings {
     #[serde(default = "default_scroll_visible_columns")]
     pub visible_columns: usize,
+    /// Enable looping navigation/visibility in scroll layout columns
+    #[serde(default)]
+    pub infinite_loop: bool,
 }
 
 impl Default for ScrollSettings {
     fn default() -> Self {
         Self {
             visible_columns: default_scroll_visible_columns(),
+            infinite_loop: false,
         }
     }
 }

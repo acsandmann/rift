@@ -96,6 +96,8 @@ default_orientation = "perpendicular"
 [settings.layout.scroll]
 # Maximum number of columns displayed at once in the scroll layout (1-5)
 visible_columns = 3
+# Allow wrapping left/right navigation in the scroll layout
+infinite_loop = false
 
 [settings.layout.gaps]
 # Gap configuration
