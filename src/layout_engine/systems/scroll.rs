@@ -18,6 +18,12 @@ struct ScrollLayoutState {
     first_visible_column: usize,
 }
 
+#[derive(Default, Clone, Copy, Serialize, Deserialize)]
+struct FullscreenState {
+    fullscreen: bool,
+    fullscreen_within_gaps: bool,
+}
+
 #[derive(Clone, Copy)]
 enum ScrollRevealEdge {
     Left,
@@ -296,7 +302,14 @@ impl ScrollLayoutSystem {
                     },
                 }
                 .round();
-                self.layout_column(*column, rect, gaps.inner.vertical, &mut result);
+                self.layout_column(
+                    *column,
+                    screen,
+                    tiling_area,
+                    rect,
+                    gaps.inner.vertical,
+                    &mut result,
+                );
             }
             x += column_width;
             if offset < visible_cap - 1 {
@@ -314,7 +327,14 @@ impl ScrollLayoutSystem {
                 if !is_visible {
                     let hide_rect =
                         Self::hidden_column_rect(screen, column_width, tiling_area.size.height);
-                    self.layout_column(*column, hide_rect, gaps.inner.vertical, &mut result);
+                    self.layout_column(
+                        *column,
+                        screen,
+                        tiling_area,
+                        hide_rect,
+                        gaps.inner.vertical,
+                        &mut result,
+                    );
                 }
             }
         }
@@ -325,6 +345,8 @@ impl ScrollLayoutSystem {
     fn layout_column(
         &self,
         column: NodeId,
+        screen: CGRect,
+        tiling_area: CGRect,
         rect: CGRect,
         vertical_gap: f64,
         out: &mut Vec<(WindowId, CGRect)>,
@@ -348,14 +370,21 @@ impl ScrollLayoutSystem {
         let mut y = rect.origin.y;
         for (idx, row) in rows.iter().enumerate() {
             if let Some(wid) = self.window_at(*row) {
-                let frame = CGRect {
-                    origin: CGPoint { x: rect.origin.x, y },
-                    size: CGSize {
-                        width: rect.size.width,
-                        height: row_height,
-                    },
-                }
-                .round();
+                let state = self.tree.data.window.fullscreen_state(*row);
+                let frame = if state.fullscreen {
+                    screen.round()
+                } else if state.fullscreen_within_gaps {
+                    tiling_area.round()
+                } else {
+                    CGRect {
+                        origin: CGPoint { x: rect.origin.x, y },
+                        size: CGSize {
+                            width: rect.size.width,
+                            height: row_height,
+                        },
+                    }
+                    .round()
+                };
                 out.push((wid, frame));
             }
             y += row_height;
@@ -973,9 +1002,29 @@ impl LayoutSystem for ScrollLayoutSystem {
 
     fn split_selection(&mut self, _layout: LayoutId, _kind: crate::layout_engine::LayoutKind) {}
 
-    fn toggle_fullscreen_of_selection(&mut self, _layout: LayoutId) -> Vec<WindowId> { Vec::new() }
+    fn toggle_fullscreen_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
+        let node = self.selection(layout);
+        if let Some(wid) = self.window_at(node) {
+            let state = self.tree.data.window.fullscreen_state_mut(node);
+            state.fullscreen = !state.fullscreen;
+            if state.fullscreen {
+                state.fullscreen_within_gaps = false;
+            }
+            return vec![wid];
+        }
+        Vec::new()
+    }
 
-    fn toggle_fullscreen_within_gaps_of_selection(&mut self, _layout: LayoutId) -> Vec<WindowId> {
+    fn toggle_fullscreen_within_gaps_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
+        let node = self.selection(layout);
+        if let Some(wid) = self.window_at(node) {
+            let state = self.tree.data.window.fullscreen_state_mut(node);
+            state.fullscreen_within_gaps = !state.fullscreen_within_gaps;
+            if state.fullscreen_within_gaps {
+                state.fullscreen = false;
+            }
+            return vec![wid];
+        }
         Vec::new()
     }
 
@@ -1044,6 +1093,8 @@ impl tree::Observer for ScrollComponents {
 #[derive(Default, Serialize, Deserialize)]
 struct Window {
     windows: slotmap::SecondaryMap<NodeId, WindowId>,
+    #[serde(default)]
+    fullscreen: slotmap::SecondaryMap<NodeId, FullscreenState>,
     window_nodes: BTreeMap<WindowId, WindowNodeInfoVec>,
 }
 
@@ -1059,6 +1110,19 @@ struct WindowNodeInfoVec(Vec<WindowNodeInfo>);
 impl Window {
     fn at(&self, node: NodeId) -> Option<WindowId> { self.windows.get(node).copied() }
 
+    fn fullscreen_state(&self, node: NodeId) -> FullscreenState {
+        self.fullscreen.get(node).copied().unwrap_or_default()
+    }
+
+    fn fullscreen_state_mut(&mut self, node: NodeId) -> &mut FullscreenState {
+        if self.fullscreen.get(node).is_none() {
+            self.fullscreen.insert(node, FullscreenState::default());
+        }
+        self.fullscreen
+            .get_mut(node)
+            .expect("fullscreen state must exist for node")
+    }
+
     fn node_for(&self, layout: LayoutId, wid: WindowId) -> Option<NodeId> {
         self.window_nodes.get(&wid).and_then(|nodes| {
             nodes.0.iter().find(|info| info.layout == layout).map(|info| info.node)
@@ -1071,6 +1135,9 @@ impl Window {
             existing.is_none(),
             "Attempted to overwrite window for node {node:?} from {existing:?} to {wid:?}"
         );
+        if self.fullscreen.get(node).is_none() {
+            self.fullscreen.insert(node, FullscreenState::default());
+        }
         self.window_nodes
             .entry(wid)
             .or_default()
@@ -1132,6 +1199,9 @@ impl Window {
             TreeEvent::Copied { src, dest, dest_layout } => {
                 if let Some(&wid) = self.windows.get(src) {
                     self.set_window(dest_layout, dest, wid);
+                    if let Some(state) = self.fullscreen.get(src).copied() {
+                        self.fullscreen.insert(dest, state);
+                    }
                 }
             }
             TreeEvent::RemovingFromParent(_) => (),
@@ -1144,6 +1214,7 @@ impl Window {
                         }
                     }
                 }
+                self.fullscreen.remove(node);
             }
         }
     }
