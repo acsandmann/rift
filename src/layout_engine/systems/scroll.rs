@@ -12,6 +12,7 @@ use crate::model::tree::{self, NodeId, NodeMap, OwnedNode, Tree};
 use crate::sys::geometry::Round;
 
 const MAX_ROWS_PER_COLUMN: usize = 3;
+const MIN_NODE_SIZE: f64 = 0.05;
 
 #[derive(Default, Clone, Copy, Serialize, Deserialize)]
 struct ScrollLayoutState {
@@ -112,6 +113,14 @@ impl ScrollLayoutSystem {
     }
 
     fn column_row_count(&self, column: NodeId) -> usize { column.children(self.map()).count() }
+
+    fn node_size(&self, node: NodeId) -> f64 {
+        self.tree
+            .data
+            .sizes
+            .size_or_default(node)
+            .max(MIN_NODE_SIZE)
+    }
 
     fn normalized_first_visible(
         &self,
@@ -223,6 +232,56 @@ impl ScrollLayoutSystem {
         result
     }
 
+    fn normalize_sizes(&mut self, nodes: &[NodeId]) {
+        if nodes.is_empty() {
+            return;
+        }
+        let mut total = 0.0;
+        for &node in nodes {
+            let sz = self.node_size(node);
+            self.tree.data.sizes.set(node, sz);
+            total += sz;
+        }
+        if total <= f64::EPSILON {
+            for &node in nodes {
+                self.tree.data.sizes.set(node, 1.0);
+            }
+            total = nodes.len() as f64;
+        }
+        let target_total = nodes.len() as f64;
+        for &node in nodes {
+            let sz = self.node_size(node);
+            let normalized = sz / total * target_total;
+            self.tree.data.sizes.set(node, normalized);
+        }
+    }
+
+    fn adjust_sizes_pair(&mut self, grow: NodeId, shrink: NodeId, delta: f64) -> bool {
+        if delta.abs() <= f64::EPSILON {
+            return false;
+        }
+
+        let grow_sz = self.node_size(grow);
+        let shrink_sz = self.node_size(shrink);
+
+        let available = if delta > 0.0 {
+            shrink_sz - MIN_NODE_SIZE
+        } else {
+            grow_sz - MIN_NODE_SIZE
+        };
+        if available <= 0.0 {
+            return false;
+        }
+
+        let applied = delta.signum() * delta.abs().min(available);
+        self.tree.data.sizes.set(grow, (grow_sz + applied).max(MIN_NODE_SIZE));
+        self.tree
+            .data
+            .sizes
+            .set(shrink, (shrink_sz - applied).max(MIN_NODE_SIZE));
+        true
+    }
+
     fn focus_window_in_column(&mut self, layout: LayoutId, column_idx: usize) -> Option<NodeId> {
         let columns = self.columns(layout);
         if columns.is_empty() {
@@ -256,6 +315,69 @@ impl ScrollLayoutSystem {
         }
     }
 
+    fn resize_rows_in_column(&mut self, column: NodeId, target: NodeId, amount: f64) -> bool {
+        if amount.abs() <= f64::EPSILON {
+            return false;
+        }
+        let neighbor_preferred = if amount > 0.0 {
+            target.next_sibling(self.map())
+        } else {
+            target.prev_sibling(self.map())
+        };
+        let neighbor_fallback = if amount > 0.0 {
+            target.prev_sibling(self.map())
+        } else {
+            target.next_sibling(self.map())
+        };
+        let neighbor = neighbor_preferred.or(neighbor_fallback);
+        let Some(neighbor) = neighbor else { return false };
+
+        let adjusted = self.adjust_sizes_pair(target, neighbor, amount);
+        if !adjusted {
+            return false;
+        }
+
+        let rows: Vec<_> = column.children(self.map()).collect();
+        self.normalize_sizes(&rows);
+        true
+    }
+
+    fn resize_columns(&mut self, layout: LayoutId, column: NodeId, amount: f64) -> bool {
+        if amount.abs() <= f64::EPSILON {
+            return false;
+        }
+        let columns = self.columns(layout);
+        if columns.len() <= 1 {
+            return false;
+        }
+        let idx = match self.column_index(layout, column) {
+            Some(i) => i,
+            None => return false,
+        };
+
+        let neighbor_preferred = if amount > 0.0 {
+            columns.get(idx + 1).copied()
+        } else if idx > 0 {
+            columns.get(idx - 1).copied()
+        } else {
+            None
+        };
+        let neighbor_fallback = if amount > 0.0 && idx > 0 {
+            columns.get(idx - 1).copied()
+        } else {
+            columns.get(idx + 1).copied()
+        };
+        let neighbor = neighbor_preferred.or(neighbor_fallback);
+        let Some(neighbor) = neighbor else { return false };
+
+        let adjusted = self.adjust_sizes_pair(column, neighbor, amount);
+        if !adjusted {
+            return false;
+        }
+        self.normalize_sizes(&columns);
+        true
+    }
+
     fn layout_columns(
         &self,
         layout: LayoutId,
@@ -276,6 +398,16 @@ impl ScrollLayoutSystem {
         } else {
             HashSet::default()
         };
+        let visible_indices: Vec<usize> = if self.infinite_loop {
+            (0..visible_cap).map(|offset| (first + offset) % total).collect()
+        } else {
+            (first..first + visible_cap).collect()
+        };
+        let visible_total: f64 = visible_indices
+            .iter()
+            .map(|idx| self.node_size(columns[*idx]))
+            .sum::<f64>()
+            .max(f64::EPSILON);
 
         let mut result = Vec::new();
         let horiz_gap = gaps.inner.horizontal;
@@ -285,15 +417,11 @@ impl ScrollLayoutSystem {
         } else {
             (tiling_area.size.width - total_gap).max(0.0)
         };
-        let column_width = usable_width / visible_cap as f64;
         let mut x = tiling_area.origin.x;
-        for offset in 0..visible_cap {
-            let idx = if self.infinite_loop {
-                (first + offset) % total
-            } else {
-                first + offset
-            };
-            if let Some(column) = columns.get(idx) {
+        for (visible_idx_offset, idx) in visible_indices.iter().enumerate() {
+            if let Some(column) = columns.get(*idx) {
+                let width_share = self.node_size(*column) / visible_total;
+                let column_width = usable_width * width_share;
                 let rect = CGRect {
                     origin: CGPoint { x, y: tiling_area.origin.y },
                     size: CGSize {
@@ -310,14 +438,15 @@ impl ScrollLayoutSystem {
                     gaps.inner.vertical,
                     &mut result,
                 );
-            }
-            x += column_width;
-            if offset < visible_cap - 1 {
-                x += horiz_gap;
+                x += column_width;
+                if visible_idx_offset < visible_indices.len().saturating_sub(1) {
+                    x += horiz_gap;
+                }
             }
         }
 
         if total > visible_cap {
+            let hidden_width = usable_width / visible_cap as f64;
             for (idx, column) in columns.iter().enumerate() {
                 let is_visible = if self.infinite_loop {
                     visible_set.contains(&idx)
@@ -326,7 +455,7 @@ impl ScrollLayoutSystem {
                 };
                 if !is_visible {
                     let hide_rect =
-                        Self::hidden_column_rect(screen, column_width, tiling_area.size.height);
+                        Self::hidden_column_rect(screen, hidden_width, tiling_area.size.height);
                     self.layout_column(
                         *column,
                         screen,
@@ -362,15 +491,14 @@ impl ScrollLayoutSystem {
         } else {
             (rect.size.height - total_gap).max(0.0)
         };
-        let row_height = if count == 0 {
-            rect.size.height
-        } else {
-            usable_height / count as f64
-        };
+        let sizes: Vec<f64> = rows.iter().map(|r| self.node_size(*r)).collect();
+        let total: f64 = sizes.iter().sum::<f64>().max(f64::EPSILON);
         let mut y = rect.origin.y;
         for (idx, row) in rows.iter().enumerate() {
             if let Some(wid) = self.window_at(*row) {
                 let state = self.tree.data.window.fullscreen_state(*row);
+                let share = sizes.get(idx).copied().unwrap_or(1.0) / total;
+                let row_height = usable_height * share;
                 let frame = if state.fullscreen {
                     screen.round()
                 } else if state.fullscreen_within_gaps {
@@ -387,6 +515,8 @@ impl ScrollLayoutSystem {
                 };
                 out.push((wid, frame));
             }
+            let share = sizes.get(idx).copied().unwrap_or(1.0) / total;
+            let row_height = usable_height * share;
             y += row_height;
             if idx < count - 1 {
                 y += vertical_gap;
@@ -723,13 +853,31 @@ impl LayoutSystem for ScrollLayoutSystem {
 
     fn on_window_resized(
         &mut self,
-        _layout: LayoutId,
-        _wid: WindowId,
-        _old_frame: CGRect,
-        _new_frame: CGRect,
-        _screen: CGRect,
-        _gaps: &crate::common::config::GapSettings,
+        layout: LayoutId,
+        wid: WindowId,
+        old_frame: CGRect,
+        new_frame: CGRect,
+        screen: CGRect,
+        gaps: &crate::common::config::GapSettings,
     ) {
+        let Some(node) = self.tree.data.window.node_for(layout, wid) else { return };
+        let Some(column) = self.column_of(layout, node) else { return };
+        let tiling = compute_tiling_area(screen, gaps);
+
+        let mut applied = false;
+        if self.column_row_count(column) > 1 && tiling.size.height > 0.0 {
+            let delta = (new_frame.size.height - old_frame.size.height) / tiling.size.height;
+            applied |= self.resize_rows_in_column(column, node, delta);
+        }
+
+        if !applied && self.columns(layout).len() > 1 && tiling.size.width > 0.0 {
+            let delta = (new_frame.size.width - old_frame.size.width) / tiling.size.width;
+            applied |= self.resize_columns(layout, column, delta);
+        }
+
+        if applied {
+            self.ensure_selection_visible(layout);
+        }
     }
 
     fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
@@ -1050,7 +1198,26 @@ impl LayoutSystem for ScrollLayoutSystem {
 
     fn unjoin_selection(&mut self, _layout: LayoutId) {}
 
-    fn resize_selection_by(&mut self, _layout: LayoutId, _amount: f64) {}
+    fn resize_selection_by(&mut self, layout: LayoutId, amount: f64) {
+        if amount.abs() <= f64::EPSILON {
+            return;
+        }
+        let selection = self.selection(layout);
+        if self.window_at(selection).is_none() {
+            return;
+        }
+        let Some(column) = self.column_of(layout, selection) else { return };
+
+        let resized = if self.column_row_count(column) > 1 {
+            self.resize_rows_in_column(column, selection, amount)
+        } else {
+            self.resize_columns(layout, column, amount)
+        };
+
+        if resized {
+            self.ensure_selection_visible(layout);
+        }
+    }
 
     fn rebalance(&mut self, _layout: LayoutId) {}
 
@@ -1061,12 +1228,14 @@ impl LayoutSystem for ScrollLayoutSystem {
 struct ScrollComponents {
     selection: Selection,
     window: Window,
+    sizes: Sizes,
 }
 
 impl ScrollComponents {
     fn dispatch_event(&mut self, map: &NodeMap, event: TreeEvent) {
         self.selection.handle_event(map, event);
         self.window.handle_event(map, event);
+        self.sizes.handle_event(event);
     }
 }
 
@@ -1106,6 +1275,37 @@ struct WindowNodeInfo {
 
 #[derive(Serialize, Deserialize, Default)]
 struct WindowNodeInfoVec(Vec<WindowNodeInfo>);
+
+#[derive(Default, Serialize, Deserialize)]
+struct Sizes {
+    values: slotmap::SecondaryMap<NodeId, f64>,
+}
+
+impl Sizes {
+    fn size_or_default(&self, node: NodeId) -> f64 { self.values.get(node).copied().unwrap_or(1.0) }
+
+    fn set(&mut self, node: NodeId, size: f64) { self.values.insert(node, size); }
+
+    fn handle_event(&mut self, event: TreeEvent) {
+        match event {
+            TreeEvent::AddedToForest(_) => (),
+            TreeEvent::AddedToParent(node) => {
+                if self.values.get(node).is_none() {
+                    self.values.insert(node, 1.0);
+                }
+            }
+            TreeEvent::Copied { src, dest, .. } => {
+                if let Some(sz) = self.values.get(src).copied() {
+                    self.values.insert(dest, sz);
+                }
+            }
+            TreeEvent::RemovingFromParent(_) => (),
+            TreeEvent::RemovedFromForest(node) => {
+                self.values.remove(node);
+            }
+        }
+    }
+}
 
 impl Window {
     fn at(&self, node: NodeId) -> Option<WindowId> { self.windows.get(node).copied() }
