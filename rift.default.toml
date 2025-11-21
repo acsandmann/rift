@@ -309,6 +309,7 @@ comb1 = "Alt + Shift"
 # - switch_to_last_workspace
 # - move_focus = "left"|"right"|"up"|"down"
 # - move_node = "left"|"right"|"up"|"down"
+# - move_column = "left"|"right"
 # - consume_window = "left"|"right"
 # - expel_window = "left"|"right"   # inserts new column on the chosen side
 # - join_window = "left"|"right"|"up"|"down"
@@ -355,6 +356,8 @@ comb1 = "Alt + Shift"
 "Alt + Shift + Right" = { join_window = "right" }
 "Alt + Shift + Up" = { join_window = "up" }
 "Alt + Shift + Down" = { join_window = "down" }
+"Alt + Ctrl + Shift + Left" = { move_column = "left" }
+"Alt + Ctrl + Shift + Right" = { move_column = "right" }
 "Alt + Comma" = "toggle_stack"
 "Alt + Slash" = "toggle_orientation"
 "Alt + Ctrl + E" = "unjoin_windows"

@@ -872,6 +872,8 @@ impl LayoutSystem for BspLayoutSystem {
         true
     }
 
+    fn move_column(&mut self, _layout: LayoutId, _direction: Direction) -> bool { false }
+
     fn consume_selection(&mut self, _layout: LayoutId, _direction: Direction) -> bool { false }
 
     fn expel_selection(&mut self, _layout: LayoutId, _direction: Direction) -> bool { false }

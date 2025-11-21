@@ -35,6 +35,7 @@ pub enum LayoutCommand {
     Ascend,
     Descend,
     MoveNode(Direction),
+    MoveColumn(#[serde(rename = "direction")] Direction),
     ConsumeWindow(Direction),
     ExpelWindow(Direction),
 
@@ -883,6 +884,12 @@ impl LayoutEngine {
                         let new_layout = self.layout(new_space);
                         self.tree.move_selection_to_layout_after_selection(layout, new_layout);
                     }
+                }
+                EventResponse::default()
+            }
+            LayoutCommand::MoveColumn(direction) => {
+                if self.tree.move_column(layout, direction) {
+                    self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
                 }
                 EventResponse::default()
             }
