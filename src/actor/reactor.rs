@@ -306,8 +306,13 @@ pub struct DragSession {
 #[derive(Debug, Clone)]
 pub enum DragState {
     Inactive,
-    Active { session: DragSession },
-    PendingSwap { dragged: WindowId, target: WindowId },
+    Active {
+        session: DragSession,
+    },
+    PendingSwap {
+        session: DragSession,
+        target: WindowId,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -571,8 +576,8 @@ impl Reactor {
     }
 
     fn get_pending_drag_swap(&self) -> Option<(WindowId, WindowId)> {
-        if let DragState::PendingSwap { dragged, target } = &self.drag_manager.drag_state {
-            Some((*dragged, *target))
+        if let DragState::PendingSwap { session, target } = &self.drag_manager.drag_state {
+            Some((session.window, *target))
         } else {
             None
         }
@@ -595,12 +600,10 @@ impl Reactor {
     }
 
     fn take_active_drag_session(&mut self) -> Option<DragSession> {
-        if let DragState::Active { session } =
-            std::mem::replace(&mut self.drag_manager.drag_state, DragState::Inactive)
-        {
-            Some(session)
-        } else {
-            None
+        match std::mem::replace(&mut self.drag_manager.drag_state, DragState::Inactive) {
+            DragState::Active { session } => Some(session),
+            DragState::PendingSwap { session, .. } => Some(session),
+            _ => None,
         }
     }
 
@@ -1234,7 +1237,11 @@ impl Reactor {
             if session.window != wid {
                 return;
             }
+            let frame_changed = session.last_frame != *new_frame;
             session.last_frame = *new_frame;
+            if frame_changed {
+                session.layout_dirty = true;
+            }
             if session.settled_space != resolved_space {
                 session.settled_space = resolved_space;
                 session.layout_dirty = true;
@@ -2032,10 +2039,19 @@ impl Reactor {
                 );
             }
 
-            self.drag_manager.drag_state = DragState::PendingSwap {
-                dragged: wid,
-                target: target_wid,
-            };
+            if let Some(session) = self.take_active_drag_session() {
+                self.drag_manager.drag_state =
+                    DragState::PendingSwap { session, target: target_wid };
+            } else {
+                trace!(
+                    ?wid,
+                    ?target_wid,
+                    "Skipping pending swap; no active drag session"
+                );
+                self.drag_manager.drag_state = DragState::Inactive;
+                self.drag_manager.skip_layout_for_window = None;
+                return;
+            }
 
             self.drag_manager.skip_layout_for_window = Some(wid);
         } else {
@@ -2046,7 +2062,11 @@ impl Reactor {
                         ?pending_target,
                         "Clearing pending drag swap; overlap ended before MouseUp"
                     );
-                    self.drag_manager.drag_state = DragState::Inactive;
+                    if let Some(session) = self.take_active_drag_session() {
+                        self.drag_manager.drag_state = DragState::Active { session };
+                    } else {
+                        self.drag_manager.drag_state = DragState::Inactive;
+                    }
                 }
             }
 

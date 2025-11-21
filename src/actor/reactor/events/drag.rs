@@ -13,10 +13,6 @@ impl DragEventHandler {
 
         let pending_swap = reactor.get_pending_drag_swap();
 
-        if pending_swap.is_some() {
-            reactor.drag_manager.drag_state = DragState::Inactive;
-        }
-
         if let Some((dragged_wid, target_wid)) = pending_swap {
             trace!(?dragged_wid, ?target_wid, "Performing deferred swap on MouseUp");
 
@@ -82,7 +78,10 @@ impl DragEventHandler {
         reactor.drag_manager.reset();
         reactor.drag_manager.drag_state = DragState::Inactive;
 
-        if finalize_needs_layout || reactor.is_in_drag() {
+        if finalize_needs_layout
+            || reactor.is_in_drag()
+            || reactor.drag_manager.skip_layout_for_window.is_some()
+        {
             need_layout_refresh = true;
         }
 

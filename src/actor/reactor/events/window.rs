@@ -8,7 +8,7 @@ use crate::actor::reactor::{
 };
 use crate::layout_engine::LayoutEvent;
 use crate::sys::app::WindowInfo as Window;
-use crate::sys::event::MouseState;
+use crate::sys::event::{MouseState, get_mouse_state};
 use crate::sys::geometry::SameAs;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 
@@ -89,8 +89,8 @@ impl WindowEventHandler {
         reactor.window_manager.windows.remove(&wid);
         reactor.send_layout_event(LayoutEvent::WindowRemoved(wid));
 
-        if let DragState::PendingSwap { dragged, target } = &reactor.drag_manager.drag_state {
-            if *dragged == wid || *target == wid {
+        if let DragState::PendingSwap { session, target } = &reactor.drag_manager.drag_state {
+            if session.window == wid || *target == wid {
                 trace!(
                     ?wid,
                     "Clearing pending drag swap because a participant window was destroyed"
@@ -189,6 +189,8 @@ impl WindowEventHandler {
             "WindowFrameChanged event"
         );
 
+        let effective_mouse_state = mouse_state.or_else(|| get_mouse_state());
+        let event_mouse_state = mouse_state;
         let result = (|| -> bool {
             let Some(window) = reactor.window_manager.windows.get_mut(&wid) else {
                 return false;
@@ -210,9 +212,17 @@ impl WindowEventHandler {
                 .window_server_id
                 .map(|wsid| reactor.transaction_manager.get_last_sent_txid(wsid))
                 .unwrap_or_default();
-            let has_pending_request = pending_target.is_some();
-            let triggered_by_rift =
+            let mut has_pending_request = pending_target.is_some();
+            let mut triggered_by_rift =
                 has_pending_request && last_seen.is_some_and(|seen| seen == last_sent_txid);
+
+            if event_mouse_state == Some(MouseState::Down) && triggered_by_rift {
+                if let Some((wsid, _)) = pending_target {
+                    reactor.transaction_manager.remove_for_window(wsid);
+                }
+                triggered_by_rift = false;
+                has_pending_request = false;
+            }
             if has_pending_request {
                 if let Some(last_seen) = last_seen
                     && last_seen != last_sent_txid
@@ -271,11 +281,15 @@ impl WindowEventHandler {
                 return false;
             }
 
-            let dragging = mouse_state == Some(MouseState::Down)
+            let dragging = event_mouse_state == Some(MouseState::Down)
                 || matches!(
                     reactor.drag_manager.drag_state,
                     DragState::Active { .. } | DragState::PendingSwap { .. }
                 );
+
+            if !dragging && !triggered_by_rift {
+                reactor.drag_manager.skip_layout_for_window = Some(wid);
+            }
 
             if dragging {
                 reactor.ensure_active_drag(wid, &old_frame);
@@ -364,7 +378,7 @@ impl WindowEventHandler {
             }
             false
         })();
-        handle_mouse_up_if_needed(reactor, mouse_state);
+        handle_mouse_up_if_needed(reactor, effective_mouse_state);
         result
     }
 
@@ -402,7 +416,10 @@ impl WindowEventHandler {
 
 fn handle_mouse_up_if_needed(reactor: &mut Reactor, mouse_state: Option<MouseState>) {
     if mouse_state == Some(MouseState::Up)
-        && matches!(reactor.drag_manager.drag_state, DragState::Active { .. })
+        && (matches!(
+            reactor.drag_manager.drag_state,
+            DragState::Active { .. } | DragState::PendingSwap { .. }
+        ) || reactor.drag_manager.skip_layout_for_window.is_some())
     {
         DragEventHandler::handle_mouse_up(reactor);
     }
