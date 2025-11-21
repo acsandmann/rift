@@ -115,11 +115,7 @@ impl ScrollLayoutSystem {
     fn column_row_count(&self, column: NodeId) -> usize { column.children(self.map()).count() }
 
     fn node_size(&self, node: NodeId) -> f64 {
-        self.tree
-            .data
-            .sizes
-            .size_or_default(node)
-            .max(MIN_NODE_SIZE)
+        self.tree.data.sizes.size_or_default(node).max(MIN_NODE_SIZE)
     }
 
     fn normalized_first_visible(
@@ -275,10 +271,7 @@ impl ScrollLayoutSystem {
 
         let applied = delta.signum() * delta.abs().min(available);
         self.tree.data.sizes.set(grow, (grow_sz + applied).max(MIN_NODE_SIZE));
-        self.tree
-            .data
-            .sizes
-            .set(shrink, (shrink_sz - applied).max(MIN_NODE_SIZE));
+        self.tree.data.sizes.set(shrink, (shrink_sz - applied).max(MIN_NODE_SIZE));
         true
     }
 
@@ -860,8 +853,12 @@ impl LayoutSystem for ScrollLayoutSystem {
         screen: CGRect,
         gaps: &crate::common::config::GapSettings,
     ) {
-        let Some(node) = self.tree.data.window.node_for(layout, wid) else { return };
-        let Some(column) = self.column_of(layout, node) else { return };
+        let Some(node) = self.tree.data.window.node_for(layout, wid) else {
+            return;
+        };
+        let Some(column) = self.column_of(layout, node) else {
+            return;
+        };
         let tiling = compute_tiling_area(screen, gaps);
 
         let mut applied = false;
@@ -1074,9 +1071,13 @@ impl LayoutSystem for ScrollLayoutSystem {
             return false;
         }
 
-        let Some(column) = self.column_of(layout, selection) else { return false };
+        let Some(column) = self.column_of(layout, selection) else {
+            return false;
+        };
         let columns = self.columns(layout);
-        let Some(idx) = self.column_index(layout, column) else { return false };
+        let Some(idx) = self.column_index(layout, column) else {
+            return false;
+        };
 
         let target_idx = match direction {
             Direction::Left if idx > 0 => Some(idx - 1),
@@ -1111,7 +1112,9 @@ impl LayoutSystem for ScrollLayoutSystem {
             return false;
         }
 
-        let Some(column) = self.column_of(layout, selection) else { return false };
+        let Some(column) = self.column_of(layout, selection) else {
+            return false;
+        };
         if self.column_row_count(column) <= 1 {
             return false;
         }
@@ -1206,7 +1209,9 @@ impl LayoutSystem for ScrollLayoutSystem {
         if self.window_at(selection).is_none() {
             return;
         }
-        let Some(column) = self.column_of(layout, selection) else { return };
+        let Some(column) = self.column_of(layout, selection) else {
+            return;
+        };
 
         let resized = if self.column_row_count(column) > 1 {
             self.resize_rows_in_column(column, selection, amount)
@@ -1318,9 +1323,7 @@ impl Window {
         if self.fullscreen.get(node).is_none() {
             self.fullscreen.insert(node, FullscreenState::default());
         }
-        self.fullscreen
-            .get_mut(node)
-            .expect("fullscreen state must exist for node")
+        self.fullscreen.get_mut(node).expect("fullscreen state must exist for node")
     }
 
     fn node_for(&self, layout: LayoutId, wid: WindowId) -> Option<NodeId> {
