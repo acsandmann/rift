@@ -817,6 +817,74 @@ impl LayoutSystem for ScrollLayoutSystem {
         }
     }
 
+    fn consume_selection(&mut self, layout: LayoutId, direction: Direction) -> bool {
+        let selection = self.selection(layout);
+        if self.window_at(selection).is_none()
+            || !matches!(direction, Direction::Left | Direction::Right)
+        {
+            return false;
+        }
+
+        let Some(column) = self.column_of(layout, selection) else { return false };
+        let columns = self.columns(layout);
+        let Some(idx) = self.column_index(layout, column) else { return false };
+
+        let target_idx = match direction {
+            Direction::Left if idx > 0 => Some(idx - 1),
+            Direction::Right if idx + 1 < columns.len() => Some(idx + 1),
+            _ => None,
+        };
+        let Some(target_idx) = target_idx else { return false };
+
+        let target_column = columns[target_idx];
+        if self.column_row_count(target_column) >= MAX_ROWS_PER_COLUMN {
+            return false;
+        }
+
+        selection.detach(&mut self.tree).push_back(target_column);
+        self.tree.data.selection.select(&self.tree.map, selection);
+        self.ensure_column_constraints(layout, column);
+
+        let edge = if matches!(direction, Direction::Right) {
+            ScrollRevealEdge::Right
+        } else {
+            ScrollRevealEdge::Left
+        };
+        self.ensure_selection_visible_with(layout, edge);
+        true
+    }
+
+    fn expel_selection(&mut self, layout: LayoutId, direction: Direction) -> bool {
+        let selection = self.selection(layout);
+        if self.window_at(selection).is_none()
+            || !matches!(direction, Direction::Left | Direction::Right)
+        {
+            return false;
+        }
+
+        let Some(column) = self.column_of(layout, selection) else { return false };
+        if self.column_row_count(column) <= 1 {
+            return false;
+        }
+
+        let new_column = if matches!(direction, Direction::Right) {
+            self.insert_column_after(layout, column)
+        } else {
+            self.insert_column_before(layout, column)
+        };
+
+        selection.detach(&mut self.tree).push_back(new_column);
+        self.tree.data.selection.select(&self.tree.map, selection);
+
+        let edge = if matches!(direction, Direction::Right) {
+            ScrollRevealEdge::Right
+        } else {
+            ScrollRevealEdge::Left
+        };
+        self.ensure_selection_visible_with(layout, edge);
+        true
+    }
+
     fn move_selection_to_layout_after_selection(
         &mut self,
         from_layout: LayoutId,

@@ -872,6 +872,10 @@ impl LayoutSystem for BspLayoutSystem {
         true
     }
 
+    fn consume_selection(&mut self, _layout: LayoutId, _direction: Direction) -> bool { false }
+
+    fn expel_selection(&mut self, _layout: LayoutId, _direction: Direction) -> bool { false }
+
     fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
         let Some(&node_a) = self.window_to_node.get(&a) else {
             return false;

@@ -57,6 +57,8 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool;
 
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool;
+    fn consume_selection(&mut self, layout: LayoutId, direction: Direction) -> bool;
+    fn expel_selection(&mut self, layout: LayoutId, direction: Direction) -> bool;
     fn move_selection_to_layout_after_selection(
         &mut self,
         from_layout: LayoutId,

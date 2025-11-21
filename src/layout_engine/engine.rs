@@ -35,6 +35,8 @@ pub enum LayoutCommand {
     Ascend,
     Descend,
     MoveNode(Direction),
+    ConsumeWindow(Direction),
+    ExpelWindow(Direction),
 
     JoinWindow(Direction),
     ToggleStack,
@@ -881,6 +883,18 @@ impl LayoutEngine {
                         let new_layout = self.layout(new_space);
                         self.tree.move_selection_to_layout_after_selection(layout, new_layout);
                     }
+                }
+                EventResponse::default()
+            }
+            LayoutCommand::ConsumeWindow(direction) => {
+                if self.tree.consume_selection(layout, direction) {
+                    self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
+                }
+                EventResponse::default()
+            }
+            LayoutCommand::ExpelWindow(direction) => {
+                if self.tree.expel_selection(layout, direction) {
+                    self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
                 }
                 EventResponse::default()
             }

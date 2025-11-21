@@ -576,6 +576,10 @@ impl LayoutSystem for TraditionalLayoutSystem {
         self.move_node(layout, selection, direction)
     }
 
+    fn consume_selection(&mut self, _layout: LayoutId, _direction: Direction) -> bool { false }
+
+    fn expel_selection(&mut self, _layout: LayoutId, _direction: Direction) -> bool { false }
+
     fn move_selection_to_layout_after_selection(
         &mut self,
         from_layout: LayoutId,
