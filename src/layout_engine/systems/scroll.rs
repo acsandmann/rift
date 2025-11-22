@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::{BTreeExt, BTreeMap, HashSet};
-use crate::layout_engine::systems::LayoutSystem;
+use crate::layout_engine::systems::{LayoutSystem, ToggleAction};
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{Direction, LayoutId};
 use crate::model::selection::{Selection, TreeEvent};
@@ -56,6 +56,96 @@ impl ScrollLayoutSystem {
     pub fn apply_settings(&mut self, settings: &crate::common::config::ScrollSettings) {
         self.max_visible_columns = settings.visible_columns.clamp(1, 5);
         self.infinite_loop = settings.infinite_loop;
+    }
+
+    pub fn scroll_by(&mut self, layout: LayoutId, delta: f64) -> Option<WindowId> {
+        if delta.abs() <= f64::EPSILON {
+            return None;
+        }
+
+        let direction = if delta > 0.0 {
+            Direction::Right
+        } else {
+            Direction::Left
+        };
+        let steps = delta.abs().round().max(1.0) as usize;
+        let mut last_focus = None;
+
+        for _ in 0..steps {
+            if self.move_selection(layout, direction) {
+                last_focus = self.selected_window(layout);
+            } else {
+                break;
+            }
+        }
+
+        last_focus
+    }
+
+    pub fn finalize_scroll(&mut self, layout: LayoutId) -> Option<WindowId> {
+        self.ensure_selection_visible(layout);
+        self.selected_window(layout)
+    }
+
+    pub fn shift_view_by(&mut self, layout: LayoutId, delta: f64) {
+        if delta.abs() <= f64::EPSILON {
+            return;
+        }
+
+        let columns = self.columns(layout);
+        if columns.is_empty() {
+            return;
+        }
+
+        let total = columns.len();
+        let visible_cap = self.max_visible_columns.min(total).max(1);
+        let steps = delta.round() as isize;
+        if steps == 0 {
+            return;
+        }
+
+        let current_state = self
+            .layout_state
+            .get(layout)
+            .map(|state| state.first_visible_column)
+            .unwrap_or(0);
+        let current = self.normalized_first_visible(current_state, total, visible_cap) as isize;
+
+        let new_first = if self.infinite_loop {
+            let modulo = total as isize;
+            ((current + steps) % modulo + modulo) % modulo
+        } else {
+            let max_start = total.saturating_sub(visible_cap) as isize;
+            (current + steps).clamp(0, max_start)
+        } as usize;
+
+        self.ensure_state(layout).first_visible_column = new_first;
+    }
+
+    fn toggle_fullscreen_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
+        let node = self.selection(layout);
+        if let Some(wid) = self.window_at(node) {
+            let state = self.tree.data.window.fullscreen_state_mut(node);
+            state.fullscreen = !state.fullscreen;
+            if state.fullscreen {
+                state.fullscreen_within_gaps = false;
+            }
+            return vec![wid];
+        }
+        Vec::new()
+    }
+
+    fn toggle_fullscreen_within_gaps_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
+        let node = self.selection(layout);
+        if let Some(wid) = self.window_at(node) {
+            let state = self.tree.data.window.fullscreen_state_mut(node);
+            state.fullscreen_within_gaps = !state.fullscreen_within_gaps;
+            if state.fullscreen_within_gaps {
+                state.fullscreen = false;
+            }
+            return vec![wid];
+        }
+        Vec::new()
     }
 
     fn root(&self, layout: LayoutId) -> NodeId { self.layout_roots[layout].id() }
@@ -1153,30 +1243,17 @@ impl LayoutSystem for ScrollLayoutSystem {
 
     fn split_selection(&mut self, _layout: LayoutId, _kind: crate::layout_engine::LayoutKind) {}
 
-    fn toggle_fullscreen_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
-        let node = self.selection(layout);
-        if let Some(wid) = self.window_at(node) {
-            let state = self.tree.data.window.fullscreen_state_mut(node);
-            state.fullscreen = !state.fullscreen;
-            if state.fullscreen {
-                state.fullscreen_within_gaps = false;
+    fn toggle_action(&mut self, layout: LayoutId, action: ToggleAction) -> Vec<WindowId> {
+        match action {
+            ToggleAction::Fullscreen { within_gaps } => {
+                if within_gaps {
+                    self.toggle_fullscreen_within_gaps_of_selection(layout)
+                } else {
+                    self.toggle_fullscreen_of_selection(layout)
+                }
             }
-            return vec![wid];
+            ToggleAction::FullWidth => Vec::new(),
         }
-        Vec::new()
-    }
-
-    fn toggle_fullscreen_within_gaps_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
-        let node = self.selection(layout);
-        if let Some(wid) = self.window_at(node) {
-            let state = self.tree.data.window.fullscreen_state_mut(node);
-            state.fullscreen_within_gaps = !state.fullscreen_within_gaps;
-            if state.fullscreen_within_gaps {
-                state.fullscreen = false;
-            }
-            return vec![wid];
-        }
-        Vec::new()
     }
 
     fn join_selection_with_direction(&mut self, _layout: LayoutId, _direction: Direction) {}

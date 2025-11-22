@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::actor::app::{WindowId, pid_t};
-use crate::layout_engine::systems::LayoutSystem;
+use crate::layout_engine::systems::{LayoutSystem, ToggleAction};
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{Direction, LayoutId, LayoutKind, Orientation};
 use crate::model::selection::*;
@@ -614,21 +614,25 @@ impl LayoutSystem for TraditionalLayoutSystem {
         self.nest_in_container_internal(layout, selection, kind);
     }
 
-    fn toggle_fullscreen_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
-        let node = self.selection(layout);
-        if self.tree.data.layout.toggle_fullscreen(node) {
-            self.visible_windows_under_internal(node)
-        } else {
-            vec![]
-        }
-    }
-
-    fn toggle_fullscreen_within_gaps_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
-        let node = self.selection(layout);
-        if self.tree.data.layout.toggle_fullscreen_within_gaps(node) {
-            self.visible_windows_under_internal(node)
-        } else {
-            vec![]
+    fn toggle_action(&mut self, layout: LayoutId, action: ToggleAction) -> Vec<WindowId> {
+        match action {
+            ToggleAction::Fullscreen { within_gaps } => {
+                let node = self.selection(layout);
+                if within_gaps {
+                    if self.tree.data.layout.toggle_fullscreen_within_gaps(node) {
+                        self.visible_windows_under_internal(node)
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    if self.tree.data.layout.toggle_fullscreen(node) {
+                        self.visible_windows_under_internal(node)
+                    } else {
+                        vec![]
+                    }
+                }
+            }
+            ToggleAction::FullWidth => vec![],
         }
     }
 

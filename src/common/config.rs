@@ -548,18 +548,58 @@ pub enum LayoutMode {
     Traditional,
     /// Binary space partitioning tiling
     Bsp,
-    /// Scroll columns/rows carousel layout
+    /// Horizontal scrolling strip layout (PaperWM/Niri style)
     Scroll,
+}
+
+fn default_scroll_gesture_fingers() -> usize { 3 }
+fn default_scroll_gesture_sensitivity() -> f64 { 1.25 }
+fn default_scroll_wheel_divisor() -> f64 { 600.0 }
+fn default_scroll_wheel_sensitivity() -> f64 { 1.0 }
+fn default_scroll_gesture_mode() -> ScrollGestureMode { ScrollGestureMode::Preview }
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum ScrollGestureMode {
+    /// Pan the viewport during the gesture, but only change selection on finalize.
+    Preview,
+    /// Immediately change the selection as the viewport crosses indices.
+    Immediate,
+    /// Hybrid mode: prefer preview behavior, but allow immediate selection under stronger crossing thresholds.
+    Hybrid,
+}
+
+impl Default for ScrollGestureMode {
+    fn default() -> Self { ScrollGestureMode::Preview }
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ScrollSettings {
+    /// Maximum number of columns visible at once in scroll layout
     #[serde(default = "default_scroll_visible_columns")]
     pub visible_columns: usize,
     /// Enable looping navigation/visibility in scroll layout columns
     #[serde(default)]
     pub infinite_loop: bool,
+    /// Number of fingers required when using gesture-based scrolling
+    #[serde(default = "default_scroll_gesture_fingers")]
+    pub gesture_fingers: usize,
+    /// Multiplier applied to horizontal gesture deltas (larger values scroll faster)
+    #[serde(default = "default_scroll_gesture_sensitivity")]
+    pub gesture_sensitivity: f64,
+    /// Pixel delta that corresponds to one window when using a scroll wheel
+    #[serde(default = "default_scroll_wheel_divisor")]
+    pub wheel_pixels_per_window: f64,
+    /// Additional sensitivity multiplier applied to scroll-wheel deltas
+    #[serde(default = "default_scroll_wheel_sensitivity")]
+    pub wheel_sensitivity: f64,
+    /// Mode used for gesture scrolling:
+    /// - "preview": gestures pan the viewport but do not change selection until finalize (default)
+    /// - "immediate": selection changes as the viewport crosses indices during the gesture
+    /// - "hybrid": generally preview, but allow immediate selection in stronger crossing cases
+    #[serde(default = "default_scroll_gesture_mode")]
+    pub gesture_mode: ScrollGestureMode,
 }
 
 impl Default for ScrollSettings {
@@ -567,6 +607,11 @@ impl Default for ScrollSettings {
         Self {
             visible_columns: default_scroll_visible_columns(),
             infinite_loop: false,
+            gesture_fingers: default_scroll_gesture_fingers(),
+            gesture_sensitivity: default_scroll_gesture_sensitivity(),
+            wheel_pixels_per_window: default_scroll_wheel_divisor(),
+            wheel_sensitivity: default_scroll_wheel_sensitivity(),
+            gesture_mode: default_scroll_gesture_mode(),
         }
     }
 }
@@ -718,6 +763,18 @@ impl ScrollSettings {
         }
         if self.visible_columns > 5 {
             issues.push("scroll.visible_columns must be at most 5".to_string());
+        }
+        if self.gesture_fingers == 0 {
+            issues.push("scroll.gesture_fingers must be at least 1".to_string());
+        }
+        if self.gesture_sensitivity <= 0.0 {
+            issues.push("scroll.gesture_sensitivity must be positive".to_string());
+        }
+        if self.wheel_pixels_per_window <= 0.0 {
+            issues.push("scroll.wheel_pixels_per_window must be positive".to_string());
+        }
+        if self.wheel_sensitivity <= 0.0 {
+            issues.push("scroll.wheel_sensitivity must be positive".to_string());
         }
         issues
     }

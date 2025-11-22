@@ -26,7 +26,7 @@ pub struct GroupContainerInfo {
 }
 
 #[non_exhaustive]
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Copy)]
 #[serde(rename_all = "snake_case")]
 pub enum LayoutCommand {
     NextWindow,
@@ -47,11 +47,20 @@ pub enum LayoutCommand {
     ToggleWindowFloating,
     ToggleFullscreen,
     ToggleFullscreenWithinGaps,
+    ToggleFullWidth,
+    ShiftViewport {
+        delta: f64,
+        finalize: bool,
+    },
 
     ResizeWindowGrow,
     ResizeWindowShrink,
     ResizeWindowBy {
         amount: f64,
+    },
+    ScrollWorkspace {
+        delta: f64,
+        finalize: bool,
     },
 
     NextWorkspace(Option<bool>),
@@ -823,6 +832,17 @@ impl LayoutEngine {
             }
         }
 
+        let make_response = |raise_windows: Vec<WindowId>| {
+            if raise_windows.is_empty() {
+                EventResponse::default()
+            } else {
+                EventResponse {
+                    raise_windows,
+                    focus_window: None,
+                }
+            }
+        };
+
         match command {
             LayoutCommand::ToggleWindowFloating => unreachable!(),
             LayoutCommand::ToggleFocusFloating => unreachable!(),
@@ -831,6 +851,56 @@ impl LayoutEngine {
                 let layout = self.layout(space);
                 let _ = self.tree.swap_windows(layout, a, b);
 
+                EventResponse::default()
+            }
+            LayoutCommand::ScrollWorkspace { delta, finalize } => {
+                if let LayoutSystemKind::Scroll(system) = &mut self.tree {
+                    let mut focus_window = None;
+                    if delta.abs() > f64::EPSILON {
+                        focus_window = system.scroll_by(layout, delta);
+                    }
+                    if finalize {
+                        let finalized_window = system.finalize_scroll(layout);
+                        focus_window = finalized_window.or(focus_window);
+                    }
+
+                    if let Some(wid) = focus_window {
+                        self.focused_window = Some(wid);
+                        self.virtual_workspace_manager.set_last_focused_window(
+                            space,
+                            workspace_id,
+                            Some(wid),
+                        );
+                        return EventResponse {
+                            focus_window: Some(wid),
+                            raise_windows: vec![wid],
+                        };
+                    }
+                }
+
+                EventResponse::default()
+            }
+
+            LayoutCommand::ShiftViewport { delta, finalize } => {
+                if let LayoutSystemKind::Scroll(system) = &mut self.tree {
+                    if delta.abs() > f64::EPSILON {
+                        system.shift_view_by(layout, delta);
+                    }
+                    if finalize {
+                        if let Some(wid) = system.finalize_scroll(layout) {
+                            self.focused_window = Some(wid);
+                            self.virtual_workspace_manager.set_last_focused_window(
+                                space,
+                                workspace_id,
+                                Some(wid),
+                            );
+                            return EventResponse {
+                                focus_window: Some(wid),
+                                raise_windows: vec![wid],
+                            };
+                        }
+                    }
+                }
                 EventResponse::default()
             }
 
@@ -906,26 +976,24 @@ impl LayoutEngine {
                 EventResponse::default()
             }
             LayoutCommand::ToggleFullscreen => {
-                let raise_windows = self.tree.toggle_fullscreen_of_selection(layout);
-                if raise_windows.is_empty() {
-                    EventResponse::default()
-                } else {
-                    EventResponse {
-                        raise_windows,
-                        focus_window: None,
-                    }
-                }
+                let raise_windows = self.tree.toggle_action(
+                    layout,
+                    crate::layout_engine::systems::ToggleAction::Fullscreen { within_gaps: false },
+                );
+                make_response(raise_windows)
             }
             LayoutCommand::ToggleFullscreenWithinGaps => {
-                let raise_windows = self.tree.toggle_fullscreen_within_gaps_of_selection(layout);
-                if raise_windows.is_empty() {
-                    EventResponse::default()
-                } else {
-                    EventResponse {
-                        raise_windows,
-                        focus_window: None,
-                    }
-                }
+                let raise_windows = self.tree.toggle_action(
+                    layout,
+                    crate::layout_engine::systems::ToggleAction::Fullscreen { within_gaps: true },
+                );
+                make_response(raise_windows)
+            }
+            LayoutCommand::ToggleFullWidth => {
+                let raise_windows = self
+                    .tree
+                    .toggle_action(layout, crate::layout_engine::systems::ToggleAction::FullWidth);
+                make_response(raise_windows)
             }
             // handled by upper reactor
             LayoutCommand::NextWorkspace(_)
@@ -1004,7 +1072,10 @@ impl LayoutEngine {
                         s.toggle_tile_orientation(layout);
                         EventResponse::default()
                     }
-                    LayoutSystemKind::Scroll(_) => EventResponse::default(),
+                    LayoutSystemKind::Scroll(s) => {
+                        s.toggle_tile_orientation(layout);
+                        EventResponse::default()
+                    }
                 };
 
                 resp

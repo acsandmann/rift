@@ -7,6 +7,16 @@ use crate::layout_engine::{Direction, LayoutKind};
 
 slotmap::new_key_type! { pub struct LayoutId; }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum ToggleAction {
+    /// Toggle fullscreen for the selected window. If `within_gaps` is true,
+    /// preserve gaps when fullscreening.
+    Fullscreen { within_gaps: bool },
+    /// Toggle the scroll-layout specific "full width" presentation.
+    FullWidth,
+}
+
 #[enum_dispatch]
 pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     fn create_layout(&mut self) -> LayoutId;
@@ -67,8 +77,7 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     );
     fn split_selection(&mut self, layout: LayoutId, kind: LayoutKind);
 
-    fn toggle_fullscreen_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId>;
-    fn toggle_fullscreen_within_gaps_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId>;
+    fn toggle_action(&mut self, layout: LayoutId, action: ToggleAction) -> Vec<WindowId>;
 
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction);
     fn apply_stacking_to_parent_of_selection(

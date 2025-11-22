@@ -16,7 +16,7 @@ use crate::actor::reactor::Reactor;
 use crate::actor::reactor::animation::AnimationManager;
 use crate::actor::{event_tap, menu_bar, raise_manager, stack_line, window_notify, wm_controller};
 use crate::common::collections::{HashMap, HashSet};
-use crate::common::config::{Config, WindowSnappingSettings};
+use crate::common::config::{Config, LayoutMode, WindowSnappingSettings};
 use crate::layout_engine::LayoutEngine;
 use crate::sys::screen::{ScreenId, SpaceId};
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
@@ -312,8 +312,13 @@ impl LayoutManager {
                 }
             }
 
+            let is_scroll_layout = matches!(
+                reactor.config_manager.config.settings.layout.mode,
+                LayoutMode::Scroll
+            );
             let suppress_animation = is_workspace_switch
-                || reactor.workspace_switch_manager.active_workspace_switch.is_some();
+                || reactor.workspace_switch_manager.active_workspace_switch.is_some()
+                || is_scroll_layout;
             if suppress_animation {
                 any_frame_changed |= AnimationManager::instant_layout(reactor, &layout, skip_wid);
             } else {
