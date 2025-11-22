@@ -315,6 +315,7 @@ impl WmController {
                     .map(|(descriptor, space)| reactor::ScreenSnapshot {
                         screen_id: descriptor.id.as_u32(),
                         frame: descriptor.frame,
+                        visible_frame: descriptor.visible_frame,
                         space,
                         display_uuid: descriptor.display_uuid,
                         name: descriptor.name,

@@ -4,6 +4,7 @@ use tracing::Span;
 
 pub mod app;
 pub mod broadcast;
+pub mod centered_bar;
 pub mod config;
 pub mod config_watcher;
 pub mod drag_swap;

@@ -1,7 +1,7 @@
 use objc2_core_foundation::CGRect;
 
 use crate::actor::app::WindowId;
-use crate::actor::menu_bar;
+use crate::actor::{centered_bar, menu_bar};
 use crate::actor::reactor::{Event, Reactor};
 use crate::common::collections::HashSet;
 use crate::model::server::{
@@ -71,6 +71,40 @@ impl Reactor {
             active_workspace,
             windows,
         }));
+    }
+
+    pub(super) fn maybe_send_centered_bar_update(&mut self) {
+        let bar_tx = match self.menu_manager.centered_bar_tx.as_ref() {
+            Some(tx) => tx.clone(),
+            None => return,
+        };
+
+        if !self.config_manager.config.settings.ui.centered_bar.enabled {
+            return;
+        }
+
+        let mut displays = Vec::new();
+        for screen in self.space_manager.screens.clone() {
+            let Some(space_id) = self.space_manager.space_for_screen(&screen) else {
+                continue;
+            };
+            let workspaces = self.handle_workspace_query(Some(space_id));
+            let active_idx = self.layout_manager.layout_engine.active_workspace_idx(space_id);
+            displays.push(centered_bar::UpdateDisplay {
+                screen_id: screen.screen_id.as_u32(),
+                frame: screen.frame,
+                visible_frame: screen.visible_frame,
+                space: Some(space_id),
+                workspaces,
+                active_workspace_idx: active_idx,
+            });
+        }
+
+        if displays.is_empty() {
+            return;
+        }
+
+        bar_tx.send(centered_bar::Event::Update(centered_bar::Update { displays }));
     }
 
     fn handle_workspace_query(&mut self, space_id_param: Option<SpaceId>) -> Vec<WorkspaceData> {

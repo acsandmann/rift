@@ -40,6 +40,7 @@ pub fn make_screen_snapshots(
         .enumerate()
         .map(|(idx, (frame, space))| ScreenSnapshot {
             frame,
+            visible_frame: frame,
             space,
             display_uuid: format!("test-display-{idx}"),
             name: None,

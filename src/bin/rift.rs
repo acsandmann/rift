@@ -7,6 +7,7 @@ use objc2_application_services::AXUIElement;
 use rift_wm::actor::config::ConfigActor;
 use rift_wm::actor::config_watcher::ConfigWatcher;
 use rift_wm::actor::event_tap::EventTap;
+use rift_wm::actor::centered_bar::CenteredBar;
 use rift_wm::actor::menu_bar::Menu;
 use rift_wm::actor::mission_control::MissionControlActor;
 use rift_wm::actor::mission_control_observer::NativeMissionControl;
@@ -153,6 +154,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
     let (event_tap_tx, event_tap_rx) = rift_wm::actor::channel();
     let (menu_tx, menu_rx) = rift_wm::actor::channel();
     let (stack_line_tx, stack_line_rx) = rift_wm::actor::channel();
+    let (centered_bar_tx, centered_bar_rx) = rift_wm::actor::channel();
     let (wnd_tx, wnd_rx) = rift_wm::actor::channel();
     let window_tx_store = WindowTxStore::new();
     let events_tx = Reactor::spawn(
@@ -163,6 +165,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         broadcast_tx.clone(),
         menu_tx.clone(),
         stack_line_tx.clone(),
+        centered_bar_tx.clone(),
         Some((wnd_tx.clone(), window_tx_store.clone())),
     );
 
@@ -239,13 +242,20 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         event_tap_rx,
         Some(wm_controller_sender.clone()),
     );
-    let menu = Menu::new(config.clone(), menu_rx, mtm);
+    let menu = Menu::new(config.clone(), menu_rx, mtm, config_tx.clone(), centered_bar_tx.clone());
     let stack_line = StackLine::new(
         config.clone(),
         stack_line_rx,
         mtm,
         events_tx.clone(),
         CoordinateConverter::default(),
+    );
+    let centered_bar = CenteredBar::new(
+        config.clone(),
+        centered_bar_rx,
+        mtm,
+        events_tx.clone(),
+        config_tx.clone(),
     );
 
     let mission_control = MissionControlActor::new(config.clone(), mc_rx, events_tx.clone(), mtm);
@@ -266,6 +276,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
             event_tap.run(),
             menu.run(),
             stack_line.run(),
+            centered_bar.run(),
             wn_actor.run(),
             mission_control_native.run(),
             mission_control.run(),
