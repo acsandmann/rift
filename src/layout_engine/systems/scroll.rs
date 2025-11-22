@@ -17,6 +17,10 @@ const MIN_NODE_SIZE: f64 = 0.05;
 #[derive(Default, Clone, Copy, Serialize, Deserialize)]
 struct ScrollLayoutState {
     first_visible_column: usize,
+    #[serde(default)]
+    viewport_offset: f64,
+    #[serde(default)]
+    selection_progress: f64,
 }
 
 #[derive(Default, Clone, Copy, Serialize, Deserialize)]
@@ -58,68 +62,176 @@ impl ScrollLayoutSystem {
         self.infinite_loop = settings.infinite_loop;
     }
 
-    pub fn scroll_by(&mut self, layout: LayoutId, delta: f64) -> Option<WindowId> {
+    fn normalize_viewport(&self, start: f64, total: usize, visible_cap: usize) -> (usize, f64) {
+        if total == 0 || visible_cap == 0 {
+            return (0, 0.0);
+        }
+
+        if self.infinite_loop {
+            let modulo = total as f64;
+            let wrapped = ((start % modulo) + modulo) % modulo;
+            let base = wrapped.floor().clamp(0.0, (total.saturating_sub(1)) as f64);
+            let offset = wrapped - base;
+            (base as usize, offset)
+        } else {
+            let max_start = total.saturating_sub(visible_cap) as f64;
+            let clamped = start.clamp(0.0, max_start.max(0.0));
+            let base = clamped.floor();
+            let offset = clamped - base;
+            (base as usize, offset)
+        }
+    }
+
+    fn set_viewport_start(
+        &mut self,
+        layout: LayoutId,
+        start: f64,
+        total: usize,
+        visible_cap: usize,
+    ) {
+        let (base, offset) = self.normalize_viewport(start, total, visible_cap);
+        let state = self.ensure_state(layout);
+        state.first_visible_column = base;
+        state.viewport_offset = offset;
+    }
+
+    fn viewport_start(&self, layout: LayoutId, total: usize, visible_cap: usize) -> (usize, f64) {
+        let state = self.layout_state.get(layout).copied().unwrap_or_default();
+        self.normalize_viewport(
+            state.first_visible_column as f64 + state.viewport_offset,
+            total,
+            visible_cap,
+        )
+    }
+
+    fn move_selection_by_columns(&mut self, layout: LayoutId, steps: isize) -> Option<WindowId> {
+        if steps == 0 {
+            return self.selected_window(layout);
+        }
+        let columns = self.columns(layout);
+        if columns.is_empty() {
+            return None;
+        }
+        let current_idx = match self.selection_column_index(layout) {
+            Some(idx) => idx,
+            None => return None,
+        };
+        let len = columns.len();
+        let target_idx = if self.infinite_loop {
+            let modulo = len as isize;
+            ((current_idx as isize + steps) % modulo + modulo) % modulo
+        } else {
+            let target = current_idx as isize + steps;
+            if target < 0 || target >= len as isize {
+                return None;
+            }
+            target
+        } as usize;
+
+        let _ = self.focus_window_in_column(layout, target_idx);
+        self.selected_window(layout)
+    }
+
+    fn visible_cap(&self, total: usize) -> usize { self.max_visible_columns.min(total).max(1) }
+
+    fn apply_scroll(
+        &mut self,
+        layout: LayoutId,
+        delta: f64,
+        change_selection: bool,
+    ) -> Option<WindowId> {
         if delta.abs() <= f64::EPSILON {
             return None;
         }
 
-        let direction = if delta > 0.0 {
-            Direction::Right
-        } else {
-            Direction::Left
-        };
-        let steps = delta.abs().round().max(1.0) as usize;
-        let mut last_focus = None;
+        let columns = self.columns(layout);
+        if columns.is_empty() {
+            return None;
+        }
 
-        for _ in 0..steps {
-            if self.move_selection(layout, direction) {
-                last_focus = self.selected_window(layout);
-            } else {
-                break;
+        let total = columns.len();
+        let visible_cap = self.visible_cap(total);
+
+        let (base, offset) = self.viewport_start(layout, total, visible_cap);
+        let mut start = base as f64 + offset;
+        let mut applied = delta;
+
+        if !self.infinite_loop {
+            let max_start = total.saturating_sub(visible_cap) as f64;
+            let clamped = (start + delta).clamp(0.0, max_start.max(0.0));
+            applied = clamped - start;
+            start = clamped;
+        } else {
+            start += delta;
+        }
+
+        self.set_viewport_start(layout, start, total, visible_cap);
+
+        let mut focus = None;
+        if change_selection {
+            let state = self.ensure_state(layout);
+            state.selection_progress += applied;
+            let steps = state.selection_progress.trunc() as isize;
+            state.selection_progress -= steps as f64;
+            if steps != 0 {
+                focus = self.move_selection_by_columns(layout, steps);
             }
         }
-
-        last_focus
+        focus
     }
 
-    pub fn finalize_scroll(&mut self, layout: LayoutId) -> Option<WindowId> {
-        self.ensure_selection_visible(layout);
-        self.selected_window(layout)
+    fn selection_column_index(&self, layout: LayoutId) -> Option<usize> {
+        self.column_of(layout, self.selection(layout))
+            .and_then(|col| self.column_index(layout, col))
     }
 
-    pub fn shift_view_by(&mut self, layout: LayoutId, delta: f64) {
-        if delta.abs() <= f64::EPSILON {
-            return;
-        }
-
+    fn snap_viewport_to_selection(&mut self, layout: LayoutId) {
         let columns = self.columns(layout);
         if columns.is_empty() {
             return;
         }
-
         let total = columns.len();
         let visible_cap = self.max_visible_columns.min(total).max(1);
-        let steps = delta.round() as isize;
-        if steps == 0 {
+        let Some(sel_idx) = self.selection_column_index(layout) else {
             return;
-        }
+        };
 
-        let current_state = self
-            .layout_state
-            .get(layout)
-            .map(|state| state.first_visible_column)
-            .unwrap_or(0);
-        let current = self.normalized_first_visible(current_state, total, visible_cap) as isize;
-
-        let new_first = if self.infinite_loop {
-            let modulo = total as isize;
-            ((current + steps) % modulo + modulo) % modulo
+        let start = if self.infinite_loop {
+            sel_idx as f64
         } else {
-            let max_start = total.saturating_sub(visible_cap) as isize;
-            (current + steps).clamp(0, max_start)
-        } as usize;
+            let max_start = total.saturating_sub(visible_cap);
+            sel_idx.min(max_start) as f64
+        };
+        self.set_viewport_start(layout, start, total, visible_cap);
+        self.ensure_state(layout).selection_progress = 0.0;
+    }
 
-        self.ensure_state(layout).first_visible_column = new_first;
+    fn wrap_index(&self, idx: isize, total: usize) -> Option<usize> {
+        if total == 0 {
+            return None;
+        }
+        if self.infinite_loop {
+            let modulo = total as isize;
+            let wrapped = ((idx % modulo) + modulo) % modulo;
+            Some(wrapped as usize)
+        } else if idx < 0 || idx as usize >= total {
+            None
+        } else {
+            Some(idx as usize)
+        }
+    }
+
+    pub fn scroll_by(&mut self, layout: LayoutId, delta: f64) -> Option<WindowId> {
+        self.apply_scroll(layout, delta, true)
+    }
+
+    pub fn finalize_scroll(&mut self, layout: LayoutId) -> Option<WindowId> {
+        self.snap_viewport_to_selection(layout);
+        self.selected_window(layout)
+    }
+
+    pub fn shift_view_by(&mut self, layout: LayoutId, delta: f64) {
+        let _ = self.apply_scroll(layout, delta, false);
     }
 
     fn toggle_fullscreen_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
@@ -208,22 +320,6 @@ impl ScrollLayoutSystem {
         self.tree.data.sizes.size_or_default(node).max(MIN_NODE_SIZE)
     }
 
-    fn normalized_first_visible(
-        &self,
-        state_first: usize,
-        total: usize,
-        visible_cap: usize,
-    ) -> usize {
-        if total == 0 || visible_cap >= total {
-            0
-        } else if self.infinite_loop {
-            state_first % total
-        } else {
-            let max_start = total.saturating_sub(visible_cap);
-            state_first.min(max_start)
-        }
-    }
-
     fn ensure_selection_visible(&mut self, layout: LayoutId) {
         self.ensure_selection_visible_with(layout, ScrollRevealEdge::Left);
     }
@@ -231,69 +327,46 @@ impl ScrollLayoutSystem {
     fn ensure_selection_visible_with(&mut self, layout: LayoutId, edge: ScrollRevealEdge) {
         let total_columns = self.columns(layout);
         if total_columns.is_empty() {
-            if let Some(state) = self.layout_state.get_mut(layout) {
-                state.first_visible_column = 0;
-            }
+            let state = self.ensure_state(layout);
+            state.first_visible_column = 0;
+            state.viewport_offset = 0.0;
+            state.selection_progress = 0.0;
             return;
         }
 
-        let visible_cap = self.max_visible_columns.min(total_columns.len());
+        let visible_cap = self.max_visible_columns.min(total_columns.len()).max(1);
         if visible_cap >= total_columns.len() {
-            if let Some(state) = self.layout_state.get_mut(layout) {
-                state.first_visible_column = 0;
-            }
+            let state = self.ensure_state(layout);
+            state.first_visible_column = 0;
+            state.viewport_offset = 0.0;
+            state.selection_progress = 0.0;
             return;
         }
 
-        let selection = self.selection(layout);
-        let target_idx =
-            self.column_of(layout, selection).and_then(|col| self.column_index(layout, col));
-        let Some(target_idx) = target_idx else { return };
-
-        let len = total_columns.len();
-        let current_state = self
-            .layout_state
-            .get(layout)
-            .map(|state| state.first_visible_column)
-            .unwrap_or(0);
-        let current_start = self.normalized_first_visible(current_state, len, visible_cap);
-
-        let is_visible = if self.infinite_loop {
-            let visible: HashSet<usize> =
-                (0..visible_cap).map(|offset| (current_start + offset) % len).collect();
-            visible.contains(&target_idx)
-        } else {
-            target_idx >= current_start && target_idx < current_start + visible_cap
-        };
-
-        if is_visible {
+        let Some(target_idx) = self.selection_column_index(layout) else {
             return;
-        }
-
-        let new_first = if self.infinite_loop {
+        };
+        let total = total_columns.len();
+        let start = if self.infinite_loop {
             match edge {
-                ScrollRevealEdge::Left => target_idx,
+                ScrollRevealEdge::Left => target_idx as f64,
                 ScrollRevealEdge::Right => {
-                    let trailing = visible_cap.saturating_sub(1);
-                    if target_idx >= trailing {
-                        target_idx - trailing
-                    } else {
-                        len - (trailing - target_idx)
-                    }
+                    target_idx as f64 - (visible_cap.saturating_sub(1)) as f64
                 }
             }
         } else {
-            let max_start = len - visible_cap;
+            let max_start = total.saturating_sub(visible_cap) as f64;
             match edge {
-                ScrollRevealEdge::Left => target_idx.min(max_start),
+                ScrollRevealEdge::Left => target_idx as f64,
                 ScrollRevealEdge::Right => {
-                    let trailing = visible_cap.saturating_sub(1);
-                    let start = target_idx.saturating_sub(trailing);
-                    start.min(max_start)
+                    let trailing = visible_cap.saturating_sub(1) as f64;
+                    (target_idx as f64 - trailing).clamp(0.0, max_start.max(0.0))
                 }
             }
         };
-        self.ensure_state(layout).first_visible_column = new_first;
+
+        self.set_viewport_start(layout, start, total, visible_cap);
+        self.ensure_state(layout).selection_progress = 0.0;
     }
 
     fn window_at(&self, node: NodeId) -> Option<WindowId> { self.tree.data.window.at(node) }
@@ -473,46 +546,66 @@ impl ScrollLayoutSystem {
             return Vec::new();
         }
         let total = columns.len();
-        let visible_cap = self.max_visible_columns.min(total).max(1);
-        let state = self.layout_state.get(layout).copied().unwrap_or_default();
-        let first = self.normalized_first_visible(state.first_visible_column, total, visible_cap);
-        let visible_set: HashSet<usize> = if self.infinite_loop {
-            (0..visible_cap).map(|offset| (first + offset) % total).collect()
-        } else {
-            HashSet::default()
-        };
-        let visible_indices: Vec<usize> = if self.infinite_loop {
-            (0..visible_cap).map(|offset| (first + offset) % total).collect()
-        } else {
-            (first..first + visible_cap).collect()
-        };
-        let visible_total: f64 = visible_indices
+        let visible_cap = self.visible_cap(total);
+        let (base, offset) = self.viewport_start(layout, total, visible_cap);
+        let start_pos = base as f64 + offset;
+        let span_end = start_pos + visible_cap as f64;
+
+        let mut visible_indices = Vec::new();
+        let mut overlaps = Vec::new();
+        let mut idx = start_pos.floor() as isize;
+        while (idx as f64) < span_end + f64::EPSILON && visible_indices.len() < total + 1 {
+            let Some(wrapped) = self.wrap_index(idx, total) else {
+                break;
+            };
+            let col_start = idx as f64;
+            let col_end = col_start + 1.0;
+            let overlap = (col_end.min(span_end) - col_start.max(start_pos)).max(0.0);
+            if overlap > f64::EPSILON {
+                visible_indices.push(wrapped);
+                overlaps.push(overlap.min(1.0));
+            }
+            idx += 1;
+        }
+
+        if visible_indices.is_empty() {
+            return Vec::new();
+        }
+
+        let weights: Vec<f64> = visible_indices
             .iter()
-            .map(|idx| self.node_size(columns[*idx]))
-            .sum::<f64>()
-            .max(f64::EPSILON);
+            .zip(overlaps.iter())
+            .map(|(idx, overlap)| self.node_size(columns[*idx]) * overlap)
+            .collect();
+        let total_weight: f64 = weights.iter().sum::<f64>().max(f64::EPSILON);
 
         let mut result = Vec::new();
         let horiz_gap = gaps.inner.horizontal;
-        let total_gap = (visible_cap.saturating_sub(1)) as f64 * horiz_gap;
+        let total_gap = (visible_indices.len().saturating_sub(1)) as f64 * horiz_gap;
         let usable_width = if horiz_gap == 0.0 {
             tiling_area.size.width
         } else {
             (tiling_area.size.width - total_gap).max(0.0)
         };
+        let mut used = HashSet::default();
         let mut x = tiling_area.origin.x;
-        for (visible_idx_offset, idx) in visible_indices.iter().enumerate() {
+        for (((idx, weight), _overlap), idx_pos) in
+            visible_indices.iter().zip(weights.iter()).zip(overlaps.iter()).zip(0..)
+        {
+            let width = usable_width * (*weight / total_weight);
+            if width <= f64::EPSILON {
+                continue;
+            }
+            used.insert(*idx);
+            let rect = CGRect {
+                origin: CGPoint { x, y: tiling_area.origin.y },
+                size: CGSize {
+                    width,
+                    height: tiling_area.size.height,
+                },
+            }
+            .round();
             if let Some(column) = columns.get(*idx) {
-                let width_share = self.node_size(*column) / visible_total;
-                let column_width = usable_width * width_share;
-                let rect = CGRect {
-                    origin: CGPoint { x, y: tiling_area.origin.y },
-                    size: CGSize {
-                        width: column_width,
-                        height: tiling_area.size.height,
-                    },
-                }
-                .round();
                 self.layout_column(
                     *column,
                     screen,
@@ -521,33 +614,30 @@ impl ScrollLayoutSystem {
                     gaps.inner.vertical,
                     &mut result,
                 );
-                x += column_width;
-                if visible_idx_offset < visible_indices.len().saturating_sub(1) {
-                    x += horiz_gap;
-                }
+            }
+            if idx_pos < visible_indices.len().saturating_sub(1) {
+                x += width + horiz_gap;
+            } else {
+                x += width;
             }
         }
 
-        if total > visible_cap {
+        if total > used.len() {
             let hidden_width = usable_width / visible_cap as f64;
             for (idx, column) in columns.iter().enumerate() {
-                let is_visible = if self.infinite_loop {
-                    visible_set.contains(&idx)
-                } else {
-                    idx >= first && idx < first + visible_cap
-                };
-                if !is_visible {
-                    let hide_rect =
-                        Self::hidden_column_rect(screen, hidden_width, tiling_area.size.height);
-                    self.layout_column(
-                        *column,
-                        screen,
-                        tiling_area,
-                        hide_rect,
-                        gaps.inner.vertical,
-                        &mut result,
-                    );
+                if used.contains(&idx) {
+                    continue;
                 }
+                let hide_rect =
+                    Self::hidden_column_rect(screen, hidden_width, tiling_area.size.height);
+                self.layout_column(
+                    *column,
+                    screen,
+                    tiling_area,
+                    hide_rect,
+                    gaps.inner.vertical,
+                    &mut result,
+                );
             }
         }
 

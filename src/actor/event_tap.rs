@@ -340,6 +340,9 @@ impl EventTap {
             CGEventType::RightMouseUp | CGEventType::LeftMouseUp => {
                 _ = self.events_tx.send(Event::MouseUp);
             }
+            CGEventType::ScrollWheel => {
+                self.handle_scroll_wheel(event);
+            }
             CGEventType::MouseMoved
                 if self.config.settings.focus_follows_mouse
                     && state.focus_follows_mouse_enabled
@@ -465,6 +468,63 @@ impl EventTap {
         }
     }
 
+    fn handle_scroll_wheel(&self, event: &CGEvent) {
+        if self.config.settings.layout.mode != LayoutMode::Scroll {
+            return;
+        }
+        let Some(wm_sender) = self.wm_sender.as_ref() else {
+            return;
+        };
+        let Some(nsevent) = NSEvent::eventWithCGEvent(event) else {
+            return;
+        };
+
+        let scroll_cfg = &self.config.settings.layout.scroll;
+        let mut delta_x = nsevent.scrollingDeltaX() as f64;
+
+        if !nsevent.hasPreciseScrollingDeltas() {
+            // Coarse wheel events are line-based; scale them up slightly to feel responsive.
+            delta_x *= 10.0;
+        }
+
+        let mut delta_units =
+            -delta_x / scroll_cfg.wheel_pixels_per_window.max(0.01) * scroll_cfg.wheel_sensitivity;
+
+        if self.config.settings.gestures.invert_horizontal_swipe {
+            delta_units = -delta_units;
+        }
+
+        let is_end = {
+            let phase = nsevent.phase();
+            let momentum = nsevent.momentumPhase();
+            phase.contains(NSEventPhase::Ended)
+                || phase.contains(NSEventPhase::Cancelled)
+                || momentum.contains(NSEventPhase::Ended)
+                || momentum.contains(NSEventPhase::Cancelled)
+        };
+
+        if delta_units.abs() < MIN_SCROLL_DELTA && !is_end {
+            return;
+        }
+
+        let finalize = is_end;
+        let command = match scroll_cfg.gesture_mode {
+            ScrollGestureMode::Preview => LC::ShiftViewport { delta: delta_units, finalize },
+            ScrollGestureMode::Immediate => LC::ScrollWorkspace { delta: delta_units, finalize },
+            ScrollGestureMode::Hybrid => {
+                if delta_units.abs() > 0.5 {
+                    LC::ScrollWorkspace { delta: delta_units, finalize }
+                } else {
+                    LC::ShiftViewport { delta: delta_units, finalize }
+                }
+            }
+        };
+
+        wm_sender.send(WmEvent::Command(WmCommand::ReactorCommand(
+            reactor::Command::Layout(command),
+        )));
+    }
+
     fn handle_scroll_layout_gesture(&self, handler: &SwipeHandler, nsevent: &NSEvent) {
         let cfg = &handler.cfg;
         let state = &handler.state;
@@ -479,8 +539,14 @@ impl EventTap {
 
         let phase = nsevent.phase();
         if phase.contains(NSEventPhase::Ended) || phase.contains(NSEventPhase::Cancelled) {
+            let finalize_cmd = match scroll_cfg.gesture_mode {
+                ScrollGestureMode::Preview => LC::ShiftViewport { delta: 0.0, finalize: true },
+                ScrollGestureMode::Immediate | ScrollGestureMode::Hybrid => {
+                    LC::ScrollWorkspace { delta: 0.0, finalize: true }
+                }
+            };
             wm_sender.send(WmEvent::Command(WmCommand::ReactorCommand(
-                reactor::Command::Layout(LC::ScrollWorkspace { delta: 0.0, finalize: true }),
+                reactor::Command::Layout(finalize_cmd),
             )));
             state.borrow_mut().reset();
             return;
