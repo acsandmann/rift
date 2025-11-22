@@ -93,6 +93,25 @@ stack_offset = 40.0
 # - "horizontal"/"vertical": force a specific orientation
 default_orientation = "perpendicular"
 
+[settings.layout.scroll]
+# Maximum number of columns displayed at once in the scroll layout (1-5)
+visible_columns = 3
+# Allow wrapping left/right navigation in the scroll layout
+infinite_loop = false
+# Number of fingers required for scroll gestures (trackpad)
+gesture_fingers = 3
+# Gesture sensitivity multiplier (higher = faster)
+gesture_sensitivity = 1.25
+# Approximate pixels of scroll wheel movement per window in scroll layout
+wheel_pixels_per_window = 600.0
+# Additional multiplier for scroll wheel sensitivity
+wheel_sensitivity = 1.0
+# How gestures affect selection:
+#   "preview"   - pan viewport; selection changes on finalize
+#   "immediate" - selection changes as viewport crosses windows
+#   "hybrid"    - mostly preview, but allow immediate under strong gestures
+gesture_mode = "preview"
+
 [settings.layout.gaps]
 # Gap configuration
 # - outer: space between windows and screen edges
@@ -303,6 +322,9 @@ comb1 = "Alt + Shift"
 # - switch_to_last_workspace
 # - move_focus = "left"|"right"|"up"|"down"
 # - move_node = "left"|"right"|"up"|"down"
+# - move_column = "left"|"right"
+# - consume_window = "left"|"right"
+# - expel_window = "left"|"right"   # inserts new column on the chosen side
 # - join_window = "left"|"right"|"up"|"down"
 # - stack_windows / unstack_windows / unjoin_windows
 # - toggle_focus_floating / toggle_window_floating / toggle_fullscreen
@@ -320,6 +342,11 @@ comb1 = "Alt + Shift"
 "Alt + J" = { move_focus = "down" }
 "Alt + K" = { move_focus = "up" }
 "Alt + L" = { move_focus = "right" }
+
+"Alt + Shift + B" = { consume_window = "left" }
+"Alt + Shift + N" = { consume_window = "right" }
+"Alt + Shift + V" = { expel_window = "left" }
+"Alt + Shift + M" = { expel_window = "right" }
 
 "comb1 + H" = { move_node = "left" }
 "comb1 + J" = { move_node = "down" }
@@ -342,6 +369,8 @@ comb1 = "Alt + Shift"
 "Alt + Shift + Right" = { join_window = "right" }
 "Alt + Shift + Up" = { join_window = "up" }
 "Alt + Shift + Down" = { join_window = "down" }
+"Alt + Ctrl + Shift + Left" = { move_column = "left" }
+"Alt + Ctrl + Shift + Right" = { move_column = "right" }
 "Alt + Comma" = "toggle_stack"
 "Alt + Slash" = "toggle_orientation"
 "Alt + Ctrl + E" = "unjoin_windows"
