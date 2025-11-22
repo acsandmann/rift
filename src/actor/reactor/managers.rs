@@ -14,7 +14,9 @@ use crate::actor::broadcast::BroadcastSender;
 use crate::actor::drag_swap::DragManager as DragSwapManager;
 use crate::actor::reactor::Reactor;
 use crate::actor::reactor::animation::AnimationManager;
-use crate::actor::{event_tap, menu_bar, raise_manager, stack_line, window_notify, wm_controller};
+use crate::actor::{
+    centered_bar, event_tap, menu_bar, raise_manager, stack_line, window_notify, wm_controller,
+};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{Config, WindowSnappingSettings};
 use crate::layout_engine::LayoutEngine;
@@ -131,6 +133,7 @@ pub struct NotificationManager {
 pub struct MenuManager {
     pub menu_state: super::MenuState,
     pub menu_tx: Option<menu_bar::Sender>,
+    pub centered_bar_tx: Option<centered_bar::Sender>,
 }
 
 /// Manages Mission Control state

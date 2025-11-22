@@ -46,6 +46,7 @@ pub struct ScreenCache<S: System = Actual> {
 pub struct ScreenDescriptor {
     pub id: ScreenId,
     pub frame: CGRect,
+    pub visible_frame: CGRect,
     pub display_uuid: String,
     pub name: Option<String>,
 }
@@ -103,11 +104,13 @@ impl<S: System> ScreenCache<S> {
                     warn!("Can't find NSScreen corresponding to {cg_id:?}");
                     return None;
                 };
-                let converted = converter.convert_rect(ns_screen.visible_frame).unwrap();
+                let visible = converter.convert_rect(ns_screen.visible_frame).unwrap();
+                let frame_full = converter.convert_rect(ns_screen.frame).unwrap_or(visible);
                 let display_uuid = uuid_strings.get(idx).cloned();
                 let descriptor = ScreenDescriptor {
                     id: cg_id,
-                    frame: converted,
+                    frame: visible,
+                    visible_frame: frame_full,
                     display_uuid: display_uuid.unwrap_or_else(|| {
                         warn!("Missing cached UUID for {:?}", cg_id);
                         String::new()

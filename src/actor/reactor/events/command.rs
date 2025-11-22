@@ -5,7 +5,7 @@ use crate::actor::app::{AppThreadHandle, WindowId};
 use crate::actor::reactor::{DisplaySelector, FocusDisplaySelector, Reactor, WorkspaceSwitchState};
 use crate::actor::stack_line::Event as StackLineEvent;
 use crate::actor::wm_controller::WmEvent;
-use crate::actor::{menu_bar, raise_manager};
+use crate::actor::{centered_bar, menu_bar, raise_manager};
 use crate::common::collections::HashMap;
 use crate::common::config::{self as config, Config};
 use crate::common::log::{MetricsCommand, handle_command};
@@ -137,11 +137,19 @@ impl CommandEventHandler {
                 warn!("Failed to send config update to menu bar: {}", e);
             }
         }
+        if let Some(tx) = &reactor.menu_manager.centered_bar_tx {
+            if let Err(e) = tx.try_send(centered_bar::Event::ConfigUpdated(
+                reactor.config_manager.config.clone(),
+            )) {
+                warn!("Failed to send config update to centered bar: {}", e);
+            }
+        }
 
         let _ = reactor.update_layout(false, true).unwrap_or_else(|e| {
             warn!("Layout update failed: {}", e);
             false
         });
+        reactor.maybe_send_centered_bar_update();
 
         if old_keys != reactor.config_manager.config.keys {
             if let Some(wm) = &reactor.communication_manager.wm_sender {

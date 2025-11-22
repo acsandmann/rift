@@ -378,6 +378,8 @@ pub struct UiSettings {
     pub stack_line: StackLineSettings,
     #[serde(default)]
     pub mission_control: MissionControlSettings,
+    #[serde(default)]
+    pub centered_bar: CenteredBarSettings,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
@@ -468,6 +470,46 @@ pub struct MenuBarSettings {
     pub active_label: ActiveWorkspaceLabel,
     #[serde(default)]
     pub display_style: WorkspaceDisplayStyle,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum CenteredBarPosition {
+    #[default]
+    OverlappingMenuBar,
+    BelowMenuBar,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum CenteredBarWindowLevel {
+    #[default]
+    Popup,
+    Normal,
+    Floating,
+    Status,
+    Screensaver,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default, Eq, Hash)]
+#[serde(deny_unknown_fields)]
+pub struct CenteredBarSettings {
+    #[serde(default = "no")]
+    pub enabled: bool,
+    #[serde(default = "yes")]
+    pub show_numbers: bool,
+    #[serde(default = "no")]
+    pub show_mode_indicator: bool,
+    #[serde(default = "no")]
+    pub deduplicate_icons: bool,
+    #[serde(default = "no")]
+    pub hide_empty_workspaces: bool,
+    #[serde(default)]
+    pub position: CenteredBarPosition,
+    #[serde(default = "no")]
+    pub notch_aware: bool,
+    #[serde(default)]
+    pub window_level: CenteredBarWindowLevel,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]

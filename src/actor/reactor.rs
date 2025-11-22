@@ -44,7 +44,7 @@ use crate::actor::app::{AppInfo, AppThreadHandle, Quiet, Request, WindowId, Wind
 use crate::actor::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::actor::raise_manager::{self, RaiseManager, RaiseRequest};
 use crate::actor::reactor::events::window_discovery::WindowDiscoveryHandler;
-use crate::actor::{self, menu_bar, stack_line};
+use crate::actor::{self, centered_bar, menu_bar, stack_line};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
 use crate::common::config::Config;
 use crate::common::log::MetricsCommand;
@@ -74,6 +74,8 @@ use crate::model::server::{
 pub struct ScreenSnapshot {
     #[serde(with = "CGRectDef")]
     pub frame: CGRect,
+    #[serde(with = "CGRectDef")]
+    pub visible_frame: CGRect,
     pub space: Option<SpaceId>,
     pub display_uuid: String,
     pub name: Option<String>,
@@ -382,6 +384,7 @@ struct PendingSpaceChange {
 #[derive(Clone, Debug)]
 struct Screen {
     frame: CGRect,
+    visible_frame: CGRect,
     space: Option<SpaceId>,
     display_uuid: String,
     name: Option<String>,
@@ -445,6 +448,7 @@ impl Reactor {
         broadcast_tx: BroadcastSender,
         menu_tx: menu_bar::Sender,
         stack_line_tx: stack_line::Sender,
+        centered_bar_tx: centered_bar::Sender,
         window_notify: Option<(crate::actor::window_notify::Sender, WindowTxStore)>,
     ) -> Sender {
         let (events_tx, events) = actor::channel();
@@ -456,6 +460,7 @@ impl Reactor {
                     Reactor::new(config, layout_engine, record, broadcast_tx, window_notify);
                 reactor.communication_manager.event_tap_tx = Some(event_tap_tx);
                 reactor.menu_manager.menu_tx = Some(menu_tx);
+                reactor.menu_manager.centered_bar_tx = Some(centered_bar_tx);
                 reactor.communication_manager.stack_line_tx = Some(stack_line_tx);
                 reactor.communication_manager.events_tx = Some(events_tx_clone.clone());
                 Executor::run(reactor.run(events, events_tx_clone));
@@ -531,6 +536,7 @@ impl Reactor {
             menu_manager: managers::MenuManager {
                 menu_state: MenuState::Closed,
                 menu_tx: None,
+                centered_bar_tx: None,
             },
             mission_control_manager: managers::MissionControlManager {
                 mission_control_state: MissionControlState::Inactive,
@@ -852,6 +858,7 @@ impl Reactor {
                     false
                 });
             self.maybe_send_menu_update();
+            self.maybe_send_centered_bar_update();
         }
 
         self.workspace_switch_manager.workspace_switch_state = WorkspaceSwitchState::Inactive;
@@ -2244,6 +2251,7 @@ impl Reactor {
             false
         });
         self.maybe_send_menu_update();
+        self.maybe_send_centered_bar_update();
     }
 
     fn force_refresh_all_windows(&mut self) {
