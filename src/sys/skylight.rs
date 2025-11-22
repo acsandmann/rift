@@ -55,7 +55,6 @@ pub enum KnownCGSEvent {
     WindowUpdated = 723,
     // maybe loginwindow active? kCGSEventNotificationSystemDefined = 724,
     WindowClosed = 804,
-    WindowIsChangingScreens = 805,
     WindowMoved = 806,
     WindowResized = 807,
     WindowReordered = 808,
@@ -235,6 +234,7 @@ unsafe extern "C" {
         set_tags: *mut u64,
         clear_tags: *mut u64,
     ) -> *mut CFArray<CFNumber>;
+    pub fn SLSCopyAssociatedWindows(cid: cid_t, wid: u32) -> *mut CFArray<CFNumber>;
     pub fn SLSManagedDisplayGetCurrentSpace(cid: cid_t, uuid: *mut CFString) -> u64;
     pub fn SLSCopyActiveMenuBarDisplayIdentifier(cid: cid_t) -> *mut CFString;
     pub fn SLSSpaceGetType(cid: cid_t, sid: u64) -> c_int;

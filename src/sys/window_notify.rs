@@ -147,7 +147,6 @@ extern "C" fn connection_callback(
                 }
             }
             CGSEventType::Known(KnownCGSEvent::WindowClosed)
-            | CGSEventType::Known(KnownCGSEvent::WindowIsChangingScreens)
             | CGSEventType::Known(KnownCGSEvent::WindowMoved)
             | CGSEventType::Known(KnownCGSEvent::WindowResized)
             | CGSEventType::Known(KnownCGSEvent::WindowReordered)

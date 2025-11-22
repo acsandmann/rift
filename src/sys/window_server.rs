@@ -182,6 +182,20 @@ pub fn window_parent(id: WindowServerId) -> Option<WindowServerId> {
     }
 }
 
+pub fn associated_windows(id: WindowServerId) -> Vec<WindowServerId> {
+    let assoc = unsafe { SLSCopyAssociatedWindows(*G_CONNECTION, id.as_u32()) };
+    let Some(assoc) = NonNull::new(assoc) else {
+        return Vec::new();
+    };
+
+    let assoc_cf: CFRetained<CFArray<CFNumber>> = unsafe { CFRetained::from_raw(assoc) };
+    assoc_cf
+        .iter()
+        .filter_map(|num| num.as_i64())
+        .map(|wid| WindowServerId::new(wid as u32))
+        .collect()
+}
+
 pub fn window_is_sticky(id: WindowServerId) -> bool {
     let cf_windows = cf_array_from_ids(&[id]);
     let space_list_ref = unsafe {
