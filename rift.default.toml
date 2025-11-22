@@ -98,6 +98,19 @@ default_orientation = "perpendicular"
 visible_columns = 3
 # Allow wrapping left/right navigation in the scroll layout
 infinite_loop = false
+# Number of fingers required for scroll gestures (trackpad)
+gesture_fingers = 3
+# Gesture sensitivity multiplier (higher = faster)
+gesture_sensitivity = 1.25
+# Approximate pixels of scroll wheel movement per window in scroll layout
+wheel_pixels_per_window = 600.0
+# Additional multiplier for scroll wheel sensitivity
+wheel_sensitivity = 1.0
+# How gestures affect selection:
+#   "preview"   - pan viewport; selection changes on finalize
+#   "immediate" - selection changes as viewport crosses windows
+#   "hybrid"    - mostly preview, but allow immediate under strong gestures
+gesture_mode = "preview"
 
 [settings.layout.gaps]
 # Gap configuration
