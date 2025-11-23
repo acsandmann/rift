@@ -76,7 +76,8 @@ hot_reload = true
 
 [settings.layout]
 # Layout system
-# - mode: "traditional" (i3/sway-like containers) or "bsp" (binary space partitioning)
+# - mode: "traditional" (i3/sway-like containers), "bsp" (binary space partitioning),
+#   or "dwindle" (Hypr-style spiral BSP)
 #   defaults to "traditional" if omitted
 mode = "traditional"
 
@@ -92,6 +93,33 @@ stack_offset = 40.0
 # - "same": use the same orientation as the parent layout
 # - "horizontal"/"vertical": force a specific orientation
 default_orientation = "perpendicular"
+
+# Dwindle-specific settings (only used when mode = "dwindle")
+[settings.layout.dwindle]
+# Initial split ratio when creating a new parent (Hypr-compatible 0.1..1.9)
+default_split_ratio = 1.0
+# Heuristic for deciding horizontal vs vertical splits based on aspect ratio
+split_width_multiplier = 1.0
+# Use cursor quadrant to decide split orientation/direction
+smart_split = false
+# Keep existing split orientation unless overridden
+preserve_split = false
+# Force split side: 0 follow heuristic, 1 force first (left/top), 2 force second (right/bottom)
+force_split = 0
+# Bias split toward the newly inserted window
+split_bias = false
+# Prefer selection over cursor when choosing insertion target
+use_active_for_splits = true
+# Keep preselect direction sticky after one insert
+permanent_direction_override = false
+# Adjust ratios based on cursor extent when resizing
+smart_resizing = true
+# Keep floating size when tiled
+pseudotile = false
+# Enforce aspect when only one window is present; set second to 0 to disable
+single_window_aspect_ratio = [0.0, 0.0]
+# Fractional padding required before aspect enforcement kicks in
+single_window_aspect_ratio_tolerance = 0.1
 
 [settings.layout.gaps]
 # Gap configuration
@@ -350,6 +378,13 @@ comb1 = "Alt + Shift"
 "Alt + F" = "toggle_fullscreen"
 "Alt + Shift + F" = "toggle_fullscreen_within_gaps"
 "comb1 + Ctrl + Space" = "toggle_focus_floating" # briefly bring focus to floating window
+"Alt + Shift + T" = "toggle_split"
+"Alt + Shift + S" = "swap_split"
+"Alt + Shift + M" = { move_to_root = { stable = true } }
+"Alt + Ctrl + Shift + H" = { preselect = "left" }
+"Alt + Ctrl + Shift + L" = { preselect = "right" }
+"Alt + Ctrl + Shift + K" = { preselect = "up" }
+"Alt + Ctrl + Shift + J" = { preselect = "down" }
 
 # smartly resize windows
 "Alt + Shift + Equal" = "resize_window_grow"

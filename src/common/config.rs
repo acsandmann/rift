@@ -534,6 +534,9 @@ pub struct LayoutSettings {
     /// Gap configuration for window spacing
     #[serde(default)]
     pub gaps: GapSettings,
+    /// Dwindle-specific configuration (only used when mode = "dwindle")
+    #[serde(default)]
+    pub dwindle: DwindleSettings,
 }
 
 /// Layout mode enum
@@ -545,6 +548,8 @@ pub enum LayoutMode {
     Traditional,
     /// Binary space partitioning tiling
     Bsp,
+    /// Hyprland-like dwindle layout
+    Dwindle,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
@@ -575,6 +580,47 @@ pub struct StackSettings {
     pub default_orientation: StackDefaultOrientation,
 }
 
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct DwindleSettings {
+    /// Initial split ratio when creating a new parent. Hyprland compatible range: 0.1..=1.9
+    #[serde(default = "DwindleSettings::default_split_ratio")]
+    pub default_split_ratio: f32,
+    /// Multiplier used to decide horizontal vs vertical split from aspect ratio
+    #[serde(default = "DwindleSettings::default_split_width_multiplier")]
+    pub split_width_multiplier: f32,
+    /// Use cursor quadrant to determine split direction
+    #[serde(default)]
+    pub smart_split: bool,
+    /// Keep existing split orientation unless overridden
+    #[serde(default)]
+    pub preserve_split: bool,
+    /// Force split side (0 follow heuristic, 1 new left/top, 2 new right/bottom)
+    #[serde(default)]
+    pub force_split: u8,
+    /// Bias split toward the newly inserted window
+    #[serde(default)]
+    pub split_bias: bool,
+    /// Prefer active/selected window instead of cursor hit-testing
+    #[serde(default = "DwindleSettings::default_use_active_for_splits")]
+    pub use_active_for_splits: bool,
+    /// Keep preselection direction sticky after one insert
+    #[serde(default)]
+    pub permanent_direction_override: bool,
+    /// Adjust ratio based on cursor extent when resizing
+    #[serde(default = "DwindleSettings::default_smart_resizing")]
+    pub smart_resizing: bool,
+    /// Keep floating size when tiled (Hypr pseudotile)
+    #[serde(default)]
+    pub pseudotile: bool,
+    /// Enforce aspect ratio when only one window is present; disabled if y == 0
+    #[serde(default = "DwindleSettings::default_single_window_aspect_ratio")]
+    pub single_window_aspect_ratio: (f32, f32),
+    /// Minimum fractional padding required to apply single-window aspect enforcement
+    #[serde(default = "DwindleSettings::default_single_window_aspect_ratio_tolerance")]
+    pub single_window_aspect_ratio_tolerance: f32,
+}
+
 /// Gap configuration for window spacing
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
 #[serde(deny_unknown_fields)]
@@ -588,6 +634,69 @@ pub struct GapSettings {
     /// Display-specific gap overrides keyed by display UUID
     #[serde(default)]
     pub per_display: HashMap<String, GapOverride>,
+}
+
+impl Default for DwindleSettings {
+    fn default() -> Self {
+        Self {
+            default_split_ratio: Self::default_split_ratio(),
+            split_width_multiplier: Self::default_split_width_multiplier(),
+            smart_split: false,
+            preserve_split: false,
+            force_split: 0,
+            split_bias: false,
+            use_active_for_splits: Self::default_use_active_for_splits(),
+            permanent_direction_override: false,
+            smart_resizing: Self::default_smart_resizing(),
+            pseudotile: false,
+            single_window_aspect_ratio: Self::default_single_window_aspect_ratio(),
+            single_window_aspect_ratio_tolerance: Self::default_single_window_aspect_ratio_tolerance(),
+        }
+    }
+}
+
+impl DwindleSettings {
+    const fn default_split_ratio() -> f32 { 1.0 }
+    const fn default_split_width_multiplier() -> f32 { 1.0 }
+    const fn default_use_active_for_splits() -> bool { true }
+    const fn default_smart_resizing() -> bool { true }
+    const fn default_single_window_aspect_ratio() -> (f32, f32) { (0.0, 0.0) }
+    const fn default_single_window_aspect_ratio_tolerance() -> f32 { 0.1 }
+
+    pub fn validate(&self) -> Vec<String> {
+        let mut issues = Vec::new();
+        if !(0.1..=1.9).contains(&self.default_split_ratio) {
+            issues.push(format!(
+                "dwindle.default_split_ratio must be in [0.1, 1.9], got {}",
+                self.default_split_ratio
+            ));
+        }
+        if self.split_width_multiplier <= 0.0 {
+            issues.push(format!(
+                "dwindle.split_width_multiplier must be positive, got {}",
+                self.split_width_multiplier
+            ));
+        }
+        if self.force_split > 2 {
+            issues.push(format!(
+                "dwindle.force_split must be 0 (follow), 1 (first), or 2 (second), got {}",
+                self.force_split
+            ));
+        }
+        if self.single_window_aspect_ratio.0 < 0.0 || self.single_window_aspect_ratio.1 < 0.0 {
+            issues.push(format!(
+                "dwindle.single_window_aspect_ratio must be non-negative, got {:?}",
+                self.single_window_aspect_ratio
+            ));
+        }
+        if self.single_window_aspect_ratio_tolerance < 0.0 {
+            issues.push(format!(
+                "dwindle.single_window_aspect_ratio_tolerance must be non-negative, got {}",
+                self.single_window_aspect_ratio_tolerance
+            ));
+        }
+        issues
+    }
 }
 
 /// Outer gap configuration (space between windows and screen edges)
@@ -679,6 +788,8 @@ impl LayoutSettings {
         issues.extend(self.stack.validate());
 
         issues.extend(self.gaps.validate());
+
+        issues.extend(self.dwindle.validate().into_iter().map(|i| format!("dwindle {i}")));
 
         issues
     }

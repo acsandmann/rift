@@ -386,6 +386,8 @@ impl LayoutSystem for TraditionalLayoutSystem {
         sizes
     }
 
+    fn update_settings(&mut self, _settings: &crate::common::config::LayoutSettings) {}
+
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
         let selection = self.selection(layout);
         self.tree.data.window.at(selection)
@@ -400,6 +402,10 @@ impl LayoutSystem for TraditionalLayoutSystem {
         let selection = self.selection(layout);
         self.visible_windows_under_internal(selection)
     }
+
+    fn set_insertion_point(&mut self, _layout: LayoutId, _point: Option<objc2_core_foundation::CGPoint>) {}
+
+    fn set_preselection(&mut self, _layout: LayoutId, _direction: Option<Direction>) {}
 
     fn ascend_selection(&mut self, layout: LayoutId) -> bool {
         if let Some(parent) = self.selection(layout).parent(self.map()) {
@@ -929,6 +935,12 @@ impl LayoutSystem for TraditionalLayoutSystem {
 
         self.rebalance(layout);
     }
+
+    fn toggle_split_of_selection(&mut self, _layout: LayoutId) {}
+
+    fn swap_split_of_selection(&mut self, _layout: LayoutId) {}
+
+    fn move_selection_to_root(&mut self, _layout: LayoutId, _stable: bool) {}
 }
 
 impl TraditionalLayoutSystem {

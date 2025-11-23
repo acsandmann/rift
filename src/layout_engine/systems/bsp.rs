@@ -613,6 +613,8 @@ impl LayoutSystem for BspLayoutSystem {
         out
     }
 
+    fn update_settings(&mut self, _settings: &crate::common::config::LayoutSettings) {}
+
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
         self.layouts.get(layout).and_then(|s| self.selection_window(s))
     }
@@ -636,6 +638,10 @@ impl LayoutSystem for BspLayoutSystem {
 
         out
     }
+
+    fn set_insertion_point(&mut self, _layout: LayoutId, _point: Option<objc2_core_foundation::CGPoint>) {}
+
+    fn set_preselection(&mut self, _layout: LayoutId, _direction: Option<Direction>) {}
 
     fn ascend_selection(&mut self, layout: LayoutId) -> bool {
         if let Some(sel) = self.selection_of_layout(layout) {
@@ -1159,4 +1165,10 @@ impl LayoutSystem for BspLayoutSystem {
             }
         }
     }
+
+    fn toggle_split_of_selection(&mut self, _layout: LayoutId) {}
+
+    fn swap_split_of_selection(&mut self, _layout: LayoutId) {}
+
+    fn move_selection_to_root(&mut self, _layout: LayoutId, _stable: bool) {}
 }

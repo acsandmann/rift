@@ -14,6 +14,7 @@ use crate::common::collections::HashMap;
 use crate::common::config::LayoutSettings;
 use crate::layout_engine::LayoutSystem;
 use crate::model::{VirtualWorkspaceId, VirtualWorkspaceManager};
+use crate::sys::event::current_cursor_location;
 use crate::sys::screen::SpaceId;
 
 #[derive(Debug, Clone)]
@@ -39,6 +40,10 @@ pub enum LayoutCommand {
     JoinWindow(Direction),
     ToggleStack,
     ToggleOrientation,
+    Preselect(Option<Direction>),
+    ToggleSplit,
+    SwapSplit,
+    MoveToRoot { stable: bool },
     UnjoinWindows,
     ToggleFocusFloating,
     ToggleWindowFloating,
@@ -112,6 +117,7 @@ pub struct LayoutEngine {
 impl LayoutEngine {
     pub fn set_layout_settings(&mut self, settings: &LayoutSettings) {
         self.layout_settings = settings.clone();
+        self.tree.update_settings(settings);
     }
 
     pub fn update_virtual_workspace_settings(
@@ -452,9 +458,12 @@ impl LayoutEngine {
             crate::common::config::LayoutMode::Bsp => {
                 LayoutSystemKind::Bsp(crate::layout_engine::BspLayoutSystem::default())
             }
+            crate::common::config::LayoutMode::Dwindle => {
+                LayoutSystemKind::Dwindle(crate::layout_engine::DwindleLayoutSystem::default())
+            }
         };
 
-        LayoutEngine {
+        let mut engine = LayoutEngine {
             tree,
             workspace_layouts: WorkspaceLayouts::default(),
             floating: FloatingManager::new(),
@@ -463,7 +472,9 @@ impl LayoutEngine {
             layout_settings: layout_settings.clone(),
             broadcast_tx,
             space_display_map: HashMap::default(),
-        }
+        };
+        engine.tree.update_settings(layout_settings);
+        engine
     }
 
     pub fn debug_tree(&self, space: SpaceId) { self.debug_tree_desc(space, "", false); }
@@ -634,6 +645,8 @@ impl LayoutEngine {
                 } else if let Some(layout) =
                     self.workspace_layouts.active(space, assigned_workspace)
                 {
+                    let cursor = current_cursor_location().ok();
+                    self.tree.set_insertion_point(layout, cursor);
                     if !self.tree.contains_window(layout, wid) {
                         self.tree.add_window_after_selection(layout, wid);
                     }
@@ -748,6 +761,8 @@ impl LayoutEngine {
                         });
 
                     if let Some(layout) = self.workspace_layouts.active(space, assigned_workspace) {
+                        let cursor = current_cursor_location().ok();
+                        self.tree.set_insertion_point(layout, cursor);
                         self.tree.add_window_after_selection(layout, wid);
                         debug!(
                             "Re-added floating window {:?} to tiling tree in workspace {:?}",
@@ -974,9 +989,29 @@ impl LayoutEngine {
                         s.toggle_tile_orientation(layout);
                         EventResponse::default()
                     }
+                    LayoutSystemKind::Dwindle(s) => {
+                        s.toggle_tile_orientation(layout);
+                        EventResponse::default()
+                    }
                 };
 
                 resp
+            }
+            LayoutCommand::Preselect(direction) => {
+                self.tree.set_preselection(layout, direction);
+                EventResponse::default()
+            }
+            LayoutCommand::ToggleSplit => {
+                self.tree.toggle_split_of_selection(layout);
+                EventResponse::default()
+            }
+            LayoutCommand::SwapSplit => {
+                self.tree.swap_split_of_selection(layout);
+                EventResponse::default()
+            }
+            LayoutCommand::MoveToRoot { stable } => {
+                self.tree.move_selection_to_root(layout, stable);
+                EventResponse::default()
             }
             LayoutCommand::ResizeWindowGrow => {
                 if is_floating {

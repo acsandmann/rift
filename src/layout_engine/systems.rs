@@ -1,5 +1,5 @@
 use enum_dispatch::enum_dispatch;
-use objc2_core_foundation::CGRect;
+use objc2_core_foundation::{CGPoint, CGRect};
 use serde::{Deserialize, Serialize};
 
 use crate::actor::app::{WindowId, pid_t};
@@ -26,9 +26,12 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
         stack_line_vert: crate::common::config::VerticalPlacement,
     ) -> Vec<(WindowId, CGRect)>;
 
+    fn update_settings(&mut self, settings: &crate::common::config::LayoutSettings);
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId>;
     fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId>;
     fn visible_windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId>;
+    fn set_insertion_point(&mut self, layout: LayoutId, point: Option<CGPoint>);
+    fn set_preselection(&mut self, layout: LayoutId, direction: Option<Direction>);
     fn ascend_selection(&mut self, layout: LayoutId) -> bool;
     fn descend_selection(&mut self, layout: LayoutId) -> bool;
     fn move_focus(
@@ -83,12 +86,17 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     fn resize_selection_by(&mut self, layout: LayoutId, amount: f64);
     fn rebalance(&mut self, layout: LayoutId);
     fn toggle_tile_orientation(&mut self, layout: LayoutId);
+    fn toggle_split_of_selection(&mut self, layout: LayoutId);
+    fn swap_split_of_selection(&mut self, layout: LayoutId);
+    fn move_selection_to_root(&mut self, layout: LayoutId, stable: bool);
 }
 
 mod traditional;
 pub use traditional::TraditionalLayoutSystem;
 mod bsp;
 pub use bsp::BspLayoutSystem;
+mod dwindle;
+pub use dwindle::DwindleLayoutSystem;
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -96,4 +104,5 @@ pub use bsp::BspLayoutSystem;
 pub enum LayoutSystemKind {
     Traditional(TraditionalLayoutSystem),
     Bsp(BspLayoutSystem),
+    Dwindle(DwindleLayoutSystem),
 }
