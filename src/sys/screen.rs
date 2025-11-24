@@ -66,16 +66,28 @@ impl<S: System> ScreenCache<S> {
     /// The main screen (if any) is always first. Note that there may be no
     /// screens.
     #[forbid(unsafe_code)]
-    pub fn update_screen_config(&mut self) -> (Vec<ScreenDescriptor>, CoordinateConverter) {
+    pub fn update_screen_config(&mut self) -> Option<(Vec<ScreenDescriptor>, CoordinateConverter)> {
+        let ns_screens = self.system.ns_screens();
+        debug!("ns_screens={ns_screens:?}");
         let mut cg_screens = self.system.cg_screens().unwrap();
         debug!("cg_screens={cg_screens:?}");
+
+        if ns_screens.len() != cg_screens.len() {
+            warn!(
+                "Ignoring screen config change: There are {} ns_screens but {} cg_screens",
+                ns_screens.len(),
+                cg_screens.len(),
+            );
+            return None;
+        }
+
         if cg_screens.is_empty() {
             // When no screens are reported, make sure we clear the cached UUIDs so
             // subsequent space queries don't pretend the previous screens still
             // exist.
             self.uuids.clear();
-            return (vec![], CoordinateConverter::default());
-        };
+            return Some((vec![], CoordinateConverter::default()));
+        }
 
         if let Some(main_screen_idx) =
             cg_screens.iter().position(|s| s.bounds.origin == CGPoint::ZERO)
@@ -87,9 +99,6 @@ impl<S: System> ScreenCache<S> {
 
         self.uuids = cg_screens.iter().map(|screen| self.system.display_uuid(screen)).collect();
         let uuid_strings: Vec<String> = self.uuids.iter().map(|uuid| uuid.to_string()).collect();
-
-        let ns_screens = self.system.ns_screens();
-        debug!("ns_screens={ns_screens:?}");
 
         let converter = CoordinateConverter {
             screen_height: cg_screens[0].bounds.max().y,
@@ -117,7 +126,7 @@ impl<S: System> ScreenCache<S> {
                 Some(descriptor)
             })
             .collect();
-        (descriptors, converter)
+        Some((descriptors, converter))
     }
 
     /// Returns a list of the active spaces on each screen. The order
@@ -479,7 +488,7 @@ mod test {
             ],
         };
         let mut sc = ScreenCache::new_with(stub);
-        let (descriptors, _) = sc.update_screen_config();
+        let (descriptors, _) = sc.update_screen_config().unwrap();
         let frames: Vec<CGRect> = descriptors.iter().map(|d| d.frame).collect();
         assert_eq!(
             vec![
@@ -511,11 +520,11 @@ mod test {
 
         let mut cache = ScreenCache::new_with(system);
 
-        let (descriptors, _) = cache.update_screen_config();
+        let (descriptors, _) = cache.update_screen_config().unwrap();
         assert_eq!(descriptors.len(), 1);
         assert_eq!(cache.uuids.len(), 1);
 
-        let (descriptors, converter) = cache.update_screen_config();
+        let (descriptors, converter) = cache.update_screen_config().unwrap();
         assert!(descriptors.is_empty());
         assert!(cache.uuids.is_empty());
         assert!(converter.convert_point(CGPoint::new(0.0, 0.0)).is_none());
