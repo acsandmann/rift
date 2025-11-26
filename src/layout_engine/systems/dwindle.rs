@@ -1,30 +1,15 @@
+use std::cell::RefCell;
+
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use serde::{Deserialize, Serialize};
 
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::{HashMap, HashSet};
+use crate::layout_engine::binary_tree::{BinaryTreeLayout, LayoutState, NodeKind, RatioPolicy};
 use crate::layout_engine::systems::LayoutSystem;
-use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{Direction, LayoutId, LayoutKind, Orientation};
-use crate::model::selection::*;
-use crate::model::tree::{NodeId, NodeMap, Tree};
+use crate::model::tree::NodeId;
 use crate::sys::event::current_cursor_location;
-
-#[derive(Serialize, Deserialize, Clone)]
-enum NodeKind {
-    Split { orientation: Orientation, ratio: f32 },
-    Leaf {
-        window: Option<WindowId>,
-        fullscreen: bool,
-        fullscreen_within_gaps: bool,
-    },
-}
-
-#[derive(Serialize, Deserialize, Clone, Copy)]
-struct LayoutState {
-    root: NodeId,
-    preselection: Option<Direction>,
-}
 
 #[derive(Clone)]
 struct LastFrame {
@@ -39,15 +24,13 @@ struct InsertionHint {
 
 #[derive(Serialize, Deserialize)]
 pub struct DwindleLayoutSystem {
-    layouts: slotmap::SlotMap<crate::layout_engine::LayoutId, LayoutState>,
-    tree: Tree<Components>,
-    kind: slotmap::SecondaryMap<NodeId, NodeKind>,
-    window_to_node: HashMap<WindowId, NodeId>,
+    #[serde(flatten)]
+    core: BinaryTreeLayout,
     settings: crate::common::config::DwindleSettings,
     #[serde(skip)]
     insertion_hints: HashMap<LayoutId, InsertionHint>,
     #[serde(skip)]
-    last_frames: std::cell::RefCell<HashMap<LayoutId, LastFrame>>,
+    last_frames: RefCell<HashMap<LayoutId, LastFrame>>,
     #[serde(skip)]
     pseudo_sizes: HashMap<WindowId, CGSize>,
 }
@@ -55,10 +38,7 @@ pub struct DwindleLayoutSystem {
 impl Default for DwindleLayoutSystem {
     fn default() -> Self {
         Self {
-            layouts: Default::default(),
-            tree: Tree::with_observer(Components::default()),
-            kind: Default::default(),
-            window_to_node: Default::default(),
+            core: BinaryTreeLayout::default(),
             settings: crate::common::config::DwindleSettings::default(),
             insertion_hints: Default::default(),
             last_frames: Default::default(),
@@ -67,135 +47,76 @@ impl Default for DwindleLayoutSystem {
     }
 }
 
+struct DwindleRatioPolicy<'a> {
+    settings: &'a crate::common::config::DwindleSettings,
+}
+
+impl RatioPolicy for DwindleRatioPolicy<'_> {
+    fn ratio_to_fraction(&self, ratio: f32) -> f64 { (ratio as f64 / 2.0).clamp(0.05, 0.95) }
+
+    fn default_ratio(&self) -> f32 { self.settings.default_split_ratio }
+}
+
 impl DwindleLayoutSystem {
+    fn policy(&self) -> DwindleRatioPolicy<'_> { DwindleRatioPolicy { settings: &self.settings } }
+
     fn clamp_ratio(ratio: f32) -> f32 { ratio.clamp(0.1, 1.9) }
 
-    fn make_leaf(&mut self, window: Option<WindowId>) -> NodeId {
-        let id = self.tree.mk_node().into_id();
-        self.kind.insert(
-            id,
-            NodeKind::Leaf {
-                window,
-                fullscreen: false,
-                fullscreen_within_gaps: false,
-            },
-        );
-        if let Some(w) = window {
-            self.window_to_node.insert(w, id);
-        }
-        id
-    }
-
-    fn descend_to_leaf(&self, mut node: NodeId) -> NodeId {
-        loop {
-            match self.kind.get(node) {
-                Some(NodeKind::Leaf { .. }) => return node,
-                Some(NodeKind::Split { .. }) => {
-                    if let Some(child) = node.first_child(&self.tree.map) {
-                        node = child;
-                    } else {
-                        return node;
-                    }
-                }
-                None => return node,
+    fn compute_split_rects(
+        &self,
+        rect: CGRect,
+        orientation: Orientation,
+        ratio: f32,
+        gaps: &crate::common::config::GapSettings,
+    ) -> (CGRect, CGRect) {
+        match orientation {
+            Orientation::Horizontal => {
+                let gap = gaps.inner.horizontal as f64;
+                let available = (rect.size.width - gap).max(0.0);
+                let first_w = available * self.policy().ratio_to_fraction(ratio);
+                let second_w = (available - first_w).max(0.0);
+                let r1 = CGRect::new(rect.origin, CGSize::new(first_w, rect.size.height));
+                let r2 = CGRect::new(
+                    CGPoint::new(rect.origin.x + first_w + gap, rect.origin.y),
+                    CGSize::new(second_w, rect.size.height),
+                );
+                (r1, r2)
+            }
+            Orientation::Vertical => {
+                let gap = gaps.inner.vertical as f64;
+                let available = (rect.size.height - gap).max(0.0);
+                let first_h = available * self.policy().ratio_to_fraction(ratio);
+                let second_h = (available - first_h).max(0.0);
+                let r1 = CGRect::new(rect.origin, CGSize::new(rect.size.width, first_h));
+                let r2 = CGRect::new(
+                    CGPoint::new(rect.origin.x, rect.origin.y + first_h + gap),
+                    CGSize::new(rect.size.width, second_h),
+                );
+                (r1, r2)
             }
         }
     }
+
+    fn make_leaf(&mut self, window: Option<WindowId>) -> NodeId { self.core.make_leaf(window) }
+
+    fn descend_to_leaf(&self, node: NodeId) -> NodeId { self.core.descend_to_leaf(node) }
 
     fn collect_windows_under(&self, node: NodeId, out: &mut Vec<WindowId>) {
-        match self.kind.get(node) {
-            Some(NodeKind::Leaf { window, .. }) => {
-                if let Some(w) = window {
-                    out.push(*w);
-                }
-            }
-            Some(NodeKind::Split { .. }) => {
-                for child in node.children(&self.tree.map) {
-                    self.collect_windows_under(child, out);
-                }
-            }
-            None => {}
-        }
+        self.core.collect_windows_under(node, out);
     }
 
-    fn find_layout_root(&self, mut node: NodeId) -> NodeId {
-        while let Some(p) = node.parent(&self.tree.map) {
-            node = p;
-        }
-        node
-    }
+    fn find_layout_root(&self, node: NodeId) -> NodeId { self.core.find_layout_root(node) }
 
     fn belongs_to_layout(&self, layout: LayoutState, node: NodeId) -> bool {
-        if self.kind.get(node).is_none() {
-            return false;
-        }
-        self.find_layout_root(node) == layout.root
+        self.core.belongs_to_layout(layout, node)
     }
 
     fn cleanup_after_removal(&mut self, node: NodeId) -> NodeId {
-        let Some(parent_id) = node.parent(&self.tree.map) else {
-            return node;
-        };
-
-        if let Some(NodeKind::Split { .. }) = self.kind.get(parent_id) {
-        } else {
-            return parent_id;
-        }
-
-        let children: Vec<_> = parent_id.children(&self.tree.map).collect();
-        if children.len() != 2 {
-            return parent_id;
-        }
-        let sibling = if children[0] == node { children[1] } else { children[0] };
-
-        let sibling_kind = match self.kind.get(sibling) {
-            Some(k) => k.clone(),
-            None => return parent_id,
-        };
-
-        self.kind.insert(parent_id, sibling_kind.clone());
-        match sibling_kind {
-            NodeKind::Split { .. } => {
-                let sib_children: Vec<_> = sibling.children(&self.tree.map).collect();
-                for c in sib_children {
-                    c.detach(&mut self.tree).push_back(parent_id);
-                }
-            }
-            NodeKind::Leaf {
-                window,
-                fullscreen,
-                fullscreen_within_gaps,
-            } => {
-                if let Some(w) = window {
-                    self.window_to_node.insert(w, parent_id);
-                }
-                self.kind.insert(
-                    parent_id,
-                    NodeKind::Leaf {
-                        window,
-                        fullscreen,
-                        fullscreen_within_gaps,
-                    },
-                );
-            }
-        }
-
-        node.detach(&mut self.tree).remove();
-        sibling.detach(&mut self.tree).remove();
-        self.kind.remove(node);
-        self.kind.remove(sibling);
-        parent_id
+        self.core.cleanup_after_removal(node)
     }
 
     fn selection_of_layout(&self, layout: crate::layout_engine::LayoutId) -> Option<NodeId> {
-        self.layouts
-            .get(layout)
-            .map(|s| self.tree.data.selection.current_selection(s.root))
-    }
-
-    fn ratio_to_fraction(ratio: f32) -> f64 {
-        // Hyprland uses ratio in 0.1..1.9 with base of half the container.
-        (ratio as f64 / 2.0).clamp(0.05, 0.95)
+        self.core.selection_of_layout(layout)
     }
 
     fn calculate_layout_recursive(
@@ -206,17 +127,18 @@ impl DwindleLayoutSystem {
         gaps: &crate::common::config::GapSettings,
         out: &mut Vec<(WindowId, CGRect)>,
     ) {
-        match self.kind.get(node) {
+        match self.core.kind.get(node) {
             Some(NodeKind::Leaf {
                 window,
                 fullscreen,
                 fullscreen_within_gaps,
+                ..
             }) => {
                 if let Some(w) = window {
                     let mut target = if *fullscreen {
                         screen
                     } else if *fullscreen_within_gaps {
-                        Self::apply_outer_gaps(screen, gaps)
+                        BinaryTreeLayout::apply_outer_gaps(screen, gaps)
                     } else {
                         rect
                     };
@@ -246,52 +168,18 @@ impl DwindleLayoutSystem {
                     out.push((*w, target));
                 }
             }
-            Some(NodeKind::Split { orientation, ratio }) => match orientation {
-                Orientation::Horizontal => {
-                    let gap = gaps.inner.horizontal as f64;
-                    let total = rect.size.width;
-                    let available = (total - gap).max(0.0);
-                    let first_w = available * Self::ratio_to_fraction(*ratio);
-                    let second_w = (available - first_w).max(0.0);
-                    let r1 = CGRect::new(rect.origin, CGSize::new(first_w, rect.size.height));
-                    let r2 = CGRect::new(
-                        CGPoint::new(rect.origin.x + first_w + gap, rect.origin.y),
-                        CGSize::new(second_w, rect.size.height),
-                    );
-                    let mut it = node.children(&self.tree.map);
-                    if let Some(first) = it.next() {
-                        self.calculate_layout_recursive(first, r1, screen, gaps, out);
-                    }
-                    if let Some(second) = it.next() {
-                        self.calculate_layout_recursive(second, r2, screen, gaps, out);
-                    }
+            Some(NodeKind::Split { orientation, ratio }) => {
+                let (r1, r2) = self.compute_split_rects(rect, *orientation, *ratio, gaps);
+                let mut it = node.children(&self.core.tree.map);
+                if let Some(first) = it.next() {
+                    self.calculate_layout_recursive(first, r1, screen, gaps, out);
                 }
-                Orientation::Vertical => {
-                    let gap = gaps.inner.vertical as f64;
-                    let total = rect.size.height;
-                    let available = (total - gap).max(0.0);
-                    let first_h = available * Self::ratio_to_fraction(*ratio);
-                    let second_h = (available - first_h).max(0.0);
-                    let r1 = CGRect::new(rect.origin, CGSize::new(rect.size.width, first_h));
-                    let r2 = CGRect::new(
-                        CGPoint::new(rect.origin.x, rect.origin.y + first_h + gap),
-                        CGSize::new(rect.size.width, second_h),
-                    );
-                    let mut it = node.children(&self.tree.map);
-                    if let Some(first) = it.next() {
-                        self.calculate_layout_recursive(first, r1, screen, gaps, out);
-                    }
-                    if let Some(second) = it.next() {
-                        self.calculate_layout_recursive(second, r2, screen, gaps, out);
-                    }
+                if let Some(second) = it.next() {
+                    self.calculate_layout_recursive(second, r2, screen, gaps, out);
                 }
-            },
+            }
             None => {}
         }
-    }
-
-    fn apply_outer_gaps(screen: CGRect, gaps: &crate::common::config::GapSettings) -> CGRect {
-        compute_tiling_area(screen, gaps)
     }
 
     fn single_window_rect(&self, rect: CGRect) -> CGRect {
@@ -326,97 +214,10 @@ impl DwindleLayoutSystem {
     }
 
     fn selection_window(&self, state: &LayoutState) -> Option<WindowId> {
-        let sel = self.tree.data.selection.current_selection(state.root);
-        match self.kind.get(sel) {
+        let sel = self.core.tree.data.selection.current_selection(state.root);
+        match self.core.kind.get(sel) {
             Some(NodeKind::Leaf { window, .. }) => *window,
             _ => None,
-        }
-    }
-
-    fn find_neighbor_leaf(&self, from_leaf: NodeId, direction: Direction) -> Option<NodeId> {
-        let mut current = from_leaf;
-
-        while let Some(parent) = current.parent(&self.tree.map) {
-            if let Some(NodeKind::Split { orientation, .. }) = self.kind.get(parent) {
-                if *orientation == direction.orientation() {
-                    let children: Vec<_> = parent.children(&self.tree.map).collect();
-                    if children.len() == 2 {
-                        let is_first = children[0] == current;
-                        let target_child = match direction {
-                            Direction::Left | Direction::Up => {
-                                if !is_first {
-                                    Some(children[0])
-                                } else {
-                                    None
-                                }
-                            }
-                            Direction::Right | Direction::Down => {
-                                if is_first {
-                                    Some(children[1])
-                                } else {
-                                    None
-                                }
-                            }
-                        };
-
-                        if let Some(target) = target_child {
-                            return Some(self.find_closest_leaf_in_direction(target, direction));
-                        }
-                    }
-                }
-            }
-            current = parent;
-        }
-
-        None
-    }
-
-    fn find_closest_leaf_in_direction(&self, root: NodeId, direction: Direction) -> NodeId {
-        match self.kind.get(root) {
-            Some(NodeKind::Leaf { .. }) => root,
-            Some(NodeKind::Split { orientation, .. }) => {
-                let children: Vec<_> = root.children(&self.tree.map).collect();
-                if children.is_empty() {
-                    return root;
-                }
-
-                let target_child = if *orientation == direction.orientation() {
-                    match direction {
-                        Direction::Left | Direction::Up => children.last().copied(),
-                        Direction::Right | Direction::Down => children.first().copied(),
-                    }
-                } else {
-                    children.first().copied()
-                };
-
-                if let Some(child) = target_child {
-                    self.find_closest_leaf_in_direction(child, direction)
-                } else {
-                    root
-                }
-            }
-            None => root,
-        }
-    }
-
-    fn window_in_direction_from(&self, node: NodeId, direction: Direction) -> Option<WindowId> {
-        match self.kind.get(node) {
-            Some(NodeKind::Leaf { window: Some(w), .. }) => Some(*w),
-            Some(NodeKind::Leaf { .. }) => None,
-            Some(NodeKind::Split { .. }) => {
-                let mut children: Vec<_> = node.children(&self.tree.map).collect();
-                match direction {
-                    Direction::Left | Direction::Up => children.reverse(),
-                    Direction::Right | Direction::Down => {}
-                }
-                for child in children {
-                    if let Some(window) = self.window_in_direction_from(child, direction) {
-                        return Some(window);
-                    }
-                }
-                None
-            }
-            None => None,
         }
     }
 
@@ -427,10 +228,10 @@ impl DwindleLayoutSystem {
     }
 
     fn rects_for_layout(&self, layout: LayoutId) -> Option<HashMap<NodeId, CGRect>> {
-        let state = self.layouts.get(layout)?;
+        let state = self.core.layouts.get(layout)?;
         let frame = self.last_frames.try_borrow().ok()?.get(&layout)?.clone();
         let mut rects = HashMap::default();
-        let root_rect = Self::apply_outer_gaps(frame.screen, &frame.gaps);
+        let root_rect = BinaryTreeLayout::apply_outer_gaps(frame.screen, &frame.gaps);
         self.populate_rects(state.root, root_rect, frame.screen, &frame.gaps, &mut rects);
         Some(rects)
     }
@@ -444,48 +245,15 @@ impl DwindleLayoutSystem {
         out: &mut HashMap<NodeId, CGRect>,
     ) {
         out.insert(node, rect);
-        match self.kind.get(node) {
-            Some(NodeKind::Split { orientation, ratio }) => {
-                match orientation {
-                    Orientation::Horizontal => {
-                        let gap = gaps.inner.horizontal as f64;
-                        let available = (rect.size.width - gap).max(0.0);
-                        let first_w = available * Self::ratio_to_fraction(*ratio);
-                        let second_w = (available - first_w).max(0.0);
-                        let r1 = CGRect::new(rect.origin, CGSize::new(first_w, rect.size.height));
-                        let r2 = CGRect::new(
-                            CGPoint::new(rect.origin.x + first_w + gap, rect.origin.y),
-                            CGSize::new(second_w, rect.size.height),
-                        );
-                        let mut it = node.children(&self.tree.map);
-                        if let Some(first) = it.next() {
-                            self.populate_rects(first, r1, screen, gaps, out);
-                        }
-                        if let Some(second) = it.next() {
-                            self.populate_rects(second, r2, screen, gaps, out);
-                        }
-                    }
-                    Orientation::Vertical => {
-                        let gap = gaps.inner.vertical as f64;
-                        let available = (rect.size.height - gap).max(0.0);
-                        let first_h = available * Self::ratio_to_fraction(*ratio);
-                        let second_h = (available - first_h).max(0.0);
-                        let r1 = CGRect::new(rect.origin, CGSize::new(rect.size.width, first_h));
-                        let r2 = CGRect::new(
-                            CGPoint::new(rect.origin.x, rect.origin.y + first_h + gap),
-                            CGSize::new(rect.size.width, second_h),
-                        );
-                        let mut it = node.children(&self.tree.map);
-                        if let Some(first) = it.next() {
-                            self.populate_rects(first, r1, screen, gaps, out);
-                        }
-                        if let Some(second) = it.next() {
-                            self.populate_rects(second, r2, screen, gaps, out);
-                        }
-                    }
-                }
+        if let Some(NodeKind::Split { orientation, ratio }) = self.core.kind.get(node) {
+            let (r1, r2) = self.compute_split_rects(rect, *orientation, *ratio, gaps);
+            let mut it = node.children(&self.core.tree.map);
+            if let Some(first) = it.next() {
+                self.populate_rects(first, r1, screen, gaps, out);
             }
-            _ => {}
+            if let Some(second) = it.next() {
+                self.populate_rects(second, r2, screen, gaps, out);
+            }
         }
     }
 
@@ -566,14 +334,14 @@ impl DwindleLayoutSystem {
         target_rect: Option<CGRect>,
     ) -> (Orientation, bool) {
         if self.settings.preserve_split {
-            if let Some(parent) = target.parent(&self.tree.map) {
-                if let Some(NodeKind::Split { orientation, .. }) = self.kind.get(parent) {
+            if let Some(parent) = target.parent(&self.core.tree.map) {
+                if let Some(NodeKind::Split { orientation, .. }) = self.core.kind.get(parent) {
                     return (*orientation, false);
                 }
             }
         }
         let mut new_first = false;
-        if let Some(state) = self.layouts.get_mut(layout) {
+        if let Some(state) = self.core.layouts.get_mut(layout) {
             if let Some(dir) = state.preselection {
                 let orientation = dir.orientation();
                 new_first = matches!(dir, Direction::Left | Direction::Up);
@@ -588,8 +356,10 @@ impl DwindleLayoutSystem {
             if let Some(cursor) = hint.cursor {
                 if self.settings.smart_split {
                     if let Some(rect) = target_rect {
-                        let center =
-                            CGPoint::new(rect.origin.x + rect.size.width / 2.0, rect.origin.y + rect.size.height / 2.0);
+                        let center = CGPoint::new(
+                            rect.origin.x + rect.size.width / 2.0,
+                            rect.origin.y + rect.size.height / 2.0,
+                        );
                         let delta_x = cursor.x - center.x;
                         let delta_y = cursor.y - center.y;
                         let slope = if delta_x.abs() < f64::EPSILON {
@@ -611,8 +381,10 @@ impl DwindleLayoutSystem {
                         }
                     }
                 } else if let Some(rect) = target_rect {
-                    let center =
-                        CGPoint::new(rect.origin.x + rect.size.width / 2.0, rect.origin.y + rect.size.height / 2.0);
+                    let center = CGPoint::new(
+                        rect.origin.x + rect.size.width / 2.0,
+                        rect.origin.y + rect.size.height / 2.0,
+                    );
                     let orientation = self.aspect_orientation(target_rect);
                     new_first = match orientation {
                         Orientation::Horizontal => cursor.x <= center.x,
@@ -640,7 +412,7 @@ impl DwindleLayoutSystem {
         new_window: WindowId,
         target_rect: Option<CGRect>,
     ) {
-        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get(leaf).cloned() {
+        if let Some(NodeKind::Leaf { window, .. }) = self.core.kind.get(leaf).cloned() {
             let (orientation, new_first) = self.plan_split(layout, leaf, target_rect);
             let mut ratio = Self::clamp_ratio(self.settings.default_split_ratio);
 
@@ -648,15 +420,15 @@ impl DwindleLayoutSystem {
             let new_node = self.make_leaf(Some(new_window));
 
             if let Some(w) = window {
-                self.window_to_node.insert(w, existing_node);
+                self.core.window_to_node.insert(w, existing_node);
             }
-            self.window_to_node.insert(new_window, new_node);
+            self.core.window_to_node.insert(new_window, new_node);
 
             if self.settings.split_bias && new_first {
                 ratio = Self::clamp_ratio(2.0 - ratio);
             }
 
-            self.kind.insert(leaf, NodeKind::Split { orientation, ratio });
+            self.core.kind.insert(leaf, NodeKind::Split { orientation, ratio });
 
             let (first_child, second_child) = if new_first {
                 (new_node, existing_node)
@@ -664,53 +436,51 @@ impl DwindleLayoutSystem {
                 (existing_node, new_node)
             };
 
-            first_child.detach(&mut self.tree).push_back(leaf);
-            second_child.detach(&mut self.tree).push_back(leaf);
+            first_child.detach(&mut self.core.tree).push_back(leaf);
+            second_child.detach(&mut self.core.tree).push_back(leaf);
 
-            self.tree.data.selection.select(&self.tree.map, new_node);
+            self.core.tree.data.selection.select(&self.core.tree.map, new_node);
         }
     }
 
     fn insert_window_at_selection(&mut self, layout: LayoutId, wid: WindowId) {
-        let Some(state) = self.layouts.get(layout).copied() else {
+        let Some(state) = self.core.layouts.get(layout).copied() else {
             return;
         };
-        let sel = self.tree.data.selection.current_selection(state.root);
-        match self.kind.get_mut(sel) {
+        let sel = self.core.tree.data.selection.current_selection(state.root);
+        match self.core.kind.get_mut(sel) {
             Some(NodeKind::Leaf {
                 window,
                 fullscreen,
                 fullscreen_within_gaps,
+                ..
             }) => {
                 if window.is_none() {
                     *window = Some(wid);
                     *fullscreen = false;
                     *fullscreen_within_gaps = false;
-                    self.window_to_node.insert(wid, sel);
+                    self.core.window_to_node.insert(wid, sel);
                 } else {
                     let existing = *window;
                     let left = self.make_leaf(existing);
                     let right = self.make_leaf(Some(wid));
-                    self.window_to_node.insert(wid, right);
+                    self.core.window_to_node.insert(wid, right);
                     if let Some(w) = existing {
-                        self.window_to_node.insert(w, left);
+                        self.core.window_to_node.insert(w, left);
                     }
                     let ratio = Self::clamp_ratio(self.settings.default_split_ratio);
-                    self.kind.insert(
-                        sel,
-                        NodeKind::Split {
-                            orientation: Orientation::Horizontal,
-                            ratio,
-                        },
-                    );
-                    left.detach(&mut self.tree).push_back(sel);
-                    right.detach(&mut self.tree).push_back(sel);
-                    self.tree.data.selection.select(&self.tree.map, right);
+                    self.core.kind.insert(sel, NodeKind::Split {
+                        orientation: Orientation::Horizontal,
+                        ratio,
+                    });
+                    left.detach(&mut self.core.tree).push_back(sel);
+                    right.detach(&mut self.core.tree).push_back(sel);
+                    self.core.tree.data.selection.select(&self.core.tree.map, right);
                 }
             }
             Some(NodeKind::Split { .. }) => {
                 let leaf = self.descend_to_leaf(sel);
-                self.tree.data.selection.select(&self.tree.map, leaf);
+                self.core.tree.data.selection.select(&self.core.tree.map, leaf);
                 self.insert_window_at_selection(layout, wid);
             }
             None => {}
@@ -718,71 +488,38 @@ impl DwindleLayoutSystem {
     }
 
     fn remove_window_internal(&mut self, layout: crate::layout_engine::LayoutId, wid: WindowId) {
-        if let Some(&node_id) = self.window_to_node.get(&wid) {
-            if let Some(state) = self.layouts.get(layout).copied() {
+        if let Some(&node_id) = self.core.window_to_node.get(&wid) {
+            if let Some(state) = self.core.layouts.get(layout).copied() {
                 if !self.belongs_to_layout(state, node_id) {
                     return;
                 }
             }
-            if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(node_id) {
+            if let Some(NodeKind::Leaf { window, .. }) = self.core.kind.get_mut(node_id) {
                 *window = None;
             }
-            self.window_to_node.remove(&wid);
+            self.core.window_to_node.remove(&wid);
             self.pseudo_sizes.remove(&wid);
             let fallback = self.cleanup_after_removal(node_id);
 
             let sel_snapshot = self
+                .core
                 .layouts
                 .get(layout)
-                .map(|s| self.tree.data.selection.current_selection(s.root));
+                .map(|s| self.core.tree.data.selection.current_selection(s.root));
             let new_sel = match sel_snapshot {
-                Some(sel) if self.kind.get(sel).is_some() => self.descend_to_leaf(sel),
+                Some(sel) if self.core.kind.get(sel).is_some() => self.descend_to_leaf(sel),
                 _ => self.descend_to_leaf(fallback),
             };
-            self.tree.data.selection.select(&self.tree.map, new_sel);
+            self.core.tree.data.selection.select(&self.core.tree.map, new_sel);
         }
-    }
-}
-
-#[derive(Default, Serialize, Deserialize)]
-struct Components {
-    selection: Selection,
-}
-
-impl crate::model::tree::Observer for Components {
-    fn added_to_forest(&mut self, map: &NodeMap, node: NodeId) {
-        self.dispatch_event(map, TreeEvent::AddedToForest(node))
-    }
-
-    fn added_to_parent(&mut self, map: &NodeMap, node: NodeId) {
-        self.dispatch_event(map, TreeEvent::AddedToParent(node))
-    }
-
-    fn removing_from_parent(&mut self, map: &NodeMap, node: NodeId) {
-        self.dispatch_event(map, TreeEvent::RemovingFromParent(node))
-    }
-
-    fn removed_child(_tree: &mut Tree<Self>, _parent: NodeId) {}
-
-    fn removed_from_forest(&mut self, map: &NodeMap, node: NodeId) {
-        self.dispatch_event(map, TreeEvent::RemovedFromForest(node))
-    }
-}
-
-impl Components {
-    fn dispatch_event(&mut self, map: &NodeMap, event: TreeEvent) {
-        self.selection.handle_event(map, event);
     }
 }
 
 impl LayoutSystem for DwindleLayoutSystem {
     fn create_layout(&mut self) -> LayoutId {
         let leaf = self.make_leaf(None);
-        let state = LayoutState {
-            root: leaf,
-            preselection: None,
-        };
-        let id = self.layouts.insert(state);
+        let state = LayoutState { root: leaf, preselection: None };
+        let id = self.core.layouts.insert(state);
         self.insertion_hints.insert(id, InsertionHint::default());
         id
     }
@@ -790,7 +527,7 @@ impl LayoutSystem for DwindleLayoutSystem {
     /// shallow
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
         let mut windows = Vec::new();
-        if let Some(state) = self.layouts.get(layout).copied() {
+        if let Some(state) = self.core.layouts.get(layout).copied() {
             self.collect_windows_under(state.root, &mut windows);
         }
         let new_layout = self.create_layout();
@@ -801,18 +538,18 @@ impl LayoutSystem for DwindleLayoutSystem {
     }
 
     fn remove_layout(&mut self, layout: LayoutId) {
-        if let Some(state) = self.layouts.remove(layout) {
+        if let Some(state) = self.core.layouts.remove(layout) {
             let mut windows = Vec::new();
             self.collect_windows_under(state.root, &mut windows);
             for w in windows {
-                self.window_to_node.remove(&w);
+                self.core.window_to_node.remove(&w);
                 self.pseudo_sizes.remove(&w);
             }
-            let ids: Vec<_> = state.root.traverse_preorder(&self.tree.map).collect();
+            let ids: Vec<_> = state.root.traverse_preorder(&self.core.tree.map).collect();
             for id in ids {
-                self.kind.remove(id);
+                self.core.kind.remove(id);
             }
-            state.root.remove_root(&mut self.tree);
+            state.root.remove_root(&mut self.core.tree);
         }
         self.insertion_hints.remove(&layout);
         if let Ok(mut map) = self.last_frames.try_borrow_mut() {
@@ -820,36 +557,7 @@ impl LayoutSystem for DwindleLayoutSystem {
         }
     }
 
-    fn draw_tree(&self, layout: LayoutId) -> String {
-        fn write_node(this: &DwindleLayoutSystem, node: NodeId, out: &mut String, indent: usize) {
-            for _ in 0..indent {
-                out.push_str("  ");
-            }
-            match this.kind.get(node) {
-                Some(NodeKind::Leaf { window, .. }) => {
-                    out.push_str(&format!("Leaf {:?}\n", window));
-                }
-                Some(NodeKind::Split { orientation, ratio }) => {
-                    out.push_str(&format!("Split {:?} {:.2}\n", orientation, ratio));
-                    let mut it = node.children(&this.tree.map);
-                    if let Some(first) = it.next() {
-                        write_node(this, first, out, indent + 1);
-                    }
-                    if let Some(second) = it.next() {
-                        write_node(this, second, out, indent + 1);
-                    }
-                }
-                None => {}
-            }
-        }
-        if let Some(state) = self.layouts.get(layout).copied() {
-            let mut s = String::new();
-            write_node(self, state.root, &mut s, 0);
-            s
-        } else {
-            "<empty dwindle>".to_string()
-        }
-    }
+    fn draw_tree(&self, layout: LayoutId) -> String { self.core.draw_tree(layout) }
 
     fn calculate_layout(
         &self,
@@ -862,20 +570,14 @@ impl LayoutSystem for DwindleLayoutSystem {
         _stack_line_vert: crate::common::config::VerticalPlacement,
     ) -> Vec<(WindowId, CGRect)> {
         let mut out = Vec::new();
-        if let Some(state) = self.layouts.get(layout).copied() {
-            let mut rect = Self::apply_outer_gaps(screen, gaps);
+        if let Some(state) = self.core.layouts.get(layout).copied() {
+            let mut rect = BinaryTreeLayout::apply_outer_gaps(screen, gaps);
             if self.visible_windows_in_layout(layout).len() == 1 {
                 rect = self.single_window_rect(rect);
             }
             self.calculate_layout_recursive(state.root, rect, screen, gaps, &mut out);
         }
-        self.store_last_frame(
-            layout,
-            LastFrame {
-                screen,
-                gaps: gaps.clone(),
-            },
-        );
+        self.store_last_frame(layout, LastFrame { screen, gaps: gaps.clone() });
         out
     }
 
@@ -884,27 +586,15 @@ impl LayoutSystem for DwindleLayoutSystem {
     }
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
-        self.layouts.get(layout).and_then(|s| self.selection_window(s))
+        self.core.layouts.get(layout).and_then(|s| self.selection_window(s))
     }
 
     fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
-        let mut out = Vec::new();
-        if let Some(state) = self.layouts.get(layout).copied() {
-            self.collect_windows_under(state.root, &mut out);
-        }
-        out
+        self.core.visible_windows_in_layout(layout)
     }
 
     fn visible_windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId> {
-        let mut out = Vec::new();
-        if let Some(sel) = self.selection_of_layout(layout) {
-            if self.kind.get(sel).is_some() {
-                let leaf = self.descend_to_leaf(sel);
-                self.collect_windows_under(leaf, &mut out);
-            }
-        }
-
-        out
+        self.core.visible_windows_under_selection(layout)
     }
 
     fn set_insertion_point(&mut self, layout: LayoutId, point: Option<CGPoint>) {
@@ -912,35 +602,15 @@ impl LayoutSystem for DwindleLayoutSystem {
     }
 
     fn set_preselection(&mut self, layout: LayoutId, direction: Option<Direction>) {
-        if let Some(state) = self.layouts.get_mut(layout) {
+        if let Some(state) = self.core.layouts.get_mut(layout) {
             state.preselection = direction;
         }
     }
 
-    fn ascend_selection(&mut self, layout: LayoutId) -> bool {
-        if let Some(sel) = self.selection_of_layout(layout) {
-            if self.kind.get(sel).is_none() {
-                return false;
-            }
-            let parent_opt = sel.parent(&self.tree.map);
-            if let Some(parent) = parent_opt {
-                let new_sel = self.descend_to_leaf(parent);
-                self.tree.data.selection.select(&self.tree.map, new_sel);
-                return true;
-            }
-        }
-        false
-    }
+    fn ascend_selection(&mut self, layout: LayoutId) -> bool { self.core.ascend_selection(layout) }
 
     fn descend_selection(&mut self, layout: LayoutId) -> bool {
-        if let Some(sel) = self.selection_of_layout(layout) {
-            let new_sel = self.descend_to_leaf(sel);
-            if new_sel != sel {
-                self.tree.data.selection.select(&self.tree.map, new_sel);
-                return true;
-            }
-        }
-        false
+        self.core.descend_selection(layout)
     }
 
     fn move_focus(
@@ -948,45 +618,28 @@ impl LayoutSystem for DwindleLayoutSystem {
         layout: LayoutId,
         direction: Direction,
     ) -> (Option<WindowId>, Vec<WindowId>) {
-        let raise_windows = self.visible_windows_in_layout(layout);
-        if raise_windows.is_empty() {
-            return (None, vec![]);
-        }
-        let sel_snapshot = self.selection_of_layout(layout);
-        let Some(current_sel) = sel_snapshot else {
-            return (None, vec![]);
-        };
-        let current_leaf = self.descend_to_leaf(current_sel);
-        let Some(next_leaf) = self.find_neighbor_leaf(current_leaf, direction) else {
-            return (None, vec![]);
-        };
-        self.tree.data.selection.select(&self.tree.map, next_leaf);
-        let focus = match self.kind.get(next_leaf) {
-            Some(NodeKind::Leaf { window, .. }) => *window,
-            _ => None,
-        };
-        (focus, raise_windows)
+        self.core.move_focus(layout, direction)
     }
 
     fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
-        self.layouts
-            .get(layout)
-            .and_then(|state| self.window_in_direction_from(state.root, direction))
+        self.core.window_in_direction(layout, direction)
     }
 
     fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId) {
-        if self.layouts.get(layout).is_some() {
+        if self.core.layouts.get(layout).is_some() {
             let target = self.choose_target_leaf(layout);
 
             if let Some(target_leaf) = target {
-                match self.kind.get(target_leaf) {
+                match self.core.kind.get(target_leaf) {
                     Some(NodeKind::Leaf { window, .. }) => {
                         if window.is_none() {
-                            if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(target_leaf) {
+                            if let Some(NodeKind::Leaf { window, .. }) =
+                                self.core.kind.get_mut(target_leaf)
+                            {
                                 *window = Some(wid);
-                                self.window_to_node.insert(wid, target_leaf);
+                                self.core.window_to_node.insert(wid, target_leaf);
                             }
-                            self.tree.data.selection.select(&self.tree.map, target_leaf);
+                            self.core.tree.data.selection.select(&self.core.tree.map, target_leaf);
                         } else {
                             let rect = self
                                 .rects_for_layout(layout)
@@ -1004,14 +657,15 @@ impl LayoutSystem for DwindleLayoutSystem {
     }
 
     fn remove_window(&mut self, wid: WindowId) {
-        if let Some(&node_id) = self.window_to_node.get(&wid) {
-            if self.kind.get(node_id).is_none() {
-                self.window_to_node.remove(&wid);
+        if let Some(&node_id) = self.core.window_to_node.get(&wid) {
+            if self.core.kind.get(node_id).is_none() {
+                self.core.window_to_node.remove(&wid);
                 self.pseudo_sizes.remove(&wid);
                 return;
             }
             let root = self.find_layout_root(node_id);
             let layout = self
+                .core
                 .layouts
                 .iter()
                 .find_map(|(id, s)| if s.root == root { Some(id) } else { None });
@@ -1023,7 +677,7 @@ impl LayoutSystem for DwindleLayoutSystem {
 
     fn remove_windows_for_app(&mut self, pid: pid_t) {
         let windows: Vec<_> =
-            self.window_to_node.keys().copied().filter(|w| w.pid == pid).collect();
+            self.core.window_to_node.keys().copied().filter(|w| w.pid == pid).collect();
         for w in windows {
             self.remove_window(w);
         }
@@ -1033,18 +687,18 @@ impl LayoutSystem for DwindleLayoutSystem {
     fn set_windows_for_app(&mut self, layout: LayoutId, pid: pid_t, desired: Vec<WindowId>) {
         let desired_set: HashSet<WindowId> = desired.iter().copied().collect();
         let mut current_set: HashSet<WindowId> = HashSet::default();
-        if let Some(state) = self.layouts.get(layout).copied() {
+        if let Some(state) = self.core.layouts.get(layout).copied() {
             let mut under: Vec<WindowId> = Vec::new();
             self.collect_windows_under(state.root, &mut under);
             for w in under.into_iter().filter(|w| w.pid == pid) {
                 current_set.insert(w);
                 if !desired_set.contains(&w) {
-                    if let Some(&node) = self.window_to_node.get(&w) {
+                    if let Some(&node) = self.core.window_to_node.get(&w) {
                         if let Some(NodeKind::Leaf {
                             fullscreen,
                             fullscreen_within_gaps,
                             ..
-                        }) = self.kind.get(node)
+                        }) = self.core.kind.get(node)
                         {
                             if *fullscreen || *fullscreen_within_gaps {
                                 continue; // keep fullscreen node in tree
@@ -1063,7 +717,7 @@ impl LayoutSystem for DwindleLayoutSystem {
     }
 
     fn has_windows_for_app(&self, layout: LayoutId, pid: pid_t) -> bool {
-        if let Some(state) = self.layouts.get(layout).copied() {
+        if let Some(state) = self.core.layouts.get(layout).copied() {
             let mut under = Vec::new();
             self.collect_windows_under(state.root, &mut under);
             under.into_iter().any(|w| w.pid == pid)
@@ -1073,29 +727,11 @@ impl LayoutSystem for DwindleLayoutSystem {
     }
 
     fn contains_window(&self, layout: LayoutId, wid: WindowId) -> bool {
-        if let Some(&node) = self.window_to_node.get(&wid) {
-            if let Some(state) = self.layouts.get(layout).copied() {
-                return self.belongs_to_layout(state, node);
-            }
-        }
-        false
+        self.core.contains_window(layout, wid)
     }
 
     fn select_window(&mut self, layout: LayoutId, wid: WindowId) -> bool {
-        if let Some(&node) = self.window_to_node.get(&wid) {
-            if self.kind.get(node).is_none() {
-                self.window_to_node.remove(&wid);
-                return false;
-            }
-            if let Some(state) = self.layouts.get(layout).copied() {
-                let belongs = self.belongs_to_layout(state, node);
-                if belongs {
-                    self.tree.data.selection.select(&self.tree.map, node);
-                    return true;
-                }
-            }
-        }
-        false
+        self.core.select_window(layout, wid)
     }
 
     fn on_window_resized(
@@ -1107,8 +743,8 @@ impl LayoutSystem for DwindleLayoutSystem {
         screen: CGRect,
         gaps: &crate::common::config::GapSettings,
     ) {
-        if let Some(&node) = self.window_to_node.get(&wid) {
-            if let Some(state) = self.layouts.get(layout).copied() {
+        if let Some(&node) = self.core.window_to_node.get(&wid) {
+            if let Some(state) = self.core.layouts.get(layout).copied() {
                 if !self.belongs_to_layout(state, node) {
                     return;
                 }
@@ -1116,7 +752,8 @@ impl LayoutSystem for DwindleLayoutSystem {
                     window: _,
                     fullscreen,
                     fullscreen_within_gaps,
-                }) = self.kind.get_mut(node)
+                    ..
+                }) = self.core.kind.get_mut(node)
                 {
                     if new_frame == screen {
                         *fullscreen = true;
@@ -1124,7 +761,7 @@ impl LayoutSystem for DwindleLayoutSystem {
                     } else if old_frame == screen {
                         *fullscreen = false;
                     } else {
-                        let tiling = Self::apply_outer_gaps(screen, gaps);
+                        let tiling = BinaryTreeLayout::apply_outer_gaps(screen, gaps);
                         if new_frame == tiling {
                             *fullscreen_within_gaps = true;
                             *fullscreen = false;
@@ -1140,87 +777,11 @@ impl LayoutSystem for DwindleLayoutSystem {
     }
 
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool {
-        let sel_snapshot = self.selection_of_layout(layout);
-        let Some(sel) = sel_snapshot else {
-            return false;
-        };
-        let sel_leaf = self.descend_to_leaf(sel);
-        let Some(neighbor_leaf) = self.find_neighbor_leaf(sel_leaf, direction) else {
-            return false;
-        };
-        let (mut a_window, mut b_window) = (None, None);
-        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(sel_leaf) {
-            a_window = *window;
-        }
-        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(neighbor_leaf) {
-            b_window = *window;
-        }
-        if a_window.is_none() && b_window.is_none() {
-            return false;
-        }
-        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(sel_leaf) {
-            *window = b_window;
-        }
-        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(neighbor_leaf) {
-            *window = a_window;
-        }
-        if let Some(w) = a_window {
-            self.window_to_node.insert(w, neighbor_leaf);
-        }
-        if let Some(w) = b_window {
-            self.window_to_node.insert(w, sel_leaf);
-        }
-        self.tree.data.selection.select(&self.tree.map, neighbor_leaf);
-        true
+        self.core.move_selection(layout, direction)
     }
 
     fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
-        let Some(&node_a) = self.window_to_node.get(&a) else {
-            return false;
-        };
-        let Some(&node_b) = self.window_to_node.get(&b) else {
-            return false;
-        };
-        if node_a == node_b {
-            return false;
-        }
-
-        if let Some(state) = self.layouts.get(layout).copied() {
-            if !self.belongs_to_layout(state, node_a) || !self.belongs_to_layout(state, node_b) {
-                return false;
-            }
-        } else {
-            return false;
-        }
-
-        let mut a_window = None;
-        let mut b_window = None;
-        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get(node_a) {
-            a_window = *window;
-        }
-        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get(node_b) {
-            b_window = *window;
-        }
-
-        if a_window.is_none() && b_window.is_none() {
-            return false;
-        }
-
-        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(node_a) {
-            *window = b_window;
-        }
-        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(node_b) {
-            *window = a_window;
-        }
-
-        if let Some(w) = a_window {
-            self.window_to_node.insert(w, node_b);
-        }
-        if let Some(w) = b_window {
-            self.window_to_node.insert(w, node_a);
-        }
-
-        true
+        self.core.swap_windows(layout, a, b)
     }
 
     fn move_selection_to_layout_after_selection(
@@ -1241,107 +802,44 @@ impl LayoutSystem for DwindleLayoutSystem {
             LayoutKind::Vertical => Orientation::Vertical,
             _ => return,
         };
-        let state = if let Some(s) = self.layouts.get(layout).copied() {
+        let state = if let Some(s) = self.core.layouts.get(layout).copied() {
             s
         } else {
             return;
         };
 
-        let sel = self.tree.data.selection.current_selection(state.root);
+        let sel = self.core.tree.data.selection.current_selection(state.root);
         let target = self.descend_to_leaf(sel);
-        match self.kind.get(target).cloned() {
+        match self.core.kind.get(target).cloned() {
             Some(NodeKind::Leaf { window, .. }) => {
                 let left = self.make_leaf(window);
                 let right = self.make_leaf(None);
                 if let Some(w) = window {
-                    self.window_to_node.insert(w, left);
+                    self.core.window_to_node.insert(w, left);
                 }
                 let ratio = Self::clamp_ratio(self.settings.default_split_ratio);
-                self.kind.insert(target, NodeKind::Split { orientation, ratio });
-                left.detach(&mut self.tree).push_back(target);
-                right.detach(&mut self.tree).push_back(target);
-                self.tree.data.selection.select(&self.tree.map, right);
+                self.core.kind.insert(target, NodeKind::Split { orientation, ratio });
+                left.detach(&mut self.core.tree).push_back(target);
+                right.detach(&mut self.core.tree).push_back(target);
+                self.core.tree.data.selection.select(&self.core.tree.map, right);
             }
             _ => {}
         }
     }
 
     fn toggle_fullscreen_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
-        if let Some(sel) = self.selection_of_layout(layout) {
-            let sel_leaf = self.descend_to_leaf(sel);
-            if let Some(NodeKind::Leaf {
-                window: Some(w),
-                fullscreen,
-                fullscreen_within_gaps,
-            }) = self.kind.get_mut(sel_leaf)
-            {
-                *fullscreen = !*fullscreen;
-                if *fullscreen {
-                    *fullscreen_within_gaps = false;
-                }
-                return vec![*w];
-            }
-        }
-        vec![]
+        self.core.toggle_fullscreen_of_selection(layout)
     }
 
     fn toggle_fullscreen_within_gaps_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
-        if let Some(sel) = self.selection_of_layout(layout) {
-            let sel_leaf = self.descend_to_leaf(sel);
-            if let Some(NodeKind::Leaf {
-                window: Some(w),
-                fullscreen_within_gaps,
-                fullscreen,
-            }) = self.kind.get_mut(sel_leaf)
-            {
-                *fullscreen_within_gaps = !*fullscreen_within_gaps;
-                if *fullscreen_within_gaps {
-                    *fullscreen = false;
-                }
-                return vec![*w];
-            }
-        }
-        vec![]
+        self.core.toggle_fullscreen_within_gaps_of_selection(layout)
     }
 
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) {
-        let Some(sel) = self.selection_of_layout(layout) else {
-            return;
-        };
-        let sel_leaf = self.descend_to_leaf(sel);
-
-        let Some(neighbor) = self.find_neighbor_leaf(sel_leaf, direction) else {
-            return;
-        };
-
-        let mut current = sel_leaf;
-        while let Some(parent) = current.parent(&self.tree.map) {
-            let children: Vec<_> = parent.children(&self.tree.map).collect();
-            if children.contains(&neighbor) {
-                if let Some(grandparent) = parent.parent(&self.tree.map) {
-                    let mut windows = Vec::new();
-                    self.collect_windows_under(parent, &mut windows);
-
-                    let _ = parent.detach(&mut self.tree);
-                    self.kind.remove(parent);
-
-                    if let Some(first_window) = windows.first() {
-                        let new_leaf = self.make_leaf(Some(*first_window));
-                        new_leaf.detach(&mut self.tree).push_back(grandparent);
-
-                        for window in windows {
-                            self.window_to_node.insert(window, new_leaf);
-                        }
-
-                        self.tree.data.selection.select(&self.tree.map, new_leaf);
-                    }
-                }
-                break;
-            }
-            current = parent;
-        }
+        self.core.join_selection_with_direction(layout, direction)
     }
 
+    // Stacking is not supported in Dwindle layout
     fn apply_stacking_to_parent_of_selection(
         &mut self,
         _: LayoutId,
@@ -1350,8 +848,10 @@ impl LayoutSystem for DwindleLayoutSystem {
         vec![]
     }
 
+    // Stacking is not supported in Dwindle layout
     fn parent_of_selection_is_stacked(&self, _layout: LayoutId) -> bool { false }
 
+    // Stacking is not supported in Dwindle layout
     fn unstack_parent_of_selection(
         &mut self,
         _: LayoutId,
@@ -1360,48 +860,7 @@ impl LayoutSystem for DwindleLayoutSystem {
         vec![]
     }
 
-    fn unjoin_selection(&mut self, layout: LayoutId) {
-        let Some(sel) = self.selection_of_layout(layout) else {
-            return;
-        };
-        let sel_leaf = self.descend_to_leaf(sel);
-        let map = &self.tree.map;
-
-        let Some(parent) = sel_leaf.parent(map) else {
-            return;
-        };
-
-        let Some(grandparent) = parent.parent(map) else {
-            return;
-        };
-
-        let mut windows: Vec<WindowId> = Vec::new();
-        self.collect_windows_under(parent, &mut windows);
-        if windows.is_empty() {
-            return;
-        }
-
-        let _ = parent.detach(&mut self.tree);
-
-        let ids: Vec<_> = parent.traverse_preorder(&self.tree.map).collect();
-        for id in ids {
-            self.kind.remove(id);
-        }
-
-        let mut first_new_leaf: Option<NodeId> = None;
-        for w in windows {
-            let new_leaf = self.make_leaf(Some(w));
-            new_leaf.detach(&mut self.tree).push_back(grandparent);
-            self.window_to_node.insert(w, new_leaf);
-            if first_new_leaf.is_none() {
-                first_new_leaf = Some(new_leaf);
-            }
-        }
-
-        if let Some(n) = first_new_leaf {
-            self.tree.data.selection.select(&self.tree.map, n);
-        }
-    }
+    fn unjoin_selection(&mut self, layout: LayoutId) { self.core.unjoin_selection(layout) }
 
     fn resize_selection_by(&mut self, layout: LayoutId, amount: f64) {
         if self.settings.smart_resizing {
@@ -1420,50 +879,49 @@ impl LayoutSystem for DwindleLayoutSystem {
                         let dist_right = (cursor.x - max_x).abs();
                         let dist_top = (cursor.y - min_y).abs();
                         let dist_bottom = (cursor.y - max_y).abs();
-                        let (orientation, dir_is_first_side) = if dist_left.min(dist_right)
-                            < dist_top.min(dist_bottom)
-                        {
-                            // horizontal axis
-                            let dir_first = cursor.x <= (min_x + max_x) / 2.0;
-                            (Orientation::Horizontal, dir_first)
-                        } else {
-                            let dir_first = cursor.y <= (min_y + max_y) / 2.0;
-                            (Orientation::Vertical, dir_first)
-                        };
+                        let (orientation, dir_is_first_side) =
+                            if dist_left.min(dist_right) < dist_top.min(dist_bottom) {
+                                // horizontal axis
+                                let dir_first = cursor.x <= (min_x + max_x) / 2.0;
+                                (Orientation::Horizontal, dir_first)
+                            } else {
+                                let dir_first = cursor.y <= (min_y + max_y) / 2.0;
+                                (Orientation::Vertical, dir_first)
+                            };
 
-                        while let Some(parent) = node.parent(&self.tree.map) {
+                        while let Some(parent) = node.parent(&self.core.tree.map) {
                             if let Some(NodeKind::Split { ratio, orientation: o }) =
-                                self.kind.get_mut(parent)
+                                self.core.kind.get_mut(parent)
                             {
                                 if *o == orientation {
                                     let is_first =
-                                        Some(node) == parent.first_child(&self.tree.map);
+                                        Some(node) == parent.first_child(&self.core.tree.map);
                                     let delta = amount as f32;
                                     match orientation {
                                         Orientation::Horizontal => {
                                             if dir_is_first_side {
                                                 if is_first {
-                                                    *ratio = Self::clamp_ratio(*ratio - delta);
+                                                    *ratio = (*ratio - delta).clamp(0.1, 1.9);
                                                 } else {
-                                                    *ratio = Self::clamp_ratio(*ratio + delta);
+                                                    *ratio = (*ratio + delta).clamp(0.1, 1.9);
                                                 }
                                             } else if is_first {
-                                                *ratio = Self::clamp_ratio(*ratio + delta);
+                                                *ratio = (*ratio + delta).clamp(0.1, 1.9);
                                             } else {
-                                                *ratio = Self::clamp_ratio(*ratio - delta);
+                                                *ratio = (*ratio - delta).clamp(0.1, 1.9);
                                             }
                                         }
                                         Orientation::Vertical => {
                                             if dir_is_first_side {
                                                 if is_first {
-                                                    *ratio = Self::clamp_ratio(*ratio - delta);
+                                                    *ratio = (*ratio - delta).clamp(0.1, 1.9);
                                                 } else {
-                                                    *ratio = Self::clamp_ratio(*ratio + delta);
+                                                    *ratio = (*ratio + delta).clamp(0.1, 1.9);
                                                 }
                                             } else if is_first {
-                                                *ratio = Self::clamp_ratio(*ratio + delta);
+                                                *ratio = (*ratio + delta).clamp(0.1, 1.9);
                                             } else {
-                                                *ratio = Self::clamp_ratio(*ratio - delta);
+                                                *ratio = (*ratio - delta).clamp(0.1, 1.9);
                                             }
                                         }
                                     }
@@ -1481,15 +939,15 @@ impl LayoutSystem for DwindleLayoutSystem {
             return;
         };
 
-        while let Some(parent) = node.parent(&self.tree.map) {
-            if let Some(NodeKind::Split { ratio, .. }) = self.kind.get_mut(parent) {
-                let is_first = Some(node) == parent.first_child(&self.tree.map);
+        while let Some(parent) = node.parent(&self.core.tree.map) {
+            if let Some(NodeKind::Split { ratio, .. }) = self.core.kind.get_mut(parent) {
+                let is_first = Some(node) == parent.first_child(&self.core.tree.map);
                 let delta = amount as f32;
                 if is_first {
-                    let new_ratio = Self::clamp_ratio(*ratio - delta);
+                    let new_ratio = (*ratio - delta).clamp(0.1, 1.9);
                     *ratio = new_ratio;
                 } else {
-                    let new_ratio = Self::clamp_ratio(*ratio + delta);
+                    let new_ratio = (*ratio + delta).clamp(0.1, 1.9);
                     *ratio = new_ratio;
                 }
                 break;
@@ -1498,48 +956,18 @@ impl LayoutSystem for DwindleLayoutSystem {
         }
     }
 
+    // Rebalancing is not supported in Dwindle layout
     fn rebalance(&mut self, _layout: LayoutId) {}
 
     fn toggle_tile_orientation(&mut self, layout: LayoutId) {
-        let sel_snapshot = self.selection_of_layout(layout);
-
-        let start_node = if let Some(sel) = sel_snapshot {
-            sel
-        } else {
-            let Some(state) = self.layouts.get(layout) else {
-                return;
-            };
-            state.root
-        };
-
-        let mut node_opt = Some(start_node);
-        while let Some(node) = node_opt {
-            if let Some(NodeKind::Split { orientation, .. }) = self.kind.get_mut(node) {
-                *orientation = match *orientation {
-                    Orientation::Horizontal => Orientation::Vertical,
-                    Orientation::Vertical => Orientation::Horizontal,
-                };
-                return;
-            }
-            node_opt = node.parent(&self.tree.map);
-        }
-
-        if let Some(state) = self.layouts.get_mut(layout) {
-            let root = state.root;
-            if let Some(NodeKind::Split { orientation, .. }) = self.kind.get_mut(root) {
-                *orientation = match *orientation {
-                    Orientation::Horizontal => Orientation::Vertical,
-                    Orientation::Vertical => Orientation::Horizontal,
-                };
-            }
-        }
+        self.core.toggle_tile_orientation(layout)
     }
 
     fn toggle_split_of_selection(&mut self, layout: LayoutId) {
         if let Some(sel) = self.selection_of_layout(layout) {
             let sel_leaf = self.descend_to_leaf(sel);
-            if let Some(parent) = sel_leaf.parent(&self.tree.map) {
-                if let Some(NodeKind::Split { orientation, .. }) = self.kind.get_mut(parent) {
+            if let Some(parent) = sel_leaf.parent(&self.core.tree.map) {
+                if let Some(NodeKind::Split { orientation, .. }) = self.core.kind.get_mut(parent) {
                     *orientation = match *orientation {
                         Orientation::Horizontal => Orientation::Vertical,
                         Orientation::Vertical => Orientation::Horizontal,
@@ -1552,12 +980,12 @@ impl LayoutSystem for DwindleLayoutSystem {
     fn swap_split_of_selection(&mut self, layout: LayoutId) {
         if let Some(sel) = self.selection_of_layout(layout) {
             let sel_leaf = self.descend_to_leaf(sel);
-            if let Some(parent) = sel_leaf.parent(&self.tree.map) {
-                let children: Vec<_> = parent.children(&self.tree.map).collect();
+            if let Some(parent) = sel_leaf.parent(&self.core.tree.map) {
+                let children: Vec<_> = parent.children(&self.core.tree.map).collect();
                 if children.len() == 2 {
                     let first_id = children[0];
                     let second_id = children[1];
-                    let detached_second = second_id.detach(&mut self.tree);
+                    let detached_second = second_id.detach(&mut self.core.tree);
                     detached_second.insert_before(first_id).finish();
                 }
             }
@@ -1565,46 +993,6 @@ impl LayoutSystem for DwindleLayoutSystem {
     }
 
     fn move_selection_to_root(&mut self, layout: LayoutId, stable: bool) {
-        let Some(sel) = self.selection_of_layout(layout) else {
-            return;
-        };
-        let leaf = self.descend_to_leaf(sel);
-        let root = self.find_layout_root(leaf);
-        if leaf == root {
-            return;
-        }
-        let Some(mut ancestor) = leaf.parent(&self.tree.map) else { return };
-        while let Some(parent) = ancestor.parent(&self.tree.map) {
-            if parent == root {
-                break;
-            }
-            ancestor = parent;
-        }
-        if ancestor.parent(&self.tree.map) != Some(root) {
-            return;
-        }
-        let children: Vec<_> = root.children(&self.tree.map).collect();
-        if children.len() != 2 {
-            return;
-        }
-        let ancestor_is_first = children.first().copied() == Some(ancestor);
-        let swap_node = if ancestor_is_first {
-            children.get(1).copied()
-        } else {
-            children.get(0).copied()
-        };
-        let Some(swap_node) = swap_node else { return };
-
-        if ancestor_is_first {
-            if !stable {
-                let detached = ancestor.detach(&mut self.tree);
-                detached.insert_after(swap_node).finish();
-            }
-        } else if stable {
-            // keep ancestor on the second side; do nothing
-        } else {
-            let detached = ancestor.detach(&mut self.tree);
-            detached.insert_before(swap_node).finish();
-        }
+        self.core.move_selection_to_root(layout, stable)
     }
 }

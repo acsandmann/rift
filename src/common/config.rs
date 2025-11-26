@@ -650,17 +650,23 @@ impl Default for DwindleSettings {
             smart_resizing: Self::default_smart_resizing(),
             pseudotile: false,
             single_window_aspect_ratio: Self::default_single_window_aspect_ratio(),
-            single_window_aspect_ratio_tolerance: Self::default_single_window_aspect_ratio_tolerance(),
+            single_window_aspect_ratio_tolerance:
+                Self::default_single_window_aspect_ratio_tolerance(),
         }
     }
 }
 
 impl DwindleSettings {
     const fn default_split_ratio() -> f32 { 1.0 }
+
     const fn default_split_width_multiplier() -> f32 { 1.0 }
+
     const fn default_use_active_for_splits() -> bool { true }
+
     const fn default_smart_resizing() -> bool { true }
+
     const fn default_single_window_aspect_ratio() -> (f32, f32) { (0.0, 0.0) }
+
     const fn default_single_window_aspect_ratio_tolerance() -> f32 { 0.1 }
 
     pub fn validate(&self) -> Vec<String> {

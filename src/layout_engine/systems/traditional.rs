@@ -403,7 +403,12 @@ impl LayoutSystem for TraditionalLayoutSystem {
         self.visible_windows_under_internal(selection)
     }
 
-    fn set_insertion_point(&mut self, _layout: LayoutId, _point: Option<objc2_core_foundation::CGPoint>) {}
+    fn set_insertion_point(
+        &mut self,
+        _layout: LayoutId,
+        _point: Option<objc2_core_foundation::CGPoint>,
+    ) {
+    }
 
     fn set_preselection(&mut self, _layout: LayoutId, _direction: Option<Direction>) {}
 

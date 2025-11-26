@@ -43,7 +43,9 @@ pub enum LayoutCommand {
     Preselect(Option<Direction>),
     ToggleSplit,
     SwapSplit,
-    MoveToRoot { stable: bool },
+    MoveToRoot {
+        stable: bool,
+    },
     UnjoinWindows,
     ToggleFocusFloating,
     ToggleWindowFloating,
