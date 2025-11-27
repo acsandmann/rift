@@ -746,7 +746,12 @@ pub struct InnerGaps {
 
 impl Default for InnerGaps {
     fn default() -> Self {
-        Self { left: 10.0, right: 10.0, top: 10.0, bottom: 10.0 }
+        Self {
+            left: 10.0,
+            right: 10.0,
+            top: 10.0,
+            bottom: 10.0,
+        }
     }
 }
 
@@ -764,18 +769,19 @@ impl InnerGaps {
 
     /// Create uniform gaps (same value for all sides)
     pub fn uniform(gap: f64) -> Self {
-        Self { left: gap, right: gap, top: gap, bottom: gap }
+        Self {
+            left: gap,
+            right: gap,
+            top: gap,
+            bottom: gap,
+        }
     }
 
     /// Get the total horizontal gap (left + right) - for compatibility
-    pub fn horizontal(&self) -> f64 {
-        self.left + self.right
-    }
+    pub fn horizontal(&self) -> f64 { self.left + self.right }
 
     /// Get the total vertical gap (top + bottom) - for compatibility
-    pub fn vertical(&self) -> f64 {
-        self.top + self.bottom
-    }
+    pub fn vertical(&self) -> f64 { self.top + self.bottom }
 }
 
 /// Overrides for gaps on a per-display basis
@@ -945,13 +951,19 @@ impl InnerGaps {
             issues.push(format!("inner.left gap must be non-negative, got {}", self.left));
         }
         if self.right < 0.0 {
-            issues.push(format!("inner.right gap must be non-negative, got {}", self.right));
+            issues.push(format!(
+                "inner.right gap must be non-negative, got {}",
+                self.right
+            ));
         }
         if self.top < 0.0 {
             issues.push(format!("inner.top gap must be non-negative, got {}", self.top));
         }
         if self.bottom < 0.0 {
-            issues.push(format!("inner.bottom gap must be non-negative, got {}", self.bottom));
+            issues.push(format!(
+                "inner.bottom gap must be non-negative, got {}",
+                self.bottom
+            ));
         }
 
         issues

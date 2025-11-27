@@ -45,8 +45,9 @@ impl WorkspaceLayouts {
         size: CGSize,
         workspaces: impl IntoIterator<Item = crate::model::VirtualWorkspaceId>,
         tree: &mut impl LayoutSystem,
-    ) {
+    ) -> Vec<LayoutId> {
         let size = Size::from(size);
+        let mut removed_layouts = Vec::new();
         for workspace_id in workspaces {
             let workspace_key = (space, workspace_id);
             let (workspace_layout, mut unchanged) = match self.map.entry(workspace_key) {
@@ -91,6 +92,7 @@ impl WorkspaceLayouts {
             };
 
             if let Some(removed) = unchanged {
+                removed_layouts.push(removed);
                 tree.remove_layout(removed);
             }
 
@@ -101,6 +103,8 @@ impl WorkspaceLayouts {
                 space
             );
         }
+
+        removed_layouts
     }
 
     pub(crate) fn active(

@@ -94,32 +94,33 @@ stack_offset = 40.0
 # - "horizontal"/"vertical": force a specific orientation
 default_orientation = "perpendicular"
 
-# Dwindle-specific settings (only used when mode = "dwindle")
-[settings.layout.dwindle]
-# Initial split ratio when creating a new parent (Hypr-compatible 0.1..1.9)
-default_split_ratio = 1.0
-# Heuristic for deciding horizontal vs vertical splits based on aspect ratio
-split_width_multiplier = 1.0
-# Use cursor quadrant to decide split orientation/direction
-smart_split = false
-# Keep existing split orientation unless overridden
-preserve_split = false
-# Force split side: 0 follow heuristic, 1 force first (left/top), 2 force second (right/bottom)
-force_split = 0
-# Bias split toward the newly inserted window
-split_bias = false
-# Prefer selection over cursor when choosing insertion target
-use_active_for_splits = true
-# Keep preselect direction sticky after one insert
-permanent_direction_override = false
-# Adjust ratios based on cursor extent when resizing
-smart_resizing = true
-# Keep floating size when tiled
-pseudotile = false
-# Enforce aspect when only one window is present; set second to 0 to disable
-single_window_aspect_ratio = [0.0, 0.0]
-# Fractional padding required before aspect enforcement kicks in
-single_window_aspect_ratio_tolerance = 0.1
+# Dwindle-specific settings (only used when mode = "dwindle").
+# Uncomment and adjust if you enable the dwindle layout mode.
+# [settings.layout.dwindle]
+# # Initial split ratio when creating a new parent (Hypr-compatible 0.1..1.9)
+# default_split_ratio = 1.0
+# # Heuristic for deciding horizontal vs vertical splits based on aspect ratio
+# split_width_multiplier = 1.0
+# # Use cursor quadrant to decide split orientation/direction
+# smart_split = false
+# # Keep existing split orientation unless overridden
+# preserve_split = false
+# # Force split side: 0 follow heuristic, 1 force first (left/top), 2 force second (right/bottom)
+# force_split = 0
+# # Bias split toward the newly inserted window
+# split_bias = false
+# # Prefer selection over cursor when choosing insertion target
+# use_active_for_splits = true
+# # Keep preselect direction sticky after one insert
+# permanent_direction_override = false
+# # Adjust ratios based on cursor extent when resizing
+# smart_resizing = true
+# # Keep floating size when tiled
+# pseudotile = false
+# # Enforce aspect when only one window is present; set second to 0 to disable
+# single_window_aspect_ratio = [0.0, 0.0]
+# # Fractional padding required before aspect enforcement kicks in
+# single_window_aspect_ratio_tolerance = 0.1
 
 [settings.layout.gaps]
 # Gap configuration

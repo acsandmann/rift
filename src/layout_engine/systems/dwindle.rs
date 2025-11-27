@@ -1,5 +1,3 @@
-use std::cell::RefCell;
-
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use serde::{Deserialize, Serialize};
 
@@ -7,30 +5,14 @@ use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::{HashMap, HashSet};
 use crate::layout_engine::binary_tree::{BinaryTreeLayout, LayoutState, NodeKind, RatioPolicy};
 use crate::layout_engine::systems::LayoutSystem;
-use crate::layout_engine::{Direction, LayoutId, LayoutKind, Orientation};
+use crate::layout_engine::{Direction, LayoutFrame, LayoutId, LayoutKind, Orientation};
 use crate::model::tree::NodeId;
-use crate::sys::event::current_cursor_location;
-
-#[derive(Clone)]
-struct LastFrame {
-    screen: CGRect,
-    gaps: crate::common::config::GapSettings,
-}
-
-#[derive(Clone, Copy, Default)]
-struct InsertionHint {
-    cursor: Option<CGPoint>,
-}
 
 #[derive(Serialize, Deserialize)]
 pub struct DwindleLayoutSystem {
     #[serde(flatten)]
     core: BinaryTreeLayout,
     settings: crate::common::config::DwindleSettings,
-    #[serde(skip)]
-    insertion_hints: HashMap<LayoutId, InsertionHint>,
-    #[serde(skip)]
-    last_frames: RefCell<HashMap<LayoutId, LastFrame>>,
     #[serde(skip)]
     pseudo_sizes: HashMap<WindowId, CGSize>,
 }
@@ -40,8 +22,6 @@ impl Default for DwindleLayoutSystem {
         Self {
             core: BinaryTreeLayout::default(),
             settings: crate::common::config::DwindleSettings::default(),
-            insertion_hints: Default::default(),
-            last_frames: Default::default(),
             pseudo_sizes: Default::default(),
         }
     }
@@ -118,10 +98,26 @@ impl DwindleLayoutSystem {
             < STICKS_TOLERANCE;
 
         // Use outer gaps at edges, inner gaps between windows
-        let left_gap = if at_left { gaps.outer.left } else { gaps.inner.left };
-        let right_gap = if at_right { gaps.outer.right } else { gaps.inner.right };
-        let top_gap = if at_top { gaps.outer.top } else { gaps.inner.top };
-        let bottom_gap = if at_bottom { gaps.outer.bottom } else { gaps.inner.bottom };
+        let left_gap = if at_left {
+            gaps.outer.left
+        } else {
+            gaps.inner.left
+        };
+        let right_gap = if at_right {
+            gaps.outer.right
+        } else {
+            gaps.inner.right
+        };
+        let top_gap = if at_top {
+            gaps.outer.top
+        } else {
+            gaps.inner.top
+        };
+        let bottom_gap = if at_bottom {
+            gaps.outer.bottom
+        } else {
+            gaps.inner.bottom
+        };
 
         CGRect::new(
             CGPoint::new(node_rect.origin.x + left_gap, node_rect.origin.y + top_gap),
@@ -252,9 +248,8 @@ impl DwindleLayoutSystem {
                     if !self.settings.preserve_split && !self.settings.smart_split {
                         let new_orientation = self.aspect_orientation(Some(rect));
                         // Mutate the stored orientation
-                        if let Some(NodeKind::Split {
-                            orientation: stored, ..
-                        }) = self.core.kind.get_mut(node)
+                        if let Some(NodeKind::Split { orientation: stored, .. }) =
+                            self.core.kind.get_mut(node)
                         {
                             *stored = new_orientation;
                         }
@@ -316,15 +311,12 @@ impl DwindleLayoutSystem {
         }
     }
 
-    fn store_last_frame(&self, layout: LayoutId, frame: LastFrame) {
-        if let Ok(mut map) = self.last_frames.try_borrow_mut() {
-            map.insert(layout, frame);
-        }
-    }
-
-    fn rects_for_layout(&self, layout: LayoutId) -> Option<HashMap<NodeId, CGRect>> {
+    fn rects_for_layout(
+        &self,
+        layout: LayoutId,
+        frame: &LayoutFrame,
+    ) -> Option<HashMap<NodeId, CGRect>> {
         let state = self.core.layouts.get(layout)?;
-        let frame = self.last_frames.try_borrow().ok()?.get(&layout)?.clone();
         let mut rects = HashMap::default();
         let mut root_rect = frame.screen;
         if self.visible_windows_in_layout(layout).len() == 1 {
@@ -358,7 +350,12 @@ impl DwindleLayoutSystem {
         }
     }
 
-    fn choose_target_leaf(&self, layout: LayoutId) -> Option<NodeId> {
+    fn choose_target_leaf(
+        &self,
+        layout: LayoutId,
+        cursor: Option<CGPoint>,
+        rects: Option<&HashMap<NodeId, CGRect>>,
+    ) -> Option<NodeId> {
         let settings = &self.settings;
 
         // Prefer active selection if enabled
@@ -369,52 +366,280 @@ impl DwindleLayoutSystem {
         }
 
         // Try cursor-based hit test
-        if let Some(hint) = self.insertion_hints.get(&layout) {
-            if let Some(cursor) = hint.cursor {
-                if let Some(rects) = self.rects_for_layout(layout) {
-                    let mut best = None;
-                    let mut best_dist = f64::MAX;
-                    for (node, rect) in rects {
-                        let min_x = rect.origin.x;
-                        let max_x = rect.origin.x + rect.size.width;
-                        let min_y = rect.origin.y;
-                        let max_y = rect.origin.y + rect.size.height;
-                        let inside = cursor.x >= min_x
-                            && cursor.x <= max_x
-                            && cursor.y >= min_y
-                            && cursor.y <= max_y;
-                        if inside {
-                            return Some(self.descend_to_leaf(node));
-                        }
-                        let dx = if cursor.x < min_x {
-                            min_x - cursor.x
-                        } else if cursor.x > max_x {
-                            cursor.x - max_x
-                        } else {
-                            0.0
-                        };
-                        let dy = if cursor.y < min_y {
-                            min_y - cursor.y
-                        } else if cursor.y > max_y {
-                            cursor.y - max_y
-                        } else {
-                            0.0
-                        };
-                        let dist = dx * dx + dy * dy;
-                        if dist < best_dist {
-                            best_dist = dist;
-                            best = Some(node);
-                        }
-                    }
-                    if let Some(node) = best {
-                        return Some(self.descend_to_leaf(node));
-                    }
+        if let (Some(cursor), Some(rects)) = (cursor, rects) {
+            let mut best = None;
+            let mut best_dist = f64::MAX;
+            for (node, rect) in rects {
+                let min_x = rect.origin.x;
+                let max_x = rect.origin.x + rect.size.width;
+                let min_y = rect.origin.y;
+                let max_y = rect.origin.y + rect.size.height;
+                let inside = cursor.x >= min_x
+                    && cursor.x <= max_x
+                    && cursor.y >= min_y
+                    && cursor.y <= max_y;
+                if inside {
+                    return Some(self.descend_to_leaf(*node));
                 }
+                let dx = if cursor.x < min_x {
+                    min_x - cursor.x
+                } else if cursor.x > max_x {
+                    cursor.x - max_x
+                } else {
+                    0.0
+                };
+                let dy = if cursor.y < min_y {
+                    min_y - cursor.y
+                } else if cursor.y > max_y {
+                    cursor.y - max_y
+                } else {
+                    0.0
+                };
+                let dist = dx * dx + dy * dy;
+                if dist < best_dist {
+                    best_dist = dist;
+                    best = Some(node);
+                }
+            }
+            if let Some(node) = best {
+                return Some(self.descend_to_leaf(*node));
             }
         }
 
         // Final fallback to selection
         self.selection_of_layout(layout).map(|sel| self.descend_to_leaf(sel))
+    }
+
+    /// Add a window using optional cursor + frame context without storing state.
+    pub fn add_window_with_context(
+        &mut self,
+        layout: LayoutId,
+        wid: WindowId,
+        cursor: Option<CGPoint>,
+        frame: Option<&LayoutFrame>,
+    ) {
+        if self.core.layouts.get(layout).is_some() {
+            let rects = frame.and_then(|f| self.rects_for_layout(layout, f));
+            let target = self.choose_target_leaf(layout, cursor, rects.as_ref());
+
+            if let Some(target_leaf) = target {
+                match self.core.kind.get(target_leaf) {
+                    Some(NodeKind::Leaf { window, .. }) => {
+                        if window.is_none() {
+                            if let Some(NodeKind::Leaf { window, .. }) =
+                                self.core.kind.get_mut(target_leaf)
+                            {
+                                *window = Some(wid);
+                                self.core.window_to_node.insert(wid, target_leaf);
+                            }
+                            self.core.tree.data.selection.select(&self.core.tree.map, target_leaf);
+                        } else {
+                            let rect = rects.as_ref().and_then(|m| m.get(&target_leaf).copied());
+                            self.split_leaf(layout, target_leaf, wid, rect, cursor);
+                        }
+                    }
+                    _ => {}
+                }
+            } else {
+                self.insert_window_at_selection(layout, wid);
+            }
+        }
+    }
+
+    /// Resize using optional cursor and frame context; falls back to simple ratio tweaks.
+    pub fn resize_selection_by_with_context(
+        &mut self,
+        layout: LayoutId,
+        amount: f64,
+        cursor: Option<CGPoint>,
+        frame: Option<&LayoutFrame>,
+    ) {
+        let rects = frame.and_then(|f| self.rects_for_layout(layout, f));
+
+        if self.settings.smart_resizing {
+            if let (Some(cursor), Some(rects)) = (cursor, rects.as_ref()) {
+                let sel_snapshot = self.selection_of_layout(layout);
+                if let Some(mut node) = sel_snapshot {
+                    let leaf = self.descend_to_leaf(node);
+                    if let Some(rect) = rects.get(&leaf).copied() {
+                        let leaf_id = leaf;
+                        let contains = |root: NodeId, target: NodeId| {
+                            root.traverse_preorder(&self.core.tree.map).any(|n| n == target)
+                        };
+                        let min_x = rect.origin.x;
+                        let max_x = rect.origin.x + rect.size.width;
+                        let min_y = rect.origin.y;
+                        let max_y = rect.origin.y + rect.size.height;
+                        let dist_left = (cursor.x - min_x).abs();
+                        let dist_right = (cursor.x - max_x).abs();
+                        let dist_top = (cursor.y - min_y).abs();
+                        let dist_bottom = (cursor.y - max_y).abs();
+                        let (orientation, dir_is_first_side) =
+                            if dist_left.min(dist_right) < dist_top.min(dist_bottom) {
+                                // horizontal axis
+                                let dir_first = cursor.x <= (min_x + max_x) / 2.0;
+                                (Orientation::Horizontal, dir_first)
+                            } else {
+                                let dir_first = cursor.y <= (min_y + max_y) / 2.0;
+                                (Orientation::Vertical, dir_first)
+                            };
+
+                        while let Some(parent) = node.parent(&self.core.tree.map) {
+                            let stored_orientation = match self.core.kind.get(parent) {
+                                Some(NodeKind::Split { orientation: o, .. }) => Some(*o),
+                                _ => None,
+                            };
+                            let parent_orientation = stored_orientation
+                                .map(|o| {
+                                    rects
+                                        .get(&parent)
+                                        .copied()
+                                        .map(|r| self.effective_orientation(r, o))
+                                        .unwrap_or(o)
+                                })
+                                .unwrap_or(Orientation::Horizontal);
+
+                            if parent_orientation == orientation {
+                                if let Some(NodeKind::Split { ratio, .. }) =
+                                    self.core.kind.get_mut(parent)
+                                {
+                                    let is_first =
+                                        Some(node) == parent.first_child(&self.core.tree.map);
+                                    let delta = amount as f32;
+                                    match orientation {
+                                        Orientation::Horizontal => {
+                                            if dir_is_first_side {
+                                                if is_first {
+                                                    *ratio = (*ratio - delta).clamp(0.1, 1.9);
+                                                } else {
+                                                    *ratio = (*ratio + delta).clamp(0.1, 1.9);
+                                                }
+                                            } else if is_first {
+                                                *ratio = (*ratio + delta).clamp(0.1, 1.9);
+                                            } else {
+                                                *ratio = (*ratio - delta).clamp(0.1, 1.9);
+                                            }
+                                        }
+                                        Orientation::Vertical => {
+                                            if dir_is_first_side {
+                                                if is_first {
+                                                    *ratio = (*ratio - delta).clamp(0.1, 1.9);
+                                                } else {
+                                                    *ratio = (*ratio + delta).clamp(0.1, 1.9);
+                                                }
+                                            } else if is_first {
+                                                *ratio = (*ratio + delta).clamp(0.1, 1.9);
+                                            } else {
+                                                *ratio = (*ratio - delta).clamp(0.1, 1.9);
+                                            }
+                                        }
+                                    }
+                                    // Adjust the inner split on the same axis if the child is also split (Hypr-style)
+                                    if let Some(NodeKind::Split {
+                                        orientation: stored_child, ..
+                                    }) = self.core.kind.get(node)
+                                    {
+                                        let child_orientation = rects
+                                            .get(&node)
+                                            .copied()
+                                            .map(|r| self.effective_orientation(r, *stored_child))
+                                            .unwrap_or(*stored_child);
+                                        if child_orientation == orientation {
+                                            let children: Vec<_> =
+                                                node.children(&self.core.tree.map).collect();
+                                            if children.len() == 2 {
+                                                let leaf_on_first = contains(children[0], leaf_id);
+                                                let leaf_on_second = contains(children[1], leaf_id);
+                                                if leaf_on_first || leaf_on_second {
+                                                    if let Some(NodeKind::Split {
+                                                        ratio: inner_ratio,
+                                                        ..
+                                                    }) = self.core.kind.get_mut(node)
+                                                    {
+                                                        let delta_inner = amount as f32;
+                                                        match orientation {
+                                                            Orientation::Horizontal => {
+                                                                if dir_is_first_side {
+                                                                    if leaf_on_first {
+                                                                        *inner_ratio =
+                                                                            (*inner_ratio
+                                                                                - delta_inner)
+                                                                                .clamp(0.1, 1.9);
+                                                                    } else {
+                                                                        *inner_ratio =
+                                                                            (*inner_ratio
+                                                                                + delta_inner)
+                                                                                .clamp(0.1, 1.9);
+                                                                    }
+                                                                } else if leaf_on_first {
+                                                                    *inner_ratio = (*inner_ratio
+                                                                        + delta_inner)
+                                                                        .clamp(0.1, 1.9);
+                                                                } else {
+                                                                    *inner_ratio = (*inner_ratio
+                                                                        - delta_inner)
+                                                                        .clamp(0.1, 1.9);
+                                                                }
+                                                            }
+                                                            Orientation::Vertical => {
+                                                                if dir_is_first_side {
+                                                                    if leaf_on_first {
+                                                                        *inner_ratio =
+                                                                            (*inner_ratio
+                                                                                - delta_inner)
+                                                                                .clamp(0.1, 1.9);
+                                                                    } else {
+                                                                        *inner_ratio =
+                                                                            (*inner_ratio
+                                                                                + delta_inner)
+                                                                                .clamp(0.1, 1.9);
+                                                                    }
+                                                                } else if leaf_on_first {
+                                                                    *inner_ratio = (*inner_ratio
+                                                                        + delta_inner)
+                                                                        .clamp(0.1, 1.9);
+                                                                } else {
+                                                                    *inner_ratio = (*inner_ratio
+                                                                        - delta_inner)
+                                                                        .clamp(0.1, 1.9);
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    return;
+                                }
+                            }
+                            node = parent;
+                        }
+                    }
+                }
+            }
+        }
+
+        let sel_snapshot = self.selection_of_layout(layout);
+        let Some(mut node) = sel_snapshot else {
+            return;
+        };
+
+        while let Some(parent) = node.parent(&self.core.tree.map) {
+            if let Some(NodeKind::Split { ratio, .. }) = self.core.kind.get_mut(parent) {
+                let is_first = Some(node) == parent.first_child(&self.core.tree.map);
+                let delta = amount as f32;
+                if is_first {
+                    let new_ratio = (*ratio - delta).clamp(0.1, 1.9);
+                    *ratio = new_ratio;
+                } else {
+                    let new_ratio = (*ratio + delta).clamp(0.1, 1.9);
+                    *ratio = new_ratio;
+                }
+                break;
+            }
+            node = parent;
+        }
     }
 
     fn aspect_orientation(&self, rect: Option<CGRect>) -> Orientation {
@@ -442,6 +667,7 @@ impl DwindleLayoutSystem {
         layout: LayoutId,
         target: NodeId,
         target_rect: Option<CGRect>,
+        cursor: Option<CGPoint>,
     ) -> (Orientation, bool) {
         if self.settings.preserve_split {
             if let Some(parent) = target.parent(&self.core.tree.map) {
@@ -462,46 +688,42 @@ impl DwindleLayoutSystem {
             }
         }
 
-        if let Some(hint) = self.insertion_hints.get(&layout) {
-            if let Some(cursor) = hint.cursor {
-                if self.settings.smart_split {
-                    if let Some(rect) = target_rect {
-                        let center = CGPoint::new(
-                            rect.origin.x + rect.size.width / 2.0,
-                            rect.origin.y + rect.size.height / 2.0,
-                        );
-                        let delta_x = cursor.x - center.x;
-                        let delta_y = cursor.y - center.y;
-                        let slope = if delta_x.abs() < f64::EPSILON {
-                            f64::INFINITY
-                        } else {
-                            delta_y / delta_x
-                        };
-                        let aspect = if rect.size.width.abs() < f64::EPSILON {
-                            f64::INFINITY
-                        } else {
-                            rect.size.height / rect.size.width
-                        };
-                        if slope.abs() < aspect {
-                            new_first = delta_x < 0.0;
-                            return (Orientation::Horizontal, new_first);
-                        } else {
-                            new_first = delta_y < 0.0;
-                            return (Orientation::Vertical, new_first);
-                        }
-                    }
-                } else if let Some(rect) = target_rect {
-                    let center = CGPoint::new(
-                        rect.origin.x + rect.size.width / 2.0,
-                        rect.origin.y + rect.size.height / 2.0,
-                    );
-                    let orientation = self.aspect_orientation(target_rect);
-                    new_first = match orientation {
-                        Orientation::Horizontal => cursor.x <= center.x,
-                        Orientation::Vertical => cursor.y <= center.y,
-                    };
-                    return (orientation, new_first);
+        if let (Some(cursor), Some(rect)) = (cursor, target_rect) {
+            if self.settings.smart_split {
+                let center = CGPoint::new(
+                    rect.origin.x + rect.size.width / 2.0,
+                    rect.origin.y + rect.size.height / 2.0,
+                );
+                let delta_x = cursor.x - center.x;
+                let delta_y = cursor.y - center.y;
+                let slope = if delta_x.abs() < f64::EPSILON {
+                    f64::INFINITY
+                } else {
+                    delta_y / delta_x
+                };
+                let aspect = if rect.size.width.abs() < f64::EPSILON {
+                    f64::INFINITY
+                } else {
+                    rect.size.height / rect.size.width
+                };
+                if slope.abs() < aspect {
+                    new_first = delta_x < 0.0;
+                    return (Orientation::Horizontal, new_first);
+                } else {
+                    new_first = delta_y < 0.0;
+                    return (Orientation::Vertical, new_first);
                 }
+            } else {
+                let center = CGPoint::new(
+                    rect.origin.x + rect.size.width / 2.0,
+                    rect.origin.y + rect.size.height / 2.0,
+                );
+                let orientation = self.aspect_orientation(target_rect);
+                new_first = match orientation {
+                    Orientation::Horizontal => cursor.x <= center.x,
+                    Orientation::Vertical => cursor.y <= center.y,
+                };
+                return (orientation, new_first);
             }
         }
 
@@ -521,9 +743,10 @@ impl DwindleLayoutSystem {
         leaf: NodeId,
         new_window: WindowId,
         target_rect: Option<CGRect>,
+        cursor: Option<CGPoint>,
     ) {
         if let Some(NodeKind::Leaf { window, .. }) = self.core.kind.get(leaf).cloned() {
-            let (orientation, new_first) = self.plan_split(layout, leaf, target_rect);
+            let (orientation, new_first) = self.plan_split(layout, leaf, target_rect, cursor);
             let mut ratio = Self::clamp_ratio(self.settings.default_split_ratio);
 
             let existing_node = self.make_leaf(window);
@@ -629,9 +852,7 @@ impl LayoutSystem for DwindleLayoutSystem {
     fn create_layout(&mut self) -> LayoutId {
         let leaf = self.make_leaf(None);
         let state = LayoutState { root: leaf, preselection: None };
-        let id = self.core.layouts.insert(state);
-        self.insertion_hints.insert(id, InsertionHint::default());
-        id
+        self.core.layouts.insert(state)
     }
 
     /// shallow
@@ -660,10 +881,6 @@ impl LayoutSystem for DwindleLayoutSystem {
                 self.core.kind.remove(id);
             }
             state.root.remove_root(&mut self.core.tree);
-        }
-        self.insertion_hints.remove(&layout);
-        if let Ok(mut map) = self.last_frames.try_borrow_mut() {
-            map.remove(&layout);
         }
     }
 
@@ -705,7 +922,6 @@ impl LayoutSystem for DwindleLayoutSystem {
                 self.calculate_layout_recursive(state.root, rect, screen, gaps, &mut out);
             }
         }
-        self.store_last_frame(layout, LastFrame { screen, gaps: gaps.clone() });
         out
     }
 
@@ -725,9 +941,7 @@ impl LayoutSystem for DwindleLayoutSystem {
         self.core.visible_windows_under_selection(layout)
     }
 
-    fn set_insertion_point(&mut self, layout: LayoutId, point: Option<CGPoint>) {
-        self.insertion_hints.entry(layout).or_default().cursor = point;
-    }
+    fn set_insertion_point(&mut self, _layout: LayoutId, _point: Option<CGPoint>) {}
 
     fn set_preselection(&mut self, layout: LayoutId, direction: Option<Direction>) {
         if let Some(state) = self.core.layouts.get_mut(layout) {
@@ -754,34 +968,7 @@ impl LayoutSystem for DwindleLayoutSystem {
     }
 
     fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId) {
-        if self.core.layouts.get(layout).is_some() {
-            let target = self.choose_target_leaf(layout);
-
-            if let Some(target_leaf) = target {
-                match self.core.kind.get(target_leaf) {
-                    Some(NodeKind::Leaf { window, .. }) => {
-                        if window.is_none() {
-                            if let Some(NodeKind::Leaf { window, .. }) =
-                                self.core.kind.get_mut(target_leaf)
-                            {
-                                *window = Some(wid);
-                                self.core.window_to_node.insert(wid, target_leaf);
-                            }
-                            self.core.tree.data.selection.select(&self.core.tree.map, target_leaf);
-                        } else {
-                            let rect = self
-                                .rects_for_layout(layout)
-                                .and_then(|m| m.get(&target_leaf).copied());
-                            self.split_leaf(layout, target_leaf, wid, rect);
-                        }
-                    }
-                    _ => {}
-                }
-            } else {
-                self.insert_window_at_selection(layout, wid);
-            }
-        }
-        self.insertion_hints.remove(&layout);
+        self.add_window_with_context(layout, wid, None, None);
     }
 
     fn remove_window(&mut self, wid: WindowId) {
@@ -991,185 +1178,7 @@ impl LayoutSystem for DwindleLayoutSystem {
     fn unjoin_selection(&mut self, layout: LayoutId) { self.core.unjoin_selection(layout) }
 
     fn resize_selection_by(&mut self, layout: LayoutId, amount: f64) {
-        if self.settings.smart_resizing {
-            if let (Some(cursor), Some(rects)) =
-                (current_cursor_location().ok(), self.rects_for_layout(layout))
-            {
-                let sel_snapshot = self.selection_of_layout(layout);
-                if let Some(mut node) = sel_snapshot {
-                    let leaf = self.descend_to_leaf(node);
-                    if let Some(rect) = rects.get(&leaf).copied() {
-                        let leaf_id = leaf;
-                        let contains = |root: NodeId, target: NodeId| {
-                            root.traverse_preorder(&self.core.tree.map).any(|n| n == target)
-                        };
-                        let min_x = rect.origin.x;
-                        let max_x = rect.origin.x + rect.size.width;
-                        let min_y = rect.origin.y;
-                        let max_y = rect.origin.y + rect.size.height;
-                        let dist_left = (cursor.x - min_x).abs();
-                        let dist_right = (cursor.x - max_x).abs();
-                        let dist_top = (cursor.y - min_y).abs();
-                        let dist_bottom = (cursor.y - max_y).abs();
-                        let (orientation, dir_is_first_side) =
-                            if dist_left.min(dist_right) < dist_top.min(dist_bottom) {
-                                // horizontal axis
-                                let dir_first = cursor.x <= (min_x + max_x) / 2.0;
-                                (Orientation::Horizontal, dir_first)
-                            } else {
-                                let dir_first = cursor.y <= (min_y + max_y) / 2.0;
-                                (Orientation::Vertical, dir_first)
-                            };
-
-                        while let Some(parent) = node.parent(&self.core.tree.map) {
-                            let stored_orientation = match self.core.kind.get(parent) {
-                                Some(NodeKind::Split { orientation: o, .. }) => Some(*o),
-                                _ => None,
-                            };
-                            let parent_orientation = stored_orientation
-                                .map(|o| {
-                                    rects
-                                        .get(&parent)
-                                        .copied()
-                                        .map(|r| self.effective_orientation(r, o))
-                                        .unwrap_or(o)
-                                })
-                                .unwrap_or(Orientation::Horizontal);
-
-                            if parent_orientation == orientation {
-                                if let Some(NodeKind::Split { ratio, .. }) =
-                                    self.core.kind.get_mut(parent)
-                                {
-                                    let is_first =
-                                        Some(node) == parent.first_child(&self.core.tree.map);
-                    // Interpret `amount` as a direct ratio delta (matches BSP behavior of 0.05 steps)
-                    let delta = amount as f32;
-                                    match orientation {
-                                        Orientation::Horizontal => {
-                                            if dir_is_first_side {
-                                                if is_first {
-                                                    *ratio = (*ratio - delta).clamp(0.1, 1.9);
-                                                } else {
-                                                    *ratio = (*ratio + delta).clamp(0.1, 1.9);
-                                                }
-                                            } else if is_first {
-                                                *ratio = (*ratio + delta).clamp(0.1, 1.9);
-                                            } else {
-                                                *ratio = (*ratio - delta).clamp(0.1, 1.9);
-                                            }
-                                        }
-                                        Orientation::Vertical => {
-                                            if dir_is_first_side {
-                                                if is_first {
-                                                    *ratio = (*ratio - delta).clamp(0.1, 1.9);
-                                                } else {
-                                                    *ratio = (*ratio + delta).clamp(0.1, 1.9);
-                                                }
-                                            } else if is_first {
-                                                *ratio = (*ratio + delta).clamp(0.1, 1.9);
-                                            } else {
-                                                *ratio = (*ratio - delta).clamp(0.1, 1.9);
-                                            }
-                                        }
-                                    }
-                                    // Adjust the inner split on the same axis if the child is also split (Hypr-style)
-                                    if let Some(NodeKind::Split { orientation: stored_child, .. }) =
-                                        self.core.kind.get(node)
-                                    {
-                                        let child_orientation = rects
-                                            .get(&node)
-                                            .copied()
-                                            .map(|r| self.effective_orientation(r, *stored_child))
-                                            .unwrap_or(*stored_child);
-                                        if child_orientation == orientation {
-                                            let children: Vec<_> = node.children(&self.core.tree.map).collect();
-                                            if children.len() == 2 {
-                                                let leaf_on_first = contains(children[0], leaf_id);
-                                                let leaf_on_second = contains(children[1], leaf_id);
-                                                if leaf_on_first || leaf_on_second {
-                                    if let Some(NodeKind::Split { ratio: inner_ratio, .. }) =
-                                        self.core.kind.get_mut(node)
-                                    {
-                                        let delta_inner = amount as f32;
-                                                        match orientation {
-                                                            Orientation::Horizontal => {
-                                                                if dir_is_first_side {
-                                                                    if leaf_on_first {
-                                                                        *inner_ratio =
-                                                                            (*inner_ratio - delta_inner).clamp(0.1, 1.9);
-                                                                    } else {
-                                                                        *inner_ratio =
-                                                                            (*inner_ratio + delta_inner).clamp(0.1, 1.9);
-                                                                    }
-                                                                } else if leaf_on_first {
-                                                                    *inner_ratio =
-                                                                        (*inner_ratio + delta_inner).clamp(0.1, 1.9);
-                                                                } else {
-                                                                    *inner_ratio =
-                                                                        (*inner_ratio - delta_inner).clamp(0.1, 1.9);
-                                                                }
-                                                            }
-                                                            Orientation::Vertical => {
-                                                                if dir_is_first_side {
-                                                                    if leaf_on_first {
-                                                                        *inner_ratio =
-                                                                            (*inner_ratio - delta_inner).clamp(0.1, 1.9);
-                                                                    } else {
-                                                                        *inner_ratio =
-                                                                            (*inner_ratio + delta_inner).clamp(0.1, 1.9);
-                                                                    }
-                                                                } else if leaf_on_first {
-                                                                    *inner_ratio =
-                                                                        (*inner_ratio + delta_inner).clamp(0.1, 1.9);
-                                                                } else {
-                                                                    *inner_ratio =
-                                                                        (*inner_ratio - delta_inner).clamp(0.1, 1.9);
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    return;
-                                }
-                            }
-                            node = parent;
-                        }
-                    }
-                }
-            }
-        }
-        let rects_opt = self.rects_for_layout(layout);
-        let sel_snapshot = self.selection_of_layout(layout);
-        let Some(mut node) = sel_snapshot else {
-            return;
-        };
-
-        while let Some(parent) = node.parent(&self.core.tree.map) {
-            let orientation = match self.core.kind.get(parent) {
-                Some(NodeKind::Split { orientation, .. }) => *orientation,
-                _ => {
-                    node = parent;
-                    continue;
-                }
-            };
-            if let Some(NodeKind::Split { ratio, .. }) = self.core.kind.get_mut(parent) {
-                let is_first = Some(node) == parent.first_child(&self.core.tree.map);
-                // Use amount directly as ratio delta to give a visible 0.05 step per keypress
-                let delta = amount as f32;
-                if is_first {
-                    let new_ratio = (*ratio - delta).clamp(0.1, 1.9);
-                    *ratio = new_ratio;
-                } else {
-                    let new_ratio = (*ratio + delta).clamp(0.1, 1.9);
-                    *ratio = new_ratio;
-                }
-                break;
-            }
-            node = parent;
-        }
+        self.resize_selection_by_with_context(layout, amount, None, None);
     }
 
     // Rebalancing is not supported in Dwindle layout

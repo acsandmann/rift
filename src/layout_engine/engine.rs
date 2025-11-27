@@ -7,7 +7,9 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-use super::{Direction, FloatingManager, LayoutId, LayoutSystemKind, WorkspaceLayouts};
+use super::{
+    Direction, FloatingManager, LayoutFrame, LayoutId, LayoutSystemKind, WorkspaceLayouts,
+};
 use crate::actor::app::{AppInfo, WindowId, pid_t};
 use crate::actor::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::common::collections::HashMap;
@@ -114,12 +116,54 @@ pub struct LayoutEngine {
     broadcast_tx: Option<BroadcastSender>,
     #[serde(skip)]
     space_display_map: HashMap<SpaceId, Option<String>>,
+    #[serde(skip)]
+    layout_frames: HashMap<LayoutId, LayoutFrame>,
 }
 
 impl LayoutEngine {
     pub fn set_layout_settings(&mut self, settings: &LayoutSettings) {
         self.layout_settings = settings.clone();
         self.tree.update_settings(settings);
+    }
+
+    fn update_layout_frame(
+        &mut self,
+        layout: LayoutId,
+        screen: CGRect,
+        gaps: &crate::common::config::GapSettings,
+    ) {
+        self.layout_frames.insert(layout, LayoutFrame { screen, gaps: gaps.clone() });
+    }
+
+    fn layout_frame(&self, layout: LayoutId) -> Option<LayoutFrame> {
+        self.layout_frames.get(&layout).cloned()
+    }
+
+    fn add_window_to_layout(&mut self, layout: LayoutId, wid: WindowId, cursor: Option<CGPoint>) {
+        let frame = self.layout_frame(layout);
+        match &mut self.tree {
+            LayoutSystemKind::Traditional(s) => s.add_window_after_selection(layout, wid),
+            LayoutSystemKind::Bsp(s) => s.add_window_after_selection(layout, wid),
+            LayoutSystemKind::Dwindle(s) => {
+                s.add_window_with_context(layout, wid, cursor, frame.as_ref());
+            }
+        }
+    }
+
+    fn resize_selection_with_context(
+        &mut self,
+        layout: LayoutId,
+        amount: f64,
+        cursor: Option<CGPoint>,
+    ) {
+        let frame = self.layout_frame(layout);
+        match &mut self.tree {
+            LayoutSystemKind::Traditional(s) => s.resize_selection_by(layout, amount),
+            LayoutSystemKind::Bsp(s) => s.resize_selection_by(layout, amount),
+            LayoutSystemKind::Dwindle(s) => {
+                s.resize_selection_by_with_context(layout, amount, cursor, frame.as_ref());
+            }
+        }
     }
 
     pub fn update_virtual_workspace_settings(
@@ -201,7 +245,7 @@ impl LayoutEngine {
     }
 
     pub fn resize_selection(&mut self, layout: LayoutId, resize_amount: f64) {
-        self.tree.resize_selection_by(layout, resize_amount);
+        self.resize_selection_with_context(layout, resize_amount, None);
     }
 
     fn move_focus_internal(
@@ -474,6 +518,7 @@ impl LayoutEngine {
             layout_settings: layout_settings.clone(),
             broadcast_tx,
             space_display_map: HashMap::default(),
+            layout_frames: HashMap::default(),
         };
         engine.tree.update_settings(layout_settings);
         engine
@@ -505,12 +550,15 @@ impl LayoutEngine {
 
                 let workspaces =
                     self.virtual_workspace_manager_mut().list_workspaces(space).to_vec();
-                self.workspace_layouts.ensure_active_for_space(
+                let removed = self.workspace_layouts.ensure_active_for_space(
                     space,
                     size,
                     workspaces.into_iter().map(|(id, _)| id),
                     &mut self.tree,
                 );
+                for layout in removed {
+                    self.layout_frames.remove(&layout);
+                }
             }
             LayoutEvent::WindowsOnScreenUpdated(space, pid, mut windows_with_titles, app_info) => {
                 self.debug_tree(space);
@@ -648,9 +696,8 @@ impl LayoutEngine {
                     self.workspace_layouts.active(space, assigned_workspace)
                 {
                     let cursor = current_cursor_location().ok();
-                    self.tree.set_insertion_point(layout, cursor);
                     if !self.tree.contains_window(layout, wid) {
-                        self.tree.add_window_after_selection(layout, wid);
+                        self.add_window_to_layout(layout, wid, cursor);
                     }
                 } else {
                     warn!(
@@ -764,8 +811,7 @@ impl LayoutEngine {
 
                     if let Some(layout) = self.workspace_layouts.active(space, assigned_workspace) {
                         let cursor = current_cursor_location().ok();
-                        self.tree.set_insertion_point(layout, cursor);
-                        self.tree.add_window_after_selection(layout, wid);
+                        self.add_window_to_layout(layout, wid, cursor);
                         debug!(
                             "Re-added floating window {:?} to tiling tree in workspace {:?}",
                             wid, assigned_workspace
@@ -1022,7 +1068,8 @@ impl LayoutEngine {
 
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
                 let resize_amount = 0.05;
-                self.tree.resize_selection_by(layout, resize_amount);
+                let cursor = current_cursor_location().ok();
+                self.resize_selection_with_context(layout, resize_amount, cursor);
                 EventResponse::default()
             }
             LayoutCommand::ResizeWindowShrink => {
@@ -1032,7 +1079,8 @@ impl LayoutEngine {
 
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
                 let resize_amount = -0.05;
-                self.tree.resize_selection_by(layout, resize_amount);
+                let cursor = current_cursor_location().ok();
+                self.resize_selection_with_context(layout, resize_amount, cursor);
                 EventResponse::default()
             }
             LayoutCommand::ResizeWindowBy { amount } => {
@@ -1041,7 +1089,8 @@ impl LayoutEngine {
                 }
 
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
-                self.tree.resize_selection_by(layout, amount);
+                let cursor = current_cursor_location().ok();
+                self.resize_selection_with_context(layout, amount, cursor);
                 EventResponse::default()
             }
         }
@@ -1057,7 +1106,7 @@ impl LayoutEngine {
         stack_line_vert: crate::common::config::VerticalPlacement,
     ) -> Vec<(WindowId, CGRect)> {
         let layout = self.layout(space);
-        self.tree.calculate_layout(
+        let positions = self.tree.calculate_layout(
             layout,
             screen,
             self.layout_settings.stack.stack_offset,
@@ -1065,7 +1114,9 @@ impl LayoutEngine {
             stack_line_thickness,
             stack_line_horiz,
             stack_line_vert,
-        )
+        );
+        self.update_layout_frame(layout, screen, gaps);
+        positions
     }
 
     pub fn calculate_layout_with_virtual_workspaces<F>(
@@ -1096,6 +1147,7 @@ impl LayoutEngine {
                     stack_line_horiz,
                     stack_line_vert,
                 );
+                self.update_layout_frame(layout, screen, gaps);
                 for (wid, rect) in tiled_positions {
                     positions.insert(wid, rect);
                 }
@@ -1174,6 +1226,7 @@ impl LayoutEngine {
                 stack_line_horiz,
                 stack_line_vert,
             );
+            self.update_layout_frame(layout, screen, gaps);
             for (wid, rect) in tiled_positions {
                 positions.insert(wid, rect);
             }
@@ -1234,12 +1287,15 @@ impl LayoutEngine {
                 .into_iter()
                 .map(|(id, _)| id);
             let default_size = CGSize::new(1000.0, 1000.0);
-            self.workspace_layouts.ensure_active_for_space(
+            let removed = self.workspace_layouts.ensure_active_for_space(
                 space,
                 default_size,
                 workspaces,
                 &mut self.tree,
             );
+            for layout in removed {
+                self.layout_frames.remove(&layout);
+            }
 
             // After ensuring an active layout exists, return it. If something
             // unexpected happened, surface an informative panic.
@@ -1412,7 +1468,7 @@ impl LayoutEngine {
                     } else if let Some(prev_layout) =
                         self.workspace_layouts.active(op_space, current_workspace_id)
                     {
-                        self.tree.add_window_after_selection(prev_layout, focused_window);
+                        self.add_window_to_layout(prev_layout, focused_window, None);
                     }
                     return EventResponse::default();
                 }
@@ -1421,7 +1477,7 @@ impl LayoutEngine {
                     if let Some(target_layout) =
                         self.workspace_layouts.active(op_space, target_workspace_id)
                     {
-                        self.tree.add_window_after_selection(target_layout, focused_window);
+                        self.add_window_to_layout(target_layout, focused_window, None);
                     }
                 }
 
