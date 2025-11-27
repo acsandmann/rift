@@ -357,7 +357,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 
     fn calculate_layout(
-        &self,
+        &mut self,
         layout: LayoutId,
         screen: CGRect,
         stack_offset: f64,
@@ -1063,9 +1063,9 @@ impl TraditionalLayoutSystem {
 
         let total: f32 = siblings.iter().map(|&child| self.tree.data.layout.info[child].size).sum();
         let inner_gap = if horizontal {
-            gaps.inner.horizontal
+            gaps.inner.horizontal()
         } else {
-            gaps.inner.vertical
+            gaps.inner.vertical()
         };
 
         let axis_len = if horizontal {
@@ -2148,9 +2148,9 @@ impl Layout {
         });
         let total = self.info[node].total;
         let inner_gap = if horizontal {
-            gaps.inner.horizontal
+            gaps.inner.horizontal()
         } else {
-            gaps.inner.vertical
+            gaps.inner.vertical()
         };
         let axis_len = if horizontal {
             rect.size.width

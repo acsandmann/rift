@@ -1,11 +1,10 @@
 use objc2_core_foundation::CGRect;
 use serde::{Deserialize, Serialize};
 
-use crate::layout_engine::LayoutId;
 use crate::actor::app::WindowId;
 use crate::common::collections::HashMap;
 use crate::layout_engine::utils::compute_tiling_area;
-use crate::layout_engine::{Direction, Orientation};
+use crate::layout_engine::{Direction, LayoutId, Orientation};
 use crate::model::selection::*;
 use crate::model::tree::{NodeId, NodeMap, Tree};
 
@@ -687,49 +686,112 @@ impl BinaryTreeLayout {
         }
     }
 
+    /// Promotes the selected window to a direct child of root, matching Hyprland's moveToRoot behavior.
+    ///
+    /// This swaps the selected leaf node with the OTHER subtree at root level:
+    /// - The selected leaf becomes a direct child of root
+    /// - The other root subtree takes the leaf's old position in the tree
+    ///
+    /// If `stable` is true, the leaf stays on the same side of the screen.
     pub fn move_selection_to_root(&mut self, layout: LayoutId, stable: bool) {
         let Some(sel) = self.selection_of_layout(layout) else {
             return;
         };
         let leaf = self.descend_to_leaf(sel);
         let root = self.find_layout_root(leaf);
+
+        // Can't move root to root
         if leaf == root {
             return;
         }
-        let Some(mut ancestor) = leaf.parent(&self.tree.map) else {
+
+        // Need a parent to participate
+        let Some(leaf_parent) = leaf.parent(&self.tree.map) else {
             return;
         };
+
+        // Already at root level (parent is root)
+        if leaf_parent == root {
+            return;
+        }
+
+        // Walk up to find the ancestor (direct child of root) containing our leaf
+        let mut ancestor = leaf_parent;
         while let Some(parent) = ancestor.parent(&self.tree.map) {
             if parent == root {
                 break;
             }
             ancestor = parent;
         }
+
+        // Verify ancestor is direct child of root
         if ancestor.parent(&self.tree.map) != Some(root) {
             return;
         }
-        let children: Vec<_> = root.children(&self.tree.map).collect();
-        if children.len() != 2 {
+
+        // Get root's children to find the swap target
+        let root_children: Vec<_> = root.children(&self.tree.map).collect();
+        if root_children.len() != 2 {
             return;
         }
-        let ancestor_is_first = children.first().copied() == Some(ancestor);
+
+        let ancestor_is_first = root_children.first().copied() == Some(ancestor);
         let swap_node = if ancestor_is_first {
-            children.get(1).copied()
+            root_children.get(1).copied()
         } else {
-            children.get(0).copied()
+            root_children.get(0).copied()
         };
         let Some(swap_node) = swap_node else { return };
 
-        if ancestor_is_first {
-            if !stable {
-                let detached = ancestor.detach(&mut self.tree);
-                detached.insert_after(swap_node).finish();
-            }
-        } else if stable {
-            // keep ancestor on the second side; do nothing
+        // Get leaf_parent's children to know leaf's position
+        let parent_children: Vec<_> = leaf_parent.children(&self.tree.map).collect();
+        if parent_children.len() != 2 {
+            return;
+        }
+        let leaf_is_first = parent_children.first().copied() == Some(leaf);
+        let leaf_sibling = if leaf_is_first {
+            parent_children.get(1).copied()
         } else {
-            let detached = ancestor.detach(&mut self.tree);
-            detached.insert_before(swap_node).finish();
+            parent_children.get(0).copied()
+        };
+        let Some(leaf_sibling) = leaf_sibling else { return };
+
+        // Perform the swap - must complete each detach+insert before starting the next
+        // to avoid holding multiple mutable borrows
+
+        // Step 1: Detach leaf and immediately insert at root level
+        // (completes with finish(), releasing the mutable borrow)
+        {
+            let detached_leaf = leaf.detach(&mut self.tree);
+            if ancestor_is_first {
+                // swap_node was second child, so insert leaf after ancestor
+                detached_leaf.insert_after(ancestor).finish();
+            } else {
+                // swap_node was first child, so insert leaf before ancestor
+                detached_leaf.insert_before(ancestor).finish();
+            }
+        }
+
+        // Step 2: Now detach swap_node and insert where leaf was
+        // leaf_sibling is still a valid reference since leaf was detached from there
+        {
+            let detached_swap = swap_node.detach(&mut self.tree);
+            if leaf_is_first {
+                detached_swap.insert_before(leaf_sibling).finish();
+            } else {
+                detached_swap.insert_after(leaf_sibling).finish();
+            }
+        }
+
+        // Step 3: If stable, swap root's children to keep leaf on same screen side
+        if stable {
+            let new_root_children: Vec<_> = root.children(&self.tree.map).collect();
+            if new_root_children.len() == 2 {
+                let first = new_root_children[0];
+                let second = new_root_children[1];
+                let detached_first = first.detach(&mut self.tree);
+                detached_first.insert_after(second).finish();
+            }
         }
     }
 }

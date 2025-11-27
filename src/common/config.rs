@@ -724,15 +724,58 @@ pub struct OuterGaps {
 }
 
 /// Inner gap configuration (space between windows)
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
+///
+/// Supports 4-sided gaps for Hyprland parity. When a window is at a screen edge,
+/// outer gaps are used; otherwise, inner gaps are used for that edge.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct InnerGaps {
-    /// Horizontal gap between windows
+    /// Gap on the left side between windows
     #[serde(default)]
-    pub horizontal: f64,
-    /// Vertical gap between windows
+    pub left: f64,
+    /// Gap on the right side between windows
     #[serde(default)]
-    pub vertical: f64,
+    pub right: f64,
+    /// Gap on the top between windows
+    #[serde(default)]
+    pub top: f64,
+    /// Gap on the bottom between windows
+    #[serde(default)]
+    pub bottom: f64,
+}
+
+impl Default for InnerGaps {
+    fn default() -> Self {
+        Self { left: 10.0, right: 10.0, top: 10.0, bottom: 10.0 }
+    }
+}
+
+impl InnerGaps {
+    /// Create symmetric gaps (same value for left/right and top/bottom)
+    /// For backwards compatibility with the old horizontal/vertical model
+    pub fn symmetric(horizontal: f64, vertical: f64) -> Self {
+        Self {
+            left: horizontal / 2.0,
+            right: horizontal / 2.0,
+            top: vertical / 2.0,
+            bottom: vertical / 2.0,
+        }
+    }
+
+    /// Create uniform gaps (same value for all sides)
+    pub fn uniform(gap: f64) -> Self {
+        Self { left: gap, right: gap, top: gap, bottom: gap }
+    }
+
+    /// Get the total horizontal gap (left + right) - for compatibility
+    pub fn horizontal(&self) -> f64 {
+        self.left + self.right
+    }
+
+    /// Get the total vertical gap (top + bottom) - for compatibility
+    pub fn vertical(&self) -> f64 {
+        self.top + self.bottom
+    }
 }
 
 /// Overrides for gaps on a per-display basis
@@ -898,18 +941,17 @@ impl InnerGaps {
     pub fn validate(&self) -> Vec<String> {
         let mut issues = Vec::new();
 
-        if self.horizontal < 0.0 {
-            issues.push(format!(
-                "inner.horizontal gap must be non-negative, got {}",
-                self.horizontal
-            ));
+        if self.left < 0.0 {
+            issues.push(format!("inner.left gap must be non-negative, got {}", self.left));
         }
-
-        if self.vertical < 0.0 {
-            issues.push(format!(
-                "inner.vertical gap must be non-negative, got {}",
-                self.vertical
-            ));
+        if self.right < 0.0 {
+            issues.push(format!("inner.right gap must be non-negative, got {}", self.right));
+        }
+        if self.top < 0.0 {
+            issues.push(format!("inner.top gap must be non-negative, got {}", self.top));
+        }
+        if self.bottom < 0.0 {
+            issues.push(format!("inner.bottom gap must be non-negative, got {}", self.bottom));
         }
 
         issues

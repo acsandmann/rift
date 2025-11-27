@@ -62,39 +62,74 @@ impl DwindleLayoutSystem {
 
     fn clamp_ratio(ratio: f32) -> f32 { ratio.clamp(0.1, 1.9) }
 
-    fn compute_split_rects(
+    /// Splits a rectangle into two parts WITHOUT subtracting gaps.
+    /// This matches Hyprland's behavior where gaps are applied per-window at leaf level.
+    fn compute_split_rects_no_gaps(
         &self,
         rect: CGRect,
         orientation: Orientation,
         ratio: f32,
-        gaps: &crate::common::config::GapSettings,
     ) -> (CGRect, CGRect) {
         match orientation {
             Orientation::Horizontal => {
-                let gap = gaps.inner.horizontal as f64;
-                let available = (rect.size.width - gap).max(0.0);
-                let first_w = available * self.policy().ratio_to_fraction(ratio);
-                let second_w = (available - first_w).max(0.0);
+                let first_w = rect.size.width * self.policy().ratio_to_fraction(ratio);
+                let second_w = rect.size.width - first_w;
                 let r1 = CGRect::new(rect.origin, CGSize::new(first_w, rect.size.height));
                 let r2 = CGRect::new(
-                    CGPoint::new(rect.origin.x + first_w + gap, rect.origin.y),
+                    CGPoint::new(rect.origin.x + first_w, rect.origin.y),
                     CGSize::new(second_w, rect.size.height),
                 );
                 (r1, r2)
             }
             Orientation::Vertical => {
-                let gap = gaps.inner.vertical as f64;
-                let available = (rect.size.height - gap).max(0.0);
-                let first_h = available * self.policy().ratio_to_fraction(ratio);
-                let second_h = (available - first_h).max(0.0);
+                let first_h = rect.size.height * self.policy().ratio_to_fraction(ratio);
+                let second_h = rect.size.height - first_h;
                 let r1 = CGRect::new(rect.origin, CGSize::new(rect.size.width, first_h));
                 let r2 = CGRect::new(
-                    CGPoint::new(rect.origin.x, rect.origin.y + first_h + gap),
+                    CGPoint::new(rect.origin.x, rect.origin.y + first_h),
                     CGSize::new(rect.size.width, second_h),
                 );
                 (r1, r2)
             }
         }
+    }
+
+    /// Applies gaps to a window rect with Hyprland-style edge detection.
+    ///
+    /// When a window is at a screen edge, outer gaps are used; otherwise inner gaps.
+    /// This matches Hyprland's STICKS() macro behavior.
+    fn apply_gaps_to_window(
+        node_rect: CGRect,
+        tiling_area: CGRect,
+        gaps: &crate::common::config::GapSettings,
+    ) -> CGRect {
+        const STICKS_TOLERANCE: f64 = 2.0;
+
+        // Detect if window is at screen edges
+        let at_left = (node_rect.origin.x - tiling_area.origin.x).abs() < STICKS_TOLERANCE;
+        let at_right = ((node_rect.origin.x + node_rect.size.width)
+            - (tiling_area.origin.x + tiling_area.size.width))
+            .abs()
+            < STICKS_TOLERANCE;
+        let at_top = (node_rect.origin.y - tiling_area.origin.y).abs() < STICKS_TOLERANCE;
+        let at_bottom = ((node_rect.origin.y + node_rect.size.height)
+            - (tiling_area.origin.y + tiling_area.size.height))
+            .abs()
+            < STICKS_TOLERANCE;
+
+        // Use outer gaps at edges, inner gaps between windows
+        let left_gap = if at_left { gaps.outer.left } else { gaps.inner.left };
+        let right_gap = if at_right { gaps.outer.right } else { gaps.inner.right };
+        let top_gap = if at_top { gaps.outer.top } else { gaps.inner.top };
+        let bottom_gap = if at_bottom { gaps.outer.bottom } else { gaps.inner.bottom };
+
+        CGRect::new(
+            CGPoint::new(node_rect.origin.x + left_gap, node_rect.origin.y + top_gap),
+            CGSize::new(
+                (node_rect.size.width - left_gap - right_gap).max(1.0),
+                (node_rect.size.height - top_gap - bottom_gap).max(1.0),
+            ),
+        )
     }
 
     fn make_leaf(&mut self, window: Option<WindowId>) -> NodeId { self.core.make_leaf(window) }
@@ -119,15 +154,21 @@ impl DwindleLayoutSystem {
         self.core.selection_of_layout(layout)
     }
 
+    /// Recursively calculates window positions using Hyprland-style gap handling.
+    ///
+    /// Key differences from the old approach:
+    /// - Splits are calculated WITHOUT subtracting gaps
+    /// - Gaps are applied per-window at leaf level based on edge detection
+    /// - Orientation is mutated when preserve_split=false and smart_split=false
     fn calculate_layout_recursive(
-        &self,
+        &mut self,
         node: NodeId,
         rect: CGRect,
-        screen: CGRect,
+        tiling_area: CGRect,
         gaps: &crate::common::config::GapSettings,
         out: &mut Vec<(WindowId, CGRect)>,
     ) {
-        match self.core.kind.get(node) {
+        match self.core.kind.get(node).cloned() {
             Some(NodeKind::Leaf {
                 window,
                 fullscreen,
@@ -135,15 +176,16 @@ impl DwindleLayoutSystem {
                 ..
             }) => {
                 if let Some(w) = window {
-                    let mut target = if *fullscreen {
-                        screen
-                    } else if *fullscreen_within_gaps {
-                        BinaryTreeLayout::apply_outer_gaps(screen, gaps)
+                    let mut target = if fullscreen {
+                        tiling_area
+                    } else if fullscreen_within_gaps {
+                        BinaryTreeLayout::apply_outer_gaps(tiling_area, gaps)
                     } else {
-                        rect
+                        // Apply Hyprland-style edge-aware gaps at leaf level
+                        Self::apply_gaps_to_window(rect, tiling_area, gaps)
                     };
                     if self.settings.pseudotile {
-                        if let Some(size) = self.pseudo_sizes.get(w) {
+                        if let Some(size) = self.pseudo_sizes.get(&w) {
                             let mut desired_w = size.width;
                             let mut desired_h = size.height;
                             if desired_w <= 0.0 || desired_h <= 0.0 {
@@ -165,17 +207,34 @@ impl DwindleLayoutSystem {
                             );
                         }
                     }
-                    out.push((*w, target));
+                    out.push((w, target));
                 }
             }
             Some(NodeKind::Split { orientation, ratio }) => {
-                let (r1, r2) = self.compute_split_rects(rect, *orientation, *ratio, gaps);
-                let mut it = node.children(&self.core.tree.map);
-                if let Some(first) = it.next() {
-                    self.calculate_layout_recursive(first, r1, screen, gaps, out);
+                // HYPRLAND BEHAVIOR: Mutate orientation when preserve_split=false and smart_split=false
+                let effective_orientation =
+                    if !self.settings.preserve_split && !self.settings.smart_split {
+                        let new_orientation = self.aspect_orientation(Some(rect));
+                        // Mutate the stored orientation
+                        if let Some(NodeKind::Split {
+                            orientation: stored, ..
+                        }) = self.core.kind.get_mut(node)
+                        {
+                            *stored = new_orientation;
+                        }
+                        new_orientation
+                    } else {
+                        orientation
+                    };
+
+                // Split WITHOUT gaps - gaps are applied at leaf level
+                let (r1, r2) = self.compute_split_rects_no_gaps(rect, effective_orientation, ratio);
+                let children: Vec<_> = node.children(&self.core.tree.map).collect();
+                if let Some(&first) = children.first() {
+                    self.calculate_layout_recursive(first, r1, tiling_area, gaps, out);
                 }
-                if let Some(second) = it.next() {
-                    self.calculate_layout_recursive(second, r2, screen, gaps, out);
+                if let Some(&second) = children.get(1) {
+                    self.calculate_layout_recursive(second, r2, tiling_area, gaps, out);
                 }
             }
             None => {}
@@ -244,9 +303,12 @@ impl DwindleLayoutSystem {
         gaps: &crate::common::config::GapSettings,
         out: &mut HashMap<NodeId, CGRect>,
     ) {
+        // For hit testing, store rects without gaps (Hyprland-style)
         out.insert(node, rect);
         if let Some(NodeKind::Split { orientation, ratio }) = self.core.kind.get(node) {
-            let (r1, r2) = self.compute_split_rects(rect, *orientation, *ratio, gaps);
+            let effective_orientation = self.effective_orientation(rect, *orientation);
+            // Use no-gaps split for consistency with Hyprland
+            let (r1, r2) = self.compute_split_rects_no_gaps(rect, effective_orientation, *ratio);
             let mut it = node.children(&self.core.tree.map);
             if let Some(first) = it.next() {
                 self.populate_rects(first, r1, screen, gaps, out);
@@ -259,14 +321,15 @@ impl DwindleLayoutSystem {
 
     fn choose_target_leaf(&self, layout: LayoutId) -> Option<NodeId> {
         let settings = &self.settings;
-        // Prefer active selection
+
+        // Prefer active selection if enabled
         if settings.use_active_for_splits {
             if let Some(sel) = self.selection_of_layout(layout) {
                 return Some(self.descend_to_leaf(sel));
             }
         }
 
-        // Try cursor-based hit test using last frame
+        // Try cursor-based hit test
         if let Some(hint) = self.insertion_hints.get(&layout) {
             if let Some(cursor) = hint.cursor {
                 if let Some(rects) = self.rects_for_layout(layout) {
@@ -311,7 +374,7 @@ impl DwindleLayoutSystem {
             }
         }
 
-        // Fallback to selection
+        // Final fallback to selection
         self.selection_of_layout(layout).map(|sel| self.descend_to_leaf(sel))
     }
 
@@ -324,6 +387,14 @@ impl DwindleLayoutSystem {
             }
         } else {
             Orientation::Horizontal
+        }
+    }
+
+    fn effective_orientation(&self, rect: CGRect, stored: Orientation) -> Orientation {
+        if self.settings.preserve_split || self.settings.smart_split {
+            stored
+        } else {
+            self.aspect_orientation(Some(rect))
         }
     }
 
@@ -560,7 +631,7 @@ impl LayoutSystem for DwindleLayoutSystem {
     fn draw_tree(&self, layout: LayoutId) -> String { self.core.draw_tree(layout) }
 
     fn calculate_layout(
-        &self,
+        &mut self,
         layout: LayoutId,
         screen: CGRect,
         _stack_offset: f64,
@@ -571,9 +642,12 @@ impl LayoutSystem for DwindleLayoutSystem {
     ) -> Vec<(WindowId, CGRect)> {
         let mut out = Vec::new();
         if let Some(state) = self.core.layouts.get(layout).copied() {
-            let mut rect = BinaryTreeLayout::apply_outer_gaps(screen, gaps);
+            // Hyprland-style: start with raw screen bounds
+            // Single window aspect ratio is applied to screen (before gaps)
+            // Gaps are applied per-window at leaf level based on edge detection
+            let mut rect = screen;
             if self.visible_windows_in_layout(layout).len() == 1 {
-                rect = self.single_window_rect(rect);
+                rect = self.single_window_rect(screen);
             }
             self.calculate_layout_recursive(state.root, rect, screen, gaps, &mut out);
         }
@@ -890,10 +964,24 @@ impl LayoutSystem for DwindleLayoutSystem {
                             };
 
                         while let Some(parent) = node.parent(&self.core.tree.map) {
-                            if let Some(NodeKind::Split { ratio, orientation: o }) =
-                                self.core.kind.get_mut(parent)
-                            {
-                                if *o == orientation {
+                            let stored_orientation = match self.core.kind.get(parent) {
+                                Some(NodeKind::Split { orientation: o, .. }) => Some(*o),
+                                _ => None,
+                            };
+                            let parent_orientation = stored_orientation
+                                .map(|o| {
+                                    rects
+                                        .get(&parent)
+                                        .copied()
+                                        .map(|r| self.effective_orientation(r, o))
+                                        .unwrap_or(o)
+                                })
+                                .unwrap_or(Orientation::Horizontal);
+
+                            if parent_orientation == orientation {
+                                if let Some(NodeKind::Split { ratio, .. }) =
+                                    self.core.kind.get_mut(parent)
+                                {
                                     let is_first =
                                         Some(node) == parent.first_child(&self.core.tree.map);
                                     let delta = amount as f32;

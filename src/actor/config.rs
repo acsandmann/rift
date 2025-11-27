@@ -159,9 +159,9 @@ impl ConfigActor {
             }
             ConfigCommand::SetInnerGaps { horizontal, vertical } => {
                 if horizontal >= 0.0 && vertical >= 0.0 {
-                    let gaps = &mut new_config.settings.layout.gaps.inner;
-                    gaps.horizontal = horizontal;
-                    gaps.vertical = vertical;
+                    // Use symmetric gaps (same for both sides of each axis)
+                    new_config.settings.layout.gaps.inner =
+                        crate::common::config::InnerGaps::symmetric(horizontal, vertical);
                     config_changed = true;
                     info!(
                         "Updated inner gaps to: horizontal={}, vertical={}",

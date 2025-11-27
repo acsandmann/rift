@@ -16,7 +16,7 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     fn draw_tree(&self, layout: LayoutId) -> String;
 
     fn calculate_layout(
-        &self,
+        &mut self,
         layout: LayoutId,
         screen: CGRect,
         stack_offset: f64,

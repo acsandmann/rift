@@ -62,7 +62,7 @@ impl BspLayoutSystem {
             }
             Some(NodeKind::Split { orientation, ratio }) => match orientation {
                 Orientation::Horizontal => {
-                    let gap = gaps.inner.horizontal as f64;
+                    let gap = gaps.inner.horizontal();
                     let total = rect.size.width;
                     let available = (total - gap).max(0.0);
                     let first_w_f = available * policy.ratio_to_fraction(*ratio);
@@ -82,7 +82,7 @@ impl BspLayoutSystem {
                     }
                 }
                 Orientation::Vertical => {
-                    let gap = gaps.inner.vertical as f64;
+                    let gap = gaps.inner.vertical();
                     let total = rect.size.height;
                     let available = (total - gap).max(0.0);
                     let first_h_f = available * policy.ratio_to_fraction(*ratio);
@@ -294,7 +294,7 @@ impl LayoutSystem for BspLayoutSystem {
     fn draw_tree(&self, layout: LayoutId) -> String { self.core.draw_tree(layout) }
 
     fn calculate_layout(
-        &self,
+        &mut self,
         layout: LayoutId,
         screen: CGRect,
         _stack_offset: f64,

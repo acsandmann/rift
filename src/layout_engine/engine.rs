@@ -1069,7 +1069,7 @@ impl LayoutEngine {
     }
 
     pub fn calculate_layout_with_virtual_workspaces<F>(
-        &self,
+        &mut self,
         space: SpaceId,
         screen: CGRect,
         gaps: &crate::common::config::GapSettings,
@@ -1153,7 +1153,7 @@ impl LayoutEngine {
     }
 
     pub fn calculate_layout_for_workspace(
-        &self,
+        &mut self,
         space: SpaceId,
         workspace_id: crate::model::VirtualWorkspaceId,
         screen: CGRect,
