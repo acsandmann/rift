@@ -154,6 +154,42 @@ impl DwindleLayoutSystem {
         self.core.selection_of_layout(layout)
     }
 
+    /// Locate a fullscreen leaf (fullscreen or fullscreen_within_gaps). Returns the window id and whether gaps should apply.
+    fn find_fullscreen_leaf(&self, node: NodeId) -> Option<(WindowId, bool)> {
+        match self.core.kind.get(node) {
+            Some(NodeKind::Leaf {
+                window: Some(w),
+                fullscreen,
+                fullscreen_within_gaps,
+                ..
+            }) => {
+                if *fullscreen {
+                    Some((*w, false))
+                } else if *fullscreen_within_gaps {
+                    Some((*w, true))
+                } else {
+                    None
+                }
+            }
+            Some(NodeKind::Leaf { .. }) => None,
+            Some(NodeKind::Split { .. }) => {
+                // Prefer a true fullscreen if present; otherwise accept fullscreen_within_gaps
+                let mut within_gaps: Option<(WindowId, bool)> = None;
+                for child in node.children(&self.core.tree.map) {
+                    if let Some(found @ (_win, false)) = self.find_fullscreen_leaf(child) {
+                        return Some(found);
+                    } else if let Some(found @ (_win, true)) = self.find_fullscreen_leaf(child) {
+                        if within_gaps.is_none() {
+                            within_gaps = Some(found);
+                        }
+                    }
+                }
+                within_gaps
+            }
+            None => None,
+        }
+    }
+
     /// Recursively calculates window positions using Hyprland-style gap handling.
     ///
     /// Key differences from the old approach:
@@ -290,7 +326,10 @@ impl DwindleLayoutSystem {
         let state = self.core.layouts.get(layout)?;
         let frame = self.last_frames.try_borrow().ok()?.get(&layout)?.clone();
         let mut rects = HashMap::default();
-        let root_rect = BinaryTreeLayout::apply_outer_gaps(frame.screen, &frame.gaps);
+        let mut root_rect = frame.screen;
+        if self.visible_windows_in_layout(layout).len() == 1 {
+            root_rect = self.single_window_rect(frame.screen);
+        }
         self.populate_rects(state.root, root_rect, frame.screen, &frame.gaps, &mut rects);
         Some(rects)
     }
@@ -642,14 +681,29 @@ impl LayoutSystem for DwindleLayoutSystem {
     ) -> Vec<(WindowId, CGRect)> {
         let mut out = Vec::new();
         if let Some(state) = self.core.layouts.get(layout).copied() {
-            // Hyprland-style: start with raw screen bounds
-            // Single window aspect ratio is applied to screen (before gaps)
-            // Gaps are applied per-window at leaf level based on edge detection
-            let mut rect = screen;
-            if self.visible_windows_in_layout(layout).len() == 1 {
-                rect = self.single_window_rect(screen);
+            // Fullscreen short-circuit: match Hyprland by only placing the fullscreen window
+            if let Some((wid, within_gaps)) = self.find_fullscreen_leaf(state.root) {
+                let base = if within_gaps {
+                    BinaryTreeLayout::apply_outer_gaps(screen, gaps)
+                } else {
+                    screen
+                };
+                let rect = if within_gaps && self.visible_windows_in_layout(layout).len() == 1 {
+                    self.single_window_rect(base)
+                } else {
+                    base
+                };
+                out.push((wid, rect));
+            } else {
+                // Hyprland-style: start with raw screen bounds
+                // Single window aspect ratio is applied to screen (before gaps)
+                // Gaps are applied per-window at leaf level based on edge detection
+                let mut rect = screen;
+                if self.visible_windows_in_layout(layout).len() == 1 {
+                    rect = self.single_window_rect(screen);
+                }
+                self.calculate_layout_recursive(state.root, rect, screen, gaps, &mut out);
             }
-            self.calculate_layout_recursive(state.root, rect, screen, gaps, &mut out);
         }
         self.store_last_frame(layout, LastFrame { screen, gaps: gaps.clone() });
         out
@@ -945,6 +999,10 @@ impl LayoutSystem for DwindleLayoutSystem {
                 if let Some(mut node) = sel_snapshot {
                     let leaf = self.descend_to_leaf(node);
                     if let Some(rect) = rects.get(&leaf).copied() {
+                        let leaf_id = leaf;
+                        let contains = |root: NodeId, target: NodeId| {
+                            root.traverse_preorder(&self.core.tree.map).any(|n| n == target)
+                        };
                         let min_x = rect.origin.x;
                         let max_x = rect.origin.x + rect.size.width;
                         let min_y = rect.origin.y;
@@ -984,7 +1042,8 @@ impl LayoutSystem for DwindleLayoutSystem {
                                 {
                                     let is_first =
                                         Some(node) == parent.first_child(&self.core.tree.map);
-                                    let delta = amount as f32;
+                    // Interpret `amount` as a direct ratio delta (matches BSP behavior of 0.05 steps)
+                    let delta = amount as f32;
                                     match orientation {
                                         Orientation::Horizontal => {
                                             if dir_is_first_side {
@@ -1013,6 +1072,66 @@ impl LayoutSystem for DwindleLayoutSystem {
                                             }
                                         }
                                     }
+                                    // Adjust the inner split on the same axis if the child is also split (Hypr-style)
+                                    if let Some(NodeKind::Split { orientation: stored_child, .. }) =
+                                        self.core.kind.get(node)
+                                    {
+                                        let child_orientation = rects
+                                            .get(&node)
+                                            .copied()
+                                            .map(|r| self.effective_orientation(r, *stored_child))
+                                            .unwrap_or(*stored_child);
+                                        if child_orientation == orientation {
+                                            let children: Vec<_> = node.children(&self.core.tree.map).collect();
+                                            if children.len() == 2 {
+                                                let leaf_on_first = contains(children[0], leaf_id);
+                                                let leaf_on_second = contains(children[1], leaf_id);
+                                                if leaf_on_first || leaf_on_second {
+                                    if let Some(NodeKind::Split { ratio: inner_ratio, .. }) =
+                                        self.core.kind.get_mut(node)
+                                    {
+                                        let delta_inner = amount as f32;
+                                                        match orientation {
+                                                            Orientation::Horizontal => {
+                                                                if dir_is_first_side {
+                                                                    if leaf_on_first {
+                                                                        *inner_ratio =
+                                                                            (*inner_ratio - delta_inner).clamp(0.1, 1.9);
+                                                                    } else {
+                                                                        *inner_ratio =
+                                                                            (*inner_ratio + delta_inner).clamp(0.1, 1.9);
+                                                                    }
+                                                                } else if leaf_on_first {
+                                                                    *inner_ratio =
+                                                                        (*inner_ratio + delta_inner).clamp(0.1, 1.9);
+                                                                } else {
+                                                                    *inner_ratio =
+                                                                        (*inner_ratio - delta_inner).clamp(0.1, 1.9);
+                                                                }
+                                                            }
+                                                            Orientation::Vertical => {
+                                                                if dir_is_first_side {
+                                                                    if leaf_on_first {
+                                                                        *inner_ratio =
+                                                                            (*inner_ratio - delta_inner).clamp(0.1, 1.9);
+                                                                    } else {
+                                                                        *inner_ratio =
+                                                                            (*inner_ratio + delta_inner).clamp(0.1, 1.9);
+                                                                    }
+                                                                } else if leaf_on_first {
+                                                                    *inner_ratio =
+                                                                        (*inner_ratio + delta_inner).clamp(0.1, 1.9);
+                                                                } else {
+                                                                    *inner_ratio =
+                                                                        (*inner_ratio - delta_inner).clamp(0.1, 1.9);
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                     return;
                                 }
                             }
@@ -1022,14 +1141,23 @@ impl LayoutSystem for DwindleLayoutSystem {
                 }
             }
         }
+        let rects_opt = self.rects_for_layout(layout);
         let sel_snapshot = self.selection_of_layout(layout);
         let Some(mut node) = sel_snapshot else {
             return;
         };
 
         while let Some(parent) = node.parent(&self.core.tree.map) {
+            let orientation = match self.core.kind.get(parent) {
+                Some(NodeKind::Split { orientation, .. }) => *orientation,
+                _ => {
+                    node = parent;
+                    continue;
+                }
+            };
             if let Some(NodeKind::Split { ratio, .. }) = self.core.kind.get_mut(parent) {
                 let is_first = Some(node) == parent.first_child(&self.core.tree.map);
+                // Use amount directly as ratio delta to give a visible 0.05 step per keypress
                 let delta = amount as f32;
                 if is_first {
                     let new_ratio = (*ratio - delta).clamp(0.1, 1.9);
