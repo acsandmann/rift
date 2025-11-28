@@ -1113,9 +1113,9 @@ impl LayoutSystem for BspLayoutSystem {
                 let is_first = Some(node) == parent.first_child(&self.tree.map);
                 let delta = (amount as f32) * 0.5;
                 if is_first {
-                    *ratio = (*ratio - delta).clamp(0.05, 0.95);
-                } else {
                     *ratio = (*ratio + delta).clamp(0.05, 0.95);
+                } else {
+                    *ratio = (*ratio - delta).clamp(0.05, 0.95);
                 }
                 break;
             }
