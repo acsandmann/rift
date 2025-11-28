@@ -282,12 +282,17 @@ impl LayoutEngine {
             return EventResponse::default();
         }
 
+        let previous_selection = self.tree.selected_window(layout);
+
         let (focus_window, raise_windows) = self.tree.move_focus(layout, direction);
         let focus_window = self.filter_active_workspace_window(space, focus_window);
         let raise_windows = self.filter_active_workspace_windows(space, raise_windows);
         if focus_window.is_some() {
             EventResponse { focus_window, raise_windows }
         } else {
+            if let Some(prev_wid) = previous_selection {
+                let _ = self.tree.select_window(layout, prev_wid);
+            }
             if let Some(new_space) = self.next_space_for_direction(
                 space,
                 direction,
