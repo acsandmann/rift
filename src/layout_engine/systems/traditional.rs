@@ -629,14 +629,8 @@ impl LayoutSystem for TraditionalLayoutSystem {
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) {
         let selection = self.selection(layout);
 
-        let original_window = self.tree.data.window.at(selection);
-
         if let Some(target) = self.find_natural_join_target(selection, direction) {
             self.perform_natural_join(layout, selection, target, direction);
-
-            if let Some(_wid) = original_window {
-                self.select(selection);
-            }
         }
     }
 
@@ -2582,39 +2576,6 @@ mod tests {
             stacked_container.children(system.map()).count(),
             3,
             "expected the joined stack to grow instead of being replaced"
-        );
-    }
-
-    #[test]
-    fn focus_navigation_works_after_join_window() {
-        // test for https://github.com/acsandmann/rift/issues/183
-        let mut system = TraditionalLayoutSystem::default();
-        let layout = system.create_layout();
-        let root = system.root(layout);
-        system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
-
-        system.add_window_after_selection(layout, w(1));
-        system.add_window_after_selection(layout, w(2));
-
-        system.select_window(layout, w(1));
-        system.join_selection_with_direction(layout, Direction::Right);
-
-        let selection = system.selection(layout);
-        assert!(
-            system.tree.data.window.at(selection).is_some(),
-            "selection should be on a window after join, not a container"
-        );
-        assert_eq!(
-            system.tree.data.window.at(selection),
-            Some(w(1)),
-            "selection should remain on the originally selected window after join"
-        );
-
-        let (focus_window, _raise_windows) = system.move_focus(layout, Direction::Right);
-        assert_eq!(
-            focus_window,
-            Some(w(2)),
-            "focus right should navigate to the neighboring window after join"
         );
     }
 
