@@ -14,7 +14,7 @@ use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use strum::VariantNames;
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 use crate::common::config::WorkspaceSelector;
 use crate::sys::app::{NSRunningApplicationExt, pid_t};
@@ -341,6 +341,7 @@ impl WmController {
             }
             Command(Wm(ToggleSpaceActivated)) => {
                 let Some(space) = self.get_focused_space() else {
+                    warn!("no focused space found");
                     return;
                 };
 
@@ -354,19 +355,24 @@ impl WmController {
                 if space_currently_enabled {
                     if default_disable {
                         self.enabled_spaces.remove(&space);
+                        debug!("removed space {:?} from enabled_spaces", space);
                     } else {
                         self.disabled_spaces.insert(space);
+                        debug!("added space {:?} to disabled_spaces", space);
                     }
                 } else if default_disable {
                     self.enabled_spaces.insert(space);
+                    debug!("added space {:?} to enabled_spaces", space);
                 } else {
                     self.disabled_spaces.remove(&space);
+                    debug!("removed space {:?} from disabled_spaces", space);
                 }
 
-                self.events_tx.send(reactor::Event::SpaceChanged(
-                    self.active_spaces(),
-                    self.get_windows(),
-                ));
+                let active_spaces = self.active_spaces();
+                trace!("active_spaces after toggle = {:?}", active_spaces);
+
+                self.events_tx
+                    .send(reactor::Event::SpaceChanged(active_spaces, self.get_windows()));
 
                 self.apply_app_rules_to_existing_windows();
             }
