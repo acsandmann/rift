@@ -522,27 +522,27 @@ impl DwindleLayoutSystem {
                                             Orientation::Horizontal => {
                                                 if dir_first {
                                                     if is_first {
-                                                        *ratio = (*ratio - delta).clamp(0.1, 1.9);
-                                                    } else {
                                                         *ratio = (*ratio + delta).clamp(0.1, 1.9);
+                                                    } else {
+                                                        *ratio = (*ratio - delta).clamp(0.1, 1.9);
                                                     }
                                                 } else if is_first {
-                                                    *ratio = (*ratio + delta).clamp(0.1, 1.9);
-                                                } else {
                                                     *ratio = (*ratio - delta).clamp(0.1, 1.9);
+                                                } else {
+                                                    *ratio = (*ratio + delta).clamp(0.1, 1.9);
                                                 }
                                             }
                                             Orientation::Vertical => {
                                                 if dir_first {
                                                     if is_first {
-                                                        *ratio = (*ratio - delta).clamp(0.1, 1.9);
-                                                    } else {
                                                         *ratio = (*ratio + delta).clamp(0.1, 1.9);
+                                                    } else {
+                                                        *ratio = (*ratio - delta).clamp(0.1, 1.9);
                                                     }
                                                 } else if is_first {
-                                                    *ratio = (*ratio + delta).clamp(0.1, 1.9);
-                                                } else {
                                                     *ratio = (*ratio - delta).clamp(0.1, 1.9);
+                                                } else {
+                                                    *ratio = (*ratio + delta).clamp(0.1, 1.9);
                                                 }
                                             }
                                         }
@@ -581,21 +581,21 @@ impl DwindleLayoutSystem {
                                                                             if leaf_on_first {
                                                                                 *inner_ratio =
                                                                                     (*inner_ratio
-                                                                                        - delta_inner)
+                                                                                        + delta_inner)
                                                                                         .clamp(0.1, 1.9);
                                                                             } else {
                                                                                 *inner_ratio =
                                                                                     (*inner_ratio
-                                                                                        + delta_inner)
+                                                                                        - delta_inner)
                                                                                         .clamp(0.1, 1.9);
                                                                             }
                                                                         } else if leaf_on_first {
                                                                             *inner_ratio =
-                                                                                (*inner_ratio + delta_inner)
+                                                                                (*inner_ratio - delta_inner)
                                                                                     .clamp(0.1, 1.9);
                                                                         } else {
                                                                             *inner_ratio =
-                                                                                (*inner_ratio - delta_inner)
+                                                                                (*inner_ratio + delta_inner)
                                                                                     .clamp(0.1, 1.9);
                                                                         }
                                                                     }
@@ -604,21 +604,21 @@ impl DwindleLayoutSystem {
                                                                             if leaf_on_first {
                                                                                 *inner_ratio =
                                                                                     (*inner_ratio
-                                                                                        - delta_inner)
+                                                                                        + delta_inner)
                                                                                         .clamp(0.1, 1.9);
                                                                             } else {
                                                                                 *inner_ratio =
                                                                                     (*inner_ratio
-                                                                                        + delta_inner)
+                                                                                        - delta_inner)
                                                                                         .clamp(0.1, 1.9);
                                                                             }
                                                                         } else if leaf_on_first {
                                                                             *inner_ratio =
-                                                                                (*inner_ratio + delta_inner)
+                                                                                (*inner_ratio - delta_inner)
                                                                                     .clamp(0.1, 1.9);
                                                                         } else {
                                                                             *inner_ratio =
-                                                                                (*inner_ratio - delta_inner)
+                                                                                (*inner_ratio + delta_inner)
                                                                                     .clamp(0.1, 1.9);
                                                                         }
                                                                     }
@@ -653,10 +653,10 @@ impl DwindleLayoutSystem {
                 let is_first = Some(node) == parent.first_child(&self.core.tree.map);
                 let delta = amount as f32;
                 if is_first {
-                    let new_ratio = (*ratio - delta).clamp(0.1, 1.9);
+                    let new_ratio = (*ratio + delta).clamp(0.1, 1.9);
                     *ratio = new_ratio;
                 } else {
-                    let new_ratio = (*ratio + delta).clamp(0.1, 1.9);
+                    let new_ratio = (*ratio - delta).clamp(0.1, 1.9);
                     *ratio = new_ratio;
                 }
                 break;
