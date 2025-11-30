@@ -462,160 +462,165 @@ impl DwindleLayoutSystem {
         if self.settings.smart_resizing {
             if let (Some(cursor), Some(rects)) = (cursor, rects.as_ref()) {
                 let sel_snapshot = self.selection_of_layout(layout);
-                if let Some(mut node) = sel_snapshot {
+                if let Some(node) = sel_snapshot {
                     let leaf = self.descend_to_leaf(node);
                     if let Some(rect) = rects.get(&leaf).copied() {
+                        let screen = frame.map(|f| f.screen).unwrap_or(rect);
                         let leaf_id = leaf;
-                        let contains = |root: NodeId, target: NodeId| {
-                            root.traverse_preorder(&self.core.tree.map).any(|n| n == target)
-                        };
                         let min_x = rect.origin.x;
                         let max_x = rect.origin.x + rect.size.width;
                         let min_y = rect.origin.y;
                         let max_y = rect.origin.y + rect.size.height;
-                        let dist_left = (cursor.x - min_x).abs();
-                        let dist_right = (cursor.x - max_x).abs();
-                        let dist_top = (cursor.y - min_y).abs();
-                        let dist_bottom = (cursor.y - max_y).abs();
-                        let (orientation, dir_is_first_side) =
-                            if dist_left.min(dist_right) < dist_top.min(dist_bottom) {
-                                // horizontal axis
-                                let dir_first = cursor.x <= (min_x + max_x) / 2.0;
-                                (Orientation::Horizontal, dir_first)
-                            } else {
-                                let dir_first = cursor.y <= (min_y + max_y) / 2.0;
-                                (Orientation::Vertical, dir_first)
-                            };
+                        let center_x = (min_x + max_x) / 2.0;
+                        let center_y = (min_y + max_y) / 2.0;
 
-                        let mut applied = 0;
-                        while let Some(parent) = node.parent(&self.core.tree.map) {
-                            let stored_orientation = match self.core.kind.get(parent) {
-                                Some(NodeKind::Split { orientation: o, .. }) => Some(*o),
-                                _ => None,
-                            };
-                            let parent_orientation = stored_orientation
-                                .map(|o| {
-                                    rects
-                                        .get(&parent)
-                                        .copied()
-                                        .map(|r| self.effective_orientation(r, o))
-                                        .unwrap_or(o)
-                                })
-                                .unwrap_or(Orientation::Horizontal);
+                        // Detect edge pinning (similar to Hypr STICKS)
+                        const STICKS_TOLERANCE: f64 = 2.0;
+                        let screen_left = screen.origin.x;
+                        let screen_right = screen.origin.x + screen.size.width;
+                        let screen_top = screen.origin.y;
+                        let screen_bottom = screen.origin.y + screen.size.height;
+                        let pinned_h = (min_x - screen_left).abs() < STICKS_TOLERANCE
+                            && (max_x - screen_right).abs() < STICKS_TOLERANCE;
+                        let pinned_v = (min_y - screen_top).abs() < STICKS_TOLERANCE
+                            && (max_y - screen_bottom).abs() < STICKS_TOLERANCE;
 
-                            if parent_orientation == orientation {
-                                if let Some(NodeKind::Split { ratio, .. }) =
-                                    self.core.kind.get_mut(parent)
-                                {
-                                    let is_first =
-                                        Some(node) == parent.first_child(&self.core.tree.map);
-                                    let scale = 0.5_f32.powi(applied);
-                                    let delta = (amount as f32) * scale;
-                                    match orientation {
-                                        Orientation::Horizontal => {
-                                            if dir_is_first_side {
-                                                if is_first {
-                                                    *ratio = (*ratio - delta).clamp(0.1, 1.9);
-                                                } else {
+                        let dir_first_h = cursor.x <= center_x;
+                        let dir_first_v = cursor.y <= center_y;
+
+                        let mut adjust_axis =
+                            |orientation: Orientation, dir_first: bool, allow: bool| {
+                            if !allow {
+                                return;
+                            }
+                            let mut node_local = node;
+                            let mut applied = 0;
+                            while let Some(parent) = node_local.parent(&self.core.tree.map) {
+                                let stored_orientation = match self.core.kind.get(parent) {
+                                    Some(NodeKind::Split { orientation: o, .. }) => Some(*o),
+                                    _ => None,
+                                };
+                                let parent_orientation = stored_orientation
+                                    .map(|o| {
+                                        rects
+                                            .get(&parent)
+                                            .copied()
+                                            .map(|r| self.effective_orientation(r, o))
+                                            .unwrap_or(o)
+                                    })
+                                    .unwrap_or(Orientation::Horizontal);
+
+                                if parent_orientation == orientation {
+                                    if let Some(NodeKind::Split { ratio, .. }) =
+                                        self.core.kind.get_mut(parent)
+                                    {
+                                        let is_first =
+                                            Some(node_local) == parent.first_child(&self.core.tree.map);
+                                        let scale = 0.5_f32.powi(applied);
+                                        let delta = (amount as f32) * scale;
+                                        match orientation {
+                                            Orientation::Horizontal => {
+                                                if dir_first {
+                                                    if is_first {
+                                                        *ratio = (*ratio - delta).clamp(0.1, 1.9);
+                                                    } else {
+                                                        *ratio = (*ratio + delta).clamp(0.1, 1.9);
+                                                    }
+                                                } else if is_first {
                                                     *ratio = (*ratio + delta).clamp(0.1, 1.9);
+                                                } else {
+                                                    *ratio = (*ratio - delta).clamp(0.1, 1.9);
                                                 }
-                                            } else if is_first {
-                                                *ratio = (*ratio + delta).clamp(0.1, 1.9);
-                                            } else {
-                                                *ratio = (*ratio - delta).clamp(0.1, 1.9);
+                                            }
+                                            Orientation::Vertical => {
+                                                if dir_first {
+                                                    if is_first {
+                                                        *ratio = (*ratio - delta).clamp(0.1, 1.9);
+                                                    } else {
+                                                        *ratio = (*ratio + delta).clamp(0.1, 1.9);
+                                                    }
+                                                } else if is_first {
+                                                    *ratio = (*ratio + delta).clamp(0.1, 1.9);
+                                                } else {
+                                                    *ratio = (*ratio - delta).clamp(0.1, 1.9);
+                                                }
                                             }
                                         }
-                                        Orientation::Vertical => {
-                                            if dir_is_first_side {
-                                                if is_first {
-                                                    *ratio = (*ratio - delta).clamp(0.1, 1.9);
-                                                } else {
-                                                    *ratio = (*ratio + delta).clamp(0.1, 1.9);
-                                                }
-                                            } else if is_first {
-                                                *ratio = (*ratio + delta).clamp(0.1, 1.9);
-                                            } else {
-                                                *ratio = (*ratio - delta).clamp(0.1, 1.9);
-                                            }
-                                        }
-                                    }
-                                    applied += 1;
-                                    // Adjust the inner split on the same axis if the child is also split (Hypr-style)
-                                    if applied == 1 {
-                                        if let Some(NodeKind::Split {
-                                            orientation: stored_child,
-                                            ..
-                                        }) = self.core.kind.get(node)
-                                        {
+                                        applied += 1;
+                                        if applied == 1 {
+                                            if let Some(NodeKind::Split {
+                                                orientation: stored_child,
+                                                ..
+                                            }) = self.core.kind.get(node_local)
+                                            {
                                             let child_orientation = rects
-                                                .get(&node)
+                                                .get(&node_local)
                                                 .copied()
                                                 .map(|r| self.effective_orientation(r, *stored_child))
                                                 .unwrap_or(*stored_child);
                                             if child_orientation == orientation {
                                                 let children: Vec<_> =
-                                                    node.children(&self.core.tree.map).collect();
+                                                    node_local.children(&self.core.tree.map).collect();
                                                 if children.len() == 2 {
-                                                    let leaf_on_first =
-                                                        contains(children[0], leaf_id);
-                                                    let leaf_on_second =
-                                                        contains(children[1], leaf_id);
-                                                    if leaf_on_first || leaf_on_second {
-                                                        if let Some(NodeKind::Split {
-                                                            ratio: inner_ratio,
-                                                            ..
-                                                        }) = self.core.kind.get_mut(node)
-                                                        {
-                                                            let delta_inner = delta * 0.5;
-                                                            match orientation {
-                                                                Orientation::Horizontal => {
-                                                                    if dir_is_first_side {
-                                                                        if leaf_on_first {
+                                                    let leaf_on_first = children[0]
+                                                        .traverse_preorder(&self.core.tree.map)
+                                                        .any(|n| n == leaf_id);
+                                                    let leaf_on_second = children[1]
+                                                        .traverse_preorder(&self.core.tree.map)
+                                                        .any(|n| n == leaf_id);
+                                                        if leaf_on_first || leaf_on_second {
+                                                            if let Some(NodeKind::Split {
+                                                                ratio: inner_ratio,
+                                                                ..
+                                                            }) = self.core.kind.get_mut(node_local)
+                                                            {
+                                                                let delta_inner = delta * 0.5;
+                                                                match orientation {
+                                                                    Orientation::Horizontal => {
+                                                                        if dir_first {
+                                                                            if leaf_on_first {
+                                                                                *inner_ratio =
+                                                                                    (*inner_ratio
+                                                                                        - delta_inner)
+                                                                                        .clamp(0.1, 1.9);
+                                                                            } else {
+                                                                                *inner_ratio =
+                                                                                    (*inner_ratio
+                                                                                        + delta_inner)
+                                                                                        .clamp(0.1, 1.9);
+                                                                            }
+                                                                        } else if leaf_on_first {
                                                                             *inner_ratio =
-                                                                                (*inner_ratio
-                                                                                    - delta_inner)
+                                                                                (*inner_ratio + delta_inner)
                                                                                     .clamp(0.1, 1.9);
                                                                         } else {
                                                                             *inner_ratio =
-                                                                                (*inner_ratio
-                                                                                    + delta_inner)
+                                                                                (*inner_ratio - delta_inner)
                                                                                     .clamp(0.1, 1.9);
                                                                         }
-                                                                    } else if leaf_on_first {
-                                                                        *inner_ratio =
-                                                                            (*inner_ratio
-                                                                                + delta_inner)
-                                                                                .clamp(0.1, 1.9);
-                                                                    } else {
-                                                                        *inner_ratio =
-                                                                            (*inner_ratio
-                                                                                - delta_inner)
-                                                                                .clamp(0.1, 1.9);
                                                                     }
-                                                                }
-                                                                Orientation::Vertical => {
-                                                                    if dir_is_first_side {
-                                                                        if leaf_on_first {
+                                                                    Orientation::Vertical => {
+                                                                        if dir_first {
+                                                                            if leaf_on_first {
+                                                                                *inner_ratio =
+                                                                                    (*inner_ratio
+                                                                                        - delta_inner)
+                                                                                        .clamp(0.1, 1.9);
+                                                                            } else {
+                                                                                *inner_ratio =
+                                                                                    (*inner_ratio
+                                                                                        + delta_inner)
+                                                                                        .clamp(0.1, 1.9);
+                                                                            }
+                                                                        } else if leaf_on_first {
                                                                             *inner_ratio =
-                                                                                (*inner_ratio
-                                                                                    - delta_inner)
+                                                                                (*inner_ratio + delta_inner)
                                                                                     .clamp(0.1, 1.9);
                                                                         } else {
                                                                             *inner_ratio =
-                                                                                (*inner_ratio
-                                                                                    + delta_inner)
+                                                                                (*inner_ratio - delta_inner)
                                                                                     .clamp(0.1, 1.9);
                                                                         }
-                                                                    } else if leaf_on_first {
-                                                                        *inner_ratio =
-                                                                            (*inner_ratio
-                                                                                + delta_inner)
-                                                                                .clamp(0.1, 1.9);
-                                                                    } else {
-                                                                        *inner_ratio =
-                                                                            (*inner_ratio
-                                                                                - delta_inner)
-                                                                                .clamp(0.1, 1.9);
                                                                     }
                                                                 }
                                                             }
@@ -626,9 +631,13 @@ impl DwindleLayoutSystem {
                                         }
                                     }
                                 }
+                                node_local = parent;
                             }
-                            node = parent;
-                        }
+                        };
+
+                        adjust_axis(Orientation::Horizontal, dir_first_h, !pinned_h);
+                        adjust_axis(Orientation::Vertical, dir_first_v, !pinned_v);
+                        return;
                     }
                 }
             }
