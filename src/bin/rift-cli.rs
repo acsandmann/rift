@@ -1,10 +1,10 @@
+use std::io::{self, Write};
 use std::process::{self};
 
 use clap::{Parser, Subcommand};
 use rift_wm::actor::reactor::{self, DisplaySelector, FocusDisplaySelector};
 use rift_wm::ipc::{RiftCommand, RiftMachClient, RiftRequest, RiftResponse};
 use rift_wm::layout_engine as layout;
-use rift_wm::model::server::{ApplicationData, LayoutStateData, WindowData, WorkspaceData};
 use rift_wm::sys::window_server::WindowServerId;
 use serde_json::Value;
 
@@ -362,7 +362,10 @@ fn main() {
     match client.send_request(&request) {
         Ok(resp) => match resp {
             RiftResponse::Success { data } => {
-                if let Err(e) = handle_success_response(&request, data) {
+                if let Err(e) = write_json(
+                    &data,
+                    std::env::var("RIFT_CLI_PRETTY").map(|v| v != "0").unwrap_or(false),
+                ) {
                     eprintln!("Failed to handle response: {}", e);
                     process::exit(1);
                 }
@@ -729,54 +732,16 @@ fn parse_focus_direction(value: &str) -> Result<layout::Direction, String> {
     }
 }
 
-fn handle_success_response(request: &RiftRequest, data: serde_json::Value) -> Result<(), String> {
-    match request {
-        RiftRequest::GetWorkspaces { .. } => {
-            let typed: Vec<WorkspaceData> = serde_json::from_value(data)
-                .map_err(|e| format!("Deserialization error: {}", e))?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&typed).map_err(|e| e.to_string())?
-            );
-        }
-        RiftRequest::GetWindows { .. } => {
-            let typed: Vec<WindowData> = serde_json::from_value(data)
-                .map_err(|e| format!("Deserialization error: {}", e))?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&typed).map_err(|e| e.to_string())?
-            );
-        }
-        RiftRequest::GetWindowInfo { .. } => {
-            let typed: WindowData = serde_json::from_value(data)
-                .map_err(|e| format!("Deserialization error: {}", e))?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&typed).map_err(|e| e.to_string())?
-            );
-        }
-        RiftRequest::GetApplications => {
-            let typed: Vec<ApplicationData> = serde_json::from_value(data)
-                .map_err(|e| format!("Deserialization error: {}", e))?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&typed).map_err(|e| e.to_string())?
-            );
-        }
-        RiftRequest::GetLayoutState { .. } => {
-            let typed: LayoutStateData = serde_json::from_value(data)
-                .map_err(|e| format!("Deserialization error: {}", e))?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&typed).map_err(|e| e.to_string())?
-            );
-        }
-        _ => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?
-            );
-        }
+fn write_json(value: &Value, pretty: bool) -> Result<(), String> {
+    let stdout = io::stdout();
+    let mut handle = stdout.lock();
+    let mut writer = io::BufWriter::new(&mut handle);
+
+    if pretty {
+        serde_json::to_writer_pretty(&mut writer, value).map_err(|e| e.to_string())?;
+    } else {
+        serde_json::to_writer(&mut writer, value).map_err(|e| e.to_string())?;
     }
-    Ok(())
+    writer.write_all(b"\n").map_err(|e| e.to_string())?;
+    writer.flush().map_err(|e| e.to_string())
 }

@@ -1,4 +1,4 @@
-use std::ffi::{CString, c_char};
+use std::ffi::c_char;
 use std::time::Duration;
 
 use r#continue::continuation;
@@ -15,8 +15,8 @@ use crate::actor::reactor::{self, Event};
 use crate::ipc::subscriptions::SharedServerState;
 use crate::sys::dispatch::block_on;
 use crate::sys::mach::{
-    is_mach_server_registered, mach_free_response, mach_msg_header_t, mach_send_request,
-    mach_server_run, send_mach_reply,
+    is_mach_server_registered, mach_msg_header_t, mach_send_request, mach_server_run,
+    send_mach_reply,
 };
 
 type ClientPort = u32;
@@ -59,29 +59,23 @@ impl RiftMachClient {
             return Err("Not connected".to_string());
         }
 
-        let request_json = serde_json::to_string(request)
+        let request_json = serde_json::to_vec(request)
             .map_err(|e| format!("Failed to serialize request: {}", e))?;
 
-        let response_ptr = unsafe {
-            let c_request = std::ffi::CString::new(request_json.clone())
-                .map_err(|e| format!("Failed to create C string: {}", e))?;
-
+        let mut response_buf = Vec::with_capacity(256);
+        let ok = unsafe {
             mach_send_request(
-                c_request.as_ptr() as *mut std::os::raw::c_char,
+                request_json.as_ptr() as *const i8,
                 request_json.len() as u32,
+                &mut response_buf,
             )
         };
 
-        if response_ptr.is_null() {
+        if !ok || response_buf.is_empty() {
             return Err("Failed to send Mach request or no response received".to_string());
         }
 
-        let response_str = unsafe {
-            let c_str = std::ffi::CStr::from_ptr(response_ptr);
-            let response = c_str.to_string_lossy().into_owned();
-            mach_free_response(response_ptr, c_str.to_bytes().len() as u32);
-            response
-        };
+        let response_str = String::from_utf8_lossy(&response_buf).into_owned();
 
         let response: RiftResponse = serde_json::from_str(&response_str)
             .map_err(|e| format!("Failed to parse response JSON: {}", e))?;
@@ -444,14 +438,13 @@ unsafe extern "C" fn handle_mach_request_c(
 }
 
 fn send_response(original_msg: *mut mach_msg_header_t, response: &RiftResponse) {
-    let response_json = serde_json::to_string(response).unwrap();
-    let c_response = CString::new(response_json).unwrap();
+    let response_json = serde_json::to_vec(response).unwrap();
 
     unsafe {
         if !send_mach_reply(
             original_msg,
-            c_response.as_ptr() as *mut c_char,
-            c_response.as_bytes().len() as u32,
+            response_json.as_ptr() as *mut c_char,
+            response_json.len() as u32,
         ) {
             error!(
                 "Failed to send mach reply for message id {}",
