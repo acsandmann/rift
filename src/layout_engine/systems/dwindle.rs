@@ -644,10 +644,10 @@ impl DwindleLayoutSystem {
 
     fn aspect_orientation(&self, rect: Option<CGRect>) -> Orientation {
         if let Some(r) = rect {
-            if r.size.width > r.size.height * self.settings.split_width_multiplier as f64 {
-                Orientation::Horizontal
-            } else {
+            if r.size.height * self.settings.split_width_multiplier as f64 > r.size.width {
                 Orientation::Vertical
+            } else {
+                Orientation::Horizontal
             }
         } else {
             Orientation::Horizontal
@@ -845,6 +845,66 @@ impl DwindleLayoutSystem {
             };
             self.core.tree.data.selection.select(&self.core.tree.map, new_sel);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::collections::HashMap;
+    use crate::common::config::{
+        GapSettings, HorizontalPlacement, InnerGaps, OuterGaps, VerticalPlacement,
+    };
+
+    fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
+
+    fn zero_gaps() -> GapSettings {
+        GapSettings {
+            outer: OuterGaps::default(),
+            inner: InnerGaps::uniform(0.0),
+            per_display: HashMap::default(),
+        }
+    }
+
+    #[test]
+    fn square_splits_horizontal_then_vertical() {
+        let mut system = DwindleLayoutSystem::default();
+        let layout = system.create_layout();
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(100.0, 100.0));
+        let gaps = zero_gaps();
+
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+        system.add_window_after_selection(layout, w(3));
+
+        let placements = system.calculate_layout(
+            layout,
+            screen,
+            0.0,
+            &gaps,
+            0.0,
+            HorizontalPlacement::default(),
+            VerticalPlacement::default(),
+        );
+        let map: HashMap<WindowId, CGRect> = placements.into_iter().collect();
+
+        let r1 = map[&w(1)];
+        assert_eq!(r1.origin.x, 0.0);
+        assert_eq!(r1.origin.y, 0.0);
+        assert_eq!(r1.size.width, 50.0);
+        assert_eq!(r1.size.height, 100.0);
+
+        let r2 = map[&w(2)];
+        assert_eq!(r2.origin.x, 50.0);
+        assert_eq!(r2.origin.y, 0.0);
+        assert_eq!(r2.size.width, 50.0);
+        assert_eq!(r2.size.height, 50.0);
+
+        let r3 = map[&w(3)];
+        assert_eq!(r3.origin.x, 50.0);
+        assert_eq!(r3.origin.y, 50.0);
+        assert_eq!(r3.size.width, 50.0);
+        assert_eq!(r3.size.height, 50.0);
     }
 }
 
