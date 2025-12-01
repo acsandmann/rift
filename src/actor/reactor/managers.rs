@@ -20,6 +20,7 @@ use crate::common::config::{Config, WindowSnappingSettings};
 use crate::layout_engine::LayoutEngine;
 use crate::sys::screen::{ScreenId, SpaceId};
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
+use crate::ui::drag_feedback::{DragFeedback, FeedbackKind};
 
 /// Manages window state and lifecycle
 pub struct WindowManager {
@@ -105,10 +106,14 @@ pub struct DragManager {
     pub drag_state: super::DragState,
     pub drag_swap_manager: DragSwapManager,
     pub skip_layout_for_window: Option<WindowId>,
+    pub drag_feedback: Option<DragFeedback>,
 }
 
 impl DragManager {
-    pub fn reset(&mut self) { self.drag_swap_manager.reset(); }
+    pub fn reset(&mut self) {
+        self.drag_swap_manager.reset();
+        self.hide_feedback();
+    }
 
     pub fn last_target(&self) -> Option<WindowId> { self.drag_swap_manager.last_target() }
 
@@ -118,6 +123,22 @@ impl DragManager {
 
     pub fn update_config(&mut self, config: WindowSnappingSettings) {
         self.drag_swap_manager.update_config(config);
+    }
+
+    pub fn show_feedback(&mut self, frame: CGRect, relative_to: Option<u32>, kind: FeedbackKind) {
+        if let Some(feedback) = self.drag_feedback.as_mut() {
+            if let Err(err) = feedback.show(frame, relative_to, kind) {
+                trace!(error=?err, "failed to show drag feedback overlay");
+            }
+        }
+    }
+
+    pub fn hide_feedback(&mut self) {
+        if let Some(feedback) = self.drag_feedback.as_mut() {
+            if let Err(err) = feedback.hide() {
+                trace!(error=?err, "failed to hide drag feedback overlay");
+            }
+        }
     }
 }
 

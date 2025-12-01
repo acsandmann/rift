@@ -61,6 +61,7 @@ use crate::sys::window_server::{
     self, WindowServerId, WindowServerInfo, current_cursor_location, space_is_fullscreen,
     wait_for_native_fullscreen_transition, window_level,
 };
+use crate::ui::drag_feedback::FeedbackKind;
 
 pub type Sender = actor::Sender<Event>;
 type Receiver = actor::Receiver<Event>;
@@ -508,6 +509,7 @@ impl Reactor {
                     config.settings.window_snapping.clone(),
                 ),
                 skip_layout_for_window: None,
+                drag_feedback: crate::ui::drag_feedback::DragFeedback::new().ok(),
             },
             workspace_switch_manager: managers::WorkspaceSwitchManager {
                 workspace_switch_state: WorkspaceSwitchState::Inactive,
@@ -1951,6 +1953,7 @@ impl Reactor {
     fn maybe_swap_on_drag(&mut self, wid: WindowId, new_frame: CGRect) {
         if !self.is_in_drag() {
             trace!(?wid, "Skipping swap: not in drag (mouse up received)");
+            self.drag_manager.hide_feedback();
             return;
         }
 
@@ -1959,6 +1962,7 @@ impl Reactor {
 
         let server_id = {
             let Some(window) = self.window_manager.windows.get(&wid) else {
+                self.drag_manager.hide_feedback();
                 return;
             };
 
@@ -1967,6 +1971,7 @@ impl Reactor {
                 .is_some_and(|wsid| self.space_manager.changing_screens.contains(&wsid))
             {
                 trace!(?wid, "Skipping swap: window is changing screens");
+                self.drag_manager.hide_feedback();
                 return;
             }
 
@@ -1980,6 +1985,7 @@ impl Reactor {
         } else {
             self.best_space_for_window(&new_frame, server_id)
         }) else {
+            self.drag_manager.hide_feedback();
             return;
         };
 
@@ -2012,12 +2018,13 @@ impl Reactor {
                     ?space,
                     "Resetting drag swap tracking after space change"
                 );
-                self.drag_manager.drag_swap_manager.reset();
+                self.drag_manager.reset();
                 return;
             }
         }
 
         if !self.layout_manager.layout_engine.is_window_in_active_workspace(space, wid) {
+            self.drag_manager.hide_feedback();
             return;
         }
 
@@ -2046,11 +2053,29 @@ impl Reactor {
         }
 
         let previous_pending = self.get_pending_drag_action();
-        let new_candidate =
-            self.drag_manager.drag_swap_manager.on_frame_change(wid, new_frame, &candidates);
+        let overlap_move_threshold = if overlap_action == DragOverlapAction::Move {
+            Some(0.0)
+        } else {
+            None
+        };
+        let new_candidate = self.drag_manager.drag_swap_manager.on_frame_change(
+            wid,
+            new_frame,
+            &candidates,
+            overlap_move_threshold,
+        );
         let active_target = self.drag_manager.drag_swap_manager.last_target();
 
         if let Some(target_wid) = active_target {
+            if let Some(target_state) = self.window_manager.windows.get(&target_wid) {
+                let relative = target_state.window_server_id.map(|id| id.as_u32());
+                let kind = match overlap_action {
+                    DragOverlapAction::Move => FeedbackKind::Outline { fill: true },
+                    _ => FeedbackKind::Outline { fill: false },
+                };
+                self.drag_manager.show_feedback(target_state.frame_monotonic, relative, kind);
+            }
+
             if new_candidate.is_some()
                 || previous_pending != Some((wid, target_wid, overlap_action))
             {
@@ -2099,6 +2124,9 @@ impl Reactor {
             if self.drag_manager.skip_layout_for_window == Some(wid) {
                 self.drag_manager.skip_layout_for_window = None;
             }
+
+            // No active target: ensure the overlay stays hidden instead of lingering or filling the screen.
+            self.drag_manager.hide_feedback();
         }
         // wait for mouse::up before doing *anything*
     }
