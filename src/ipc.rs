@@ -448,7 +448,11 @@ unsafe extern "C" fn handle_mach_request_c(
 }
 
 fn send_response(original_msg: *mut mach_msg_header_t, response: &RiftResponse) {
-    let response_json = serde_json::to_vec(response).unwrap();
+    let mut response_json = serde_json::to_vec(response).unwrap();
+
+    if response_json.last().copied() != Some(0) {
+        response_json.push(0);
+    }
 
     unsafe {
         if !send_mach_reply(

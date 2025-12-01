@@ -201,11 +201,12 @@ impl ServerState {
 
     fn send_event_to_client(client_port: ClientPort, event_json: &str) {
         let c_message = CString::new(event_json).unwrap_or_default();
+        let bytes = c_message.as_bytes_with_nul();
         unsafe {
             let result = mach_send_message(
                 client_port,
                 c_message.as_ptr() as *mut c_char,
-                event_json.len() as u32,
+                bytes.len() as u32,
                 false,
                 None,
             );
