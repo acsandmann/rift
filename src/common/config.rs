@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use super::collections::HashMap;
 use crate::actor::wm_controller::WmCommand;
-use crate::sys::hotkey::{Hotkey, HotkeySpec};
+use crate::sys::hotkey::{Hotkey, HotkeySpec, Modifiers};
 
 const MAX_WORKSPACES: usize = 32;
 
@@ -424,11 +424,34 @@ impl Default for GestureSettings {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default, Copy)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DragOverlapAction {
+    #[default]
+    Swap,
+    Stack,
+    Move,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
+#[serde(deny_unknown_fields)]
+pub struct DragOverlapOverride {
+    #[serde(default, with = "crate::sys::hotkey::modifier_serde")]
+    pub modifiers: Modifiers,
+    pub action: DragOverlapAction,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct WindowSnappingSettings {
     #[serde(default = "default_drag_swap_fraction")]
     pub drag_swap_fraction: f64,
+    /// Default behavior when dragging a window over another.
+    #[serde(default = "default_drag_overlap_action")]
+    pub drag_overlap_default_action: DragOverlapAction,
+    /// Optional overrides keyed by modifier combinations (e.g., Shift).
+    #[serde(default = "default_drag_overlap_overrides")]
+    pub drag_overlap_overrides: Vec<DragOverlapOverride>,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
@@ -501,6 +524,15 @@ pub struct MissionControlSettings {
 fn default_mission_control_fade_duration_ms() -> f64 { 180.0 }
 
 fn default_drag_swap_fraction() -> f64 { 0.3 }
+
+fn default_drag_overlap_action() -> DragOverlapAction { DragOverlapAction::Swap }
+
+fn default_drag_overlap_overrides() -> Vec<DragOverlapOverride> {
+    vec![DragOverlapOverride {
+        modifiers: Modifiers::SHIFT,
+        action: DragOverlapAction::Stack,
+    }]
+}
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
 #[serde(rename_all = "snake_case")]

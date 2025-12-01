@@ -120,7 +120,7 @@ impl CommandEventHandler {
 
         reactor
             .drag_manager
-            .update_config(reactor.config_manager.config.settings.window_snapping);
+            .update_config(reactor.config_manager.config.settings.window_snapping.clone());
 
         if let Some(tx) = &reactor.communication_manager.stack_line_tx {
             if let Err(e) = tx.try_send(StackLineEvent::ConfigUpdated(

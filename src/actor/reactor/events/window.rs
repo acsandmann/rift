@@ -89,11 +89,11 @@ impl WindowEventHandler {
         reactor.window_manager.windows.remove(&wid);
         reactor.send_layout_event(LayoutEvent::WindowRemoved(wid));
 
-        if let DragState::PendingSwap { session, target } = &reactor.drag_manager.drag_state {
+        if let DragState::PendingDrop { session, target, .. } = &reactor.drag_manager.drag_state {
             if session.window == wid || *target == wid {
                 trace!(
                     ?wid,
-                    "Clearing pending drag swap because a participant window was destroyed"
+                    "Clearing pending drag action because a participant window was destroyed"
                 );
                 reactor.drag_manager.drag_state = DragState::Inactive;
             }
@@ -284,7 +284,7 @@ impl WindowEventHandler {
             let dragging = event_mouse_state == Some(MouseState::Down)
                 || matches!(
                     reactor.drag_manager.drag_state,
-                    DragState::Active { .. } | DragState::PendingSwap { .. }
+                    DragState::Active { .. } | DragState::PendingDrop { .. }
                 );
 
             if !dragging && !triggered_by_rift {
@@ -321,7 +321,7 @@ impl WindowEventHandler {
                 if old_space != new_space {
                     if matches!(
                         reactor.drag_manager.drag_state,
-                        DragState::Active { .. } | DragState::PendingSwap { .. }
+                        DragState::Active { .. } | DragState::PendingDrop { .. }
                     ) || matches!(
                         &reactor.drag_manager.drag_state,
                         DragState::Active { session } if session.window == wid
@@ -418,7 +418,7 @@ fn handle_mouse_up_if_needed(reactor: &mut Reactor, mouse_state: Option<MouseSta
     if mouse_state == Some(MouseState::Up)
         && (matches!(
             reactor.drag_manager.drag_state,
-            DragState::Active { .. } | DragState::PendingSwap { .. }
+            DragState::Active { .. } | DragState::PendingDrop { .. }
         ) || reactor.drag_manager.skip_layout_for_window.is_some())
     {
         DragEventHandler::handle_mouse_up(reactor);

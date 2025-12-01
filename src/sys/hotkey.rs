@@ -5,7 +5,7 @@ use anyhow::anyhow;
 use objc2_core_graphics::{CGEvent, CGEventField, CGEventFlags};
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Hash, Default)]
 pub struct Modifiers(u8);
 
 impl Modifiers {
@@ -15,6 +15,10 @@ impl Modifiers {
     pub const SHIFT: Modifiers = Modifiers(0b0001);
 
     pub fn empty() -> Self { Modifiers(0) }
+
+    pub fn bits(self) -> u8 { self.0 }
+
+    pub fn from_bits(bits: u8) -> Self { Modifiers(bits) }
 
     pub fn contains(&self, other: Modifiers) -> bool { (self.0 & other.0) == other.0 }
 
@@ -42,6 +46,39 @@ impl Modifiers {
             }
             _ => false,
         }
+    }
+}
+
+pub mod modifier_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use super::Modifiers;
+
+    pub fn serialize<S>(mods: &Modifiers, serializer: S) -> Result<S::Ok, S::Error>
+    where S: Serializer {
+        let s = mods.to_string().to_lowercase();
+        serializer.serialize_str(&s)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Modifiers, D::Error>
+    where D: Deserializer<'de> {
+        let raw = String::deserialize(deserializer)?;
+        if raw.trim().is_empty() {
+            return Ok(Modifiers::empty());
+        }
+
+        let mut mods = Modifiers::empty();
+        for token in raw.split('+') {
+            let token = token.trim();
+            if token.is_empty() {
+                continue;
+            }
+            if !mods.insert_from_token(token) {
+                return Err(serde::de::Error::custom(format!("Unknown modifier: {token}")));
+            }
+        }
+
+        Ok(mods)
     }
 }
 

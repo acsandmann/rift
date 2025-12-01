@@ -46,7 +46,7 @@ use crate::actor::raise_manager::{self, RaiseManager, RaiseRequest};
 use crate::actor::reactor::events::window_discovery::WindowDiscoveryHandler;
 use crate::actor::{self, menu_bar, stack_line};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
-use crate::common::config::Config;
+use crate::common::config::{Config, DragOverlapAction};
 use crate::common::log::MetricsCommand;
 use crate::layout_engine::{self as layout, Direction, LayoutCommand, LayoutEngine, LayoutEvent};
 use crate::model::VirtualWorkspaceId;
@@ -54,6 +54,7 @@ use crate::model::tx_store::WindowTxStore;
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt};
+use crate::sys::hotkey::Modifiers;
 use crate::sys::screen::{ScreenId, SpaceId, get_active_space_number};
 use crate::sys::timer::Timer;
 use crate::sys::window_server::{
@@ -309,9 +310,10 @@ pub enum DragState {
     Active {
         session: DragSession,
     },
-    PendingSwap {
+    PendingDrop {
         session: DragSession,
         target: WindowId,
+        action: DragOverlapAction,
     },
 }
 
@@ -503,7 +505,7 @@ impl Reactor {
             drag_manager: managers::DragManager {
                 drag_state: DragState::Inactive,
                 drag_swap_manager: crate::actor::drag_swap::DragManager::new(
-                    config.settings.window_snapping,
+                    config.settings.window_snapping.clone(),
                 ),
                 skip_layout_for_window: None,
             },
@@ -564,7 +566,7 @@ impl Reactor {
     fn is_in_drag(&self) -> bool {
         matches!(
             self.drag_manager.drag_state,
-            DragState::Active { .. } | DragState::PendingSwap { .. }
+            DragState::Active { .. } | DragState::PendingDrop { .. }
         )
     }
 
@@ -575,9 +577,9 @@ impl Reactor {
         )
     }
 
-    fn get_pending_drag_swap(&self) -> Option<(WindowId, WindowId)> {
-        if let DragState::PendingSwap { session, target } = &self.drag_manager.drag_state {
-            Some((session.window, *target))
+    fn get_pending_drag_action(&self) -> Option<(WindowId, WindowId, DragOverlapAction)> {
+        if let DragState::PendingDrop { session, target, action } = &self.drag_manager.drag_state {
+            Some((session.window, *target, *action))
         } else {
             None
         }
@@ -602,7 +604,7 @@ impl Reactor {
     fn take_active_drag_session(&mut self) -> Option<DragSession> {
         match std::mem::replace(&mut self.drag_manager.drag_state, DragState::Inactive) {
             DragState::Active { session } => Some(session),
-            DragState::PendingSwap { session, .. } => Some(session),
+            DragState::PendingDrop { session, .. } => Some(session),
             _ => None,
         }
     }
@@ -1342,6 +1344,16 @@ impl Reactor {
         }
     }
 
+    fn drag_overlap_action(&self, modifiers: Modifiers) -> DragOverlapAction {
+        let settings = &self.config_manager.config.settings.window_snapping;
+        settings
+            .drag_overlap_overrides
+            .iter()
+            .find(|ov| modifiers.contains(ov.modifiers))
+            .map(|ov| ov.action)
+            .unwrap_or(settings.drag_overlap_default_action)
+    }
+
     fn pid_has_changing_screens(&self, pid: pid_t) -> bool {
         self.space_manager.changing_screens.iter().any(|wsid| {
             if let Some(wid) = self.window_manager.window_ids.get(wsid) {
@@ -1942,6 +1954,9 @@ impl Reactor {
             return;
         }
 
+        let modifiers = crate::sys::event::get_current_modifiers();
+        let overlap_action = self.drag_overlap_action(modifiers);
+
         let server_id = {
             let Some(window) = self.window_manager.windows.get(&wid) else {
                 return;
@@ -1979,7 +1994,7 @@ impl Reactor {
 
         if let Some(origin_space) = origin_space_hint {
             if origin_space != space {
-                if let Some((pending_wid, pending_target)) = self.get_pending_drag_swap() {
+                if let Some((pending_wid, pending_target, _)) = self.get_pending_drag_action() {
                     if pending_wid == wid {
                         trace!(
                             ?wid,
@@ -2030,28 +2045,34 @@ impl Reactor {
             candidates.push((other_wid, other_state.frame_monotonic));
         }
 
-        let previous_pending = self.get_pending_drag_swap();
+        let previous_pending = self.get_pending_drag_action();
         let new_candidate =
             self.drag_manager.drag_swap_manager.on_frame_change(wid, new_frame, &candidates);
         let active_target = self.drag_manager.drag_swap_manager.last_target();
 
         if let Some(target_wid) = active_target {
-            if new_candidate.is_some() || previous_pending != Some((wid, target_wid)) {
+            if new_candidate.is_some()
+                || previous_pending != Some((wid, target_wid, overlap_action))
+            {
                 trace!(
                     ?wid,
                     ?target_wid,
-                    "Detected swap candidate; deferring until MouseUp"
+                    ?overlap_action,
+                    "Detected drag candidate; deferring until MouseUp"
                 );
             }
 
             if let Some(session) = self.take_active_drag_session() {
-                self.drag_manager.drag_state =
-                    DragState::PendingSwap { session, target: target_wid };
+                self.drag_manager.drag_state = DragState::PendingDrop {
+                    session,
+                    target: target_wid,
+                    action: overlap_action,
+                };
             } else {
                 trace!(
                     ?wid,
                     ?target_wid,
-                    "Skipping pending swap; no active drag session"
+                    "Skipping pending drag action; no active drag session"
                 );
                 self.drag_manager.drag_state = DragState::Inactive;
                 self.drag_manager.skip_layout_for_window = None;
@@ -2060,12 +2081,12 @@ impl Reactor {
 
             self.drag_manager.skip_layout_for_window = Some(wid);
         } else {
-            if let Some((pending_wid, pending_target)) = previous_pending {
+            if let Some((pending_wid, pending_target, _)) = previous_pending {
                 if pending_wid == wid {
                     trace!(
                         ?wid,
                         ?pending_target,
-                        "Clearing pending drag swap; overlap ended before MouseUp"
+                        "Clearing pending drag action; overlap ended before MouseUp"
                     );
                     if let Some(session) = self.take_active_drag_session() {
                         self.drag_manager.drag_state = DragState::Active { session };

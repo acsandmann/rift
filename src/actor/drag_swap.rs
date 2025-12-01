@@ -200,7 +200,10 @@ mod tests {
 
     #[test]
     fn selects_candidate_based_on_scored_overlap() {
-        let mut dm = DragManager::new(WindowSnappingSettings { drag_swap_fraction: 0.3 });
+        let mut dm = DragManager::new(WindowSnappingSettings {
+            drag_swap_fraction: 0.3,
+            ..Default::default()
+        });
 
         let dragged = rect(0.0, 0.0, 100.0, 100.0);
         let wid = WindowId::new(1, 1);
@@ -214,7 +217,10 @@ mod tests {
 
     #[test]
     fn respects_last_target_to_avoid_repeats() {
-        let mut dm = DragManager::new(WindowSnappingSettings { drag_swap_fraction: 0.25 });
+        let mut dm = DragManager::new(WindowSnappingSettings {
+            drag_swap_fraction: 0.25,
+            ..Default::default()
+        });
         let wid = WindowId::new(1, 10);
         let dragged = rect(0.0, 0.0, 200.0, 100.0);
 
@@ -229,7 +235,10 @@ mod tests {
 
     #[test]
     fn clears_active_target_when_overlap_is_lost() {
-        let mut dm = DragManager::new(WindowSnappingSettings { drag_swap_fraction: 0.2 });
+        let mut dm = DragManager::new(WindowSnappingSettings {
+            drag_swap_fraction: 0.2,
+            ..Default::default()
+        });
         let wid = WindowId::new(1, 42);
         let dragged = rect(0.0, 0.0, 100.0, 100.0);
         let cand = (WindowId::new(1, 99), rect(0.0, 0.0, 60.0, 100.0));
@@ -246,7 +255,10 @@ mod tests {
 
     #[test]
     fn hysteresis_keeps_candidate_when_overlap_drops_slightly() {
-        let mut dm = DragManager::new(WindowSnappingSettings { drag_swap_fraction: 0.4 });
+        let mut dm = DragManager::new(WindowSnappingSettings {
+            drag_swap_fraction: 0.4,
+            ..Default::default()
+        });
         let wid = WindowId::new(5, 1);
         let dragged = rect(0.0, 0.0, 100.0, 100.0);
         let cand = (WindowId::new(5, 2), rect(0.0, 0.0, 50.0, 100.0)); // 50%
@@ -262,7 +274,10 @@ mod tests {
 
     #[test]
     fn switches_only_when_new_candidate_is_meaningfully_better() {
-        let mut dm = DragManager::new(WindowSnappingSettings { drag_swap_fraction: 0.3 });
+        let mut dm = DragManager::new(WindowSnappingSettings {
+            drag_swap_fraction: 0.3,
+            ..Default::default()
+        });
         let wid = WindowId::new(7, 1);
         let dragged = rect(0.0, 0.0, 120.0, 100.0);
 

@@ -62,6 +62,7 @@ pub enum LayoutCommand {
     SwitchToLastWorkspace,
 
     SwapWindows(crate::actor::app::WindowId, crate::actor::app::WindowId),
+    StackWindows(crate::actor::app::WindowId, crate::actor::app::WindowId),
 }
 
 #[non_exhaustive]
@@ -823,6 +824,16 @@ impl LayoutEngine {
             LayoutCommand::SwapWindows(a, b) => {
                 let layout = self.layout(space);
                 let _ = self.tree.swap_windows(layout, a, b);
+
+                EventResponse::default()
+            }
+
+            LayoutCommand::StackWindows(a, b) => {
+                let layout = self.layout(space);
+                let default_orientation = self.layout_settings.stack.default_orientation;
+                if !self.tree.stack_windows(layout, a, b, default_orientation) {
+                    warn!("StackWindows command ignored (missing nodes)");
+                }
 
                 EventResponse::default()
             }
@@ -1594,6 +1605,21 @@ impl LayoutEngine {
 
     fn rebalance_all_layouts(&mut self) {
         self.workspace_layouts.for_each_active(|layout| self.tree.rebalance(layout));
+    }
+
+    pub fn select_window_in_space(&mut self, space: SpaceId, wid: WindowId) -> bool {
+        if self.floating.is_floating(wid) {
+            return false;
+        }
+
+        let Some(workspace_id) = self.virtual_workspace_manager.active_workspace(space) else {
+            return false;
+        };
+        let Some(layout) = self.workspace_layouts.active(space, workspace_id) else {
+            return false;
+        };
+
+        self.tree.select_window(layout, wid)
     }
 
     pub fn is_window_in_active_workspace(&self, space: SpaceId, window_id: WindowId) -> bool {

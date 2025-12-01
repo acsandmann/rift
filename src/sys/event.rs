@@ -1,5 +1,6 @@
 use std::convert::TryFrom;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::AtomicU8;
+use std::sync::atomic::Ordering::Relaxed;
 
 use objc2_core_foundation::CGPoint;
 use objc2_core_graphics::{
@@ -22,6 +23,7 @@ pub enum MouseState {
 const MOUSE_STATE_UNKNOWN: u8 = 0;
 
 static MOUSE_STATE: AtomicU8 = AtomicU8::new(MOUSE_STATE_UNKNOWN);
+static MODIFIER_STATE: AtomicU8 = AtomicU8::new(0);
 
 impl From<MouseState> for u8 {
     fn from(state: MouseState) -> u8 { state as u8 }
@@ -39,14 +41,18 @@ impl TryFrom<u8> for MouseState {
     }
 }
 
-pub fn set_mouse_state(state: MouseState) { MOUSE_STATE.store(state.into(), Ordering::Relaxed); }
+pub fn set_mouse_state(state: MouseState) { MOUSE_STATE.store(state.into(), Relaxed); }
 
 pub fn get_mouse_state() -> Option<MouseState> {
-    match MouseState::try_from(MOUSE_STATE.load(Ordering::Relaxed)) {
+    match MouseState::try_from(MOUSE_STATE.load(Relaxed)) {
         Ok(s) => Some(s),
         Err(_) => None,
     }
 }
+
+pub fn set_current_modifiers(mods: Modifiers) { MODIFIER_STATE.store(mods.bits(), Relaxed); }
+
+pub fn get_current_modifiers() -> Modifiers { Modifiers::from_bits(MODIFIER_STATE.load(Relaxed)) }
 
 pub fn warp_mouse(point: CGPoint) -> Result<(), CGError> {
     cg_ok(unsafe { CGWarpMouseCursorPosition(point) })

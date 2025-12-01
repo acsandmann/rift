@@ -902,6 +902,77 @@ impl LayoutSystem for TraditionalLayoutSystem {
         true
     }
 
+    fn stack_windows(
+        &mut self,
+        layout: LayoutId,
+        dragged: WindowId,
+        target: WindowId,
+        default_orientation: crate::common::config::StackDefaultOrientation,
+    ) -> bool {
+        let Some(dragged_node) = self.tree.data.window.node_for(layout, dragged) else {
+            return false;
+        };
+        let Some(target_node) = self.tree.data.window.node_for(layout, target) else {
+            return false;
+        };
+
+        if dragged_node == target_node {
+            return false;
+        }
+
+        let target_parent = target_node.parent(self.map());
+
+        let stack_kind = match target_parent.map(|p| self.layout(p)) {
+            Some(LayoutKind::HorizontalStack) => LayoutKind::HorizontalStack,
+            Some(LayoutKind::VerticalStack) => LayoutKind::VerticalStack,
+            Some(LayoutKind::Horizontal) => match default_orientation {
+                crate::common::config::StackDefaultOrientation::Perpendicular => {
+                    LayoutKind::VerticalStack
+                }
+                crate::common::config::StackDefaultOrientation::Same
+                | crate::common::config::StackDefaultOrientation::Horizontal => {
+                    LayoutKind::HorizontalStack
+                }
+                crate::common::config::StackDefaultOrientation::Vertical => {
+                    LayoutKind::VerticalStack
+                }
+            },
+            Some(LayoutKind::Vertical) => match default_orientation {
+                crate::common::config::StackDefaultOrientation::Perpendicular => {
+                    LayoutKind::HorizontalStack
+                }
+                crate::common::config::StackDefaultOrientation::Same
+                | crate::common::config::StackDefaultOrientation::Vertical => {
+                    LayoutKind::VerticalStack
+                }
+                crate::common::config::StackDefaultOrientation::Horizontal => {
+                    LayoutKind::HorizontalStack
+                }
+            },
+            None => match default_orientation {
+                crate::common::config::StackDefaultOrientation::Vertical => {
+                    LayoutKind::VerticalStack
+                }
+                _ => LayoutKind::HorizontalStack,
+            },
+        };
+
+        let container = if target_parent.is_some_and(|p| self.layout(p).is_stacked()) {
+            target_parent.unwrap()
+        } else {
+            self.nest_in_container_internal(layout, target_node, stack_kind)
+        };
+
+        // Ensure the container is stacked even if nest_in_container_internal reused an
+        // existing parent.
+        self.tree.data.layout.set_kind(container, stack_kind);
+
+        let _ = dragged_node.detach(&mut self.tree).insert_after(target_node).finish();
+
+        self.select(container);
+        true
+    }
+
     fn toggle_tile_orientation(&mut self, layout: LayoutId) {
         use crate::layout_engine::LayoutKind;
 

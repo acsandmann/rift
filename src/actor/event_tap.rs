@@ -19,7 +19,9 @@ use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{Config, HapticPattern};
 use crate::common::log::trace_misc;
 use crate::layout_engine::LayoutCommand as LC;
-use crate::sys::event::{self, Hotkey, KeyCode, MouseState, set_mouse_state};
+use crate::sys::event::{
+    self, Hotkey, KeyCode, MouseState, set_current_modifiers, set_mouse_state,
+};
 use crate::sys::geometry::CGRectExt;
 use crate::sys::haptics;
 use crate::sys::hotkey::{
@@ -299,6 +301,9 @@ impl EventTap {
             return true;
         }
 
+        let flags = CGEvent::flags(Some(event));
+        set_current_modifiers(modifiers_from_flags(flags));
+
         match event_type {
             CGEventType::LeftMouseDown | CGEventType::RightMouseDown => {
                 set_mouse_state(MouseState::Down);
@@ -311,6 +316,7 @@ impl EventTap {
         }
 
         let mut state = self.state.borrow_mut();
+        state.current_flags = flags;
 
         if matches!(
             event_type,

@@ -55,6 +55,13 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     );
 
     fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool;
+    fn stack_windows(
+        &mut self,
+        layout: LayoutId,
+        dragged: WindowId,
+        target: WindowId,
+        default_orientation: crate::common::config::StackDefaultOrientation,
+    ) -> bool;
 
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool;
     fn move_selection_to_layout_after_selection(
