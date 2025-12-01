@@ -1021,8 +1021,13 @@ impl Reactor {
         for screen in &self.space_manager.screens {
             if let Some(space) = screen.space {
                 self.space_manager.screen_space_by_id.insert(screen.screen_id, space);
+                trace!("screen {:?} -> space {:?}", screen.screen_id, space);
+            } else {
+                let removed = self.space_manager.screen_space_by_id.remove(&screen.screen_id);
+                trace!("screen {:?} -> None (removed={:?})", screen.screen_id, removed);
             }
         }
+        trace!("final map = {:?}", self.space_manager.screen_space_by_id);
         self.space_manager
             .screen_space_by_id
             .retain(|screen_id, _| valid_screen_ids.contains(screen_id));

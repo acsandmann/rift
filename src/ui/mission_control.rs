@@ -553,7 +553,9 @@ struct ScreenMetrics {
 impl MissionControlOverlay {
     fn gather_screen_metrics(&self) -> Option<(Vec<ScreenMetrics>, CoordinateConverter)> {
         let mut cache = ScreenCache::new(self.mtm);
-        let (_descriptors, converter) = cache.update_screen_config();
+        let Some((_descriptors, converter)) = cache.update_screen_config() else {
+            return None;
+        };
 
         let screens = NSScreen::screens(self.mtm);
         let mut metrics = Vec::new();
@@ -1544,8 +1546,9 @@ impl MissionControlOverlay {
 
         if let Some(screen) = NSScreen::mainScreen(mtm) {
             let mut cache = ScreenCache::new(mtm);
-            let (_descriptors, converter) = cache.update_screen_config();
-            coordinate_converter = converter;
+            if let Some((_descriptors, converter)) = cache.update_screen_config() {
+                coordinate_converter = converter;
+            }
             scale = screen.backingScaleFactor();
             if let Ok(screen_id) = screen.get_number() {
                 frame = CGDisplayBounds(screen_id.as_u32());

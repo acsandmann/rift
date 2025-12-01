@@ -2,6 +2,7 @@ use std::ffi::CString;
 use std::os::raw::c_char;
 use std::sync::Arc;
 
+use dashmap::DashMap;
 use dispatchr::queue;
 use dispatchr::time::Time;
 use parking_lot::{Mutex, RwLock};
@@ -9,7 +10,7 @@ use serde_json::Value;
 use tracing::{debug, error, info, warn};
 
 use crate::actor::broadcast::BroadcastEvent;
-use crate::common::collections::HashMap;
+use crate::common::collections::{HashMap, HashSet};
 use crate::sys::dispatch::DispatchExt;
 use crate::sys::mach::mach_send_message;
 
@@ -22,7 +23,8 @@ pub struct CliSubscription {
 }
 
 pub struct ServerState {
-    subscriptions: Mutex<HashMap<ClientPort, Vec<String>>>,
+    subscriptions_by_client: DashMap<ClientPort, Vec<String>>,
+    subscriptions_by_event: DashMap<String, Vec<ClientPort>>,
     cli_subscriptions: Mutex<HashMap<String, Vec<CliSubscription>>>,
 }
 
@@ -31,28 +33,61 @@ pub type SharedServerState = Arc<RwLock<ServerState>>;
 impl ServerState {
     pub fn new() -> Self {
         Self {
-            subscriptions: Mutex::new(HashMap::default()),
+            subscriptions_by_client: DashMap::new(),
+            subscriptions_by_event: DashMap::new(),
             cli_subscriptions: Mutex::new(HashMap::default()),
         }
     }
 
     pub fn subscribe_client(&self, client_port: ClientPort, event: String) {
         info!("Client {} subscribing to event: {}", client_port, event);
-        let mut guard = self.subscriptions.lock();
-        let subs = guard.entry(client_port).or_insert_with(Vec::new);
-        if !subs.contains(&event) {
-            subs.push(event);
-            info!("Client {} now subscribed to: {:?}", client_port, subs);
+        let mut added = false;
+        self.subscriptions_by_client
+            .entry(client_port)
+            .and_modify(|subs| {
+                if !subs.contains(&event) {
+                    subs.push(event.clone());
+                    added = true;
+                }
+            })
+            .or_insert_with(|| {
+                added = true;
+                vec![event.clone()]
+            });
+
+        if added {
+            self.subscriptions_by_event
+                .entry(event.clone())
+                .and_modify(|clients| {
+                    if !clients.contains(&client_port) {
+                        clients.push(client_port);
+                    }
+                })
+                .or_insert_with(|| vec![client_port]);
+            info!("Client {} now subscribed to '{}'", client_port, event);
         }
     }
 
     pub fn unsubscribe_client(&self, client_port: ClientPort, event: String) {
         info!("Client {} unsubscribing from event: {}", client_port, event);
-        let mut guard = self.subscriptions.lock();
-        if let Some(events) = guard.get_mut(&client_port) {
-            events.retain(|e| e != &event);
-            if events.is_empty() {
-                guard.remove(&client_port);
+        let mut removed = false;
+
+        if let Some(mut entry) = self.subscriptions_by_client.get_mut(&client_port) {
+            entry.retain(|e| e != &event);
+            removed = true;
+            if entry.is_empty() {
+                drop(entry);
+                self.subscriptions_by_client.remove(&client_port);
+            }
+        }
+
+        if removed {
+            if let Some(mut entry) = self.subscriptions_by_event.get_mut(&event) {
+                entry.retain(|c| c != &client_port);
+                if entry.is_empty() {
+                    drop(entry);
+                    self.subscriptions_by_event.remove(&event);
+                }
             }
         }
     }
@@ -115,23 +150,28 @@ impl ServerState {
             BroadcastEvent::WindowTitleChanged { .. } => "window_title_changed",
         };
 
-        let subscriptions_snapshot = {
-            let guard = self.subscriptions.lock();
-            guard.clone()
+        let mut targets: HashSet<ClientPort> = HashSet::default();
+        if let Some(clients) = self.subscriptions_by_event.get(event_name) {
+            targets.extend(clients.iter().copied());
+        }
+        if let Some(clients) = self.subscriptions_by_event.get("*") {
+            targets.extend(clients.iter().copied());
+        }
+
+        if targets.is_empty() {
+            return;
+        }
+
+        let event_json = match serde_json::to_string(&event) {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Failed to serialize broadcast event: {}", e);
+                return;
+            }
         };
 
-        for (client_port, events) in subscriptions_snapshot {
-            if events.contains(&event_name.to_string()) || events.contains(&"*".to_string()) {
-                let event_json = match serde_json::to_string(&event) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        error!("Failed to serialize broadcast event: {}", e);
-                        continue;
-                    }
-                };
-
-                schedule_event_send(client_port, event_json.clone());
-            }
+        for client_port in targets {
+            schedule_event_send(client_port, event_json.clone());
         }
     }
 
@@ -167,8 +207,9 @@ impl ServerState {
                 c_message.as_ptr() as *mut c_char,
                 event_json.len() as u32,
                 false,
+                None,
             );
-            if result.is_null() {
+            if !result {
                 warn!("Failed to send event to client {}", client_port);
             } else {
                 debug!("Successfully sent event to client {}", client_port);
@@ -177,8 +218,17 @@ impl ServerState {
     }
 
     pub fn remove_client(&self, client_port: ClientPort) {
-        let mut guard = self.subscriptions.lock();
-        guard.remove(&client_port);
+        if let Some((_k, events)) = self.subscriptions_by_client.remove(&client_port) {
+            for event in events {
+                if let Some(mut entry) = self.subscriptions_by_event.get_mut(&event) {
+                    entry.retain(|c| c != &client_port);
+                    if entry.is_empty() {
+                        drop(entry);
+                        self.subscriptions_by_event.remove(&event);
+                    }
+                }
+            }
+        }
     }
 }
 

@@ -255,7 +255,9 @@ impl SpaceEventHandler {
             StaleCleanupState::Enabled
         };
         if spaces_all_none {
-            trace!("Space change has no active screens; skipping");
+            if spaces.len() == reactor.space_manager.screens.len() {
+                reactor.set_screen_spaces(&spaces);
+            }
             return;
         }
         if spaces.len() != reactor.space_manager.screens.len() {

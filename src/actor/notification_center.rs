@@ -120,15 +120,10 @@ impl NotificationCenterInner {
 
     fn send_screen_parameters(&self) {
         let mut screen_cache = self.ivars().screen_cache.borrow_mut();
-        let (descriptors, converter) = screen_cache.update_screen_config();
-        let spaces = screen_cache.get_screen_spaces();
-
-        // If the system reports no screens (common immediately after wake),
-        // ignore this transient state to avoid clearing WM screen state.
-        if descriptors.is_empty() {
-            trace!("Screen parameters empty after update; suppressing transient update");
+        let Some((descriptors, converter)) = screen_cache.update_screen_config() else {
             return;
-        }
+        };
+        let spaces = screen_cache.get_screen_spaces();
 
         let mut last_state = self.ivars().last_screen_state.borrow_mut();
         let is_unchanged = match &*last_state {

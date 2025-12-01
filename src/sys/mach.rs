@@ -11,6 +11,7 @@ use core::mem::{size_of, zeroed};
 use core::ptr::{copy_nonoverlapping, null, null_mut};
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
+use std::vec::Vec;
 
 use tracing::{debug, error, info};
 
@@ -292,13 +293,18 @@ pub unsafe fn mach_send_message(
     message: *const c_char,
     len: u32,
     await_response: bool,
-) -> *mut c_char {
-    if message.is_null() || port == 0 || len > MAX_MESSAGE_SIZE {
+    response_buf: Option<&mut Vec<u8>>,
+) -> bool {
+    if message.is_null()
+        || port == 0
+        || len > MAX_MESSAGE_SIZE
+        || (await_response && response_buf.is_none())
+    {
         error!(
-            "mach_send_message: invalid input args message={:?} port={} len={}",
-            message, port, len
+            "mach_send_message: invalid input args message={:?} port={} len={} await_response={}",
+            message, port, len, await_response
         );
-        return null_mut();
+        return false;
     }
 
     let mut reply_port: mach_port_t = 0;
@@ -307,7 +313,7 @@ pub unsafe fn mach_send_message(
     if await_response {
         if mach_port_allocate(task, MACH_PORT_RIGHT_RECEIVE, &mut reply_port) != KERN_SUCCESS {
             error!("mach_send_message: mach_port_allocate failed for reply port");
-            return null_mut();
+            return false;
         }
         let limits = mach_port_limits { mpl_qlimit: 1 };
         let _ = mach_port_set_attributes(
@@ -327,17 +333,18 @@ pub unsafe fn mach_send_message(
             );
             let _ = mach_port_mod_refs(task, reply_port, MACH_PORT_RIGHT_RECEIVE, -1);
             let _ = mach_port_deallocate(task, reply_port);
-            return null_mut();
+            return false;
         }
     }
 
-    let mut msg: simple_message = zeroed();
+    let aligned_len = (len + 3) & !3;
 
-    msg.header.msgh_remote_port = port;
-    msg.header.msgh_local_port = if await_response { reply_port } else { 0 };
-    msg.header.msgh_voucher_port = 0;
-    msg.header.msgh_id = if await_response { reply_port as i32 } else { 0 };
-    msg.header.msgh_bits = MACH_MSGH_BITS(
+    let mut sm: simple_message = zeroed();
+    sm.header.msgh_remote_port = port;
+    sm.header.msgh_local_port = if await_response { reply_port } else { 0 };
+    sm.header.msgh_voucher_port = 0;
+    sm.header.msgh_id = if await_response { reply_port as i32 } else { 0 };
+    sm.header.msgh_bits = MACH_MSGH_BITS(
         MACH_MSG_TYPE_COPY_SEND,
         if await_response {
             MACH_MSG_TYPE_MAKE_SEND
@@ -345,11 +352,8 @@ pub unsafe fn mach_send_message(
             0
         },
     );
+    sm.header.msgh_size = (size_of::<mach_msg_header_t>() as u32) + aligned_len;
 
-    let aligned_len = (len + 3) & !3;
-    msg.header.msgh_size = (size_of::<mach_msg_header_t>() as u32) + aligned_len;
-    let mut sm: simple_message = zeroed();
-    sm.header = msg.header;
     copy_nonoverlapping(message as *const u8, sm.data.as_mut_ptr(), len as usize);
     if aligned_len > len {
         let pad = (aligned_len - len) as usize;
@@ -375,7 +379,7 @@ pub unsafe fn mach_send_message(
             let _ = mach_port_mod_refs(task, reply_port, MACH_PORT_RIGHT_RECEIVE, -1);
             let _ = mach_port_deallocate(task, reply_port);
         }
-        return null_mut();
+        return false;
     }
 
     if await_response {
@@ -398,7 +402,7 @@ pub unsafe fn mach_send_message(
                 "mach_send_message: failed to receive response (recv_result={} reply_port={})",
                 recv_result, reply_port
             );
-            return null_mut();
+            return false;
         }
 
         let mut rsp_ptr: *mut c_char = null_mut();
@@ -417,33 +421,32 @@ pub unsafe fn mach_send_message(
             rsp_ptr = unsafe { (*sm_ptr).data.as_mut_ptr() as *mut c_char };
         }
 
-        let layout = match std::alloc::Layout::array::<c_char>(rsp_len + 1) {
-            Ok(l) => l,
-            Err(_) => return null_mut(),
-        };
-        let out = std::alloc::alloc(layout) as *mut c_char;
-        if out.is_null() {
-            return null_mut();
+        if let Some(buf) = response_buf {
+            buf.clear();
+            if rsp_len > 0 && !rsp_ptr.is_null() {
+                let slice = core::slice::from_raw_parts(rsp_ptr as *const u8, rsp_len);
+                buf.extend_from_slice(slice);
+            }
         }
-        if rsp_len > 0 && !rsp_ptr.is_null() {
-            copy_nonoverlapping(rsp_ptr as *const u8, out as *mut u8, rsp_len);
-        }
-        *out.add(rsp_len) = 0;
 
         mach_msg_destroy(&mut buffer.message.header);
-        return out;
+        return true;
     }
 
-    1 as *mut c_char
+    true
 }
 
-pub unsafe fn mach_send_request(message: *const c_char, len: u32) -> *mut c_char {
+pub unsafe fn mach_send_request(
+    message: *const c_char,
+    len: u32,
+    response_buf: &mut Vec<u8>,
+) -> bool {
     if message.is_null() || len > MAX_MESSAGE_SIZE {
         error!(
             "mach_send_request: invalid args message={:?} len={}",
             message, len
         );
-        return null_mut();
+        return false;
     }
 
     let service_name = bs_name();
@@ -466,18 +469,10 @@ pub unsafe fn mach_send_request(message: *const c_char, len: u32) -> *mut c_char
             service_name.to_string_lossy(),
             attempt
         );
-        return null_mut();
+        return false;
     }
 
-    mach_send_message(service_port, message, len, true)
-}
-
-pub unsafe fn mach_free_response(ptr: *mut c_char, len: u32) {
-    if ptr.is_null() {
-        return;
-    }
-    let layout = std::alloc::Layout::array::<c_char>((len as usize) + 1).unwrap();
-    std::alloc::dealloc(ptr as *mut u8, layout);
+    mach_send_message(service_port, message, len, true, Some(response_buf))
 }
 
 pub type mach_handler = unsafe extern "C" fn(
