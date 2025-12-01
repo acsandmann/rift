@@ -1,4 +1,4 @@
-use std::ffi::c_char;
+use std::ffi::{CStr, c_char};
 use std::time::Duration;
 
 use r#continue::continuation;
@@ -75,10 +75,20 @@ impl RiftMachClient {
             return Err("Failed to send Mach request or no response received".to_string());
         }
 
-        let response_str = String::from_utf8_lossy(&response_buf).into_owned();
+        let json_bytes = CStr::from_bytes_until_nul(&response_buf)
+            .map_err(|_| {
+                "response missing NUL
+          terminator"
+            })?
+            .to_bytes();
 
-        let response: RiftResponse = serde_json::from_str(&response_str)
-            .map_err(|e| format!("Failed to parse response JSON: {}", e))?;
+        let response: RiftResponse = serde_json::from_slice(json_bytes).map_err(|e| {
+            format!(
+                "Failed to parse
+          response JSON: {}",
+                e
+            )
+        })?;
 
         Ok(response)
     }
