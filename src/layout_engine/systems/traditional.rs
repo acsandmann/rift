@@ -856,7 +856,11 @@ impl LayoutSystem for TraditionalLayoutSystem {
                 return;
             }
             let dir = if affects_first {
-                if delta >= 0.0 { negative_dir } else { positive_dir }
+                if delta >= 0.0 {
+                    negative_dir
+                } else {
+                    positive_dir
+                }
             } else if delta >= 0.0 {
                 positive_dir
             } else {

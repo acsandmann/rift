@@ -99,13 +99,7 @@ impl ResizeDelta {
         }
     }
 
-    pub fn exact(x: ResizeValue, y: ResizeValue) -> Self {
-        Self {
-            x,
-            y,
-            mode: ResizeMode::Exact,
-        }
-    }
+    pub fn exact(x: ResizeValue, y: ResizeValue) -> Self { Self { x, y, mode: ResizeMode::Exact } }
 
     /// Convert into pixel deltas given current size (for relative) and screen size (for exact %).
     pub fn to_pixel_delta(

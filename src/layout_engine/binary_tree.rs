@@ -340,7 +340,11 @@ impl BinaryTreeLayout {
                 Some(NodeKind::Leaf { window, .. }) => {
                     out.push_str(&format!("Leaf {:?}\n", window));
                 }
-                Some(NodeKind::Split { orientation, ratio, locked_orientation }) => {
+                Some(NodeKind::Split {
+                    orientation,
+                    ratio,
+                    locked_orientation,
+                }) => {
                     out.push_str(&format!(
                         "Split {:?} {:.2}{}\n",
                         orientation,
@@ -672,8 +676,11 @@ impl BinaryTreeLayout {
 
         let mut node_opt = Some(start_node);
         while let Some(node) = node_opt {
-            if let Some(NodeKind::Split { orientation, locked_orientation, .. }) =
-                self.kind.get_mut(node)
+            if let Some(NodeKind::Split {
+                orientation,
+                locked_orientation,
+                ..
+            }) = self.kind.get_mut(node)
             {
                 *orientation = match *orientation {
                     Orientation::Horizontal => Orientation::Vertical,
@@ -687,8 +694,11 @@ impl BinaryTreeLayout {
 
         if let Some(state) = self.layouts.get_mut(layout) {
             let root = state.root;
-            if let Some(NodeKind::Split { orientation, locked_orientation, .. }) =
-                self.kind.get_mut(root)
+            if let Some(NodeKind::Split {
+                orientation,
+                locked_orientation,
+                ..
+            }) = self.kind.get_mut(root)
             {
                 *orientation = match *orientation {
                     Orientation::Horizontal => Orientation::Vertical,

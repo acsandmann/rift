@@ -201,10 +201,11 @@ impl BspLayoutSystem {
             }
             self.core.window_to_node.insert(new_window, new_node);
 
-            self.core.kind.insert(
-                leaf,
-                NodeKind::Split { orientation, ratio: 0.5, locked_orientation: false },
-            );
+            self.core.kind.insert(leaf, NodeKind::Split {
+                orientation,
+                ratio: 0.5,
+                locked_orientation: false,
+            });
 
             let (first_child, second_child) = match direction {
                 Direction::Left | Direction::Up => (new_node, existing_node),
@@ -651,15 +652,13 @@ impl LayoutSystem for BspLayoutSystem {
             const STICKS: f64 = 2.0;
             let screen = frame.screen;
             let at_left = (rect.origin.x - screen.origin.x).abs() < STICKS;
-            let at_right = ((rect.origin.x + rect.size.width)
-                - (screen.origin.x + screen.size.width))
-                .abs()
-                < STICKS;
+            let at_right =
+                ((rect.origin.x + rect.size.width) - (screen.origin.x + screen.size.width)).abs()
+                    < STICKS;
             let at_top = (rect.origin.y - screen.origin.y).abs() < STICKS;
-            let at_bottom = ((rect.origin.y + rect.size.height)
-                - (screen.origin.y + screen.size.height))
-                .abs()
-                < STICKS;
+            let at_bottom =
+                ((rect.origin.y + rect.size.height) - (screen.origin.y + screen.size.height)).abs()
+                    < STICKS;
             (at_left && at_right, at_top && at_bottom)
         } else {
             (false, false)
@@ -686,7 +685,9 @@ impl LayoutSystem for BspLayoutSystem {
         };
 
         if delta_x.abs() > 0.001 && !pinned_h {
-            if let Some((parent, is_first_child)) = self.find_parent_split(node, Orientation::Horizontal) {
+            if let Some((parent, is_first_child)) =
+                self.find_parent_split(node, Orientation::Horizontal)
+            {
                 self.apply_split_resize(
                     parent,
                     delta_x,
@@ -699,7 +700,9 @@ impl LayoutSystem for BspLayoutSystem {
         }
 
         if delta_y.abs() > 0.001 && !pinned_v {
-            if let Some((parent, is_first_child)) = self.find_parent_split(node, Orientation::Vertical) {
+            if let Some((parent, is_first_child)) =
+                self.find_parent_split(node, Orientation::Vertical)
+            {
                 self.apply_split_resize(
                     parent,
                     delta_y,
@@ -756,20 +759,21 @@ impl BspLayoutSystem {
         rects: Option<&HashMap<NodeId, CGRect>>,
         fallback_size: Option<CGSize>,
     ) {
-        if let Some(NodeKind::Split { ratio, orientation, .. }) =
-            self.core.kind.get_mut(split_node)
+        if let Some(NodeKind::Split { ratio, orientation, .. }) = self.core.kind.get_mut(split_node)
         {
             let parent_rect = rects.and_then(|r| r.get(&split_node).copied());
             let denom = match (orientation, parent_rect) {
                 (Orientation::Horizontal, Some(r)) => r.size.width,
                 (Orientation::Vertical, Some(r)) => r.size.height,
-                (Orientation::Horizontal, None) => {
-                    fallback_size.map(|s| s.width).unwrap_or(1000.0)
-                }
+                (Orientation::Horizontal, None) => fallback_size.map(|s| s.width).unwrap_or(1000.0),
                 (Orientation::Vertical, None) => fallback_size.map(|s| s.height).unwrap_or(1000.0),
             };
             let ratio_delta = (delta * 2.0 / denom).clamp(-1.0, 1.0) as f32;
-            let increase_ratio = if affects_first_edge { !is_first_child } else { is_first_child };
+            let increase_ratio = if affects_first_edge {
+                !is_first_child
+            } else {
+                is_first_child
+            };
             if increase_ratio {
                 *ratio = (*ratio + ratio_delta).clamp(0.05, 0.95);
             } else {

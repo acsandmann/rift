@@ -151,9 +151,12 @@ impl LayoutEngine {
     }
 
     fn window_rect(&self, layout: LayoutId, window: WindowId) -> Option<CGRect> {
-        self.layout_positions
-            .get(&layout)
-            .and_then(|m| m.get(&window).copied())
+        self.layout_positions.get(&layout).and_then(|m| m.get(&window).copied())
+    }
+
+    fn cursor_resize_enabled(&self) -> bool {
+        !matches!(&self.tree, LayoutSystemKind::Dwindle(_))
+            || self.layout_settings.dwindle.smart_resizing
     }
 
     fn add_window_to_layout(&mut self, layout: LayoutId, wid: WindowId, cursor: Option<CGPoint>) {
@@ -177,6 +180,9 @@ impl LayoutEngine {
         let Some(selected) = self.tree.selected_window(layout) else {
             return;
         };
+
+        let use_cursor_for_corner = self.cursor_resize_enabled();
+        let cursor = if use_cursor_for_corner { cursor } else { None };
 
         let frame = self.layout_frame(layout);
         let (screen_w, screen_h) = frame
@@ -203,34 +209,51 @@ impl LayoutEngine {
         let (delta_x, delta_y) = delta.to_pixel_delta(current_w, current_h, screen_w, screen_h);
 
         let mut effective_corner = corner;
-        if matches!(corner, ResizeCorner::None) {
-            if let (Some(cursor), Some(center)) = (cursor, window_center) {
-                effective_corner = ResizeCorner::from_cursor_position(cursor, center);
-            } else {
-                effective_corner = ResizeCorner::BottomRight;
-            }
+        if matches!(corner, ResizeCorner::None) && use_cursor_for_corner {
+            effective_corner = match (cursor, window_center) {
+                (Some(cursor_pos), Some(center)) => {
+                    ResizeCorner::from_cursor_position(cursor_pos, center)
+                }
+                _ => ResizeCorner::BottomRight,
+            };
         }
 
-        let (allowed_x, allowed_y) = if let (Some(rect), Some(f)) = (self.window_rect(layout, selected), frame.as_ref()) {
-            self.calculate_allowed_movement((delta_x, delta_y), rect, f.screen)
-        } else {
-            (delta_x, delta_y)
-        };
+        let (allowed_x, allowed_y) =
+            if let (Some(rect), Some(f)) = (self.window_rect(layout, selected), frame.as_ref()) {
+                self.calculate_allowed_movement((delta_x, delta_y), rect, f.screen)
+            } else {
+                (delta_x, delta_y)
+            };
 
         if allowed_x.abs() < 0.001 && allowed_y.abs() < 0.001 {
             return;
         }
 
         match &mut self.tree {
-            LayoutSystemKind::Traditional(s) => {
-                s.resize_active(layout, allowed_x, allowed_y, effective_corner, frame.as_ref(), cursor)
-            }
-            LayoutSystemKind::Bsp(s) => {
-                s.resize_active(layout, allowed_x, allowed_y, effective_corner, frame.as_ref(), cursor)
-            }
-            LayoutSystemKind::Dwindle(s) => {
-                s.resize_active(layout, allowed_x, allowed_y, effective_corner, frame.as_ref(), cursor)
-            }
+            LayoutSystemKind::Traditional(s) => s.resize_active(
+                layout,
+                allowed_x,
+                allowed_y,
+                effective_corner,
+                frame.as_ref(),
+                cursor,
+            ),
+            LayoutSystemKind::Bsp(s) => s.resize_active(
+                layout,
+                allowed_x,
+                allowed_y,
+                effective_corner,
+                frame.as_ref(),
+                cursor,
+            ),
+            LayoutSystemKind::Dwindle(s) => s.resize_active(
+                layout,
+                allowed_x,
+                allowed_y,
+                effective_corner,
+                frame.as_ref(),
+                cursor,
+            ),
         }
     }
 
@@ -1163,7 +1186,12 @@ impl LayoutEngine {
                 }
 
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
-                let cursor = current_cursor_location().ok();
+                let use_cursor_for_corner = self.cursor_resize_enabled();
+                let cursor = if use_cursor_for_corner {
+                    current_cursor_location().ok()
+                } else {
+                    None
+                };
                 self.resize_active(layout, delta, corner, cursor);
                 EventResponse::default()
             }

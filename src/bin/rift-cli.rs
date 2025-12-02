@@ -496,16 +496,19 @@ fn map_window_command(cmd: WindowCommands) -> Result<RiftCommand, String> {
                 Some("bottomright") | Some("br") => ResizeCorner::BottomRight,
                 _ => ResizeCorner::None,
             };
-            let mode = if exact { ResizeMode::Exact } else { ResizeMode::Relative };
-            let x_val =
-                ResizeValue::parse(&x).ok_or_else(|| "Invalid x value for resizeactive".to_string())?;
-            let y_val =
-                ResizeValue::parse(&y).ok_or_else(|| "Invalid y value for resizeactive".to_string())?;
+            let mode = if exact {
+                ResizeMode::Exact
+            } else {
+                ResizeMode::Relative
+            };
+            let x_val = ResizeValue::parse(&x)
+                .ok_or_else(|| "Invalid x value for resizeactive".to_string())?;
+            let y_val = ResizeValue::parse(&y)
+                .ok_or_else(|| "Invalid y value for resizeactive".to_string())?;
             let delta = ResizeDelta { x: x_val, y: y_val, mode };
-            Ok(RiftCommand::Reactor(reactor::Command::Layout(LC::ResizeActive {
-                delta,
-                corner,
-            })))
+            Ok(RiftCommand::Reactor(reactor::Command::Layout(
+                LC::ResizeActive { delta, corner },
+            )))
         }
         WindowCommands::Close { window_id } => {
             let wsid = parse_window_server_id(&window_id)?;
