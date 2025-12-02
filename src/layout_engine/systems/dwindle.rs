@@ -665,6 +665,82 @@ impl DwindleLayoutSystem {
         }
     }
 
+    fn apply_resize_axis(
+        &mut self,
+        node: NodeId,
+        delta: f64,
+        orientation: Orientation,
+        affects_first_edge: bool,
+        rects: Option<&HashMap<NodeId, CGRect>>,
+    ) {
+        let mut current = node;
+        let mut target_parent: Option<NodeId> = None;
+        let mut target_child: Option<NodeId> = None;
+        let mut inner_parent: Option<NodeId> = None;
+        let mut inner_child: Option<NodeId> = None;
+
+        while let Some(parent) = current.parent(&self.core.tree.map) {
+            if let Some(NodeKind::Split { orientation: o, .. }) = self.core.kind.get(parent) {
+                if *o == orientation {
+                    let is_first = Some(current) == parent.first_child(&self.core.tree.map);
+                    let matches = if affects_first_edge { !is_first } else { is_first };
+                    if target_parent.is_none() && matches {
+                        target_parent = Some(parent);
+                        target_child = Some(current);
+                    } else if inner_parent.is_none() {
+                        inner_parent = Some(parent);
+                        inner_child = Some(current);
+                    }
+                    if target_parent.is_some() {
+                        break;
+                    }
+                }
+            }
+            current = parent;
+        }
+
+        if let (Some(parent), Some(child)) = (target_parent, target_child) {
+            if let Some(NodeKind::Split { ratio, .. }) = self.core.kind.get_mut(parent) {
+                let parent_rect = rects.and_then(|r| r.get(&parent).copied());
+                let denom = match (orientation, parent_rect) {
+                    (Orientation::Horizontal, Some(r)) => r.size.width,
+                    (Orientation::Vertical, Some(r)) => r.size.height,
+                    _ => 1000.0,
+                };
+                let ratio_delta = (delta * 2.0 / denom).clamp(-1.0, 1.0) as f32;
+                let is_first_child = Some(child) == parent.first_child(&self.core.tree.map);
+                if is_first_child {
+                    *ratio = (*ratio + ratio_delta).clamp(0.1, 1.9);
+                } else {
+                    *ratio = (*ratio - ratio_delta).clamp(0.1, 1.9);
+                }
+            }
+
+            if self.settings.smart_resizing {
+                if let (Some(inner_parent), Some(inner_child)) = (inner_parent, inner_child) {
+                    if let Some(NodeKind::Split { ratio, .. }) =
+                        self.core.kind.get_mut(inner_parent)
+                    {
+                        let parent_rect = rects.and_then(|r| r.get(&inner_parent).copied());
+                        let denom = match (orientation, parent_rect) {
+                            (Orientation::Horizontal, Some(r)) => r.size.width,
+                            (Orientation::Vertical, Some(r)) => r.size.height,
+                            _ => 1000.0,
+                        };
+                        let ratio_delta = (delta * 2.0 / denom).clamp(-1.0, 1.0) as f32;
+                        let is_first_child =
+                            Some(inner_child) == inner_parent.first_child(&self.core.tree.map);
+                        if is_first_child {
+                            *ratio = (*ratio - ratio_delta).clamp(0.1, 1.9);
+                        } else {
+                            *ratio = (*ratio + ratio_delta).clamp(0.1, 1.9);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn aspect_orientation(&self, rect: Option<CGRect>) -> Orientation {
         if let Some(r) = rect {
             if r.size.height * self.settings.split_width_multiplier as f64 > r.size.width {
@@ -1266,8 +1342,73 @@ impl LayoutSystem for DwindleLayoutSystem {
 
     fn unjoin_selection(&mut self, layout: LayoutId) { self.core.unjoin_selection(layout) }
 
-    fn resize_selection_by(&mut self, layout: LayoutId, amount: f64) {
-        self.resize_selection_by_with_context(layout, amount, None, None);
+    fn resize_active(
+        &mut self,
+        layout: LayoutId,
+        delta_x: f64,
+        delta_y: f64,
+        corner: crate::layout_engine::ResizeCorner,
+        frame: Option<&crate::layout_engine::LayoutFrame>,
+        cursor: Option<CGPoint>,
+    ) {
+        let sel_snapshot = self.selection_of_layout(layout);
+        let Some(node) = sel_snapshot else {
+            return;
+        };
+
+        let rects = frame.and_then(|f| self.rects_for_layout(layout, f));
+        let leaf = self.descend_to_leaf(node);
+        let window_rect = rects.as_ref().and_then(|m| m.get(&leaf).copied());
+
+        let effective_corner = if matches!(corner, crate::layout_engine::ResizeCorner::None) {
+            if let (Some(cursor), Some(rect)) = (cursor, window_rect) {
+                let center = CGPoint::new(
+                    rect.origin.x + rect.size.width / 2.0,
+                    rect.origin.y + rect.size.height / 2.0,
+                );
+                crate::layout_engine::ResizeCorner::from_cursor_position(cursor, center)
+            } else {
+                crate::layout_engine::ResizeCorner::BottomRight
+            }
+        } else {
+            corner
+        };
+
+        let (pinned_h, pinned_v) = if let (Some(rect), Some(frame)) = (window_rect, frame) {
+            const STICKS: f64 = 2.0;
+            let screen = frame.screen;
+            let at_left = (rect.origin.x - screen.origin.x).abs() < STICKS;
+            let at_right =
+                ((rect.origin.x + rect.size.width) - (screen.origin.x + screen.size.width)).abs()
+                    < STICKS;
+            let at_top = (rect.origin.y - screen.origin.y).abs() < STICKS;
+            let at_bottom =
+                ((rect.origin.y + rect.size.height) - (screen.origin.y + screen.size.height)).abs()
+                    < STICKS;
+            (at_left && at_right, at_top && at_bottom)
+        } else {
+            (false, false)
+        };
+
+        if delta_x.abs() > 0.001 && !pinned_h {
+            self.apply_resize_axis(
+                leaf,
+                delta_x,
+                Orientation::Horizontal,
+                effective_corner.affects_left(),
+                rects.as_ref(),
+            );
+        }
+
+        if delta_y.abs() > 0.001 && !pinned_v {
+            self.apply_resize_axis(
+                leaf,
+                delta_y,
+                Orientation::Vertical,
+                effective_corner.affects_top(),
+                rects.as_ref(),
+            );
+        }
     }
 
     // Rebalancing is not supported in Dwindle layout

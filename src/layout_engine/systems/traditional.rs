@@ -827,34 +827,63 @@ impl LayoutSystem for TraditionalLayoutSystem {
         }
     }
 
-    fn resize_selection_by(&mut self, layout: LayoutId, amount: f64) {
+    fn resize_active(
+        &mut self,
+        layout: LayoutId,
+        delta_x: f64,
+        delta_y: f64,
+        corner: crate::layout_engine::ResizeCorner,
+        frame: Option<&crate::layout_engine::LayoutFrame>,
+        _cursor: Option<objc2_core_foundation::CGPoint>,
+    ) {
         let selection = self.selection(layout);
-        if let Some(_focused_window) = self.window_at(selection) {
-            let candidates = selection
-                .ancestors(self.map())
-                .filter(|&node| {
-                    if let Some(parent) = node.parent(self.map()) {
-                        !self.layout(parent).is_group()
-                    } else {
-                        false
-                    }
-                })
-                .collect::<Vec<_>>();
-
-            let resized = candidates.iter().any(|&node| {
-                self.resize_internal(node, amount, crate::layout_engine::Direction::Right)
-            }) || candidates.iter().any(|&node| {
-                self.resize_internal(node, amount, crate::layout_engine::Direction::Down)
-            });
-
-            if !resized {
-                let _ = candidates.iter().any(|&node| {
-                    self.resize_internal(node, amount, crate::layout_engine::Direction::Left)
-                }) || candidates.iter().any(|&node| {
-                    self.resize_internal(node, amount, crate::layout_engine::Direction::Up)
-                });
-            }
+        if self.window_at(selection).is_none() {
+            return;
         }
+
+        let screen = frame.map(|f| f.screen);
+        let screen_w = screen.map(|s| s.size.width).unwrap_or(1920.0);
+        let screen_h = screen.map(|s| s.size.height).unwrap_or(1080.0);
+
+        let apply_axis = |this: &mut Self,
+                          node: NodeId,
+                          delta: f64,
+                          screen_size: f64,
+                          affects_first: bool,
+                          positive_dir: Direction,
+                          negative_dir: Direction| {
+            if delta.abs() < 0.001 {
+                return;
+            }
+            let dir = if affects_first {
+                if delta >= 0.0 { negative_dir } else { positive_dir }
+            } else if delta >= 0.0 {
+                positive_dir
+            } else {
+                negative_dir
+            };
+            let amount = (delta.abs() / screen_size).max(0.0);
+            let _ = this.resize_internal(node, amount, dir);
+        };
+
+        apply_axis(
+            self,
+            selection,
+            delta_x,
+            screen_w,
+            corner.affects_left(),
+            Direction::Right,
+            Direction::Left,
+        );
+        apply_axis(
+            self,
+            selection,
+            delta_y,
+            screen_h,
+            corner.affects_top(),
+            Direction::Down,
+            Direction::Up,
+        );
     }
 
     fn rebalance(&mut self, layout: LayoutId) {

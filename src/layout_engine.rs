@@ -2,6 +2,7 @@ pub mod binary_tree;
 pub mod engine;
 mod floating;
 pub(crate) mod graph;
+pub mod resize;
 pub mod systems;
 pub mod utils;
 mod workspaces;
@@ -9,6 +10,7 @@ mod workspaces;
 pub use engine::{EventResponse, LayoutCommand, LayoutEngine, LayoutEvent};
 pub(crate) use floating::FloatingManager;
 pub use graph::{Direction, LayoutKind, Orientation};
+pub use resize::{ResizeCorner, ResizeDelta, ResizeMode, ResizeValue};
 pub(crate) use systems::LayoutId;
 pub use systems::{
     BspLayoutSystem, DwindleLayoutSystem, LayoutSystem, LayoutSystemKind, TraditionalLayoutSystem,

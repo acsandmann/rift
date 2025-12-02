@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 use rift_wm::actor::reactor::{self, DisplaySelector, FocusDisplaySelector};
 use rift_wm::ipc::{RiftCommand, RiftMachClient, RiftRequest, RiftResponse};
 use rift_wm::layout_engine as layout;
+use rift_wm::layout_engine::{ResizeCorner, ResizeDelta, ResizeMode, ResizeValue};
 use rift_wm::sys::window_server::WindowServerId;
 use serde_json::Value;
 
@@ -132,17 +133,15 @@ enum WindowCommands {
     ToggleFullscreen,
     /// Toggle fullscreen within configured outer gaps (respects outer gaps / fills tiling area)
     ToggleFullscreenWithinGaps,
-    /// Grow the current window size (increments by ~5%).
-    ResizeGrow,
-    /// Shrink the current window size (decrements by ~5%).
-    ResizeShrink,
-    /// Resize the selected window by a fractional amount.
-    /// - Pass a signed floating value: positive to grow, negative to shrink.
-    /// - The value is a fraction of the current size (e.g. `0.05` = 5%).
-    /// Examples:
-    ///   rift-cli execute window resize-by --amount 0.05    # grow by 5%
-    ///   rift-cli execute window resize-by --amount -0.10   # shrink by 10%
-    ResizeBy { amount: f64 },
+    /// Hyprland-style resizeactive: resize by pixel/percentage with optional corner/exact mode.
+    ResizeActive {
+        x: String,
+        y: String,
+        #[arg(long)]
+        corner: Option<String>,
+        #[arg(long, default_value_t = false)]
+        exact: bool,
+    },
     /// Close a window by window server identifier
     Close {
         /// Window Id (window server id or idx from window id)
@@ -489,15 +488,25 @@ fn map_window_command(cmd: WindowCommands) -> Result<RiftCommand, String> {
         WindowCommands::ToggleFullscreenWithinGaps => Ok(RiftCommand::Reactor(
             reactor::Command::Layout(LC::ToggleFullscreenWithinGaps),
         )),
-        WindowCommands::ResizeGrow => Ok(RiftCommand::Reactor(reactor::Command::Layout(
-            LC::ResizeWindowGrow,
-        ))),
-        WindowCommands::ResizeShrink => Ok(RiftCommand::Reactor(reactor::Command::Layout(
-            LC::ResizeWindowShrink,
-        ))),
-        WindowCommands::ResizeBy { amount } => Ok(RiftCommand::Reactor(reactor::Command::Layout(
-            LC::ResizeWindowBy { amount },
-        ))),
+        WindowCommands::ResizeActive { x, y, corner, exact } => {
+            let corner = match corner.as_deref() {
+                Some("topleft") | Some("tl") => ResizeCorner::TopLeft,
+                Some("topright") | Some("tr") => ResizeCorner::TopRight,
+                Some("bottomleft") | Some("bl") => ResizeCorner::BottomLeft,
+                Some("bottomright") | Some("br") => ResizeCorner::BottomRight,
+                _ => ResizeCorner::None,
+            };
+            let mode = if exact { ResizeMode::Exact } else { ResizeMode::Relative };
+            let x_val =
+                ResizeValue::parse(&x).ok_or_else(|| "Invalid x value for resizeactive".to_string())?;
+            let y_val =
+                ResizeValue::parse(&y).ok_or_else(|| "Invalid y value for resizeactive".to_string())?;
+            let delta = ResizeDelta { x: x_val, y: y_val, mode };
+            Ok(RiftCommand::Reactor(reactor::Command::Layout(LC::ResizeActive {
+                delta,
+                corner,
+            })))
+        }
         WindowCommands::Close { window_id } => {
             let wsid = parse_window_server_id(&window_id)?;
             Ok(RiftCommand::Reactor(reactor::Command::Reactor(

@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use super::{
-    Direction, FloatingManager, LayoutFrame, LayoutId, LayoutSystemKind, WorkspaceLayouts,
+    Direction, FloatingManager, LayoutFrame, LayoutId, LayoutSystemKind, ResizeCorner, ResizeDelta,
+    WorkspaceLayouts,
 };
 use crate::actor::app::{AppInfo, WindowId, pid_t};
 use crate::actor::broadcast::{BroadcastEvent, BroadcastSender};
@@ -54,10 +55,10 @@ pub enum LayoutCommand {
     ToggleFullscreen,
     ToggleFullscreenWithinGaps,
 
-    ResizeWindowGrow,
-    ResizeWindowShrink,
-    ResizeWindowBy {
-        amount: f64,
+    ResizeActive {
+        delta: ResizeDelta,
+        #[serde(default)]
+        corner: ResizeCorner,
     },
 
     NextWorkspace(Option<bool>),
@@ -118,6 +119,8 @@ pub struct LayoutEngine {
     space_display_map: HashMap<SpaceId, Option<String>>,
     #[serde(skip)]
     layout_frames: HashMap<LayoutId, LayoutFrame>,
+    #[serde(skip)]
+    layout_positions: HashMap<LayoutId, HashMap<WindowId, CGRect>>,
 }
 
 impl LayoutEngine {
@@ -139,6 +142,20 @@ impl LayoutEngine {
         self.layout_frames.get(&layout).cloned()
     }
 
+    fn update_layout_positions(&mut self, layout: LayoutId, positions: &[(WindowId, CGRect)]) {
+        let mut map = HashMap::default();
+        for (wid, rect) in positions {
+            map.insert(*wid, *rect);
+        }
+        self.layout_positions.insert(layout, map);
+    }
+
+    fn window_rect(&self, layout: LayoutId, window: WindowId) -> Option<CGRect> {
+        self.layout_positions
+            .get(&layout)
+            .and_then(|m| m.get(&window).copied())
+    }
+
     fn add_window_to_layout(&mut self, layout: LayoutId, wid: WindowId, cursor: Option<CGPoint>) {
         let frame = self.layout_frame(layout);
         match &mut self.tree {
@@ -150,20 +167,96 @@ impl LayoutEngine {
         }
     }
 
-    fn resize_selection_with_context(
+    pub fn resize_active(
         &mut self,
         layout: LayoutId,
-        amount: f64,
+        delta: ResizeDelta,
+        corner: ResizeCorner,
         cursor: Option<CGPoint>,
     ) {
+        let Some(selected) = self.tree.selected_window(layout) else {
+            return;
+        };
+
         let frame = self.layout_frame(layout);
-        match &mut self.tree {
-            LayoutSystemKind::Traditional(s) => s.resize_selection_by(layout, amount),
-            LayoutSystemKind::Bsp(s) => s.resize_selection_by(layout, amount),
-            LayoutSystemKind::Dwindle(s) => {
-                s.resize_selection_by_with_context(layout, amount, cursor, frame.as_ref());
+        let (screen_w, screen_h) = frame
+            .as_ref()
+            .map(|f| (f.screen.size.width, f.screen.size.height))
+            .unwrap_or((1920.0, 1080.0));
+        let (current_w, current_h, screen_w, screen_h, window_center) =
+            if let Some(rect) = self.window_rect(layout, selected) {
+                let center = CGPoint::new(
+                    rect.origin.x + rect.size.width / 2.0,
+                    rect.origin.y + rect.size.height / 2.0,
+                );
+                (
+                    rect.size.width,
+                    rect.size.height,
+                    screen_w,
+                    screen_h,
+                    Some(center),
+                )
+            } else {
+                (screen_w, screen_h, screen_w, screen_h, None)
+            };
+
+        let (delta_x, delta_y) = delta.to_pixel_delta(current_w, current_h, screen_w, screen_h);
+
+        let mut effective_corner = corner;
+        if matches!(corner, ResizeCorner::None) {
+            if let (Some(cursor), Some(center)) = (cursor, window_center) {
+                effective_corner = ResizeCorner::from_cursor_position(cursor, center);
+            } else {
+                effective_corner = ResizeCorner::BottomRight;
             }
         }
+
+        let (allowed_x, allowed_y) = if let (Some(rect), Some(f)) = (self.window_rect(layout, selected), frame.as_ref()) {
+            self.calculate_allowed_movement((delta_x, delta_y), rect, f.screen)
+        } else {
+            (delta_x, delta_y)
+        };
+
+        if allowed_x.abs() < 0.001 && allowed_y.abs() < 0.001 {
+            return;
+        }
+
+        match &mut self.tree {
+            LayoutSystemKind::Traditional(s) => {
+                s.resize_active(layout, allowed_x, allowed_y, effective_corner, frame.as_ref(), cursor)
+            }
+            LayoutSystemKind::Bsp(s) => {
+                s.resize_active(layout, allowed_x, allowed_y, effective_corner, frame.as_ref(), cursor)
+            }
+            LayoutSystemKind::Dwindle(s) => {
+                s.resize_active(layout, allowed_x, allowed_y, effective_corner, frame.as_ref(), cursor)
+            }
+        }
+    }
+
+    fn calculate_allowed_movement(
+        &self,
+        delta: (f64, f64),
+        window_frame: CGRect,
+        screen_frame: CGRect,
+    ) -> (f64, f64) {
+        const STICK_THRESHOLD: f64 = 2.0;
+
+        let at_left = (window_frame.origin.x - screen_frame.origin.x).abs() < STICK_THRESHOLD;
+        let at_right = ((window_frame.origin.x + window_frame.size.width)
+            - (screen_frame.origin.x + screen_frame.size.width))
+            .abs()
+            < STICK_THRESHOLD;
+        let at_top = (window_frame.origin.y - screen_frame.origin.y).abs() < STICK_THRESHOLD;
+        let at_bottom = ((window_frame.origin.y + window_frame.size.height)
+            - (screen_frame.origin.y + screen_frame.size.height))
+            .abs()
+            < STICK_THRESHOLD;
+
+        let allowed_x = if at_left && at_right { 0.0 } else { delta.0 };
+        let allowed_y = if at_top && at_bottom { 0.0 } else { delta.1 };
+
+        (allowed_x, allowed_y)
     }
 
     pub fn update_virtual_workspace_settings(
@@ -242,10 +335,6 @@ impl LayoutEngine {
         window: Option<WindowId>,
     ) -> Option<WindowId> {
         window.filter(|wid| self.is_window_in_active_workspace(space, *wid))
-    }
-
-    pub fn resize_selection(&mut self, layout: LayoutId, resize_amount: f64) {
-        self.resize_selection_with_context(layout, resize_amount, None);
     }
 
     fn move_focus_internal(
@@ -524,6 +613,7 @@ impl LayoutEngine {
             broadcast_tx,
             space_display_map: HashMap::default(),
             layout_frames: HashMap::default(),
+            layout_positions: HashMap::default(),
         };
         engine.tree.update_settings(layout_settings);
         engine
@@ -563,6 +653,7 @@ impl LayoutEngine {
                 );
                 for layout in removed {
                     self.layout_frames.remove(&layout);
+                    self.layout_positions.remove(&layout);
                 }
             }
             LayoutEvent::WindowsOnScreenUpdated(space, pid, mut windows_with_titles, app_info) => {
@@ -1066,36 +1157,14 @@ impl LayoutEngine {
                 self.tree.move_selection_to_root(layout, stable);
                 EventResponse::default()
             }
-            LayoutCommand::ResizeWindowGrow => {
-                if is_floating {
-                    return EventResponse::default();
-                }
-
-                self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
-                let resize_amount = 0.05;
-                let cursor = current_cursor_location().ok();
-                self.resize_selection_with_context(layout, resize_amount, cursor);
-                EventResponse::default()
-            }
-            LayoutCommand::ResizeWindowShrink => {
-                if is_floating {
-                    return EventResponse::default();
-                }
-
-                self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
-                let resize_amount = -0.05;
-                let cursor = current_cursor_location().ok();
-                self.resize_selection_with_context(layout, resize_amount, cursor);
-                EventResponse::default()
-            }
-            LayoutCommand::ResizeWindowBy { amount } => {
+            LayoutCommand::ResizeActive { delta, corner } => {
                 if is_floating {
                     return EventResponse::default();
                 }
 
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
                 let cursor = current_cursor_location().ok();
-                self.resize_selection_with_context(layout, amount, cursor);
+                self.resize_active(layout, delta, corner, cursor);
                 EventResponse::default()
             }
         }
@@ -1120,6 +1189,7 @@ impl LayoutEngine {
             stack_line_horiz,
             stack_line_vert,
         );
+        self.update_layout_positions(layout, &positions);
         self.update_layout_frame(layout, screen, gaps);
         positions
     }
@@ -1153,6 +1223,7 @@ impl LayoutEngine {
                     stack_line_vert,
                 );
                 self.update_layout_frame(layout, screen, gaps);
+                self.update_layout_positions(layout, &tiled_positions);
                 for (wid, rect) in tiled_positions {
                     positions.insert(wid, rect);
                 }
@@ -1300,6 +1371,7 @@ impl LayoutEngine {
             );
             for layout in removed {
                 self.layout_frames.remove(&layout);
+                self.layout_positions.remove(&layout);
             }
 
             // After ensuring an active layout exists, return it. If something

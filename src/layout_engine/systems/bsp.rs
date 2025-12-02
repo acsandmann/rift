@@ -2,7 +2,7 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use serde::{Deserialize, Serialize};
 
 use crate::actor::app::{WindowId, pid_t};
-use crate::common::collections::HashSet;
+use crate::common::collections::{HashMap, HashSet};
 use crate::layout_engine::binary_tree::{BinaryTreeLayout, LayoutState, NodeKind, RatioPolicy};
 use crate::layout_engine::systems::LayoutSystem;
 use crate::layout_engine::{Direction, LayoutId, LayoutKind, Orientation};
@@ -566,24 +566,67 @@ impl LayoutSystem for BspLayoutSystem {
 
     fn unjoin_selection(&mut self, layout: LayoutId) { self.core.unjoin_selection(layout) }
 
-    fn resize_selection_by(&mut self, layout: LayoutId, amount: f64) {
+    fn resize_active(
+        &mut self,
+        layout: LayoutId,
+        delta_x: f64,
+        delta_y: f64,
+        corner: crate::layout_engine::ResizeCorner,
+        frame: Option<&crate::layout_engine::LayoutFrame>,
+        cursor: Option<CGPoint>,
+    ) {
         let sel_snapshot = self.core.selection_of_layout(layout);
-        let Some(mut node) = sel_snapshot else {
+        let Some(node) = sel_snapshot else {
             return;
         };
 
-        while let Some(parent) = node.parent(&self.core.tree.map) {
-            if let Some(NodeKind::Split { ratio, .. }) = self.core.kind.get_mut(parent) {
-                let is_first = Some(node) == parent.first_child(&self.core.tree.map);
-                let delta = (amount as f32) * 0.5;
-                if is_first {
-                    *ratio = (*ratio + delta).clamp(0.05, 0.95);
+        let (pinned_h, pinned_v) = (false, false);
+
+        let rects_cache: Option<HashMap<NodeId, CGRect>> = None;
+        let fallback_size = frame.map(|f| f.screen.size);
+
+        let effective_corner = if matches!(corner, crate::layout_engine::ResizeCorner::None) {
+            if let (Some(cursor), Some(rects)) = (cursor, rects_cache.as_ref()) {
+                if let Some(rect) = rects.get(&node) {
+                    let center = CGPoint::new(
+                        rect.origin.x + rect.size.width / 2.0,
+                        rect.origin.y + rect.size.height / 2.0,
+                    );
+                    crate::layout_engine::ResizeCorner::from_cursor_position(cursor, center)
                 } else {
-                    *ratio = (*ratio - delta).clamp(0.05, 0.95);
+                    crate::layout_engine::ResizeCorner::BottomRight
                 }
-                break;
+            } else {
+                crate::layout_engine::ResizeCorner::BottomRight
             }
-            node = parent;
+        } else {
+            corner
+        };
+
+        if delta_x.abs() > 0.001 && !pinned_h {
+            if let Some((parent, is_first_child)) = self.find_parent_split(node, Orientation::Horizontal) {
+                self.apply_split_resize(
+                    parent,
+                    delta_x,
+                    is_first_child,
+                    effective_corner.affects_left(),
+                    rects_cache.as_ref(),
+                    fallback_size,
+                );
+            }
+        }
+
+        if delta_y.abs() > 0.001 && !pinned_v {
+            if let Some((parent, is_first_child)) = self.find_parent_split(node, Orientation::Vertical) {
+                self.apply_split_resize(
+                    parent,
+                    delta_y,
+                    is_first_child,
+                    effective_corner.affects_top(),
+                    rects_cache.as_ref(),
+                    fallback_size,
+                );
+            }
         }
     }
 
@@ -600,5 +643,56 @@ impl LayoutSystem for BspLayoutSystem {
 
     fn move_selection_to_root(&mut self, layout: LayoutId, stable: bool) {
         self.core.move_selection_to_root(layout, stable)
+    }
+}
+
+impl BspLayoutSystem {
+    fn find_parent_split(
+        &self,
+        start: NodeId,
+        target_orientation: Orientation,
+    ) -> Option<(NodeId, bool)> {
+        let mut current = start;
+        while let Some(parent) = current.parent(&self.core.tree.map) {
+            if let Some(NodeKind::Split { orientation, .. }) = self.core.kind.get(parent) {
+                if *orientation == target_orientation {
+                    let is_first = Some(current) == parent.first_child(&self.core.tree.map);
+                    return Some((parent, is_first));
+                }
+            }
+            current = parent;
+        }
+        None
+    }
+
+    fn apply_split_resize(
+        &mut self,
+        split_node: NodeId,
+        delta: f64,
+        is_first_child: bool,
+        affects_first_edge: bool,
+        rects: Option<&HashMap<NodeId, CGRect>>,
+        fallback_size: Option<CGSize>,
+    ) {
+        if let Some(NodeKind::Split { ratio, orientation, .. }) =
+            self.core.kind.get_mut(split_node)
+        {
+            let parent_rect = rects.and_then(|r| r.get(&split_node).copied());
+            let denom = match (orientation, parent_rect) {
+                (Orientation::Horizontal, Some(r)) => r.size.width,
+                (Orientation::Vertical, Some(r)) => r.size.height,
+                (Orientation::Horizontal, None) => {
+                    fallback_size.map(|s| s.width).unwrap_or(1000.0)
+                }
+                (Orientation::Vertical, None) => fallback_size.map(|s| s.height).unwrap_or(1000.0),
+            };
+            let ratio_delta = (delta * 2.0 / denom).clamp(-1.0, 1.0) as f32;
+            let increase_ratio = if affects_first_edge { !is_first_child } else { is_first_child };
+            if increase_ratio {
+                *ratio = (*ratio + ratio_delta).clamp(0.05, 0.95);
+            } else {
+                *ratio = (*ratio - ratio_delta).clamp(0.05, 0.95);
+            }
+        }
     }
 }

@@ -3,7 +3,7 @@ use objc2_core_foundation::{CGPoint, CGRect};
 use serde::{Deserialize, Serialize};
 
 use crate::actor::app::{WindowId, pid_t};
-use crate::layout_engine::{Direction, LayoutKind};
+use crate::layout_engine::{Direction, LayoutFrame, LayoutKind, ResizeCorner};
 
 slotmap::new_key_type! { pub struct LayoutId; }
 
@@ -83,7 +83,15 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     ) -> Vec<WindowId>;
     fn parent_of_selection_is_stacked(&self, layout: LayoutId) -> bool;
     fn unjoin_selection(&mut self, _layout: LayoutId);
-    fn resize_selection_by(&mut self, layout: LayoutId, amount: f64);
+    fn resize_active(
+        &mut self,
+        layout: LayoutId,
+        delta_x: f64,
+        delta_y: f64,
+        corner: ResizeCorner,
+        frame: Option<&LayoutFrame>,
+        cursor: Option<CGPoint>,
+    );
     fn rebalance(&mut self, layout: LayoutId);
     fn toggle_tile_orientation(&mut self, layout: LayoutId);
     fn toggle_split_of_selection(&mut self, layout: LayoutId);
