@@ -5,7 +5,7 @@ use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::{HashMap, HashSet};
 use crate::layout_engine::binary_tree::{BinaryTreeLayout, LayoutState, NodeKind, RatioPolicy};
 use crate::layout_engine::systems::LayoutSystem;
-use crate::layout_engine::{Direction, LayoutId, LayoutKind, Orientation};
+use crate::layout_engine::{Direction, LayoutFrame, LayoutId, LayoutKind, Orientation};
 use crate::model::tree::NodeId;
 
 struct BspRatioPolicy;
@@ -32,6 +32,65 @@ impl Default for BspLayoutSystem {
 
 impl BspLayoutSystem {
     fn policy(&self) -> BspRatioPolicy { BspRatioPolicy }
+
+    fn rects_for_layout(
+        &self,
+        layout: LayoutId,
+        frame: &LayoutFrame,
+    ) -> Option<HashMap<NodeId, CGRect>> {
+        let state = self.core.layouts.get(layout)?;
+        let mut rects = HashMap::default();
+        let root_rect = BinaryTreeLayout::apply_outer_gaps(frame.screen, &frame.gaps);
+        self.populate_node_rects(state.root, root_rect, &frame.gaps, &mut rects);
+        Some(rects)
+    }
+
+    fn populate_node_rects(
+        &self,
+        node: NodeId,
+        rect: CGRect,
+        gaps: &crate::common::config::GapSettings,
+        out: &mut HashMap<NodeId, CGRect>,
+    ) {
+        out.insert(node, rect);
+        if let Some(NodeKind::Split { orientation, ratio, .. }) = self.core.kind.get(node) {
+            let (r1, r2) = match orientation {
+                Orientation::Horizontal => {
+                    let gap = gaps.inner.horizontal();
+                    let available = (rect.size.width - gap).max(0.0);
+                    let first_w = available * self.policy().ratio_to_fraction(*ratio);
+                    let second_w = (available - first_w).max(0.0);
+                    (
+                        CGRect::new(rect.origin, CGSize::new(first_w, rect.size.height)),
+                        CGRect::new(
+                            CGPoint::new(rect.origin.x + first_w + gap, rect.origin.y),
+                            CGSize::new(second_w, rect.size.height),
+                        ),
+                    )
+                }
+                Orientation::Vertical => {
+                    let gap = gaps.inner.vertical();
+                    let available = (rect.size.height - gap).max(0.0);
+                    let first_h = available * self.policy().ratio_to_fraction(*ratio);
+                    let second_h = (available - first_h).max(0.0);
+                    (
+                        CGRect::new(rect.origin, CGSize::new(rect.size.width, first_h)),
+                        CGRect::new(
+                            CGPoint::new(rect.origin.x, rect.origin.y + first_h + gap),
+                            CGSize::new(rect.size.width, second_h),
+                        ),
+                    )
+                }
+            };
+            let mut it = node.children(&self.core.tree.map);
+            if let Some(first) = it.next() {
+                self.populate_node_rects(first, r1, gaps, out);
+            }
+            if let Some(second) = it.next() {
+                self.populate_node_rects(second, r2, gaps, out);
+            }
+        }
+    }
 
     fn calculate_layout_recursive(
         &self,
@@ -60,7 +119,7 @@ impl BspLayoutSystem {
                     out.push((*w, target));
                 }
             }
-            Some(NodeKind::Split { orientation, ratio }) => match orientation {
+            Some(NodeKind::Split { orientation, ratio, .. }) => match orientation {
                 Orientation::Horizontal => {
                     let gap = gaps.inner.horizontal();
                     let total = rect.size.width;
@@ -142,7 +201,10 @@ impl BspLayoutSystem {
             }
             self.core.window_to_node.insert(new_window, new_node);
 
-            self.core.kind.insert(leaf, NodeKind::Split { orientation, ratio: 0.5 });
+            self.core.kind.insert(
+                leaf,
+                NodeKind::Split { orientation, ratio: 0.5, locked_orientation: false },
+            );
 
             let (first_child, second_child) = match direction {
                 Direction::Left | Direction::Up => (new_node, existing_node),
@@ -184,6 +246,7 @@ impl BspLayoutSystem {
                     self.core.kind.insert(sel, NodeKind::Split {
                         orientation: Orientation::Horizontal,
                         ratio: 0.5,
+                        locked_orientation: false,
                     });
                     left.detach(&mut self.core.tree).push_back(sel);
                     right.detach(&mut self.core.tree).push_back(sel);
@@ -522,6 +585,7 @@ impl LayoutSystem for BspLayoutSystem {
                 self.core.kind.insert(target, NodeKind::Split {
                     orientation,
                     ratio: self.policy().default_ratio(),
+                    locked_orientation: false,
                 });
                 left.detach(&mut self.core.tree).push_back(target);
                 right.detach(&mut self.core.tree).push_back(target);
@@ -580,13 +644,31 @@ impl LayoutSystem for BspLayoutSystem {
             return;
         };
 
-        let (pinned_h, pinned_v) = (false, false);
+        let rects = frame.and_then(|f| self.rects_for_layout(layout, f));
+        let window_rect = rects.as_ref().and_then(|m| m.get(&node).copied());
 
-        let rects_cache: Option<HashMap<NodeId, CGRect>> = None;
+        let (pinned_h, pinned_v) = if let (Some(rect), Some(frame)) = (window_rect, frame) {
+            const STICKS: f64 = 2.0;
+            let screen = frame.screen;
+            let at_left = (rect.origin.x - screen.origin.x).abs() < STICKS;
+            let at_right = ((rect.origin.x + rect.size.width)
+                - (screen.origin.x + screen.size.width))
+                .abs()
+                < STICKS;
+            let at_top = (rect.origin.y - screen.origin.y).abs() < STICKS;
+            let at_bottom = ((rect.origin.y + rect.size.height)
+                - (screen.origin.y + screen.size.height))
+                .abs()
+                < STICKS;
+            (at_left && at_right, at_top && at_bottom)
+        } else {
+            (false, false)
+        };
+
         let fallback_size = frame.map(|f| f.screen.size);
 
         let effective_corner = if matches!(corner, crate::layout_engine::ResizeCorner::None) {
-            if let (Some(cursor), Some(rects)) = (cursor, rects_cache.as_ref()) {
+            if let (Some(cursor), Some(rects)) = (cursor, rects.as_ref()) {
                 if let Some(rect) = rects.get(&node) {
                     let center = CGPoint::new(
                         rect.origin.x + rect.size.width / 2.0,
@@ -610,7 +692,7 @@ impl LayoutSystem for BspLayoutSystem {
                     delta_x,
                     is_first_child,
                     effective_corner.affects_left(),
-                    rects_cache.as_ref(),
+                    rects.as_ref(),
                     fallback_size,
                 );
             }
@@ -623,7 +705,7 @@ impl LayoutSystem for BspLayoutSystem {
                     delta_y,
                     is_first_child,
                     effective_corner.affects_top(),
-                    rects_cache.as_ref(),
+                    rects.as_ref(),
                     fallback_size,
                 );
             }

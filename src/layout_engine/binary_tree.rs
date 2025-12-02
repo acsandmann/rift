@@ -20,6 +20,8 @@ pub enum NodeKind {
     Split {
         orientation: Orientation,
         ratio: f32,
+        #[serde(default)]
+        locked_orientation: bool,
     },
     Leaf {
         window: Option<WindowId>,
@@ -338,8 +340,13 @@ impl BinaryTreeLayout {
                 Some(NodeKind::Leaf { window, .. }) => {
                     out.push_str(&format!("Leaf {:?}\n", window));
                 }
-                Some(NodeKind::Split { orientation, ratio }) => {
-                    out.push_str(&format!("Split {:?} {:.2}\n", orientation, ratio));
+                Some(NodeKind::Split { orientation, ratio, locked_orientation }) => {
+                    out.push_str(&format!(
+                        "Split {:?} {:.2}{}\n",
+                        orientation,
+                        ratio,
+                        if *locked_orientation { " (locked)" } else { "" }
+                    ));
                     let mut it = node.children(&this.tree.map);
                     if let Some(first) = it.next() {
                         write_node(this, first, out, indent + 1);
@@ -665,11 +672,14 @@ impl BinaryTreeLayout {
 
         let mut node_opt = Some(start_node);
         while let Some(node) = node_opt {
-            if let Some(NodeKind::Split { orientation, .. }) = self.kind.get_mut(node) {
+            if let Some(NodeKind::Split { orientation, locked_orientation, .. }) =
+                self.kind.get_mut(node)
+            {
                 *orientation = match *orientation {
                     Orientation::Horizontal => Orientation::Vertical,
                     Orientation::Vertical => Orientation::Horizontal,
                 };
+                *locked_orientation = true;
                 return;
             }
             node_opt = node.parent(&self.tree.map);
@@ -677,11 +687,14 @@ impl BinaryTreeLayout {
 
         if let Some(state) = self.layouts.get_mut(layout) {
             let root = state.root;
-            if let Some(NodeKind::Split { orientation, .. }) = self.kind.get_mut(root) {
+            if let Some(NodeKind::Split { orientation, locked_orientation, .. }) =
+                self.kind.get_mut(root)
+            {
                 *orientation = match *orientation {
                     Orientation::Horizontal => Orientation::Vertical,
                     Orientation::Vertical => Orientation::Horizontal,
                 };
+                *locked_orientation = true;
             }
         }
     }

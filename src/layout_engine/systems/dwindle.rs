@@ -245,24 +245,27 @@ impl DwindleLayoutSystem {
                     out.push((w, target));
                 }
             }
-            Some(NodeKind::Split { orientation, ratio }) => {
+            Some(NodeKind::Split { orientation, ratio, locked_orientation }) => {
                 // HYPRLAND BEHAVIOR: Mutate orientation when preserve_split=false and smart_split=false
-                let effective_orientation =
-                    if !self.settings.preserve_split && !self.settings.smart_split {
-                        let new_orientation = self.aspect_orientation(Some(rect));
-                        // Mutate the stored orientation
-                        if let Some(NodeKind::Split { orientation: stored, .. }) =
-                            self.core.kind.get_mut(node)
-                        {
-                            *stored = new_orientation;
-                        }
-                        new_orientation
-                    } else {
-                        orientation
-                    };
+                let effective_orientation = if locked_orientation
+                    || self.settings.preserve_split
+                    || self.settings.smart_split
+                {
+                    orientation
+                } else {
+                    let new_orientation = self.aspect_orientation(Some(rect));
+                    // Mutate the stored orientation
+                    if let Some(NodeKind::Split { orientation: stored, .. }) =
+                        self.core.kind.get_mut(node)
+                    {
+                        *stored = new_orientation;
+                    }
+                    new_orientation
+                };
 
                 // Split WITHOUT gaps - gaps are applied at leaf level
-                let (r1, r2) = self.compute_split_rects_no_gaps(rect, effective_orientation, ratio);
+                let (r1, r2) =
+                    self.compute_split_rects_no_gaps(rect, effective_orientation, ratio);
                 let children: Vec<_> = node.children(&self.core.tree.map).collect();
                 if let Some(&first) = children.first() {
                     self.calculate_layout_recursive(first, r1, tiling_area, gaps, out);
@@ -339,8 +342,14 @@ impl DwindleLayoutSystem {
     ) {
         // For hit testing, store rects without gaps (Hyprland-style)
         out.insert(node, rect);
-        if let Some(NodeKind::Split { orientation, ratio }) = self.core.kind.get(node) {
-            let effective_orientation = self.effective_orientation(rect, *orientation);
+        if let Some(NodeKind::Split {
+            orientation,
+            ratio,
+            locked_orientation,
+        }) = self.core.kind.get(node)
+        {
+            let effective_orientation =
+                self.effective_orientation(rect, *orientation, *locked_orientation);
             // Use no-gaps split for consistency with Hyprland
             let (r1, r2) = self.compute_split_rects_no_gaps(rect, effective_orientation, *ratio);
             let mut it = node.children(&self.core.tree.map);
@@ -496,19 +505,24 @@ impl DwindleLayoutSystem {
                             let mut node_local = node;
                             let mut applied = 0;
                             while let Some(parent) = node_local.parent(&self.core.tree.map) {
-                                let stored_orientation = match self.core.kind.get(parent) {
-                                    Some(NodeKind::Split { orientation: o, .. }) => Some(*o),
-                                    _ => None,
+                                let parent_orientation = match self.core.kind.get(parent) {
+                                    Some(NodeKind::Split {
+                                        orientation: o,
+                                        locked_orientation,
+                                        ..
+                                    }) => rects
+                                        .get(&parent)
+                                        .copied()
+                                        .map(|r| {
+                                            self.effective_orientation(
+                                                r,
+                                                *o,
+                                                *locked_orientation,
+                                            )
+                                        })
+                                        .unwrap_or(*o),
+                                    _ => Orientation::Horizontal,
                                 };
-                                let parent_orientation = stored_orientation
-                                    .map(|o| {
-                                        rects
-                                            .get(&parent)
-                                            .copied()
-                                            .map(|r| self.effective_orientation(r, o))
-                                            .unwrap_or(o)
-                                    })
-                                    .unwrap_or(Orientation::Horizontal);
 
                                 if parent_orientation == orientation {
                                     if let Some(NodeKind::Split { ratio, .. }) =
@@ -550,24 +564,32 @@ impl DwindleLayoutSystem {
                                         if applied == 1 {
                                             if let Some(NodeKind::Split {
                                                 orientation: stored_child,
+                                                locked_orientation: child_locked,
                                                 ..
                                             }) = self.core.kind.get(node_local)
                                             {
-                                            let child_orientation = rects
-                                                .get(&node_local)
-                                                .copied()
-                                                .map(|r| self.effective_orientation(r, *stored_child))
-                                                .unwrap_or(*stored_child);
-                                            if child_orientation == orientation {
-                                                let children: Vec<_> =
-                                                    node_local.children(&self.core.tree.map).collect();
-                                                if children.len() == 2 {
-                                                    let leaf_on_first = children[0]
-                                                        .traverse_preorder(&self.core.tree.map)
-                                                        .any(|n| n == leaf_id);
-                                                    let leaf_on_second = children[1]
-                                                        .traverse_preorder(&self.core.tree.map)
-                                                        .any(|n| n == leaf_id);
+                                                let child_orientation = rects
+                                                    .get(&node_local)
+                                                    .copied()
+                                                    .map(|r| {
+                                                        self.effective_orientation(
+                                                            r,
+                                                            *stored_child,
+                                                            *child_locked,
+                                                        )
+                                                    })
+                                                    .unwrap_or(*stored_child);
+                                                if child_orientation == orientation {
+                                                    let children: Vec<_> = node_local
+                                                        .children(&self.core.tree.map)
+                                                        .collect();
+                                                    if children.len() == 2 {
+                                                        let leaf_on_first = children[0]
+                                                            .traverse_preorder(&self.core.tree.map)
+                                                            .any(|n| n == leaf_id);
+                                                        let leaf_on_second = children[1]
+                                                            .traverse_preorder(&self.core.tree.map)
+                                                            .any(|n| n == leaf_id);
                                                         if leaf_on_first || leaf_on_second {
                                                             if let Some(NodeKind::Split {
                                                                 ratio: inner_ratio,
@@ -753,8 +775,8 @@ impl DwindleLayoutSystem {
         }
     }
 
-    fn effective_orientation(&self, rect: CGRect, stored: Orientation) -> Orientation {
-        if self.settings.preserve_split || self.settings.smart_split {
+    fn effective_orientation(&self, rect: CGRect, stored: Orientation, locked: bool) -> Orientation {
+        if locked || self.settings.preserve_split || self.settings.smart_split {
             stored
         } else {
             self.aspect_orientation(Some(rect))
@@ -865,7 +887,10 @@ impl DwindleLayoutSystem {
                 ratio = Self::clamp_ratio(2.0 - ratio);
             }
 
-            self.core.kind.insert(leaf, NodeKind::Split { orientation, ratio });
+            self.core.kind.insert(
+                leaf,
+                NodeKind::Split { orientation, ratio, locked_orientation: false },
+            );
 
             let (first_child, second_child) = if new_first {
                 (new_node, existing_node)
@@ -910,6 +935,7 @@ impl DwindleLayoutSystem {
                     self.core.kind.insert(sel, NodeKind::Split {
                         orientation: Orientation::Horizontal,
                         ratio,
+                        locked_orientation: false,
                     });
                     left.detach(&mut self.core.tree).push_back(sel);
                     right.detach(&mut self.core.tree).push_back(sel);
@@ -1010,6 +1036,60 @@ mod tests {
         assert_eq!(r3.origin.y, 50.0);
         assert_eq!(r3.size.width, 50.0);
         assert_eq!(r3.size.height, 50.0);
+    }
+
+    #[test]
+    fn toggle_split_reorients_parent_even_when_not_preserving_splits() {
+        let mut system = DwindleLayoutSystem::default();
+        let layout = system.create_layout();
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(100.0, 100.0));
+        let gaps = zero_gaps();
+
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+
+        let placements: HashMap<WindowId, CGRect> = system
+            .calculate_layout(
+                layout,
+                screen,
+                0.0,
+                &gaps,
+                0.0,
+                HorizontalPlacement::default(),
+                VerticalPlacement::default(),
+            )
+            .into_iter()
+            .collect();
+
+        assert_eq!(placements[&w(1)].size.width, 50.0);
+        assert_eq!(placements[&w(1)].size.height, 100.0);
+        assert_eq!(placements[&w(2)].origin.x, 50.0);
+
+        system.toggle_split_of_selection(layout);
+
+        let after: HashMap<WindowId, CGRect> = system
+            .calculate_layout(
+                layout,
+                screen,
+                0.0,
+                &gaps,
+                0.0,
+                HorizontalPlacement::default(),
+                VerticalPlacement::default(),
+            )
+            .into_iter()
+            .collect();
+
+        assert_eq!(after[&w(1)].size.width, 100.0);
+        assert_eq!(after[&w(1)].size.height, 50.0);
+        assert_eq!(after[&w(2)].size.width, 100.0);
+        assert_eq!(after[&w(2)].size.height, 50.0);
+
+        let ys = [after[&w(1)].origin.y, after[&w(2)].origin.y];
+        assert!(ys.contains(&0.0));
+        assert!(ys.contains(&50.0));
+        assert_eq!(after[&w(1)].origin.x, 0.0);
+        assert_eq!(after[&w(2)].origin.x, 0.0);
     }
 }
 
@@ -1298,7 +1378,10 @@ impl LayoutSystem for DwindleLayoutSystem {
                     self.core.window_to_node.insert(w, left);
                 }
                 let ratio = Self::clamp_ratio(self.settings.default_split_ratio);
-                self.core.kind.insert(target, NodeKind::Split { orientation, ratio });
+                self.core.kind.insert(
+                    target,
+                    NodeKind::Split { orientation, ratio, locked_orientation: false },
+                );
                 left.detach(&mut self.core.tree).push_back(target);
                 right.detach(&mut self.core.tree).push_back(target);
                 self.core.tree.data.selection.select(&self.core.tree.map, right);
@@ -1422,11 +1505,17 @@ impl LayoutSystem for DwindleLayoutSystem {
         if let Some(sel) = self.selection_of_layout(layout) {
             let sel_leaf = self.descend_to_leaf(sel);
             if let Some(parent) = sel_leaf.parent(&self.core.tree.map) {
-                if let Some(NodeKind::Split { orientation, .. }) = self.core.kind.get_mut(parent) {
+                if let Some(NodeKind::Split {
+                    orientation,
+                    locked_orientation,
+                    ..
+                }) = self.core.kind.get_mut(parent)
+                {
                     *orientation = match *orientation {
                         Orientation::Horizontal => Orientation::Vertical,
                         Orientation::Vertical => Orientation::Horizontal,
                     };
+                    *locked_orientation = true;
                 }
             }
         }

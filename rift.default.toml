@@ -138,8 +138,10 @@ bottom = 0
 right = 0
 
 [settings.layout.gaps.inner]
-horizontal = 0
-vertical = 0
+left = 0
+right = 0
+top = 0
+bottom = 0
 
 # Example per-display overrides:
 # Replace the quoted key with your display's UUID. Only specify values you want to override.
@@ -335,7 +337,7 @@ comb1 = "Alt + Shift"
 # - join_window = "left"|"right"|"up"|"down"
 # - stack_windows / unstack_windows / unjoin_windows
 # - toggle_focus_floating / toggle_window_floating / toggle_fullscreen
-# - resize_window_grow / resize_window_shrink
+# - resize_active = { delta = { x = { type = "pixels", value = N }, y = { type = "pixels", value = N } }, corner = "bottom_right" }
 # - move_mouse_to_display = N or UUID
 # - focus_display = { direction = "left"|"right"|"up"|"down" }
 # - focus_display = { index = N }
@@ -387,9 +389,9 @@ comb1 = "Alt + Shift"
 "Alt + Ctrl + Shift + K" = { preselect = "up" }
 "Alt + Ctrl + Shift + J" = { preselect = "down" }
 
-# smartly resize windows
-"Alt + Shift + Equal" = "resize_window_grow"
-"Alt + Shift + Minus" = "resize_window_shrink"
+# smartly resize windows (Hyprland-style resizeactive)
+"Alt + Shift + Equal" = { resize_active = { delta = { x = { type = "pixels", value = 50.0 }, y = { type = "pixels", value = 50.0 } } } }
+"Alt + Shift + Minus" = { resize_active = { delta = { x = { type = "pixels", value = -50.0 }, y = { type = "pixels", value = -50.0 } } } }
 
 # Move mouse cursor to display by index (0-based) or UUID
 # Examples:
