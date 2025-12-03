@@ -13,8 +13,7 @@ use objc2::runtime::AnyObject;
 use objc2_app_kit::{NSApplication, NSColor, NSPopUpMenuWindowLevel, NSScreen};
 use objc2_core_foundation::{CFRetained, CFString, CFType, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
-    CGColor, CGContext, CGDisplayBounds, CGEvent, CGEventField, CGEventTapOptions, CGEventTapProxy,
-    CGEventType,
+    CGColor, CGContext, CGDisplayBounds, CGEvent, CGEventField, CGEventFlags, CGEventTapOptions, CGEventTapProxy, CGEventType
 };
 use objc2_foundation::MainThreadMarker;
 use objc2_quartz_core::{CALayer, CATextLayer, CATransaction};
@@ -436,6 +435,7 @@ enum NavDirection {
     Up,
     Down,
     Next,
+    Prev,
 }
 
 fn workspace_column_count(count: usize) -> usize {
@@ -812,6 +812,9 @@ impl MissionControlOverlay {
                 NavDirection::Next => {
                     idx = (idx + len - 1) % len; 
                 }
+                NavDirection::Prev => {
+                    idx = (idx - len + 1) % len; 
+                }
             }
             return Some(idx);
         }
@@ -869,6 +872,17 @@ impl MissionControlOverlay {
                     Some(0)
                 }
             }
+            NavDirection::Prev => {
+                if idx == 0 {
+                    if len == 0 {
+                        None
+                    } else {
+                        Some(len - 1)
+                    }
+                } else {
+                    Some(idx - 1)
+                }
+            }
         }
     }
 
@@ -886,9 +900,7 @@ impl MissionControlOverlay {
                 idx = (idx + 1) % len;
             }
 
-            NavDirection::Next => {
-                
-            }
+            NavDirection::Next | NavDirection::Prev => {}
         }
         Some(idx)
     }
@@ -1894,11 +1906,18 @@ impl MissionControlOverlay {
         queue::main().after_f(Time::NOW, Box::into_raw(ctx) as *mut c_void, action_callback);
     }
 
-    fn handle_keycode(&self, keycode: u16) {
+    fn handle_keycode(&self, keycode: u16, shift_down: bool) {
         match keycode {
             53 => self.emit_action(MissionControlAction::Dismiss),
+
             48 => {
-                if self.adjust_selection(NavDirection::Next) {
+                let success: bool;
+                if shift_down {
+                    success = self.adjust_selection(NavDirection::Prev);
+                } else {
+                    success = self.adjust_selection(NavDirection::Next);
+                }
+                if success {
                     self.draw_and_present();
                 }
             }
@@ -2044,7 +2063,12 @@ impl MissionControlOverlay {
                                 CGEventField::KeyboardEventKeycode,
                             ) as u16
                         };
-                        overlay.handle_keycode(keycode);
+
+                        let flags = unsafe { CGEvent::flags(Some(event.as_ref())) };
+
+                        let shift_down = flags.contains(CGEventFlags::MaskShift);
+
+                        overlay.handle_keycode(keycode, shift_down);
                         handled = true;
                     }
                     CGEventType::LeftMouseDown => {
