@@ -31,7 +31,7 @@ use crate::sys::dispatch::DispatchExt;
 use crate::sys::event::Hotkey;
 use crate::sys::geometry::CGRectExt;
 use crate::sys::screen::{CoordinateConverter, NSScreenExt, ScreenDescriptor, ScreenId, SpaceId};
-use crate::sys::window_server::{WindowServerInfo, current_cursor_location};
+use crate::sys::window_server::{WindowServerInfo, current_cursor_location, window_space};
 use crate::{layout_engine as layout, sys};
 
 #[derive(Debug)]
@@ -653,46 +653,40 @@ impl WmController {
     }
 
     fn get_windows(&self) -> Vec<WindowServerInfo> {
-        #[cfg(not(test))]
-        {
-            let all_windows = sys::window_server::get_visible_windows_with_layer(None);
+        let all_windows = sys::window_server::get_visible_windows_with_layer(None);
 
-            let space_ids: Vec<u64> = self
-                .active_spaces()
+        let active_space_ids: Vec<SpaceId> =
+            self.active_spaces().into_iter().filter_map(|opt| opt).collect();
+
+        if active_space_ids.is_empty() {
+            return all_windows;
+        }
+
+        let space_id_values: Vec<u64> = active_space_ids.iter().map(|space| space.get()).collect();
+        let active_spaces: HashSet<SpaceId> = active_space_ids.into_iter().collect();
+
+        let allowed_window_ids: HashSet<u32> =
+            sys::window_server::space_window_list_for_connection(&space_id_values, 0, false)
                 .into_iter()
-                .filter_map(|opt| opt.map(|s| s.get()))
                 .collect();
 
-            if space_ids.is_empty() {
-                return all_windows;
+        if allowed_window_ids.is_empty() {
+            if !all_windows.is_empty() {
+                tracing::trace!(
+                    ?space_id_values,
+                    "space window list empty during screen update; skipping update"
+                );
             }
-
-            let allowed_window_ids: HashSet<u32> =
-                sys::window_server::space_window_list_for_connection(&space_ids, 0, false)
-                    .into_iter()
-                    .collect();
-
-            if allowed_window_ids.is_empty() {
-                // SLS can briefly report no windows for a space while displays reconfigure;
-                // avoid dropping state by falling back to the unfiltered visible list.
-                if !all_windows.is_empty() {
-                    tracing::trace!(
-                        ?space_ids,
-                        "space window list empty during screen update; using unfiltered set"
-                    );
-                }
-                return all_windows;
-            }
-
-            all_windows
-                .into_iter()
-                .filter(|info| allowed_window_ids.contains(&info.id.as_u32()))
-                .collect()
+            return Vec::new();
         }
-        #[cfg(test)]
-        {
-            vec![]
-        }
+
+        all_windows
+            .into_iter()
+            .filter(|info| {
+                allowed_window_ids.contains(&info.id.as_u32())
+                    && window_space(info.id).map_or(false, |space| active_spaces.contains(&space))
+            })
+            .collect()
     }
 
     fn apply_app_rules_to_existing_windows(&mut self) {
