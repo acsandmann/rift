@@ -3,9 +3,7 @@ use tracing::{error, info, warn};
 use super::super::Screen;
 use crate::actor::app::{AppThreadHandle, WindowId};
 use crate::actor::reactor::transaction_manager::TransactionId;
-use crate::actor::reactor::{
-    DisplaySelector, FocusDisplaySelector, MoveDisplaySelector, Reactor, WorkspaceSwitchState,
-};
+use crate::actor::reactor::{DisplaySelector, Reactor, WorkspaceSwitchState};
 use crate::actor::stack_line::Event as StackLineEvent;
 use crate::actor::wm_controller::WmEvent;
 use crate::actor::{menu_bar, raise_manager};
@@ -271,12 +269,7 @@ impl CommandEventHandler {
         reactor: &mut Reactor,
         selector: &DisplaySelector,
     ) {
-        let target_screen = match selector {
-            DisplaySelector::Index(idx) => reactor.space_manager.screens.get(*idx).cloned(),
-            DisplaySelector::Uuid(uuid) => {
-                reactor.space_manager.screens.iter().find(|s| s.display_uuid == *uuid).cloned()
-            }
-        };
+        let target_screen = reactor.screen_for_selector(selector, None).cloned();
 
         if let Some(screen) = target_screen {
             let center = screen.frame.mid();
@@ -287,11 +280,8 @@ impl CommandEventHandler {
         }
     }
 
-    pub fn handle_command_reactor_focus_display(
-        reactor: &mut Reactor,
-        selector: &FocusDisplaySelector,
-    ) {
-        let screen = match reactor.screen_for_focus_selector(selector).cloned() {
+    pub fn handle_command_reactor_focus_display(reactor: &mut Reactor, selector: &DisplaySelector) {
+        let screen = match reactor.screen_for_selector(selector, None).cloned() {
             Some(s) => s,
             None => return,
         };
@@ -307,7 +297,7 @@ impl CommandEventHandler {
 
     pub fn handle_command_reactor_move_window_to_display(
         reactor: &mut Reactor,
-        selector: &MoveDisplaySelector,
+        selector: &DisplaySelector,
         window_idx: Option<u32>,
     ) {
         if reactor.is_in_drag() {
@@ -362,22 +352,9 @@ impl CommandEventHandler {
 
         let origin_screen = reactor.space_manager.screen_by_space(source_space);
 
-        let target_screen = match selector {
-            MoveDisplaySelector::Index { index } => {
-                reactor.space_manager.screens.get(*index).cloned()
-            }
-            MoveDisplaySelector::Uuid { uuid } => {
-                reactor.space_manager.screens.iter().find(|s| s.display_uuid == *uuid).cloned()
-            }
-            MoveDisplaySelector::Direction { direction } => {
-                let origin_point = origin_screen
-                    .map(|s| s.frame.mid())
-                    .or_else(|| reactor.current_screen_center());
-                origin_point
-                    .and_then(|origin| reactor.screen_for_direction_from_point(origin, *direction))
-                    .cloned()
-            }
-        };
+        let origin_point =
+            origin_screen.map(|s| s.frame.mid()).or_else(|| reactor.current_screen_center());
+        let target_screen = reactor.screen_for_selector(selector, origin_point).cloned();
 
         let Some(target_screen) = target_screen else {
             warn!(

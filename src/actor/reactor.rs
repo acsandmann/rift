@@ -261,24 +261,9 @@ pub enum Command {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum DisplaySelector {
+    Direction(Direction),
     Index(usize),
     Uuid(String),
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[serde(untagged)]
-pub enum FocusDisplaySelector {
-    Direction { direction: Direction },
-    Index { index: usize },
-    Uuid { uuid: String },
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[serde(untagged)]
-pub enum MoveDisplaySelector {
-    Direction { direction: Direction },
-    Index { index: usize },
-    Uuid { uuid: String },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -296,12 +281,12 @@ pub enum ReactorCommand {
     ShowMissionControlCurrent,
     DismissMissionControl,
     MoveMouseToDisplay(DisplaySelector),
-    FocusDisplay(FocusDisplaySelector),
+    FocusDisplay(DisplaySelector),
     CloseWindow {
         window_server_id: Option<WindowServerId>,
     },
     MoveWindowToDisplay {
-        selector: MoveDisplaySelector,
+        selector: DisplaySelector,
         window_id: Option<u32>,
     },
 }
@@ -2434,18 +2419,18 @@ impl Reactor {
         best.map(|(_, _, screen)| screen)
     }
 
-    fn screen_for_focus_direction(&self, direction: Direction) -> Option<&Screen> {
-        let origin = self.current_screen_center()?;
-        self.screen_for_direction_from_point(origin, direction)
-    }
-
-    fn screen_for_focus_selector(&self, selector: &FocusDisplaySelector) -> Option<&Screen> {
+    fn screen_for_selector(
+        &self,
+        selector: &DisplaySelector,
+        origin_override: Option<CGPoint>,
+    ) -> Option<&Screen> {
         match selector {
-            FocusDisplaySelector::Direction { direction } => {
-                self.screen_for_focus_direction(*direction)
+            DisplaySelector::Direction(direction) => {
+                let origin = origin_override.or_else(|| self.current_screen_center())?;
+                self.screen_for_direction_from_point(origin, *direction)
             }
-            FocusDisplaySelector::Index { index } => self.space_manager.screens.get(*index),
-            FocusDisplaySelector::Uuid { uuid } => {
+            DisplaySelector::Index(index) => self.space_manager.screens.get(*index),
+            DisplaySelector::Uuid(uuid) => {
                 self.space_manager.screens.iter().find(|screen| screen.display_uuid == *uuid)
             }
         }
