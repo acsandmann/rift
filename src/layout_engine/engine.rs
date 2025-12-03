@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use serde::{Deserialize, Serialize};
+use serde_json;
 use tracing::{debug, info, warn};
 
 use super::{Direction, FloatingManager, LayoutId, LayoutSystemKind, WorkspaceLayouts};
@@ -120,6 +121,16 @@ impl LayoutEngine {
         settings: &crate::common::config::VirtualWorkspaceSettings,
     ) {
         self.virtual_workspace_manager.update_settings(settings);
+    }
+
+    pub fn clone_for_preview(&self) -> Option<Self> {
+        let data = serde_json::to_vec(self).ok()?;
+        let mut cloned: LayoutEngine = serde_json::from_slice(&data).ok()?;
+        cloned.layout_settings = self.layout_settings.clone();
+        cloned.focused_window = self.focused_window;
+        cloned.space_display_map = self.space_display_map.clone();
+        cloned.broadcast_tx = None;
+        Some(cloned)
     }
 
     fn active_floating_windows_in_workspace(&self, space: SpaceId) -> Vec<WindowId> {

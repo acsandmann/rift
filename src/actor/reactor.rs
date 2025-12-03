@@ -31,7 +31,7 @@ use events::system::SystemEventHandler;
 use events::window::WindowEventHandler;
 use main_window::MainWindowTracker;
 use managers::LayoutManager;
-use objc2_core_foundation::{CGPoint, CGRect};
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 pub use replay::{Record, replay};
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -55,7 +55,9 @@ use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt};
 use crate::sys::hotkey::Modifiers;
-use crate::sys::screen::{ScreenId, SpaceId, get_active_space_number};
+use crate::sys::screen::{
+    ScreenId, SpaceId, get_active_space_number, order_visible_spaces_by_position,
+};
 use crate::sys::timer::Timer;
 use crate::sys::window_server::{
     self, WindowServerId, WindowServerInfo, current_cursor_location, space_is_fullscreen,
@@ -2052,6 +2054,12 @@ impl Reactor {
             candidates.push((other_wid, other_state.frame_monotonic));
         }
 
+        // No candidate windows to swap with; hide feedback and return early
+        if candidates.is_empty() {
+            self.drag_manager.hide_feedback();
+            return;
+        }
+
         let previous_pending = self.get_pending_drag_action();
         let overlap_move_threshold = if overlap_action == DragOverlapAction::Move {
             Some(0.0)
@@ -2067,14 +2075,27 @@ impl Reactor {
         let active_target = self.drag_manager.drag_swap_manager.last_target();
 
         if let Some(target_wid) = active_target {
-            if let Some(target_state) = self.window_manager.windows.get(&target_wid) {
-                let relative = target_state.window_server_id.map(|id| id.as_u32());
-                let kind = match overlap_action {
-                    DragOverlapAction::Move => FeedbackKind::Outline { fill: true },
-                    _ => FeedbackKind::Outline { fill: false },
-                };
-                self.drag_manager.show_feedback(target_state.frame_monotonic, relative, kind);
-            }
+            let Some(target_state) = self.window_manager.windows.get(&target_wid) else {
+                // Target window no longer exists; hide feedback and reset
+                self.drag_manager.hide_feedback();
+                self.drag_manager.drag_swap_manager.reset();
+                return;
+            };
+
+            let relative = target_state.window_server_id.map(|id| id.as_u32());
+            let kind = match overlap_action {
+                DragOverlapAction::Move => FeedbackKind::Outline { fill: true },
+                _ => FeedbackKind::Outline { fill: false },
+            };
+            let preview_frame = if overlap_action == DragOverlapAction::Move {
+                let direction =
+                    Self::move_direction_for_preview(new_frame, target_state.frame_monotonic);
+                self.preview_frame_for_move(space, wid, direction)
+                    .unwrap_or(target_state.frame_monotonic)
+            } else {
+                target_state.frame_monotonic
+            };
+            self.drag_manager.show_feedback(preview_frame, relative, kind);
 
             if new_candidate.is_some()
                 || previous_pending != Some((wid, target_wid, overlap_action))
@@ -2129,6 +2150,94 @@ impl Reactor {
             self.drag_manager.hide_feedback();
         }
         // wait for mouse::up before doing *anything*
+    }
+
+    fn move_direction_for_preview(dragged_frame: CGRect, target_frame: CGRect) -> Direction {
+        let delta_x = target_frame.mid().x - dragged_frame.mid().x;
+        let delta_y = target_frame.mid().y - dragged_frame.mid().y;
+        if delta_x.abs() >= delta_y.abs() {
+            if delta_x >= 0.0 {
+                Direction::Right
+            } else {
+                Direction::Left
+            }
+        } else if delta_y >= 0.0 {
+            Direction::Down
+        } else {
+            Direction::Up
+        }
+    }
+
+    fn preview_frame_for_move(
+        &self,
+        space: SpaceId,
+        dragged_wid: WindowId,
+        direction: Direction,
+    ) -> Option<CGRect> {
+        let (screen_frame, display_uuid) =
+            self.space_manager.screens.iter().find_map(|screen| {
+                if self.space_manager.space_for_screen(screen) == Some(space) {
+                    Some((screen.frame, screen.display_uuid.clone()))
+                } else {
+                    None
+                }
+            })?;
+        let visible_spaces_input: Vec<(SpaceId, CGPoint)> = self
+            .space_manager
+            .screens
+            .iter()
+            .filter_map(|screen| {
+                self.space_manager
+                    .space_for_screen(screen)
+                    .map(|space_id| (space_id, screen.frame.mid()))
+            })
+            .collect();
+        if visible_spaces_input.is_empty() {
+            return None;
+        }
+        let mut visible_space_centers = HashMap::default();
+        for (space_id, center) in &visible_spaces_input {
+            visible_space_centers.insert(*space_id, *center);
+        }
+        let visible_spaces = order_visible_spaces_by_position(visible_spaces_input.iter().cloned());
+        let mut preview_engine = self.layout_manager.layout_engine.clone_for_preview()?;
+        preview_engine.handle_command(
+            Some(space),
+            &visible_spaces,
+            &visible_space_centers,
+            LayoutCommand::MoveNode(direction),
+        );
+        let display_uuid_opt = if display_uuid.is_empty() {
+            None
+        } else {
+            Some(display_uuid.as_str())
+        };
+        let gaps = self
+            .config_manager
+            .config
+            .settings
+            .layout
+            .gaps
+            .effective_for_display(display_uuid_opt);
+        let stack_line = &self.config_manager.config.settings.ui.stack_line;
+        let layout_result = preview_engine.calculate_layout_with_virtual_workspaces(
+            space,
+            screen_frame,
+            &gaps,
+            stack_line.thickness(),
+            stack_line.horiz_placement,
+            stack_line.vert_placement,
+            |wid| {
+                self.window_manager
+                    .windows
+                    .get(&wid)
+                    .map(|w| w.frame_monotonic.size)
+                    .unwrap_or_else(|| CGSize::new(500.0, 500.0))
+            },
+        );
+        layout_result
+            .into_iter()
+            .find_map(|(wid, rect)| (wid == dragged_wid).then(|| rect))
     }
 
     fn window_id_under_cursor(&self) -> Option<WindowId> {

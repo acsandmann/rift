@@ -150,9 +150,7 @@ impl DragFeedback {
 
         self.present();
         self.visible = true;
-        if !same_frame {
-            self.cgs_window.order_above(relative_to)?;
-        }
+        self.cgs_window.order_above(relative_to)?;
         Ok(())
     }
 
