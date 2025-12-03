@@ -477,12 +477,6 @@ impl WmController {
         }
     }
 
-    fn dismiss_mission_control(&self) {
-        if let Some(tx) = &self.mission_control_tx {
-            let _ = tx.try_send(mission_control::Event::Dismiss);
-        }
-    }
-
     fn new_app(&mut self, pid: pid_t, info: AppInfo) {
         if info.bundle_id.as_deref() == Some("com.apple.loginwindow") {
             self.login_window_pid = Some(pid);
