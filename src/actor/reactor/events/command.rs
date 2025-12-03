@@ -323,7 +323,13 @@ impl CommandEventHandler {
                             .find_map(|sp| vwm.find_window_by_idx(sp, idx))
                     }
                 }
-                None => reactor.main_window(),
+                None => reactor.main_window().or_else(|| reactor.window_id_under_cursor()).or_else(
+                    || {
+                        reactor
+                            .workspace_command_space()
+                            .and_then(|space| vwm.find_window_by_idx(space, 0))
+                    },
+                ),
             }
         };
 
