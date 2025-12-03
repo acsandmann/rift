@@ -9,6 +9,7 @@ use tracing::instrument;
 use crate::actor::{self, reactor};
 use crate::common::config::Config;
 use crate::model::server::{WindowData, WorkspaceData};
+use crate::model::virtual_workspace::VirtualWorkspaceId;
 use crate::sys::dispatch::block_on;
 use crate::ui::mission_control::{MissionControlAction, MissionControlMode, MissionControlOverlay};
 
@@ -17,6 +18,13 @@ pub enum Event {
     ShowAll,
     ShowCurrent,
     Dismiss,
+    RefreshCurrentWorkspace,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MissionControlViewMode {
+    AllWorkspaces,
+    CurrentWorkspace,
 }
 
 pub type Sender = actor::Sender<Event>;
@@ -29,6 +37,7 @@ pub struct MissionControlActor {
     overlay: Option<MissionControlOverlay>,
     mtm: MainThreadMarker,
     mission_control_active: bool,
+    current_view_mode: Option<MissionControlViewMode>,
 }
 
 impl MissionControlActor {
@@ -45,6 +54,7 @@ impl MissionControlActor {
             overlay: None,
             mtm,
             mission_control_active: false,
+            current_view_mode: None,
         }
     }
 
@@ -87,6 +97,7 @@ impl MissionControlActor {
             overlay.hide();
         }
         self.mission_control_active = false;
+        self.current_view_mode = None;
     }
 
     fn handle_overlay_action(&mut self, action: MissionControlAction) {
@@ -129,11 +140,25 @@ impl MissionControlActor {
                 }
             }
             Event::Dismiss => self.dispose_overlay(),
+            Event::RefreshCurrentWorkspace => {
+                if self.mission_control_active {
+                    match self.current_view_mode {
+                        Some(MissionControlViewMode::CurrentWorkspace) => {
+                            self.show_current_workspace();
+                        }
+                        Some(MissionControlViewMode::AllWorkspaces) => {
+                            self.refresh_all_workspaces_highlight();
+                        }
+                        None => {}
+                    }
+                }
+            }
         }
     }
 
     fn show_all_workspaces(&mut self) {
         self.mission_control_active = true;
+        self.current_view_mode = Some(MissionControlViewMode::AllWorkspaces);
         {
             let overlay = self.ensure_overlay();
             overlay.update(MissionControlMode::AllWorkspaces(Vec::new()));
@@ -154,6 +179,7 @@ impl MissionControlActor {
 
     fn show_current_workspace(&mut self) {
         self.mission_control_active = true;
+        self.current_view_mode = Some(MissionControlViewMode::CurrentWorkspace);
         {
             let overlay = self.ensure_overlay();
             overlay.update(MissionControlMode::CurrentWorkspace(Vec::new()));
@@ -175,5 +201,22 @@ impl MissionControlActor {
 
         let overlay = self.ensure_overlay();
         overlay.update(MissionControlMode::CurrentWorkspace(windows));
+    }
+
+    fn refresh_all_workspaces_highlight(&mut self) {
+        let (tx, fut) = continuation::<Option<VirtualWorkspaceId>>();
+        let _ = self
+            .reactor_tx
+            .try_send(reactor::Event::QueryActiveWorkspace { space_id: None, response: tx });
+        match block_on(fut, std::time::Duration::from_secs_f32(0.75)) {
+            Ok(active_workspace) => {
+                if let Some(overlay) = self.overlay.as_ref() {
+                    overlay.refresh_active_workspace(active_workspace);
+                }
+            }
+            Err(_) => {
+                tracing::warn!("active workspace query timed out");
+            }
+        }
     }
 }

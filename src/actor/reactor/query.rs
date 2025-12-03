@@ -7,6 +7,7 @@ use crate::common::collections::HashSet;
 use crate::model::server::{
     ApplicationData, DisplayData, LayoutStateData, WindowData, WorkspaceData,
 };
+use crate::model::virtual_workspace::VirtualWorkspaceId;
 use crate::sys::screen::{SpaceId, get_active_space_number};
 
 impl Reactor {
@@ -19,6 +20,10 @@ impl Reactor {
             Event::QueryWindows { space_id, response } => {
                 let windows = self.handle_windows_query(space_id);
                 response.send(windows);
+            }
+            Event::QueryActiveWorkspace { space_id, response } => {
+                let active = self.handle_active_workspace_query(space_id);
+                let _ = response.send(active);
             }
             Event::QueryWindowInfo { window_id, response } => {
                 let window_info = self.handle_window_info_query(window_id);
@@ -180,6 +185,16 @@ impl Reactor {
         }
 
         workspaces
+    }
+
+    fn handle_active_workspace_query(
+        &self,
+        space_id_param: Option<SpaceId>,
+    ) -> Option<VirtualWorkspaceId> {
+        let space_id = space_id_param
+            .or_else(|| get_active_space_number())
+            .or_else(|| self.space_manager.screens.first().and_then(|s| s.space))?;
+        self.layout_manager.layout_engine.active_workspace(space_id)
     }
 
     fn handle_displays_query(&self) -> Vec<DisplayData> {

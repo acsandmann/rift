@@ -205,6 +205,19 @@ impl WmController {
         use self::WmCmd::*;
         use self::WmCommand::*;
         use self::WmEvent::*;
+
+        if matches!(
+            event,
+            Command(Wm(NextWorkspace))
+                | Command(Wm(PrevWorkspace))
+                | Command(Wm(SwitchToWorkspace(_)))
+                | Command(Wm(SwitchToLastWorkspace))
+                | SpaceChanged(_)
+        ) && let Some(tx) = &self.mission_control_tx
+        {
+            tx.send(mission_control::Event::RefreshCurrentWorkspace);
+        }
+
         match event {
             SystemWoke => self.events_tx.send(Event::SystemWoke),
             AppEventsRegistered => {
@@ -377,13 +390,11 @@ impl WmController {
                 self.apply_app_rules_to_existing_windows();
             }
             Command(Wm(NextWorkspace)) => {
-                self.dismiss_mission_control();
                 self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
                     layout::LayoutCommand::NextWorkspace(None),
                 )));
             }
             Command(Wm(PrevWorkspace)) => {
-                self.dismiss_mission_control();
                 self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
                     layout::LayoutCommand::PrevWorkspace(None),
                 )));
@@ -401,7 +412,6 @@ impl WmController {
                 };
 
                 if let Some(workspace_index) = maybe_index {
-                    self.dismiss_mission_control();
                     self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
                         layout::LayoutCommand::SwitchToWorkspace(workspace_index),
                     )));
@@ -444,7 +454,6 @@ impl WmController {
                 )));
             }
             Command(Wm(SwitchToLastWorkspace)) => {
-                self.dismiss_mission_control();
                 self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
                     layout::LayoutCommand::SwitchToLastWorkspace,
                 )));

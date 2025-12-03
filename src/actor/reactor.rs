@@ -212,6 +212,12 @@ pub enum Event {
         response: r#continue::Sender<Vec<WindowData>>,
     },
     #[serde(skip)]
+    QueryActiveWorkspace {
+        space_id: Option<SpaceId>,
+        #[serde(skip)]
+        response: r#continue::Sender<Option<VirtualWorkspaceId>>,
+    },
+    #[serde(skip)]
     QueryDisplays(r#continue::Sender<Vec<DisplayData>>),
     #[serde(skip)]
     QueryWindowInfo {
@@ -645,6 +651,7 @@ impl Reactor {
                 | Event::QueryWindowInfo { .. }
                 | Event::QueryWindows { .. }
                 | Event::QueryWorkspaces { .. }
+                | Event::QueryActiveWorkspace { .. }
                 | Event::QueryDisplays(..)
         ) {
             return self.handle_query(event);

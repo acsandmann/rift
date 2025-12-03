@@ -13,8 +13,8 @@ use objc2::runtime::AnyObject;
 use objc2_app_kit::{NSApplication, NSColor, NSPopUpMenuWindowLevel, NSScreen};
 use objc2_core_foundation::{CFRetained, CFString, CFType, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
-    CGColor, CGContext, CGDisplayBounds, CGEvent, CGEventField, CGEventTapOptions, CGEventTapProxy,
-    CGEventType,
+    CGColor, CGContext, CGDisplayBounds, CGEvent, CGEventField, CGEventFlags, CGEventTapOptions,
+    CGEventTapProxy, CGEventType,
 };
 use objc2_foundation::MainThreadMarker;
 use objc2_quartz_core::{CALayer, CATextLayer, CATransaction};
@@ -26,6 +26,7 @@ use crate::actor::app::WindowId;
 use crate::common::collections::{HashMap, HashSet, hash_map};
 use crate::common::config::Config;
 use crate::model::server::{WindowData, WorkspaceData};
+use crate::model::virtual_workspace::VirtualWorkspaceId;
 use crate::sys::cgs_window::CgsWindow;
 use crate::sys::dispatch::DispatchExt;
 use crate::sys::event::current_cursor_location;
@@ -330,6 +331,42 @@ impl MissionControlState {
         };
         if is_valid {
             self.selection = Some(selection);
+        }
+    }
+
+    fn highlight_active_workspace(&mut self, active_id: Option<String>) -> bool {
+        let target = active_id.as_deref();
+        if let Some(mode) = self.mode.as_mut() {
+            if let MissionControlMode::AllWorkspaces(workspaces) = mode {
+                let mut changed = false;
+                let mut visible_index = 0usize;
+                let mut active_selection = None;
+                for ws in workspaces.iter_mut() {
+                    let should_be_active = target == Some(ws.id.as_str());
+                    if ws.is_active != should_be_active {
+                        ws.is_active = should_be_active;
+                        changed = true;
+                    }
+                    let should_be_visible = !ws.windows.is_empty() || ws.is_active;
+                    if should_be_visible {
+                        if ws.is_active {
+                            active_selection = Some(visible_index);
+                        }
+                        visible_index += 1;
+                    }
+                }
+                if let Some(idx) = active_selection {
+                    if self.selection() != Some(Selection::Workspace(idx)) {
+                        self.selection = Some(Selection::Workspace(idx));
+                        changed = true;
+                    }
+                }
+                changed
+            } else {
+                false
+            }
+        } else {
+            false
         }
     }
 
@@ -949,6 +986,104 @@ impl MissionControlOverlay {
             }
         }
         false
+    }
+
+    fn cycle_selection(&self, forward: bool) -> bool {
+        let mut state = match self.state.try_borrow_mut() {
+            Ok(state) => state,
+            Err(_) => return false,
+        };
+        state.ensure_selection();
+        let current = state.selection();
+        let mode = state.mode();
+
+        let new_selection = match (mode, current) {
+            (
+                Some(MissionControlMode::AllWorkspaces(workspaces)),
+                Some(Selection::Workspace(idx)),
+            ) => {
+                let visible = Self::visible_workspaces(workspaces);
+                if visible.is_empty() {
+                    None
+                } else {
+                    let len = visible.len();
+                    let idx = idx.min(len.saturating_sub(1));
+                    Self::next_workspace_index(idx, len, forward).map(Selection::Workspace)
+                }
+            }
+            (Some(MissionControlMode::CurrentWorkspace(windows)), Some(Selection::Window(idx))) => {
+                if windows.is_empty() {
+                    None
+                } else {
+                    let len = windows.len();
+                    let idx = idx.min(len.saturating_sub(1));
+                    let new_idx = if forward {
+                        (idx + 1) % len
+                    } else {
+                        (idx + len - 1) % len
+                    };
+                    Some(Selection::Window(new_idx))
+                }
+            }
+            (Some(MissionControlMode::AllWorkspaces(workspaces)), None) => {
+                let visible = Self::visible_workspaces(workspaces);
+                if visible.is_empty() {
+                    None
+                } else {
+                    let len = visible.len();
+                    let idx = if forward { 0 } else { len.saturating_sub(1) };
+                    Some(Selection::Workspace(idx))
+                }
+            }
+            (Some(MissionControlMode::CurrentWorkspace(windows)), None) => {
+                if windows.is_empty() {
+                    None
+                } else {
+                    let len = windows.len();
+                    let idx = if forward { 0 } else { len - 1 };
+                    Some(Selection::Window(idx))
+                }
+            }
+            _ => None,
+        };
+
+        if let Some(selection) = new_selection {
+            if state.selection() != Some(selection) {
+                state.set_selection(selection);
+                return true;
+            }
+        }
+        false
+    }
+
+    fn next_workspace_index(current_idx: usize, len: usize, forward: bool) -> Option<usize> {
+        if len == 0 {
+            return None;
+        }
+        let columns = workspace_column_count(len);
+        let rows = if len > columns { 2 } else { 1 };
+
+        let mut order: Vec<usize> = (0..len).collect();
+        order.sort_by_key(|&order_idx| {
+            let (row, col) = Self::workspace_grid_position(order_idx, rows);
+            (row, col)
+        });
+
+        let current_pos = order.iter().position(|&idx| idx == current_idx)?;
+        let next_pos = if forward {
+            (current_pos + 1) % len
+        } else {
+            (current_pos + len - 1) % len
+        };
+        order.get(next_pos).copied()
+    }
+
+    fn workspace_grid_position(order_idx: usize, rows: usize) -> (usize, usize) {
+        if rows == 1 {
+            (0, order_idx)
+        } else {
+            (order_idx % rows, order_idx / rows)
+        }
     }
 
     fn activate_selection_action(&self) {
@@ -1810,6 +1945,18 @@ impl MissionControlOverlay {
         }
     }
 
+    pub fn refresh_active_workspace(&self, active_workspace: Option<VirtualWorkspaceId>) {
+        let active_id = active_workspace.map(|ws| format!("{:?}", ws));
+        let mut state = match self.state.try_borrow_mut() {
+            Ok(state) => state,
+            Err(_) => return,
+        };
+        if state.highlight_active_workspace(active_id) {
+            drop(state);
+            self.draw_and_present();
+        }
+    }
+
     fn draw_and_present(&self) {
         CATransaction::begin();
         CATransaction::setDisableActions(true);
@@ -1878,32 +2025,50 @@ impl MissionControlOverlay {
         queue::main().after_f(Time::NOW, Box::into_raw(ctx) as *mut c_void, action_callback);
     }
 
-    fn handle_keycode(&self, keycode: u16) {
-        match keycode {
-            53 => self.emit_action(MissionControlAction::Dismiss),
+    fn handle_keycode(&self, keycode: u16, flags: CGEventFlags) -> bool {
+        let handled = match keycode {
+            53 => {
+                self.emit_action(MissionControlAction::Dismiss);
+                true
+            }
             123 => {
                 if self.adjust_selection(NavDirection::Left) {
                     self.draw_and_present();
                 }
+                true
             }
             124 => {
                 if self.adjust_selection(NavDirection::Right) {
                     self.draw_and_present();
                 }
+                true
             }
             125 => {
                 if self.adjust_selection(NavDirection::Down) {
                     self.draw_and_present();
                 }
+                true
             }
             126 => {
                 if self.adjust_selection(NavDirection::Up) {
                     self.draw_and_present();
                 }
+                true
             }
-            36 | 76 => self.activate_selection_action(),
-            _ => {}
-        }
+            36 | 76 => {
+                self.activate_selection_action();
+                true
+            }
+            48 => {
+                let forward = !flags.contains(CGEventFlags::MaskShift);
+                if self.cycle_selection(forward) {
+                    self.draw_and_present();
+                }
+                true
+            }
+            _ => false,
+        };
+        handled
     }
 
     fn handle_click_global(&self, g_pt: CGPoint) {
@@ -2021,8 +2186,8 @@ impl MissionControlOverlay {
                                 CGEventField::KeyboardEventKeycode,
                             ) as u16
                         };
-                        overlay.handle_keycode(keycode);
-                        handled = true;
+                        let flags = unsafe { CGEvent::flags(Some(event.as_ref())) };
+                        handled = overlay.handle_keycode(keycode, flags);
                     }
                     CGEventType::LeftMouseDown => {
                         let loc = unsafe { CGEvent::location(Some(event.as_ref())) };
