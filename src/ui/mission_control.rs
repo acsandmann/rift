@@ -435,6 +435,7 @@ enum NavDirection {
     Right,
     Up,
     Down,
+    Next,
 }
 
 fn workspace_column_count(count: usize) -> usize {
@@ -808,6 +809,9 @@ impl MissionControlOverlay {
                 NavDirection::Right | NavDirection::Down => {
                     idx = (idx + 1) % len;
                 }
+                NavDirection::Next => {
+                    idx = (idx + len - 1) % len; 
+                }
             }
             return Some(idx);
         }
@@ -857,6 +861,14 @@ impl MissionControlOverlay {
                     Some(col * rows)
                 }
             }
+
+            NavDirection::Next => {
+                if idx + 1 < len {
+                    Some(idx + 1)
+                } else {
+                    Some(0)
+                }
+            }
         }
     }
 
@@ -872,6 +884,10 @@ impl MissionControlOverlay {
             }
             NavDirection::Right | NavDirection::Down => {
                 idx = (idx + 1) % len;
+            }
+
+            NavDirection::Next => {
+                
             }
         }
         Some(idx)
@@ -1881,6 +1897,12 @@ impl MissionControlOverlay {
     fn handle_keycode(&self, keycode: u16) {
         match keycode {
             53 => self.emit_action(MissionControlAction::Dismiss),
+            48 => {
+                if self.adjust_selection(NavDirection::Next) {
+                    self.draw_and_present();
+                }
+            }
+
             123 => {
                 if self.adjust_selection(NavDirection::Left) {
                     self.draw_and_present();
@@ -1902,6 +1924,7 @@ impl MissionControlOverlay {
                 }
             }
             36 | 76 => self.activate_selection_action(),
+
             _ => {}
         }
     }
