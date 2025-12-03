@@ -12,7 +12,7 @@ use super::{Direction, FloatingManager, LayoutId, LayoutSystemKind, WorkspaceLay
 use crate::actor::app::{AppInfo, WindowId, pid_t};
 use crate::actor::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::common::collections::HashMap;
-use crate::common::config::LayoutSettings;
+use crate::common::config::{GapSettings, HorizontalPlacement, LayoutSettings, VerticalPlacement};
 use crate::layout_engine::LayoutSystem;
 use crate::model::{VirtualWorkspaceId, VirtualWorkspaceManager};
 use crate::sys::screen::SpaceId;
@@ -1631,6 +1631,55 @@ impl LayoutEngine {
         };
 
         self.tree.select_window(layout, wid)
+    }
+
+    pub fn space_for_window(&self, window_id: WindowId) -> Option<SpaceId> {
+        self.virtual_workspace_manager.space_for_window(window_id)
+    }
+
+    pub fn preview_window_frame_after_command<F>(
+        &self,
+        space: SpaceId,
+        visible_spaces: &[SpaceId],
+        visible_space_centers: &HashMap<SpaceId, CGPoint>,
+        screen_frames: &HashMap<SpaceId, CGRect>,
+        gaps_by_space: &HashMap<SpaceId, GapSettings>,
+        stack_line_thickness: f64,
+        stack_line_horiz: HorizontalPlacement,
+        stack_line_vert: VerticalPlacement,
+        command: LayoutCommand,
+        window_id: WindowId,
+        get_window_size: F,
+    ) -> Option<CGRect>
+    where
+        F: Fn(WindowId) -> CGSize,
+    {
+        let mut preview_engine = self.clone_for_preview()?;
+        if !preview_engine.select_window_in_space(space, window_id) {
+            return None;
+        }
+        preview_engine.handle_command(Some(space), visible_spaces, visible_space_centers, command);
+        let target_space = preview_engine.space_for_window(window_id).unwrap_or(space);
+        let screen_frame = screen_frames
+            .get(&target_space)
+            .copied()
+            .or_else(|| screen_frames.get(&space).copied())?;
+        let gaps = gaps_by_space
+            .get(&target_space)
+            .or_else(|| gaps_by_space.get(&space))
+            .unwrap_or(&self.layout_settings.gaps);
+        let layout_result = preview_engine.calculate_layout_with_virtual_workspaces(
+            target_space,
+            screen_frame,
+            gaps,
+            stack_line_thickness,
+            stack_line_horiz,
+            stack_line_vert,
+            get_window_size,
+        );
+        layout_result
+            .into_iter()
+            .find_map(|(wid, rect)| (wid == window_id).then(|| rect))
     }
 
     pub fn is_window_in_active_workspace(&self, space: SpaceId, window_id: WindowId) -> bool {

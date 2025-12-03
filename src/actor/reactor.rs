@@ -2174,24 +2174,28 @@ impl Reactor {
         dragged_wid: WindowId,
         direction: Direction,
     ) -> Option<CGRect> {
-        let (screen_frame, display_uuid) =
-            self.space_manager.screens.iter().find_map(|screen| {
-                if self.space_manager.space_for_screen(screen) == Some(space) {
-                    Some((screen.frame, screen.display_uuid.clone()))
-                } else {
+        let mut visible_spaces_input: Vec<(SpaceId, CGPoint)> = Vec::new();
+        let mut screen_frames = HashMap::default();
+        let mut gaps_by_space = HashMap::default();
+        for screen in &self.space_manager.screens {
+            if let Some(space_id) = self.space_manager.space_for_screen(screen) {
+                visible_spaces_input.push((space_id, screen.frame.mid()));
+                screen_frames.insert(space_id, screen.frame);
+                let display_uuid_opt = if screen.display_uuid.is_empty() {
                     None
-                }
-            })?;
-        let visible_spaces_input: Vec<(SpaceId, CGPoint)> = self
-            .space_manager
-            .screens
-            .iter()
-            .filter_map(|screen| {
-                self.space_manager
-                    .space_for_screen(screen)
-                    .map(|space_id| (space_id, screen.frame.mid()))
-            })
-            .collect();
+                } else {
+                    Some(screen.display_uuid.as_str())
+                };
+                let gaps = self
+                    .config_manager
+                    .config
+                    .settings
+                    .layout
+                    .gaps
+                    .effective_for_display(display_uuid_opt);
+                gaps_by_space.insert(space_id, gaps);
+            }
+        }
         if visible_spaces_input.is_empty() {
             return None;
         }
@@ -2200,33 +2204,21 @@ impl Reactor {
             visible_space_centers.insert(*space_id, *center);
         }
         let visible_spaces = order_visible_spaces_by_position(visible_spaces_input.iter().cloned());
-        let mut preview_engine = self.layout_manager.layout_engine.clone_for_preview()?;
-        preview_engine.handle_command(
-            Some(space),
+        if !screen_frames.contains_key(&space) {
+            return None;
+        }
+        let stack_line = &self.config_manager.config.settings.ui.stack_line;
+        self.layout_manager.layout_engine.preview_window_frame_after_command(
+            space,
             &visible_spaces,
             &visible_space_centers,
-            LayoutCommand::MoveNode(direction),
-        );
-        let display_uuid_opt = if display_uuid.is_empty() {
-            None
-        } else {
-            Some(display_uuid.as_str())
-        };
-        let gaps = self
-            .config_manager
-            .config
-            .settings
-            .layout
-            .gaps
-            .effective_for_display(display_uuid_opt);
-        let stack_line = &self.config_manager.config.settings.ui.stack_line;
-        let layout_result = preview_engine.calculate_layout_with_virtual_workspaces(
-            space,
-            screen_frame,
-            &gaps,
+            &screen_frames,
+            &gaps_by_space,
             stack_line.thickness(),
             stack_line.horiz_placement,
             stack_line.vert_placement,
+            LayoutCommand::MoveNode(direction),
+            dragged_wid,
             |wid| {
                 self.window_manager
                     .windows
@@ -2234,10 +2226,7 @@ impl Reactor {
                     .map(|w| w.frame_monotonic.size)
                     .unwrap_or_else(|| CGSize::new(500.0, 500.0))
             },
-        );
-        layout_result
-            .into_iter()
-            .find_map(|(wid, rect)| (wid == dragged_wid).then(|| rect))
+        )
     }
 
     fn window_id_under_cursor(&self) -> Option<WindowId> {

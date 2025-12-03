@@ -421,6 +421,13 @@ impl VirtualWorkspaceManager {
         self.window_to_workspace.get(&(space, window_id)).copied()
     }
 
+    pub fn space_for_window(&self, window_id: WindowId) -> Option<SpaceId> {
+        self.window_to_workspace
+            .iter()
+            .find(|((space, wid), _)| *wid == window_id)
+            .map(|((space, _), _)| *space)
+    }
+
     pub fn remove_window(&mut self, window_id: WindowId) {
         let keys: Vec<(SpaceId, WindowId)> = self
             .window_to_workspace
