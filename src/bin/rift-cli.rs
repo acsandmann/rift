@@ -2,7 +2,7 @@ use std::io::{self, Write};
 use std::process::{self};
 
 use clap::{Parser, Subcommand};
-use rift_wm::actor::reactor::{self, DisplaySelector, FocusDisplaySelector};
+use rift_wm::actor::reactor::{self, DisplaySelector, FocusDisplaySelector, MoveDisplaySelector};
 use rift_wm::ipc::{RiftCommand, RiftMachClient, RiftRequest, RiftResponse};
 use rift_wm::layout_engine as layout;
 use rift_wm::sys::window_server::WindowServerId;
@@ -295,6 +295,21 @@ enum DisplayCommands {
     MoveMouseToUuid {
         /// Display UUID
         uuid: String,
+    },
+    /// Move a window to a display by direction, index, or UUID.
+    MoveWindow {
+        /// Direction relative to the window's current display (left, right, up, down).
+        #[arg(long)]
+        direction: Option<String>,
+        /// Display index (0-based).
+        #[arg(long)]
+        index: Option<usize>,
+        /// Display UUID.
+        #[arg(long)]
+        uuid: Option<String>,
+        /// Optional window id (window idx); defaults to the focused window if omitted.
+        #[arg(long)]
+        window_id: Option<u32>,
     },
 }
 
@@ -691,6 +706,17 @@ fn map_display_command(cmd: DisplayCommands) -> Result<RiftCommand, String> {
                 reactor::ReactorCommand::MoveMouseToDisplay(DisplaySelector::Uuid(uuid)),
             )))
         }
+        DisplayCommands::MoveWindow {
+            direction,
+            index,
+            uuid,
+            window_id,
+        } => Ok(RiftCommand::Reactor(reactor::Command::Reactor(
+            reactor::ReactorCommand::MoveWindowToDisplay {
+                selector: build_move_display_selector(direction, index, uuid)?,
+                window_id,
+            },
+        ))),
     }
 }
 
@@ -714,6 +740,31 @@ fn build_focus_display_selector(
         Ok(FocusDisplaySelector::Index { index })
     } else if let Some(uuid) = uuid {
         Ok(FocusDisplaySelector::Uuid { uuid })
+    } else {
+        unreachable!("At least one selector value is guaranteed to be provided")
+    }
+}
+
+fn build_move_display_selector(
+    direction: Option<String>,
+    index: Option<usize>,
+    uuid: Option<String>,
+) -> Result<MoveDisplaySelector, String> {
+    let provided =
+        direction.is_some() as usize + index.is_some() as usize + uuid.is_some() as usize;
+    if provided != 1 {
+        return Err(
+            "move window requires exactly one of --direction, --index, or --uuid".to_string(),
+        );
+    }
+
+    if let Some(direction) = direction {
+        let parsed_direction = parse_focus_direction(&direction)?;
+        Ok(MoveDisplaySelector::Direction { direction: parsed_direction })
+    } else if let Some(index) = index {
+        Ok(MoveDisplaySelector::Index { index })
+    } else if let Some(uuid) = uuid {
+        Ok(MoveDisplaySelector::Uuid { uuid })
     } else {
         unreachable!("At least one selector value is guaranteed to be provided")
     }

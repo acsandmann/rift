@@ -274,6 +274,14 @@ pub enum FocusDisplaySelector {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum MoveDisplaySelector {
+    Direction { direction: Direction },
+    Index { index: usize },
+    Uuid { uuid: String },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReactorCommand {
     Debug,
@@ -291,6 +299,10 @@ pub enum ReactorCommand {
     FocusDisplay(FocusDisplaySelector),
     CloseWindow {
         window_server_id: Option<WindowServerId>,
+    },
+    MoveWindowToDisplay {
+        selector: MoveDisplaySelector,
+        window_id: Option<u32>,
     },
 }
 
@@ -828,6 +840,14 @@ impl Reactor {
             }
             Event::Command(Command::Reactor(ReactorCommand::FocusDisplay(selector))) => {
                 CommandEventHandler::handle_command_reactor_focus_display(self, &selector);
+            }
+            Event::Command(Command::Reactor(ReactorCommand::MoveWindowToDisplay {
+                selector,
+                window_id,
+            })) => {
+                CommandEventHandler::handle_command_reactor_move_window_to_display(
+                    self, &selector, window_id,
+                );
             }
             Event::Command(Command::Reactor(ReactorCommand::CloseWindow { window_server_id })) => {
                 CommandEventHandler::handle_command_reactor_close_window(self, window_server_id)
@@ -2377,8 +2397,11 @@ impl Reactor {
         self.space_manager.screens.first().map(|screen| screen.frame.mid())
     }
 
-    fn screen_for_focus_direction(&self, direction: Direction) -> Option<&Screen> {
-        let origin = self.current_screen_center()?;
+    fn screen_for_direction_from_point(
+        &self,
+        origin: CGPoint,
+        direction: Direction,
+    ) -> Option<&Screen> {
         let mut best: Option<(f64, f64, &Screen)> = None;
 
         for screen in &self.space_manager.screens {
@@ -2386,8 +2409,9 @@ impl Reactor {
             let delta = match direction {
                 Direction::Left => origin.x - center.x,
                 Direction::Right => center.x - origin.x,
-                Direction::Up => center.y - origin.y,
-                Direction::Down => origin.y - center.y,
+                // Screen coordinates are flipped vertically; a smaller y means visually "up".
+                Direction::Up => origin.y - center.y,
+                Direction::Down => center.y - origin.y,
             };
             if delta <= 0.0 {
                 continue;
@@ -2408,6 +2432,11 @@ impl Reactor {
         }
 
         best.map(|(_, _, screen)| screen)
+    }
+
+    fn screen_for_focus_direction(&self, direction: Direction) -> Option<&Screen> {
+        let origin = self.current_screen_center()?;
+        self.screen_for_direction_from_point(origin, direction)
     }
 
     fn screen_for_focus_selector(&self, selector: &FocusDisplaySelector) -> Option<&Screen> {
