@@ -289,4 +289,8 @@ impl SpaceEventHandler {
         }
         reactor.refresh_windows_after_mission_control();
     }
+
+    pub fn handle_active_spaces_changed(reactor: &mut Reactor, spaces: Vec<Option<SpaceId>>) {
+        reactor.set_active_spaces(&spaces);
+    }
 }

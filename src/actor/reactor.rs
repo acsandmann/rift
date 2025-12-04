@@ -104,6 +104,9 @@ pub enum Event {
     /// WindowsDiscovered are not ordered with respect to space events.
     SpaceChanged(Vec<Option<SpaceId>>, Vec<WindowServerInfo>),
 
+    /// Which spaces Rift is currently managing (subset of the SpaceChanged list).
+    ActiveSpacesChanged(Vec<Option<SpaceId>>),
+
     /// An application was launched. This event is also sent for every running
     /// application on startup.
     ///
@@ -367,6 +370,7 @@ pub struct Reactor {
     mission_control_manager: managers::MissionControlManager,
     refocus_manager: managers::RefocusManager,
     pending_space_change_manager: managers::PendingSpaceChangeManager,
+    active_spaces: HashSet<SpaceId>,
 }
 
 #[derive(Debug)]
@@ -546,8 +550,18 @@ impl Reactor {
             pending_space_change_manager: managers::PendingSpaceChangeManager {
                 pending_space_change: None,
             },
+            active_spaces: HashSet::default(),
         }
     }
+
+    fn set_active_spaces(&mut self, spaces: &[Option<SpaceId>]) {
+        self.active_spaces.clear();
+        for space in spaces.iter().flatten().copied() {
+            self.active_spaces.insert(space);
+        }
+    }
+
+    fn is_space_active(&self, space: SpaceId) -> bool { self.active_spaces.contains(&space) }
 
     // fn store_txid(&self, wsid: Option<WindowServerId>, txid: TransactionId, target: CGRect) {
     //     self.transaction_manager.store_txid(wsid, txid, target);
@@ -755,6 +769,9 @@ impl Reactor {
             }
             Event::ScreenParametersChanged(screens, ws_info) => {
                 SpaceEventHandler::handle_screen_parameters_changed(self, screens, ws_info);
+            }
+            Event::ActiveSpacesChanged(spaces) => {
+                SpaceEventHandler::handle_active_spaces_changed(self, spaces);
             }
             Event::SpaceChanged(spaces, ws_info) => {
                 SpaceEventHandler::handle_space_changed(self, spaces, ws_info);

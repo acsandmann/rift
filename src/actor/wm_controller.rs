@@ -31,7 +31,9 @@ use crate::sys::dispatch::DispatchExt;
 use crate::sys::event::Hotkey;
 use crate::sys::geometry::CGRectExt;
 use crate::sys::screen::{CoordinateConverter, NSScreenExt, ScreenDescriptor, ScreenId, SpaceId};
-use crate::sys::window_server::{WindowServerInfo, current_cursor_location, window_space};
+use crate::sys::window_server::{
+    WindowServerId, WindowServerInfo, current_cursor_location, space_window_list_for_connection,
+};
 use crate::{layout_engine as layout, sys};
 
 #[derive(Debug)]
@@ -345,9 +347,10 @@ impl WmController {
                 }
             }
             SpaceChanged(spaces) => {
-                self.handle_space_changed(spaces);
-                self.events_tx
-                    .send(Event::SpaceChanged(self.active_spaces(), self.get_windows()));
+                self.handle_space_changed(spaces.clone());
+                let active_spaces = self.active_spaces();
+                self.events_tx.send(reactor::Event::ActiveSpacesChanged(active_spaces.clone()));
+                self.events_tx.send(reactor::Event::SpaceChanged(spaces, self.get_windows()));
             }
             PowerStateChanged(is_low_power_mode) => {
                 info!("Power state changed: low power mode = {}", is_low_power_mode);
@@ -383,11 +386,13 @@ impl WmController {
 
                 let active_spaces = self.active_spaces();
                 trace!("active_spaces after toggle = {:?}", active_spaces);
+                let current_spaces = self.cur_space.clone();
 
+                self.events_tx.send(reactor::Event::ActiveSpacesChanged(active_spaces.clone()));
                 self.events_tx
-                    .send(reactor::Event::SpaceChanged(active_spaces, self.get_windows()));
+                    .send(reactor::Event::SpaceChanged(current_spaces, self.get_windows()));
 
-                self.apply_app_rules_to_existing_windows();
+                self.apply_app_rules_to_existing_windows(&[space]);
             }
             Command(Wm(NextWorkspace)) => {
                 self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
@@ -663,7 +668,6 @@ impl WmController {
         }
 
         let space_id_values: Vec<u64> = active_space_ids.iter().map(|space| space.get()).collect();
-        let active_spaces: HashSet<SpaceId> = active_space_ids.into_iter().collect();
 
         let allowed_window_ids: HashSet<u32> =
             sys::window_server::space_window_list_for_connection(&space_id_values, 0, false)
@@ -682,20 +686,35 @@ impl WmController {
 
         all_windows
             .into_iter()
-            .filter(|info| {
-                allowed_window_ids.contains(&info.id.as_u32())
-                    && window_space(info.id).map_or(false, |space| active_spaces.contains(&space))
-            })
+            .filter(|info| allowed_window_ids.contains(&info.id.as_u32()))
             .collect()
     }
 
-    fn apply_app_rules_to_existing_windows(&mut self) {
+    fn apply_app_rules_to_existing_windows(&mut self, target_spaces: &[SpaceId]) {
         use crate::common::collections::HashMap;
+
+        if target_spaces.is_empty() {
+            return;
+        }
+
+        let space_id_values: Vec<u64> = target_spaces.iter().map(|space| space.get()).collect();
+        let allowed_window_ids: HashSet<WindowServerId> =
+            space_window_list_for_connection(&space_id_values, 0, false)
+                .into_iter()
+                .map(WindowServerId::new)
+                .collect();
+
+        if allowed_window_ids.is_empty() {
+            return;
+        }
 
         let visible_windows = self.get_windows();
         let mut windows_by_pid: HashMap<pid_t, Vec<WindowServerInfo>> = HashMap::default();
 
         for window in visible_windows {
+            if !allowed_window_ids.contains(&window.id) {
+                continue;
+            }
             windows_by_pid.entry(window.pid).or_default().push(window);
         }
 

@@ -55,15 +55,17 @@ impl WindowEventHandler {
 
         if is_manageable {
             if let Some(space) = reactor.best_space_for_window(&frame, server_id) {
-                if let Some(app_info) =
-                    reactor.app_manager.apps.get(&wid.pid).map(|app| app.info.clone())
-                {
-                    if let Some(wsid) = server_id {
-                        reactor.app_manager.mark_wsids_recent(std::iter::once(wsid));
+                if reactor.is_space_active(space) {
+                    if let Some(app_info) =
+                        reactor.app_manager.apps.get(&wid.pid).map(|app| app.info.clone())
+                    {
+                        if let Some(wsid) = server_id {
+                            reactor.app_manager.mark_wsids_recent(std::iter::once(wsid));
+                        }
+                        reactor.process_windows_for_app_rules(wid.pid, vec![wid], app_info);
                     }
-                    reactor.process_windows_for_app_rules(wid.pid, vec![wid], app_info);
+                    reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
                 }
-                reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
             }
         }
         // TODO: drag state is maybe managed by ensure_active_drag
@@ -166,7 +168,9 @@ impl WindowEventHandler {
 
         if is_manageable {
             if let Some(space) = reactor.best_space_for_window(&frame, server_id) {
-                reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+                if reactor.is_space_active(space) {
+                    reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+                }
             }
         }
     }
@@ -338,26 +342,34 @@ impl WindowEventHandler {
                         }
                     } else {
                         if let Some(space) = new_space {
-                            if let Some(active_ws) =
-                                reactor.layout_manager.layout_engine.active_workspace(space)
-                            {
-                                let assigned = reactor
-                                    .layout_manager
-                                    .layout_engine
-                                    .virtual_workspace_manager_mut()
-                                    .assign_window_to_workspace(space, wid, active_ws);
-                                if !assigned {
-                                    warn!(
-                                        "Failed to assign window {:?} to workspace {:?}",
-                                        wid, active_ws
-                                    );
+                            if reactor.is_space_active(space) {
+                                if let Some(active_ws) =
+                                    reactor.layout_manager.layout_engine.active_workspace(space)
+                                {
+                                    let assigned = reactor
+                                        .layout_manager
+                                        .layout_engine
+                                        .virtual_workspace_manager_mut()
+                                        .assign_window_to_workspace(space, wid, active_ws);
+                                    if !assigned {
+                                        warn!(
+                                            "Failed to assign window {:?} to workspace {:?}",
+                                            wid, active_ws
+                                        );
+                                    }
                                 }
+                                reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+                                let _ = reactor.update_layout(false, false).unwrap_or_else(|e| {
+                                    warn!("Layout update failed: {}", e);
+                                    false
+                                });
+                            } else {
+                                reactor.send_layout_event(LayoutEvent::WindowRemoved(wid));
+                                let _ = reactor.update_layout(false, false).unwrap_or_else(|e| {
+                                    warn!("Layout update failed: {}", e);
+                                    false
+                                });
                             }
-                            reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
-                            let _ = reactor.update_layout(false, false).unwrap_or_else(|e| {
-                                warn!("Layout update failed: {}", e);
-                                false
-                            });
                         } else {
                             reactor.send_layout_event(LayoutEvent::WindowRemoved(wid));
                             let _ = reactor.update_layout(false, false).unwrap_or_else(|e| {
@@ -367,13 +379,18 @@ impl WindowEventHandler {
                         }
                     }
                 } else if old_frame.size != new_frame.size {
-                    reactor.send_layout_event(LayoutEvent::WindowResized {
-                        wid,
-                        old_frame,
-                        new_frame,
-                        screens,
-                    });
-                    return true;
+                    if let Some(space) = old_space {
+                        if reactor.is_space_active(space) {
+                            reactor.send_layout_event(LayoutEvent::WindowResized {
+                                wid,
+                                old_frame,
+                                new_frame,
+                                screens,
+                            });
+                            return true;
+                        }
+                    }
+                    return false;
                 }
             }
             false
@@ -409,7 +426,9 @@ impl WindowEventHandler {
         });
 
         if let Some(space) = space {
-            reactor.send_layout_event(LayoutEvent::WindowFocused(space, wid));
+            if reactor.is_space_active(space) {
+                reactor.send_layout_event(LayoutEvent::WindowFocused(space, wid));
+            }
         }
     }
 }
