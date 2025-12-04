@@ -3,7 +3,9 @@ use tracing::{error, info, warn};
 use super::super::Screen;
 use crate::actor::app::{AppThreadHandle, WindowId};
 use crate::actor::reactor::transaction_manager::TransactionId;
-use crate::actor::reactor::{DisplaySelector, Reactor, WorkspaceSwitchState};
+use crate::actor::reactor::{
+    DisplaySelector, Reactor, WorkspaceSwitchOrigin, WorkspaceSwitchState,
+};
 use crate::actor::stack_line::Event as StackLineEvent;
 use crate::actor::wm_controller::WmEvent;
 use crate::actor::{menu_bar, raise_manager};
@@ -54,10 +56,11 @@ impl CommandEventHandler {
             None
         };
         if is_workspace_switch {
-            reactor.workspace_switch_manager.workspace_switch_generation =
-                reactor.workspace_switch_manager.workspace_switch_generation.wrapping_add(1);
-            reactor.workspace_switch_manager.active_workspace_switch =
-                Some(reactor.workspace_switch_manager.workspace_switch_generation);
+            reactor
+                .workspace_switch_manager
+                .start_workspace_switch(WorkspaceSwitchOrigin::Manual);
+        } else {
+            reactor.workspace_switch_manager.mark_workspace_switch_inactive();
         }
 
         let response = match &cmd {
@@ -93,11 +96,6 @@ impl CommandEventHandler {
             ),
         };
 
-        reactor.workspace_switch_manager.workspace_switch_state = if is_workspace_switch {
-            WorkspaceSwitchState::Active
-        } else {
-            WorkspaceSwitchState::Inactive
-        };
         reactor.handle_layout_response(response, workspace_space);
     }
 

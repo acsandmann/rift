@@ -7,6 +7,7 @@ use super::main_window::MainWindowTracker;
 use super::replay::Record;
 use super::{
     AppState, AutoWorkspaceSwitch, Event, FullscreenTrack, PendingSpaceChange, Screen, WindowState,
+    WorkspaceSwitchOrigin, WorkspaceSwitchState,
 };
 use crate::actor;
 use crate::actor::app::{WindowId, pid_t};
@@ -145,7 +146,27 @@ pub struct WorkspaceSwitchManager {
     pub workspace_switch_generation: u64,
     pub active_workspace_switch: Option<u64>,
     pub last_auto_workspace_switch: Option<AutoWorkspaceSwitch>,
+    pub pending_workspace_switch_origin: Option<WorkspaceSwitchOrigin>,
     pub pending_workspace_mouse_warp: Option<WindowId>,
+}
+
+impl WorkspaceSwitchManager {
+    pub fn start_workspace_switch(&mut self, origin: WorkspaceSwitchOrigin) {
+        self.workspace_switch_generation = self.workspace_switch_generation.wrapping_add(1);
+        self.active_workspace_switch = Some(self.workspace_switch_generation);
+        self.workspace_switch_state = WorkspaceSwitchState::Active;
+        self.pending_workspace_switch_origin = Some(origin);
+    }
+
+    pub fn manual_switch_in_progress(&self) -> bool {
+        self.workspace_switch_state == WorkspaceSwitchState::Active
+            && self.pending_workspace_switch_origin == Some(WorkspaceSwitchOrigin::Manual)
+    }
+
+    pub fn mark_workspace_switch_inactive(&mut self) {
+        self.workspace_switch_state = WorkspaceSwitchState::Inactive;
+        self.pending_workspace_switch_origin = None;
+    }
 }
 
 /// Manages refocus and cleanup state

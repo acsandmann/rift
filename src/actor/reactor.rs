@@ -340,6 +340,12 @@ pub enum WorkspaceSwitchState {
     Active,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceSwitchOrigin {
+    Manual,
+    Auto,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StaleCleanupState {
     Enabled,
@@ -519,6 +525,7 @@ impl Reactor {
                 workspace_switch_generation: 0,
                 active_workspace_switch: None,
                 last_auto_workspace_switch: None,
+                pending_workspace_switch_origin: None,
                 pending_workspace_mouse_warp: None,
             },
             recording_manager: managers::RecordingManager { record },
@@ -883,7 +890,7 @@ impl Reactor {
             self.maybe_send_menu_update();
         }
 
-        self.workspace_switch_manager.workspace_switch_state = WorkspaceSwitchState::Inactive;
+        self.workspace_switch_manager.mark_workspace_switch_inactive();
         if self.workspace_switch_manager.active_workspace_switch.is_some() && !layout_changed {
             self.workspace_switch_manager.active_workspace_switch = None;
             trace!("Workspace switch stabilized with no further frame changes");
@@ -1592,6 +1599,14 @@ impl Reactor {
             return;
         }
 
+        if self.workspace_switch_manager.manual_switch_in_progress() {
+            debug!(
+                "Skipping auto workspace switch for pid {} because a manual switch is in progress",
+                pid
+            );
+            return;
+        }
+
         if let Some(active_space) = get_active_space_number()
             && space_is_fullscreen(active_space.get())
         {
@@ -1748,11 +1763,8 @@ impl Reactor {
                         from_workspace: Some(current_workspace),
                         to_workspace: window_workspace,
                     });
-                self.workspace_switch_manager.workspace_switch_generation =
-                    self.workspace_switch_manager.workspace_switch_generation.wrapping_add(1);
-                self.workspace_switch_manager.active_workspace_switch =
-                    Some(self.workspace_switch_manager.workspace_switch_generation);
-                self.workspace_switch_manager.workspace_switch_state = WorkspaceSwitchState::Active;
+                self.workspace_switch_manager
+                    .start_workspace_switch(WorkspaceSwitchOrigin::Auto);
 
                 let response = self.layout_manager.layout_engine.handle_virtual_workspace_command(
                     window_space,
@@ -1769,7 +1781,7 @@ impl Reactor {
         workspace_switch_space: Option<SpaceId>,
     ) {
         if self.is_in_drag() {
-            self.workspace_switch_manager.workspace_switch_state = WorkspaceSwitchState::Inactive;
+            self.workspace_switch_manager.mark_workspace_switch_inactive();
             return;
         }
 
@@ -1875,7 +1887,7 @@ impl Reactor {
         }
 
         if handled_without_raise && raise_windows.is_empty() && focus_window.is_none() {
-            self.workspace_switch_manager.workspace_switch_state = WorkspaceSwitchState::Inactive;
+            self.workspace_switch_manager.mark_workspace_switch_inactive();
             return;
         }
 
