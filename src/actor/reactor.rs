@@ -1864,11 +1864,17 @@ impl Reactor {
             }
         }
 
+        let require_visible_focus = matches!(
+            self.workspace_switch_manager.workspace_switch_state,
+            WorkspaceSwitchState::Inactive
+        );
+
         if let Some(wid) = focus_window {
             if let Some(state) = self.window_manager.windows.get(&wid) {
                 if let Some(wsid) = state.window_server_id {
                     if self.space_manager.changing_screens.contains(&wsid)
-                        || !self.window_manager.visible_windows.contains(&wsid)
+                        || (require_visible_focus
+                            && !self.window_manager.visible_windows.contains(&wsid))
                     {
                         focus_window = None;
                     } else if let Some(space) =
