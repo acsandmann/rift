@@ -3,9 +3,7 @@ use tracing::{error, info, warn};
 use super::super::Screen;
 use crate::actor::app::{AppThreadHandle, WindowId};
 use crate::actor::reactor::transaction_manager::TransactionId;
-use crate::actor::reactor::{
-    DisplaySelector, Reactor, WorkspaceSwitchOrigin, WorkspaceSwitchState,
-};
+use crate::actor::reactor::{DisplaySelector, Reactor, WorkspaceSwitchOrigin};
 use crate::actor::stack_line::Event as StackLineEvent;
 use crate::actor::wm_controller::WmEvent;
 use crate::actor::{menu_bar, raise_manager};

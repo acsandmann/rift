@@ -220,6 +220,7 @@ impl SpaceEventHandler {
                 })
                 .collect();
             reactor.update_screen_space_map();
+            reactor.set_active_spaces(&spaces);
             if let Some(info) = ws_info_opt.take() {
                 reactor.finalize_space_change(&spaces, info);
             }
