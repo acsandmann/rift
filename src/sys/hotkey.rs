@@ -9,18 +9,78 @@ use serde::{Deserialize, Serialize};
 pub struct Modifiers(u8);
 
 impl Modifiers {
-    pub const ALT: Modifiers = Modifiers(0b0100);
-    pub const CONTROL: Modifiers = Modifiers(0b0010);
-    pub const META: Modifiers = Modifiers(0b1000);
-    pub const SHIFT: Modifiers = Modifiers(0b0001);
+    pub const ALT: Modifiers = Modifiers(0b0011_0000);
+    pub const ALT_LEFT: Modifiers = Modifiers(0b0001_0000);
+    pub const ALT_RIGHT: Modifiers = Modifiers(0b0010_0000);
+    pub const CONTROL: Modifiers = Modifiers(0b0000_1100);
+    pub const CONTROL_LEFT: Modifiers = Modifiers(0b0000_0100);
+    pub const CONTROL_RIGHT: Modifiers = Modifiers(0b0000_1000);
+    pub const META: Modifiers = Modifiers(0b1100_0000);
+    pub const META_LEFT: Modifiers = Modifiers(0b0100_0000);
+    pub const META_RIGHT: Modifiers = Modifiers(0b1000_0000);
+    // Generic modifiers (match either left or right)
+    pub const SHIFT: Modifiers = Modifiers(0b0000_0011);
+    // Specific left/right modifier bits
+    pub const SHIFT_LEFT: Modifiers = Modifiers(0b0000_0001);
+    pub const SHIFT_RIGHT: Modifiers = Modifiers(0b0000_0010);
 
     pub fn empty() -> Self { Modifiers(0) }
 
     pub fn contains(&self, other: Modifiers) -> bool { (self.0 & other.0) == other.0 }
 
+    pub fn intersects(&self, other: Modifiers) -> bool { (self.0 & other.0) != 0 }
+
     pub fn insert(&mut self, other: Modifiers) { self.0 |= other.0; }
 
     pub fn remove(&mut self, other: Modifiers) { self.0 &= !other.0; }
+
+    pub fn has_generic_modifiers(&self) -> bool {
+        let has_both_shift =
+            self.contains(Modifiers::SHIFT_LEFT) && self.contains(Modifiers::SHIFT_RIGHT);
+        let has_both_ctrl =
+            self.contains(Modifiers::CONTROL_LEFT) && self.contains(Modifiers::CONTROL_RIGHT);
+        let has_both_alt =
+            self.contains(Modifiers::ALT_LEFT) && self.contains(Modifiers::ALT_RIGHT);
+        let has_both_meta =
+            self.contains(Modifiers::META_LEFT) && self.contains(Modifiers::META_RIGHT);
+        has_both_shift || has_both_ctrl || has_both_alt || has_both_meta
+    }
+
+    pub fn expand_to_specific(&self) -> Vec<Modifiers> {
+        let mut variants = vec![Modifiers::empty()];
+
+        let expand_modifier = |variants: &mut Vec<Modifiers>, left: Modifiers, right: Modifiers| {
+            let has_left = self.contains(left);
+            let has_right = self.contains(right);
+            if has_left && has_right {
+                let mut new_variants = Vec::new();
+                for v in variants.iter() {
+                    let mut with_left = *v;
+                    with_left.insert(left);
+                    new_variants.push(with_left);
+                    let mut with_right = *v;
+                    with_right.insert(right);
+                    new_variants.push(with_right);
+                }
+                *variants = new_variants;
+            } else if has_left {
+                for v in variants.iter_mut() {
+                    v.insert(left);
+                }
+            } else if has_right {
+                for v in variants.iter_mut() {
+                    v.insert(right);
+                }
+            }
+        };
+
+        expand_modifier(&mut variants, Modifiers::SHIFT_LEFT, Modifiers::SHIFT_RIGHT);
+        expand_modifier(&mut variants, Modifiers::CONTROL_LEFT, Modifiers::CONTROL_RIGHT);
+        expand_modifier(&mut variants, Modifiers::ALT_LEFT, Modifiers::ALT_RIGHT);
+        expand_modifier(&mut variants, Modifiers::META_LEFT, Modifiers::META_RIGHT);
+
+        variants
+    }
 
     pub fn insert_from_token(&mut self, token: &str) -> bool {
         match token.to_lowercase().as_str() {
@@ -28,16 +88,48 @@ impl Modifiers {
                 self.insert(Modifiers::ALT);
                 true
             }
+            "altleft" | "lalt" | "optionleft" | "loption" => {
+                self.insert(Modifiers::ALT_LEFT);
+                true
+            }
+            "altright" | "ralt" | "optionright" | "roption" => {
+                self.insert(Modifiers::ALT_RIGHT);
+                true
+            }
             "ctrl" | "control" => {
                 self.insert(Modifiers::CONTROL);
+                true
+            }
+            "ctrlleft" | "lctrl" | "controlleft" | "lcontrol" => {
+                self.insert(Modifiers::CONTROL_LEFT);
+                true
+            }
+            "ctrlright" | "rctrl" | "controlright" | "rcontrol" => {
+                self.insert(Modifiers::CONTROL_RIGHT);
                 true
             }
             "shift" => {
                 self.insert(Modifiers::SHIFT);
                 true
             }
+            "shiftleft" | "lshift" => {
+                self.insert(Modifiers::SHIFT_LEFT);
+                true
+            }
+            "shiftright" | "rshift" => {
+                self.insert(Modifiers::SHIFT_RIGHT);
+                true
+            }
             "meta" | "cmd" | "command" => {
                 self.insert(Modifiers::META);
+                true
+            }
+            "metaleft" | "lmeta" | "cmdleft" | "lcmd" | "commandleft" | "lcommand" => {
+                self.insert(Modifiers::META_LEFT);
+                true
+            }
+            "metaright" | "rmeta" | "cmdright" | "rcmd" | "commandright" | "rcommand" => {
+                self.insert(Modifiers::META_RIGHT);
                 true
             }
             _ => false,
@@ -48,18 +140,47 @@ impl Modifiers {
 impl fmt::Display for Modifiers {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut parts: Vec<&str> = Vec::new();
-        if self.contains(Modifiers::CONTROL) {
+
+        let has_ctrl_left = self.contains(Modifiers::CONTROL_LEFT);
+        let has_ctrl_right = self.contains(Modifiers::CONTROL_RIGHT);
+        if has_ctrl_left && has_ctrl_right {
             parts.push("Ctrl");
+        } else if has_ctrl_left {
+            parts.push("CtrlLeft");
+        } else if has_ctrl_right {
+            parts.push("CtrlRight");
         }
-        if self.contains(Modifiers::ALT) {
+
+        let has_alt_left = self.contains(Modifiers::ALT_LEFT);
+        let has_alt_right = self.contains(Modifiers::ALT_RIGHT);
+        if has_alt_left && has_alt_right {
             parts.push("Alt");
+        } else if has_alt_left {
+            parts.push("AltLeft");
+        } else if has_alt_right {
+            parts.push("AltRight");
         }
-        if self.contains(Modifiers::SHIFT) {
+
+        let has_shift_left = self.contains(Modifiers::SHIFT_LEFT);
+        let has_shift_right = self.contains(Modifiers::SHIFT_RIGHT);
+        if has_shift_left && has_shift_right {
             parts.push("Shift");
+        } else if has_shift_left {
+            parts.push("ShiftLeft");
+        } else if has_shift_right {
+            parts.push("ShiftRight");
         }
-        if self.contains(Modifiers::META) {
+
+        let has_meta_left = self.contains(Modifiers::META_LEFT);
+        let has_meta_right = self.contains(Modifiers::META_RIGHT);
+        if has_meta_left && has_meta_right {
             parts.push("Meta");
+        } else if has_meta_left {
+            parts.push("MetaLeft");
+        } else if has_meta_right {
+            parts.push("MetaRight");
         }
+
         write!(f, "{}", parts.join(" + "))
     }
 }
@@ -422,6 +543,71 @@ pub fn modifiers_from_flags(flags: CGEventFlags) -> Modifiers {
     mods
 }
 
+pub fn modifiers_from_flags_with_keys<S: std::hash::BuildHasher>(
+    flags: CGEventFlags,
+    pressed_keys: &std::collections::HashSet<KeyCode, S>,
+) -> Modifiers {
+    let mut mods = Modifiers::empty();
+
+    if flags.contains(CGEventFlags::MaskControl) {
+        let has_left = pressed_keys.contains(&KeyCode::ControlLeft);
+        let has_right = pressed_keys.contains(&KeyCode::ControlRight);
+        if has_left {
+            mods.insert(Modifiers::CONTROL_LEFT);
+        }
+        if has_right {
+            mods.insert(Modifiers::CONTROL_RIGHT);
+        }
+        if !has_left && !has_right {
+            mods.insert(Modifiers::CONTROL_LEFT);
+        }
+    }
+
+    if flags.contains(CGEventFlags::MaskAlternate) {
+        let has_left = pressed_keys.contains(&KeyCode::AltLeft);
+        let has_right = pressed_keys.contains(&KeyCode::AltRight);
+        if has_left {
+            mods.insert(Modifiers::ALT_LEFT);
+        }
+        if has_right {
+            mods.insert(Modifiers::ALT_RIGHT);
+        }
+        if !has_left && !has_right {
+            mods.insert(Modifiers::ALT_LEFT);
+        }
+    }
+
+    if flags.contains(CGEventFlags::MaskCommand) {
+        let has_left = pressed_keys.contains(&KeyCode::MetaLeft);
+        let has_right = pressed_keys.contains(&KeyCode::MetaRight);
+        if has_left {
+            mods.insert(Modifiers::META_LEFT);
+        }
+        if has_right {
+            mods.insert(Modifiers::META_RIGHT);
+        }
+        if !has_left && !has_right {
+            mods.insert(Modifiers::META_LEFT);
+        }
+    }
+
+    if flags.contains(CGEventFlags::MaskShift) {
+        let has_left = pressed_keys.contains(&KeyCode::ShiftLeft);
+        let has_right = pressed_keys.contains(&KeyCode::ShiftRight);
+        if has_left {
+            mods.insert(Modifiers::SHIFT_LEFT);
+        }
+        if has_right {
+            mods.insert(Modifiers::SHIFT_RIGHT);
+        }
+        if !has_left && !has_right {
+            mods.insert(Modifiers::SHIFT_LEFT);
+        }
+    }
+
+    mods
+}
+
 pub fn modifier_flag_for_key(key_code: KeyCode) -> Option<CGEventFlags> {
     match key_code {
         KeyCode::ShiftLeft | KeyCode::ShiftRight => Some(CGEventFlags::MaskShift),
@@ -487,14 +673,30 @@ impl<'de> serde::de::Deserialize<'de> for HotkeySpec {
 }
 
 fn default_key_for_modifiers(mods: Modifiers) -> Option<KeyCode> {
-    if mods.contains(Modifiers::CONTROL) {
-        Some(KeyCode::ControlLeft)
-    } else if mods.contains(Modifiers::ALT) {
-        Some(KeyCode::AltLeft)
-    } else if mods.contains(Modifiers::META) {
-        Some(KeyCode::MetaLeft)
-    } else if mods.contains(Modifiers::SHIFT) {
-        Some(KeyCode::ShiftLeft)
+    if mods.intersects(Modifiers::CONTROL) {
+        if mods.contains(Modifiers::CONTROL_RIGHT) && !mods.contains(Modifiers::CONTROL_LEFT) {
+            Some(KeyCode::ControlRight)
+        } else {
+            Some(KeyCode::ControlLeft)
+        }
+    } else if mods.intersects(Modifiers::ALT) {
+        if mods.contains(Modifiers::ALT_RIGHT) && !mods.contains(Modifiers::ALT_LEFT) {
+            Some(KeyCode::AltRight)
+        } else {
+            Some(KeyCode::AltLeft)
+        }
+    } else if mods.intersects(Modifiers::META) {
+        if mods.contains(Modifiers::META_RIGHT) && !mods.contains(Modifiers::META_LEFT) {
+            Some(KeyCode::MetaRight)
+        } else {
+            Some(KeyCode::MetaLeft)
+        }
+    } else if mods.intersects(Modifiers::SHIFT) {
+        if mods.contains(Modifiers::SHIFT_RIGHT) && !mods.contains(Modifiers::SHIFT_LEFT) {
+            Some(KeyCode::ShiftRight)
+        } else {
+            Some(KeyCode::ShiftLeft)
+        }
     } else {
         None
     }
