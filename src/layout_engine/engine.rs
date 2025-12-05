@@ -446,12 +446,10 @@ impl LayoutEngine {
     /// Useful when the OS recreates spaces (e.g. after sleep/resume) and we
     /// want to migrate layout state to the new space id.
     pub fn space_for_display_uuid(&self, display_uuid: &str) -> Option<SpaceId> {
-        self.space_display_map
-            .iter()
-            .find_map(|(space, uuid_opt)| match uuid_opt {
-                Some(uuid) if uuid == display_uuid => Some(*space),
-                _ => None,
-            })
+        self.space_display_map.iter().find_map(|(space, uuid_opt)| match uuid_opt {
+            Some(uuid) if uuid == display_uuid => Some(*space),
+            _ => None,
+        })
     }
 
     /// Move all per-space layout state from `old_space` to `new_space`.

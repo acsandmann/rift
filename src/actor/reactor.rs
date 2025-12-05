@@ -1055,7 +1055,9 @@ impl Reactor {
         let mut seen_displays: HashSet<String> = HashSet::default();
 
         for (screen, space_opt) in self.space_manager.screens.iter().zip(spaces.iter()) {
-            let Some(space) = space_opt else { continue; };
+            let Some(space) = space_opt else {
+                continue;
+            };
             if screen.display_uuid.is_empty() {
                 continue;
             }
@@ -1063,15 +1065,11 @@ impl Reactor {
                 continue;
             }
 
-            if let Some(previous_space) = self
-                .layout_manager
-                .layout_engine
-                .space_for_display_uuid(&screen.display_uuid)
+            if let Some(previous_space) =
+                self.layout_manager.layout_engine.space_for_display_uuid(&screen.display_uuid)
             {
                 if previous_space != *space {
-                    self.layout_manager
-                        .layout_engine
-                        .remap_space(previous_space, *space);
+                    self.layout_manager.layout_engine.remap_space(previous_space, *space);
                 }
             }
         }

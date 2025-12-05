@@ -108,12 +108,8 @@ impl WorkspaceLayouts {
             return;
         }
 
-        let old_keys: Vec<_> = self
-            .map
-            .keys()
-            .filter(|(space, _)| *space == old_space)
-            .cloned()
-            .collect();
+        let old_keys: Vec<_> =
+            self.map.keys().filter(|(space, _)| *space == old_space).cloned().collect();
 
         if old_keys.is_empty() {
             return;
