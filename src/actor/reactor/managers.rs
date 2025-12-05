@@ -6,7 +6,7 @@ use tracing::trace;
 use super::main_window::MainWindowTracker;
 use super::replay::Record;
 use super::{
-    AppState, AutoWorkspaceSwitch, Event, FullscreenTrack, PendingSpaceChange, Screen, WindowState,
+    AppState, Event, FullscreenTrack, PendingSpaceChange, Screen, WindowState,
     WorkspaceSwitchOrigin, WorkspaceSwitchState,
 };
 use crate::actor;
@@ -145,7 +145,6 @@ pub struct WorkspaceSwitchManager {
     pub workspace_switch_state: super::WorkspaceSwitchState,
     pub workspace_switch_generation: u64,
     pub active_workspace_switch: Option<u64>,
-    pub last_auto_workspace_switch: Option<AutoWorkspaceSwitch>,
     pub pending_workspace_switch_origin: Option<WorkspaceSwitchOrigin>,
     pub pending_workspace_mouse_warp: Option<WindowId>,
 }

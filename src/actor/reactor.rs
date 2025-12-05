@@ -401,14 +401,6 @@ struct Screen {
     screen_id: ScreenId,
 }
 
-#[derive(Clone, Debug)]
-struct AutoWorkspaceSwitch {
-    occurred_at: std::time::Instant,
-    space: SpaceId,
-    from_workspace: Option<VirtualWorkspaceId>,
-    to_workspace: VirtualWorkspaceId,
-}
-
 #[derive(Debug)]
 struct WindowState {
     #[allow(unused)]
@@ -524,7 +516,6 @@ impl Reactor {
                 workspace_switch_state: WorkspaceSwitchState::Inactive,
                 workspace_switch_generation: 0,
                 active_workspace_switch: None,
-                last_auto_workspace_switch: None,
                 pending_workspace_switch_origin: None,
                 pending_workspace_mouse_warp: None,
             },
@@ -726,8 +717,8 @@ impl Reactor {
             Event::ApplicationThreadTerminated(pid) => {
                 AppEventHandler::handle_application_thread_terminated(self, pid);
             }
-            Event::ApplicationActivated(pid, _) => {
-                AppEventHandler::handle_application_activated(self, pid);
+            Event::ApplicationActivated(pid, quiet) => {
+                AppEventHandler::handle_application_activated(self, pid, quiet);
             }
             Event::ApplicationDeactivated(..)
             | Event::ApplicationGloballyDeactivated(..)
@@ -1749,23 +1740,6 @@ impl Reactor {
         };
 
         if window_workspace != current_workspace {
-            const AUTO_SWITCH_BOUNCE_MS: u64 = 300;
-            if let Some(last_switch) = &self.workspace_switch_manager.last_auto_workspace_switch {
-                if last_switch.space == window_space
-                    && last_switch.to_workspace == current_workspace
-                    && last_switch.from_workspace == Some(window_workspace)
-                    && last_switch.occurred_at.elapsed()
-                        < std::time::Duration::from_millis(AUTO_SWITCH_BOUNCE_MS)
-                {
-                    debug!(
-                        ?current_workspace,
-                        ?window_workspace,
-                        "Suppressing auto workspace switch to avoid rapid oscillation"
-                    );
-                    return;
-                }
-            }
-
             let workspaces = self
                 .layout_manager
                 .layout_engine
@@ -1780,13 +1754,6 @@ impl Reactor {
                 );
 
                 self.store_current_floating_positions(window_space);
-                self.workspace_switch_manager.last_auto_workspace_switch =
-                    Some(AutoWorkspaceSwitch {
-                        occurred_at: std::time::Instant::now(),
-                        space: window_space,
-                        from_workspace: Some(current_workspace),
-                        to_workspace: window_workspace,
-                    });
                 self.workspace_switch_manager
                     .start_workspace_switch(WorkspaceSwitchOrigin::Auto);
 

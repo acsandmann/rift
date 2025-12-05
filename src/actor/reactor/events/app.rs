@@ -1,6 +1,6 @@
-use tracing::warn;
+use tracing::{debug, warn};
 
-use crate::actor::app::{AppInfo, AppThreadHandle, WindowId};
+use crate::actor::app::{AppInfo, AppThreadHandle, Quiet, WindowId};
 use crate::actor::reactor::{AppState, Reactor};
 use crate::sys::app::WindowInfo;
 use crate::sys::window_server::{self as window_server, WindowServerId, WindowServerInfo};
@@ -97,7 +97,15 @@ impl AppEventHandler {
         }
     }
 
-    pub fn handle_application_activated(reactor: &mut Reactor, pid: i32) {
+    pub fn handle_application_activated(reactor: &mut Reactor, pid: i32, quiet: Quiet) {
+        if quiet == Quiet::Yes {
+            debug!(
+                pid,
+                "Skipping auto workspace switch for quiet app activation (initiated by Rift)"
+            );
+            return;
+        }
+
         reactor.handle_app_activation_workspace_switch(pid);
     }
 
