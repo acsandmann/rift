@@ -104,6 +104,9 @@ pub enum Event {
     /// WindowsDiscovered are not ordered with respect to space events.
     SpaceChanged(Vec<Option<SpaceId>>, Vec<WindowServerInfo>),
 
+    /// Which spaces Rift is currently managing (subset of the SpaceChanged list).
+    ActiveSpacesChanged(Vec<Option<SpaceId>>),
+
     /// An application was launched. This event is also sent for every running
     /// application on startup.
     ///
@@ -212,6 +215,12 @@ pub enum Event {
         response: r#continue::Sender<Vec<WindowData>>,
     },
     #[serde(skip)]
+    QueryActiveWorkspace {
+        space_id: Option<SpaceId>,
+        #[serde(skip)]
+        response: r#continue::Sender<Option<VirtualWorkspaceId>>,
+    },
+    #[serde(skip)]
     QueryDisplays(r#continue::Sender<Vec<DisplayData>>),
     #[serde(skip)]
     QueryWindowInfo {
@@ -255,16 +264,9 @@ pub enum Command {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum DisplaySelector {
+    Direction(Direction),
     Index(usize),
     Uuid(String),
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[serde(untagged)]
-pub enum FocusDisplaySelector {
-    Direction { direction: Direction },
-    Index { index: usize },
-    Uuid { uuid: String },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -282,9 +284,13 @@ pub enum ReactorCommand {
     ShowMissionControlCurrent,
     DismissMissionControl,
     MoveMouseToDisplay(DisplaySelector),
-    FocusDisplay(FocusDisplaySelector),
+    FocusDisplay(DisplaySelector),
     CloseWindow {
         window_server_id: Option<WindowServerId>,
+    },
+    MoveWindowToDisplay {
+        selector: DisplaySelector,
+        window_id: Option<u32>,
     },
 }
 
@@ -334,6 +340,12 @@ pub enum WorkspaceSwitchState {
     Active,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceSwitchOrigin {
+    Manual,
+    Auto,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StaleCleanupState {
     Enabled,
@@ -364,6 +376,7 @@ pub struct Reactor {
     mission_control_manager: managers::MissionControlManager,
     refocus_manager: managers::RefocusManager,
     pending_space_change_manager: managers::PendingSpaceChangeManager,
+    active_spaces: HashSet<SpaceId>,
 }
 
 #[derive(Debug)]
@@ -512,6 +525,7 @@ impl Reactor {
                 workspace_switch_generation: 0,
                 active_workspace_switch: None,
                 last_auto_workspace_switch: None,
+                pending_workspace_switch_origin: None,
                 pending_workspace_mouse_warp: None,
             },
             recording_manager: managers::RecordingManager { record },
@@ -543,8 +557,18 @@ impl Reactor {
             pending_space_change_manager: managers::PendingSpaceChangeManager {
                 pending_space_change: None,
             },
+            active_spaces: HashSet::default(),
         }
     }
+
+    fn set_active_spaces(&mut self, spaces: &[Option<SpaceId>]) {
+        self.active_spaces.clear();
+        for space in spaces.iter().flatten().copied() {
+            self.active_spaces.insert(space);
+        }
+    }
+
+    fn is_space_active(&self, space: SpaceId) -> bool { self.active_spaces.contains(&space) }
 
     // fn store_txid(&self, wsid: Option<WindowServerId>, txid: TransactionId, target: CGRect) {
     //     self.transaction_manager.store_txid(wsid, txid, target);
@@ -645,6 +669,7 @@ impl Reactor {
                 | Event::QueryWindowInfo { .. }
                 | Event::QueryWindows { .. }
                 | Event::QueryWorkspaces { .. }
+                | Event::QueryActiveWorkspace { .. }
                 | Event::QueryDisplays(..)
         ) {
             return self.handle_query(event);
@@ -752,6 +777,9 @@ impl Reactor {
             Event::ScreenParametersChanged(screens, ws_info) => {
                 SpaceEventHandler::handle_screen_parameters_changed(self, screens, ws_info);
             }
+            Event::ActiveSpacesChanged(spaces) => {
+                SpaceEventHandler::handle_active_spaces_changed(self, spaces);
+            }
             Event::SpaceChanged(spaces, ws_info) => {
                 SpaceEventHandler::handle_space_changed(self, spaces, ws_info);
             }
@@ -822,6 +850,14 @@ impl Reactor {
             Event::Command(Command::Reactor(ReactorCommand::FocusDisplay(selector))) => {
                 CommandEventHandler::handle_command_reactor_focus_display(self, &selector);
             }
+            Event::Command(Command::Reactor(ReactorCommand::MoveWindowToDisplay {
+                selector,
+                window_id,
+            })) => {
+                CommandEventHandler::handle_command_reactor_move_window_to_display(
+                    self, &selector, window_id,
+                );
+            }
             Event::Command(Command::Reactor(ReactorCommand::CloseWindow { window_server_id })) => {
                 CommandEventHandler::handle_command_reactor_close_window(self, window_server_id)
             }
@@ -854,7 +890,7 @@ impl Reactor {
             self.maybe_send_menu_update();
         }
 
-        self.workspace_switch_manager.workspace_switch_state = WorkspaceSwitchState::Inactive;
+        self.workspace_switch_manager.mark_workspace_switch_inactive();
         if self.workspace_switch_manager.active_workspace_switch.is_some() && !layout_changed {
             self.workspace_switch_manager.active_workspace_switch = None;
             trace!("Workspace switch stabilized with no further frame changes");
@@ -1563,6 +1599,14 @@ impl Reactor {
             return;
         }
 
+        if self.workspace_switch_manager.manual_switch_in_progress() {
+            debug!(
+                "Skipping auto workspace switch for pid {} because a manual switch is in progress",
+                pid
+            );
+            return;
+        }
+
         if let Some(active_space) = get_active_space_number()
             && space_is_fullscreen(active_space.get())
         {
@@ -1719,11 +1763,8 @@ impl Reactor {
                         from_workspace: Some(current_workspace),
                         to_workspace: window_workspace,
                     });
-                self.workspace_switch_manager.workspace_switch_generation =
-                    self.workspace_switch_manager.workspace_switch_generation.wrapping_add(1);
-                self.workspace_switch_manager.active_workspace_switch =
-                    Some(self.workspace_switch_manager.workspace_switch_generation);
-                self.workspace_switch_manager.workspace_switch_state = WorkspaceSwitchState::Active;
+                self.workspace_switch_manager
+                    .start_workspace_switch(WorkspaceSwitchOrigin::Auto);
 
                 let response = self.layout_manager.layout_engine.handle_virtual_workspace_command(
                     window_space,
@@ -1740,7 +1781,7 @@ impl Reactor {
         workspace_switch_space: Option<SpaceId>,
     ) {
         if self.is_in_drag() {
-            self.workspace_switch_manager.workspace_switch_state = WorkspaceSwitchState::Inactive;
+            self.workspace_switch_manager.mark_workspace_switch_inactive();
             return;
         }
 
@@ -1823,11 +1864,17 @@ impl Reactor {
             }
         }
 
+        let require_visible_focus = matches!(
+            self.workspace_switch_manager.workspace_switch_state,
+            WorkspaceSwitchState::Inactive
+        );
+
         if let Some(wid) = focus_window {
             if let Some(state) = self.window_manager.windows.get(&wid) {
                 if let Some(wsid) = state.window_server_id {
                     if self.space_manager.changing_screens.contains(&wsid)
-                        || !self.window_manager.visible_windows.contains(&wsid)
+                        || (require_visible_focus
+                            && !self.window_manager.visible_windows.contains(&wsid))
                     {
                         focus_window = None;
                     } else if let Some(space) =
@@ -1846,7 +1893,7 @@ impl Reactor {
         }
 
         if handled_without_raise && raise_windows.is_empty() && focus_window.is_none() {
-            self.workspace_switch_manager.workspace_switch_state = WorkspaceSwitchState::Inactive;
+            self.workspace_switch_manager.mark_workspace_switch_inactive();
             return;
         }
 
@@ -2370,8 +2417,11 @@ impl Reactor {
         self.space_manager.screens.first().map(|screen| screen.frame.mid())
     }
 
-    fn screen_for_focus_direction(&self, direction: Direction) -> Option<&Screen> {
-        let origin = self.current_screen_center()?;
+    fn screen_for_direction_from_point(
+        &self,
+        origin: CGPoint,
+        direction: Direction,
+    ) -> Option<&Screen> {
         let mut best: Option<(f64, f64, &Screen)> = None;
 
         for screen in &self.space_manager.screens {
@@ -2379,8 +2429,9 @@ impl Reactor {
             let delta = match direction {
                 Direction::Left => origin.x - center.x,
                 Direction::Right => center.x - origin.x,
-                Direction::Up => center.y - origin.y,
-                Direction::Down => origin.y - center.y,
+                // Screen coordinates are flipped vertically; a smaller y means visually "up".
+                Direction::Up => origin.y - center.y,
+                Direction::Down => center.y - origin.y,
             };
             if delta <= 0.0 {
                 continue;
@@ -2403,13 +2454,18 @@ impl Reactor {
         best.map(|(_, _, screen)| screen)
     }
 
-    fn screen_for_focus_selector(&self, selector: &FocusDisplaySelector) -> Option<&Screen> {
+    fn screen_for_selector(
+        &self,
+        selector: &DisplaySelector,
+        origin_override: Option<CGPoint>,
+    ) -> Option<&Screen> {
         match selector {
-            FocusDisplaySelector::Direction { direction } => {
-                self.screen_for_focus_direction(*direction)
+            DisplaySelector::Direction(direction) => {
+                let origin = origin_override.or_else(|| self.current_screen_center())?;
+                self.screen_for_direction_from_point(origin, *direction)
             }
-            FocusDisplaySelector::Index { index } => self.space_manager.screens.get(*index),
-            FocusDisplaySelector::Uuid { uuid } => {
+            DisplaySelector::Index(index) => self.space_manager.screens.get(*index),
+            DisplaySelector::Uuid(uuid) => {
                 self.space_manager.screens.iter().find(|screen| screen.display_uuid == *uuid)
             }
         }

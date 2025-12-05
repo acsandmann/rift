@@ -23,7 +23,8 @@ use crate::sys::event::{self, Hotkey, KeyCode, MouseState, set_mouse_state};
 use crate::sys::geometry::CGRectExt;
 use crate::sys::haptics;
 use crate::sys::hotkey::{
-    is_modifier_key, key_code_from_event, modifier_flag_for_key, modifiers_from_flags,
+    Modifiers, is_modifier_key, key_code_from_event, modifier_flag_for_key,
+    modifiers_from_flags_with_keys,
 };
 use crate::sys::screen::CoordinateConverter;
 use crate::sys::window_server::{self, WindowServerId, window_level};
@@ -277,9 +278,19 @@ impl EventTap {
                 let mut map = self.hotkeys.borrow_mut();
                 map.clear();
                 for (hotkey, command) in bindings {
-                    let entry = map.entry(hotkey).or_default();
-                    if !entry.contains(&command) {
-                        entry.push(command);
+                    if hotkey.modifiers.has_generic_modifiers() {
+                        for expanded_mods in hotkey.modifiers.expand_to_specific() {
+                            let expanded_hotkey = Hotkey::new(expanded_mods, hotkey.key_code);
+                            let entry = map.entry(expanded_hotkey).or_default();
+                            if !entry.contains(&command) {
+                                entry.push(command.clone());
+                            }
+                        }
+                    } else {
+                        let entry = map.entry(hotkey).or_default();
+                        if !entry.contains(&command) {
+                            entry.push(command);
+                        }
                     }
                 }
                 debug!("Updated hotkey bindings: {}", map.len());
@@ -489,7 +500,10 @@ impl EventTap {
 
         if event_type == CGEventType::KeyDown {
             if let Some(key_code) = key_code_opt {
-                let hotkey = Hotkey::new(modifiers_from_flags(state.current_flags), key_code);
+                let hotkey = Hotkey::new(
+                    modifiers_from_flags_with_keys(state.current_flags, &state.pressed_keys),
+                    key_code,
+                );
                 let commands = {
                     let bindings = self.hotkeys.borrow();
                     bindings.get(&hotkey).cloned()
@@ -539,8 +553,31 @@ impl State {
     }
 
     fn compute_disable_hotkey_active(&self, target: Hotkey) -> bool {
-        let active_mods = modifiers_from_flags(self.current_flags);
-        if !active_mods.contains(target.modifiers) {
+        let active_mods = modifiers_from_flags_with_keys(self.current_flags, &self.pressed_keys);
+
+        let check_modifier = |left: Modifiers, right: Modifiers| -> bool {
+            let target_has_left = target.modifiers.contains(left);
+            let target_has_right = target.modifiers.contains(right);
+            let active_has_left = active_mods.contains(left);
+            let active_has_right = active_mods.contains(right);
+
+            if target_has_left && target_has_right {
+                active_has_left || active_has_right
+            } else if target_has_left {
+                active_has_left
+            } else if target_has_right {
+                active_has_right
+            } else {
+                true
+            }
+        };
+
+        let shift_ok = check_modifier(Modifiers::SHIFT_LEFT, Modifiers::SHIFT_RIGHT);
+        let ctrl_ok = check_modifier(Modifiers::CONTROL_LEFT, Modifiers::CONTROL_RIGHT);
+        let alt_ok = check_modifier(Modifiers::ALT_LEFT, Modifiers::ALT_RIGHT);
+        let meta_ok = check_modifier(Modifiers::META_LEFT, Modifiers::META_RIGHT);
+
+        if !(shift_ok && ctrl_ok && alt_ok && meta_ok) {
             return false;
         }
 

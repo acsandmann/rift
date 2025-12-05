@@ -220,6 +220,7 @@ impl SpaceEventHandler {
                 })
                 .collect();
             reactor.update_screen_space_map();
+            reactor.set_active_spaces(&spaces);
             if let Some(info) = ws_info_opt.take() {
                 reactor.finalize_space_change(&spaces, info);
             }
@@ -288,5 +289,9 @@ impl SpaceEventHandler {
             reactor.set_mission_control_active(false);
         }
         reactor.refresh_windows_after_mission_control();
+    }
+
+    pub fn handle_active_spaces_changed(reactor: &mut Reactor, spaces: Vec<Option<SpaceId>>) {
+        reactor.set_active_spaces(&spaces);
     }
 }

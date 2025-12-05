@@ -377,6 +377,9 @@ impl WindowDiscoveryHandler {
             let Some(space) = reactor.space_manager.space_for_screen(&screen) else {
                 continue;
             };
+            if !reactor.is_space_active(space) {
+                continue;
+            }
             let windows_for_space = app_windows.remove(&space).unwrap_or_default();
 
             if !windows_for_space.is_empty() {
@@ -439,7 +442,9 @@ impl WindowDiscoveryHandler {
         if let Some(main_window) = reactor.main_window() {
             if main_window.pid == pid {
                 if let Some(space) = reactor.main_window_space() {
-                    reactor.send_layout_event(LayoutEvent::WindowFocused(space, main_window));
+                    if reactor.is_space_active(space) {
+                        reactor.send_layout_event(LayoutEvent::WindowFocused(space, main_window));
+                    }
                 }
             }
         }

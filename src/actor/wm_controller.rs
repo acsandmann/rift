@@ -31,7 +31,9 @@ use crate::sys::dispatch::DispatchExt;
 use crate::sys::event::Hotkey;
 use crate::sys::geometry::CGRectExt;
 use crate::sys::screen::{CoordinateConverter, NSScreenExt, ScreenDescriptor, ScreenId, SpaceId};
-use crate::sys::window_server::{WindowServerInfo, current_cursor_location};
+use crate::sys::window_server::{
+    WindowServerId, WindowServerInfo, current_cursor_location, space_window_list_for_connection,
+};
 use crate::{layout_engine as layout, sys};
 
 #[derive(Debug)]
@@ -135,6 +137,7 @@ pub struct WmController {
     disabled_spaces: HashSet<SpaceId>,
     enabled_spaces: HashSet<SpaceId>,
     last_known_space_by_screen: HashMap<ScreenId, SpaceId>,
+    last_known_space_by_display_uuid: HashMap<String, SpaceId>,
     login_window_pid: Option<pid_t>,
     login_window_active: bool,
     spawning_apps: HashSet<pid_t>,
@@ -179,6 +182,7 @@ impl WmController {
             disabled_spaces: HashSet::default(),
             enabled_spaces: HashSet::default(),
             last_known_space_by_screen: HashMap::default(),
+            last_known_space_by_display_uuid: HashMap::default(),
             login_window_pid: None,
             login_window_active: false,
             spawning_apps: HashSet::default(),
@@ -205,6 +209,19 @@ impl WmController {
         use self::WmCmd::*;
         use self::WmCommand::*;
         use self::WmEvent::*;
+
+        if matches!(
+            event,
+            Command(Wm(NextWorkspace))
+                | Command(Wm(PrevWorkspace))
+                | Command(Wm(SwitchToWorkspace(_)))
+                | Command(Wm(SwitchToLastWorkspace))
+                | SpaceChanged(_)
+        ) && let Some(tx) = &self.mission_control_tx
+        {
+            tx.send(mission_control::Event::RefreshCurrentWorkspace);
+        }
+
         match event {
             SystemWoke => self.events_tx.send(Event::SystemWoke),
             AppEventsRegistered => {
@@ -332,9 +349,10 @@ impl WmController {
                 }
             }
             SpaceChanged(spaces) => {
-                self.handle_space_changed(spaces);
-                self.events_tx
-                    .send(Event::SpaceChanged(self.active_spaces(), self.get_windows()));
+                self.handle_space_changed(spaces.clone());
+                let active_spaces = self.active_spaces();
+                self.events_tx.send(reactor::Event::ActiveSpacesChanged(active_spaces.clone()));
+                self.events_tx.send(reactor::Event::SpaceChanged(spaces, self.get_windows()));
             }
             PowerStateChanged(is_low_power_mode) => {
                 info!("Power state changed: low power mode = {}", is_low_power_mode);
@@ -370,20 +388,20 @@ impl WmController {
 
                 let active_spaces = self.active_spaces();
                 trace!("active_spaces after toggle = {:?}", active_spaces);
+                let current_spaces = self.cur_space.clone();
 
+                self.events_tx.send(reactor::Event::ActiveSpacesChanged(active_spaces.clone()));
                 self.events_tx
-                    .send(reactor::Event::SpaceChanged(active_spaces, self.get_windows()));
+                    .send(reactor::Event::SpaceChanged(current_spaces, self.get_windows()));
 
-                self.apply_app_rules_to_existing_windows();
+                self.apply_app_rules_to_existing_windows(&[space]);
             }
             Command(Wm(NextWorkspace)) => {
-                self.dismiss_mission_control();
                 self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
                     layout::LayoutCommand::NextWorkspace(None),
                 )));
             }
             Command(Wm(PrevWorkspace)) => {
-                self.dismiss_mission_control();
                 self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
                     layout::LayoutCommand::PrevWorkspace(None),
                 )));
@@ -401,7 +419,6 @@ impl WmController {
                 };
 
                 if let Some(workspace_index) = maybe_index {
-                    self.dismiss_mission_control();
                     self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
                         layout::LayoutCommand::SwitchToWorkspace(workspace_index),
                     )));
@@ -444,7 +461,6 @@ impl WmController {
                 )));
             }
             Command(Wm(SwitchToLastWorkspace)) => {
-                self.dismiss_mission_control();
                 self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
                     layout::LayoutCommand::SwitchToLastWorkspace,
                 )));
@@ -465,12 +481,6 @@ impl WmController {
             Command(ReactorCommand(cmd)) => {
                 self.events_tx.send(reactor::Event::Command(cmd));
             }
-        }
-    }
-
-    fn dismiss_mission_control(&self) {
-        if let Some(tx) = &self.mission_control_tx {
-            let _ = tx.try_send(mission_control::Event::Dismiss);
         }
     }
 
@@ -549,6 +559,16 @@ impl WmController {
                         return Some(space);
                     }
                 }
+
+                if let Some(display_uuid) =
+                    self.cur_display_uuid.get(idx).filter(|uuid| !uuid.is_empty())
+                {
+                    if let Some(space) =
+                        self.last_known_space_by_display_uuid.get(display_uuid).copied()
+                    {
+                        return Some(space);
+                    }
+                }
             }
         }
 
@@ -564,12 +584,20 @@ impl WmController {
             self.cur_screen_id.iter().copied().zip(self.cur_space.iter().copied()).collect();
 
         for (idx, (screen_id, space_opt)) in pairs.into_iter().enumerate() {
+            let display_uuid_opt =
+                self.cur_display_uuid.get(idx).filter(|uuid| !uuid.is_empty()).cloned();
+
             if let Some(new_space) = space_opt {
                 let previous_space = previous_spaces
                     .get(idx)
                     .copied()
                     .flatten()
-                    .or_else(|| self.last_known_space_by_screen.get(&screen_id).copied());
+                    .or_else(|| self.last_known_space_by_screen.get(&screen_id).copied())
+                    .or_else(|| {
+                        display_uuid_opt.as_ref().and_then(|uuid| {
+                            self.last_known_space_by_display_uuid.get(uuid).copied()
+                        })
+                    });
 
                 if let Some(previous_space) = previous_space {
                     if previous_space != new_space {
@@ -578,6 +606,11 @@ impl WmController {
                 }
 
                 self.last_known_space_by_screen.insert(screen_id, new_space);
+                if let Some(uuid) = display_uuid_opt.as_ref() {
+                    self.last_known_space_by_display_uuid.insert(uuid.clone(), new_space);
+                }
+            } else if let Some(uuid) = display_uuid_opt {
+                self.last_known_space_by_display_uuid.remove(&uuid);
             }
         }
 
@@ -650,55 +683,63 @@ impl WmController {
     }
 
     fn get_windows(&self) -> Vec<WindowServerInfo> {
-        #[cfg(not(test))]
-        {
-            let all_windows = sys::window_server::get_visible_windows_with_layer(None);
+        let all_windows = sys::window_server::get_visible_windows_with_layer(None);
 
-            let space_ids: Vec<u64> = self
-                .active_spaces()
+        let active_space_ids: Vec<SpaceId> =
+            self.active_spaces().into_iter().filter_map(|opt| opt).collect();
+
+        if active_space_ids.is_empty() {
+            return all_windows;
+        }
+
+        let space_id_values: Vec<u64> = active_space_ids.iter().map(|space| space.get()).collect();
+
+        let allowed_window_ids: HashSet<u32> =
+            sys::window_server::space_window_list_for_connection(&space_id_values, 0, false)
                 .into_iter()
-                .filter_map(|opt| opt.map(|s| s.get()))
                 .collect();
 
-            if space_ids.is_empty() {
-                return all_windows;
+        if allowed_window_ids.is_empty() {
+            if !all_windows.is_empty() {
+                tracing::trace!(
+                    ?space_id_values,
+                    "space window list empty during screen update; skipping update"
+                );
             }
-
-            let allowed_window_ids: HashSet<u32> =
-                sys::window_server::space_window_list_for_connection(&space_ids, 0, false)
-                    .into_iter()
-                    .collect();
-
-            if allowed_window_ids.is_empty() {
-                // SLS can briefly report no windows for a space while displays reconfigure;
-                // avoid dropping state by falling back to the unfiltered visible list.
-                if !all_windows.is_empty() {
-                    tracing::trace!(
-                        ?space_ids,
-                        "space window list empty during screen update; using unfiltered set"
-                    );
-                }
-                return all_windows;
-            }
-
-            all_windows
-                .into_iter()
-                .filter(|info| allowed_window_ids.contains(&info.id.as_u32()))
-                .collect()
+            return Vec::new();
         }
-        #[cfg(test)]
-        {
-            vec![]
-        }
+
+        all_windows
+            .into_iter()
+            .filter(|info| allowed_window_ids.contains(&info.id.as_u32()))
+            .collect()
     }
 
-    fn apply_app_rules_to_existing_windows(&mut self) {
+    fn apply_app_rules_to_existing_windows(&mut self, target_spaces: &[SpaceId]) {
         use crate::common::collections::HashMap;
+
+        if target_spaces.is_empty() {
+            return;
+        }
+
+        let space_id_values: Vec<u64> = target_spaces.iter().map(|space| space.get()).collect();
+        let allowed_window_ids: HashSet<WindowServerId> =
+            space_window_list_for_connection(&space_id_values, 0, false)
+                .into_iter()
+                .map(WindowServerId::new)
+                .collect();
+
+        if allowed_window_ids.is_empty() {
+            return;
+        }
 
         let visible_windows = self.get_windows();
         let mut windows_by_pid: HashMap<pid_t, Vec<WindowServerInfo>> = HashMap::default();
 
         for window in visible_windows {
+            if !allowed_window_ids.contains(&window.id) {
+                continue;
+            }
             windows_by_pid.entry(window.pid).or_default().push(window);
         }
 
