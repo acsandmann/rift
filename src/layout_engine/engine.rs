@@ -442,6 +442,33 @@ impl LayoutEngine {
         self.space_display_map.get(&space).and_then(|uuid| uuid.clone())
     }
 
+    /// Returns the last known space associated with the given display UUID.
+    /// Useful when the OS recreates spaces (e.g. after sleep/resume) and we
+    /// want to migrate layout state to the new space id.
+    pub fn space_for_display_uuid(&self, display_uuid: &str) -> Option<SpaceId> {
+        self.space_display_map
+            .iter()
+            .find_map(|(space, uuid_opt)| match uuid_opt {
+                Some(uuid) if uuid == display_uuid => Some(*space),
+                _ => None,
+            })
+    }
+
+    /// Move all per-space layout state from `old_space` to `new_space`.
+    pub fn remap_space(&mut self, old_space: SpaceId, new_space: SpaceId) {
+        if old_space == new_space {
+            return;
+        }
+
+        self.workspace_layouts.remap_space(old_space, new_space);
+        self.floating.remap_space(old_space, new_space);
+        self.virtual_workspace_manager.remap_space(old_space, new_space);
+
+        if let Some(uuid) = self.space_display_map.remove(&old_space) {
+            self.space_display_map.insert(new_space, uuid);
+        }
+    }
+
     pub fn new(
         virtual_workspace_config: &crate::common::config::VirtualWorkspaceSettings,
         layout_settings: &LayoutSettings,

@@ -1051,6 +1051,32 @@ impl Reactor {
         self.update_screen_space_map();
     }
 
+    fn reconcile_spaces_with_display_history(&mut self, spaces: &[Option<SpaceId>]) {
+        let mut seen_displays: HashSet<String> = HashSet::default();
+
+        for (screen, space_opt) in self.space_manager.screens.iter().zip(spaces.iter()) {
+            let Some(space) = space_opt else { continue; };
+            if screen.display_uuid.is_empty() {
+                continue;
+            }
+            if !seen_displays.insert(screen.display_uuid.clone()) {
+                continue;
+            }
+
+            if let Some(previous_space) = self
+                .layout_manager
+                .layout_engine
+                .space_for_display_uuid(&screen.display_uuid)
+            {
+                if previous_space != *space {
+                    self.layout_manager
+                        .layout_engine
+                        .remap_space(previous_space, *space);
+                }
+            }
+        }
+    }
+
     fn update_screen_space_map(&mut self) {
         let valid_screen_ids: HashSet<ScreenId> =
             self.space_manager.screens.iter().map(|screen| screen.screen_id).collect();

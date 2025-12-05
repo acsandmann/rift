@@ -221,6 +221,7 @@ impl SpaceEventHandler {
                 .collect();
             reactor.update_screen_space_map();
             reactor.set_active_spaces(&spaces);
+            reactor.reconcile_spaces_with_display_history(&spaces);
             if let Some(info) = ws_info_opt.take() {
                 reactor.finalize_space_change(&spaces, info);
             }
@@ -271,6 +272,7 @@ impl SpaceEventHandler {
                 Some(PendingSpaceChange { spaces, ws_info });
             return;
         }
+        reactor.reconcile_spaces_with_display_history(&spaces);
         info!("space changed");
         reactor.pending_space_change_manager.pending_space_change = None;
         reactor.set_screen_spaces(&spaces);

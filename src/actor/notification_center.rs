@@ -141,7 +141,30 @@ impl NotificationCenterInner {
     }
 
     fn send_current_space(&self) {
-        let spaces = self.ivars().screen_cache.borrow().get_screen_spaces();
+        let mut screen_cache = self.ivars().screen_cache.borrow_mut();
+        if let Some((descriptors, converter)) = screen_cache.update_screen_config() {
+            let mut last_state = self.ivars().last_screen_state.borrow_mut();
+            let is_unchanged = match &*last_state {
+                Some(prev) => *prev == descriptors,
+                None => false,
+            };
+
+            if !is_unchanged {
+                *last_state = Some(descriptors.clone());
+                drop(last_state);
+                let spaces = screen_cache.get_screen_spaces();
+                drop(screen_cache);
+                self.send_event(WmEvent::ScreenParametersChanged(
+                    descriptors,
+                    converter,
+                    spaces.clone(),
+                ));
+                self.send_event(WmEvent::SpaceChanged(spaces));
+                return;
+            }
+        }
+        let spaces = screen_cache.get_screen_spaces();
+        drop(screen_cache);
         self.send_event(WmEvent::SpaceChanged(spaces));
     }
 

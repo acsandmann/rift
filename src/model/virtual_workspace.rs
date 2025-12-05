@@ -199,6 +199,71 @@ impl VirtualWorkspaceManager {
         }
     }
 
+    pub fn remap_space(&mut self, old_space: SpaceId, new_space: SpaceId) {
+        if old_space == new_space || !self.workspaces_by_space.contains_key(&old_space) {
+            return;
+        }
+
+        // Remove any auto-created state for the target space; the migrated state
+        // should be authoritative.
+        if let Some(existing) = self.workspaces_by_space.remove(&new_space) {
+            for ws_id in existing {
+                if let Some(ws) = self.workspaces.get(ws_id) {
+                    if ws.space == new_space {
+                        self.workspaces.remove(ws_id);
+                    }
+                }
+            }
+        }
+        self.active_workspace_per_space.remove(&new_space);
+
+        let ids = self.workspaces_by_space.remove(&old_space).unwrap_or_default();
+        for ws_id in &ids {
+            if let Some(ws) = self.workspaces.get_mut(*ws_id) {
+                ws.space = new_space;
+            }
+        }
+        if !ids.is_empty() {
+            self.workspaces_by_space.insert(new_space, ids.clone());
+        }
+
+        if let Some((last, active)) = self.active_workspace_per_space.remove(&old_space) {
+            self.active_workspace_per_space.insert(new_space, (last, active));
+        }
+
+        let mut new_window_to_workspace = HashMap::default();
+        for ((space, wid), ws_id) in std::mem::take(&mut self.window_to_workspace) {
+            if space == new_space && old_space != new_space {
+                // Drop auto-created mappings for the target space; migrated
+                // state will replace them.
+                continue;
+            }
+            let target_space = if space == old_space { new_space } else { space };
+            new_window_to_workspace.insert((target_space, wid), ws_id);
+        }
+        self.window_to_workspace = new_window_to_workspace;
+
+        let mut new_window_rule_floating = HashMap::default();
+        for ((space, wid), is_float) in std::mem::take(&mut self.window_rule_floating) {
+            if space == new_space && old_space != new_space {
+                continue;
+            }
+            let target_space = if space == old_space { new_space } else { space };
+            new_window_rule_floating.insert((target_space, wid), is_float);
+        }
+        self.window_rule_floating = new_window_rule_floating;
+
+        let mut new_positions = HashMap::default();
+        for ((space, ws_id), positions) in std::mem::take(&mut self.floating_positions) {
+            if space == new_space && old_space != new_space {
+                continue;
+            }
+            let target_space = if space == old_space { new_space } else { space };
+            new_positions.insert((target_space, ws_id), positions);
+        }
+        self.floating_positions = new_positions;
+    }
+
     pub fn create_workspace(
         &mut self,
         space: SpaceId,

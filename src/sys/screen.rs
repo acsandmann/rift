@@ -140,7 +140,7 @@ impl<S: System> ScreenCache<S> {
                     CFRetained::<objc2_core_foundation::CFString>::as_ptr(&screen).as_ptr(),
                 )
             })
-            .map(|id| Some(SpaceId(id)))
+            .map(|id| if id == 0 { None } else { Some(SpaceId(id)) })
             .collect()
     }
 }

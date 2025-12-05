@@ -104,4 +104,22 @@ impl FloatingManager {
             space_map.entry(wid.pid).or_default().insert(wid);
         }
     }
+
+    pub(crate) fn remap_space(&mut self, old_space: SpaceId, new_space: SpaceId) {
+        if old_space == new_space {
+            return;
+        }
+
+        let mut merged = self.active_floating_windows.remove(&new_space).unwrap_or_default();
+
+        if let Some(old) = self.active_floating_windows.remove(&old_space) {
+            for (pid, windows) in old {
+                merged.entry(pid).or_default().extend(windows);
+            }
+        }
+
+        if !merged.is_empty() {
+            self.active_floating_windows.insert(new_space, merged);
+        }
+    }
 }

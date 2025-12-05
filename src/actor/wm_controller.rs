@@ -136,6 +136,8 @@ pub struct WmController {
     cur_frames: Vec<CGRect>,
     disabled_spaces: HashSet<SpaceId>,
     enabled_spaces: HashSet<SpaceId>,
+    enabled_displays: HashSet<String>,
+    disabled_displays: HashSet<String>,
     last_known_space_by_screen: HashMap<ScreenId, SpaceId>,
     login_window_pid: Option<pid_t>,
     login_window_active: bool,
@@ -180,6 +182,8 @@ impl WmController {
             cur_frames: Vec::new(),
             disabled_spaces: HashSet::default(),
             enabled_spaces: HashSet::default(),
+            enabled_displays: HashSet::default(),
+            disabled_displays: HashSet::default(),
             last_known_space_by_screen: HashMap::default(),
             login_window_pid: None,
             login_window_active: false,
@@ -361,6 +365,12 @@ impl WmController {
                     return;
                 };
 
+                let display_uuid = self
+                    .cur_space
+                    .iter()
+                    .position(|s| *s == Some(space))
+                    .and_then(|idx| self.cur_display_uuid.get(idx).cloned());
+
                 let default_disable = self.config.config.settings.default_disable;
                 let space_currently_enabled = if default_disable {
                     self.enabled_spaces.contains(&space)
@@ -371,16 +381,28 @@ impl WmController {
                 if space_currently_enabled {
                     if default_disable {
                         self.enabled_spaces.remove(&space);
+                        if let Some(ref uuid) = display_uuid {
+                            self.enabled_displays.remove(uuid);
+                        }
                         debug!("removed space {:?} from enabled_spaces", space);
                     } else {
                         self.disabled_spaces.insert(space);
+                        if let Some(ref uuid) = display_uuid {
+                            self.disabled_displays.insert(uuid.clone());
+                        }
                         debug!("added space {:?} to disabled_spaces", space);
                     }
                 } else if default_disable {
                     self.enabled_spaces.insert(space);
+                    if let Some(ref uuid) = display_uuid {
+                        self.enabled_displays.insert(uuid.clone());
+                    }
                     debug!("added space {:?} to enabled_spaces", space);
                 } else {
                     self.disabled_spaces.remove(&space);
+                    if let Some(ref uuid) = display_uuid {
+                        self.disabled_displays.remove(uuid);
+                    }
                     debug!("removed space {:?} from disabled_spaces", space);
                 }
 
@@ -568,6 +590,14 @@ impl WmController {
     fn handle_space_changed(&mut self, spaces: Vec<Option<SpaceId>>) {
         let previous_spaces = self.cur_space.clone();
         self.cur_space = spaces;
+
+        debug!(
+            "handle_space_changed: previous_spaces={:?}, cur_space={:?}, cur_screen_id.len={}",
+            previous_spaces,
+            self.cur_space,
+            self.cur_screen_id.len()
+        );
+
         let pairs: Vec<(ScreenId, Option<SpaceId>)> =
             self.cur_screen_id.iter().copied().zip(self.cur_space.iter().copied()).collect();
 
@@ -581,11 +611,57 @@ impl WmController {
 
                 if let Some(previous_space) = previous_space {
                     if previous_space != new_space {
+                        debug!(
+                            "transferring space activation: idx={}, screen_id={:?}, {:?} -> {:?}",
+                            idx, screen_id, previous_space, new_space
+                        );
                         self.transfer_space_activation(previous_space, new_space);
                     }
                 }
 
                 self.last_known_space_by_screen.insert(screen_id, new_space);
+            }
+        }
+
+        for idx in self.cur_screen_id.len()..self.cur_space.len() {
+            if let Some(Some(new_space)) = self.cur_space.get(idx).copied() {
+                if let Some(previous_space) = previous_spaces.get(idx).copied().flatten() {
+                    if previous_space != new_space {
+                        debug!(
+                            "transferring space activation (no screen_id): idx={}, {:?} -> {:?}",
+                            idx, previous_space, new_space
+                        );
+                        self.transfer_space_activation(previous_space, new_space);
+                    }
+                }
+            }
+        }
+
+        let default_disable = self.config.config.settings.default_disable;
+        for (idx, space_opt) in self.cur_space.iter().enumerate() {
+            let Some(space) = space_opt else { continue };
+            let Some(display_uuid) = self.cur_display_uuid.get(idx) else {
+                continue;
+            };
+
+            if default_disable {
+                if self.enabled_displays.contains(display_uuid) {
+                    if self.enabled_spaces.insert(*space) {
+                        debug!(
+                            "synced space {:?} to enabled_spaces from display {:?}",
+                            space, display_uuid
+                        );
+                    }
+                }
+            } else {
+                if self.disabled_displays.contains(display_uuid) {
+                    if self.disabled_spaces.insert(*space) {
+                        debug!(
+                            "synced space {:?} to disabled_spaces from display {:?}",
+                            space, display_uuid
+                        );
+                    }
+                }
             }
         }
 
@@ -620,12 +696,21 @@ impl WmController {
 
     fn active_spaces(&self) -> Vec<Option<SpaceId>> {
         let mut spaces = self.cur_space.clone();
-        for space in &mut spaces {
+        for (idx, space) in spaces.iter_mut().enumerate() {
+            // Get the display UUID for this index to check display-based activation
+            let display_uuid = self.cur_display_uuid.get(idx);
+            let display_enabled =
+                display_uuid.map(|uuid| self.enabled_displays.contains(uuid)).unwrap_or(false);
+            let display_disabled =
+                display_uuid.map(|uuid| self.disabled_displays.contains(uuid)).unwrap_or(false);
+
             let enabled = match space {
                 _ if self.login_window_active => false,
                 Some(_) if self.config.one_space && *space != self.starting_space => false,
                 Some(sp) if self.disabled_spaces.contains(sp) => false,
+                _ if display_disabled => false,
                 Some(sp) if self.enabled_spaces.contains(sp) => true,
+                _ if display_enabled => true,
                 _ if self.config.config.settings.default_disable => false,
                 _ => true,
             };

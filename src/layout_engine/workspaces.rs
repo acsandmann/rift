@@ -103,6 +103,33 @@ impl WorkspaceLayouts {
         }
     }
 
+    pub(crate) fn remap_space(&mut self, old_space: SpaceId, new_space: SpaceId) {
+        if old_space == new_space {
+            return;
+        }
+
+        let old_keys: Vec<_> = self
+            .map
+            .keys()
+            .filter(|(space, _)| *space == old_space)
+            .cloned()
+            .collect();
+
+        if old_keys.is_empty() {
+            return;
+        }
+
+        // Prefer the migrated state over anything already associated with the
+        // new space (e.g. default layouts created after a reconnect).
+        self.map.retain(|(space, _), _| *space != new_space);
+
+        for (space, workspace_id) in old_keys {
+            if let Some(info) = self.map.remove(&(space, workspace_id)) {
+                self.map.insert((new_space, workspace_id), info);
+            }
+        }
+    }
+
     pub(crate) fn active(
         &self,
         space: SpaceId,
