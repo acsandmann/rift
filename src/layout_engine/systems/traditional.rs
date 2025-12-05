@@ -631,6 +631,11 @@ impl LayoutSystem for TraditionalLayoutSystem {
 
         if let Some(target) = self.find_natural_join_target(selection, direction) {
             self.perform_natural_join(layout, selection, target, direction);
+            if self.tree.data.window.at(selection).is_some() {
+                self.select(selection);
+            } else {
+                let _ = self.descend_selection(layout);
+            }
         }
     }
 
