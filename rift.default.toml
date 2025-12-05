@@ -363,6 +363,13 @@ comb1 = "Alt + Shift"
 # Focus another display (direction/index/uuid)
 # "Alt + Shift + F" = { focus_display = { direction = "right" } }
 
+# Move a window to a display (by index, UUID, or direction)
+# "Alt + Ctrl + Up" = { move_window_to_display = { selector = "up" } }
+# "Alt + Ctrl + Down" = { move_window_to_display = { selector = "down" } }
+# "Alt + Ctrl + Left" = { move_window_to_display = { selector = "left" } }
+# "Alt + Ctrl + Right" = { move_window_to_display = { selector = "right" } }
+# "Alt + Ctrl + A" = { move_window_to_display = { selector = 0 } }
+
 # if mission control is enabled
 # this will show an exploded view of the windows in the active workspace
 # "Alt + Ctrl + Shift + M" = "show_mission_control_current"
