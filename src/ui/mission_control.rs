@@ -488,6 +488,8 @@ const WINDOW_TILE_GAP: f64 = 1.0;
 const WINDOW_TILE_MIN_SIZE: f64 = 2.0;
 const WINDOW_TILE_SCALE_FACTOR: f64 = 0.75;
 const WINDOW_TILE_MAX_SCALE: f64 = 1.0;
+const SMALL_TILE_MIN_FRACTION: f64 = 0.44;
+const INNER_RELAX_FACTOR: f64 = 0.94;
 const WORKSPACE_TILE_SPACING: f64 = 20.0;
 const CURRENT_WS_TILE_SPACING: f64 = 48.0;
 const CURRENT_WS_TILE_PADDING: f64 = 16.0;
@@ -748,66 +750,108 @@ impl MissionControlOverlay {
             return None;
         }
 
-        let columns = Self::exploded_column_count(windows.len(), bounds);
-        let rows = ((windows.len() + columns - 1) / columns).max(1);
         let spacing = CURRENT_WS_TILE_SPACING;
+        let padding = CURRENT_WS_TILE_PADDING;
+        let target_aspect = (bounds.size.width.max(1.0)) / (bounds.size.height.max(1.0));
 
-        let total_spacing_x = spacing * ((columns + 1) as f64);
+        let mut best_layout: Option<(usize, usize, f64)> = None;
+        for cols in 1..=windows.len() {
+            let rows = (windows.len() + cols - 1) / cols;
+            let total_spacing_x = spacing * ((cols + 1) as f64);
+            let total_spacing_y = spacing * ((rows + 1) as f64);
+            let cell_w =
+                (bounds.size.width - total_spacing_x).max(WINDOW_TILE_MIN_SIZE) / cols as f64;
+            let cell_h =
+                (bounds.size.height - total_spacing_y).max(WINDOW_TILE_MIN_SIZE) / rows as f64;
+            if cell_w <= 0.0 || cell_h <= 0.0 {
+                continue;
+            }
+
+            let cell_aspect = cell_w / cell_h;
+            let usage = ((cell_w * cell_h * windows.len() as f64)
+                / ((bounds.size.width * bounds.size.height).max(1.0)))
+            .clamp(0.0, 1.0);
+            let empty_penalty = (rows * cols - windows.len()) as f64 * 0.02;
+            let score = (cell_aspect - target_aspect).abs() * 0.7
+                + (1.0 - usage) * 1.0
+                + empty_penalty * 1.2;
+
+            match best_layout {
+                Some((_, _, best_score)) if score >= best_score => {}
+                _ => best_layout = Some((rows, cols, score)),
+            }
+        }
+
+        let (rows, cols) = best_layout.map(|(r, c, _)| (r, c)).unwrap_or((1, windows.len()));
+
+        let total_spacing_x = spacing * ((cols + 1) as f64);
         let total_spacing_y = spacing * ((rows + 1) as f64);
+        let cell_w = (bounds.size.width - total_spacing_x).max(WINDOW_TILE_MIN_SIZE) / cols as f64;
+        let cell_h = (bounds.size.height - total_spacing_y).max(WINDOW_TILE_MIN_SIZE) / rows as f64;
 
-        let available_width = (bounds.size.width - total_spacing_x).max(1.0);
-        let available_height = (bounds.size.height - total_spacing_y).max(1.0);
-        let cell_width = available_width / columns as f64;
-        let cell_height = available_height / rows as f64;
+        let inner_w = (cell_w - 2.0 * padding).max(WINDOW_TILE_MIN_SIZE);
+        let inner_h = (cell_h - 2.0 * padding).max(WINDOW_TILE_MIN_SIZE);
+        let relaxed_w = inner_w * INNER_RELAX_FACTOR;
+        let relaxed_h = inner_h * INNER_RELAX_FACTOR;
+        let remainder = windows.len() % cols;
 
-        let mut rects = Vec::with_capacity(windows.len());
+        let mut ordered: Vec<(usize, &WindowData)> = windows.iter().enumerate().collect();
+        ordered.sort_by(|(ai, a), (bi, b)| {
+            use std::cmp::Ordering;
+            let top_a = a.frame.origin.y + a.frame.size.height;
+            let top_b = b.frame.origin.y + b.frame.size.height;
+            top_b
+                .partial_cmp(&top_a)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| {
+                    a.frame.origin.x.partial_cmp(&b.frame.origin.x).unwrap_or(Ordering::Equal)
+                })
+                .then_with(|| ai.cmp(bi))
+        });
 
-        for (idx, window) in windows.iter().enumerate() {
-            let row = idx / columns;
-            let col = idx % columns;
+        let mut rects =
+            vec![CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(0.0, 0.0)); windows.len()];
 
-            let cell_origin_x = bounds.origin.x + spacing + (cell_width + spacing) * (col as f64);
-            let cell_origin_y = bounds.origin.y + spacing + (cell_height + spacing) * (row as f64);
+        for (order_idx, (original_idx, window)) in ordered.into_iter().enumerate() {
+            let row = order_idx / cols;
+            let col_in_row = order_idx % cols;
+            let row_window_count = if row == rows - 1 && remainder != 0 {
+                remainder
+            } else {
+                cols
+            };
+            let row_offset = if row_window_count < cols {
+                ((cols - row_window_count) as f64) * (cell_w + spacing) / 2.0
+            } else {
+                0.0
+            };
 
-            let inner_width =
-                (cell_width - 2.0 * CURRENT_WS_TILE_PADDING).max(WINDOW_TILE_MIN_SIZE);
-            let inner_height =
-                (cell_height - 2.0 * CURRENT_WS_TILE_PADDING).max(WINDOW_TILE_MIN_SIZE);
+            let cell_origin_x =
+                bounds.origin.x + spacing + row_offset + (cell_w + spacing) * (col_in_row as f64);
+            let cell_origin_y = bounds.origin.y + spacing + (cell_h + spacing) * (row as f64);
 
-            let original_width = window.frame.size.width.max(1.0);
-            let original_height = window.frame.size.height.max(1.0);
-
-            let mut scale = (inner_width / original_width)
-                .min(inner_height / original_height)
-                .min(WINDOW_TILE_MAX_SCALE);
+            let original_w = window.frame.size.width.max(1.0);
+            let original_h = window.frame.size.height.max(1.0);
+            let mut scale =
+                (relaxed_w / original_w).min(relaxed_h / original_h).min(WINDOW_TILE_MAX_SCALE);
             if scale > 0.5 {
                 scale *= CURRENT_WS_TILE_SCALE_FACTOR;
             }
-            let scaled_width = (original_width * scale).max(WINDOW_TILE_MIN_SIZE);
-            let scaled_height = (original_height * scale).max(WINDOW_TILE_MIN_SIZE);
+            let min_scale_w = (inner_w * SMALL_TILE_MIN_FRACTION) / original_w;
+            let min_scale_h = (inner_h * SMALL_TILE_MIN_FRACTION) / original_h;
+            let min_scale = min_scale_w.max(min_scale_h);
+            scale = scale.max(min_scale).min(WINDOW_TILE_MAX_SCALE);
 
-            let origin_x = cell_origin_x + (cell_width - scaled_width) / 2.0;
-            let origin_y = cell_origin_y + (cell_height - scaled_height) / 2.0;
+            let scaled_w = (original_w * scale).clamp(WINDOW_TILE_MIN_SIZE, inner_w);
+            let scaled_h = (original_h * scale).clamp(WINDOW_TILE_MIN_SIZE, inner_h);
+            let origin_x = cell_origin_x + (cell_w - scaled_w) / 2.0;
+            let origin_y = cell_origin_y + (cell_h - scaled_h) / 2.0;
 
-            rects.push(CGRect::new(
-                CGPoint::new(origin_x, origin_y),
-                CGSize::new(scaled_width, scaled_height),
-            ));
+            rects[original_idx] =
+                CGRect::new(CGPoint::new(origin_x, origin_y), CGSize::new(scaled_w, scaled_h));
         }
 
         Some(rects)
-    }
-
-    fn exploded_column_count(count: usize, bounds: CGRect) -> usize {
-        if count <= 1 {
-            return count.max(1);
-        }
-
-        let width = bounds.size.width.max(1.0);
-        let height = bounds.size.height.max(1.0);
-        let aspect = (width / height).clamp(0.5, 2.0);
-        let estimate = ((count as f64) * aspect).sqrt().ceil() as usize;
-        estimate.clamp(1, count)
     }
 
     fn compute_window_rects(
