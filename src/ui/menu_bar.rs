@@ -2,11 +2,12 @@
 use std::cell::RefCell;
 
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send};
+use objc2::runtime::{AnyObject, NSObject, ProtocolObject, Sel};
+use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSColor, NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSGraphicsContext,
-    NSStatusBar, NSStatusItem, NSVariableStatusItemLength, NSView,
+    NSColor, NSControlStateValueOff, NSControlStateValueOn, NSFont, NSFontAttributeName,
+    NSForegroundColorAttributeName, NSGraphicsContext, NSMenu, NSMenuItem, NSStatusBar,
+    NSStatusItem, NSVariableStatusItemLength, NSView,
 };
 use objc2_core_foundation::{
     CFAttributedString, CFDictionary, CFRetained, CFString, CGFloat, CGPoint, CGRect, CGSize,
@@ -17,10 +18,13 @@ use objc2_foundation::{
     MainThreadMarker, NSAttributedStringKey, NSDictionary, NSMutableDictionary, NSRect, NSSize,
     NSString,
 };
+use serde_json::json;
 use tracing::debug;
 
+use crate::actor::config as config_actor;
 use crate::common::config::{
-    ActiveWorkspaceLabel, MenuBarDisplayMode, MenuBarSettings, WorkspaceDisplayStyle,
+    ActiveWorkspaceLabel, CenteredBarPosition, CenteredBarWindowLevel, Config, ConfigCommand,
+    MenuBarDisplayMode, MenuBarSettings, WorkspaceDisplayStyle,
 };
 use crate::model::VirtualWorkspaceId;
 use crate::model::server::{WindowData, WorkspaceData};
@@ -34,32 +38,349 @@ const BORDER_WIDTH: f64 = 1.0;
 const CONTENT_INSET: f64 = 2.0;
 const FONT_SIZE: f64 = 12.0;
 
+struct MenuHandlerIvars {
+    config_tx: config_actor::Sender,
+}
+
+define_class! {
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "RiftCenteredBarMenuHandler"]
+    #[ivars = MenuHandlerIvars]
+    struct MenuHandler;
+
+    impl MenuHandler {
+        #[unsafe(method(toggleCenteredBar:))]
+        fn toggle_centered_bar(&self, sender: &NSMenuItem) {
+            let new_val = sender.state() != NSControlStateValueOn;
+            self.apply_bool("settings.ui.centered_bar.enabled", new_val);
+        }
+
+        #[unsafe(method(toggleCenteredBarShowNumbers:))]
+        fn toggle_show_numbers(&self, sender: &NSMenuItem) {
+            let new_val = sender.state() != NSControlStateValueOn;
+            self.apply_bool("settings.ui.centered_bar.show_numbers", new_val);
+        }
+
+        #[unsafe(method(toggleCenteredBarShowMode:))]
+        fn toggle_show_mode(&self, sender: &NSMenuItem) {
+            let new_val = sender.state() != NSControlStateValueOn;
+            self.apply_bool("settings.ui.centered_bar.show_mode_indicator", new_val);
+        }
+
+        #[unsafe(method(toggleCenteredBarDedup:))]
+        fn toggle_dedup(&self, sender: &NSMenuItem) {
+            let new_val = sender.state() != NSControlStateValueOn;
+            self.apply_bool("settings.ui.centered_bar.deduplicate_icons", new_val);
+        }
+
+        #[unsafe(method(toggleCenteredBarHideEmpty:))]
+        fn toggle_hide_empty(&self, sender: &NSMenuItem) {
+            let new_val = sender.state() != NSControlStateValueOn;
+            self.apply_bool("settings.ui.centered_bar.hide_empty_workspaces", new_val);
+        }
+
+        #[unsafe(method(toggleCenteredBarNotchAware:))]
+        fn toggle_notch(&self, sender: &NSMenuItem) {
+            let new_val = sender.state() != NSControlStateValueOn;
+            self.apply_bool("settings.ui.centered_bar.notch_aware", new_val);
+        }
+
+        #[unsafe(method(setCenteredBarPositionOverlap:))]
+        fn set_position_overlap(&self, _sender: &NSMenuItem) {
+            self.apply_str("settings.ui.centered_bar.position", "overlapping_menu_bar");
+        }
+
+        #[unsafe(method(setCenteredBarPositionBelow:))]
+        fn set_position_below(&self, _sender: &NSMenuItem) {
+            self.apply_str("settings.ui.centered_bar.position", "below_menu_bar");
+        }
+
+        #[unsafe(method(setCenteredBarLevelNormal:))]
+        fn set_level_normal(&self, _sender: &NSMenuItem) {
+            self.apply_str("settings.ui.centered_bar.window_level", "normal");
+        }
+
+        #[unsafe(method(setCenteredBarLevelFloating:))]
+        fn set_level_floating(&self, _sender: &NSMenuItem) {
+            self.apply_str("settings.ui.centered_bar.window_level", "floating");
+        }
+
+        #[unsafe(method(setCenteredBarLevelStatus:))]
+        fn set_level_status(&self, _sender: &NSMenuItem) {
+            self.apply_str("settings.ui.centered_bar.window_level", "status");
+        }
+
+        #[unsafe(method(setCenteredBarLevelPopup:))]
+        fn set_level_popup(&self, _sender: &NSMenuItem) {
+            self.apply_str("settings.ui.centered_bar.window_level", "popup");
+        }
+
+        #[unsafe(method(setCenteredBarLevelScreensaver:))]
+        fn set_level_screensaver(&self, _sender: &NSMenuItem) {
+            self.apply_str("settings.ui.centered_bar.window_level", "screensaver");
+        }
+    }
+}
+
+impl MenuHandler {
+    fn new(mtm: MainThreadMarker, config_tx: config_actor::Sender) -> Retained<Self> {
+        let obj = mtm.alloc().set_ivars(MenuHandlerIvars { config_tx });
+        unsafe { msg_send![super(obj), init] }
+    }
+
+    fn apply_bool(&self, key: &str, value: bool) {
+        self.apply_config(ConfigCommand::Set { key: key.to_string(), value: json!(value) });
+    }
+
+    fn apply_str(&self, key: &str, value: &str) {
+        self.apply_config(ConfigCommand::Set { key: key.to_string(), value: json!(value) });
+    }
+
+    fn apply_config(&self, cmd: ConfigCommand) {
+        let tx = &self.ivars().config_tx;
+        tx.send(config_actor::Event::ApplyConfigFireAndForget { cmd });
+    }
+}
+
 pub struct MenuIcon {
     status_item: Retained<NSStatusItem>,
     view: Retained<MenuIconView>,
     mtm: MainThreadMarker,
     prev_width: f64,
+    menu: Retained<NSMenu>,
+    handler: Retained<MenuHandler>,
 }
 
 impl MenuIcon {
-    pub fn new(mtm: MainThreadMarker) -> Self {
+    pub fn new(mtm: MainThreadMarker, config_tx: config_actor::Sender) -> Self {
         let status_bar = NSStatusBar::systemStatusBar();
         let status_item = status_bar.statusItemWithLength(NSVariableStatusItemLength);
         let view = MenuIconView::new(mtm);
+        let menu: Retained<NSMenu> = unsafe { msg_send![NSMenu::alloc(mtm), init] };
+        let handler = MenuHandler::new(mtm, config_tx.clone());
+        status_item.setMenu(Some(&menu));
         if let Some(btn) = status_item.button(mtm) {
             btn.addSubview(&*view);
             view.setFrameSize(NSSize::new(0.0, 0.0));
             status_item.setVisible(true);
         }
 
-        Self {
+        let this = Self {
             status_item,
             view,
             mtm,
             prev_width: 0.0,
-        }
+            menu,
+            handler,
+        };
+
+        this.refresh_click_handler();
+        this
     }
 
+    pub fn update_menu(&mut self, config: &Config) {
+        let centered = &config.settings.ui.centered_bar;
+        let new_menu: Retained<NSMenu> = unsafe { msg_send![NSMenu::alloc(self.mtm), init] };
+        let add_toggle = |menu: &NSMenu,
+                          title: &str,
+                          selector: Sel,
+                          checked: bool,
+                          handler: &MenuHandler,
+                          mtm: MainThreadMarker| {
+            let item: Retained<NSMenuItem> = unsafe {
+                let title_ns = NSString::from_str(title);
+                let empty_ns = NSString::from_str("");
+                let title_ref: &NSString = title_ns.as_ref();
+                let empty_ref: &NSString = empty_ns.as_ref();
+                msg_send![
+                    NSMenuItem::alloc(mtm),
+                    initWithTitle: title_ref,
+                    action: Some(selector),
+                    keyEquivalent: empty_ref
+                ]
+            };
+            unsafe { item.setTarget(Some(handler)) };
+            item.setState(if checked { NSControlStateValueOn } else { NSControlStateValueOff });
+            menu.addItem(&item);
+        };
+
+        add_toggle(
+            &new_menu,
+            "Centered bar enabled",
+            sel!(toggleCenteredBar:),
+            centered.enabled,
+            &self.handler,
+            self.mtm,
+        );
+        add_toggle(
+            &new_menu,
+            "Show workspace numbers",
+            sel!(toggleCenteredBarShowNumbers:),
+            centered.show_numbers,
+            &self.handler,
+            self.mtm,
+        );
+        add_toggle(
+            &new_menu,
+            "Show mode indicator",
+            sel!(toggleCenteredBarShowMode:),
+            centered.show_mode_indicator,
+            &self.handler,
+            self.mtm,
+        );
+        add_toggle(
+            &new_menu,
+            "Deduplicate app icons",
+            sel!(toggleCenteredBarDedup:),
+            centered.deduplicate_icons,
+            &self.handler,
+            self.mtm,
+        );
+        add_toggle(
+            &new_menu,
+            "Hide empty workspaces",
+            sel!(toggleCenteredBarHideEmpty:),
+            centered.hide_empty_workspaces,
+            &self.handler,
+            self.mtm,
+        );
+        add_toggle(
+            &new_menu,
+            "Notch-aware positioning",
+            sel!(toggleCenteredBarNotchAware:),
+            centered.notch_aware,
+            &self.handler,
+            self.mtm,
+        );
+
+        new_menu.addItem(&NSMenuItem::separatorItem(self.mtm));
+
+        let position_sub: Retained<NSMenu> = unsafe { msg_send![NSMenu::alloc(self.mtm), init] };
+        let add_radio = |menu: &NSMenu,
+                         title: &str,
+                         selector: Sel,
+                         on: bool,
+                         handler: &MenuHandler,
+                         mtm: MainThreadMarker| {
+            let item: Retained<NSMenuItem> = unsafe {
+                let title_ns = NSString::from_str(title);
+                let empty_ns = NSString::from_str("");
+                let title_ref: &NSString = title_ns.as_ref();
+                let empty_ref: &NSString = empty_ns.as_ref();
+                msg_send![
+                    NSMenuItem::alloc(mtm),
+                    initWithTitle: title_ref,
+                    action: Some(selector),
+                    keyEquivalent: empty_ref
+                ]
+            };
+            unsafe { item.setTarget(Some(handler)) };
+            item.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff });
+            menu.addItem(&item);
+        };
+        add_radio(
+            &position_sub,
+            "Overlap menu bar",
+            sel!(setCenteredBarPositionOverlap:),
+            matches!(centered.position, CenteredBarPosition::OverlappingMenuBar),
+            &self.handler,
+            self.mtm,
+        );
+        add_radio(
+            &position_sub,
+            "Below menu bar",
+            sel!(setCenteredBarPositionBelow:),
+            matches!(centered.position, CenteredBarPosition::BelowMenuBar),
+            &self.handler,
+            self.mtm,
+        );
+        let pos_item: Retained<NSMenuItem> = unsafe {
+            let title_ns = NSString::from_str("Bar position");
+            let empty_ns = NSString::from_str("");
+            let title_ref: &NSString = title_ns.as_ref();
+            let empty_ref: &NSString = empty_ns.as_ref();
+            msg_send![
+                NSMenuItem::alloc(self.mtm),
+                initWithTitle: title_ref,
+                action: None::<Sel>,
+                keyEquivalent: empty_ref
+            ]
+        };
+        pos_item.setSubmenu(Some(&position_sub));
+        new_menu.addItem(&pos_item);
+
+        let level_sub: Retained<NSMenu> = unsafe { msg_send![NSMenu::alloc(self.mtm), init] };
+        let level_matches = |lvl: CenteredBarWindowLevel| centered.window_level == lvl;
+        add_radio(
+            &level_sub,
+            "Popup (default)",
+            sel!(setCenteredBarLevelPopup:),
+            level_matches(CenteredBarWindowLevel::Popup),
+            &self.handler,
+            self.mtm,
+        );
+        add_radio(
+            &level_sub,
+            "Normal",
+            sel!(setCenteredBarLevelNormal:),
+            level_matches(CenteredBarWindowLevel::Normal),
+            &self.handler,
+            self.mtm,
+        );
+        add_radio(
+            &level_sub,
+            "Floating",
+            sel!(setCenteredBarLevelFloating:),
+            level_matches(CenteredBarWindowLevel::Floating),
+            &self.handler,
+            self.mtm,
+        );
+        add_radio(
+            &level_sub,
+            "Status",
+            sel!(setCenteredBarLevelStatus:),
+            level_matches(CenteredBarWindowLevel::Status),
+            &self.handler,
+            self.mtm,
+        );
+        add_radio(
+            &level_sub,
+            "Screensaver (highest)",
+            sel!(setCenteredBarLevelScreensaver:),
+            level_matches(CenteredBarWindowLevel::Screensaver),
+            &self.handler,
+            self.mtm,
+        );
+        let level_item: Retained<NSMenuItem> = unsafe {
+            let title_ns = NSString::from_str("Window level");
+            let empty_ns = NSString::from_str("");
+            let title_ref: &NSString = title_ns.as_ref();
+            let empty_ref: &NSString = empty_ns.as_ref();
+            msg_send![
+                NSMenuItem::alloc(self.mtm),
+                initWithTitle: title_ref,
+                action: None::<Sel>,
+                keyEquivalent: empty_ref
+            ]
+        };
+        level_item.setSubmenu(Some(&level_sub));
+        new_menu.addItem(&level_item);
+
+        self.menu = new_menu.clone();
+        self.status_item.setMenu(Some(&self.menu));
+        self.refresh_click_handler();
+    }
+
+    fn refresh_click_handler(&self) {
+        let status_item_clone = self.status_item.clone();
+        let mtm = self.mtm;
+        self.view.set_click_handler(Box::new(move || {
+            if let Some(btn) = status_item_clone.button(mtm) {
+                unsafe { btn.performClick(None::<&AnyObject>) };
+            }
+        }));
+    }
     pub fn update(
         &mut self,
         _active_space: SpaceId,
@@ -227,6 +548,7 @@ struct MenuIconViewIvars {
     layout: RefCell<MenuIconLayout>,
     active_text_attrs: Retained<NSDictionary<NSAttributedStringKey, AnyObject>>,
     inactive_text_attrs: Retained<NSDictionary<NSAttributedStringKey, AnyObject>>,
+    click_handler: RefCell<Option<Box<dyn Fn()>>>,
 }
 
 fn as_any_object<T: Message>(obj: &T) -> &AnyObject {
@@ -293,6 +615,7 @@ impl MenuIconView {
             layout: RefCell::new(MenuIconLayout::default()),
             active_text_attrs: active_attrs,
             inactive_text_attrs: inactive_attrs,
+            click_handler: RefCell::new(None),
         });
         unsafe { msg_send![super(view), initWithFrame: frame] }
     }
@@ -300,6 +623,10 @@ impl MenuIconView {
     fn set_layout(&self, layout: MenuIconLayout) {
         *self.ivars().layout.borrow_mut() = layout;
         self.setNeedsDisplay(true);
+    }
+
+    fn set_click_handler(&self, handler: Box<dyn Fn()>) {
+        *self.ivars().click_handler.borrow_mut() = Some(handler);
     }
 }
 
@@ -560,6 +887,13 @@ define_class!(
                 }
 
                 CGContext::restore_g_state(Some(cg));
+            }
+        }
+
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, _event: &objc2_app_kit::NSEvent) {
+            if let Some(handler) = self.ivars().click_handler.borrow().as_ref() {
+                handler();
             }
         }
     }

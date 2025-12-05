@@ -19,6 +19,10 @@ pub enum Event {
         #[serde(skip)]
         response: r#continue::Sender<Result<(), String>>,
     },
+    #[serde(skip)]
+    ApplyConfigFireAndForget {
+        cmd: ConfigCommand,
+    },
 }
 
 pub struct ConfigActor {
@@ -62,6 +66,12 @@ impl ConfigActor {
                 Event::ApplyConfig { cmd, response } => {
                     let res = self.handle_config_command(cmd);
                     let _ = response.send(res);
+                }
+                Event::ApplyConfigFireAndForget { cmd } => {
+                    let res = self.handle_config_command(cmd);
+                    if let Err(e) = res {
+                        tracing::warn!("config apply (fire-and-forget) failed: {}", e);
+                    }
                 }
             }
         }

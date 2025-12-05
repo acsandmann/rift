@@ -3,6 +3,8 @@ use objc2::MainThreadMarker;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::actor;
+use crate::actor::centered_bar;
+use crate::actor::config as config_actor;
 use crate::common::config::Config;
 use crate::model::VirtualWorkspaceId;
 use crate::model::server::{WindowData, WorkspaceData};
@@ -28,6 +30,8 @@ pub struct Menu {
     rx: Receiver,
     icon: Option<MenuIcon>,
     mtm: MainThreadMarker,
+    _config_tx: config_actor::Sender,
+    centered_bar_tx: centered_bar::Sender,
     last_signature: Option<u64>,
     last_update: Option<Update>,
 }
@@ -36,12 +40,25 @@ pub type Sender = actor::Sender<Event>;
 pub type Receiver = actor::Receiver<Event>;
 
 impl Menu {
-    pub fn new(config: Config, rx: Receiver, mtm: MainThreadMarker) -> Self {
+    pub fn new(
+        config: Config,
+        rx: Receiver,
+        mtm: MainThreadMarker,
+        config_tx: config_actor::Sender,
+        centered_bar_tx: centered_bar::Sender,
+    ) -> Self {
         Self {
-            icon: config.settings.ui.menu_bar.enabled.then(|| MenuIcon::new(mtm)),
+            icon: config
+                .settings
+                .ui
+                .menu_bar
+                .enabled
+                .then(|| MenuIcon::new(mtm, config_tx.clone())),
             config,
             rx,
             mtm,
+            _config_tx: config_tx,
+            centered_bar_tx,
             last_signature: None,
             last_update: None,
         }
@@ -118,6 +135,7 @@ impl Menu {
         self.last_signature = Some(sig);
 
         let menu_bar_settings = &self.config.settings.ui.menu_bar;
+        icon.update_menu(&self.config);
         icon.update(
             update.active_space,
             update.workspaces.clone(),
@@ -125,6 +143,13 @@ impl Menu {
             update.windows.clone(),
             menu_bar_settings,
         );
+
+        // keep centered bar in sync (e.g., enable/disable via config)
+        if let Err(e) =
+            self.centered_bar_tx.try_send(centered_bar::Event::ConfigUpdated(self.config.clone()))
+        {
+            tracing::warn!("Failed to notify centered bar of config: {}", e);
+        }
     }
 
     fn handle_config_updated(&mut self, new_config: Config) {
@@ -133,7 +158,7 @@ impl Menu {
         self.config = new_config;
 
         if should_enable && self.icon.is_none() {
-            self.icon = Some(MenuIcon::new(self.mtm));
+            self.icon = Some(MenuIcon::new(self.mtm, self._config_tx.clone()));
         } else if !should_enable && self.icon.is_some() {
             self.icon = None;
         }
@@ -141,6 +166,8 @@ impl Menu {
         self.last_signature = None;
         if let Some(update) = self.last_update.take() {
             self.handle_update(update);
+        } else if let Some(icon) = &mut self.icon {
+            icon.update_menu(&self.config);
         }
     }
 
