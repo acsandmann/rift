@@ -137,6 +137,7 @@ pub struct WmController {
     disabled_spaces: HashSet<SpaceId>,
     enabled_spaces: HashSet<SpaceId>,
     last_known_space_by_screen: HashMap<ScreenId, SpaceId>,
+    last_known_space_by_display_uuid: HashMap<String, SpaceId>,
     login_window_pid: Option<pid_t>,
     login_window_active: bool,
     spawning_apps: HashSet<pid_t>,
@@ -181,6 +182,7 @@ impl WmController {
             disabled_spaces: HashSet::default(),
             enabled_spaces: HashSet::default(),
             last_known_space_by_screen: HashMap::default(),
+            last_known_space_by_display_uuid: HashMap::default(),
             login_window_pid: None,
             login_window_active: false,
             spawning_apps: HashSet::default(),
@@ -557,6 +559,16 @@ impl WmController {
                         return Some(space);
                     }
                 }
+
+                if let Some(display_uuid) =
+                    self.cur_display_uuid.get(idx).filter(|uuid| !uuid.is_empty())
+                {
+                    if let Some(space) =
+                        self.last_known_space_by_display_uuid.get(display_uuid).copied()
+                    {
+                        return Some(space);
+                    }
+                }
             }
         }
 
@@ -572,12 +584,20 @@ impl WmController {
             self.cur_screen_id.iter().copied().zip(self.cur_space.iter().copied()).collect();
 
         for (idx, (screen_id, space_opt)) in pairs.into_iter().enumerate() {
+            let display_uuid_opt =
+                self.cur_display_uuid.get(idx).filter(|uuid| !uuid.is_empty()).cloned();
+
             if let Some(new_space) = space_opt {
                 let previous_space = previous_spaces
                     .get(idx)
                     .copied()
                     .flatten()
-                    .or_else(|| self.last_known_space_by_screen.get(&screen_id).copied());
+                    .or_else(|| self.last_known_space_by_screen.get(&screen_id).copied())
+                    .or_else(|| {
+                        display_uuid_opt.as_ref().and_then(|uuid| {
+                            self.last_known_space_by_display_uuid.get(uuid).copied()
+                        })
+                    });
 
                 if let Some(previous_space) = previous_space {
                     if previous_space != new_space {
@@ -586,6 +606,11 @@ impl WmController {
                 }
 
                 self.last_known_space_by_screen.insert(screen_id, new_space);
+                if let Some(uuid) = display_uuid_opt.as_ref() {
+                    self.last_known_space_by_display_uuid.insert(uuid.clone(), new_space);
+                }
+            } else if let Some(uuid) = display_uuid_opt {
+                self.last_known_space_by_display_uuid.remove(&uuid);
             }
         }
 
