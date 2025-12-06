@@ -31,7 +31,7 @@ use events::system::SystemEventHandler;
 use events::window::WindowEventHandler;
 use main_window::MainWindowTracker;
 use managers::LayoutManager;
-use objc2_core_foundation::{CGPoint, CGRect};
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 pub use replay::{Record, replay};
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -46,7 +46,7 @@ use crate::actor::raise_manager::{self, RaiseManager, RaiseRequest};
 use crate::actor::reactor::events::window_discovery::WindowDiscoveryHandler;
 use crate::actor::{self, menu_bar, stack_line};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
-use crate::common::config::Config;
+use crate::common::config::{Config, DragOverlapAction};
 use crate::common::log::MetricsCommand;
 use crate::layout_engine::{self as layout, Direction, LayoutCommand, LayoutEngine, LayoutEvent};
 use crate::model::VirtualWorkspaceId;
@@ -54,12 +54,16 @@ use crate::model::tx_store::WindowTxStore;
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt};
-use crate::sys::screen::{ScreenId, SpaceId, get_active_space_number};
+use crate::sys::hotkey::Modifiers;
+use crate::sys::screen::{
+    ScreenId, SpaceId, get_active_space_number, order_visible_spaces_by_position,
+};
 use crate::sys::timer::Timer;
 use crate::sys::window_server::{
     self, WindowServerId, WindowServerInfo, current_cursor_location, space_is_fullscreen,
     wait_for_native_fullscreen_transition, window_level,
 };
+use crate::ui::drag_feedback::FeedbackKind;
 
 pub type Sender = actor::Sender<Event>;
 type Receiver = actor::Receiver<Event>;
@@ -315,9 +319,10 @@ pub enum DragState {
     Active {
         session: DragSession,
     },
-    PendingSwap {
+    PendingDrop {
         session: DragSession,
         target: WindowId,
+        action: DragOverlapAction,
     },
 }
 
@@ -508,9 +513,10 @@ impl Reactor {
             drag_manager: managers::DragManager {
                 drag_state: DragState::Inactive,
                 drag_swap_manager: crate::actor::drag_swap::DragManager::new(
-                    config.settings.window_snapping,
+                    config.settings.window_snapping.clone(),
                 ),
                 skip_layout_for_window: None,
+                drag_feedback: crate::ui::drag_feedback::DragFeedback::new().ok(),
             },
             workspace_switch_manager: managers::WorkspaceSwitchManager {
                 workspace_switch_state: WorkspaceSwitchState::Inactive,
@@ -579,7 +585,7 @@ impl Reactor {
     fn is_in_drag(&self) -> bool {
         matches!(
             self.drag_manager.drag_state,
-            DragState::Active { .. } | DragState::PendingSwap { .. }
+            DragState::Active { .. } | DragState::PendingDrop { .. }
         )
     }
 
@@ -590,9 +596,9 @@ impl Reactor {
         )
     }
 
-    fn get_pending_drag_swap(&self) -> Option<(WindowId, WindowId)> {
-        if let DragState::PendingSwap { session, target } = &self.drag_manager.drag_state {
-            Some((session.window, *target))
+    fn get_pending_drag_action(&self) -> Option<(WindowId, WindowId, DragOverlapAction)> {
+        if let DragState::PendingDrop { session, target, action } = &self.drag_manager.drag_state {
+            Some((session.window, *target, *action))
         } else {
             None
         }
@@ -617,7 +623,7 @@ impl Reactor {
     fn take_active_drag_session(&mut self) -> Option<DragSession> {
         match std::mem::replace(&mut self.drag_manager.drag_state, DragState::Inactive) {
             DragState::Active { session } => Some(session),
-            DragState::PendingSwap { session, .. } => Some(session),
+            DragState::PendingDrop { session, .. } => Some(session),
             _ => None,
         }
     }
@@ -1393,6 +1399,16 @@ impl Reactor {
         }
     }
 
+    fn drag_overlap_action(&self, modifiers: Modifiers) -> DragOverlapAction {
+        let settings = &self.config_manager.config.settings.window_snapping;
+        settings
+            .drag_overlap_overrides
+            .iter()
+            .find(|ov| modifiers.contains(ov.modifiers))
+            .map(|ov| ov.action)
+            .unwrap_or(settings.drag_overlap_default_action)
+    }
+
     fn pid_has_changing_screens(&self, pid: pid_t) -> bool {
         self.space_manager.changing_screens.iter().any(|wsid| {
             if let Some(wid) = self.window_manager.window_ids.get(wsid) {
@@ -1977,11 +1993,16 @@ impl Reactor {
     fn maybe_swap_on_drag(&mut self, wid: WindowId, new_frame: CGRect) {
         if !self.is_in_drag() {
             trace!(?wid, "Skipping swap: not in drag (mouse up received)");
+            self.drag_manager.hide_feedback();
             return;
         }
 
+        let modifiers = crate::sys::event::get_current_modifiers();
+        let overlap_action = self.drag_overlap_action(modifiers);
+
         let server_id = {
             let Some(window) = self.window_manager.windows.get(&wid) else {
+                self.drag_manager.hide_feedback();
                 return;
             };
 
@@ -1990,6 +2011,7 @@ impl Reactor {
                 .is_some_and(|wsid| self.space_manager.changing_screens.contains(&wsid))
             {
                 trace!(?wid, "Skipping swap: window is changing screens");
+                self.drag_manager.hide_feedback();
                 return;
             }
 
@@ -2003,6 +2025,7 @@ impl Reactor {
         } else {
             self.best_space_for_window(&new_frame, server_id)
         }) else {
+            self.drag_manager.hide_feedback();
             return;
         };
 
@@ -2017,7 +2040,7 @@ impl Reactor {
 
         if let Some(origin_space) = origin_space_hint {
             if origin_space != space {
-                if let Some((pending_wid, pending_target)) = self.get_pending_drag_swap() {
+                if let Some((pending_wid, pending_target, _)) = self.get_pending_drag_action() {
                     if pending_wid == wid {
                         trace!(
                             ?wid,
@@ -2035,12 +2058,13 @@ impl Reactor {
                     ?space,
                     "Resetting drag swap tracking after space change"
                 );
-                self.drag_manager.drag_swap_manager.reset();
+                self.drag_manager.reset();
                 return;
             }
         }
 
         if !self.layout_manager.layout_engine.is_window_in_active_workspace(space, wid) {
+            self.drag_manager.hide_feedback();
             return;
         }
 
@@ -2068,28 +2092,71 @@ impl Reactor {
             candidates.push((other_wid, other_state.frame_monotonic));
         }
 
-        let previous_pending = self.get_pending_drag_swap();
-        let new_candidate =
-            self.drag_manager.drag_swap_manager.on_frame_change(wid, new_frame, &candidates);
+        // No candidate windows to swap with; hide feedback and return early
+        if candidates.is_empty() {
+            self.drag_manager.hide_feedback();
+            return;
+        }
+
+        let previous_pending = self.get_pending_drag_action();
+        let overlap_move_threshold = if overlap_action == DragOverlapAction::Move {
+            Some(0.0)
+        } else {
+            None
+        };
+        let new_candidate = self.drag_manager.drag_swap_manager.on_frame_change(
+            wid,
+            new_frame,
+            &candidates,
+            overlap_move_threshold,
+        );
         let active_target = self.drag_manager.drag_swap_manager.last_target();
 
         if let Some(target_wid) = active_target {
-            if new_candidate.is_some() || previous_pending != Some((wid, target_wid)) {
+            let Some(target_state) = self.window_manager.windows.get(&target_wid) else {
+                // Target window no longer exists; hide feedback and reset
+                self.drag_manager.hide_feedback();
+                self.drag_manager.drag_swap_manager.reset();
+                return;
+            };
+
+            let relative = target_state.window_server_id.map(|id| id.as_u32());
+            let kind = match overlap_action {
+                DragOverlapAction::Move => FeedbackKind::Outline { fill: true },
+                _ => FeedbackKind::Outline { fill: false },
+            };
+            let preview_frame = if overlap_action == DragOverlapAction::Move {
+                let direction =
+                    Self::move_direction_for_preview(new_frame, target_state.frame_monotonic);
+                self.preview_frame_for_move(space, wid, direction)
+                    .unwrap_or(target_state.frame_monotonic)
+            } else {
+                target_state.frame_monotonic
+            };
+            self.drag_manager.show_feedback(preview_frame, relative, kind);
+
+            if new_candidate.is_some()
+                || previous_pending != Some((wid, target_wid, overlap_action))
+            {
                 trace!(
                     ?wid,
                     ?target_wid,
-                    "Detected swap candidate; deferring until MouseUp"
+                    ?overlap_action,
+                    "Detected drag candidate; deferring until MouseUp"
                 );
             }
 
             if let Some(session) = self.take_active_drag_session() {
-                self.drag_manager.drag_state =
-                    DragState::PendingSwap { session, target: target_wid };
+                self.drag_manager.drag_state = DragState::PendingDrop {
+                    session,
+                    target: target_wid,
+                    action: overlap_action,
+                };
             } else {
                 trace!(
                     ?wid,
                     ?target_wid,
-                    "Skipping pending swap; no active drag session"
+                    "Skipping pending drag action; no active drag session"
                 );
                 self.drag_manager.drag_state = DragState::Inactive;
                 self.drag_manager.skip_layout_for_window = None;
@@ -2098,12 +2165,12 @@ impl Reactor {
 
             self.drag_manager.skip_layout_for_window = Some(wid);
         } else {
-            if let Some((pending_wid, pending_target)) = previous_pending {
+            if let Some((pending_wid, pending_target, _)) = previous_pending {
                 if pending_wid == wid {
                     trace!(
                         ?wid,
                         ?pending_target,
-                        "Clearing pending drag swap; overlap ended before MouseUp"
+                        "Clearing pending drag action; overlap ended before MouseUp"
                     );
                     if let Some(session) = self.take_active_drag_session() {
                         self.drag_manager.drag_state = DragState::Active { session };
@@ -2116,8 +2183,88 @@ impl Reactor {
             if self.drag_manager.skip_layout_for_window == Some(wid) {
                 self.drag_manager.skip_layout_for_window = None;
             }
+
+            // No active target: ensure the overlay stays hidden instead of lingering or filling the screen.
+            self.drag_manager.hide_feedback();
         }
         // wait for mouse::up before doing *anything*
+    }
+
+    fn move_direction_for_preview(dragged_frame: CGRect, target_frame: CGRect) -> Direction {
+        let delta_x = target_frame.mid().x - dragged_frame.mid().x;
+        let delta_y = target_frame.mid().y - dragged_frame.mid().y;
+        if delta_x.abs() >= delta_y.abs() {
+            if delta_x >= 0.0 {
+                Direction::Right
+            } else {
+                Direction::Left
+            }
+        } else if delta_y >= 0.0 {
+            Direction::Down
+        } else {
+            Direction::Up
+        }
+    }
+
+    fn preview_frame_for_move(
+        &self,
+        space: SpaceId,
+        dragged_wid: WindowId,
+        direction: Direction,
+    ) -> Option<CGRect> {
+        let mut visible_spaces_input: Vec<(SpaceId, CGPoint)> = Vec::new();
+        let mut screen_frames = HashMap::default();
+        let mut gaps_by_space = HashMap::default();
+        for screen in &self.space_manager.screens {
+            if let Some(space_id) = self.space_manager.space_for_screen(screen) {
+                visible_spaces_input.push((space_id, screen.frame.mid()));
+                screen_frames.insert(space_id, screen.frame);
+                let display_uuid_opt = if screen.display_uuid.is_empty() {
+                    None
+                } else {
+                    Some(screen.display_uuid.as_str())
+                };
+                let gaps = self
+                    .config_manager
+                    .config
+                    .settings
+                    .layout
+                    .gaps
+                    .effective_for_display(display_uuid_opt);
+                gaps_by_space.insert(space_id, gaps);
+            }
+        }
+        if visible_spaces_input.is_empty() {
+            return None;
+        }
+        let mut visible_space_centers = HashMap::default();
+        for (space_id, center) in &visible_spaces_input {
+            visible_space_centers.insert(*space_id, *center);
+        }
+        let visible_spaces = order_visible_spaces_by_position(visible_spaces_input.iter().cloned());
+        if !screen_frames.contains_key(&space) {
+            return None;
+        }
+        let stack_line = &self.config_manager.config.settings.ui.stack_line;
+        self.layout_manager.layout_engine.preview_window_frame_after_command(
+            space,
+            &visible_spaces,
+            &visible_space_centers,
+            &screen_frames,
+            &gaps_by_space,
+            stack_line.thickness(),
+            stack_line.horiz_placement,
+            stack_line.vert_placement,
+            LayoutCommand::MoveNode(direction),
+            dragged_wid,
+            |wid| {
+                self.window_manager
+                    .windows
+                    .get(&wid)
+                    .map(|w| w.frame_monotonic.size)
+                    .unwrap_or_else(|| CGSize::new(500.0, 500.0))
+            },
+        )
     }
 
     fn window_id_under_cursor(&self) -> Option<WindowId> {

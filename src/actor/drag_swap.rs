@@ -53,6 +53,7 @@ impl DragManager {
         wid: WindowId,
         new_frame: CGRect,
         candidates: &[(WindowId, CGRect)],
+        required_overlap: Option<f64>,
     ) -> Option<WindowId> {
         if self.dragged_window.is_none() {
             self.dragged_window = Some(wid);
@@ -69,8 +70,9 @@ impl DragManager {
             return None;
         }
 
-        let stick_fraction = (self.config.drag_swap_fraction * STICK_RATIO)
-            .clamp(0.0, self.config.drag_swap_fraction);
+        let overlap_threshold =
+            required_overlap.unwrap_or(self.config.drag_swap_fraction).clamp(0.0, 1.0);
+        let stick_fraction = (overlap_threshold * STICK_RATIO).clamp(0.0, overlap_threshold);
         let dragged_center = Self::rect_center(new_frame);
         let dragged_diag =
             f64::hypot(new_frame.size.width, new_frame.size.height).max(f64::EPSILON);
@@ -135,9 +137,7 @@ impl DragManager {
                 return None;
             }
 
-            if best.overlap >= self.config.drag_swap_fraction
-                && best.score >= active.score + SWITCH_DELTA
-            {
+            if best.overlap >= overlap_threshold && best.score >= active.score + SWITCH_DELTA {
                 self.active_candidate = Some(ActiveCandidate { window: best.window });
                 return Some(best.window);
             }
@@ -145,7 +145,7 @@ impl DragManager {
             return None;
         }
 
-        if best.overlap >= self.config.drag_swap_fraction {
+        if best.overlap >= overlap_threshold {
             self.active_candidate = Some(ActiveCandidate { window: best.window });
             return Some(best.window);
         }
@@ -200,7 +200,10 @@ mod tests {
 
     #[test]
     fn selects_candidate_based_on_scored_overlap() {
-        let mut dm = DragManager::new(WindowSnappingSettings { drag_swap_fraction: 0.3 });
+        let mut dm = DragManager::new(WindowSnappingSettings {
+            drag_swap_fraction: 0.3,
+            ..Default::default()
+        });
 
         let dragged = rect(0.0, 0.0, 100.0, 100.0);
         let wid = WindowId::new(1, 1);
@@ -208,61 +211,73 @@ mod tests {
         let cand_a = (WindowId::new(1, 2), rect(0.0, 0.0, 40.0, 100.0)); // 40%
         let cand_b = (WindowId::new(1, 3), rect(0.0, 0.0, 60.0, 100.0)); // 60%
 
-        let chosen = dm.on_frame_change(wid, dragged, &[cand_a, cand_b]);
+        let chosen = dm.on_frame_change(wid, dragged, &[cand_a, cand_b], None);
         assert_eq!(chosen, Some(WindowId::new(1, 3)));
     }
 
     #[test]
     fn respects_last_target_to_avoid_repeats() {
-        let mut dm = DragManager::new(WindowSnappingSettings { drag_swap_fraction: 0.25 });
+        let mut dm = DragManager::new(WindowSnappingSettings {
+            drag_swap_fraction: 0.25,
+            ..Default::default()
+        });
         let wid = WindowId::new(1, 10);
         let dragged = rect(0.0, 0.0, 200.0, 100.0);
 
         let cand = (WindowId::new(1, 20), rect(0.0, 0.0, 100.0, 100.0)); // 50% overlap
 
-        let chosen1 = dm.on_frame_change(wid, dragged, &[cand]);
+        let chosen1 = dm.on_frame_change(wid, dragged, &[cand], None);
         assert_eq!(chosen1, Some(WindowId::new(1, 20)));
 
-        let chosen2 = dm.on_frame_change(wid, dragged, &[cand]);
+        let chosen2 = dm.on_frame_change(wid, dragged, &[cand], None);
         assert_eq!(chosen2, None);
     }
 
     #[test]
     fn clears_active_target_when_overlap_is_lost() {
-        let mut dm = DragManager::new(WindowSnappingSettings { drag_swap_fraction: 0.2 });
+        let mut dm = DragManager::new(WindowSnappingSettings {
+            drag_swap_fraction: 0.2,
+            ..Default::default()
+        });
         let wid = WindowId::new(1, 42);
         let dragged = rect(0.0, 0.0, 100.0, 100.0);
         let cand = (WindowId::new(1, 99), rect(0.0, 0.0, 60.0, 100.0));
 
-        let chosen = dm.on_frame_change(wid, dragged, &[cand]);
+        let chosen = dm.on_frame_change(wid, dragged, &[cand], None);
         assert_eq!(chosen, Some(WindowId::new(1, 99)));
         assert_eq!(dm.last_target(), Some(WindowId::new(1, 99)));
 
         let moved = rect(200.0, 0.0, 100.0, 100.0);
-        let cleared = dm.on_frame_change(wid, moved, &[cand]);
+        let cleared = dm.on_frame_change(wid, moved, &[cand], None);
         assert!(cleared.is_none());
         assert!(dm.last_target().is_none());
     }
 
     #[test]
     fn hysteresis_keeps_candidate_when_overlap_drops_slightly() {
-        let mut dm = DragManager::new(WindowSnappingSettings { drag_swap_fraction: 0.4 });
+        let mut dm = DragManager::new(WindowSnappingSettings {
+            drag_swap_fraction: 0.4,
+            ..Default::default()
+        });
         let wid = WindowId::new(5, 1);
         let dragged = rect(0.0, 0.0, 100.0, 100.0);
         let cand = (WindowId::new(5, 2), rect(0.0, 0.0, 50.0, 100.0)); // 50%
 
-        let chosen = dm.on_frame_change(wid, dragged, &[cand]);
+        let chosen = dm.on_frame_change(wid, dragged, &[cand], None);
         assert_eq!(chosen, Some(WindowId::new(5, 2)));
 
         let shifted = rect(20.0, 0.0, 100.0, 100.0); // 30% overlap
-        let result = dm.on_frame_change(wid, shifted, &[cand]);
+        let result = dm.on_frame_change(wid, shifted, &[cand], None);
         assert!(result.is_none());
         assert_eq!(dm.last_target(), Some(WindowId::new(5, 2)));
     }
 
     #[test]
     fn switches_only_when_new_candidate_is_meaningfully_better() {
-        let mut dm = DragManager::new(WindowSnappingSettings { drag_swap_fraction: 0.3 });
+        let mut dm = DragManager::new(WindowSnappingSettings {
+            drag_swap_fraction: 0.3,
+            ..Default::default()
+        });
         let wid = WindowId::new(7, 1);
         let dragged = rect(0.0, 0.0, 120.0, 100.0);
 
@@ -270,17 +285,17 @@ mod tests {
         let cand_b = (WindowId::new(7, 3), rect(0.0, 0.0, 68.0, 100.0)); // 56.6%
 
         assert_eq!(
-            dm.on_frame_change(wid, dragged, &[cand_a, cand_b]),
+            dm.on_frame_change(wid, dragged, &[cand_a, cand_b], None),
             Some(WindowId::new(7, 3))
         );
 
         let cand_a_shifted = (WindowId::new(7, 2), rect(0.0, 0.0, 66.0, 100.0)); // 55%
-        let result = dm.on_frame_change(wid, dragged, &[cand_a_shifted, cand_b]);
+        let result = dm.on_frame_change(wid, dragged, &[cand_a_shifted, cand_b], None);
         assert!(result.is_none());
         assert_eq!(dm.last_target(), Some(WindowId::new(7, 3)));
 
         let cand_a_dominant = (WindowId::new(7, 2), rect(-10.0, 0.0, 120.0, 100.0)); // 100% overlap
-        let switched = dm.on_frame_change(wid, dragged, &[cand_a_dominant, cand_b]);
+        let switched = dm.on_frame_change(wid, dragged, &[cand_a_dominant, cand_b], None);
         assert_eq!(switched, Some(WindowId::new(7, 2)));
         assert_eq!(dm.last_target(), Some(WindowId::new(7, 2)));
     }

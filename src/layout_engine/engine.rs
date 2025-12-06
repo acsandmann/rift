@@ -5,13 +5,14 @@ use std::path::PathBuf;
 
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use serde::{Deserialize, Serialize};
+use serde_json;
 use tracing::{debug, info, warn};
 
 use super::{Direction, FloatingManager, LayoutId, LayoutSystemKind, WorkspaceLayouts};
 use crate::actor::app::{AppInfo, WindowId, pid_t};
 use crate::actor::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::common::collections::HashMap;
-use crate::common::config::LayoutSettings;
+use crate::common::config::{GapSettings, HorizontalPlacement, LayoutSettings, VerticalPlacement};
 use crate::layout_engine::LayoutSystem;
 use crate::model::{VirtualWorkspaceId, VirtualWorkspaceManager};
 use crate::sys::screen::SpaceId;
@@ -62,6 +63,7 @@ pub enum LayoutCommand {
     SwitchToLastWorkspace,
 
     SwapWindows(crate::actor::app::WindowId, crate::actor::app::WindowId),
+    StackWindows(crate::actor::app::WindowId, crate::actor::app::WindowId),
 }
 
 #[non_exhaustive]
@@ -119,6 +121,16 @@ impl LayoutEngine {
         settings: &crate::common::config::VirtualWorkspaceSettings,
     ) {
         self.virtual_workspace_manager.update_settings(settings);
+    }
+
+    pub fn clone_for_preview(&self) -> Option<Self> {
+        let data = serde_json::to_vec(self).ok()?;
+        let mut cloned: LayoutEngine = serde_json::from_slice(&data).ok()?;
+        cloned.layout_settings = self.layout_settings.clone();
+        cloned.focused_window = self.focused_window;
+        cloned.space_display_map = self.space_display_map.clone();
+        cloned.broadcast_tx = None;
+        Some(cloned)
     }
 
     fn active_floating_windows_in_workspace(&self, space: SpaceId) -> Vec<WindowId> {
@@ -848,6 +860,16 @@ impl LayoutEngine {
             LayoutCommand::SwapWindows(a, b) => {
                 let layout = self.layout(space);
                 let _ = self.tree.swap_windows(layout, a, b);
+
+                EventResponse::default()
+            }
+
+            LayoutCommand::StackWindows(a, b) => {
+                let layout = self.layout(space);
+                let default_orientation = self.layout_settings.stack.default_orientation;
+                if !self.tree.stack_windows(layout, a, b, default_orientation) {
+                    warn!("StackWindows command ignored (missing nodes)");
+                }
 
                 EventResponse::default()
             }
@@ -1737,6 +1759,70 @@ impl LayoutEngine {
 
     fn rebalance_all_layouts(&mut self) {
         self.workspace_layouts.for_each_active(|layout| self.tree.rebalance(layout));
+    }
+
+    pub fn select_window_in_space(&mut self, space: SpaceId, wid: WindowId) -> bool {
+        if self.floating.is_floating(wid) {
+            return false;
+        }
+
+        let Some(workspace_id) = self.virtual_workspace_manager.active_workspace(space) else {
+            return false;
+        };
+        let Some(layout) = self.workspace_layouts.active(space, workspace_id) else {
+            return false;
+        };
+
+        self.tree.select_window(layout, wid)
+    }
+
+    pub fn space_for_window(&self, window_id: WindowId) -> Option<SpaceId> {
+        self.virtual_workspace_manager.space_for_window(window_id)
+    }
+
+    pub fn preview_window_frame_after_command<F>(
+        &self,
+        space: SpaceId,
+        visible_spaces: &[SpaceId],
+        visible_space_centers: &HashMap<SpaceId, CGPoint>,
+        screen_frames: &HashMap<SpaceId, CGRect>,
+        gaps_by_space: &HashMap<SpaceId, GapSettings>,
+        stack_line_thickness: f64,
+        stack_line_horiz: HorizontalPlacement,
+        stack_line_vert: VerticalPlacement,
+        command: LayoutCommand,
+        window_id: WindowId,
+        get_window_size: F,
+    ) -> Option<CGRect>
+    where
+        F: Fn(WindowId) -> CGSize,
+    {
+        let mut preview_engine = self.clone_for_preview()?;
+        if !preview_engine.select_window_in_space(space, window_id) {
+            return None;
+        }
+        preview_engine.handle_command(Some(space), visible_spaces, visible_space_centers, command);
+        let target_space = preview_engine.space_for_window(window_id).unwrap_or(space);
+        let screen_frame = screen_frames
+            .get(&target_space)
+            .copied()
+            .or_else(|| screen_frames.get(&space).copied())?;
+        let gaps = gaps_by_space
+            .get(&target_space)
+            .or_else(|| gaps_by_space.get(&space))
+            .unwrap_or(&self.layout_settings.gaps);
+        let layout_result = preview_engine.calculate_layout_with_virtual_workspaces(
+            target_space,
+            screen_frame,
+            gaps,
+            stack_line_thickness,
+            stack_line_horiz,
+            stack_line_vert,
+            get_window_size,
+        );
+        layout_result
+            .into_iter()
+            .find_map(|(wid, rect)| (wid == window_id).then(|| rect))
     }
 
     pub fn is_window_in_active_workspace(&self, space: SpaceId, window_id: WindowId) -> bool {
