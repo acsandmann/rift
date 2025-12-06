@@ -95,6 +95,10 @@ impl CommandEventHandler {
         };
 
         reactor.handle_layout_response(response, workspace_space);
+
+        if matches!(cmd, LayoutCommand::ScrollWorkspace { .. }) {
+            let _ = reactor.update_layout(false, false);
+        }
     }
 
     pub fn handle_command_metrics(_reactor: &mut Reactor, cmd: MetricsCommand) {

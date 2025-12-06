@@ -16,7 +16,7 @@ use super::reactor::{self, Event};
 use crate::actor;
 use crate::actor::wm_controller::{self, WmCommand, WmEvent};
 use crate::common::collections::{HashMap, HashSet};
-use crate::common::config::{Config, HapticPattern};
+use crate::common::config::{Config, HapticPattern, LayoutMode, ScrollGestureMode};
 use crate::common::log::trace_misc;
 use crate::layout_engine::LayoutCommand as LC;
 use crate::sys::event::{self, Hotkey, KeyCode, MouseState, set_mouse_state};
@@ -88,6 +88,8 @@ struct CallbackCtx {
     this: Rc<EventTap>,
 }
 
+const MIN_SCROLL_DELTA: f64 = 1e-4;
+
 #[derive(Debug, Clone)]
 struct SwipeConfig {
     enabled: bool,
@@ -128,6 +130,7 @@ struct SwipeState {
     phase: GesturePhase,
     start_x: f64,
     start_y: f64,
+    last_dx: f64,
 }
 
 impl SwipeState {
@@ -135,6 +138,7 @@ impl SwipeState {
         self.phase = GesturePhase::Idle;
         self.start_x = 0.0;
         self.start_y = 0.0;
+        self.last_dx = 0.0;
     }
 }
 
@@ -168,7 +172,8 @@ impl EventTap {
             .clone()
             .and_then(|spec| spec.to_hotkey());
         let swipe_cfg = SwipeConfig::from_config(&config);
-        let swipe = if swipe_cfg.enabled && wm_sender.is_some() {
+        let layout_is_scroll = config.settings.layout.mode == LayoutMode::Scroll;
+        let swipe = if (swipe_cfg.enabled || layout_is_scroll) && wm_sender.is_some() {
             Some(SwipeHandler {
                 cfg: swipe_cfg,
                 state: RefCell::new(SwipeState::default()),
@@ -346,6 +351,9 @@ impl EventTap {
             CGEventType::RightMouseUp | CGEventType::LeftMouseUp => {
                 _ = self.events_tx.send(Event::MouseUp);
             }
+            CGEventType::ScrollWheel => {
+                self.handle_scroll_wheel(event);
+            }
             CGEventType::MouseMoved
                 if self.config.settings.focus_follows_mouse
                     && state.focus_follows_mouse_enabled
@@ -363,6 +371,11 @@ impl EventTap {
     }
 
     fn handle_gesture_event(&self, handler: &SwipeHandler, nsevent: &NSEvent) {
+        if self.config.settings.layout.mode == LayoutMode::Scroll {
+            self.handle_scroll_layout_gesture(handler, nsevent);
+            return;
+        }
+
         let cfg = &handler.cfg;
         let state = &handler.state;
         let Some(wm_sender) = self.wm_sender.as_ref() else {
@@ -461,6 +474,193 @@ impl EventTap {
             GesturePhase::Committed => {
                 if active_count == 0 {
                     st.reset();
+                }
+            }
+        }
+    }
+
+    fn handle_scroll_wheel(&self, event: &CGEvent) {
+        if self.config.settings.layout.mode != LayoutMode::Scroll {
+            return;
+        }
+        let Some(wm_sender) = self.wm_sender.as_ref() else {
+            return;
+        };
+        let Some(nsevent) = NSEvent::eventWithCGEvent(event) else {
+            return;
+        };
+
+        let scroll_cfg = &self.config.settings.layout.scroll;
+        let mut delta_x = nsevent.scrollingDeltaX() as f64;
+
+        if !nsevent.hasPreciseScrollingDeltas() {
+            // Coarse wheel events are line-based; scale them up slightly to feel responsive.
+            delta_x *= 10.0;
+        }
+
+        let mut delta_units =
+            -delta_x / scroll_cfg.wheel_pixels_per_window.max(0.01) * scroll_cfg.wheel_sensitivity;
+
+        if self.config.settings.gestures.invert_horizontal_swipe {
+            delta_units = -delta_units;
+        }
+
+        let is_end = {
+            let phase = nsevent.phase();
+            let momentum = nsevent.momentumPhase();
+            phase.contains(NSEventPhase::Ended)
+                || phase.contains(NSEventPhase::Cancelled)
+                || momentum.contains(NSEventPhase::Ended)
+                || momentum.contains(NSEventPhase::Cancelled)
+        };
+
+        if delta_units.abs() < MIN_SCROLL_DELTA && !is_end {
+            return;
+        }
+
+        let finalize = is_end;
+        let command = match scroll_cfg.gesture_mode {
+            ScrollGestureMode::Preview => LC::ShiftViewport { delta: delta_units, finalize },
+            ScrollGestureMode::Immediate => LC::ScrollWorkspace { delta: delta_units, finalize },
+            ScrollGestureMode::Hybrid => {
+                if delta_units.abs() > 0.5 {
+                    LC::ScrollWorkspace { delta: delta_units, finalize }
+                } else {
+                    LC::ShiftViewport { delta: delta_units, finalize }
+                }
+            }
+        };
+
+        wm_sender.send(WmEvent::Command(WmCommand::ReactorCommand(
+            reactor::Command::Layout(command),
+        )));
+    }
+
+    fn handle_scroll_layout_gesture(&self, handler: &SwipeHandler, nsevent: &NSEvent) {
+        let cfg = &handler.cfg;
+        let state = &handler.state;
+        let Some(wm_sender) = self.wm_sender.as_ref() else {
+            state.borrow_mut().reset();
+            return;
+        };
+
+        let scroll_cfg = &self.config.settings.layout.scroll;
+        let required_fingers = scroll_cfg.gesture_fingers;
+        let sensitivity = scroll_cfg.gesture_sensitivity.max(0.01) * 0.5;
+
+        let phase = nsevent.phase();
+        if phase.contains(NSEventPhase::Ended) || phase.contains(NSEventPhase::Cancelled) {
+            let finalize_cmd = match scroll_cfg.gesture_mode {
+                ScrollGestureMode::Preview => LC::ShiftViewport { delta: 0.0, finalize: true },
+                ScrollGestureMode::Immediate | ScrollGestureMode::Hybrid => {
+                    LC::ScrollWorkspace { delta: 0.0, finalize: true }
+                }
+            };
+            wm_sender.send(WmEvent::Command(WmCommand::ReactorCommand(
+                reactor::Command::Layout(finalize_cmd),
+            )));
+            state.borrow_mut().reset();
+            return;
+        }
+
+        if phase.contains(NSEventPhase::Began) {
+            state.borrow_mut().reset();
+        }
+
+        let touches = nsevent.allTouches();
+        let mut sum_x = 0.0f64;
+        let mut sum_y = 0.0f64;
+        let mut touch_count = 0usize;
+        let mut active_count = 0usize;
+
+        for t in touches.iter() {
+            let phase = t.phase();
+            if phase.contains(NSTouchPhase::Stationary) {
+                continue;
+            }
+
+            touch_count += 1;
+            if touch_count > required_fingers {
+                state.borrow_mut().reset();
+                return;
+            }
+
+            let ended =
+                phase.contains(NSTouchPhase::Ended) || phase.contains(NSTouchPhase::Cancelled);
+            if !ended {
+                let pos = t.normalizedPosition();
+                sum_x += pos.x as f64;
+                sum_y += pos.y as f64;
+                active_count += 1;
+            }
+        }
+
+        if touch_count != required_fingers || active_count == 0 {
+            state.borrow_mut().reset();
+            return;
+        }
+
+        let avg_x = sum_x / active_count as f64;
+        let avg_y = sum_y / active_count as f64;
+
+        let mut st = state.borrow_mut();
+        match st.phase {
+            GesturePhase::Idle => {
+                st.start_x = avg_x;
+                st.start_y = avg_y;
+                st.last_dx = 0.0;
+                st.phase = GesturePhase::Armed;
+            }
+            GesturePhase::Armed | GesturePhase::Committed => {
+                let dx = avg_x - st.start_x;
+                let dy = avg_y - st.start_y;
+
+                if dy.abs() > cfg.vertical_tolerance {
+                    return;
+                }
+
+                let current_dx = dx;
+                let delta_norm = current_dx - st.last_dx;
+                st.last_dx = current_dx;
+
+                let mut delta_units = -delta_norm * sensitivity;
+                if cfg.invert_horizontal {
+                    delta_units = -delta_units;
+                }
+
+                if delta_units.abs() < MIN_SCROLL_DELTA {
+                    st.phase = GesturePhase::Committed;
+                    return;
+                }
+
+                st.phase = GesturePhase::Committed;
+
+                let mode = scroll_cfg.gesture_mode;
+                let gesture_magnitude = dx.abs();
+                let gesture_velocity = delta_norm.abs();
+
+                let use_immediate = match mode {
+                    ScrollGestureMode::Immediate => true,
+                    ScrollGestureMode::Preview => false,
+                    ScrollGestureMode::Hybrid => {
+                        gesture_magnitude > 0.15 || gesture_velocity > 0.01
+                    }
+                };
+
+                if use_immediate {
+                    wm_sender.send(WmEvent::Command(WmCommand::ReactorCommand(
+                        reactor::Command::Layout(LC::ScrollWorkspace {
+                            delta: delta_units,
+                            finalize: false,
+                        }),
+                    )));
+                } else {
+                    wm_sender.send(WmEvent::Command(WmCommand::ReactorCommand(
+                        reactor::Command::Layout(LC::ShiftViewport {
+                            delta: delta_units,
+                            finalize: false,
+                        }),
+                    )));
                 }
             }
         }
@@ -654,6 +854,7 @@ fn build_event_mask(swipe_enabled: bool) -> CGEventMask {
         CGEventType::MouseMoved,
         CGEventType::LeftMouseDragged,
         CGEventType::RightMouseDragged,
+        CGEventType::ScrollWheel,
     ] {
         add(&mut m, ty);
     }
