@@ -250,7 +250,7 @@ struct State {
     needs_resync: HashSet<WindowId>,
     last_window_idx: u32,
     main_window: Option<WindowId>,
-    last_activated: Option<(Instant, Quiet, r#continue::Sender<()>)>,
+    last_activated: Option<(Instant, Quiet, Option<WindowId>, r#continue::Sender<()>)>,
     is_hidden: bool,
     is_frontmost: bool,
     raises_tx: actor::Sender<RaiseRequest>,
@@ -862,11 +862,24 @@ impl State {
 
         if !is_frontmost && make_key_result.is_ok() && is_standard {
             let (tx, rx) = continuation();
-            let quiet_activation = if wids.len() == 1 { quiet } else { Quiet::Yes };
+            let (quiet_activation, quiet_window_change);
+            if wids.len() == 1 {
+                // `quiet` only applies if the first window is also the last.
+                quiet_activation = quiet;
+                quiet_window_change = (quiet == Quiet::Yes).then_some(first);
+            } else {
+                // Windows before the last are always quiet.
+                quiet_activation = Quiet::Yes;
+                quiet_window_change = Some(first);
+            }
+            // this.last_activated = Some((Instant::now(), quiet_activation, quiet_window_change, tx));
 
-            if let Some((_, _, prev_tx)) =
-                this.last_activated.replace((Instant::now(), quiet_activation, tx))
-            {
+            if let Some((_, _, _, prev_tx)) = this.last_activated.replace((
+                Instant::now(),
+                quiet_activation,
+                quiet_window_change,
+                tx,
+            )) {
                 let _ = prev_tx.send(());
             }
 
@@ -973,24 +986,26 @@ impl State {
             self.pid, is_frontmost, old_frontmost
         );
 
-        let event = if is_frontmost {
-            let quiet = match self.last_activated.take() {
-                Some((ts, quiet, tx)) if ts.elapsed() <= Duration::from_millis(1000) => {
+        let event = if !is_frontmost {
+            Event::ApplicationDeactivated(self.pid)
+        } else {
+            let (quiet_activation, quiet_window_change) = match self.last_activated.take() {
+                Some((ts, quiet_activation, quiet_window_change, tx))
+                    if ts.elapsed() < Duration::from_millis(1000) =>
+                {
                     trace!("by us");
                     _ = tx.send(());
-                    quiet
+                    (quiet_activation, quiet_window_change)
                 }
-                Some((ts, _, tx)) if ts.elapsed() > Duration::from_millis(1000) => {
+                _ => {
                     trace!("by user");
-                    _ = tx.send(());
-                    self.on_main_window_changed(None);
-                    Quiet::No
+                    (Quiet::No, None)
                 }
-                _ => Quiet::No,
             };
-            Event::ApplicationActivated(self.pid, quiet)
-        } else {
-            Event::ApplicationDeactivated(self.pid)
+
+            self.on_main_window_changed(quiet_window_change);
+
+            Event::ApplicationActivated(self.pid, quiet_activation)
         };
 
         if old_frontmost != is_frontmost {
@@ -1249,7 +1264,7 @@ impl State {
 
 impl Drop for State {
     fn drop(&mut self) {
-        if let Some((_, _, tx)) = self.last_activated.take() {
+        if let Some((_, _, _, tx)) = self.last_activated.take() {
             let _ = tx.send(());
         }
     }
