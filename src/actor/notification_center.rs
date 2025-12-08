@@ -2,8 +2,11 @@
 //! application is launched or focused or the screen state changes.
 
 use std::cell::RefCell;
+use std::ffi::c_void;
 use std::{future, mem};
 
+use dispatchr::queue;
+use dispatchr::time::Time;
 use objc2::rc::{Allocated, Retained};
 use objc2::{AnyThread, ClassType, DeclaredClass, Encode, Encoding, define_class, msg_send, sel};
 use objc2_app_kit::{
@@ -16,8 +19,10 @@ use tracing::{debug, info_span, trace, warn};
 
 use super::wm_controller::{self, WmEvent};
 use crate::sys::app::NSRunningApplicationExt;
+use crate::sys::dispatch::DispatchExt;
 use crate::sys::power::{init_power_state, set_low_power_mode_state};
 use crate::sys::screen::{ScreenCache, ScreenDescriptor};
+use crate::sys::skylight::{CGDisplayRegisterReconfigurationCallback, DisplayReconfigFlags};
 
 #[repr(C)]
 struct Instance {
@@ -61,15 +66,13 @@ define_class! {
         #[unsafe(method(recvWakeEvent:))]
         fn recv_wake_event(&self, notif: &NSNotification) {
             trace!("{notif:#?}");
-            // On wake, macOS may briefly report zero displays which would
-            // cause us to clear screen state and lose track of windows.
-            // Avoid pushing an immediate screen/space update here; instead,
-            // rely on the subsequent system notifications
-            // (NSApplicationDidChangeScreenParametersNotification and
-            // NSWorkspaceActiveSpaceDidChangeNotification) to deliver the
-            // real, stable configuration. We still notify the system-woke
-            // event so subsystems can re-subscribe OS callbacks.
+            // On wake, macOS may briefly report zero displays. We still want
+            // to refresh screen state in case the display set changed while
+            // asleep, but we avoid clearing state when the system reports an
+            // empty configuration.
             self.send_event(WmEvent::SystemWoke);
+            self.ivars().last_screen_state.borrow_mut().take();
+            self.send_screen_parameters();
         }
 
         #[unsafe(method(recvPowerEvent:))]
@@ -87,7 +90,14 @@ impl NotificationCenterInner {
             events_tx,
             last_screen_state: RefCell::new(None),
         };
-        unsafe { msg_send![Self::alloc(), initWith: instance] }
+        let handler: Retained<Self> = unsafe { msg_send![Self::alloc(), initWith: instance] };
+        unsafe {
+            CGDisplayRegisterReconfigurationCallback(
+                Some(Self::display_reconfig_callback),
+                Retained::<NotificationCenterInner>::as_ptr(&handler) as *mut c_void,
+            );
+        }
+        handler
     }
 
     fn handle_screen_changed_event(&self, notif: &NSNotification) {
@@ -123,6 +133,10 @@ impl NotificationCenterInner {
         let Some((descriptors, converter)) = screen_cache.update_screen_config() else {
             return;
         };
+        if descriptors.is_empty() {
+            trace!("Screen parameters empty after update; skipping state reset");
+            return;
+        }
         let spaces = screen_cache.get_screen_spaces();
 
         let mut last_state = self.ivars().last_screen_state.borrow_mut();
@@ -201,6 +215,32 @@ impl NotificationCenterInner {
         assert!(app.class() == NSRunningApplication::class());
         let app: Retained<NSRunningApplication> = unsafe { mem::transmute(app) };
         Some(app)
+    }
+
+    fn handle_display_reconfig(&self, flags: DisplayReconfigFlags) {
+        if flags.contains(DisplayReconfigFlags::BEGIN_CONFIGURATION) {
+            trace!("Display reconfig begin; deferring update");
+            return;
+        }
+        trace!(?flags, "Display reconfig detected; refreshing screen parameters");
+        self.ivars().last_screen_state.borrow_mut().take();
+        self.send_screen_parameters();
+    }
+
+    unsafe extern "C" fn display_reconfig_callback(
+        _display: u32,
+        flags: u32,
+        user_info: *mut c_void,
+    ) {
+        if user_info.is_null() {
+            return;
+        }
+        let handler_ptr = user_info as *mut NotificationCenterInner;
+        let parsed = DisplayReconfigFlags::from_bits_truncate(flags);
+        queue::main().after_f_s(Time::NOW, (handler_ptr, parsed), |(handler_ptr, flags)| unsafe {
+            let handler = &*handler_ptr;
+            handler.handle_display_reconfig(flags);
+        });
     }
 }
 

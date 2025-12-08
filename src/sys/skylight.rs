@@ -154,6 +154,24 @@ bitflags! {
     }
 }
 
+bitflags! {
+    #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+    #[repr(transparent)]
+    pub struct DisplayReconfigFlags: u32 {
+        const BEGIN_CONFIGURATION        = 0x0000_0001;
+        const MOVED                      = 0x0000_0002;
+        const SET_MAIN                   = 0x0000_0004;
+        const SET_MODE                   = 0x0000_0008;
+        const ADD                        = 0x0000_0010;
+        const REMOVE                     = 0x0000_0020;
+        const ENABLED                    = 0x0000_0040;
+        const DISABLED                   = 0x0000_0080;
+        const MIRROR                     = 0x0000_0100;
+        const UNMIRROR                   = 0x0000_0200;
+        const DESKTOP_SHAPE_CHANGED      = 0x0000_1000;
+    }
+}
+
 unsafe extern "C" {
     #[allow(clashing_extern_declarations)]
     pub fn CFRelease(cf: *mut CFType);
@@ -187,6 +205,14 @@ unsafe extern "C" {
     pub fn CGSCopyBestManagedDisplayForRect(cid: c_int, rect: CGRect) -> *mut CFString;
     pub fn CGDisplayCreateUUIDFromDisplayID(did: u32) -> *mut CFType;
     pub fn CFUUIDCreateString(allocator: *mut c_void, uuid: *mut CFType) -> *mut CFString;
+    pub fn CGDisplayRegisterReconfigurationCallback(
+        callback: Option<unsafe extern "C" fn(u32, u32, *mut c_void)>,
+        user_info: *mut c_void,
+    );
+    pub fn CGDisplayRemoveReconfigurationCallback(
+        callback: Option<unsafe extern "C" fn(u32, u32, *mut c_void)>,
+        user_info: *mut c_void,
+    );
 
     pub fn SLSMainConnectionID() -> cid_t;
     pub fn SLSDisableUpdate(cid: cid_t) -> i32;

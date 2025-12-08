@@ -72,21 +72,26 @@ impl<S: System> ScreenCache<S> {
         let mut cg_screens = self.system.cg_screens().unwrap();
         debug!("cg_screens={cg_screens:?}");
 
+        if cg_screens.is_empty() {
+            if ns_screens.is_empty() {
+                self.uuids.clear();
+                return Some((vec![], CoordinateConverter::default()));
+            } else {
+                warn!(
+                    "Ignoring screen config change: There are {} ns_screens but no cg_screens",
+                    ns_screens.len()
+                );
+                self.uuids.clear();
+                return None;
+            }
+        }
+
         if ns_screens.len() != cg_screens.len() {
             warn!(
-                "Ignoring screen config change: There are {} ns_screens but {} cg_screens",
+                "Screen config mismatch: There are {} ns_screens but {} cg_screens; continuing with cg_screens",
                 ns_screens.len(),
                 cg_screens.len(),
             );
-            return None;
-        }
-
-        if cg_screens.is_empty() {
-            // When no screens are reported, make sure we clear the cached UUIDs so
-            // subsequent space queries don't pretend the previous screens still
-            // exist.
-            self.uuids.clear();
-            return Some((vec![], CoordinateConverter::default()));
         }
 
         if let Some(main_screen_idx) =
@@ -107,21 +112,22 @@ impl<S: System> ScreenCache<S> {
         let descriptors = cg_screens
             .iter()
             .enumerate()
-            .flat_map(|(idx, &CGScreenInfo { cg_id, .. })| {
-                let Some(ns_screen) = ns_screens.iter().find(|s| s.cg_id == cg_id) else {
-                    warn!("Can't find NSScreen corresponding to {cg_id:?}");
-                    return None;
+            .flat_map(|(idx, &CGScreenInfo { cg_id, bounds })| {
+                let frame = if let Some(ns_screen) = ns_screens.iter().find(|s| s.cg_id == cg_id) {
+                    converter.convert_rect(ns_screen.visible_frame).unwrap_or(bounds)
+                } else {
+                    warn!("Can't find NSScreen corresponding to {cg_id:?}; using CG bounds");
+                    bounds
                 };
-                let converted = converter.convert_rect(ns_screen.visible_frame).unwrap();
                 let display_uuid = uuid_strings.get(idx).cloned();
                 let descriptor = ScreenDescriptor {
                     id: cg_id,
-                    frame: converted,
+                    frame,
                     display_uuid: display_uuid.unwrap_or_else(|| {
                         warn!("Missing cached UUID for {:?}", cg_id);
                         String::new()
                     }),
-                    name: ns_screen.name.clone(),
+                    name: ns_screens.iter().find(|s| s.cg_id == cg_id).and_then(|s| s.name.clone()),
                 };
                 Some(descriptor)
             })
