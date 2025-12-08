@@ -137,6 +137,24 @@ active_label = "index"
 # options are "layout" or "label"
 display_style = "layout"
 
+[settings.ui.centered_bar]
+# enable centered workspace/app bar overlay
+enabled = false
+# show workspace numbers in the bar
+show_numbers = true
+# show the current mode indicator next to the workspace label when active
+show_mode_indicator = false
+# group windows by app and show a count badge
+deduplicate_icons = false
+# skip drawing empty workspaces
+hide_empty_workspaces = false
+# place the bar overlapping the menu bar or just below it
+position = "overlapping_menu_bar"
+# shift bar to avoid the notch area when present
+notch_aware = false
+# z-order for the bar; options: normal, floating, status, popup, screensaver
+window_level = "popup"
+
 [settings.ui.stack_line]
 # experimental stack line indicator (defaults to off)
 enabled = false

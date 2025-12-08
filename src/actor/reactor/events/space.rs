@@ -213,6 +213,7 @@ impl SpaceEventHandler {
                 .into_iter()
                 .map(|snapshot| Screen {
                     frame: snapshot.frame,
+                    visible_frame: snapshot.visible_frame,
                     space: snapshot.space,
                     display_uuid: snapshot.display_uuid,
                     name: snapshot.name,
