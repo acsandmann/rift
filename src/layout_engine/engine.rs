@@ -348,6 +348,23 @@ impl LayoutEngine {
                 return response;
             }
 
+            let visible_windows = self.filter_active_workspace_windows(
+                space,
+                self.tree.visible_windows_in_layout(layout),
+            );
+
+            if let Some(fallback_focus) = self
+                .filter_active_workspace_window(space, previous_selection)
+                .or_else(|| visible_windows.first().copied())
+            {
+                let response = EventResponse {
+                    focus_window: Some(fallback_focus),
+                    raise_windows: visible_windows,
+                };
+                self.apply_focus_response(space, layout, &response);
+                return response;
+            }
+
             EventResponse::default()
         }
     }
