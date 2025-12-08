@@ -86,7 +86,10 @@ impl MenuIcon {
                 let filtered = if settings.show_empty {
                     workspaces
                 } else {
-                    workspaces.into_iter().filter(|w| w.window_count > 0).collect::<Vec<_>>()
+                    workspaces
+                        .into_iter()
+                        .filter(|w| w.window_count > 0 || w.is_active)
+                        .collect::<Vec<_>>()
                 };
                 filtered
                     .into_iter()
@@ -99,7 +102,7 @@ impl MenuIcon {
             }
             (MenuBarDisplayMode::All, WorkspaceDisplayStyle::Label) => workspaces
                 .into_iter()
-                .filter(|w| settings.show_empty || w.window_count > 0)
+                .filter(|w| settings.show_empty || w.window_count > 0 || w.is_active)
                 .map(|ws| {
                     let mut clone = ws.clone();
                     clone.windows.clear();
