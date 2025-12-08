@@ -357,7 +357,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 
     fn calculate_layout(
-        &self,
+        &mut self,
         layout: LayoutId,
         screen: CGRect,
         stack_offset: f64,
@@ -386,6 +386,8 @@ impl LayoutSystem for TraditionalLayoutSystem {
         sizes
     }
 
+    fn update_settings(&mut self, _settings: &crate::common::config::LayoutSettings) {}
+
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
         let selection = self.selection(layout);
         self.tree.data.window.at(selection)
@@ -400,6 +402,15 @@ impl LayoutSystem for TraditionalLayoutSystem {
         let selection = self.selection(layout);
         self.visible_windows_under_internal(selection)
     }
+
+    fn set_insertion_point(
+        &mut self,
+        _layout: LayoutId,
+        _point: Option<objc2_core_foundation::CGPoint>,
+    ) {
+    }
+
+    fn set_preselection(&mut self, _layout: LayoutId, _direction: Option<Direction>) {}
 
     fn ascend_selection(&mut self, layout: LayoutId) -> bool {
         if let Some(parent) = self.selection(layout).parent(self.map()) {
@@ -821,34 +832,67 @@ impl LayoutSystem for TraditionalLayoutSystem {
         }
     }
 
-    fn resize_selection_by(&mut self, layout: LayoutId, amount: f64) {
+    fn resize_active(
+        &mut self,
+        layout: LayoutId,
+        delta_x: f64,
+        delta_y: f64,
+        corner: crate::layout_engine::ResizeCorner,
+        frame: Option<&crate::layout_engine::LayoutFrame>,
+        _cursor: Option<objc2_core_foundation::CGPoint>,
+    ) {
         let selection = self.selection(layout);
-        if let Some(_focused_window) = self.window_at(selection) {
-            let candidates = selection
-                .ancestors(self.map())
-                .filter(|&node| {
-                    if let Some(parent) = node.parent(self.map()) {
-                        !self.layout(parent).is_group()
-                    } else {
-                        false
-                    }
-                })
-                .collect::<Vec<_>>();
-
-            let resized = candidates.iter().any(|&node| {
-                self.resize_internal(node, amount, crate::layout_engine::Direction::Right)
-            }) || candidates.iter().any(|&node| {
-                self.resize_internal(node, amount, crate::layout_engine::Direction::Down)
-            });
-
-            if !resized {
-                let _ = candidates.iter().any(|&node| {
-                    self.resize_internal(node, amount, crate::layout_engine::Direction::Left)
-                }) || candidates.iter().any(|&node| {
-                    self.resize_internal(node, amount, crate::layout_engine::Direction::Up)
-                });
-            }
+        if self.window_at(selection).is_none() {
+            return;
         }
+
+        let screen = frame.map(|f| f.screen);
+        let screen_w = screen.map(|s| s.size.width).unwrap_or(1920.0);
+        let screen_h = screen.map(|s| s.size.height).unwrap_or(1080.0);
+
+        let apply_axis = |this: &mut Self,
+                          node: NodeId,
+                          delta: f64,
+                          screen_size: f64,
+                          affects_first: bool,
+                          positive_dir: Direction,
+                          negative_dir: Direction| {
+            if delta.abs() < 0.001 {
+                return;
+            }
+            let dir = if affects_first {
+                if delta >= 0.0 {
+                    negative_dir
+                } else {
+                    positive_dir
+                }
+            } else if delta >= 0.0 {
+                positive_dir
+            } else {
+                negative_dir
+            };
+            let amount = (delta.abs() / screen_size).max(0.0);
+            let _ = this.resize_internal(node, amount, dir);
+        };
+
+        apply_axis(
+            self,
+            selection,
+            delta_x,
+            screen_w,
+            corner.affects_left(),
+            Direction::Right,
+            Direction::Left,
+        );
+        apply_axis(
+            self,
+            selection,
+            delta_y,
+            screen_h,
+            corner.affects_top(),
+            Direction::Down,
+            Direction::Up,
+        );
     }
 
     fn rebalance(&mut self, layout: LayoutId) {
@@ -934,6 +978,12 @@ impl LayoutSystem for TraditionalLayoutSystem {
 
         self.rebalance(layout);
     }
+
+    fn toggle_split_of_selection(&mut self, _layout: LayoutId) {}
+
+    fn swap_split_of_selection(&mut self, _layout: LayoutId) {}
+
+    fn move_selection_to_root(&mut self, _layout: LayoutId, _stable: bool) {}
 }
 
 impl TraditionalLayoutSystem {
@@ -1051,9 +1101,9 @@ impl TraditionalLayoutSystem {
 
         let total: f32 = siblings.iter().map(|&child| self.tree.data.layout.info[child].size).sum();
         let inner_gap = if horizontal {
-            gaps.inner.horizontal
+            gaps.inner.horizontal()
         } else {
-            gaps.inner.vertical
+            gaps.inner.vertical()
         };
 
         let axis_len = if horizontal {
@@ -2136,9 +2186,9 @@ impl Layout {
         });
         let total = self.info[node].total;
         let inner_gap = if horizontal {
-            gaps.inner.horizontal
+            gaps.inner.horizontal()
         } else {
-            gaps.inner.vertical
+            gaps.inner.vertical()
         };
         let axis_len = if horizontal {
             rect.size.width
