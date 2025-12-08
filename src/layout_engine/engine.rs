@@ -196,6 +196,21 @@ impl LayoutEngine {
         self.tree.resize_selection_by(layout, resize_amount);
     }
 
+    fn apply_focus_response(&mut self, space: SpaceId, layout: LayoutId, response: &EventResponse) {
+        if let Some(wid) = response.focus_window {
+            self.focused_window = Some(wid);
+            if self.floating.is_floating(wid) {
+                self.floating.set_last_focus(Some(wid));
+            } else {
+                let _ = self.tree.select_window(layout, wid);
+                if let Some(wsid) = self.virtual_workspace_manager.active_workspace(space) {
+                    self.virtual_workspace_manager
+                        .set_last_focused_window(space, wsid, Some(wid));
+                }
+            }
+        }
+    }
+
     fn move_focus_internal(
         &mut self,
         space: SpaceId,
@@ -242,10 +257,12 @@ impl LayoutEngine {
                                 next_idx, floating_windows[next_idx]
                             );
                             let focus_window = Some(floating_windows[next_idx]);
-                            return EventResponse {
+                            let response = EventResponse {
                                 focus_window,
                                 raise_windows: vec![],
                             };
+                            self.apply_focus_response(space, layout, &response);
+                            return response;
                         } else {
                             debug!("Could not find current window in floating windows list");
                         }
@@ -267,15 +284,12 @@ impl LayoutEngine {
             );
             debug!("Trying tiled windows: {:?}", tiled_windows);
             if !tiled_windows.is_empty() {
-                let focus_window = tiled_windows.first().copied();
-                if let Some(wid) = focus_window {
-                    let _ = self.tree.select_window(layout, wid);
-                }
-                debug!("Focusing tiled window: {:?}", focus_window);
-                return EventResponse {
-                    focus_window,
+                let response = EventResponse {
+                    focus_window: tiled_windows.first().copied(),
                     raise_windows: tiled_windows,
                 };
+                self.apply_focus_response(space, layout, &response);
+                return response;
             }
 
             debug!("No windows to navigate to, returning default");
@@ -284,11 +298,13 @@ impl LayoutEngine {
 
         let previous_selection = self.tree.selected_window(layout);
 
-        let (focus_window, raise_windows) = self.tree.move_focus(layout, direction);
-        let focus_window = self.filter_active_workspace_window(space, focus_window);
+        let (focus_window_raw, raise_windows) = self.tree.move_focus(layout, direction);
+        let focus_window = self.filter_active_workspace_window(space, focus_window_raw);
         let raise_windows = self.filter_active_workspace_windows(space, raise_windows);
         if focus_window.is_some() {
-            EventResponse { focus_window, raise_windows }
+            let response = EventResponse { focus_window, raise_windows };
+            self.apply_focus_response(space, layout, &response);
+            response
         } else {
             if let Some(prev_wid) = previous_selection {
                 let _ = self.tree.select_window(layout, prev_wid);
@@ -312,10 +328,12 @@ impl LayoutEngine {
                     .or_else(|| windows_in_new_space.first().copied())
                 {
                     let _ = self.tree.select_window(new_layout, target_window);
-                    return EventResponse {
+                    let response = EventResponse {
                         focus_window: Some(target_window),
                         raise_windows: windows_in_new_space,
                     };
+                    self.apply_focus_response(new_space, new_layout, &response);
+                    return response;
                 }
             }
 
@@ -323,10 +341,12 @@ impl LayoutEngine {
 
             if let Some(&first_floating) = floating_windows.first() {
                 let focus_window = Some(first_floating);
-                return EventResponse {
+                let response = EventResponse {
                     focus_window,
                     raise_windows: vec![],
                 };
+                self.apply_focus_response(space, layout, &response);
+                return response;
             }
 
             EventResponse::default()
@@ -827,8 +847,10 @@ impl LayoutEngine {
                 let selection = self.tree.selected_window(layout);
                 let mut raise_windows = self.tree.visible_windows_in_layout(layout);
                 let focus_window = selection.or_else(|| raise_windows.pop());
-                return EventResponse { raise_windows, focus_window };
-            } else {
+                let response = EventResponse { raise_windows, focus_window };
+                self.apply_focus_response(space, layout, &response);
+                return response;
+            } else… {
                 let floating_windows: Vec<WindowId> =
                     self.active_floating_windows_in_workspace(space);
                 let mut raise_windows: Vec<_> = floating_windows
@@ -837,7 +859,9 @@ impl LayoutEngine {
                     .filter(|wid| Some(*wid) != self.floating.last_focus())
                     .collect();
                 let focus_window = self.floating.last_focus().or_else(|| raise_windows.pop());
-                return EventResponse { raise_windows, focus_window };
+                let response = EventResponse { raise_windows, focus_window };
+                self.apply_focus_response(space, layout, &response);
+                return response;
             }
         }
 
