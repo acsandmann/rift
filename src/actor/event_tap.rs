@@ -238,12 +238,8 @@ impl EventTap {
                 if let Err(e) = event::warp_mouse(point) {
                     warn!("Failed to warp mouse: {e:?}");
                 } else {
-                    let new_window = window_server::get_window_at_point(point);
-                    let new_window_level = new_window
-                        .and_then(|id| trace_misc("window_level", || window_level(id.into())))
-                        .unwrap_or(NSWindowLevel::MIN);
-                    state.above_window = new_window;
-                    state.above_window_level = new_window_level;
+                    state.above_window = None;
+                    state.above_window_level = NSWindowLevel::MIN;
                 }
                 if self.config.settings.mouse_hides_on_focus && !state.hidden {
                     debug!("Hiding mouse");

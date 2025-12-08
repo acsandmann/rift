@@ -204,8 +204,7 @@ impl LayoutEngine {
             } else {
                 let _ = self.tree.select_window(layout, wid);
                 if let Some(wsid) = self.virtual_workspace_manager.active_workspace(space) {
-                    self.virtual_workspace_manager
-                        .set_last_focused_window(space, wsid, Some(wid));
+                    self.virtual_workspace_manager.set_last_focused_window(space, wsid, Some(wid));
                 }
             }
         }
@@ -850,7 +849,7 @@ impl LayoutEngine {
                 let response = EventResponse { raise_windows, focus_window };
                 self.apply_focus_response(space, layout, &response);
                 return response;
-            } else… {
+            } else {
                 let floating_windows: Vec<WindowId> =
                     self.active_floating_windows_in_workspace(space);
                 let mut raise_windows: Vec<_> = floating_windows
