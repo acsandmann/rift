@@ -134,14 +134,25 @@ impl LayoutEngine {
         space: SpaceId,
         workspace_id: VirtualWorkspaceId,
     ) -> EventResponse {
-        let mut focus_window =
-            self.virtual_workspace_manager.last_focused_window(space, workspace_id);
+        let mut focus_window = self
+            .virtual_workspace_manager
+            .last_focused_window(space, workspace_id)
+            .filter(|wid| {
+                self.virtual_workspace_manager.workspace_for_window(space, *wid)
+                    == Some(workspace_id)
+            });
 
         if focus_window.is_none() {
             if let Some(layout) = self.workspace_layouts.active(space, workspace_id) {
-                let selected = self.tree.selected_window(layout);
-                let visible = self.tree.visible_windows_in_layout(layout);
-                focus_window = selected.or_else(|| visible.first().copied());
+                let selected = self.tree.selected_window(layout).filter(|wid| {
+                    self.virtual_workspace_manager.workspace_for_window(space, *wid)
+                        == Some(workspace_id)
+                });
+                let visible = self.tree.visible_windows_in_layout(layout).into_iter().find(|wid| {
+                    self.virtual_workspace_manager.workspace_for_window(space, *wid)
+                        == Some(workspace_id)
+                });
+                focus_window = selected.or(visible);
             }
         }
 
@@ -740,9 +751,11 @@ impl LayoutEngine {
                 } else {
                     let layout = self.layout(space);
                     let _ = self.tree.select_window(layout, wid);
-                    if let Some(workspace_id) =
-                        self.virtual_workspace_manager.active_workspace(space)
-                    {
+                    let workspace_id = self
+                        .virtual_workspace_manager
+                        .workspace_for_window(space, wid)
+                        .or_else(|| self.virtual_workspace_manager.active_workspace(space));
+                    if let Some(workspace_id) = workspace_id {
                         self.virtual_workspace_manager.set_last_focused_window(
                             space,
                             workspace_id,
