@@ -1452,7 +1452,7 @@ impl Reactor {
             return false;
         };
 
-        if !window.is_manageable {
+        if !window.is_manageable && !self.layout_manager.layout_engine.is_window_floating(wid) {
             return false;
         }
 
