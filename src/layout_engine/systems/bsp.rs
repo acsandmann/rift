@@ -921,6 +921,17 @@ impl LayoutSystem for BspLayoutSystem {
         true
     }
 
+    fn stack_windows(
+        &mut self,
+        _layout: LayoutId,
+        _dragged: WindowId,
+        _target: WindowId,
+        _default_orientation: crate::common::config::StackDefaultOrientation,
+    ) -> bool {
+        // BSP layouts do not currently support stacking via drag-and-drop.
+        false
+    }
+
     fn move_selection_to_layout_after_selection(
         &mut self,
         from_layout: LayoutId,

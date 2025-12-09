@@ -184,6 +184,19 @@ haptic_pattern = "level_change"
 # If you prefer more aggressive swapping, lower the value; increase it
 # to require greater overlap before a swap occurs.
 drag_swap_fraction = 0.3
+# Default action when you drag a window on top of another:
+#   "swap" (swap positions), "stack" (stack them), "move" (move in the
+#   inferred direction relative to target). Defaults to swap.
+drag_overlap_default_action = "swap"
+# Optional per-modifier overrides. Modifiers are case-insensitive and can be
+# combined with '+', e.g., "shift+cmd". Common values: "shift", "ctrl", "cmd",
+# "alt", or combos. Example below: hold Shift while dragging to stack instead
+# of swap.
+drag_overlap_overrides = [
+  { modifiers = "shift", action = "stack" },
+  # { modifiers = "cmd+shift", action = "swap" },
+  # { modifiers = "ctrl", action = "move" },
+]
 
 [virtual_workspaces]
 # Virtual workspaces
