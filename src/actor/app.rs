@@ -584,10 +584,12 @@ impl State {
 
                 if eui {
                     with_enhanced_ui_disabled(&elem, || {
+                        let _ = elem.set_size(desired.size);
                         let _ = elem.set_position(desired.origin);
                         let _ = elem.set_size(desired.size);
                     });
                 } else {
+                    let _ = elem.set_size(desired.size);
                     let _ = elem.set_position(desired.origin);
                     let _ = elem.set_size(desired.size);
                 }
