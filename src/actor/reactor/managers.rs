@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use objc2_core_foundation::{CGRect, CGSize};
+use objc2_core_foundation::CGRect;
 use tracing::trace;
 
 use super::main_window::MainWindowTracker;
@@ -243,14 +243,7 @@ impl LayoutManager {
                     reactor.config_manager.config.settings.ui.stack_line.thickness(),
                     reactor.config_manager.config.settings.ui.stack_line.horiz_placement,
                     reactor.config_manager.config.settings.ui.stack_line.vert_placement,
-                    |wid| {
-                        reactor
-                            .window_manager
-                            .windows
-                            .get(&wid)
-                            .map(|w| w.frame_monotonic.size)
-                            .unwrap_or_else(|| CGSize::new(500.0, 500.0))
-                    },
+                    |wid| reactor.window_manager.windows.get(&wid).map(|w| w.frame_monotonic),
                 );
             layout_result.push((space, layout));
         }

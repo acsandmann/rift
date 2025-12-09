@@ -97,6 +97,8 @@ pub struct VirtualWorkspaceManager {
     pub window_to_workspace: HashMap<(SpaceId, WindowId), VirtualWorkspaceId>,
     #[serde(skip)]
     window_rule_floating: HashMap<(SpaceId, WindowId), bool>,
+    #[serde(skip)]
+    last_rule_decision: HashMap<(SpaceId, WindowId), bool>,
     floating_positions: HashMap<(SpaceId, VirtualWorkspaceId), FloatingWindowPositions>,
     workspace_counter: usize,
     #[serde(skip)]
@@ -137,6 +139,7 @@ impl VirtualWorkspaceManager {
             active_workspace_per_space: HashMap::default(),
             window_to_workspace: HashMap::default(),
             window_rule_floating: HashMap::default(),
+            last_rule_decision: HashMap::default(),
             floating_positions: HashMap::default(),
             workspace_counter: 1,
             app_rules: config.app_rules.clone(),
@@ -252,6 +255,16 @@ impl VirtualWorkspaceManager {
             new_window_rule_floating.insert((target_space, wid), is_float);
         }
         self.window_rule_floating = new_window_rule_floating;
+
+        let mut new_last_rule_decision = HashMap::default();
+        for ((space, wid), decision) in std::mem::take(&mut self.last_rule_decision) {
+            if space == new_space && old_space != new_space {
+                continue;
+            }
+            let target_space = if space == old_space { new_space } else { space };
+            new_last_rule_decision.insert((target_space, wid), decision);
+        }
+        self.last_rule_decision = new_last_rule_decision;
 
         let mut new_positions = HashMap::default();
         for ((space, ws_id), positions) in std::mem::take(&mut self.floating_positions) {
@@ -486,6 +499,10 @@ impl VirtualWorkspaceManager {
         self.window_to_workspace.get(&(space, window_id)).copied()
     }
 
+    pub fn set_last_rule_decision(&mut self, space: SpaceId, window_id: WindowId, value: bool) {
+        self.last_rule_decision.insert((space, window_id), value);
+    }
+
     pub fn remove_window(&mut self, window_id: WindowId) {
         let keys: Vec<(SpaceId, WindowId)> = self
             .window_to_workspace
@@ -499,6 +516,7 @@ impl VirtualWorkspaceManager {
                     workspace.remove_window(wid);
                 }
                 self.window_rule_floating.remove(&(space, wid));
+                self.last_rule_decision.remove(&(space, wid));
             }
         }
     }
@@ -522,6 +540,7 @@ impl VirtualWorkspaceManager {
                     workspace.remove_window(window_id);
                 }
                 self.window_rule_floating.remove(&(space, window_id));
+                self.last_rule_decision.remove(&(space, window_id));
             }
         }
     }
@@ -626,6 +645,32 @@ impl VirtualWorkspaceManager {
         CGRect::new(hidden_point, original_size)
     }
 
+    pub fn is_hidden_position(
+        &self,
+        screen_frame: &CGRect,
+        rect: &CGRect,
+        app_bundle_id: Option<&str>,
+    ) -> bool {
+        let hidden_rect = self.calculate_hidden_position(
+            *screen_frame,
+            0,
+            rect.size,
+            HideCorner::BottomRight,
+            app_bundle_id,
+        );
+
+        let visible_width = (rect.max().x.min(screen_frame.max().x)
+            - rect.origin.x.max(screen_frame.origin.x))
+        .max(0.0);
+        let visible_height = (rect.max().y.min(screen_frame.max().y)
+            - rect.origin.y.max(screen_frame.origin.y))
+        .max(0.0);
+
+        (rect.origin == hidden_rect.origin && rect.size == hidden_rect.size)
+            || visible_width <= 3.0
+            || visible_height <= 3.0
+    }
+
     pub fn set_last_focused_window(
         &mut self,
         space: SpaceId,
@@ -666,16 +711,29 @@ impl VirtualWorkspaceManager {
     pub fn store_floating_position(
         &mut self,
         space: SpaceId,
+        workspace_id: VirtualWorkspaceId,
         window_id: WindowId,
         position: CGRect,
     ) {
-        if let Some(workspace_id) = self.active_workspace(space) {
-            let key = (space, workspace_id);
-            self.floating_positions
-                .entry(key)
-                .or_default()
-                .store_position(window_id, position);
-        }
+        let key = (space, workspace_id);
+        self.floating_positions
+            .entry(key)
+            .or_default()
+            .store_position(window_id, position);
+    }
+
+    pub fn store_floating_position_if_absent(
+        &mut self,
+        space: SpaceId,
+        workspace_id: VirtualWorkspaceId,
+        window_id: WindowId,
+        position: CGRect,
+    ) {
+        let key = (space, workspace_id);
+        self.floating_positions
+            .entry(key)
+            .or_default()
+            .store_if_absent(window_id, position);
     }
 
     pub fn get_floating_position(
@@ -800,7 +858,10 @@ impl VirtualWorkspaceManager {
         window_title: Option<&str>,
         ax_role: Option<&str>,
         ax_subrole: Option<&str>,
-    ) -> Result<(VirtualWorkspaceId, bool), WorkspaceError> {
+    ) -> Result<(VirtualWorkspaceId, bool, bool), WorkspaceError> {
+        let prev_rule_decision =
+            self.last_rule_decision.get(&(space, window_id)).copied().unwrap_or(false);
+
         self.ensure_space_initialized(space);
         if self.workspaces_by_space.get(&space).map(|v| v.is_empty()).unwrap_or(true) {
             return Err(WorkspaceError::NoWorkspacesAvailable);
@@ -871,7 +932,7 @@ impl VirtualWorkspaceManager {
                 } else {
                     self.window_rule_floating.remove(&(space, window_id));
                 }
-                return Ok((existing_ws, rule.floating));
+                return Ok((existing_ws, rule.floating, prev_rule_decision));
             }
 
             if self.assign_window_to_workspace(space, window_id, target_workspace_id) {
@@ -880,7 +941,7 @@ impl VirtualWorkspaceManager {
                 } else {
                     self.window_rule_floating.remove(&(space, window_id));
                 }
-                return Ok((target_workspace_id, rule.floating));
+                return Ok((target_workspace_id, rule.floating, prev_rule_decision));
             } else {
                 error!("Failed to assign window to workspace from app rule");
             }
@@ -888,13 +949,13 @@ impl VirtualWorkspaceManager {
 
         if let Some(existing_ws) = existing_assignment {
             self.window_rule_floating.remove(&(space, window_id));
-            return Ok((existing_ws, false));
+            return Ok((existing_ws, false, prev_rule_decision));
         }
 
         let default_workspace_id = self.get_default_workspace(space)?;
         if self.assign_window_to_workspace(space, window_id, default_workspace_id) {
             self.window_rule_floating.remove(&(space, window_id));
-            Ok((default_workspace_id, false))
+            Ok((default_workspace_id, false, prev_rule_decision))
         } else {
             error!("Failed to assign window to default workspace");
             Err(WorkspaceError::AssignmentFailed)
@@ -1133,6 +1194,10 @@ pub struct FloatingWindowPositions {
 impl FloatingWindowPositions {
     pub fn store_position(&mut self, window_id: WindowId, position: CGRect) {
         self.positions.insert(window_id, position);
+    }
+
+    pub fn store_if_absent(&mut self, window_id: WindowId, position: CGRect) {
+        self.positions.entry(window_id).or_insert(position);
     }
 
     pub fn get_position(&self, window_id: WindowId) -> Option<CGRect> {
@@ -1446,7 +1511,7 @@ mod tests {
 
         // 1. Floating persistence via app_id (case-insensitive)
         let w_float = WindowId::new(10, 1);
-        let (_, should_float) = manager
+        let (_, should_float, _) = manager
             .assign_window_with_app_info(
                 w_float,
                 space1,
@@ -1462,7 +1527,7 @@ mod tests {
         assert!(should_float);
         manager.remove_window(w_float);
         // After removal, reassign should still float.
-        let (_, should_float_again) = manager
+        let (_, should_float_again, _) = manager
             .assign_window_with_app_info(
                 w_float,
                 space1,
@@ -1477,7 +1542,7 @@ mod tests {
 
         // 2. Match by app_name
         let w_name = WindowId::new(20, 2);
-        let (ws_name, _) = manager
+        let (ws_name, _, _) = manager
             .assign_window_with_app_info(
                 w_name,
                 space1,
@@ -1495,7 +1560,7 @@ mod tests {
         // 3. Title substring and regex for same app
         let w_pref = WindowId::new(30, 3);
         let w_dialog = WindowId::new(30, 4);
-        let (ws_pref, _) = manager
+        let (ws_pref, _, _) = manager
             .assign_window_with_app_info(
                 w_pref,
                 space1,
@@ -1506,7 +1571,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        let (ws_dialog, _) = manager
+        let (ws_dialog, _, _) = manager
             .assign_window_with_app_info(
                 w_dialog,
                 space1,
@@ -1524,7 +1589,7 @@ mod tests {
 
         // 4. AX role + subrole floating
         let w_ax = WindowId::new(40, 5);
-        let (_ws_ax, ax_float) = manager
+        let (_ws_ax, ax_float, _) = manager
             .assign_window_with_app_info(
                 w_ax,
                 space1,
@@ -1539,7 +1604,7 @@ mod tests {
 
         // 5. Workspace name resolution
         let w_named = WindowId::new(50, 6);
-        let (ws_named, _) = manager
+        let (ws_named, _, _) = manager
             .assign_window_with_app_info(
                 w_named,
                 space1,
@@ -1556,7 +1621,7 @@ mod tests {
 
         // 6. Specificity tie-breaking (generic vs substring)
         let w_tie = WindowId::new(60, 7);
-        let (ws_tie, _) = manager
+        let (ws_tie, _, _) = manager
             .assign_window_with_app_info(
                 w_tie,
                 space1,
@@ -1572,7 +1637,7 @@ mod tests {
 
         // 7. Reapplication updates existing window to floating (Bitwarden title)
         let w_bw = WindowId::new(70, 8);
-        let (bw_initial_ws, bw_initial_float) = manager
+        let (bw_initial_ws, bw_initial_float, _) = manager
             .assign_window_with_app_info(
                 w_bw,
                 space1,
@@ -1584,7 +1649,7 @@ mod tests {
             )
             .unwrap();
         assert!(!bw_initial_float);
-        let (bw_updated_ws, bw_updated_float) = manager
+        let (bw_updated_ws, bw_updated_float, _) = manager
             .assign_window_with_app_info(
                 w_bw,
                 space1,
@@ -1600,7 +1665,7 @@ mod tests {
 
         // 8. Workspace override + floating with specific substring on different space
         let w_bw2 = WindowId::new(80, 9);
-        let (bw2_initial_ws, bw2_initial_float) = manager
+        let (bw2_initial_ws, bw2_initial_float, _) = manager
             .assign_window_with_app_info(
                 w_bw2,
                 space2,
@@ -1612,7 +1677,7 @@ mod tests {
             )
             .unwrap();
         assert!(!bw2_initial_float);
-        let (bw2_updated_ws, bw2_updated_float) = manager
+        let (bw2_updated_ws, bw2_updated_float, _) = manager
             .assign_window_with_app_info(
                 w_bw2,
                 space2,

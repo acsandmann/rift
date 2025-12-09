@@ -576,20 +576,9 @@ impl LayoutEngine {
                     &mut self.tree,
                 );
             }
-            LayoutEvent::WindowsOnScreenUpdated(space, pid, mut windows_with_titles, app_info) => {
+            LayoutEvent::WindowsOnScreenUpdated(space, pid, windows_with_titles, app_info) => {
                 self.debug_tree(space);
                 self.floating.clear_active_for_app(space, pid);
-                let mut floating_active_accum = Vec::new();
-                windows_with_titles.retain(|(wid, _, _, _)| {
-                    let is_floating = self.floating.is_floating(*wid);
-                    if is_floating {
-                        floating_active_accum.push(*wid);
-                    }
-                    !is_floating
-                });
-                for wid in floating_active_accum {
-                    self.floating.add_active(space, pid, wid);
-                }
 
                 let mut windows_by_workspace: HashMap<
                     crate::model::VirtualWorkspaceId,
@@ -606,7 +595,8 @@ impl LayoutEngine {
                     let ax_role_ref = ax_role_opt.as_deref();
                     let ax_subrole_ref = ax_subrole_opt.as_deref();
 
-                    let (assigned_workspace, should_float) = match self
+                    let was_floating = self.floating.is_floating(wid);
+                    let (assigned_workspace, rule_says_float, prev_rule_decision) = match self
                         .virtual_workspace_manager
                         .assign_window_with_app_info(
                             wid,
@@ -617,10 +607,12 @@ impl LayoutEngine {
                             ax_role_ref,
                             ax_subrole_ref,
                         ) {
-                        Ok((workspace_id, should_float)) => (workspace_id, should_float),
+                        Ok((workspace_id, should_float, prev_rule_decision)) => {
+                            (workspace_id, should_float, prev_rule_decision)
+                        }
                         Err(_) => {
                             match self.virtual_workspace_manager.auto_assign_window(wid, space) {
-                                Ok(ws) => (ws, false),
+                                Ok(ws) => (ws, was_floating, false),
                                 Err(_) => {
                                     warn!(
                                         "Could not determine workspace for window {:?} on space {:?}; skipping assignment",
@@ -632,25 +624,28 @@ impl LayoutEngine {
                         }
                     };
 
+                    let should_float = rule_says_float || (!prev_rule_decision && was_floating);
+
                     if should_float {
                         self.floating.add_floating(wid);
                         self.floating.add_active(space, pid, wid);
+                    } else if was_floating {
+                        self.floating.remove_floating(wid);
                     }
 
-                    windows_by_workspace.entry(assigned_workspace).or_default().push(wid);
+                    if !self.floating.is_floating(wid) {
+                        windows_by_workspace.entry(assigned_workspace).or_default().push(wid);
+                    }
+
+                    self.virtual_workspace_manager_mut().set_last_rule_decision(
+                        space,
+                        wid,
+                        rule_says_float,
+                    );
                 }
 
-                let mut tiled_by_workspace: HashMap<
-                    crate::model::VirtualWorkspaceId,
-                    Vec<WindowId>,
-                > = HashMap::default();
-                for (workspace_id, workspace_windows) in windows_by_workspace {
-                    let tiled: Vec<WindowId> = workspace_windows
-                        .into_iter()
-                        .filter(|wid| !self.floating.is_floating(*wid))
-                        .collect();
-                    tiled_by_workspace.insert(workspace_id, tiled);
-                }
+                // `windows_by_workspace` already excludes floating windows.
+                let tiled_by_workspace = windows_by_workspace;
 
                 let total_tiled_count: usize = tiled_by_workspace.values().map(|v| v.len()).sum();
 
@@ -1115,21 +1110,71 @@ impl LayoutEngine {
     }
 
     pub fn calculate_layout_with_virtual_workspaces<F>(
-        &self,
+        &mut self,
         space: SpaceId,
         screen: CGRect,
         gaps: &crate::common::config::GapSettings,
         stack_line_thickness: f64,
         stack_line_horiz: crate::common::config::HorizontalPlacement,
         stack_line_vert: crate::common::config::VerticalPlacement,
-        get_window_size: F,
+        get_window_frame: F,
     ) -> Vec<(WindowId, CGRect)>
     where
-        F: Fn(WindowId) -> CGSize,
+        F: Fn(WindowId) -> Option<CGRect>,
     {
         use crate::model::HideCorner;
 
         let mut positions = HashMap::default();
+        let window_size = |wid| {
+            get_window_frame(wid)
+                .map(|f| f.size)
+                .unwrap_or_else(|| CGSize::new(500.0, 500.0))
+        };
+        let center_rect = |size: CGSize| {
+            let center = screen.mid();
+            let origin = CGPoint::new(center.x - size.width / 2.0, center.y - size.height / 2.0);
+            CGRect::new(origin, size)
+        };
+
+        fn ensure_visible_floating(
+            engine: &mut LayoutEngine,
+            positions: &mut HashMap<WindowId, CGRect>,
+            space: SpaceId,
+            workspace_id: crate::model::VirtualWorkspaceId,
+            wid: WindowId,
+            candidate: Option<CGRect>,
+            store_if_absent: bool,
+            screen: &CGRect,
+            center_rect: &impl Fn(CGSize) -> CGRect,
+            window_size: &impl Fn(WindowId) -> CGSize,
+        ) {
+            let existing = positions.get(&wid).copied();
+            let bundle_id = engine.get_app_bundle_id_for_window(wid);
+            let visible = candidate.or(existing).filter(|rect| {
+                !engine.virtual_workspace_manager.is_hidden_position(
+                    screen,
+                    rect,
+                    bundle_id.as_deref(),
+                )
+            });
+            let rect = visible.unwrap_or_else(|| center_rect(window_size(wid)));
+            positions.insert(wid, rect);
+            if store_if_absent {
+                engine.virtual_workspace_manager.store_floating_position_if_absent(
+                    space,
+                    workspace_id,
+                    wid,
+                    rect,
+                );
+            } else {
+                engine.virtual_workspace_manager.store_floating_position(
+                    space,
+                    workspace_id,
+                    wid,
+                    rect,
+                );
+            }
+        }
 
         if let Some(active_workspace_id) = self.virtual_workspace_manager.active_workspace(space) {
             if let Some(layout) = self.workspace_layouts.active(space, active_workspace_id) {
@@ -1152,14 +1197,63 @@ impl LayoutEngine {
                 .get_workspace_floating_positions(space, active_workspace_id);
             for (window_id, stored_position) in floating_positions {
                 if self.floating.is_floating(window_id) {
-                    positions.insert(window_id, stored_position);
+                    ensure_visible_floating(
+                        self,
+                        &mut positions,
+                        space,
+                        active_workspace_id,
+                        window_id,
+                        Some(stored_position),
+                        false,
+                        &screen,
+                        &center_rect,
+                        &window_size,
+                    );
                 }
+            }
+
+            let floating_windows = self.active_floating_windows_in_workspace(space);
+            for wid in floating_windows {
+                ensure_visible_floating(
+                    self,
+                    &mut positions,
+                    space,
+                    active_workspace_id,
+                    wid,
+                    None,
+                    false,
+                    &screen,
+                    &center_rect,
+                    &window_size,
+                );
             }
         }
 
         let hidden_windows = self.virtual_workspace_manager.windows_in_inactive_workspaces(space);
         for (index, wid) in hidden_windows.into_iter().enumerate() {
-            let original_size = get_window_size(wid);
+            let original_frame = get_window_frame(wid);
+
+            if self.floating.is_floating(wid) {
+                if let Some(workspace_id) =
+                    self.virtual_workspace_manager.workspace_for_window(space, wid)
+                {
+                    ensure_visible_floating(
+                        self,
+                        &mut positions,
+                        space,
+                        workspace_id,
+                        wid,
+                        original_frame,
+                        true,
+                        &screen,
+                        &center_rect,
+                        &window_size,
+                    );
+                }
+            }
+
+            let original_size =
+                original_frame.map(|f| f.size).unwrap_or_else(|| CGSize::new(500.0, 500.0));
             let app_bundle_id = self.get_app_bundle_id_for_window(wid);
             let hidden_rect = self.virtual_workspace_manager.calculate_hidden_position(
                 screen,

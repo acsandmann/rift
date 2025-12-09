@@ -1366,7 +1366,7 @@ impl Reactor {
             .or_else(|| self.best_space_for_frame(&session.last_frame))
             .or_else(|| self.best_space_for_window_id(wid));
 
-        if session.origin_space != final_space {
+        let needs_layout = if session.origin_space != final_space {
             if session.origin_space.is_some() {
                 self.send_layout_event(LayoutEvent::WindowRemoved(wid));
             }
@@ -1390,7 +1390,26 @@ impl Reactor {
             true
         } else {
             false
+        };
+
+        if let Some(space) = final_space {
+            if self.layout_manager.layout_engine.is_window_floating(wid) {
+                if let Some(ws_id) = self
+                    .layout_manager
+                    .layout_engine
+                    .virtual_workspace_manager()
+                    .workspace_for_window(space, wid)
+                    .or_else(|| self.layout_manager.layout_engine.active_workspace(space))
+                {
+                    self.layout_manager
+                        .layout_engine
+                        .virtual_workspace_manager_mut()
+                        .store_floating_position(space, ws_id, wid, session.last_frame);
+                }
+            }
         }
+
+        needs_layout
     }
 
     fn pid_has_changing_screens(&self, pid: pid_t) -> bool {
