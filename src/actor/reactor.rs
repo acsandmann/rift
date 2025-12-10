@@ -2453,32 +2453,63 @@ impl Reactor {
         origin: CGPoint,
         direction: Direction,
     ) -> Option<&Screen> {
+        fn interval_gap(a_min: f64, a_max: f64, b_min: f64, b_max: f64) -> f64 {
+            if a_max < b_min {
+                b_min - a_max
+            } else if b_max < a_min {
+                a_min - b_max
+            } else {
+                0.0
+            }
+        }
+
         let mut best: Option<(f64, f64, &Screen)> = None;
 
         for screen in &self.space_manager.screens {
-            let center = screen.frame.mid();
-            let delta = match direction {
-                Direction::Left => origin.x - center.x,
-                Direction::Right => center.x - origin.x,
-                // Screen coordinates are flipped vertically; a smaller y means visually "up".
-                Direction::Up => origin.y - center.y,
-                Direction::Down => center.y - origin.y,
-            };
-            if delta <= 0.0 {
+            let frame = screen.frame;
+
+            if frame.contains(origin) {
                 continue;
             }
 
-            let orthogonal = match direction {
-                Direction::Left | Direction::Right => (center.y - origin.y).abs(),
-                Direction::Up | Direction::Down => (center.x - origin.x).abs(),
+            let min = frame.min();
+            let max = frame.max();
+
+            let (primary_dist, orth_gap) = match direction {
+                Direction::Left => {
+                    if max.x > origin.x {
+                        continue;
+                    }
+                    (origin.x - max.x, interval_gap(min.y, max.y, origin.y, origin.y))
+                }
+                Direction::Right => {
+                    if min.x < origin.x {
+                        continue;
+                    }
+                    (min.x - origin.x, interval_gap(min.y, max.y, origin.y, origin.y))
+                }
+                Direction::Up => {
+                    // Smaller y means visually "up".
+                    if max.y > origin.y {
+                        continue;
+                    }
+                    (origin.y - max.y, interval_gap(min.x, max.x, origin.x, origin.x))
+                }
+                Direction::Down => {
+                    if min.y < origin.y {
+                        continue;
+                    }
+                    (min.y - origin.y, interval_gap(min.x, max.x, origin.x, origin.x))
+                }
             };
 
-            let should_replace = best.as_ref().map_or(true, |(best_delta, best_ortho, _)| {
-                delta < *best_delta || (delta == *best_delta && orthogonal < *best_ortho)
+            let should_replace = best.as_ref().map_or(true, |(best_primary, best_orth, _)| {
+                primary_dist < *best_primary
+                    || (primary_dist == *best_primary && orth_gap < *best_orth)
             });
 
             if should_replace {
-                best = Some((delta, orthogonal, screen));
+                best = Some((primary_dist, orth_gap, screen));
             }
         }
 

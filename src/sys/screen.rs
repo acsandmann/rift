@@ -90,9 +90,12 @@ impl<S: System> ScreenCache<S> {
         self.uuids = cg_screens.iter().map(|screen| self.system.display_uuid(screen)).collect();
         let uuid_strings: Vec<String> = self.uuids.iter().map(|uuid| uuid.to_string()).collect();
 
-        let converter = CoordinateConverter {
-            screen_height: cg_screens[0].bounds.max().y,
-        };
+        let union_max_y = cg_screens
+            .iter()
+            .map(|screen| screen.bounds.max().y)
+            .fold(f64::NEG_INFINITY, f64::max);
+
+        let converter = CoordinateConverter { screen_height: union_max_y };
 
         let descriptors = cg_screens
             .iter()
@@ -205,7 +208,9 @@ fn constrain_display_bounds(did: u32, raw: CGRect, notch_height: f64) -> CGRect 
     let mut frame = raw;
 
     if !menu_bar_hidden() {
-        let h = menu_bar_height(did);
+        // macOS reports the menubar height without the topmost usable pixel; add 1 to avoid
+        // leaving a dead strip or placing windows under the bar.
+        let h = menu_bar_height(did) + 1.0;
         if h > 0.0 {
             frame.origin.y += h;
             frame.size.height = (frame.size.height - h).max(0.0);
