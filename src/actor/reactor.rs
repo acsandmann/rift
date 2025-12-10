@@ -1042,7 +1042,11 @@ impl Reactor {
         self.update_screen_space_map();
     }
 
-    fn reconcile_spaces_with_display_history(&mut self, spaces: &[Option<SpaceId>]) {
+    fn reconcile_spaces_with_display_history(
+        &mut self,
+        spaces: &[Option<SpaceId>],
+        allow_remap: bool,
+    ) {
         let mut seen_displays: HashSet<String> = HashSet::default();
 
         for (screen, space_opt) in self.space_manager.screens.iter().zip(spaces.iter()) {
@@ -1056,13 +1060,30 @@ impl Reactor {
                 continue;
             }
 
-            if let Some(previous_space) =
-                self.layout_manager.layout_engine.space_for_display_uuid(&screen.display_uuid)
-            {
-                if previous_space != *space {
-                    self.layout_manager.layout_engine.remap_space(previous_space, *space);
+            let seen_before =
+                self.layout_manager.layout_engine.display_seen_before(&screen.display_uuid);
+            let last_space = if allow_remap && seen_before {
+                self.layout_manager
+                    .layout_engine
+                    .last_space_for_display_uuid(&screen.display_uuid)
+            } else {
+                None
+            };
+
+            // When a display reconnects, remap the most recent space observed for
+            // that display to the newly reported space so layout state follows the
+            // monitor. During routine space switches (allow_remap=false), we simply
+            // record the mapping without remapping.
+            if allow_remap {
+                if let Some(previous_space) = last_space {
+                    if previous_space != *space {
+                        self.layout_manager.layout_engine.remap_space(previous_space, *space);
+                    }
                 }
             }
+            self.layout_manager
+                .layout_engine
+                .update_space_display(*space, Some(screen.display_uuid.clone()));
         }
     }
 

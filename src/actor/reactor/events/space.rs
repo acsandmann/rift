@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 
 use objc2_app_kit::NSRunningApplication;
@@ -194,6 +195,12 @@ impl SpaceEventHandler {
         screens: Vec<ScreenSnapshot>,
         ws_info: Vec<WindowServerInfo>,
     ) {
+        let previous_displays: HashSet<String> =
+            reactor.space_manager.screens.iter().map(|s| s.display_uuid.clone()).collect();
+        let new_displays: HashSet<String> =
+            screens.iter().map(|s| s.display_uuid.clone()).collect();
+        let displays_changed = previous_displays != new_displays;
+
         let spaces: Vec<Option<SpaceId>> = screens.iter().map(|s| s.space).collect();
         let spaces_all_none = spaces.iter().all(|space| space.is_none());
         reactor.refocus_manager.stale_cleanup_state = if spaces_all_none {
@@ -221,7 +228,7 @@ impl SpaceEventHandler {
                 .collect();
             reactor.update_screen_space_map();
             reactor.set_active_spaces(&spaces);
-            reactor.reconcile_spaces_with_display_history(&spaces);
+            reactor.reconcile_spaces_with_display_history(&spaces, displays_changed);
             if let Some(info) = ws_info_opt.take() {
                 reactor.finalize_space_change(&spaces, info);
             }
@@ -272,7 +279,7 @@ impl SpaceEventHandler {
                 Some(PendingSpaceChange { spaces, ws_info });
             return;
         }
-        reactor.reconcile_spaces_with_display_history(&spaces);
+        reactor.reconcile_spaces_with_display_history(&spaces, false);
         info!("space changed");
         reactor.pending_space_change_manager.pending_space_change = None;
         reactor.set_screen_spaces(&spaces);

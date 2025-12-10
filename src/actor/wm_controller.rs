@@ -747,12 +747,18 @@ impl WmController {
 
         let active_space_ids: Vec<SpaceId> =
             self.active_spaces().into_iter().filter_map(|opt| opt).collect();
+        let fallback_space_ids: Vec<SpaceId> = self.cur_space.iter().copied().flatten().collect();
+        let space_id_values: Vec<u64> = if active_space_ids.is_empty() {
+            fallback_space_ids.iter().map(|space| space.get()).collect()
+        } else {
+            active_space_ids.iter().map(|space| space.get()).collect()
+        };
 
-        if active_space_ids.is_empty() {
-            return all_windows;
+        // If we don't know any current spaces yet, avoid leaking windows across
+        // spaces; wait for a valid space list before surfacing anything.
+        if space_id_values.is_empty() {
+            return Vec::new();
         }
-
-        let space_id_values: Vec<u64> = active_space_ids.iter().map(|space| space.get()).collect();
 
         let allowed_window_ids: HashSet<u32> =
             sys::window_server::space_window_list_for_connection(&space_id_values, 0, false)

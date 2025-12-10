@@ -6,16 +6,18 @@ use std::ptr::NonNull;
 use objc2::rc::Retained;
 use objc2::{ClassType, msg_send};
 use objc2_app_kit::NSScreen;
-use objc2_core_foundation::{CFRetained, CFString, CGPoint, CGRect};
+use objc2_core_foundation::{CFRetained, CFString, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGDisplayBounds, CGError, CGGetActiveDisplayList};
 use objc2_foundation::{MainThreadMarker, NSArray, NSNumber, ns_string};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use super::skylight::{
-    CFRelease, CFUUIDCreateString, CGDisplayCreateUUIDFromDisplayID,
-    CGSCopyBestManagedDisplayForRect, CGSCopyManagedDisplaySpaces, CGSCopyManagedDisplays,
-    CGSCopySpaces, CGSGetActiveSpace, CGSManagedDisplayGetCurrentSpace, CGSSpaceMask,
+    CFRelease, CFUUIDCreateFromString, CFUUIDCreateString, CGDisplayCreateUUIDFromDisplayID,
+    CGDisplayGetDisplayIDFromUUID, CGSCopyBestManagedDisplayForRect, CGSCopyManagedDisplaySpaces,
+    CGSCopyManagedDisplays, CGSCopySpaces, CGSGetActiveSpace, CGSManagedDisplayGetCurrentSpace,
+    CGSSpaceMask, CoreDockGetAutoHideEnabled, CoreDockGetOrientationAndPinning, G_CONNECTION,
+    SLSGetDisplayMenubarHeight, SLSGetDockRectWithReason, SLSGetMenuBarAutohideEnabled,
     SLSGetSpaceManagementMode, SLSMainConnectionID,
 };
 
@@ -72,19 +74,7 @@ impl<S: System> ScreenCache<S> {
         let mut cg_screens = self.system.cg_screens().unwrap();
         debug!("cg_screens={cg_screens:?}");
 
-        if ns_screens.len() != cg_screens.len() {
-            warn!(
-                "Screen config mismatch: There are {} ns_screens but {} cg_screens; continuing with cg_screens",
-                ns_screens.len(),
-                cg_screens.len(),
-            );
-            return None;
-        }
-
         if cg_screens.is_empty() {
-            // When no screens are reported, make sure we clear the cached UUIDs so
-            // subsequent space queries don't pretend the previous screens still
-            // exist.
             self.uuids.clear();
             return Some((vec![], CoordinateConverter::default()));
         }
@@ -107,24 +97,22 @@ impl<S: System> ScreenCache<S> {
         let descriptors = cg_screens
             .iter()
             .enumerate()
-            .flat_map(|(idx, &CGScreenInfo { cg_id, bounds })| {
-                let frame = if let Some(ns_screen) = ns_screens.iter().find(|s| s.cg_id == cg_id) {
-                    converter.convert_rect(ns_screen.visible_frame).unwrap_or(bounds)
-                } else {
-                    warn!("Can't find NSScreen corresponding to {cg_id:?}; using CG bounds");
-                    bounds
-                };
-                let display_uuid = uuid_strings.get(idx).cloned();
-                let descriptor = ScreenDescriptor {
+            .map(|(idx, &CGScreenInfo { cg_id, bounds })| {
+                let notch_height = self.system.notch_height(cg_id.as_u32());
+                let frame = constrain_display_bounds(cg_id.as_u32(), bounds, notch_height);
+                let display_uuid =
+                    uuid_strings.get(idx).cloned().filter(|uuid| !uuid.is_empty()).unwrap_or_else(
+                        || {
+                            warn!("Missing cached UUID for {:?}; using fallback", cg_id);
+                            format!("cgdisplay-{}", cg_id.as_u32())
+                        },
+                    );
+                ScreenDescriptor {
                     id: cg_id,
                     frame,
-                    display_uuid: display_uuid.unwrap_or_else(|| {
-                        warn!("Missing cached UUID for {:?}", cg_id);
-                        String::new()
-                    }),
+                    display_uuid,
                     name: ns_screens.iter().find(|s| s.cg_id == cg_id).and_then(|s| s.name.clone()),
-                };
-                Some(descriptor)
+                }
             })
             .collect();
         Some((descriptors, converter))
@@ -144,6 +132,123 @@ impl<S: System> ScreenCache<S> {
             .map(|id| if id == 0 { None } else { Some(SpaceId(id)) })
             .collect()
     }
+}
+
+const DOCK_ORIENTATION_LEFT: i32 = 1;
+const DOCK_ORIENTATION_BOTTOM: i32 = 2;
+const DOCK_ORIENTATION_RIGHT: i32 = 3;
+
+fn menu_bar_hidden() -> bool {
+    let mut status = 0;
+    unsafe { SLSGetMenuBarAutohideEnabled(*G_CONNECTION, &mut status) };
+    status != 0
+}
+
+fn menu_bar_height(did: u32) -> f64 {
+    let mut height: u32 = 0;
+    unsafe { SLSGetDisplayMenubarHeight(did, &mut height) };
+    height as f64
+}
+
+fn dock_hidden() -> bool { unsafe { CoreDockGetAutoHideEnabled() } }
+
+fn dock_orientation() -> i32 {
+    let mut orientation = 0;
+    let mut pinning = 0;
+    unsafe { CoreDockGetOrientationAndPinning(&mut orientation, &mut pinning) };
+    orientation
+}
+
+fn dock_rect() -> CGRect {
+    let mut rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(0.0, 0.0));
+    let mut reason = 0;
+    unsafe { SLSGetDockRectWithReason(*G_CONNECTION, &mut rect, &mut reason) };
+    rect
+}
+
+fn dock_rect_with_reason() -> (CGRect, i32) {
+    let mut rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(0.0, 0.0));
+    let mut reason = 0;
+    unsafe { SLSGetDockRectWithReason(*G_CONNECTION, &mut rect, &mut reason) };
+    (rect, reason)
+}
+
+fn dock_display_id() -> Option<u32> {
+    unsafe {
+        let dock = dock_rect();
+        let uuid_ref = CGSCopyBestManagedDisplayForRect(*G_CONNECTION, dock);
+        if uuid_ref.is_null() {
+            return None;
+        }
+        let uuid = CFUUIDCreateFromString(std::ptr::null_mut(), uuid_ref);
+        if uuid.is_null() {
+            CFRelease(uuid_ref as *mut _);
+            return None;
+        }
+        let did = CGDisplayGetDisplayIDFromUUID(uuid);
+        CFRelease(uuid as *mut _);
+        CFRelease(uuid_ref as *mut _);
+        if did == 0 { None } else { Some(did) }
+    }
+}
+
+fn rects_intersect(a: &CGRect, b: &CGRect) -> bool {
+    let ax2 = a.origin.x + a.size.width;
+    let ay2 = a.origin.y + a.size.height;
+    let bx2 = b.origin.x + b.size.width;
+    let by2 = b.origin.y + b.size.height;
+
+    !(ax2 <= b.origin.x || bx2 <= a.origin.x || ay2 <= b.origin.y || by2 <= a.origin.y)
+}
+
+fn constrain_display_bounds(did: u32, raw: CGRect, notch_height: f64) -> CGRect {
+    let mut frame = raw;
+
+    if !menu_bar_hidden() {
+        let h = menu_bar_height(did);
+        if h > 0.0 {
+            frame.origin.y += h;
+            frame.size.height = (frame.size.height - h).max(0.0);
+        }
+    } else if notch_height > 0.0 {
+        frame.origin.y += notch_height;
+        frame.size.height = (frame.size.height - notch_height).max(0.0);
+    }
+
+    let auto_hide = dock_hidden();
+    let (dock, dock_reason) = dock_rect_with_reason();
+
+    let dock_display = dock_display_id();
+
+    let dock_visible = (!auto_hide || dock_reason == 0)
+        && dock_display.map(|dock_did| dock_did == did).unwrap_or(true)
+        && rects_intersect(&frame, &dock);
+
+    if dock_visible {
+        match dock_orientation() {
+            DOCK_ORIENTATION_LEFT => {
+                frame.origin.x += dock.size.width;
+                frame.size.width = (frame.size.width - dock.size.width).max(0.0);
+            }
+            DOCK_ORIENTATION_RIGHT => {
+                frame.size.width = (frame.size.width - dock.size.width).max(0.0);
+            }
+            DOCK_ORIENTATION_BOTTOM => {
+                frame.size.height = (frame.size.height - dock.size.height).max(0.0);
+            }
+            _ => {
+                if dock.size.width > dock.size.height {
+                    frame.origin.y += dock.size.height;
+                    frame.size.height = (frame.size.height - dock.size.height).max(0.0);
+                } else {
+                    frame.origin.x += dock.size.width;
+                    frame.size.width = (frame.size.width - dock.size.width).max(0.0);
+                }
+            }
+        }
+    }
+
+    frame
 }
 
 /// Converts between Quartz and Cocoa coordinate systems.
@@ -200,6 +305,7 @@ pub trait System {
     fn cg_screens(&self) -> Result<Vec<CGScreenInfo>, CGError>;
     fn display_uuid(&self, screen: &CGScreenInfo) -> CFRetained<CFString>;
     fn ns_screens(&self) -> Vec<NSScreenInfo>;
+    fn notch_height(&self, _did: u32) -> f64 { 0.0 }
 }
 
 #[derive(Debug, Clone)]
@@ -265,10 +371,16 @@ impl System for Actual {
                     screen.cg_id
                 );
             }
-            CFRetained::from_raw(NonNull::new_unchecked(CGSCopyBestManagedDisplayForRect(
-                SLSMainConnectionID(),
-                screen.bounds,
-            )))
+            let managed = CGSCopyBestManagedDisplayForRect(SLSMainConnectionID(), screen.bounds);
+            if let Some(managed) = NonNull::new(managed) {
+                CFRetained::from_raw(managed)
+            } else {
+                warn!(
+                    "CGSCopyBestManagedDisplayForRect returned null for display {:?}",
+                    screen.cg_id
+                );
+                CFString::from_str("")
+            }
         }
     }
 
@@ -285,6 +397,25 @@ impl System for Actual {
                 })
             })
             .collect()
+    }
+
+    fn notch_height(&self, did: u32) -> f64 {
+        let screens = NSScreen::screens(self.mtm);
+        let builtin = unsafe { super::skylight::CGDisplayIsBuiltin(did) };
+        if !builtin {
+            return 0.0;
+        }
+
+        for screen in screens {
+            if let Ok(screen_id) = screen.get_number() {
+                if screen_id.as_u32() == did {
+                    #[allow(deprecated)]
+                    let insets = screen.safeAreaInsets();
+                    return insets.top;
+                }
+            }
+        }
+        0.0
     }
 }
 
@@ -415,6 +546,8 @@ mod test {
         }
 
         fn ns_screens(&self) -> Vec<NSScreenInfo> { self.ns_screens.clone() }
+
+        fn notch_height(&self, _did: u32) -> f64 { 0.0 }
     }
 
     struct SequenceSystem {
@@ -452,6 +585,8 @@ mod test {
         fn ns_screens(&self) -> Vec<NSScreenInfo> {
             self.ns_screens.borrow_mut().pop_front().unwrap_or_default()
         }
+
+        fn notch_height(&self, _did: u32) -> f64 { 0.0 }
     }
 
     #[test]

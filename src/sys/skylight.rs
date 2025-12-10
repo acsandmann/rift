@@ -204,6 +204,10 @@ unsafe extern "C" {
     pub fn CGSManagedDisplayGetCurrentSpace(cid: c_int, uuid: *mut CFString) -> u64;
     pub fn CGSCopyBestManagedDisplayForRect(cid: c_int, rect: CGRect) -> *mut CFString;
     pub fn CGDisplayCreateUUIDFromDisplayID(did: u32) -> *mut CFType;
+    pub fn CFUUIDCreateFromString(
+        allocator: *mut c_void,
+        uuid_string: *mut CFString,
+    ) -> *mut CFType;
     pub fn CFUUIDCreateString(allocator: *mut c_void, uuid: *mut CFType) -> *mut CFString;
     pub fn CGDisplayRegisterReconfigurationCallback(
         callback: Option<unsafe extern "C" fn(u32, u32, *mut c_void)>,
@@ -264,6 +268,13 @@ unsafe extern "C" {
     pub fn SLSManagedDisplayGetCurrentSpace(cid: cid_t, uuid: *mut CFString) -> u64;
     pub fn SLSCopyActiveMenuBarDisplayIdentifier(cid: cid_t) -> *mut CFString;
     pub fn SLSSpaceGetType(cid: cid_t, sid: u64) -> c_int;
+    pub fn SLSGetMenuBarAutohideEnabled(cid: cid_t, enabled: *mut i32) -> i32;
+    pub fn SLSGetDisplayMenubarHeight(did: u32, height: *mut u32) -> i32;
+    pub fn CoreDockGetAutoHideEnabled() -> bool;
+    pub fn CoreDockGetOrientationAndPinning(orientation: *mut i32, pinning: *mut i32) -> bool;
+    pub fn SLSGetDockRectWithReason(cid: cid_t, rect: *mut CGRect, reason: *mut i32) -> bool;
+    pub fn CGDisplayIsBuiltin(did: u32) -> bool;
+    pub fn CGDisplayGetDisplayIDFromUUID(uuid: *mut CFType) -> u32;
 
     pub fn SLSWindowQueryWindows(
         cid: c_int,

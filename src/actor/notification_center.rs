@@ -1,7 +1,7 @@
 //! This actor manages the global notification queue, which tells us when an
 //! application is launched or focused or the screen state changes.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::{future, mem};
 
@@ -9,9 +9,7 @@ use dispatchr::queue;
 use dispatchr::time::Time;
 use objc2::rc::{Allocated, Retained};
 use objc2::{AnyThread, ClassType, DeclaredClass, Encode, Encoding, define_class, msg_send, sel};
-use objc2_app_kit::{
-    self, NSApplication, NSRunningApplication, NSWorkspace, NSWorkspaceApplicationKey,
-};
+use objc2_app_kit::{self, NSRunningApplication, NSWorkspace, NSWorkspaceApplicationKey};
 use objc2_foundation::{
     MainThreadMarker, NSNotification, NSNotificationCenter, NSObject, NSProcessInfo, NSString,
 };
@@ -21,14 +19,14 @@ use super::wm_controller::{self, WmEvent};
 use crate::sys::app::NSRunningApplicationExt;
 use crate::sys::dispatch::DispatchExt;
 use crate::sys::power::{init_power_state, set_low_power_mode_state};
-use crate::sys::screen::{ScreenCache, ScreenDescriptor};
+use crate::sys::screen::{CoordinateConverter, ScreenCache, ScreenDescriptor, SpaceId};
 use crate::sys::skylight::{CGDisplayRegisterReconfigurationCallback, DisplayReconfigFlags};
 
 #[repr(C)]
 struct Instance {
     screen_cache: RefCell<ScreenCache>,
     events_tx: wm_controller::Sender,
-    last_screen_state: RefCell<Option<Vec<ScreenDescriptor>>>,
+    refresh_pending: Cell<bool>,
 }
 
 unsafe impl Encode for Instance {
@@ -66,17 +64,28 @@ define_class! {
         #[unsafe(method(recvWakeEvent:))]
         fn recv_wake_event(&self, notif: &NSNotification) {
             trace!("{notif:#?}");
-            // On wake, macOS may briefly report zero displays. We still want
-            // to refresh screen state in case the display set changed while
-            // asleep, but we avoid clearing state when the system reports an
-            // empty configuration.
+            // On wake, refresh state immediately so display swaps while asleep
+            // are reflected as soon as possible.
             self.send_event(WmEvent::SystemWoke);
+            self.send_screen_parameters();
         }
 
         #[unsafe(method(recvPowerEvent:))]
         fn recv_power_event(&self, notif: &NSNotification) {
             trace!("{notif:#?}");
             self.handle_power_event(notif);
+        }
+
+        #[unsafe(method(recvMenuBarPrefChanged:))]
+        fn recv_menu_bar_pref_changed(&self, notif: &NSNotification) {
+            trace!("{notif:#?}");
+            self.handle_menu_bar_pref_changed();
+        }
+
+        #[unsafe(method(recvDockPrefChanged:))]
+        fn recv_dock_pref_changed(&self, notif: &NSNotification) {
+            trace!("{notif:#?}");
+            self.handle_dock_pref_changed();
         }
     }
 }
@@ -86,7 +95,7 @@ impl NotificationCenterInner {
         let instance = Instance {
             screen_cache: RefCell::new(ScreenCache::new(MainThreadMarker::new().unwrap())),
             events_tx,
-            last_screen_state: RefCell::new(None),
+            refresh_pending: Cell::new(false),
         };
         let handler: Retained<Self> = unsafe { msg_send![Self::alloc(), initWith: instance] };
         unsafe {
@@ -103,12 +112,12 @@ impl NotificationCenterInner {
         let name = &*notif.name();
         let span = info_span!("notification_center::handle_screen_changed_event", ?name);
         let _s = span.enter();
-        if unsafe { NSWorkspaceActiveSpaceDidChangeNotification } == name {
+        if unsafe { NSWorkspaceActiveSpaceDidChangeNotification } == name
+            || name.to_string() == "NSWorkspaceActiveDisplayDidChangeNotification"
+        {
             self.send_current_space();
-        } else if unsafe { NSApplicationDidChangeScreenParametersNotification } == name {
-            self.send_screen_parameters();
         } else {
-            panic!("Unexpected screen changed event: {notif:?}");
+            warn!("Unexpected screen changed event: {notif:?}");
         }
     }
 
@@ -126,58 +135,41 @@ impl NotificationCenterInner {
         }
     }
 
-    fn send_screen_parameters(&self) {
+    fn collect_state(
+        &self,
+    ) -> Option<(Vec<ScreenDescriptor>, CoordinateConverter, Vec<Option<SpaceId>>)> {
         let mut screen_cache = self.ivars().screen_cache.borrow_mut();
         let Some((descriptors, converter)) = screen_cache.update_screen_config() else {
-            return;
+            warn!("Unable to refresh screen configuration; skipping update");
+            return None;
         };
-        if descriptors.is_empty() {
-            trace!("Screen parameters empty after update; skipping state reset");
-            return;
-        }
         let spaces = screen_cache.get_screen_spaces();
+        Some((descriptors, converter, spaces))
+    }
 
-        let mut last_state = self.ivars().last_screen_state.borrow_mut();
-        let is_unchanged = match &*last_state {
-            Some(prev) => *prev == descriptors,
-            None => false,
-        };
-
-        if is_unchanged {
-            trace!("Screen parameters unchanged; ignoring duplicate notification");
-            return;
+    fn send_screen_parameters(&self) {
+        let span = info_span!("notification_center::send_screen_parameters");
+        let _s = span.enter();
+        if let Some((descriptors, converter, spaces)) = self.collect_state() {
+            if descriptors.is_empty() {
+                trace!("Skipping screen parameter update: no active displays reported");
+                return;
+            }
+            if spaces.iter().any(|space| space.is_none()) {
+                trace!("Deferring screen parameter update: spaces not yet available");
+                self.schedule_screen_refresh();
+                return;
+            }
+            self.send_event(WmEvent::ScreenParametersChanged(descriptors, converter, spaces));
         }
-
-        *last_state = Some(descriptors.clone());
-        self.send_event(WmEvent::ScreenParametersChanged(descriptors, converter, spaces));
     }
 
     fn send_current_space(&self) {
-        let mut screen_cache = self.ivars().screen_cache.borrow_mut();
-        if let Some((descriptors, converter)) = screen_cache.update_screen_config() {
-            let mut last_state = self.ivars().last_screen_state.borrow_mut();
-            let is_unchanged = match &*last_state {
-                Some(prev) => *prev == descriptors,
-                None => false,
-            };
-
-            if !is_unchanged {
-                *last_state = Some(descriptors.clone());
-                drop(last_state);
-                let spaces = screen_cache.get_screen_spaces();
-                drop(screen_cache);
-                self.send_event(WmEvent::ScreenParametersChanged(
-                    descriptors,
-                    converter,
-                    spaces.clone(),
-                ));
-                self.send_event(WmEvent::SpaceChanged(spaces));
-                return;
-            }
+        let span = info_span!("notification_center::send_current_space");
+        let _s = span.enter();
+        if let Some((_, _, spaces)) = self.collect_state() {
+            self.send_event(WmEvent::SpaceChanged(spaces));
         }
-        let spaces = screen_cache.get_screen_spaces();
-        drop(screen_cache);
-        self.send_event(WmEvent::SpaceChanged(spaces));
     }
 
     fn handle_app_event(&self, notif: &NSNotification) {
@@ -220,9 +212,35 @@ impl NotificationCenterInner {
             trace!("Display reconfig begin; deferring update");
             return;
         }
-        trace!(?flags, "Display reconfig detected; refreshing screen parameters");
-        self.ivars().last_screen_state.borrow_mut().take();
-        self.send_screen_parameters();
+        trace!(?flags, "Display reconfig detected; scheduling refresh");
+        self.schedule_screen_refresh();
+    }
+
+    fn handle_dock_pref_changed(&self) {
+        trace!("Dock preferences changed; scheduling refresh");
+        self.schedule_screen_refresh();
+    }
+
+    fn handle_menu_bar_pref_changed(&self) {
+        trace!("Menu bar autohide changed; scheduling refresh");
+        self.schedule_screen_refresh();
+    }
+
+    fn schedule_screen_refresh(&self) {
+        if self.ivars().refresh_pending.replace(true) {
+            return;
+        }
+
+        let handler_ptr = self as *const _ as *mut Self;
+        queue::main().after_f_s(
+            Time::new_after(Time::NOW, 150 * 1_000_000),
+            handler_ptr,
+            |handler_ptr| unsafe {
+                let handler = &*handler_ptr;
+                handler.ivars().refresh_pending.set(false);
+                handler.send_screen_parameters();
+            },
+        );
     }
 
     unsafe extern "C" fn display_reconfig_callback(
@@ -264,14 +282,15 @@ impl NotificationCenter {
         let workspace = &NSWorkspace::sharedWorkspace();
         let workspace_center = &workspace.notificationCenter();
         let default_center = &NSNotificationCenter::defaultCenter();
-        let shared_app = &NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
         unsafe {
             use objc2_app_kit::*;
-            register_unsafe(
+            workspace_center.addObserver_selector_name_object(
+                &handler,
                 sel!(recvScreenChangedEvent:),
-                NSApplicationDidChangeScreenParametersNotification,
-                default_center,
-                shared_app,
+                Some(&NSString::from_str(
+                    "NSWorkspaceActiveDisplayDidChangeNotification",
+                )),
+                Some(workspace),
             );
             register_unsafe(
                 sel!(recvScreenChangedEvent:),
@@ -291,9 +310,20 @@ impl NotificationCenter {
                 workspace_center,
                 workspace,
             );
-        };
-
-        unsafe {
+            default_center.addObserver_selector_name_object(
+                &handler,
+                sel!(recvDockPrefChanged:),
+                Some(&NSString::from_str("com.apple.dock.prefchanged")),
+                None,
+            );
+            default_center.addObserver_selector_name_object(
+                &handler,
+                sel!(recvMenuBarPrefChanged:),
+                Some(&NSString::from_str(
+                    "AppleInterfaceMenuBarHidingChangedNotification",
+                )),
+                None,
+            );
             default_center.addObserver_selector_name_object(
                 &handler,
                 sel!(recvPowerEvent:),

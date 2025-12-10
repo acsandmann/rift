@@ -107,6 +107,8 @@ pub struct LayoutEngine {
     broadcast_tx: Option<BroadcastSender>,
     #[serde(skip)]
     space_display_map: HashMap<SpaceId, Option<String>>,
+    #[serde(skip)]
+    display_last_space: HashMap<String, SpaceId>,
 }
 
 impl LayoutEngine {
@@ -479,10 +481,19 @@ impl LayoutEngine {
 
     pub fn update_space_display(&mut self, space: SpaceId, display_uuid: Option<String>) {
         if let Some(uuid) = display_uuid {
-            self.space_display_map.insert(space, Some(uuid));
+            self.space_display_map.insert(space, Some(uuid.clone()));
+            self.display_last_space.insert(uuid, space);
         } else {
             self.space_display_map.remove(&space);
         }
+    }
+
+    pub fn last_space_for_display_uuid(&self, display_uuid: &str) -> Option<SpaceId> {
+        self.display_last_space.get(display_uuid).copied()
+    }
+
+    pub fn display_seen_before(&self, display_uuid: &str) -> bool {
+        self.display_last_space.contains_key(display_uuid)
     }
 
     fn display_uuid_for_space(&self, space: SpaceId) -> Option<String> {
@@ -512,6 +523,12 @@ impl LayoutEngine {
         if let Some(uuid) = self.space_display_map.remove(&old_space) {
             self.space_display_map.insert(new_space, uuid);
         }
+
+        for (_uuid, space) in self.display_last_space.iter_mut() {
+            if *space == old_space {
+                *space = new_space;
+            }
+        }
     }
 
     pub fn new(
@@ -540,6 +557,7 @@ impl LayoutEngine {
             layout_settings: layout_settings.clone(),
             broadcast_tx,
             space_display_map: HashMap::default(),
+            display_last_space: HashMap::default(),
         }
     }
 
