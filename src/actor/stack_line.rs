@@ -69,7 +69,7 @@ impl StackLine {
 
     pub async fn run(mut self) {
         if !self.is_enabled() {
-            return;
+            tracing::debug!("stack line disabled at start; will listen for config changes");
         }
 
         while let Some((span, event)) = self.rx.recv().await {
@@ -82,6 +82,14 @@ impl StackLine {
 
     #[instrument(name = "stack_line::handle_event", skip(self))]
     fn handle_event(&mut self, event: Event) {
+        if !self.is_enabled()
+            && !matches!(
+                event,
+                Event::ConfigUpdated(_) | Event::ScreenParametersChanged(_)
+            )
+        {
+            return;
+        }
         match event {
             Event::GroupsUpdated { space_id, groups } => {
                 self.handle_groups_updated(space_id, groups);
