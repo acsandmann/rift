@@ -71,8 +71,6 @@ define_class! {
             // asleep, but we avoid clearing state when the system reports an
             // empty configuration.
             self.send_event(WmEvent::SystemWoke);
-            self.ivars().last_screen_state.borrow_mut().take();
-            self.send_screen_parameters();
         }
 
         #[unsafe(method(recvPowerEvent:))]

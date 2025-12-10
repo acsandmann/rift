@@ -72,26 +72,21 @@ impl<S: System> ScreenCache<S> {
         let mut cg_screens = self.system.cg_screens().unwrap();
         debug!("cg_screens={cg_screens:?}");
 
-        if cg_screens.is_empty() {
-            if ns_screens.is_empty() {
-                self.uuids.clear();
-                return Some((vec![], CoordinateConverter::default()));
-            } else {
-                warn!(
-                    "Ignoring screen config change: There are {} ns_screens but no cg_screens",
-                    ns_screens.len()
-                );
-                self.uuids.clear();
-                return None;
-            }
-        }
-
         if ns_screens.len() != cg_screens.len() {
             warn!(
                 "Screen config mismatch: There are {} ns_screens but {} cg_screens; continuing with cg_screens",
                 ns_screens.len(),
                 cg_screens.len(),
             );
+            return None;
+        }
+
+        if cg_screens.is_empty() {
+            // When no screens are reported, make sure we clear the cached UUIDs so
+            // subsequent space queries don't pretend the previous screens still
+            // exist.
+            self.uuids.clear();
+            return Some((vec![], CoordinateConverter::default()));
         }
 
         if let Some(main_screen_idx) =
