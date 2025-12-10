@@ -7,7 +7,7 @@ use objc2::rc::Retained;
 use objc2::{ClassType, msg_send};
 use objc2_app_kit::NSScreen;
 use objc2_core_foundation::{CFRetained, CFString, CGPoint, CGRect, CGSize};
-use objc2_core_graphics::{CGDisplayBounds, CGError, CGGetActiveDisplayList};
+use objc2_core_graphics::{CGDisplayBounds, CGError, CGGetActiveDisplayList, CGMainDisplayID};
 use objc2_foundation::{MainThreadMarker, NSArray, NSNumber, ns_string};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
@@ -79,9 +79,17 @@ impl<S: System> ScreenCache<S> {
             return Some((vec![], CoordinateConverter::default()));
         }
 
-        if let Some(main_screen_idx) =
-            cg_screens.iter().position(|s| s.bounds.origin == CGPoint::ZERO)
-        {
+        cg_screens.sort_by(|a, b| {
+            let x_order = a.bounds.origin.x.total_cmp(&b.bounds.origin.x);
+            if x_order == Ordering::Equal {
+                a.bounds.origin.y.total_cmp(&b.bounds.origin.y)
+            } else {
+                x_order
+            }
+        });
+
+        let main_id = CGMainDisplayID();
+        if let Some(main_screen_idx) = cg_screens.iter().position(|s| s.cg_id.0 == main_id) {
             cg_screens.swap(0, main_screen_idx);
         } else {
             warn!("Could not find main screen. cg_screens={cg_screens:?}");
@@ -226,7 +234,7 @@ fn constrain_display_bounds(did: u32, raw: CGRect, notch_height: f64) -> CGRect 
     let dock_display = dock_display_id();
 
     let dock_visible = (!auto_hide || dock_reason == 0)
-        && dock_display.map(|dock_did| dock_did == did).unwrap_or(true)
+        && dock_display.map(|dock_did| dock_did == did).unwrap_or(false)
         && rects_intersect(&frame, &dock);
 
     if dock_visible {
