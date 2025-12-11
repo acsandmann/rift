@@ -228,7 +228,10 @@ impl SpaceEventHandler {
                 .collect();
             reactor.update_screen_space_map();
             reactor.set_active_spaces(&spaces);
-            reactor.reconcile_spaces_with_display_history(&spaces, displays_changed);
+            // Do not remap layout state across reconnects; new space ids can churn and
+            // remapping has caused windows to oscillate. Keep existing state and only
+            // update the screen→space mapping.
+            reactor.reconcile_spaces_with_display_history(&spaces, false);
             if let Some(info) = ws_info_opt.take() {
                 reactor.finalize_space_change(&spaces, info);
             }
