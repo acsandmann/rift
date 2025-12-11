@@ -10,6 +10,7 @@ use dispatchr::time::Time;
 use objc2::rc::{Allocated, Retained};
 use objc2::{AnyThread, ClassType, DeclaredClass, Encode, Encoding, define_class, msg_send, sel};
 use objc2_app_kit::{self, NSRunningApplication, NSWorkspace, NSWorkspaceApplicationKey};
+use objc2_core_graphics::CGDisplayBounds;
 use objc2_foundation::{
     MainThreadMarker, NSNotification, NSNotificationCenter, NSObject, NSProcessInfo, NSString,
 };
@@ -22,11 +23,17 @@ use crate::sys::power::{init_power_state, set_low_power_mode_state};
 use crate::sys::screen::{CoordinateConverter, ScreenCache, ScreenDescriptor, SpaceId};
 use crate::sys::skylight::{CGDisplayRegisterReconfigurationCallback, DisplayReconfigFlags};
 
+const REFRESH_DEFAULT_DELAY_NS: i64 = 150_000_000;
+const REFRESH_RETRY_DELAY_NS: i64 = 150_000_000;
+const REFRESH_MAX_RETRIES: u8 = 10;
+
 #[repr(C)]
 struct Instance {
     screen_cache: RefCell<ScreenCache>,
     events_tx: wm_controller::Sender,
     refresh_pending: Cell<bool>,
+    reconfig_in_progress: Cell<bool>,
+    pending_reconfig_flags: Cell<DisplayReconfigFlags>,
 }
 
 unsafe impl Encode for Instance {
@@ -96,6 +103,8 @@ impl NotificationCenterInner {
             screen_cache: RefCell::new(ScreenCache::new(MainThreadMarker::new().unwrap())),
             events_tx,
             refresh_pending: Cell::new(false),
+            reconfig_in_progress: Cell::new(false),
+            pending_reconfig_flags: Cell::new(DisplayReconfigFlags::empty()),
         };
         let handler: Retained<Self> = unsafe { msg_send![Self::alloc(), initWith: instance] };
         unsafe {
@@ -150,23 +159,53 @@ impl NotificationCenterInner {
     fn send_screen_parameters(&self) {
         let span = info_span!("notification_center::send_screen_parameters");
         let _s = span.enter();
-        if let Some((descriptors, converter, spaces)) = self.collect_state() {
-            if descriptors.is_empty() {
-                trace!("Skipping screen parameter update: no active displays reported");
-                return;
-            }
-            if spaces.iter().any(|space| space.is_none()) {
-                trace!("Deferring screen parameter update: spaces not yet available");
-                self.schedule_screen_refresh();
-                return;
-            }
-            self.send_event(WmEvent::ScreenParametersChanged(descriptors, converter, spaces));
+        self.process_screen_refresh(0, true);
+    }
+
+    fn process_screen_refresh(&self, attempt: u8, allow_retry: bool) {
+        let span = info_span!("notification_center::process_screen_refresh", attempt);
+        let _s = span.enter();
+        let ivars = self.ivars();
+
+        let Some((descriptors, converter, spaces)) = self.collect_state() else {
+            warn!("Unable to refresh screen configuration; skipping update");
+            ivars.refresh_pending.set(false);
+            return;
+        };
+
+        if descriptors.is_empty() {
+            trace!("Skipping screen parameter update: no active displays reported");
+            ivars.refresh_pending.set(false);
+            return;
         }
+
+        if spaces.iter().any(|space| space.is_none()) {
+            if allow_retry && attempt < REFRESH_MAX_RETRIES {
+                trace!(attempt, "Spaces not yet available; retrying refresh");
+                self.schedule_screen_refresh_after(REFRESH_RETRY_DELAY_NS, attempt + 1);
+                return;
+            }
+            warn!(
+                attempt,
+                "Spaces missing after retries; proceeding with partial info"
+            );
+        }
+
+        self.send_event(WmEvent::ScreenParametersChanged(descriptors, converter, spaces));
+        ivars.refresh_pending.set(false);
     }
 
     fn send_current_space(&self) {
         let span = info_span!("notification_center::send_current_space");
         let _s = span.enter();
+        // Avoid emitting space changes while a display reconfiguration is in-flight or a
+        // screen refresh is pending; these can interleave and cause window thrash between
+        // displays/spaces. The refresh will emit a consistent SpaceChanged afterward.
+        let ivars = self.ivars();
+        if ivars.refresh_pending.get() || ivars.reconfig_in_progress.get() {
+            trace!("Skipping current space update during display reconfig/refresh");
+            return;
+        }
         if let Some((_, _, spaces)) = self.collect_state() {
             self.send_event(WmEvent::SpaceChanged(spaces));
         }
@@ -208,12 +247,41 @@ impl NotificationCenterInner {
     }
 
     fn handle_display_reconfig(&self, flags: DisplayReconfigFlags) {
+        let ivars = self.ivars();
+
         if flags.contains(DisplayReconfigFlags::BEGIN_CONFIGURATION) {
-            trace!("Display reconfig begin; deferring update");
+            trace!("Display reconfig begin; aggregating changes");
+            ivars.reconfig_in_progress.set(true);
+            ivars.pending_reconfig_flags.set(DisplayReconfigFlags::empty());
             return;
         }
-        trace!(?flags, "Display reconfig detected; scheduling refresh");
-        self.schedule_screen_refresh();
+
+        let aggregated = ivars.pending_reconfig_flags.get() | flags;
+        ivars.pending_reconfig_flags.set(aggregated);
+
+        if !Self::needs_refresh_for_flags(aggregated) {
+            trace!(?aggregated, "Display reconfig ignored (no impactful flags)");
+            return;
+        }
+
+        // We got a post-begin callback or a standalone change; prefer to refresh immediately
+        // for add/remove so we capture the new topology as soon as it stabilises.
+        let saw_begin = ivars.reconfig_in_progress.replace(false);
+        ivars.pending_reconfig_flags.set(DisplayReconfigFlags::empty());
+
+        let immediate = aggregated
+            .intersects(DisplayReconfigFlags::ADD | DisplayReconfigFlags::REMOVE)
+            || saw_begin;
+
+        trace!(
+            ?aggregated,
+            immediate, "Display reconfig detected; scheduling refresh"
+        );
+        if immediate {
+            self.schedule_screen_refresh_after(0, 0);
+        } else {
+            self.schedule_screen_refresh();
+        }
     }
 
     fn handle_dock_pref_changed(&self) {
@@ -227,20 +295,43 @@ impl NotificationCenterInner {
     }
 
     fn schedule_screen_refresh(&self) {
-        if self.ivars().refresh_pending.replace(true) {
-            return;
+        self.schedule_screen_refresh_after(REFRESH_DEFAULT_DELAY_NS, 0);
+    }
+
+    fn schedule_screen_refresh_after(&self, delay_ns: i64, attempt: u8) {
+        let ivars = self.ivars();
+        if attempt == 0 {
+            if ivars.refresh_pending.replace(true) {
+                return;
+            }
+        } else if !ivars.refresh_pending.get() {
+            ivars.refresh_pending.set(true);
         }
 
         let handler_ptr = self as *const _ as *mut Self;
         queue::main().after_f_s(
-            Time::new_after(Time::NOW, 150 * 1_000_000),
-            handler_ptr,
-            |handler_ptr| unsafe {
+            Time::new_after(Time::NOW, delay_ns),
+            (handler_ptr, attempt),
+            |(handler_ptr, attempt)| unsafe {
                 let handler = &*handler_ptr;
-                handler.ivars().refresh_pending.set(false);
-                handler.send_screen_parameters();
+                handler.process_screen_refresh(attempt, true);
             },
         );
+    }
+
+    fn needs_refresh_for_flags(flags: DisplayReconfigFlags) -> bool {
+        flags.intersects(
+            DisplayReconfigFlags::ADD
+                | DisplayReconfigFlags::REMOVE
+                | DisplayReconfigFlags::MOVED
+                | DisplayReconfigFlags::SET_MAIN
+                | DisplayReconfigFlags::SET_MODE
+                | DisplayReconfigFlags::ENABLED
+                | DisplayReconfigFlags::DISABLED
+                | DisplayReconfigFlags::MIRROR
+                | DisplayReconfigFlags::UNMIRROR
+                | DisplayReconfigFlags::DESKTOP_SHAPE_CHANGED,
+        )
     }
 
     unsafe extern "C" fn display_reconfig_callback(
@@ -253,10 +344,51 @@ impl NotificationCenterInner {
         }
         let handler_ptr = user_info as *mut NotificationCenterInner;
         let parsed = DisplayReconfigFlags::from_bits_truncate(flags);
-        queue::main().after_f_s(Time::NOW, (handler_ptr, parsed), |(handler_ptr, flags)| unsafe {
-            let handler = &*handler_ptr;
-            handler.handle_display_reconfig(flags);
-        });
+        let normalized = NotificationCenterInner::normalize_display_flags(parsed, _display);
+        queue::main().after_f_s(
+            Time::NOW,
+            (handler_ptr, normalized),
+            |(handler_ptr, flags)| unsafe {
+                let handler = &*handler_ptr;
+                handler.handle_display_reconfig(flags);
+            },
+        );
+    }
+
+    /// Normalize conflicting CGDisplay flags to a single add/remove decision, following
+    /// observed macOS behavior where add/remove/enable/disable can all be set together.
+    fn normalize_display_flags(flags: DisplayReconfigFlags, display: u32) -> DisplayReconfigFlags {
+        let mut flags = flags;
+
+        // Map enable/disable into add/remove.
+        if flags.contains(DisplayReconfigFlags::DISABLED) {
+            flags.insert(DisplayReconfigFlags::REMOVE);
+        }
+        if flags.contains(DisplayReconfigFlags::ENABLED) {
+            flags.insert(DisplayReconfigFlags::ADD);
+        }
+
+        // Mirroring treats the external display as removed; unmirror as added.
+        if flags.contains(DisplayReconfigFlags::MIRROR) {
+            flags.insert(DisplayReconfigFlags::REMOVE);
+        }
+        if flags.contains(DisplayReconfigFlags::UNMIRROR) {
+            flags.insert(DisplayReconfigFlags::ADD);
+        }
+
+        if flags.contains(DisplayReconfigFlags::ADD) && flags.contains(DisplayReconfigFlags::REMOVE)
+        {
+            // Heuristic informed by SDL issue: a valid non-zero mode implies add wins unless mirroring.
+            let bounds = CGDisplayBounds(display);
+            let size_valid = bounds.size.width > 1.0 && bounds.size.height > 1.0;
+            if !flags.contains(DisplayReconfigFlags::MIRROR) && size_valid {
+                flags.remove(DisplayReconfigFlags::REMOVE);
+            } else {
+                flags.remove(DisplayReconfigFlags::ADD);
+            }
+        }
+
+        flags
     }
 }
 

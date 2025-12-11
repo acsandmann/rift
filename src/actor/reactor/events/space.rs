@@ -237,6 +237,12 @@ impl SpaceEventHandler {
             reactor.update_complete_window_server_info(info);
         }
         reactor.try_apply_pending_space_change();
+
+        // Mark that we should perform a one-shot relayout after spaces are applied,
+        // so windows return to their prior displays post-topology change.
+        if displays_changed {
+            reactor.pending_space_change_manager.topology_relayout_pending = true;
+        }
     }
 
     pub fn handle_space_changed(
@@ -244,6 +250,28 @@ impl SpaceEventHandler {
         mut spaces: Vec<Option<SpaceId>>,
         ws_info: Vec<WindowServerInfo>,
     ) {
+        // If a topology change is in-flight, ignore space updates that don't match the
+        // current screen count; wait for the matching vector before applying changes.
+        if reactor.pending_space_change_manager.topology_relayout_pending
+            && spaces.len() != reactor.space_manager.screens.len()
+        {
+            println!(
+                "[rift][space_changed] drop mismatch during topology change (screens={}, spaces_len={})",
+                reactor.space_manager.screens.len(),
+                spaces.len()
+            );
+            return;
+        }
+        // Also drop any space update that reports more spaces than screens; these are
+        // transient and can reorder active workspaces across displays.
+        if spaces.len() > reactor.space_manager.screens.len() {
+            println!(
+                "[rift][space_changed] drop oversize spaces vector (screens={}, spaces_len={})",
+                reactor.space_manager.screens.len(),
+                spaces.len()
+            );
+            return;
+        }
         // TODO: this logic is flawed if multiple spaces are changing at once
         if reactor.handle_fullscreen_space_transition(&mut spaces) {
             return;
@@ -271,19 +299,26 @@ impl SpaceEventHandler {
         }
         if spaces.len() != reactor.space_manager.screens.len() {
             warn!(
-                "Deferring space change: have {} screens but {} spaces",
+                "Ignoring space change: have {} screens but {} spaces",
                 reactor.space_manager.screens.len(),
                 spaces.len()
             );
-            reactor.pending_space_change_manager.pending_space_change =
-                Some(PendingSpaceChange { spaces, ws_info });
             return;
         }
         reactor.reconcile_spaces_with_display_history(&spaces, false);
         info!("space changed");
-        reactor.pending_space_change_manager.pending_space_change = None;
         reactor.set_screen_spaces(&spaces);
         reactor.finalize_space_change(&spaces, ws_info);
+
+        // If a topology change was detected earlier, perform a one-shot refresh/layout
+        // now that we have a consistent space vector matching the screens.
+        if reactor.pending_space_change_manager.topology_relayout_pending {
+            reactor.pending_space_change_manager.topology_relayout_pending = false;
+            reactor.force_refresh_all_windows();
+            if let Err(e) = reactor.update_layout(false, false) {
+                warn!(error = ?e, "Layout update failed after topology change");
+            }
+        }
     }
 
     pub fn handle_mission_control_native_entered(reactor: &mut Reactor) {

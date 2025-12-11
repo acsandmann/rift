@@ -353,4 +353,5 @@ pub struct MainWindowTrackerManager {
 /// Manages pending space changes
 pub struct PendingSpaceChangeManager {
     pub pending_space_change: Option<PendingSpaceChange>,
+    pub topology_relayout_pending: bool,
 }

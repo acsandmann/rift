@@ -547,6 +547,7 @@ impl Reactor {
             },
             pending_space_change_manager: managers::PendingSpaceChangeManager {
                 pending_space_change: None,
+                topology_relayout_pending: false,
             },
             active_spaces: HashSet::default(),
         }
