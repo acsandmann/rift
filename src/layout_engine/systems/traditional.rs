@@ -119,6 +119,34 @@ impl TraditionalLayoutSystem {
     }
 
     fn find_natural_join_target(&self, from: NodeId, direction: Direction) -> Option<NodeId> {
+        if let Some(parent) = from.parent(self.map()) {
+            let parent_layout = self.layout(parent);
+            if parent_layout.orientation() == direction.orientation() && !parent_layout.is_group() {
+                let child_count = parent.children(self.map()).count();
+                if child_count == 2 {
+                    if let Some(neighbor) = match direction {
+                        Direction::Right | Direction::Down => parent.next_sibling(self.map()),
+                        Direction::Left | Direction::Up => parent.prev_sibling(self.map()),
+                    } {
+                        return Some(neighbor);
+                    }
+                }
+                let is_edge = match direction {
+                    Direction::Right | Direction::Down => from.next_sibling(self.map()).is_none(),
+                    Direction::Left | Direction::Up => from.prev_sibling(self.map()).is_none(),
+                };
+                if is_edge {
+                    let neighbor = match direction {
+                        Direction::Right | Direction::Down => parent.next_sibling(self.map()),
+                        Direction::Left | Direction::Up => parent.prev_sibling(self.map()),
+                    };
+                    if let Some(neighbor) = neighbor {
+                        return Some(neighbor);
+                    }
+                }
+            }
+        }
+
         if let Some(sibling) = self.find_direct_sibling_target(from, direction) {
             return Some(sibling);
         }
@@ -627,9 +655,58 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) {
-        let selection = self.selection(layout);
+        let mut selection = self.selection(layout);
 
         if let Some(target) = self.find_natural_join_target(selection, direction) {
+            let map = self.map();
+
+            // If the selection is a leaf at the edge of a container that matches the direction,
+            // lift the selection to that container so we can merge whole groups.
+            if let Some(parent) = selection.parent(map) {
+                let parent_layout = self.layout(parent);
+                let is_edge = match direction {
+                    Direction::Right | Direction::Down => selection.next_sibling(map).is_none(),
+                    Direction::Left | Direction::Up => selection.prev_sibling(map).is_none(),
+                };
+
+                if parent_layout.orientation() == direction.orientation()
+                    && !parent_layout.is_group()
+                    && (is_edge || parent.children(map).count() == 2)
+                    && target.parent(map) != Some(parent)
+                    && !target.ancestors(map).any(|a| a == parent)
+                {
+                    selection = parent;
+                }
+            }
+
+            // If the selection is now a container that matches the join orientation,
+            // absorb the target into it to avoid creating an extra nesting layer.
+            let selection_layout = self.layout(selection);
+            let target_is_ancestor = target.ancestors(map).any(|a| a == selection);
+            let selection_is_ancestor = selection.ancestors(map).any(|a| a == target);
+            if self.window_at(selection).is_none()
+                && selection_layout.orientation() == direction.orientation()
+                && !selection_layout.is_group()
+                && !target_is_ancestor
+                && !selection_is_ancestor
+                && target.parent(map) != Some(selection)
+            {
+                match direction {
+                    Direction::Right | Direction::Down => {
+                        target.detach(&mut self.tree).push_back(selection);
+                    }
+                    Direction::Left | Direction::Up => {
+                        if let Some(first) = selection.first_child(map) {
+                            target.detach(&mut self.tree).insert_before(first);
+                        } else {
+                            target.detach(&mut self.tree).push_back(selection);
+                        }
+                    }
+                }
+                self.select(selection);
+                return;
+            }
+
             self.perform_natural_join(layout, selection, target, direction);
             if self.tree.data.window.at(selection).is_some() {
                 self.select(selection);
@@ -1573,6 +1650,20 @@ impl TraditionalLayoutSystem {
         node1: NodeId,
         node2: NodeId,
     ) -> NodeId {
+        let map = self.map();
+
+        if node1 == node2 {
+            return node1;
+        }
+
+        if node1.ancestors(map).any(|ancestor| ancestor == node2) {
+            return node2;
+        }
+
+        if node2.ancestors(map).any(|ancestor| ancestor == node1) {
+            return node1;
+        }
+
         let parent1 = node1.parent(self.map());
         let parent2 = node2.parent(self.map());
         if let (Some(p1), Some(p2)) = (parent1, parent2) {
