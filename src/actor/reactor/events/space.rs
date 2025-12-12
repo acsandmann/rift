@@ -200,6 +200,10 @@ impl SpaceEventHandler {
         let new_displays: HashSet<String> =
             screens.iter().map(|s| s.display_uuid.clone()).collect();
         let displays_changed = previous_displays != new_displays;
+        if displays_changed {
+            let active_list: Vec<String> = new_displays.iter().cloned().collect();
+            reactor.layout_manager.layout_engine.prune_display_state(&active_list);
+        }
 
         let spaces: Vec<Option<SpaceId>> = screens.iter().map(|s| s.space).collect();
         let spaces_all_none = spaces.iter().all(|space| space.is_none());

@@ -276,8 +276,12 @@ impl WmController {
                 if self.login_window_pid == Some(pid) {
                     info!("Login window deactivated");
                     self.login_window_active = false;
-                    self.events_tx
-                        .send(Event::SpaceChanged(self.active_spaces(), self.get_windows()));
+                    let active_spaces = self.active_spaces();
+                    info!(
+                        ?active_spaces,
+                        "Login window deactivated; recomputing active_spaces"
+                    );
+                    self.events_tx.send(Event::SpaceChanged(active_spaces, self.get_windows()));
                 }
                 self.events_tx.send(Event::ApplicationGloballyDeactivated(pid));
             }
@@ -321,11 +325,51 @@ impl WmController {
                 }
             }
             ScreenParametersChanged(screens, converter, spaces) => {
+                let default_disable = self.config.config.settings.default_disable;
+                let prev_display_uuids: HashSet<String> =
+                    self.cur_display_uuid.iter().cloned().collect();
+                let new_display_uuids: HashSet<String> =
+                    screens.iter().map(|s| s.display_uuid.clone()).collect();
+                let displays_changed = prev_display_uuids != new_display_uuids;
+
+                info!(
+                    default_disable,
+                    prev_displays = ?prev_display_uuids,
+                    new_displays = ?new_display_uuids,
+                    displays_changed,
+                    screen_count = screens.len(),
+                    "ScreenParametersChanged received"
+                );
+
+                if displays_changed && !default_disable {
+                    // When displays change in default-enable mode, drop any remembered
+                    // disabled display/space state so surviving displays default to enabled.
+                    self.disabled_spaces.clear();
+                    self.disabled_displays.clear();
+                    info!(
+                        "Cleared disabled state due to display set change (default_disable=false)"
+                    );
+                }
+                if !default_disable && screens.len() == 1 {
+                    // After sleep/resume with a single display, ensure we default to enabled.
+                    self.disabled_spaces.clear();
+                    self.disabled_displays.clear();
+                    info!("Cleared disabled state for single-display default-enable scenario");
+                }
+
                 self.screen_params_received = true;
                 self.cur_screen_id = screens.iter().map(|s| s.id).collect();
                 self.cur_display_uuid = screens.iter().map(|s| s.display_uuid.clone()).collect();
                 self.handle_space_changed(spaces);
                 let active_spaces = self.active_spaces();
+                info!(
+                    ?active_spaces,
+                    disabled_spaces = ?self.disabled_spaces,
+                    enabled_spaces = ?self.enabled_spaces,
+                    disabled_displays = ?self.disabled_displays,
+                    enabled_displays = ?self.enabled_displays,
+                    "Computed active_spaces after ScreenParametersChanged"
+                );
                 let frames: Vec<CGRect> = screens.iter().map(|s| s.frame).collect();
                 self.cur_frames = frames.clone();
                 let snapshots: Vec<reactor::ScreenSnapshot> = screens
@@ -590,6 +634,20 @@ impl WmController {
     fn handle_space_changed(&mut self, spaces: Vec<Option<SpaceId>>) {
         let previous_spaces = self.cur_space.clone();
         self.cur_space = spaces;
+
+        let active_spaces: HashSet<SpaceId> =
+            self.cur_space.iter().copied().flatten().collect::<HashSet<_>>();
+        let active_displays: HashSet<String> =
+            self.cur_display_uuid.iter().cloned().collect::<HashSet<_>>();
+        let active_screen_ids: HashSet<ScreenId> =
+            self.cur_screen_id.iter().copied().collect::<HashSet<_>>();
+
+        self.disabled_spaces.retain(|space| active_spaces.contains(space));
+        self.enabled_spaces.retain(|space| active_spaces.contains(space));
+        self.disabled_displays.retain(|uuid| active_displays.contains(uuid));
+        self.enabled_displays.retain(|uuid| active_displays.contains(uuid));
+        self.last_known_space_by_screen
+            .retain(|screen, _| active_screen_ids.contains(screen));
 
         debug!(
             "handle_space_changed: previous_spaces={:?}, cur_space={:?}, cur_screen_id.len={}",

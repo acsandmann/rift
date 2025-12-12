@@ -10,7 +10,7 @@ use tracing::{debug, info, warn};
 use super::{Direction, FloatingManager, LayoutId, LayoutSystemKind, WorkspaceLayouts};
 use crate::actor::app::{AppInfo, WindowId, pid_t};
 use crate::actor::broadcast::{BroadcastEvent, BroadcastSender};
-use crate::common::collections::HashMap;
+use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::LayoutSettings;
 use crate::layout_engine::LayoutSystem;
 use crate::model::{VirtualWorkspaceId, VirtualWorkspaceManager};
@@ -529,6 +529,16 @@ impl LayoutEngine {
                 *space = new_space;
             }
         }
+    }
+
+    pub fn prune_display_state(&mut self, active_display_uuids: &[String]) {
+        let active: HashSet<&str> = active_display_uuids.iter().map(|s| s.as_str()).collect();
+
+        self.display_last_space.retain(|uuid, _| active.contains(uuid.as_str()));
+
+        self.space_display_map.retain(|_, uuid_opt| {
+            uuid_opt.as_ref().map(|uuid| active.contains(uuid.as_str())).unwrap_or(false)
+        });
     }
 
     pub fn new(

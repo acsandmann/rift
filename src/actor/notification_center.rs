@@ -71,10 +71,22 @@ define_class! {
         #[unsafe(method(recvWakeEvent:))]
         fn recv_wake_event(&self, notif: &NSNotification) {
             trace!("{notif:#?}");
+            {
+                let mut cache = self.ivars().screen_cache.borrow_mut();
+                cache.mark_sleeping(false);
+                cache.mark_dirty();
+            }
             // On wake, refresh state immediately so display swaps while asleep
             // are reflected as soon as possible.
             self.send_event(WmEvent::SystemWoke);
             self.send_screen_parameters();
+        }
+
+        #[unsafe(method(recvSleepEvent:))]
+        fn recv_sleep_event(&self, notif: &NSNotification) {
+            trace!("{notif:#?}");
+            let mut cache = self.ivars().screen_cache.borrow_mut();
+            cache.mark_sleeping(true);
         }
 
         #[unsafe(method(recvPowerEvent:))]
@@ -148,12 +160,10 @@ impl NotificationCenterInner {
         &self,
     ) -> Option<(Vec<ScreenDescriptor>, CoordinateConverter, Vec<Option<SpaceId>>)> {
         let mut screen_cache = self.ivars().screen_cache.borrow_mut();
-        let Some((descriptors, converter)) = screen_cache.update_screen_config() else {
+        screen_cache.refresh().or_else(|| {
             warn!("Unable to refresh screen configuration; skipping update");
-            return None;
-        };
-        let spaces = screen_cache.get_screen_spaces();
-        Some((descriptors, converter, spaces))
+            None
+        })
     }
 
     fn send_screen_parameters(&self) {
@@ -277,6 +287,10 @@ impl NotificationCenterInner {
             ?aggregated,
             immediate, "Display reconfig detected; scheduling refresh"
         );
+        {
+            let mut cache = ivars.screen_cache.borrow_mut();
+            cache.mark_dirty();
+        }
         if immediate {
             self.schedule_screen_refresh_after(0, 0);
         } else {
@@ -433,6 +447,12 @@ impl NotificationCenter {
             register_unsafe(
                 sel!(recvWakeEvent:),
                 NSWorkspaceDidWakeNotification,
+                workspace_center,
+                workspace,
+            );
+            register_unsafe(
+                sel!(recvSleepEvent:),
+                NSWorkspaceWillSleepNotification,
                 workspace_center,
                 workspace,
             );
