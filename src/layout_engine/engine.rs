@@ -922,14 +922,14 @@ impl LayoutEngine {
                 space,
                 visible_spaces,
                 visible_space_centers,
-                Direction::Left,
+                Direction::Right,
                 is_floating,
             ),
             LayoutCommand::PrevWindow => self.move_focus_internal(
                 space,
                 visible_spaces,
                 visible_space_centers,
-                Direction::Right,
+                Direction::Left,
                 is_floating,
             ),
             LayoutCommand::MoveFocus(direction) => {
