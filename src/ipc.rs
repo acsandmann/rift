@@ -113,6 +113,27 @@ impl MachHandler {
         }
     }
 
+    fn forget_reactor_query_sender(event: Event) {
+        match event {
+            Event::QueryWorkspaces { response, .. } => std::mem::forget(response),
+            Event::QueryWindows { response, .. } => std::mem::forget(response),
+            Event::QueryActiveWorkspace { response, .. } => std::mem::forget(response),
+            Event::QueryDisplays(response) => std::mem::forget(response),
+            Event::QueryWindowInfo { response, .. } => std::mem::forget(response),
+            Event::QueryApplications(response) => std::mem::forget(response),
+            Event::QueryLayoutState { response, .. } => std::mem::forget(response),
+            Event::QueryMetrics(response) => std::mem::forget(response),
+            _ => {}
+        }
+    }
+
+    fn forget_config_query_sender(event: config_actor::Event) {
+        match event {
+            config_actor::Event::QueryConfig(response) => std::mem::forget(response),
+            config_actor::Event::ApplyConfig { response, .. } => std::mem::forget(response),
+        }
+    }
+
     fn perform_query<T>(
         &self,
         make_event: impl FnOnce(r#continue::Sender<T>) -> Event,
@@ -124,7 +145,11 @@ impl MachHandler {
         let event = make_event(cont_tx);
 
         if let Err(e) = self.reactor_tx.try_send(event) {
-            return Err(format!("Failed to send query: {}", e));
+            let msg = format!("{e}");
+            let tokio::sync::mpsc::error::SendError((_span, event)) = e;
+            // `continue::Sender` panics on drop if never used.
+            Self::forget_reactor_query_sender(event);
+            return Err(format!("Failed to send query: {msg}"));
         }
 
         match block_on(cont_fut, Duration::from_secs(5)) {
@@ -144,7 +169,10 @@ impl MachHandler {
         let event = make_event(cont_tx);
 
         if let Err(e) = self.config_tx.try_send(event) {
-            return Err(format!("Failed to send config query: {}", e));
+            let msg = format!("{e}");
+            let tokio::sync::mpsc::error::SendError((_span, event)) = e;
+            Self::forget_config_query_sender(event);
+            return Err(format!("Failed to send config query: {msg}"));
         }
 
         match block_on(cont_fut, Duration::from_secs(5)) {

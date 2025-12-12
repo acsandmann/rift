@@ -165,9 +165,15 @@ impl MissionControlActor {
         }
 
         let (tx, fut) = continuation::<Vec<WorkspaceData>>();
-        let _ = self
-            .reactor_tx
-            .try_send(reactor::Event::QueryWorkspaces { space_id: None, response: tx });
+        let event = reactor::Event::QueryWorkspaces { space_id: None, response: tx };
+        if let Err(e) = self.reactor_tx.try_send(event) {
+            let tokio::sync::mpsc::error::SendError((_span, event)) = e;
+            if let reactor::Event::QueryWorkspaces { response, .. } = event {
+                std::mem::forget(response);
+            }
+            tracing::warn!("workspace query send failed");
+            return;
+        }
         match block_on(fut, std::time::Duration::from_secs_f32(0.75)) {
             Ok(resp) => {
                 let overlay = self.ensure_overlay();
@@ -187,10 +193,18 @@ impl MissionControlActor {
 
         let active_space = crate::sys::screen::get_active_space_number();
         let (tx, fut) = continuation::<Vec<WindowData>>();
-        let _ = self.reactor_tx.try_send(reactor::Event::QueryWindows {
+        let event = reactor::Event::QueryWindows {
             space_id: active_space,
             response: tx,
-        });
+        };
+        if let Err(e) = self.reactor_tx.try_send(event) {
+            let tokio::sync::mpsc::error::SendError((_span, event)) = e;
+            if let reactor::Event::QueryWindows { response, .. } = event {
+                std::mem::forget(response);
+            }
+            tracing::warn!("windows query send failed");
+            return;
+        }
         let windows = match block_on(fut, std::time::Duration::from_secs_f32(0.75)) {
             Ok(windows) => windows,
             Err(_) => {
@@ -205,9 +219,15 @@ impl MissionControlActor {
 
     fn refresh_all_workspaces_highlight(&mut self) {
         let (tx, fut) = continuation::<Option<VirtualWorkspaceId>>();
-        let _ = self
-            .reactor_tx
-            .try_send(reactor::Event::QueryActiveWorkspace { space_id: None, response: tx });
+        let event = reactor::Event::QueryActiveWorkspace { space_id: None, response: tx };
+        if let Err(e) = self.reactor_tx.try_send(event) {
+            let tokio::sync::mpsc::error::SendError((_span, event)) = e;
+            if let reactor::Event::QueryActiveWorkspace { response, .. } = event {
+                std::mem::forget(response);
+            }
+            tracing::warn!("active workspace query send failed");
+            return;
+        }
         match block_on(fut, std::time::Duration::from_secs_f32(0.75)) {
             Ok(active_workspace) => {
                 if let Some(overlay) = self.overlay.as_ref() {

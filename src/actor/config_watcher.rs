@@ -153,14 +153,28 @@ impl ConfigWatcher {
             response: tx,
         };
 
-        self.config_tx.send(msg);
+        if let Err(e) = self.config_tx.try_send(msg) {
+            let tokio::sync::mpsc::error::SendError((_span, msg)) = e;
+            match msg {
+                ConfigEvent::ApplyConfig { response, .. } => std::mem::forget(response),
+                ConfigEvent::QueryConfig(response) => std::mem::forget(response),
+            }
+            return Err("Config actor unavailable".to_string());
+        }
 
         fut.await
     }
 
     async fn query_config(&self) -> Result<config::Config, ()> {
         let (tx, fut) = r#continue::continuation();
-        self.config_tx.send(ConfigEvent::QueryConfig(tx));
+        let event = ConfigEvent::QueryConfig(tx);
+        if let Err(e) = self.config_tx.try_send(event) {
+            let tokio::sync::mpsc::error::SendError((_span, event)) = e;
+            if let ConfigEvent::QueryConfig(response) = event {
+                std::mem::forget(response);
+            }
+            return Err(());
+        }
         Ok(fut.await)
     }
 }
