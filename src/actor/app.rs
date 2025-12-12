@@ -992,14 +992,17 @@ impl State {
             Event::ApplicationDeactivated(self.pid)
         } else {
             let (quiet_activation, quiet_window_change) = match self.last_activated.take() {
-                Some((ts, quiet_activation, quiet_window_change, tx))
-                    if ts.elapsed() < Duration::from_millis(1000) =>
-                {
-                    trace!("by us");
+                Some((ts, quiet_activation, quiet_window_change, tx)) => {
                     _ = tx.send(());
-                    (quiet_activation, quiet_window_change)
+                    if ts.elapsed() < Duration::from_millis(1000) {
+                        trace!("by us");
+                        (quiet_activation, quiet_window_change)
+                    } else {
+                        trace!("by user");
+                        (Quiet::No, None)
+                    }
                 }
-                _ => {
+                None => {
                     trace!("by user");
                     (Quiet::No, None)
                 }
