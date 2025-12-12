@@ -38,6 +38,21 @@ pub enum WorkspaceError {
     InconsistentState(String),
 }
 
+/// Details about an app rule assignment when Rift will manage the window.
+#[derive(Debug, Clone, Copy)]
+pub struct AppRuleAssignment {
+    pub workspace_id: VirtualWorkspaceId,
+    pub floating: bool,
+    pub prev_rule_decision: bool,
+}
+
+/// Result of evaluating app rules for a window.
+#[derive(Debug, Clone, Copy)]
+pub enum AppRuleResult {
+    Managed(AppRuleAssignment),
+    Unmanaged,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VirtualWorkspace {
     pub name: String,
@@ -858,7 +873,7 @@ impl VirtualWorkspaceManager {
         window_title: Option<&str>,
         ax_role: Option<&str>,
         ax_subrole: Option<&str>,
-    ) -> Result<(VirtualWorkspaceId, bool, bool), WorkspaceError> {
+    ) -> Result<AppRuleResult, WorkspaceError> {
         let prev_rule_decision =
             self.last_rule_decision.get(&(space, window_id)).copied().unwrap_or(false);
 
@@ -874,6 +889,11 @@ impl VirtualWorkspaceManager {
         let existing_assignment = self.window_to_workspace.get(&(space, window_id)).copied();
 
         if let Some(rule) = rule_match {
+            if !rule.manage {
+                self.window_rule_floating.remove(&(space, window_id));
+                return Ok(AppRuleResult::Unmanaged);
+            }
+
             let target_workspace_id = if let Some(ref ws_sel) = rule.workspace {
                 let maybe_idx: Option<usize> = match ws_sel {
                     WorkspaceSelector::Index(i) => Some(*i),
@@ -932,7 +952,11 @@ impl VirtualWorkspaceManager {
                 } else {
                     self.window_rule_floating.remove(&(space, window_id));
                 }
-                return Ok((existing_ws, rule.floating, prev_rule_decision));
+                return Ok(AppRuleResult::Managed(AppRuleAssignment {
+                    workspace_id: existing_ws,
+                    floating: rule.floating,
+                    prev_rule_decision,
+                }));
             }
 
             if self.assign_window_to_workspace(space, window_id, target_workspace_id) {
@@ -941,7 +965,11 @@ impl VirtualWorkspaceManager {
                 } else {
                     self.window_rule_floating.remove(&(space, window_id));
                 }
-                return Ok((target_workspace_id, rule.floating, prev_rule_decision));
+                return Ok(AppRuleResult::Managed(AppRuleAssignment {
+                    workspace_id: target_workspace_id,
+                    floating: rule.floating,
+                    prev_rule_decision,
+                }));
             } else {
                 error!("Failed to assign window to workspace from app rule");
             }
@@ -949,13 +977,21 @@ impl VirtualWorkspaceManager {
 
         if let Some(existing_ws) = existing_assignment {
             self.window_rule_floating.remove(&(space, window_id));
-            return Ok((existing_ws, false, prev_rule_decision));
+            return Ok(AppRuleResult::Managed(AppRuleAssignment {
+                workspace_id: existing_ws,
+                floating: false,
+                prev_rule_decision,
+            }));
         }
 
         let default_workspace_id = self.get_default_workspace(space)?;
         if self.assign_window_to_workspace(space, window_id, default_workspace_id) {
             self.window_rule_floating.remove(&(space, window_id));
-            Ok((default_workspace_id, false, prev_rule_decision))
+            Ok(AppRuleResult::Managed(AppRuleAssignment {
+                workspace_id: default_workspace_id,
+                floating: false,
+                prev_rule_decision,
+            }))
         } else {
             error!("Failed to assign window to default workspace");
             Err(WorkspaceError::AssignmentFailed)
@@ -1235,6 +1271,37 @@ mod tests {
     use crate::actor::app::WindowId;
     use crate::sys::screen::SpaceId;
 
+    fn expect_managed(result: Result<AppRuleResult, WorkspaceError>) -> AppRuleAssignment {
+        match result {
+            Ok(AppRuleResult::Managed(decision)) => decision,
+            Ok(AppRuleResult::Unmanaged) => {
+                panic!("App rule unexpectedly marked window as unmanaged")
+            }
+            Err(e) => panic!("assign_window_with_app_info failed: {:?}", e),
+        }
+    }
+
+    fn assign(
+        manager: &mut VirtualWorkspaceManager,
+        window_id: WindowId,
+        space: SpaceId,
+        app_id: Option<&str>,
+        app_name: Option<&str>,
+        window_title: Option<&str>,
+        ax_role: Option<&str>,
+        ax_subrole: Option<&str>,
+    ) -> AppRuleAssignment {
+        expect_managed(manager.assign_window_with_app_info(
+            window_id,
+            space,
+            app_id,
+            app_name,
+            window_title,
+            ax_role,
+            ax_subrole,
+        ))
+    }
+
     #[test]
     fn test_virtual_workspace_creation() {
         let mut manager = VirtualWorkspaceManager::new();
@@ -1337,6 +1404,7 @@ mod tests {
         settings.default_workspace = 3;
 
         let mut manager = VirtualWorkspaceManager::new_with_config(&settings);
+
         let space = SpaceId::new(42);
         let workspaces = manager.list_workspaces(space);
         let expected_ws = workspaces.get(settings.default_workspace).unwrap().0;
@@ -1381,6 +1449,7 @@ mod tests {
                 app_id: Some("com.example.test".into()),
                 workspace: None,
                 floating: true,
+                manage: true,
                 app_name: None,
                 title_regex: None,
                 title_substring: None,
@@ -1392,6 +1461,7 @@ mod tests {
                 app_id: None,
                 workspace: Some(WorkspaceSelector::Index(1)),
                 floating: false,
+                manage: true,
                 app_name: Some("Calendar".into()),
                 title_regex: None,
                 title_substring: None,
@@ -1403,6 +1473,7 @@ mod tests {
                 app_id: Some("com.example.foo".into()),
                 workspace: Some(WorkspaceSelector::Index(0)),
                 floating: false,
+                manage: true,
                 app_name: None,
                 title_regex: None,
                 title_substring: Some("Preferences".into()),
@@ -1414,6 +1485,7 @@ mod tests {
                 app_id: Some("com.example.foo".into()),
                 workspace: Some(WorkspaceSelector::Index(2)),
                 floating: false,
+                manage: true,
                 app_name: None,
                 title_regex: Some(r"Dialog\s+\d+".into()),
                 title_substring: None,
@@ -1425,6 +1497,7 @@ mod tests {
                 app_id: Some("com.example.special".into()),
                 workspace: None,
                 floating: true,
+                manage: true,
                 app_name: None,
                 title_regex: None,
                 title_substring: None,
@@ -1436,6 +1509,7 @@ mod tests {
                 app_id: Some("com.example.name".into()),
                 workspace: Some(WorkspaceSelector::Name("coding".into())),
                 floating: false,
+                manage: true,
                 app_name: None,
                 title_regex: None,
                 title_substring: None,
@@ -1447,6 +1521,7 @@ mod tests {
                 app_id: Some("com.example.tie".into()),
                 workspace: Some(WorkspaceSelector::Index(0)),
                 floating: false,
+                manage: true,
                 app_name: None,
                 title_regex: None,
                 title_substring: None,
@@ -1457,6 +1532,7 @@ mod tests {
                 app_id: Some("com.example.tie".into()),
                 workspace: Some(WorkspaceSelector::Index(2)),
                 floating: false,
+                manage: true,
                 app_name: None,
                 title_regex: None,
                 title_substring: Some("Editor".into()),
@@ -1468,6 +1544,7 @@ mod tests {
                 app_id: Some("app.zen-browser.zen".into()),
                 workspace: None,
                 floating: true,
+                manage: true,
                 app_name: None,
                 title_regex: None,
                 title_substring: Some("Bitwarden".into()),
@@ -1478,6 +1555,7 @@ mod tests {
                 app_id: Some("app.zen-browser.zen".into()),
                 workspace: Some(WorkspaceSelector::Index(2)),
                 floating: false,
+                manage: true,
                 app_name: None,
                 title_regex: None,
                 title_substring: None,
@@ -1489,6 +1567,7 @@ mod tests {
                 app_id: Some("app.zen-browser.zen".into()),
                 workspace: Some(WorkspaceSelector::Index(1)),
                 floating: false,
+                manage: true,
                 app_name: None,
                 title_regex: None,
                 title_substring: None,
@@ -1499,6 +1578,7 @@ mod tests {
                 app_id: Some("app.zen-browser.zen".into()),
                 workspace: Some(WorkspaceSelector::Index(3)),
                 floating: true,
+                manage: true,
                 app_name: None,
                 title_regex: None,
                 title_substring: Some("bitwarden".into()),
@@ -1511,48 +1591,46 @@ mod tests {
 
         // 1. Floating persistence via app_id (case-insensitive)
         let w_float = WindowId::new(10, 1);
-        let (_, should_float, _) = manager
-            .assign_window_with_app_info(
-                w_float,
-                space1,
-                Some("COM.EXAMPLE.Test"),
-                None,
-                None,
-                None,
-                None,
-            )
-            .unwrap();
-        assert!(should_float);
-        // Indirect verification via floating assignment return value; internal map is private.
-        assert!(should_float);
+        let assignment = assign(
+            &mut manager,
+            w_float,
+            space1,
+            Some("COM.EXAMPLE.Test"),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(assignment.floating);
+
         manager.remove_window(w_float);
+
         // After removal, reassign should still float.
-        let (_, should_float_again, _) = manager
-            .assign_window_with_app_info(
-                w_float,
-                space1,
-                Some("com.example.test"),
-                None,
-                None,
-                None,
-                None,
-            )
-            .unwrap();
-        assert!(should_float_again);
+        let assignment_again = assign(
+            &mut manager,
+            w_float,
+            space1,
+            Some("com.example.test"),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(assignment_again.floating);
 
         // 2. Match by app_name
         let w_name = WindowId::new(20, 2);
-        let (ws_name, _, _) = manager
-            .assign_window_with_app_info(
-                w_name,
-                space1,
-                None,
-                Some("MyCalendarApp"),
-                None,
-                None,
-                None,
-            )
-            .unwrap();
+        let ws_name = assign(
+            &mut manager,
+            w_name,
+            space1,
+            None,
+            Some("MyCalendarApp"),
+            None,
+            None,
+            None,
+        )
+        .workspace_id;
         let coding_idx = 1; // Calendar rule points to workspace index 1
         let expected_ws_name = manager.list_workspaces(space1).get(coding_idx).unwrap().0;
         assert_eq!(ws_name, expected_ws_name);
@@ -1560,28 +1638,28 @@ mod tests {
         // 3. Title substring and regex for same app
         let w_pref = WindowId::new(30, 3);
         let w_dialog = WindowId::new(30, 4);
-        let (ws_pref, _, _) = manager
-            .assign_window_with_app_info(
-                w_pref,
-                space1,
-                Some("com.example.foo"),
-                None,
-                Some("App Preferences"),
-                None,
-                None,
-            )
-            .unwrap();
-        let (ws_dialog, _, _) = manager
-            .assign_window_with_app_info(
-                w_dialog,
-                space1,
-                Some("com.example.foo"),
-                None,
-                Some("Dialog 42"),
-                None,
-                None,
-            )
-            .unwrap();
+        let ws_pref = assign(
+            &mut manager,
+            w_pref,
+            space1,
+            Some("com.example.foo"),
+            None,
+            Some("App Preferences"),
+            None,
+            None,
+        )
+        .workspace_id;
+        let ws_dialog = assign(
+            &mut manager,
+            w_dialog,
+            space1,
+            Some("com.example.foo"),
+            None,
+            Some("Dialog 42"),
+            None,
+            None,
+        )
+        .workspace_id;
         let expected_pref = manager.list_workspaces(space1).get(0).unwrap().0;
         let expected_dialog = manager.list_workspaces(space1).get(2).unwrap().0;
         assert_eq!(ws_pref, expected_pref);
@@ -1589,112 +1667,113 @@ mod tests {
 
         // 4. AX role + subrole floating
         let w_ax = WindowId::new(40, 5);
-        let (_ws_ax, ax_float, _) = manager
-            .assign_window_with_app_info(
-                w_ax,
-                space1,
-                Some("com.example.special"),
-                None,
-                None,
-                Some("AXWindow"),
-                Some("AXDialog"),
-            )
-            .unwrap();
-        assert!(ax_float);
+        let ax_assignment = assign(
+            &mut manager,
+            w_ax,
+            space1,
+            Some("com.example.special"),
+            None,
+            None,
+            Some("AXWindow"),
+            Some("AXDialog"),
+        );
+        assert!(ax_assignment.floating);
 
         // 5. Workspace name resolution
         let w_named = WindowId::new(50, 6);
-        let (ws_named, _, _) = manager
-            .assign_window_with_app_info(
-                w_named,
-                space1,
-                Some("com.example.name"),
-                None,
-                None,
-                None,
-                None,
-            )
-            .unwrap();
+        let ws_named = assign(
+            &mut manager,
+            w_named,
+            space1,
+            Some("com.example.name"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .workspace_id;
         let coding_ws =
             manager.list_workspaces(space1).iter().find(|(_, n)| n == "coding").unwrap().0;
         assert_eq!(ws_named, coding_ws);
 
         // 6. Specificity tie-breaking (generic vs substring)
         let w_tie = WindowId::new(60, 7);
-        let (ws_tie, _, _) = manager
-            .assign_window_with_app_info(
-                w_tie,
-                space1,
-                Some("com.example.tie"),
-                None,
-                Some("Editor - Untitled"),
-                None,
-                None,
-            )
-            .unwrap();
+        let ws_tie = assign(
+            &mut manager,
+            w_tie,
+            space1,
+            Some("com.example.tie"),
+            None,
+            Some("Editor - Untitled"),
+            None,
+            None,
+        )
+        .workspace_id;
         let expected_specific = manager.list_workspaces(space1).get(2).unwrap().0; // substring rule points to 2
         assert_eq!(ws_tie, expected_specific);
 
         // 7. Reapplication updates existing window to floating (Bitwarden title)
         let w_bw = WindowId::new(70, 8);
-        let (bw_initial_ws, bw_initial_float, _) = manager
-            .assign_window_with_app_info(
-                w_bw,
-                space1,
-                Some("app.zen-browser.zen"),
-                None,
-                None,
-                None,
-                None,
-            )
-            .unwrap();
-        assert!(!bw_initial_float);
-        let (bw_updated_ws, bw_updated_float, _) = manager
-            .assign_window_with_app_info(
-                w_bw,
-                space1,
-                Some("app.zen-browser.zen"),
-                None,
-                Some("Bitwarden Login"),
-                None,
-                None,
-            )
-            .unwrap();
-        assert_eq!(bw_initial_ws, bw_updated_ws);
-        assert!(bw_updated_float);
+        let bw_initial_assignment = assign(
+            &mut manager,
+            w_bw,
+            space1,
+            Some("app.zen-browser.zen"),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(!bw_initial_assignment.floating);
+        let bw_updated_assignment = assign(
+            &mut manager,
+            w_bw,
+            space1,
+            Some("app.zen-browser.zen"),
+            None,
+            Some("Bitwarden Login"),
+            None,
+            None,
+        );
+        assert_eq!(
+            bw_initial_assignment.workspace_id,
+            bw_updated_assignment.workspace_id
+        );
+        assert!(bw_updated_assignment.floating);
 
         // 8. Workspace override + floating with specific substring on different space
         let w_bw2 = WindowId::new(80, 9);
-        let (bw2_initial_ws, bw2_initial_float, _) = manager
-            .assign_window_with_app_info(
-                w_bw2,
-                space2,
-                Some("app.zen-browser.zen"),
-                None,
-                None,
-                None,
-                None,
-            )
-            .unwrap();
-        assert!(!bw2_initial_float);
-        let (bw2_updated_ws, bw2_updated_float, _) = manager
-            .assign_window_with_app_info(
-                w_bw2,
-                space2,
-                Some("app.zen-browser.zen"),
-                None,
-                Some("Bitwarden Vault"),
-                None,
-                None,
-            )
-            .unwrap();
+        let bw2_initial_assignment = assign(
+            &mut manager,
+            w_bw2,
+            space2,
+            Some("app.zen-browser.zen"),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(!bw2_initial_assignment.floating);
+        let bw2_updated_assignment = assign(
+            &mut manager,
+            w_bw2,
+            space2,
+            Some("app.zen-browser.zen"),
+            None,
+            Some("Bitwarden Vault"),
+            None,
+            None,
+        );
         // The generic rule with workspace index 1 should apply first.
         // When title matches, the specific rule (index 3, floating) should override.
         let expected_initial = manager.list_workspaces(space2).get(2).unwrap().0; // workspace index 1
         let expected_updated = manager.list_workspaces(space2).get(3).unwrap().0; // workspace index 3
-        assert_eq!(bw2_initial_ws, expected_initial);
+        assert_eq!(bw2_initial_assignment.workspace_id, expected_initial);
         // Workspace may remain same depending on rule ordering; ensure floating toggled and workspace is one of the target candidates.
-        assert!(bw2_updated_ws == expected_initial || bw2_updated_ws == expected_updated);
-        assert!(bw2_updated_float);
+        assert!(
+            bw2_updated_assignment.workspace_id == expected_initial
+                || bw2_updated_assignment.workspace_id == expected_updated
+        );
+        assert!(bw2_updated_assignment.floating);
     }
 }

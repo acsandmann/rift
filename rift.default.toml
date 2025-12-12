@@ -229,6 +229,7 @@ workspace_names = [
 #   - workspace (integer, 0-based): target workspace index. If omitted or invalid, uses the active workspace.
 #     Alternatively, `workspace` may be a workspace name string to target by name.
 #   - floating (boolean): whether matched windows should float by default.
+#   - manage (boolean): whether Rift should manage the matching window. Set to false to ignore the window completely (default = true).
 #
 # Matching behavior (summary):
 #   1. All rules that match a window are evaluated.

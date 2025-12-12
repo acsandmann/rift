@@ -34,7 +34,13 @@ impl AppEventHandler {
         let all_windows: Vec<WindowId> = windows
             .iter()
             .filter_map(|info| reactor.window_manager.window_ids.get(&info.id).copied())
-            .filter(|wid| reactor.window_is_standard(*wid))
+            .filter(|wid| {
+                reactor
+                    .window_manager
+                    .windows
+                    .get(wid)
+                    .map_or(false, |window| window.is_manageable)
+            })
             .collect();
 
         if !all_windows.is_empty() {

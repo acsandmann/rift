@@ -552,6 +552,7 @@ fn it_respects_wsid_suppression_for_apply_app_rules() {
         is_ax_root: info.is_root,
         is_minimized: info.is_minimized,
         is_manageable: true,
+        ignore_app_rule: false,
         window_server_id: info.sys_id,
         bundle_id: info.bundle_id.clone(),
         bundle_path: info.path.clone(),

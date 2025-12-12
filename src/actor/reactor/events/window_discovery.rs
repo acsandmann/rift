@@ -3,6 +3,7 @@ use tracing::{trace, warn};
 use crate::actor::app::{AppInfo, WindowId, WindowInfo, pid_t};
 use crate::actor::reactor::{Event, LayoutEvent, Reactor, WindowState, utils};
 use crate::common::collections::{BTreeMap, HashSet};
+use crate::model::virtual_workspace::AppRuleResult;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{self, WindowServerId};
 
@@ -249,6 +250,7 @@ impl WindowDiscoveryHandler {
                         is_ax_root: info.is_root,
                         is_minimized: info.is_minimized,
                         is_manageable: false,
+                        ignore_app_rule: false,
                         window_server_id: info.sys_id,
                         bundle_id: info.bundle_id.clone(),
                         bundle_path: info.path.clone(),
@@ -386,7 +388,7 @@ impl WindowDiscoveryHandler {
                 for wid in &windows_for_space {
                     let title_opt =
                         reactor.window_manager.windows.get(wid).map(|w| w.title.clone());
-                    if let Err(e) = reactor
+                    let assign_result = reactor
                         .layout_manager
                         .layout_engine
                         .virtual_workspace_manager_mut()
@@ -406,9 +408,31 @@ impl WindowDiscoveryHandler {
                                 .windows
                                 .get(wid)
                                 .and_then(|w| w.ax_subrole.as_deref()),
-                        )
-                    {
-                        warn!("Failed to assign window {:?} to workspace: {:?}", wid, e);
+                        );
+
+                    match assign_result {
+                        Ok(AppRuleResult::Managed(_)) => {
+                            if let Some(window) = reactor.window_manager.windows.get_mut(wid) {
+                                window.ignore_app_rule = false;
+                            }
+                        }
+                        Ok(AppRuleResult::Unmanaged) => {
+                            if let Some(window) = reactor.window_manager.windows.get_mut(wid) {
+                                window.ignore_app_rule = true;
+                            }
+                            let needs_removal = {
+                                let engine = &reactor.layout_manager.layout_engine;
+                                engine
+                                    .virtual_workspace_manager()
+                                    .workspace_for_window(space, *wid)
+                                    .is_some()
+                                    || engine.is_window_floating(*wid)
+                            };
+                            if needs_removal {
+                                reactor.send_layout_event(LayoutEvent::WindowRemoved(*wid));
+                            }
+                        }
+                        Err(e) => warn!("Failed to assign window {:?} to workspace: {:?}", wid, e),
                     }
                 }
             }
@@ -420,6 +444,14 @@ impl WindowDiscoveryHandler {
                 Option<String>,
             )> = windows_for_space
                 .iter()
+                .filter(|&&wid| {
+                    reactor
+                        .window_manager
+                        .windows
+                        .get(&wid)
+                        .map(|window| window.is_effectively_manageable())
+                        .unwrap_or(false)
+                })
                 .map(|&wid| {
                     let title_opt =
                         reactor.window_manager.windows.get(&wid).map(|w| w.title.clone());

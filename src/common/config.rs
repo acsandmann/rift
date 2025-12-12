@@ -104,6 +104,10 @@ pub struct AppWorkspaceRule {
     /// Whether windows should be floating in this workspace
     #[serde(default)]
     pub floating: bool,
+    /// Whether Rift should manage matching windows (defaults to true). `false` makes the
+    /// window invisible to Rift (no tiling, floating, or assignments).
+    #[serde(default = "yes")]
+    pub manage: bool,
     /// Optional: Application name pattern (alternative to app_id)
     pub app_name: Option<String>,
     /// Optional: Regular expression to match window title (applies to window.title)

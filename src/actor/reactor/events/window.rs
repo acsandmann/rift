@@ -64,7 +64,15 @@ impl WindowEventHandler {
                         }
                         reactor.process_windows_for_app_rules(wid.pid, vec![wid], app_info);
                     }
-                    reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+                    let should_dispatch = reactor
+                        .window_manager
+                        .windows
+                        .get(&wid)
+                        .map(|window| window.is_effectively_manageable())
+                        .unwrap_or(false);
+                    if should_dispatch {
+                        reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+                    }
                 }
             }
         }
@@ -169,7 +177,15 @@ impl WindowEventHandler {
         if is_manageable {
             if let Some(space) = reactor.best_space_for_window(&frame, server_id) {
                 if reactor.is_space_active(space) {
-                    reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+                    let should_dispatch = reactor
+                        .window_manager
+                        .windows
+                        .get(&wid)
+                        .map(|window| window.is_effectively_manageable())
+                        .unwrap_or(false);
+                    if should_dispatch {
+                        reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+                    }
                 }
             }
         }

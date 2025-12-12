@@ -13,7 +13,9 @@ use crate::actor::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::LayoutSettings;
 use crate::layout_engine::LayoutSystem;
-use crate::model::{VirtualWorkspaceId, VirtualWorkspaceManager};
+use crate::model::virtual_workspace::{
+    AppRuleAssignment, AppRuleResult, VirtualWorkspaceId, VirtualWorkspaceManager,
+};
 use crate::sys::screen::SpaceId;
 
 #[derive(Debug, Clone)]
@@ -624,7 +626,7 @@ impl LayoutEngine {
                     let ax_subrole_ref = ax_subrole_opt.as_deref();
 
                     let was_floating = self.floating.is_floating(wid);
-                    let (assigned_workspace, rule_says_float, prev_rule_decision) = match self
+                    let assignment = match self
                         .virtual_workspace_manager
                         .assign_window_with_app_info(
                             wid,
@@ -635,12 +637,15 @@ impl LayoutEngine {
                             ax_role_ref,
                             ax_subrole_ref,
                         ) {
-                        Ok((workspace_id, should_float, prev_rule_decision)) => {
-                            (workspace_id, should_float, prev_rule_decision)
-                        }
+                        Ok(AppRuleResult::Managed(decision)) => Some(decision),
+                        Ok(AppRuleResult::Unmanaged) => None,
                         Err(_) => {
                             match self.virtual_workspace_manager.auto_assign_window(wid, space) {
-                                Ok(ws) => (ws, was_floating, false),
+                                Ok(ws) => Some(AppRuleAssignment {
+                                    workspace_id: ws,
+                                    floating: was_floating,
+                                    prev_rule_decision: false,
+                                }),
                                 Err(_) => {
                                     warn!(
                                         "Could not determine workspace for window {:?} on space {:?}; skipping assignment",
@@ -650,6 +655,15 @@ impl LayoutEngine {
                                 }
                             }
                         }
+                    };
+
+                    let AppRuleAssignment {
+                        workspace_id: assigned_workspace,
+                        floating: rule_says_float,
+                        prev_rule_decision,
+                    } = match assignment {
+                        Some(assign) => assign,
+                        None => continue,
                     };
 
                     let should_float = rule_says_float || (!prev_rule_decision && was_floating);
