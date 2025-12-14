@@ -119,6 +119,11 @@ enum ExecuteCommands {
         #[command(subcommand)]
         display_cmd: DisplayCommands,
     },
+    /// macOS space management commands
+    Space {
+        #[command(subcommand)]
+        space_cmd: SpaceCommands,
+    },
     /// Save current state and exit rift
     SaveAndExit,
     /// Print layout tree debugging output in the running rift instance
@@ -137,9 +142,20 @@ enum WindowCommands {
     Next,
     /// Focus the previous window
     Prev,
-    /// Move focus in a direction
+    /// Focus a window by direction or by specific window ID
+    #[command(group = clap::ArgGroup::new("focus-target").required(true).multiple(false))]
     Focus {
-        direction: String, // up, down, left, right
+        /// Direction to move focus (up, down, left, right)
+        #[arg(long, group = "focus-target")]
+        direction: Option<String>,
+
+        /// Internal window ID in pid:idx format (e.g., "1234:0")
+        #[arg(long, group = "focus-target")]
+        window_id: Option<String>,
+
+        /// Optional window server ID for fallback focusing (only used with --window-id)
+        #[arg(long, requires = "window_id")]
+        window_server_id: Option<u32>,
     },
     /// Toggle window floating state
     ToggleFloat,
@@ -228,6 +244,17 @@ enum LayoutCommands {
     /// Toggle centering of the selected column in scrolling layout.
     /// If invoked again on the same selection, centering is removed.
     CenterSelection,
+}
+
+#[derive(Subcommand)]
+enum SpaceCommands {
+    /// Toggle whether rift manages the current macOS space
+    ToggleActivated,
+    /// Switch to an adjacent macOS space (Mission Control spaces, not virtual workspaces)
+    Switch {
+        /// Direction to switch (left, right, up, down)
+        direction: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -505,6 +532,7 @@ fn build_execute_request(execute: ExecuteCommands) -> Result<RiftRequest, String
             map_mission_control_command(mission_cmd)?
         }
         ExecuteCommands::Display { display_cmd } => map_display_command(display_cmd)?,
+        ExecuteCommands::Space { space_cmd } => map_space_command(space_cmd)?,
         ExecuteCommands::SaveAndExit => {
             RiftCommand::Reactor(reactor::Command::Reactor(reactor::ReactorCommand::SaveAndExit))
         }
@@ -555,9 +583,30 @@ fn map_window_command(cmd: WindowCommands) -> Result<RiftCommand, String> {
     match cmd {
         WindowCommands::Next => Ok(RiftCommand::Reactor(reactor::Command::Layout(LC::NextWindow))),
         WindowCommands::Prev => Ok(RiftCommand::Reactor(reactor::Command::Layout(LC::PrevWindow))),
-        WindowCommands::Focus { direction } => Ok(RiftCommand::Reactor(reactor::Command::Layout(
-            LC::MoveFocus(direction.into()),
-        ))),
+        WindowCommands::Focus {
+            direction,
+            window_id,
+            window_server_id,
+        } => {
+            if let Some(dir) = direction {
+                return Ok(RiftCommand::Reactor(reactor::Command::Layout(LC::MoveFocus(
+                    dir.into(),
+                ))));
+            }
+
+            if let Some(wid_str) = window_id {
+                let wid = parse_window_id(&wid_str)?;
+                let wsid = window_server_id.map(WindowServerId::new);
+                return Ok(RiftCommand::Reactor(reactor::Command::Reactor(
+                    reactor::ReactorCommand::FocusWindow {
+                        window_id: wid,
+                        window_server_id: wsid,
+                    },
+                )));
+            }
+
+            Err("Focus command requires either --direction or --window-id".to_string())
+        }
         WindowCommands::ToggleFloat => Ok(RiftCommand::Reactor(reactor::Command::Layout(
             LC::ToggleWindowFloating,
         ))),
@@ -601,12 +650,33 @@ fn parse_window_server_id(input: &str) -> Result<WindowServerId, String> {
 }
 
 fn parse_window_id(input: &str) -> Result<WindowId, String> {
-    WindowId::from_debug_string(input.trim()).ok_or_else(|| {
-        format!(
-            "Invalid window id '{}'; expected `WindowId {{ pid: 123, idx: 456 }}`",
-            input
-        )
-    })
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("window_id cannot be empty".to_string());
+    }
+
+    if let Ok(window_id) = serde_json::from_str(trimmed) {
+        return Ok(window_id);
+    }
+
+    if let Some(window_id) = WindowId::from_debug_string(trimmed) {
+        return Ok(window_id);
+    }
+
+    if let Some((pid, idx)) = trimmed.split_once(':') {
+        let json_array = format!("[{},{}]", pid.trim(), idx.trim());
+        return serde_json::from_str(&json_array).map_err(|e| {
+            format!(
+                "Invalid window_id format '{}'. Expected 'pid:idx' (e.g., '1234:1'). Error: {}",
+                trimmed, e
+            )
+        });
+    }
+
+    Err(format!(
+        "Invalid window id '{}'; expected 'pid:idx', '[pid,idx]', '{{\"pid\":123,\"idx\":1}}', or `WindowId {{ pid: 123, idx: 1 }}`",
+        trimmed
+    ))
 }
 
 fn parse_layout_mode(value: &str) -> Result<LayoutMode, String> {
@@ -835,6 +905,20 @@ fn map_display_command(cmd: DisplayCommands) -> Result<RiftCommand, String> {
                 window_id,
             },
         ))),
+    }
+}
+
+fn map_space_command(cmd: SpaceCommands) -> Result<RiftCommand, String> {
+    match cmd {
+        SpaceCommands::ToggleActivated => Ok(RiftCommand::Reactor(reactor::Command::Reactor(
+            reactor::ReactorCommand::ToggleSpaceActivated,
+        ))),
+        SpaceCommands::Switch { direction } => {
+            let dir = parse_focus_direction(&direction)?;
+            Ok(RiftCommand::Reactor(reactor::Command::Reactor(
+                reactor::ReactorCommand::SwitchSpace(dir),
+            )))
+        }
     }
 }
 
