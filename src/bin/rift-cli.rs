@@ -110,10 +110,19 @@ enum ExecuteCommands {
         #[command(subcommand)]
         display_cmd: DisplayCommands,
     },
+    /// macOS space management commands
+    Space {
+        #[command(subcommand)]
+        space_cmd: SpaceCommands,
+    },
     /// Save current state and exit rift
     SaveAndExit,
     /// Show timing metrics
     ShowTiming,
+    /// Print layout tree to stdout (for debugging)
+    Debug,
+    /// Print serialized engine state to stdout (for debugging)
+    Serialize,
 }
 
 #[derive(Subcommand)]
@@ -125,6 +134,15 @@ enum WindowCommands {
     /// Move focus in a direction
     Focus {
         direction: String, // up, down, left, right
+    },
+    /// Focus a specific window by its internal ID (for scripting/automation)
+    FocusId {
+        /// Internal window ID in pid:idx format (e.g., "1234:0")
+        #[arg(long)]
+        window_id: String,
+        /// Optional window server ID for fallback focusing
+        #[arg(long)]
+        window_server_id: Option<u32>,
     },
     /// Toggle window floating state
     ToggleFloat,
@@ -188,6 +206,17 @@ enum LayoutCommands {
     Unjoin,
     /// Toggle floating on the focused selection (tree focus)
     ToggleFocusFloat,
+}
+
+#[derive(Subcommand)]
+enum SpaceCommands {
+    /// Toggle whether rift manages the current macOS space
+    ToggleActivated,
+    /// Switch to an adjacent macOS space (Mission Control spaces, not virtual workspaces)
+    Switch {
+        /// Direction to switch (left, right, up, down)
+        direction: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -451,12 +480,19 @@ fn build_execute_request(execute: ExecuteCommands) -> Result<RiftRequest, String
             map_mission_control_command(mission_cmd)?
         }
         ExecuteCommands::Display { display_cmd } => map_display_command(display_cmd)?,
+        ExecuteCommands::Space { space_cmd } => map_space_command(space_cmd)?,
         ExecuteCommands::SaveAndExit => {
             RiftCommand::Reactor(reactor::Command::Reactor(reactor::ReactorCommand::SaveAndExit))
         }
         ExecuteCommands::ShowTiming => RiftCommand::Reactor(reactor::Command::Metrics(
             rift_wm::common::log::MetricsCommand::ShowTiming,
         )),
+        ExecuteCommands::Debug => {
+            RiftCommand::Reactor(reactor::Command::Reactor(reactor::ReactorCommand::Debug))
+        }
+        ExecuteCommands::Serialize => {
+            RiftCommand::Reactor(reactor::Command::Reactor(reactor::ReactorCommand::Serialize))
+        }
     };
 
     if let RiftCommand::Config(rift_wm::common::config::ConfigCommand::GetConfig) = &rift_command {
@@ -495,6 +531,16 @@ fn map_window_command(cmd: WindowCommands) -> Result<RiftCommand, String> {
         WindowCommands::Focus { direction } => Ok(RiftCommand::Reactor(reactor::Command::Layout(
             LC::MoveFocus(direction.into()),
         ))),
+        WindowCommands::FocusId { window_id, window_server_id } => {
+            let wid = parse_window_id(&window_id)?;
+            let wsid = window_server_id.map(WindowServerId::new);
+            Ok(RiftCommand::Reactor(reactor::Command::Reactor(
+                reactor::ReactorCommand::FocusWindow {
+                    window_id: wid,
+                    window_server_id: wsid,
+                },
+            )))
+        }
         WindowCommands::ToggleFloat => Ok(RiftCommand::Reactor(reactor::Command::Layout(
             LC::ToggleWindowFloating,
         ))),
@@ -535,6 +581,36 @@ fn parse_window_server_id(input: &str) -> Result<WindowServerId, String> {
         trimmed.parse().map_err(|_| format!("Invalid window server id: {}", trimmed))?
     };
     Ok(WindowServerId::new(value))
+}
+
+fn parse_window_id(input: &str) -> Result<rift_wm::actor::app::WindowId, String> {
+    use std::num::NonZeroU32;
+
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("window_id cannot be empty".to_string());
+    }
+
+    let parts: Vec<&str> = trimmed.split(':').collect();
+    if parts.len() != 2 {
+        return Err(format!(
+            "Invalid window_id format '{}'. Expected 'pid:idx' (e.g., '1234:1')",
+            trimmed
+        ));
+    }
+
+    let pid: i32 = parts[0]
+        .parse()
+        .map_err(|_| format!("Invalid pid '{}' in window_id", parts[0]))?;
+
+    let idx: u32 = parts[1]
+        .parse()
+        .map_err(|_| format!("Invalid idx '{}' in window_id", parts[1]))?;
+
+    let idx = NonZeroU32::new(idx)
+        .ok_or_else(|| "Window index must be non-zero".to_string())?;
+
+    Ok(rift_wm::actor::app::WindowId { pid, idx })
 }
 
 fn map_workspace_command(cmd: WorkspaceCommands) -> Result<RiftCommand, String> {
@@ -717,6 +793,20 @@ fn map_display_command(cmd: DisplayCommands) -> Result<RiftCommand, String> {
                 window_id,
             },
         ))),
+    }
+}
+
+fn map_space_command(cmd: SpaceCommands) -> Result<RiftCommand, String> {
+    match cmd {
+        SpaceCommands::ToggleActivated => Ok(RiftCommand::Reactor(reactor::Command::Reactor(
+            reactor::ReactorCommand::ToggleSpaceActivated,
+        ))),
+        SpaceCommands::Switch { direction } => {
+            let dir = parse_focus_direction(&direction)?;
+            Ok(RiftCommand::Reactor(reactor::Command::Reactor(
+                reactor::ReactorCommand::SwitchSpace(dir),
+            )))
+        }
     }
 }
 

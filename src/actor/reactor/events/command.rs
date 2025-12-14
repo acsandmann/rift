@@ -443,4 +443,14 @@ impl CommandEventHandler {
             warn!("Close window command ignored because no window is tracked");
         }
     }
+
+    pub fn handle_command_reactor_toggle_space_activated(reactor: &mut Reactor) {
+        if let Some(wm) = reactor.communication_manager.wm_sender.as_ref() {
+            let _ = wm.send(crate::actor::wm_controller::WmEvent::Command(
+                crate::actor::wm_controller::WmCommand::Wm(
+                    crate::actor::wm_controller::WmCmd::ToggleSpaceActivated,
+                ),
+            ));
+        }
+    }
 }
