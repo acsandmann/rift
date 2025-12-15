@@ -137,11 +137,11 @@ enum WindowCommands {
         /// Direction to move focus (up, down, left, right)
         #[arg(long, group = "focus-target")]
         direction: Option<String>,
-        
+
         /// Internal window ID in pid:idx format (e.g., "1234:0")
         #[arg(long, group = "focus-target")]
         window_id: Option<String>,
-        
+
         /// Optional window server ID for fallback focusing (only used with --window-id)
         #[arg(long, requires = "window_id")]
         window_server_id: Option<u32>,
@@ -530,14 +530,18 @@ fn map_window_command(cmd: WindowCommands) -> Result<RiftCommand, String> {
     match cmd {
         WindowCommands::Next => Ok(RiftCommand::Reactor(reactor::Command::Layout(LC::NextWindow))),
         WindowCommands::Prev => Ok(RiftCommand::Reactor(reactor::Command::Layout(LC::PrevWindow))),
-        WindowCommands::Focus { direction, window_id, window_server_id } => {
+        WindowCommands::Focus {
+            direction,
+            window_id,
+            window_server_id,
+        } => {
             // Handle direction-based focus
             if let Some(dir) = direction {
-                return Ok(RiftCommand::Reactor(reactor::Command::Layout(
-                    LC::MoveFocus(dir.into()),
-                )));
+                return Ok(RiftCommand::Reactor(reactor::Command::Layout(LC::MoveFocus(
+                    dir.into(),
+                ))));
             }
-            
+
             // Handle window-id-based focus
             if let Some(wid_str) = window_id {
                 let wid = parse_window_id(&wid_str)?;
@@ -549,7 +553,7 @@ fn map_window_command(cmd: WindowCommands) -> Result<RiftCommand, String> {
                     },
                 )));
             }
-            
+
             // This shouldn't happen due to clap's ArgGroup validation
             Err("Focus command requires either --direction or --window-id".to_string())
         }
@@ -603,8 +607,12 @@ fn parse_window_id(input: &str) -> Result<rift_wm::actor::app::WindowId, String>
 
     // Try parsing as JSON array format [pid, idx] using serde
     let json_array = format!("[{}]", trimmed.replace(':', ","));
-    serde_json::from_str(&json_array)
-        .map_err(|e| format!("Invalid window_id format '{}'. Expected 'pid:idx' (e.g., '1234:1'). Error: {}", trimmed, e))
+    serde_json::from_str(&json_array).map_err(|e| {
+        format!(
+            "Invalid window_id format '{}'. Expected 'pid:idx' (e.g., '1234:1'). Error: {}",
+            trimmed, e
+        )
+    })
 }
 
 fn map_workspace_command(cmd: WorkspaceCommands) -> Result<RiftCommand, String> {
