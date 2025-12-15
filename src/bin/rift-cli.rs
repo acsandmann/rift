@@ -131,17 +131,19 @@ enum WindowCommands {
     Next,
     /// Focus the previous window
     Prev,
-    /// Move focus in a direction
+    /// Focus a window by direction or by specific window ID
+    #[command(group = clap::ArgGroup::new("focus-target").required(true).multiple(false))]
     Focus {
-        direction: String, // up, down, left, right
-    },
-    /// Focus a specific window by its internal ID (for scripting/automation)
-    FocusId {
+        /// Direction to move focus (up, down, left, right)
+        #[arg(long, group = "focus-target")]
+        direction: Option<String>,
+        
         /// Internal window ID in pid:idx format (e.g., "1234:0")
-        #[arg(long)]
-        window_id: String,
-        /// Optional window server ID for fallback focusing
-        #[arg(long)]
+        #[arg(long, group = "focus-target")]
+        window_id: Option<String>,
+        
+        /// Optional window server ID for fallback focusing (only used with --window-id)
+        #[arg(long, requires = "window_id")]
         window_server_id: Option<u32>,
     },
     /// Toggle window floating state
@@ -528,18 +530,28 @@ fn map_window_command(cmd: WindowCommands) -> Result<RiftCommand, String> {
     match cmd {
         WindowCommands::Next => Ok(RiftCommand::Reactor(reactor::Command::Layout(LC::NextWindow))),
         WindowCommands::Prev => Ok(RiftCommand::Reactor(reactor::Command::Layout(LC::PrevWindow))),
-        WindowCommands::Focus { direction } => Ok(RiftCommand::Reactor(reactor::Command::Layout(
-            LC::MoveFocus(direction.into()),
-        ))),
-        WindowCommands::FocusId { window_id, window_server_id } => {
-            let wid = parse_window_id(&window_id)?;
-            let wsid = window_server_id.map(WindowServerId::new);
-            Ok(RiftCommand::Reactor(reactor::Command::Reactor(
-                reactor::ReactorCommand::FocusWindow {
-                    window_id: wid,
-                    window_server_id: wsid,
-                },
-            )))
+        WindowCommands::Focus { direction, window_id, window_server_id } => {
+            // Handle direction-based focus
+            if let Some(dir) = direction {
+                return Ok(RiftCommand::Reactor(reactor::Command::Layout(
+                    LC::MoveFocus(dir.into()),
+                )));
+            }
+            
+            // Handle window-id-based focus
+            if let Some(wid_str) = window_id {
+                let wid = parse_window_id(&wid_str)?;
+                let wsid = window_server_id.map(WindowServerId::new);
+                return Ok(RiftCommand::Reactor(reactor::Command::Reactor(
+                    reactor::ReactorCommand::FocusWindow {
+                        window_id: wid,
+                        window_server_id: wsid,
+                    },
+                )));
+            }
+            
+            // This shouldn't happen due to clap's ArgGroup validation
+            Err("Focus command requires either --direction or --window-id".to_string())
         }
         WindowCommands::ToggleFloat => Ok(RiftCommand::Reactor(reactor::Command::Layout(
             LC::ToggleWindowFloating,
@@ -584,33 +596,15 @@ fn parse_window_server_id(input: &str) -> Result<WindowServerId, String> {
 }
 
 fn parse_window_id(input: &str) -> Result<rift_wm::actor::app::WindowId, String> {
-    use std::num::NonZeroU32;
-
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err("window_id cannot be empty".to_string());
     }
 
-    let parts: Vec<&str> = trimmed.split(':').collect();
-    if parts.len() != 2 {
-        return Err(format!(
-            "Invalid window_id format '{}'. Expected 'pid:idx' (e.g., '1234:1')",
-            trimmed
-        ));
-    }
-
-    let pid: i32 = parts[0]
-        .parse()
-        .map_err(|_| format!("Invalid pid '{}' in window_id", parts[0]))?;
-
-    let idx: u32 = parts[1]
-        .parse()
-        .map_err(|_| format!("Invalid idx '{}' in window_id", parts[1]))?;
-
-    let idx = NonZeroU32::new(idx)
-        .ok_or_else(|| "Window index must be non-zero".to_string())?;
-
-    Ok(rift_wm::actor::app::WindowId { pid, idx })
+    // Try parsing as JSON array format [pid, idx] using serde
+    let json_array = format!("[{}]", trimmed.replace(':', ","));
+    serde_json::from_str(&json_array)
+        .map_err(|e| format!("Invalid window_id format '{}'. Expected 'pid:idx' (e.g., '1234:1'). Error: {}", trimmed, e))
 }
 
 fn map_workspace_command(cmd: WorkspaceCommands) -> Result<RiftCommand, String> {
