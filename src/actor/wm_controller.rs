@@ -331,30 +331,44 @@ impl WmController {
                 let new_display_uuids: HashSet<String> =
                     screens.iter().map(|s| s.display_uuid.clone()).collect();
                 let displays_changed = prev_display_uuids != new_display_uuids;
+                let returning_displays: Vec<String> =
+                    new_display_uuids.intersection(&prev_display_uuids).cloned().collect();
 
                 info!(
                     default_disable,
                     prev_displays = ?prev_display_uuids,
                     new_displays = ?new_display_uuids,
                     displays_changed,
+                    returning_displays = ?returning_displays,
                     screen_count = screens.len(),
                     "ScreenParametersChanged received"
                 );
 
-                if displays_changed && !default_disable {
-                    // When displays change in default-enable mode, drop any remembered
-                    // disabled display/space state so surviving displays default to enabled.
-                    self.disabled_spaces.clear();
-                    self.disabled_displays.clear();
-                    info!(
-                        "Cleared disabled state due to display set change (default_disable=false)"
-                    );
+                // During wake/sleep when displays are disconnecting, ignore intermediate events
+                // to avoid processing incomplete display topology states
+                if displays_changed
+                    && new_display_uuids.len() < prev_display_uuids.len()
+                    && !prev_display_uuids.is_empty()
+                {
+                    return;
                 }
-                if !default_disable && screens.len() == 1 {
-                    // After sleep/resume with a single display, ensure we default to enabled.
+
+                if displays_changed && !default_disable {
+                    let removed_displays: Vec<_> =
+                        prev_display_uuids.difference(&new_display_uuids).collect();
+                    if !removed_displays.is_empty() {
+                        info!(
+                            removed_displays = ?removed_displays,
+                            "clearing disabled state for removed displays"
+                        );
+                        self.disabled_displays.retain(|uuid| new_display_uuids.contains(uuid));
+                        self.disabled_spaces.clear();
+                    }
+                }
+                if !default_disable && screens.len() == 1 && prev_display_uuids.len() > 1 {
                     self.disabled_spaces.clear();
                     self.disabled_displays.clear();
-                    info!("Cleared disabled state for single-display default-enable scenario");
+                    info!("Cleared disabled state for single-display transition");
                 }
 
                 self.screen_params_received = true;
@@ -633,19 +647,25 @@ impl WmController {
 
     fn handle_space_changed(&mut self, spaces: Vec<Option<SpaceId>>) {
         let previous_spaces = self.cur_space.clone();
+        let previous_enabled_displays = self.enabled_displays.clone();
+        let previous_disabled_displays = self.disabled_displays.clone();
         self.cur_space = spaces;
 
-        let active_spaces: HashSet<SpaceId> =
-            self.cur_space.iter().copied().flatten().collect::<HashSet<_>>();
-        let active_displays: HashSet<String> =
-            self.cur_display_uuid.iter().cloned().collect::<HashSet<_>>();
-        let active_screen_ids: HashSet<ScreenId> =
-            self.cur_screen_id.iter().copied().collect::<HashSet<_>>();
+        let active_spaces: HashSet<SpaceId> = self.cur_space.iter().copied().flatten().collect();
+        let active_screen_ids: HashSet<ScreenId> = self.cur_screen_id.iter().copied().collect();
 
-        self.disabled_spaces.retain(|space| active_spaces.contains(space));
-        self.enabled_spaces.retain(|space| active_spaces.contains(space));
-        self.disabled_displays.retain(|uuid| active_displays.contains(uuid));
-        self.enabled_displays.retain(|uuid| active_displays.contains(uuid));
+        let default_disable = self.config.config.settings.default_disable;
+        let preserve_activation_state = if default_disable {
+            !self.enabled_displays.is_empty() && active_spaces.is_empty()
+        } else {
+            !self.disabled_displays.is_empty() && active_spaces.is_empty()
+        };
+
+        if !preserve_activation_state {
+            self.disabled_spaces.retain(|space| active_spaces.contains(space));
+            self.enabled_spaces.retain(|space| active_spaces.contains(space));
+        }
+
         self.last_known_space_by_screen
             .retain(|screen, _| active_screen_ids.contains(screen));
 
@@ -695,7 +715,6 @@ impl WmController {
             }
         }
 
-        let default_disable = self.config.config.settings.default_disable;
         for (idx, space_opt) in self.cur_space.iter().enumerate() {
             let Some(space) = space_opt else { continue };
             let Some(display_uuid) = self.cur_display_uuid.get(idx) else {
@@ -703,23 +722,17 @@ impl WmController {
             };
 
             if default_disable {
-                if self.enabled_displays.contains(display_uuid) {
-                    if self.enabled_spaces.insert(*space) {
-                        debug!(
-                            "synced space {:?} to enabled_spaces from display {:?}",
-                            space, display_uuid
-                        );
-                    }
+                if self.enabled_displays.contains(display_uuid)
+                    || previous_enabled_displays.contains(display_uuid)
+                {
+                    self.enabled_displays.insert(display_uuid.clone());
+                    self.enabled_spaces.insert(*space);
                 }
-            } else {
-                if self.disabled_displays.contains(display_uuid) {
-                    if self.disabled_spaces.insert(*space) {
-                        debug!(
-                            "synced space {:?} to disabled_spaces from display {:?}",
-                            space, display_uuid
-                        );
-                    }
-                }
+            } else if self.disabled_displays.contains(display_uuid)
+                || previous_disabled_displays.contains(display_uuid)
+            {
+                self.disabled_displays.insert(display_uuid.clone());
+                self.disabled_spaces.insert(*space);
             }
         }
 

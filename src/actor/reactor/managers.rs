@@ -80,9 +80,11 @@ impl AppManager {
 /// Manages space and screen state
 pub struct SpaceManager {
     pub screens: Vec<Screen>,
+    pub screen_space_by_id: HashMap<ScreenId, SpaceId>,
     pub fullscreen_by_space: HashMap<u64, FullscreenTrack>,
     pub changing_screens: HashSet<WindowServerId>,
-    pub screen_space_by_id: HashMap<ScreenId, SpaceId>,
+    pub pending_wake_from_sleep: bool,
+    pub wake_completed_at: Option<std::time::Instant>,
 }
 
 impl SpaceManager {

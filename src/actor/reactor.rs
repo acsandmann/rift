@@ -36,7 +36,7 @@ pub use replay::{Record, replay};
 use serde::{Deserialize, Serialize};
 use serde_json;
 use serde_with::serde_as;
-use tracing::{debug, instrument, trace, warn};
+use tracing::{debug, info, instrument, trace, warn};
 use transaction_manager::TransactionId;
 
 use super::event_tap;
@@ -508,6 +508,8 @@ impl Reactor {
                 fullscreen_by_space: HashMap::default(),
                 changing_screens: HashSet::default(),
                 screen_space_by_id: HashMap::default(),
+                pending_wake_from_sleep: false,
+                wake_completed_at: None,
             },
             main_window_tracker_manager: managers::MainWindowTrackerManager {
                 main_window_tracker: MainWindowTracker::default(),
@@ -740,7 +742,9 @@ impl Reactor {
                 SystemEventHandler::handle_register_wm_sender(self, sender)
             }
             Event::WindowsDiscovered { pid, new, known_visible } => {
-                AppEventHandler::handle_windows_discovered(self, pid, new, known_visible);
+                if !self.space_manager.pending_wake_from_sleep {
+                    AppEventHandler::handle_windows_discovered(self, pid, new, known_visible);
+                }
             }
             Event::WindowCreated(wid, window, ws_info, mouse_state) => {
                 WindowEventHandler::handle_window_created(self, wid, window, ws_info, mouse_state);
@@ -1085,6 +1089,12 @@ impl Reactor {
             if allow_remap {
                 if let Some(previous_space) = last_space {
                     if previous_space != *space {
+                        info!(
+                            ?previous_space,
+                            new_space = ?space,
+                            display = ?screen.display_uuid,
+                            "remapping space for display"
+                        );
                         self.layout_manager.layout_engine.remap_space(previous_space, *space);
                     }
                 }
@@ -1131,7 +1141,9 @@ impl Reactor {
             }
         }
         self.update_complete_window_server_info(ws_info);
-        self.check_for_new_windows();
+        if !self.space_manager.pending_wake_from_sleep {
+            self.check_for_new_windows();
+        }
 
         if let Some(space) = spaces.iter().copied().flatten().next() {
             if let Some(workspace_id) = self.layout_manager.layout_engine.active_workspace(space) {
@@ -2608,6 +2620,20 @@ impl Reactor {
         is_resize: bool,
         is_workspace_switch: bool,
     ) -> Result<bool, error::ReactorError> {
+        // Block layout updates during wake and stabilization period to prevent corrupting
+        // layout state while macOS is still changing space IDs and reconnecting displays
+        if self.space_manager.pending_wake_from_sleep {
+            return Ok(false);
+        }
+
+        if let Some(completed_at) = self.space_manager.wake_completed_at {
+            if completed_at.elapsed() < Duration::from_secs(5) {
+                return Ok(false);
+            }
+            self.space_manager.wake_completed_at = None;
+            info!("wake stabilization period complete, resuming normal operations");
+        }
+
         LayoutManager::update_layout(self, is_resize, is_workspace_switch)
     }
 }
