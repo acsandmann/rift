@@ -212,6 +212,9 @@ impl LayoutManager {
     }
 
     fn calculate_layout(reactor: &mut Reactor) -> LayoutResult {
+        if reactor.window_manager.windows.is_empty() {
+            return LayoutResult::new();
+        }
         let screens = reactor.space_manager.screens.clone();
         let mut layout_result = LayoutResult::new();
 
