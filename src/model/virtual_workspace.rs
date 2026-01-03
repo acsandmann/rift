@@ -119,6 +119,8 @@ pub struct VirtualWorkspaceManager {
     #[serde(skip)]
     app_rules: Vec<AppWorkspaceRule>,
     #[serde(skip)]
+    app_rule_regex_cache: Vec<Option<regex::Regex>>,
+    #[serde(skip)]
     max_workspaces: usize,
     #[serde(skip)]
     default_workspace_count: usize,
@@ -148,7 +150,7 @@ impl VirtualWorkspaceManager {
         let target_count = config.default_workspace_count.max(1).min(max_workspaces);
         let default_workspace = config.default_workspace.min(target_count - 1);
 
-        Self {
+        let mut manager = Self {
             workspaces: SlotMap::default(),
             workspaces_by_space: HashMap::default(),
             active_workspace_per_space: HashMap::default(),
@@ -158,12 +160,16 @@ impl VirtualWorkspaceManager {
             floating_positions: HashMap::default(),
             workspace_counter: 1,
             app_rules: config.app_rules.clone(),
+            app_rule_regex_cache: Vec::new(),
             max_workspaces,
             default_workspace_count: config.default_workspace_count,
             default_workspace_names: config.workspace_names.clone(),
             default_workspace,
             workspace_auto_back_and_forth: config.workspace_auto_back_and_forth,
-        }
+        };
+
+        manager.rebuild_app_rule_regex_cache();
+        manager
     }
 
     pub fn update_settings(&mut self, config: &VirtualWorkspaceSettings) {
@@ -171,6 +177,7 @@ impl VirtualWorkspaceManager {
         self.default_workspace_count = config.default_workspace_count;
         self.default_workspace_names = config.workspace_names.clone();
         self.workspace_auto_back_and_forth = config.workspace_auto_back_and_forth;
+        self.rebuild_app_rule_regex_cache();
 
         let target_count = self.default_workspace_count.max(1).min(self.max_workspaces);
         self.default_workspace = config.default_workspace.min(target_count - 1);
@@ -190,6 +197,27 @@ impl VirtualWorkspaceManager {
                 ids.push(id);
             }
         }
+    }
+
+    fn rebuild_app_rule_regex_cache(&mut self) {
+        self.app_rule_regex_cache = self
+            .app_rules
+            .iter()
+            .map(|rule| {
+                rule.title_regex.as_ref().and_then(|rule_re| {
+                    if rule_re.is_empty() {
+                        return None;
+                    }
+                    match regex::RegexBuilder::new(rule_re).case_insensitive(true).build() {
+                        Ok(regex) => Some(regex),
+                        Err(e) => {
+                            warn!("Invalid title_regex '{}' in app rule: {}", rule_re, e);
+                            None
+                        }
+                    }
+                })
+            })
+            .collect();
     }
 
     fn ensure_space_initialized(&mut self, space: SpaceId) {
@@ -1065,19 +1093,14 @@ impl VirtualWorkspaceManager {
                     continue;
                 }
                 match window_title {
-                    Some(title) => {
-                        match regex::RegexBuilder::new(rule_re).case_insensitive(true).build() {
-                            Ok(re) => {
-                                if !re.is_match(title) {
-                                    continue;
-                                }
-                            }
-                            Err(e) => {
-                                warn!("Invalid title_regex '{}' in app rule: {}", rule_re, e);
+                    Some(title) => match self.app_rule_regex_cache.get(idx) {
+                        Some(Some(re)) => {
+                            if !re.is_match(title) {
                                 continue;
                             }
                         }
-                    }
+                        _ => continue,
+                    },
                     None => continue,
                 }
             }
