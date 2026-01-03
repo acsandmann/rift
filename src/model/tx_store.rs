@@ -23,9 +23,7 @@ impl WindowTxStore {
     pub fn insert(&self, id: WindowServerId, txid: TransactionId, target: CGRect) {
         match self.0.entry(id) {
             Entry::Occupied(mut entry) => {
-                let record = entry.get_mut();
-                record.txid = txid;
-                record.target = Some(target);
+                *entry.get_mut() = TxRecord { txid, target: Some(target) }
             }
             Entry::Vacant(entry) => {
                 entry.insert(TxRecord { txid, target: Some(target) });
@@ -40,19 +38,20 @@ impl WindowTxStore {
     pub fn remove(&self, id: &WindowServerId) { self.0.remove(id); }
 
     pub fn next_txid(&self, id: WindowServerId) -> TransactionId {
-        match self.0.entry(id) {
+        let new_txid = match self.0.entry(id) {
             Entry::Occupied(mut entry) => {
                 let record = entry.get_mut();
-                record.txid = record.txid.next();
-                record.target = None;
-                record.txid
+                let new_txid = record.txid.next();
+                *record = TxRecord { txid: new_txid, target: None };
+                new_txid
             }
             Entry::Vacant(entry) => {
                 let txid = TransactionId::default().next();
                 entry.insert(TxRecord { txid, target: None });
                 txid
             }
-        }
+        };
+        new_txid
     }
 
     pub fn set_last_txid(&self, id: WindowServerId, txid: TransactionId) {
