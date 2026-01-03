@@ -41,7 +41,6 @@ pub enum WmEvent {
     DiscoverRunningApps,
     AppEventsRegistered,
     AppLaunch(pid_t, AppInfo),
-    AppThreadTerminated(pid_t),
     AppGloballyActivated(pid_t),
     AppGloballyDeactivated(pid_t),
     AppTerminated(pid_t),
@@ -294,14 +293,6 @@ impl WmController {
                     debug!(pid = ?pid, "App terminated; removed from spawning_apps");
                 }
                 self.events_tx.send(Event::ApplicationTerminated(pid));
-            }
-            AppThreadTerminated(pid) => {
-                if self.known_apps.remove(&pid) {
-                    debug!(pid = ?pid, "App thread terminated; removed from known_apps");
-                }
-                if self.spawning_apps.remove(&pid) {
-                    debug!(pid = ?pid, "App thread terminated; removed from spawning_apps");
-                }
             }
             ConfigUpdated(new_cfg) => {
                 let old_keys_ser = serde_json::to_string(&self.config.config.keys).ok();
