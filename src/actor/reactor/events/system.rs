@@ -1,4 +1,4 @@
-use tracing::debug;
+use tracing::{debug, info};
 
 use crate::actor::app::WindowId;
 use crate::actor::raise_manager;
@@ -35,10 +35,13 @@ impl SystemEventHandler {
     }
 
     pub fn handle_system_woke(reactor: &mut Reactor) {
+        info!("system woke from sleep");
         let ids: Vec<u32> =
             reactor.window_manager.window_ids.keys().map(|wsid| wsid.as_u32()).collect();
         crate::sys::window_notify::update_window_notifications(&ids);
         reactor.notification_manager.last_sls_notification_ids = ids;
+
+        reactor.space_manager.pending_wake_from_sleep = true;
     }
 
     pub fn handle_raise_completed(reactor: &mut Reactor, window_id: WindowId, sequence_id: u64) {

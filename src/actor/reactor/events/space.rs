@@ -22,6 +22,19 @@ impl SpaceEventHandler {
         wsid: WindowServerId,
         sid: SpaceId,
     ) {
+        if reactor.space_manager.pending_wake_from_sleep {
+            return;
+        }
+
+        let active_spaces: HashSet<SpaceId> =
+            reactor.space_manager.screens.iter().filter_map(|s| s.space).collect();
+
+        // Filter out destruction events for inactive spaces to prevent processing stale events
+        // during wake-from-sleep when macOS sends spurious destruction events
+        if !active_spaces.is_empty() && !active_spaces.contains(&sid) {
+            return;
+        }
+
         if crate::sys::window_server::space_is_fullscreen(sid.get()) {
             let entry = match reactor.space_manager.fullscreen_by_space.entry(sid.get()) {
                 Entry::Occupied(o) => o.into_mut(),
@@ -197,15 +210,34 @@ impl SpaceEventHandler {
     ) {
         let previous_displays: HashSet<String> =
             reactor.space_manager.screens.iter().map(|s| s.display_uuid.clone()).collect();
-        let new_displays: HashSet<String> =
-            screens.iter().map(|s| s.display_uuid.clone()).collect();
-        let displays_changed = previous_displays != new_displays;
-        if displays_changed {
-            let active_list: Vec<String> = new_displays.iter().cloned().collect();
-            reactor.layout_manager.layout_engine.prune_display_state(&active_list);
+
+        let was_waking_from_sleep = reactor.space_manager.pending_wake_from_sleep;
+        // During wake, ignore events until all displays have reconnected to avoid processing
+        // intermediate states where macOS is still reconnecting external displays
+        if was_waking_from_sleep && screens.len() < previous_displays.len() {
+            return;
         }
 
         let spaces: Vec<Option<SpaceId>> = screens.iter().map(|s| s.space).collect();
+        let has_any_valid_space = spaces.iter().any(|s| s.is_some());
+
+        // Detect wake completion: all displays reconnected and spaces have been assigned.
+        // We then enter a stabilization period during which layout updates are blocked,
+        // allowing macOS to finish internal space ID changes.
+        if was_waking_from_sleep {
+            let all_displays_reconnected = screens.len() == previous_displays.len();
+
+            if all_displays_reconnected && has_any_valid_space {
+                reactor.space_manager.pending_wake_from_sleep = false;
+                reactor.space_manager.wake_completed_at = Some(std::time::Instant::now());
+                info!(
+                    displays = screens.len(),
+                    ?spaces,
+                    "wake from sleep completed, entering 5s stabilization period"
+                );
+            }
+        }
+
         let spaces_all_none = spaces.iter().all(|space| space.is_none());
         reactor.refocus_manager.stale_cleanup_state = if spaces_all_none {
             StaleCleanupState::Suppressed
@@ -235,21 +267,22 @@ impl SpaceEventHandler {
             // Do not remap layout state across reconnects; new space ids can churn and
             // remapping has caused windows to oscillate. Keep existing state and only
             // update the screen→space mapping.
-            reactor.reconcile_spaces_with_display_history(&spaces, false);
-            if let Some(info) = ws_info_opt.take() {
-                reactor.finalize_space_change(&spaces, info);
+            // Exception: during wake-from-sleep, allow remapping to preserve layouts when
+            // macOS changes space IDs.
+            let should_remap = was_waking_from_sleep && has_any_valid_space;
+            reactor.reconcile_spaces_with_display_history(&spaces, should_remap);
+
+            // Skip finalization during wake to prevent premature space changes
+            if !was_waking_from_sleep {
+                if let Some(info) = ws_info_opt.take() {
+                    reactor.finalize_space_change(&spaces, info);
+                }
             }
         }
         if let Some(info) = ws_info_opt.take() {
             reactor.update_complete_window_server_info(info);
         }
         reactor.try_apply_pending_space_change();
-
-        // Mark that we should perform a one-shot relayout after spaces are applied,
-        // so windows return to their prior displays post-topology change.
-        if displays_changed {
-            reactor.pending_space_change_manager.topology_relayout_pending = true;
-        }
     }
 
     pub fn handle_space_changed(
@@ -312,18 +345,26 @@ impl SpaceEventHandler {
             );
             return;
         }
-        reactor.reconcile_spaces_with_display_history(&spaces, false);
+        // Allow space remapping during wake to preserve layouts when macOS changes space IDs
+        let should_remap = reactor.space_manager.pending_wake_from_sleep;
+        reactor.reconcile_spaces_with_display_history(&spaces, should_remap);
         info!("space changed");
         reactor.set_screen_spaces(&spaces);
         reactor.finalize_space_change(&spaces, ws_info);
 
-        // If a topology change was detected earlier, perform a one-shot refresh/layout
-        // now that we have a consistent space vector matching the screens.
-        if reactor.pending_space_change_manager.topology_relayout_pending {
-            reactor.pending_space_change_manager.topology_relayout_pending = false;
-            reactor.force_refresh_all_windows();
-            if let Err(e) = reactor.update_layout(false, false) {
-                warn!(error = ?e, "Layout update failed after topology change");
+        // Alternative wake completion path: sometimes space changes complete before screen params
+        if reactor.space_manager.pending_wake_from_sleep {
+            let has_any_valid_space = spaces.iter().any(|s| s.is_some());
+            let all_screens_have_spaces = spaces.len() == reactor.space_manager.screens.len();
+
+            if has_any_valid_space && all_screens_have_spaces {
+                reactor.space_manager.pending_wake_from_sleep = false;
+                reactor.space_manager.wake_completed_at = Some(std::time::Instant::now());
+                info!(
+                    screens = reactor.space_manager.screens.len(),
+                    ?spaces,
+                    "wake from sleep completed via space change, entering 5s stabilization period"
+                );
             }
         }
     }
