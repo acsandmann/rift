@@ -217,6 +217,8 @@ impl BspLayoutSystem {
         }
     }
 
+    /// Calculates the depth of a node in the BSP tree by counting parent levels.
+    /// The root node has depth 0, its direct children have depth 1, and so on.
     fn node_depth(&self, node: NodeId) -> usize {
         let mut depth = 0;
         let mut current = node;
@@ -225,6 +227,18 @@ impl BspLayoutSystem {
             current = parent;
         }
         depth
+    }
+
+    /// Returns the orientation for a new split based on the node's depth.
+    /// Creates a fibonacci spiral pattern by alternating orientations:
+    /// - Even depth (0, 2, 4, ...) → Horizontal split
+    /// - Odd depth (1, 3, 5, ...) → Vertical split
+    fn orientation_for_depth(&self, depth: usize) -> Orientation {
+        if depth % 2 == 0 {
+            Orientation::Horizontal
+        } else {
+            Orientation::Vertical
+        }
     }
 
     fn collect_windows_under(&self, node: NodeId, out: &mut Vec<WindowId>) {
@@ -352,11 +366,7 @@ impl BspLayoutSystem {
                     }
                     // Use alternating orientations based on depth for fibonacci spiral
                     let depth = self.node_depth(sel);
-                    let orientation = if depth % 2 == 0 {
-                        Orientation::Horizontal
-                    } else {
-                        Orientation::Vertical
-                    };
+                    let orientation = self.orientation_for_depth(depth);
                     self.kind.insert(sel, NodeKind::Split {
                         orientation,
                         ratio: 0.5,
