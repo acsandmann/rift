@@ -193,12 +193,16 @@ drag_swap_fraction = 0.3
 # - preserve_focus_per_workspace: remember last focused window per workspace
 # - workspace_auto_back_and_forth: when enabled, if you try to switch to the same workspace
 #   that's already active, it will switch to the last workspace instead
+# - stay_on_empty_workspace: when enabled, you will stay on the current workspace even when
+#   it becomes empty. If false (default), activating an app on another workspace will switch
+#   to that workspace automatically
 # - reapply_app_rules_on_title_change: if true, app rules are re-evaluated when a window's title changes
 enabled = true
 default_workspace_count = 4
 auto_assign_windows = true
 preserve_focus_per_workspace = true
 workspace_auto_back_and_forth = false
+stay_on_empty_workspace = false
 reapply_app_rules_on_title_change = false
 
 

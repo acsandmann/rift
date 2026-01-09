@@ -2053,6 +2053,15 @@ impl Reactor {
 
         use crate::sys::app::NSRunningApplicationExt;
 
+        // Check if stay_on_empty_workspace is enabled
+        if self.layout_manager.layout_engine.virtual_workspace_manager().stay_on_empty_workspace() {
+            debug!(
+                "Skipping auto workspace switch for pid {} because stay_on_empty_workspace is enabled",
+                pid
+            );
+            return;
+        }
+
         if self.workspace_switch_manager.active_workspace_switch.is_some() {
             trace!(
                 "Skipping auto workspace switch for pid {} because a workspace switch is in progress",

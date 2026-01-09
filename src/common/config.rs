@@ -75,6 +75,8 @@ pub struct VirtualWorkspaceSettings {
     pub preserve_focus_per_workspace: bool,
     #[serde(default = "no")]
     pub workspace_auto_back_and_forth: bool,
+    #[serde(default)]
+    pub stay_on_empty_workspace: bool,
     #[serde(default = "default_workspace_names")]
     pub workspace_names: Vec<String>,
     #[serde(default)]
@@ -141,6 +143,7 @@ impl Default for VirtualWorkspaceSettings {
             auto_assign_windows: true,
             preserve_focus_per_workspace: true,
             workspace_auto_back_and_forth: false,
+            stay_on_empty_workspace: false,
             workspace_names: default_workspace_names(),
             default_workspace: 0,
             reapply_app_rules_on_title_change: false,

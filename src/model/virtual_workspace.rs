@@ -130,6 +130,8 @@ pub struct VirtualWorkspaceManager {
     default_workspace: usize,
     #[serde(skip)]
     workspace_auto_back_and_forth: bool,
+    #[serde(skip)]
+    stay_on_empty_workspace: bool,
 }
 
 impl Default for VirtualWorkspaceManager {
@@ -166,6 +168,7 @@ impl VirtualWorkspaceManager {
             default_workspace_names: config.workspace_names.clone(),
             default_workspace,
             workspace_auto_back_and_forth: config.workspace_auto_back_and_forth,
+            stay_on_empty_workspace: config.stay_on_empty_workspace,
         };
 
         manager.rebuild_app_rule_regex_cache();
@@ -177,6 +180,7 @@ impl VirtualWorkspaceManager {
         self.default_workspace_count = config.default_workspace_count;
         self.default_workspace_names = config.workspace_names.clone();
         self.workspace_auto_back_and_forth = config.workspace_auto_back_and_forth;
+        self.stay_on_empty_workspace = config.stay_on_empty_workspace;
         self.rebuild_app_rule_regex_cache();
 
         let target_count = self.default_workspace_count.max(1).min(self.max_workspaces);
@@ -366,6 +370,8 @@ impl VirtualWorkspaceManager {
     }
 
     pub fn workspace_auto_back_and_forth(&self) -> bool { self.workspace_auto_back_and_forth }
+
+    pub fn stay_on_empty_workspace(&self) -> bool { self.stay_on_empty_workspace }
 
     pub fn set_active_workspace(
         &mut self,
