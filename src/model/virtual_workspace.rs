@@ -1805,4 +1805,30 @@ mod tests {
         );
         assert!(bw2_updated_assignment.floating);
     }
+
+    #[test]
+    fn test_stay_on_empty_workspace_setting() {
+        // Test with stay_on_empty_workspace = false (default)
+        let settings_false = VirtualWorkspaceSettings::default();
+        assert_eq!(settings_false.stay_on_empty_workspace, false);
+        
+        let manager_false = VirtualWorkspaceManager::new_with_config(&settings_false);
+        assert_eq!(manager_false.stay_on_empty_workspace(), false);
+
+        // Test with stay_on_empty_workspace = true
+        let mut settings_true = VirtualWorkspaceSettings::default();
+        settings_true.stay_on_empty_workspace = true;
+        
+        let manager_true = VirtualWorkspaceManager::new_with_config(&settings_true);
+        assert_eq!(manager_true.stay_on_empty_workspace(), true);
+
+        // Test that update_settings propagates the setting correctly
+        let mut manager = VirtualWorkspaceManager::new();
+        assert_eq!(manager.stay_on_empty_workspace(), false);
+        
+        let mut updated_settings = VirtualWorkspaceSettings::default();
+        updated_settings.stay_on_empty_workspace = true;
+        manager.update_settings(&updated_settings);
+        assert_eq!(manager.stay_on_empty_workspace(), true);
+    }
 }
