@@ -110,7 +110,7 @@ impl CgsWindow {
             ))
             .map_err(CgsWindowError::Window)?;
 
-            cg_ok(SLSSetWindowResolution(connection, wid, 2.0))
+            cg_ok(SLSSetWindowResolution(connection, wid, 1.0))
                 .map_err(CgsWindowError::Resolution)?;
 
             Ok(Self {
@@ -177,14 +177,16 @@ impl CgsWindow {
             let offset = frame.origin;
             let size_rect = CGRect::new(CGPoint::new(0.0, 0.0), frame.size);
             let region = CFRegion::from_rect(&size_rect).map_err(CgsWindowError::Region)?;
-            cg_ok(SLSSetWindowShape(
+            let result = cg_ok(SLSSetWindowShape(
                 self.connection,
                 self.id,
                 offset.x as f32,
                 offset.y as f32,
                 region.as_ptr(),
             ))
-            .map_err(CgsWindowError::Shape)
+            .map_err(CgsWindowError::Shape);
+            drop(region);
+            result
         }
     }
 
