@@ -33,6 +33,7 @@ pub struct RaiseRequest {
     /// The window to raise and focus last.
     pub focus_window: Option<(WindowId, Option<CGPoint>)>,
     pub app_handles: HashMap<i32, AppThreadHandle>,
+    pub focus_quiet: Quiet,
 }
 
 pub struct RaiseManager {
@@ -49,7 +50,7 @@ pub struct RaiseManager {
 struct ActiveSequence {
     sequence_id: u64,
     pending_raises: HashSet<WindowId>,
-    focus_batch: Option<(pid_t, Vec<WindowId>, Option<CGPoint>)>,
+    focus_batch: Option<(pid_t, Vec<WindowId>, Option<CGPoint>, Quiet)>,
     app_handles: HashMap<i32, AppThreadHandle>,
     raise_token: CancellationToken,
     started_at: Instant,
@@ -129,6 +130,7 @@ impl RaiseManager {
                 raise_windows,
                 focus_window,
                 app_handles,
+                focus_quiet,
             }) => {
                 debug!(
                     "Processing layout response with {} raise_windows",
@@ -140,6 +142,7 @@ impl RaiseManager {
                     raise_windows,
                     focus_window,
                     app_handles,
+                    focus_quiet,
                 });
             }
             Event::RaiseCompleted { window_id, sequence_id } => {
@@ -196,6 +199,7 @@ impl RaiseManager {
             raise_windows,
             focus_window,
             app_handles,
+            focus_quiet,
         }: RaiseRequest,
     ) {
         let sequence_id = self.next_sequence_id;
@@ -217,7 +221,7 @@ impl RaiseManager {
                 let last = wids.len() - 1;
                 wids.swap(focus_idx, last);
                 if focus_batch.is_none() {
-                    focus_batch = Some((pid, wids, focus_window.unwrap().1));
+                    focus_batch = Some((pid, wids, focus_window.unwrap().1, focus_quiet));
                     continue;
                 }
             }
@@ -240,7 +244,7 @@ impl RaiseManager {
         if let Some((wid, warp)) = focus_window
             && focus_batch.is_none()
         {
-            focus_batch = Some((wid.pid, vec![wid], warp));
+            focus_batch = Some((wid.pid, vec![wid], warp, focus_quiet));
         }
 
         if !pending_raises.is_empty() || focus_batch.is_some() {
@@ -266,7 +270,7 @@ impl RaiseManager {
         // If all regular raises are complete but we have a focus window, send
         // the focus request.
         if sequence.pending_raises.is_empty()
-            && let Some((pid, wids, warp)) = sequence.focus_batch.take()
+            && let Some((pid, wids, warp, quiet)) = sequence.focus_batch.take()
         {
             changed = true;
             debug!(focus_window = ?wids);
@@ -277,7 +281,7 @@ impl RaiseManager {
                         wids.clone(),
                         sequence.raise_token.clone(),
                         sequence.sequence_id, // Use proper sequence ID for tracking
-                        Quiet::No,
+                        quiet,
                     ))
                     .is_ok()
                 {
@@ -332,11 +336,13 @@ mod tests {
         raise_windows: Vec<WindowId>,
         focus_window: Option<(WindowId, Option<CGPoint>)>,
         app_handles: HashMap<i32, AppThreadHandle>,
+        focus_quiet: Quiet,
     ) -> Event {
         Event::RaiseRequest(RaiseRequest {
             raise_windows: raise_windows.into_iter().map(|w| vec![w]).collect(),
             focus_window,
             app_handles,
+            focus_quiet,
         })
     }
 
@@ -384,6 +390,7 @@ mod tests {
                 vec![WindowId::new(1, 1), WindowId::new(1, 2)],
                 Some((WindowId::new(1, 3), None)),
                 app_handles,
+                Quiet::No,
             );
 
             // Handle the message synchronously
@@ -407,6 +414,7 @@ mod tests {
                 vec![WindowId::new(1, 1), WindowId::new(1, 2)],
                 Some((WindowId::new(1, 3), None)),
                 app_handles,
+                Quiet::No,
             );
 
             raise_manager.handle_message(layout_msg);
@@ -441,7 +449,8 @@ mod tests {
             let mut raise_manager = RaiseManager::new();
             let (app_handles, _app_rx) = create_test_app_handles();
 
-            let layout_msg = create_layout_response(vec![WindowId::new(1, 1)], None, app_handles);
+            let layout_msg =
+                create_layout_response(vec![WindowId::new(1, 1)], None, app_handles, Quiet::No);
 
             raise_manager.handle_message(layout_msg);
 
@@ -473,6 +482,7 @@ mod tests {
                 vec![WindowId::new(1, 1), WindowId::new(1, 2)],
                 Some((WindowId::new(1, 3), Some(CGPoint::new(100.0, 200.0)))),
                 app_handles,
+                Quiet::No,
             );
 
             raise_manager.handle_message(layout_msg);
@@ -530,6 +540,7 @@ mod tests {
                 vec![WindowId::new(1, 1), WindowId::new(1, 2)],
                 Some((WindowId::new(1, 3), None)),
                 app_handles,
+                Quiet::No,
             );
 
             raise_manager.handle_message(layout_msg);
@@ -573,11 +584,13 @@ mod tests {
                 vec![WindowId::new(1, 1)],
                 Some((WindowId::new(1, 2), None)),
                 app_handles.clone(),
+                Quiet::No,
             );
             let msg2 = create_layout_response(
                 vec![WindowId::new(1, 3)],
                 Some((WindowId::new(1, 4), None)),
                 app_handles.clone(),
+                Quiet::No,
             );
 
             raise_manager.handle_message(msg1);
@@ -661,16 +674,19 @@ mod tests {
                 vec![WindowId::new(1, 1)],
                 Some((WindowId::new(1, 2), None)),
                 app_handles.clone(),
+                Quiet::No,
             );
             let msg2 = create_layout_response(
                 vec![],
                 Some((WindowId::new(1, 3), None)),
                 app_handles.clone(),
+                Quiet::No,
             );
             let msg3 = create_layout_response(
                 vec![WindowId::new(1, 4)],
                 Some((WindowId::new(1, 5), None)),
                 app_handles.clone(),
+                Quiet::No,
             );
 
             // Queue all three sequences
@@ -771,6 +787,7 @@ mod tests {
                 raise_windows: batched_windows,
                 focus_window: Some((WindowId::new(1, 7), None)),
                 app_handles,
+                focus_quiet: Quiet::No,
             });
 
             // Handle the batched raise request

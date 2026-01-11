@@ -273,9 +273,7 @@ fn handle_layout_response_groups_windows_by_app_and_screen() {
     let msg = raise_manager_rx.try_recv().expect("Should have sent an event").1;
     match msg {
         raise_manager::Event::RaiseRequest(RaiseRequest {
-            raise_windows,
-            focus_window,
-            app_handles: _,
+            raise_windows, focus_window, ..
         }) => {
             let raise_windows: HashSet<Vec<WindowId>> = raise_windows.into_iter().collect();
             let expected = [

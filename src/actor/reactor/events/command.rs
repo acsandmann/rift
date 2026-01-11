@@ -1,7 +1,7 @@
 use tracing::{error, info, warn};
 
 use super::super::Screen;
-use crate::actor::app::{AppThreadHandle, WindowId};
+use crate::actor::app::{AppThreadHandle, Quiet, WindowId};
 use crate::actor::reactor::transaction_manager::TransactionId;
 use crate::actor::reactor::{DisplaySelector, Reactor, WorkspaceSwitchOrigin};
 use crate::actor::stack_line::Event as StackLineEvent;
@@ -200,6 +200,7 @@ impl CommandEventHandler {
                 raise_windows: Vec::new(),
                 focus_window: Some((window_id, None)),
                 app_handles,
+                focus_quiet: Quiet::No,
             });
             if let Err(e) = reactor.communication_manager.raise_manager_tx.try_send(request) {
                 warn!("Failed to send raise request: {}", e);
