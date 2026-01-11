@@ -201,11 +201,10 @@ pub fn window_is_sticky(id: WindowServerId) -> bool {
     let space_list_ref = unsafe {
         SLSCopySpacesForWindows(*G_CONNECTION, 0x7, CFRetained::as_ptr(&cf_windows).as_ptr())
     };
-    if space_list_ref.is_null() {
+    let Some(space_list_ref) = NonNull::new(space_list_ref) else {
         return false;
-    }
-    let spaces_cf: CFRetained<CFArray<CFNumber>> =
-        unsafe { CFRetained::retain(NonNull::new_unchecked(space_list_ref)) };
+    };
+    let spaces_cf: CFRetained<CFArray<CFNumber>> = unsafe { CFRetained::from_raw(space_list_ref) };
     spaces_cf.len() > 1
 }
 
