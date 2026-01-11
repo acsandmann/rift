@@ -10,7 +10,6 @@ use dispatchr::time::Time;
 use objc2::rc::{Allocated, Retained};
 use objc2::{AnyThread, ClassType, DeclaredClass, Encode, Encoding, define_class, msg_send, sel};
 use objc2_app_kit::{self, NSRunningApplication, NSWorkspace, NSWorkspaceApplicationKey};
-use objc2_core_graphics::CGDisplayBounds;
 use objc2_foundation::{
     MainThreadMarker, NSNotification, NSNotificationCenter, NSObject, NSProcessInfo, NSString,
 };
@@ -22,18 +21,37 @@ use crate::sys::dispatch::DispatchExt;
 use crate::sys::power::{init_power_state, set_low_power_mode_state};
 use crate::sys::screen::{CoordinateConverter, ScreenCache, ScreenDescriptor, SpaceId};
 use crate::sys::skylight::{CGDisplayRegisterReconfigurationCallback, DisplayReconfigFlags};
+use crate::sys::window_server;
 
 const REFRESH_DEFAULT_DELAY_NS: i64 = 150_000_000;
 const REFRESH_RETRY_DELAY_NS: i64 = 150_000_000;
 const REFRESH_MAX_RETRIES: u8 = 10;
+
+const DISPLAY_CHURN_QUIET_NS: i64 = 300_000_000;
+const DISPLAY_STABILIZE_RETRY_NS: i64 = 200_000_000;
+const DISPLAY_STABILIZE_MAX_ATTEMPTS: u8 = 25;
+const DISPLAY_STABLE_REQUIRED_HITS: u8 = 2;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DisplayTopologyFingerprint(Vec<(String, u64, u64, u64, u64)>);
+
+#[derive(Debug, Clone)]
+struct DisplayTopologyState {
+    fingerprint: DisplayTopologyFingerprint,
+    hits: u8,
+}
 
 #[repr(C)]
 struct Instance {
     screen_cache: RefCell<ScreenCache>,
     events_tx: wm_controller::Sender,
     refresh_pending: Cell<bool>,
-    reconfig_in_progress: Cell<bool>,
-    pending_reconfig_flags: Cell<DisplayReconfigFlags>,
+
+    display_churn_active: Cell<bool>,
+    display_churn_epoch: Cell<u64>,
+    display_churn_flags: Cell<DisplayReconfigFlags>,
+    display_topology_state: RefCell<Option<DisplayTopologyState>>,
+    refresh_deferred_until_stable: Cell<bool>,
 }
 
 unsafe impl Encode for Instance {
@@ -115,8 +133,12 @@ impl NotificationCenterInner {
             screen_cache: RefCell::new(ScreenCache::new(MainThreadMarker::new().unwrap())),
             events_tx,
             refresh_pending: Cell::new(false),
-            reconfig_in_progress: Cell::new(false),
-            pending_reconfig_flags: Cell::new(DisplayReconfigFlags::empty()),
+
+            display_churn_active: Cell::new(false),
+            display_churn_epoch: Cell::new(0),
+            display_churn_flags: Cell::new(DisplayReconfigFlags::empty()),
+            display_topology_state: RefCell::new(None),
+            refresh_deferred_until_stable: Cell::new(false),
         };
         let handler: Retained<Self> = unsafe { msg_send![Self::alloc(), initWith: instance] };
         unsafe {
@@ -177,13 +199,30 @@ impl NotificationCenterInner {
         let _s = span.enter();
         let ivars = self.ivars();
 
+        if ivars.display_churn_active.get() {
+            trace!("Deferring screen refresh until display churn ends");
+            ivars.refresh_deferred_until_stable.set(true);
+            ivars.refresh_pending.set(false);
+            return;
+        }
+
         let Some((descriptors, converter, spaces)) = self.collect_state() else {
+            if allow_retry && attempt < REFRESH_MAX_RETRIES {
+                trace!(attempt, "Screen state not ready; retrying refresh");
+                self.schedule_screen_refresh_after(REFRESH_RETRY_DELAY_NS, attempt + 1);
+                return;
+            }
             warn!("Unable to refresh screen configuration; skipping update");
             ivars.refresh_pending.set(false);
             return;
         };
 
         if descriptors.is_empty() {
+            if allow_retry && attempt < REFRESH_MAX_RETRIES {
+                trace!(attempt, "No displays yet; retrying refresh");
+                self.schedule_screen_refresh_after(REFRESH_RETRY_DELAY_NS, attempt + 1);
+                return;
+            }
             trace!("Skipping screen parameter update: no active displays reported");
             ivars.refresh_pending.set(false);
             return;
@@ -212,7 +251,7 @@ impl NotificationCenterInner {
         // screen refresh is pending; these can interleave and cause window thrash between
         // displays/spaces. The refresh will emit a consistent SpaceChanged afterward.
         let ivars = self.ivars();
-        if ivars.refresh_pending.get() || ivars.reconfig_in_progress.get() {
+        if ivars.refresh_pending.get() || ivars.display_churn_active.get() {
             trace!("Skipping current space update during display reconfig/refresh");
             return;
         }
@@ -256,46 +295,166 @@ impl NotificationCenterInner {
         Some(app)
     }
 
-    fn handle_display_reconfig(&self, flags: DisplayReconfigFlags) {
+    fn handle_display_reconfig_event(&self, display_id: u32, flags: DisplayReconfigFlags) {
         let ivars = self.ivars();
 
-        if flags.contains(DisplayReconfigFlags::BEGIN_CONFIGURATION) {
-            trace!("Display reconfig begin; aggregating changes");
-            ivars.reconfig_in_progress.set(true);
-            ivars.pending_reconfig_flags.set(DisplayReconfigFlags::empty());
-            return;
+        let was_active = ivars.display_churn_active.replace(true);
+        ivars.display_churn_flags.set(ivars.display_churn_flags.get() | flags);
+        ivars.display_churn_epoch.set(ivars.display_churn_epoch.get().wrapping_add(1));
+        ivars.display_topology_state.borrow_mut().take();
+        if !was_active {
+            self.send_event(WmEvent::DisplayChurnBegin);
         }
 
-        let aggregated = ivars.pending_reconfig_flags.get() | flags;
-        ivars.pending_reconfig_flags.set(aggregated);
-
-        if !Self::needs_refresh_for_flags(aggregated) {
-            trace!(?aggregated, "Display reconfig ignored (no impactful flags)");
-            return;
-        }
-
-        // We got a post-begin callback or a standalone change; prefer to refresh immediately
-        // for add/remove so we capture the new topology as soon as it stabilises.
-        let saw_begin = ivars.reconfig_in_progress.replace(false);
-        ivars.pending_reconfig_flags.set(DisplayReconfigFlags::empty());
-
-        let immediate = aggregated
-            .intersects(DisplayReconfigFlags::ADD | DisplayReconfigFlags::REMOVE)
-            || saw_begin;
-
-        trace!(
-            ?aggregated,
-            immediate, "Display reconfig detected; scheduling refresh"
-        );
         {
             let mut cache = ivars.screen_cache.borrow_mut();
             cache.mark_dirty();
         }
-        if immediate {
-            self.schedule_screen_refresh_after(0, 0);
-        } else {
-            self.schedule_screen_refresh();
+
+        let expected_epoch = ivars.display_churn_epoch.get();
+        trace!(
+            display_id,
+            ?flags,
+            expected_epoch,
+            "Display reconfig event; debouncing"
+        );
+
+        self.schedule_display_stabilization_check(expected_epoch);
+    }
+
+    fn schedule_display_stabilization_check(&self, expected_epoch: u64) {
+        self.schedule_display_stabilization(expected_epoch, 0, DISPLAY_CHURN_QUIET_NS);
+    }
+
+    fn attempt_finish_display_churn(&self, expected_epoch: u64, attempt: u8) {
+        let ivars = self.ivars();
+        if expected_epoch != ivars.display_churn_epoch.get() || !ivars.display_churn_active.get() {
+            return;
         }
+
+        let Some((descriptors, _, _)) = self.collect_state() else {
+            self.retry_or_finish_display_churn(
+                expected_epoch,
+                attempt,
+                "Unable to refresh displays after retries; forcing refresh",
+            );
+            return;
+        };
+
+        if descriptors.is_empty() {
+            self.retry_or_finish_display_churn(
+                expected_epoch,
+                attempt,
+                "No active displays reported after retries; forcing refresh",
+            );
+            return;
+        }
+
+        let fingerprint = Self::fingerprint_displays(&descriptors);
+        let mut state = ivars.display_topology_state.borrow_mut();
+        let hits = match state.as_mut() {
+            Some(existing) if existing.fingerprint == fingerprint => {
+                existing.hits = existing.hits.saturating_add(1);
+                existing.hits
+            }
+            _ => {
+                trace!(
+                    "fingerprint_changed expected_epoch={} attempt={}",
+                    expected_epoch, attempt
+                );
+                *state = Some(DisplayTopologyState { fingerprint, hits: 1 });
+                drop(state);
+                self.schedule_display_stabilization_retry(expected_epoch, attempt + 1);
+                return;
+            }
+        };
+        drop(state);
+
+        if hits >= DISPLAY_STABLE_REQUIRED_HITS {
+            if !window_server::windowserver_quiet_for_us(window_server::WINDOWSERVER_QUIET_US) {
+                trace!(
+                    hits,
+                    expected_epoch, "WindowServer still churning; waiting before finalizing"
+                );
+                if !self.retry_display_stabilization(expected_epoch, attempt) {
+                    warn!("WindowServer churn did not settle; forcing refresh");
+                    self.finish_display_churn(expected_epoch);
+                }
+                return;
+            }
+
+            trace!(hits, expected_epoch, "Display churn settled; refreshing");
+            self.finish_display_churn(expected_epoch);
+            return;
+        }
+
+        if !self.retry_display_stabilization(expected_epoch, attempt) {
+            warn!("Unable to confirm stable display topology; forcing refresh");
+            self.finish_display_churn(expected_epoch);
+        }
+    }
+
+    fn schedule_display_stabilization_retry(&self, expected_epoch: u64, attempt: u8) {
+        self.schedule_display_stabilization(expected_epoch, attempt, DISPLAY_STABILIZE_RETRY_NS);
+    }
+
+    fn schedule_display_stabilization(&self, expected_epoch: u64, attempt: u8, delay_ns: i64) {
+        let handler_ptr = self as *const _ as *mut Self;
+        queue::main().after_f_s(
+            Time::new_after(Time::NOW, delay_ns),
+            (handler_ptr, expected_epoch, attempt),
+            |(handler_ptr, expected_epoch, attempt)| unsafe {
+                let handler = &*handler_ptr;
+                handler.attempt_finish_display_churn(expected_epoch, attempt);
+            },
+        );
+    }
+
+    fn retry_display_stabilization(&self, expected_epoch: u64, attempt: u8) -> bool {
+        if attempt < DISPLAY_STABILIZE_MAX_ATTEMPTS {
+            self.schedule_display_stabilization_retry(expected_epoch, attempt + 1);
+            return true;
+        }
+        false
+    }
+
+    fn retry_or_finish_display_churn(
+        &self,
+        expected_epoch: u64,
+        attempt: u8,
+        warn_msg: &'static str,
+    ) {
+        if !self.retry_display_stabilization(expected_epoch, attempt) {
+            warn!("{}", warn_msg);
+            self.finish_display_churn(expected_epoch);
+        }
+    }
+
+    fn finish_display_churn(&self, expected_epoch: u64) {
+        let ivars = self.ivars();
+        if expected_epoch != ivars.display_churn_epoch.get() {
+            return;
+        }
+        if !ivars.display_churn_active.get() {
+            return;
+        }
+
+        trace!(
+            expected_epoch,
+            churn_flags = ?ivars.display_churn_flags.get(),
+            "Finalizing display churn"
+        );
+
+        ivars.display_churn_active.set(false);
+        ivars.display_churn_epoch.set(ivars.display_churn_epoch.get().wrapping_add(1));
+        ivars.display_churn_flags.set(DisplayReconfigFlags::empty());
+        ivars.display_topology_state.borrow_mut().take();
+        self.send_event(WmEvent::DisplayChurnEnd);
+
+        if ivars.refresh_deferred_until_stable.replace(false) {
+            trace!("Running deferred refresh after display churn");
+        }
+        self.schedule_screen_refresh_after(0, 0);
     }
 
     fn handle_dock_pref_changed(&self) {
@@ -314,6 +473,12 @@ impl NotificationCenterInner {
 
     fn schedule_screen_refresh_after(&self, delay_ns: i64, attempt: u8) {
         let ivars = self.ivars();
+        if attempt == 0 && ivars.display_churn_active.get() {
+            trace!("Deferring refresh until display churn ends");
+            ivars.refresh_deferred_until_stable.set(true);
+            return;
+        }
+
         if attempt == 0 {
             if ivars.refresh_pending.replace(true) {
                 return;
@@ -333,23 +498,8 @@ impl NotificationCenterInner {
         );
     }
 
-    fn needs_refresh_for_flags(flags: DisplayReconfigFlags) -> bool {
-        flags.intersects(
-            DisplayReconfigFlags::ADD
-                | DisplayReconfigFlags::REMOVE
-                | DisplayReconfigFlags::MOVED
-                | DisplayReconfigFlags::SET_MAIN
-                | DisplayReconfigFlags::SET_MODE
-                | DisplayReconfigFlags::ENABLED
-                | DisplayReconfigFlags::DISABLED
-                | DisplayReconfigFlags::MIRROR
-                | DisplayReconfigFlags::UNMIRROR
-                | DisplayReconfigFlags::DESKTOP_SHAPE_CHANGED,
-        )
-    }
-
     unsafe extern "C" fn display_reconfig_callback(
-        _display: u32,
+        display_id: u32,
         flags: u32,
         user_info: *mut c_void,
     ) {
@@ -358,51 +508,31 @@ impl NotificationCenterInner {
         }
         let handler_ptr = user_info as *mut NotificationCenterInner;
         let parsed = DisplayReconfigFlags::from_bits_truncate(flags);
-        let normalized = NotificationCenterInner::normalize_display_flags(parsed, _display);
         queue::main().after_f_s(
             Time::NOW,
-            (handler_ptr, normalized),
-            |(handler_ptr, flags)| unsafe {
+            (handler_ptr, display_id, parsed),
+            |(handler_ptr, display_id, flags)| unsafe {
                 let handler = &*handler_ptr;
-                handler.handle_display_reconfig(flags);
+                handler.handle_display_reconfig_event(display_id, flags);
             },
         );
     }
 
-    /// Normalize conflicting CGDisplay flags to a single add/remove decision, following
-    /// observed macOS behavior where add/remove/enable/disable can all be set together.
-    fn normalize_display_flags(flags: DisplayReconfigFlags, display: u32) -> DisplayReconfigFlags {
-        let mut flags = flags;
-
-        // Map enable/disable into add/remove.
-        if flags.contains(DisplayReconfigFlags::DISABLED) {
-            flags.insert(DisplayReconfigFlags::REMOVE);
-        }
-        if flags.contains(DisplayReconfigFlags::ENABLED) {
-            flags.insert(DisplayReconfigFlags::ADD);
-        }
-
-        // Mirroring treats the external display as removed; unmirror as added.
-        if flags.contains(DisplayReconfigFlags::MIRROR) {
-            flags.insert(DisplayReconfigFlags::REMOVE);
-        }
-        if flags.contains(DisplayReconfigFlags::UNMIRROR) {
-            flags.insert(DisplayReconfigFlags::ADD);
-        }
-
-        if flags.contains(DisplayReconfigFlags::ADD) && flags.contains(DisplayReconfigFlags::REMOVE)
-        {
-            // Heuristic informed by SDL issue: a valid non-zero mode implies add wins unless mirroring.
-            let bounds = CGDisplayBounds(display);
-            let size_valid = bounds.size.width > 1.0 && bounds.size.height > 1.0;
-            if !flags.contains(DisplayReconfigFlags::MIRROR) && size_valid {
-                flags.remove(DisplayReconfigFlags::REMOVE);
-            } else {
-                flags.remove(DisplayReconfigFlags::ADD);
-            }
-        }
-
-        flags
+    fn fingerprint_displays(descriptors: &[ScreenDescriptor]) -> DisplayTopologyFingerprint {
+        DisplayTopologyFingerprint(
+            descriptors
+                .iter()
+                .map(|d| {
+                    (
+                        d.display_uuid.clone(),
+                        d.frame.origin.x.to_bits(),
+                        d.frame.origin.y.to_bits(),
+                        d.frame.size.width.to_bits(),
+                        d.frame.size.height.to_bits(),
+                    )
+                })
+                .collect(),
+        )
     }
 }
 

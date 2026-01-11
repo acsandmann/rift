@@ -135,10 +135,7 @@ impl CommandEventHandler {
             }
         }
 
-        let _ = reactor.update_layout(false, true).unwrap_or_else(|e| {
-            warn!("Layout update failed: {}", e);
-            false
-        });
+        let _ = reactor.update_layout_or_warn(false, true);
 
         if old_keys != reactor.config_manager.config.keys {
             if let Some(wm) = &reactor.communication_manager.wm_sender {
@@ -425,10 +422,7 @@ impl CommandEventHandler {
 
         reactor.handle_layout_response(response, None);
 
-        let _ = reactor.update_layout(false, false).unwrap_or_else(|e| {
-            warn!("Layout update failed: {}", e);
-            false
-        });
+        let _ = reactor.update_layout_or_warn(false, false);
     }
 
     pub fn handle_command_reactor_close_window(

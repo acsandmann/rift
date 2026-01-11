@@ -25,15 +25,7 @@ impl FloatingManager {
 
     pub(crate) fn remove_floating(&mut self, window_id: WindowId) {
         self.floating_windows.remove(&window_id);
-
-        for space_floating in self.active_floating_windows.values_mut() {
-            if let Some(app_set) = space_floating.get_mut(&window_id.pid) {
-                app_set.remove(&window_id);
-                if app_set.is_empty() {
-                    space_floating.remove(&window_id.pid);
-                }
-            }
-        }
+        self.remove_active_entries(window_id);
         if self.last_floating_focus == Some(window_id) {
             self.last_floating_focus = None;
         }
@@ -63,6 +55,10 @@ impl FloatingManager {
                 }
             }
         }
+    }
+
+    pub(crate) fn remove_active_for_window(&mut self, window_id: WindowId) {
+        self.remove_active_entries(window_id);
     }
 
     pub(crate) fn active_flat(&self, space: SpaceId) -> Vec<WindowId> {
@@ -120,6 +116,17 @@ impl FloatingManager {
 
         if !merged.is_empty() {
             self.active_floating_windows.insert(new_space, merged);
+        }
+    }
+
+    fn remove_active_entries(&mut self, window_id: WindowId) {
+        for space_map in self.active_floating_windows.values_mut() {
+            if let Some(app_set) = space_map.get_mut(&window_id.pid) {
+                app_set.remove(&window_id);
+                if app_set.is_empty() {
+                    space_map.remove(&window_id.pid);
+                }
+            }
         }
     }
 }

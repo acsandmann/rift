@@ -357,6 +357,8 @@ impl WindowEventHandler {
                             }
                         }
                     } else {
+                        reactor
+                            .send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
                         if let Some(space) = new_space {
                             if reactor.is_space_active(space) {
                                 if let Some(active_ws) =
@@ -375,24 +377,9 @@ impl WindowEventHandler {
                                     }
                                 }
                                 reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
-                                let _ = reactor.update_layout(false, false).unwrap_or_else(|e| {
-                                    warn!("Layout update failed: {}", e);
-                                    false
-                                });
-                            } else {
-                                reactor.send_layout_event(LayoutEvent::WindowRemoved(wid));
-                                let _ = reactor.update_layout(false, false).unwrap_or_else(|e| {
-                                    warn!("Layout update failed: {}", e);
-                                    false
-                                });
                             }
-                        } else {
-                            reactor.send_layout_event(LayoutEvent::WindowRemoved(wid));
-                            let _ = reactor.update_layout(false, false).unwrap_or_else(|e| {
-                                warn!("Layout update failed: {}", e);
-                                false
-                            });
                         }
+                        let _ = reactor.update_layout_or_warn(false, false);
                     }
                 } else if old_frame.size != new_frame.size {
                     if let Some(space) = old_space {

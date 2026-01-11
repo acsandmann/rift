@@ -1,6 +1,8 @@
 use std::ffi::{c_int, c_void};
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use dispatchr::queue;
 use dispatchr::time::Time;
@@ -30,6 +32,9 @@ use crate::sys::skylight::*;
 use crate::sys::timer::Timer;
 
 static G_CONNECTION: Lazy<i32> = Lazy::new(|| unsafe { SLSMainConnectionID() });
+static LAST_WINDOWSERVER_ACTIVITY_US: AtomicU64 = AtomicU64::new(0);
+
+pub const WINDOWSERVER_QUIET_US: u64 = 350_000;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct WindowServerId(pub CGWindowID);
@@ -62,6 +67,28 @@ impl TryFrom<&AXUIElement> for WindowServerId {
 
 impl From<WindowId> for WindowServerId {
     fn from(id: WindowId) -> Self { Self(id.idx.into()) }
+}
+
+#[inline]
+fn now_us() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as u64
+}
+
+pub fn note_windowserver_activity(wsid: u32) {
+    LAST_WINDOWSERVER_ACTIVITY_US.store(now_us(), Ordering::SeqCst);
+    // Keep this trace low-cost; it's only used to stabilize display churn.
+    tracing::trace!(wsid, "windowserver activity");
+}
+
+pub fn windowserver_quiet_for_us(quiet_us: u64) -> bool {
+    let last = LAST_WINDOWSERVER_ACTIVITY_US.load(Ordering::SeqCst);
+    if last == 0 {
+        return true;
+    }
+    now_us().saturating_sub(last) >= quiet_us
 }
 
 #[inline]

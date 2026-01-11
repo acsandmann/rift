@@ -180,6 +180,11 @@ pub enum Event {
     SystemWoke,
 
     #[serde(skip)]
+    DisplayChurnBegin,
+    #[serde(skip)]
+    DisplayChurnEnd,
+
+    #[serde(skip)]
     MissionControlNativeEntered,
     #[serde(skip)]
     MissionControlNativeExited,
@@ -378,6 +383,8 @@ pub struct Reactor {
     refocus_manager: managers::RefocusManager,
     pending_space_change_manager: managers::PendingSpaceChangeManager,
     active_spaces: HashSet<SpaceId>,
+    display_churn_active: bool,
+    display_churn_pending_full_refresh: bool,
 }
 
 #[derive(Debug)]
@@ -557,6 +564,8 @@ impl Reactor {
                 topology_relayout_pending: false,
             },
             active_spaces: HashSet::default(),
+            display_churn_active: false,
+            display_churn_pending_full_refresh: false,
         }
     }
 
@@ -644,8 +653,80 @@ impl Reactor {
     async fn run_reactor_loop(mut self, mut events: Receiver) {
         while let Some((span, event)) = events.recv().await {
             let _guard = span.enter();
+            let is_screen_params_changed = matches!(event, Event::ScreenParametersChanged(..));
+            if self.display_churn_active
+                && !Self::is_query_event(&event)
+                && !matches!(
+                    event,
+                    Event::ScreenParametersChanged(..)
+                        | Event::DisplayChurnBegin
+                        | Event::DisplayChurnEnd
+                )
+            {
+                Self::note_windowserver_activity_during_display_churn(&event);
+                if matches!(
+                    event,
+                    Event::WindowServerDestroyed(..)
+                        | Event::WindowServerAppeared(..)
+                        | Event::ResyncAppForWindow(..)
+                ) {
+                    trace!("reactor_drop event={:?}", event);
+                }
+                self.display_churn_pending_full_refresh = true;
+                continue;
+            }
+
             self.handle_event(event);
+
+            if is_screen_params_changed
+                && self.display_churn_pending_full_refresh
+                && !self.display_churn_active
+            {
+                self.recover_from_display_churn();
+            }
         }
+    }
+
+    fn recover_from_display_churn(&mut self) {
+        self.display_churn_pending_full_refresh = false;
+        self.refresh_window_server_snapshot_after_churn();
+        self.resync_windows_after_churn();
+        self.force_refresh_all_windows();
+        self.update_layout_or_warn_with(false, false, "Layout update failed after display churn");
+    }
+
+    fn note_windowserver_activity_during_display_churn(event: &Event) {
+        let wsid = match event {
+            Event::WindowFrameChanged(wid, ..) => Some(wid.idx.get()),
+            Event::WindowCreated(wid, ..) => Some(wid.idx.get()),
+            Event::WindowDestroyed(wid) => Some(wid.idx.get()),
+            Event::WindowMinimized(wid) => Some(wid.idx.get()),
+            Event::WindowDeminiaturized(wid) => Some(wid.idx.get()),
+            Event::MouseMovedOverWindow(wsid) => Some(wsid.as_u32()),
+            Event::ResyncAppForWindow(wsid) => Some(wsid.as_u32()),
+            Event::WindowServerDestroyed(wsid, _) => Some(wsid.as_u32()),
+            Event::WindowServerAppeared(wsid, _) => Some(wsid.as_u32()),
+            _ => None,
+        };
+        if let Some(wsid) = wsid {
+            window_server::note_windowserver_activity(wsid);
+        }
+    }
+
+    pub(crate) fn is_display_churn_active(&self) -> bool { self.display_churn_active }
+
+    fn is_query_event(event: &Event) -> bool {
+        matches!(
+            event,
+            Event::QueryApplications(..)
+                | Event::QueryLayoutState { .. }
+                | Event::QueryMetrics(..)
+                | Event::QueryWindowInfo { .. }
+                | Event::QueryWindows { .. }
+                | Event::QueryWorkspaces { .. }
+                | Event::QueryActiveWorkspace { .. }
+                | Event::QueryDisplays(..)
+        )
     }
 
     fn log_event(&self, event: &Event) {
@@ -660,18 +741,21 @@ impl Reactor {
         self.log_event(&event);
         self.recording_manager.record.on_event(&event);
 
-        if matches!(
-            event,
-            Event::QueryApplications(..)
-                | Event::QueryLayoutState { .. }
-                | Event::QueryMetrics(..)
-                | Event::QueryWindowInfo { .. }
-                | Event::QueryWindows { .. }
-                | Event::QueryWorkspaces { .. }
-                | Event::QueryActiveWorkspace { .. }
-                | Event::QueryDisplays(..)
-        ) {
+        if Self::is_query_event(&event) {
             return self.handle_query(event);
+        }
+
+        match event {
+            Event::DisplayChurnBegin => {
+                self.display_churn_active = true;
+                self.display_churn_pending_full_refresh = true;
+                return;
+            }
+            Event::DisplayChurnEnd => {
+                self.display_churn_active = false;
+                return;
+            }
+            _ => {}
         }
 
         let should_update_notifications = matches!(
@@ -862,6 +946,26 @@ impl Reactor {
             }
             _ => (),
         }
+
+        self.finalize_event_processing(
+            raised_window,
+            is_resize,
+            window_was_destroyed,
+            should_update_notifications,
+        );
+    }
+
+    fn finalize_event_processing(
+        &mut self,
+        raised_window: Option<WindowId>,
+        is_resize: bool,
+        window_was_destroyed: bool,
+        should_update_notifications: bool,
+    ) {
+        if self.display_churn_active || self.display_churn_pending_full_refresh {
+            return;
+        }
+
         if let Some(raised_window) = raised_window {
             if let Some(space) =
                 self.window_manager.windows.get(&raised_window).and_then(|w| {
@@ -874,18 +978,13 @@ impl Reactor {
 
         let mut layout_changed = false;
         if !self.is_in_drag() || window_was_destroyed {
-            layout_changed = self
-                .update_layout(
-                    is_resize,
-                    matches!(
-                        self.workspace_switch_manager.workspace_switch_state,
-                        WorkspaceSwitchState::Active
-                    ),
-                )
-                .unwrap_or_else(|e| {
-                    warn!("Layout update failed: {}", e);
-                    false
-                });
+            layout_changed = self.update_layout_or_warn(
+                is_resize,
+                matches!(
+                    self.workspace_switch_manager.workspace_switch_state,
+                    WorkspaceSwitchState::Active
+                ),
+            );
             self.maybe_send_menu_update();
         }
 
@@ -1032,10 +1131,7 @@ impl Reactor {
                     }
                 }
                 self.refocus_manager.refocus_state = RefocusState::Pending(space);
-                self.update_layout(false, false).unwrap_or_else(|e| {
-                    warn!("Layout update failed: {}", e);
-                    false
-                });
+                self.update_layout_or_warn(false, false);
                 self.update_focus_follows_mouse_state();
             }
         }
@@ -2377,11 +2473,54 @@ impl Reactor {
         self.mission_control_manager.pending_mission_control_refresh.clear();
         self.force_refresh_all_windows();
         self.check_for_new_windows();
-        self.update_layout(false, false).unwrap_or_else(|e| {
-            warn!("Layout update failed: {}", e);
-            false
-        });
+        self.update_layout_or_warn(false, false);
         self.maybe_send_menu_update();
+    }
+
+    fn refresh_window_server_snapshot_after_churn(&mut self) {
+        let ws_info = window_server::get_visible_windows_with_layer(None);
+        self.update_complete_window_server_info(ws_info);
+    }
+
+    fn resync_windows_after_churn(&mut self) {
+        let known_spaces: Vec<SpaceId> = self.space_manager.iter_known_spaces().collect();
+        let mut to_rehome: Vec<WindowId> = Vec::new();
+        let mut windows_by_pid: HashMap<pid_t, Vec<WindowId>> = HashMap::default();
+
+        for (&wid, state) in &self.window_manager.windows {
+            windows_by_pid.entry(wid.pid).or_default().push(wid);
+
+            let Some(actual_space) =
+                self.best_space_for_window(&state.frame_monotonic, state.window_server_id)
+            else {
+                continue;
+            };
+            let assigned_space = known_spaces
+                .iter()
+                .find(|space| {
+                    self.layout_manager
+                        .layout_engine
+                        .virtual_workspace_manager()
+                        .workspace_for_window(**space, wid)
+                        .is_some()
+                })
+                .copied();
+
+            if assigned_space != Some(actual_space) {
+                to_rehome.push(wid);
+            }
+        }
+
+        for wid in to_rehome {
+            self.send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
+        }
+
+        for (pid, window_ids) in windows_by_pid {
+            let Some(app_state) = self.app_manager.apps.get(&pid) else {
+                continue;
+            };
+            self.process_windows_for_app_rules(pid, window_ids, app_state.info.clone());
+        }
     }
 
     fn force_refresh_all_windows(&mut self) {
@@ -2608,6 +2747,26 @@ impl Reactor {
                 .layout_engine
                 .store_floating_window_positions(space, &floating_windows_in_workspace);
         }
+    }
+
+    pub(crate) fn update_layout_or_warn(
+        &mut self,
+        is_resize: bool,
+        is_workspace_switch: bool,
+    ) -> bool {
+        self.update_layout_or_warn_with(is_resize, is_workspace_switch, "Layout update failed")
+    }
+
+    pub(crate) fn update_layout_or_warn_with(
+        &mut self,
+        is_resize: bool,
+        is_workspace_switch: bool,
+        context: &'static str,
+    ) -> bool {
+        self.update_layout(is_resize, is_workspace_switch).unwrap_or_else(|e| {
+            warn!(error = ?e, "{}", context);
+            false
+        })
     }
 
     #[instrument(skip(self), fields())]

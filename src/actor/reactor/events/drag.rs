@@ -1,4 +1,4 @@
-use tracing::{trace, warn};
+use tracing::trace;
 
 use crate::actor::reactor::{DragState, Reactor};
 use crate::common::collections::HashMap;
@@ -87,15 +87,9 @@ impl DragEventHandler {
 
         if need_layout_refresh {
             let skip_layout_occurred = reactor.drag_manager.skip_layout_for_window.is_some();
-            let _ = reactor.update_layout(false, false).unwrap_or_else(|e| {
-                warn!("Layout update failed: {}", e);
-                false
-            });
+            let _ = reactor.update_layout_or_warn(false, false);
             if skip_layout_occurred {
-                let _ = reactor.update_layout(false, false).unwrap_or_else(|e| {
-                    warn!("Layout update failed: {}", e);
-                    false
-                });
+                let _ = reactor.update_layout_or_warn(false, false);
             }
         }
 

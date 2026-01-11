@@ -44,6 +44,8 @@ pub enum WmEvent {
     AppGloballyActivated(pid_t),
     AppGloballyDeactivated(pid_t),
     AppTerminated(pid_t),
+    DisplayChurnBegin,
+    DisplayChurnEnd,
     SpaceChanged(Vec<Option<SpaceId>>),
     ScreenParametersChanged(Vec<ScreenDescriptor>, CoordinateConverter, Vec<Option<SpaceId>>),
     SystemWoke,
@@ -225,6 +227,8 @@ impl WmController {
 
         match event {
             SystemWoke => self.events_tx.send(Event::SystemWoke),
+            DisplayChurnBegin => self.events_tx.send(Event::DisplayChurnBegin),
+            DisplayChurnEnd => self.events_tx.send(Event::DisplayChurnEnd),
             AppEventsRegistered => {
                 _ = self.event_tap_tx.send(event_tap::Request::SetEventProcessing(false));
 

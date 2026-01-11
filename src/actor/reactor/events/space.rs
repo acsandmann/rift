@@ -54,6 +54,20 @@ impl SpaceEventHandler {
             return;
         } else if crate::sys::window_server::space_is_user(sid.get()) {
             if let Some(&wid) = reactor.window_manager.window_ids.get(&wsid) {
+                // During display churn the window server can emit transient "destroyed"
+                // notifications while the window is being migrated between spaces/displays.
+                // Avoid tearing down reactor state; force an app-level refresh instead.
+                if reactor.is_display_churn_active() {
+                    reactor.window_manager.visible_windows.remove(&wsid);
+                    if let Some(app_state) = reactor.app_manager.apps.get(&wid.pid) {
+                        if let Err(e) =
+                            app_state.handle.send(Request::MarkWindowsNeedingInfo(vec![wid]))
+                        {
+                            warn!("Failed to send MarkWindowsNeedingInfo: {}", e);
+                        }
+                    }
+                    return;
+                }
                 reactor.window_manager.window_ids.remove(&wsid);
                 reactor.window_server_info_manager.window_server_info.remove(&wsid);
                 reactor.window_manager.visible_windows.remove(&wsid);
@@ -322,9 +336,11 @@ impl SpaceEventHandler {
         if reactor.pending_space_change_manager.topology_relayout_pending {
             reactor.pending_space_change_manager.topology_relayout_pending = false;
             reactor.force_refresh_all_windows();
-            if let Err(e) = reactor.update_layout(false, false) {
-                warn!(error = ?e, "Layout update failed after topology change");
-            }
+            let _ = reactor.update_layout_or_warn_with(
+                false,
+                false,
+                "Layout update failed after topology change",
+            );
         }
     }
 

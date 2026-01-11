@@ -78,6 +78,7 @@ pub enum LayoutEvent {
     AppClosed(pid_t),
     WindowAdded(SpaceId, WindowId),
     WindowRemoved(WindowId),
+    WindowRemovedPreserveFloating(WindowId),
     WindowFocused(SpaceId, WindowId),
     WindowResized {
         wid: WindowId,
@@ -451,6 +452,33 @@ impl LayoutEngine {
         }
     }
 
+    fn remove_window_internal(&mut self, wid: WindowId, preserve_floating: bool) {
+        let affected_space: Option<SpaceId> = self.space_with_window(wid);
+
+        self.tree.remove_window(wid);
+
+        if preserve_floating {
+            self.floating.remove_active_for_window(wid);
+        } else {
+            self.floating.remove_floating(wid);
+        }
+
+        self.virtual_workspace_manager.remove_window(wid);
+        if !preserve_floating {
+            self.virtual_workspace_manager.remove_floating_position(wid);
+        }
+
+        if self.focused_window == Some(wid) {
+            self.focused_window = None;
+        }
+
+        if let Some(space) = affected_space {
+            self.broadcast_windows_changed(space);
+        }
+
+        self.rebalance_all_layouts();
+    }
+
     fn space_with_window(&self, wid: WindowId) -> Option<SpaceId> {
         for space in self.workspace_layouts.spaces() {
             if let Some(ws_id) = self.virtual_workspace_manager.active_workspace(space) {
@@ -761,25 +789,10 @@ impl LayoutEngine {
                 self.broadcast_windows_changed(space);
             }
             LayoutEvent::WindowRemoved(wid) => {
-                let affected_space: Option<SpaceId> = self.space_with_window(wid);
-
-                self.tree.remove_window(wid);
-
-                self.floating.remove_floating(wid);
-
-                self.virtual_workspace_manager.remove_window(wid);
-
-                self.virtual_workspace_manager.remove_floating_position(wid);
-
-                if self.focused_window == Some(wid) {
-                    self.focused_window = None;
-                }
-
-                if let Some(space) = affected_space {
-                    self.broadcast_windows_changed(space);
-                }
-
-                self.rebalance_all_layouts();
+                self.remove_window_internal(wid, false);
+            }
+            LayoutEvent::WindowRemovedPreserveFloating(wid) => {
+                self.remove_window_internal(wid, true);
             }
             LayoutEvent::WindowFocused(space, wid) => {
                 self.focused_window = Some(wid);
