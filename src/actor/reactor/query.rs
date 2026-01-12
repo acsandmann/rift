@@ -133,21 +133,16 @@ impl Reactor {
                         } else {
                             Some(screen.display_uuid.as_str())
                         };
-                        let gaps = self
-                            .config_manager
-                            .config
-                            .settings
-                            .layout
-                            .gaps
-                            .effective_for_display(display_uuid);
+                        let gaps =
+                            self.config.settings.layout.gaps.effective_for_display(display_uuid);
                         self.layout_manager.layout_engine.calculate_layout_for_workspace(
                             space,
                             *workspace_id,
                             screen.frame,
                             &gaps,
-                            self.config_manager.config.settings.ui.stack_line.thickness(),
-                            self.config_manager.config.settings.ui.stack_line.horiz_placement,
-                            self.config_manager.config.settings.ui.stack_line.vert_placement,
+                            self.config.settings.ui.stack_line.thickness(),
+                            self.config.settings.ui.stack_line.horiz_placement,
+                            self.config.settings.ui.stack_line.vert_placement,
                         )
                     } else {
                         vec![]
@@ -252,7 +247,6 @@ impl Reactor {
                     self.window_manager.windows.keys().filter(|wid| wid.pid == pid).count();
 
                 let is_frontmost = self
-                    .main_window_tracker_manager
                     .main_window_tracker
                     .main_window()
                     .map(|wid| wid.pid == pid)

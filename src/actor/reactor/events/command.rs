@@ -102,44 +102,38 @@ impl CommandEventHandler {
     }
 
     pub fn handle_config_updated(reactor: &mut Reactor, new_cfg: Config) {
-        let old_keys = reactor.config_manager.config.keys.clone();
+        let old_keys = reactor.config.keys.clone();
 
-        reactor.config_manager.config = new_cfg;
+        reactor.config = new_cfg;
         reactor
             .layout_manager
             .layout_engine
-            .set_layout_settings(&reactor.config_manager.config.settings.layout);
+            .set_layout_settings(&reactor.config.settings.layout);
 
         reactor
             .layout_manager
             .layout_engine
-            .update_virtual_workspace_settings(&reactor.config_manager.config.virtual_workspaces);
+            .update_virtual_workspace_settings(&reactor.config.virtual_workspaces);
 
-        reactor
-            .drag_manager
-            .update_config(reactor.config_manager.config.settings.window_snapping);
+        reactor.drag_manager.update_config(reactor.config.settings.window_snapping);
 
         if let Some(tx) = &reactor.communication_manager.stack_line_tx {
-            if let Err(e) = tx.try_send(StackLineEvent::ConfigUpdated(
-                reactor.config_manager.config.clone(),
-            )) {
+            if let Err(e) = tx.try_send(StackLineEvent::ConfigUpdated(reactor.config.clone())) {
                 warn!("Failed to send config update to stack line: {}", e);
             }
         }
 
         if let Some(tx) = &reactor.menu_manager.menu_tx {
-            if let Err(e) = tx.try_send(menu_bar::Event::ConfigUpdated(
-                reactor.config_manager.config.clone(),
-            )) {
+            if let Err(e) = tx.try_send(menu_bar::Event::ConfigUpdated(reactor.config.clone())) {
                 warn!("Failed to send config update to menu bar: {}", e);
             }
         }
 
         let _ = reactor.update_layout_or_warn(false, true);
 
-        if old_keys != reactor.config_manager.config.keys {
+        if old_keys != reactor.config.keys {
             if let Some(wm) = &reactor.communication_manager.wm_sender {
-                wm.send(WmEvent::ConfigUpdated(reactor.config_manager.config.clone()));
+                wm.send(WmEvent::ConfigUpdated(reactor.config.clone()));
             }
         }
     }

@@ -156,9 +156,9 @@ impl AnimationManager {
             return false;
         };
         let mut anim = Animation::new(
-            reactor.config_manager.config.settings.animation_fps,
-            reactor.config_manager.config.settings.animation_duration,
-            reactor.config_manager.config.settings.animation_easing.clone(),
+            reactor.config.settings.animation_fps,
+            reactor.config.settings.animation_duration,
+            reactor.config.settings.animation_easing.clone(),
         );
         let mut animated_count = 0;
         let mut animated_wids_wsids: Vec<u32> = Vec::new();
@@ -238,7 +238,7 @@ impl AnimationManager {
 
         if animated_count > 0 {
             let low_power = power::is_low_power_mode_enabled();
-            if is_resize || !reactor.config_manager.config.settings.animate || low_power {
+            if is_resize || !reactor.config.settings.animate || low_power {
                 anim.skip_to_end();
             } else {
                 anim.run();

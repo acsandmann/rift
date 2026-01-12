@@ -365,13 +365,13 @@ pub enum RefocusState {
 }
 
 pub struct Reactor {
-    config_manager: managers::ConfigManager,
+    pub config: Config,
     app_manager: managers::AppManager,
     layout_manager: managers::LayoutManager,
     window_manager: managers::WindowManager,
     window_server_info_manager: managers::WindowServerInfoManager,
     space_manager: managers::SpaceManager,
-    main_window_tracker_manager: managers::MainWindowTrackerManager,
+    main_window_tracker: MainWindowTracker,
     drag_manager: managers::DragManager,
     workspace_switch_manager: managers::WorkspaceSwitchManager,
     recording_manager: managers::RecordingManager,
@@ -498,7 +498,7 @@ impl Reactor {
             None => (None, WindowTxStore::new()),
         };
         Reactor {
-            config_manager: managers::ConfigManager { config: config.clone() },
+            config: config.clone(),
             app_manager: managers::AppManager::new(),
             layout_manager: managers::LayoutManager { layout_engine },
             window_manager: managers::WindowManager {
@@ -516,9 +516,7 @@ impl Reactor {
                 changing_screens: HashSet::default(),
                 screen_space_by_id: HashMap::default(),
             },
-            main_window_tracker_manager: managers::MainWindowTrackerManager {
-                main_window_tracker: MainWindowTracker::default(),
-            },
+            main_window_tracker: MainWindowTracker::default(),
             drag_manager: managers::DragManager {
                 drag_state: DragState::Inactive,
                 drag_swap_manager: crate::actor::drag_swap::DragManager::new(
@@ -772,8 +770,7 @@ impl Reactor {
                 | Event::ScreenParametersChanged(..)
         );
 
-        let raised_window =
-            self.main_window_tracker_manager.main_window_tracker.handle_event(&event);
+        let raised_window = self.main_window_tracker.handle_event(&event);
         let mut is_resize = false;
         let mut window_was_destroyed = false;
 
@@ -1295,7 +1292,7 @@ impl Reactor {
     }
 
     fn maybe_reapply_app_rules_for_window(&mut self, window_id: WindowId) {
-        if !self.config_manager.config.virtual_workspaces.reapply_app_rules_on_title_change {
+        if !self.config.virtual_workspaces.reapply_app_rules_on_title_change {
             return;
         }
 
@@ -1866,13 +1863,7 @@ impl Reactor {
         };
         let bundle_id_str = bundle_id.to_string();
 
-        if self
-            .config_manager
-            .config
-            .settings
-            .auto_focus_blacklist
-            .contains(&bundle_id_str)
-        {
+        if self.config.settings.auto_focus_blacklist.contains(&bundle_id_str) {
             debug!(
                 "App {} is blacklisted for auto-focus workspace switching, ignoring activation",
                 bundle_id_str
@@ -1991,7 +1982,7 @@ impl Reactor {
                     }
                 } else if self.focus_untracked_window_under_cursor() {
                     handled_without_raise = true;
-                } else if self.config_manager.config.settings.mouse_follows_focus {
+                } else if self.config.settings.mouse_follows_focus {
                     let skip_center_warp = workspace_switch_space
                         .map(|space| {
                             self.layout_manager
@@ -2029,7 +2020,7 @@ impl Reactor {
                         focus_window = Some(wid);
                     } else if self.focus_untracked_window_under_cursor() {
                         handled_without_raise = true;
-                    } else if self.config_manager.config.settings.mouse_follows_focus {
+                    } else if self.config.settings.mouse_follows_focus {
                         if let Some(screen) = self.space_manager.screen_by_space(space) {
                             let center = screen.frame.mid();
                             if let Some(event_tap_tx) =
@@ -2122,7 +2113,7 @@ impl Reactor {
         }
 
         let focus_window_with_warp = focus_window.map(|wid| {
-            let warp = match self.config_manager.config.settings.mouse_follows_focus {
+            let warp = match self.config.settings.mouse_follows_focus {
                 true => {
                     if self.workspace_switch_manager.workspace_switch_state
                         == WorkspaceSwitchState::Active
@@ -2539,9 +2530,7 @@ impl Reactor {
         }
     }
 
-    fn main_window(&self) -> Option<WindowId> {
-        self.main_window_tracker_manager.main_window_tracker.main_window()
-    }
+    fn main_window(&self) -> Option<WindowId> { self.main_window_tracker.main_window() }
 
     fn main_window_space(&self) -> Option<SpaceId> {
         // TODO: Optimize this with a cache or something.

@@ -348,7 +348,7 @@ fn it_preserves_layout_after_login_screen() {
     let default = reactor.layout_manager.layout_engine.calculate_layout(
         space,
         full_screen,
-        &reactor.config_manager.config.settings.layout.gaps,
+        &reactor.config.settings.layout.gaps,
         0.0,
         crate::common::config::HorizontalPlacement::Top,
         crate::common::config::VerticalPlacement::Right,
@@ -362,7 +362,7 @@ fn it_preserves_layout_after_login_screen() {
     let modified = reactor.layout_manager.layout_engine.calculate_layout(
         space,
         full_screen,
-        &reactor.config_manager.config.settings.layout.gaps,
+        &reactor.config.settings.layout.gaps,
         0.0,
         crate::common::config::HorizontalPlacement::Top,
         crate::common::config::VerticalPlacement::Right,
@@ -409,7 +409,7 @@ fn it_preserves_layout_after_login_screen() {
         reactor.layout_manager.layout_engine.calculate_layout(
             space,
             full_screen,
-            &reactor.config_manager.config.settings.layout.gaps,
+            &reactor.config.settings.layout.gaps,
             0.0,
             crate::common::config::HorizontalPlacement::Top,
             crate::common::config::VerticalPlacement::Right,
