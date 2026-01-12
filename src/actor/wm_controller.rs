@@ -548,13 +548,14 @@ impl WmController {
             self.login_window_pid = Some(pid);
         }
 
-        if self.known_apps.contains(&pid) || self.spawning_apps.contains(&pid) {
-            debug!(pid = ?pid, "Duplicate AppLaunch received; skipping spawn");
+        if self.known_apps.contains(&pid) || !self.spawning_apps.insert(pid) {
+            debug!(pid = ?pid, "Duplicate AppLaunch or already known; skipping");
             return;
         }
 
         let Some(running_app) = NSRunningApplication::with_process_id(pid) else {
             debug!(pid = ?pid, "Failed to resolve NSRunningApplication for new app");
+            self.spawning_apps.remove(&pid);
             return;
         };
 
@@ -571,6 +572,7 @@ impl WmController {
             if running_app.activationPolicy() == NSApplicationActivationPolicy::Regular {
                 sys::app::remove_activation_policy_observer(pid);
             } else {
+                self.spawning_apps.remove(&pid);
                 return;
             }
         }
@@ -586,11 +588,10 @@ impl WmController {
             if running_app.isFinishedLaunching() {
                 sys::app::remove_finished_launching_observer(pid);
             } else {
+                self.spawning_apps.remove(&pid);
                 return;
             }
         }
-
-        self.spawning_apps.insert(pid);
 
         actor::app::spawn_app_thread(
             pid,
