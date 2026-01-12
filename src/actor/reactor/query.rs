@@ -298,7 +298,7 @@ impl Reactor {
 
         Some(LayoutStateData {
             space_id: space_id_u64,
-            mode: "tiling".to_string(), // TODO: Determine actual mode
+            mode: self.layout_manager.layout_engine.layout_mode().to_string(),
             floating_windows,
             tiled_windows,
             focused_window,

@@ -126,6 +126,13 @@ impl LayoutEngine {
         self.virtual_workspace_manager.update_settings(settings);
     }
 
+    pub fn layout_mode(&self) -> &'static str {
+        match &self.tree {
+            LayoutSystemKind::Traditional(_) => "traditional",
+            LayoutSystemKind::Bsp(_) => "bsp",
+        }
+    }
+
     fn active_floating_windows_in_workspace(&self, space: SpaceId) -> Vec<WindowId> {
         self.floating
             .active_flat(space)
