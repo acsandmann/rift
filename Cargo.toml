@@ -19,10 +19,13 @@ split-debuginfo = "packed"
 panic = "unwind"
 
 [profile.release]
+opt-level = 3
 debug = 1
 codegen-units = 1
 panic = "abort"
-incremental = true
+incremental = false
+lto = "thin"
+strip = true
 
 [lib]
 doctest = false
