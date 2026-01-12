@@ -1,5 +1,6 @@
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::ffi::c_void;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -266,14 +267,18 @@ pub fn ensure_activation_policy_observer(pid: pid_t, info: AppInfo) {
     let Some(callback) = callback else {
         return;
     };
-    if ACTIVATION_POLICY_OBSERVERS.lock().contains_key(&pid) {
+    let mut observers = ACTIVATION_POLICY_OBSERVERS.lock();
+    if observers.contains_key(&pid) {
         return;
     }
     let Some(app) = NSRunningApplication::with_process_id(pid) else {
+        drop(observers);
         callback(pid, info);
         return;
     };
-    observe_activation_policy(app, info, callback);
+    let observer = ActivationPolicyObserver::new(app, info, callback);
+    let raw = Retained::into_raw(observer);
+    observers.insert(pid, raw as usize);
 }
 
 pub fn ensure_finished_launching_observer(pid: pid_t, info: AppInfo) {
@@ -281,18 +286,21 @@ pub fn ensure_finished_launching_observer(pid: pid_t, info: AppInfo) {
     let Some(callback) = callback else {
         return;
     };
-    if FINISHED_LAUNCHING_OBSERVERS.lock().contains_key(&pid) {
+    let mut observers = FINISHED_LAUNCHING_OBSERVERS.lock();
+    if observers.contains_key(&pid) {
         return;
     }
     let Some(app) = NSRunningApplication::with_process_id(pid) else {
         return;
     };
     if app.isFinishedLaunching() {
+        drop(observers);
         callback(pid, info);
         return;
-    }
-
-    observe_finished_launching(app, info, callback);
+    };
+    let observer = FinishedLaunchingObserver::new(app, info, callback);
+    let raw = Retained::into_raw(observer);
+    observers.insert(pid, raw as usize);
 }
 
 pub fn remove_activation_policy_observer(pid: pid_t) {
@@ -311,38 +319,6 @@ pub fn remove_finished_launching_observer(pid: pid_t) {
             let _ = Retained::from_raw(ptr);
         }
     }
-}
-
-fn observe_activation_policy(
-    app: Retained<NSRunningApplication>,
-    info: AppInfo,
-    callback: ActivationPolicyCallback,
-) {
-    let pid = app.pid();
-    {
-        if ACTIVATION_POLICY_OBSERVERS.lock().contains_key(&pid) {
-            return;
-        }
-    }
-    let observer = ActivationPolicyObserver::new(app, info, callback);
-    let raw = Retained::into_raw(observer) as *mut ActivationPolicyObserver;
-    ACTIVATION_POLICY_OBSERVERS.lock().insert(pid, raw as usize);
-}
-
-fn observe_finished_launching(
-    app: Retained<NSRunningApplication>,
-    info: AppInfo,
-    callback: ActivationPolicyCallback,
-) {
-    let pid = app.pid();
-    {
-        if FINISHED_LAUNCHING_OBSERVERS.lock().contains_key(&pid) {
-            return;
-        }
-    }
-    let observer = FinishedLaunchingObserver::new(app, info, callback);
-    let raw = Retained::into_raw(observer) as *mut FinishedLaunchingObserver;
-    FINISHED_LAUNCHING_OBSERVERS.lock().insert(pid, raw as usize);
 }
 
 pub fn running_apps(bundle: Option<String>) -> impl Iterator<Item = (pid_t, AppInfo)> {
@@ -371,7 +347,13 @@ pub fn running_apps(bundle: Option<String>) -> impl Iterator<Item = (pid_t, AppI
                 && bundle_id.as_deref() != Some("com.apple.loginwindow")
             {
                 if let Some(cb) = callback.clone() {
-                    observe_activation_policy(app, info, cb);
+                    let pid = app.pid();
+                    let mut observers = ACTIVATION_POLICY_OBSERVERS.lock();
+                    if let Entry::Vacant(entry) = observers.entry(pid) {
+                        let observer = ActivationPolicyObserver::new(app, info, cb);
+                        let raw = Retained::into_raw(observer);
+                        entry.insert(raw as usize);
+                    }
                 }
                 return None;
             }
