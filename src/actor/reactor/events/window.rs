@@ -357,8 +357,7 @@ impl WindowEventHandler {
                             }
                         }
                     } else {
-                        reactor
-                            .send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
+                        reactor.send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
                         if let Some(space) = new_space {
                             if reactor.is_space_active(space) {
                                 if let Some(active_ws) =
