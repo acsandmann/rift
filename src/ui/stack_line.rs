@@ -11,6 +11,7 @@ use tracing::warn;
 
 use crate::common::config::{HorizontalPlacement, VerticalPlacement};
 use crate::sys::cgs_window::{CgsWindow, CgsWindowError};
+use crate::sys::screen::SpaceId;
 use crate::sys::skylight::{
     CFRelease, G_CONNECTION, SLSFlushWindowContentRegion, SLWindowContextCreate,
 };
@@ -110,6 +111,7 @@ struct IndicatorState {
     separator_layers: Vec<Retained<CALayer>>,
     selected_layer: Option<Retained<CALayer>>,
     click_callback: Option<SegmentClickCallback>,
+    space_id: Option<SpaceId>,
 }
 
 impl IndicatorState {
@@ -121,6 +123,7 @@ impl IndicatorState {
             separator_layers: Vec::new(),
             selected_layer: None,
             click_callback: None,
+            space_id: None,
         }
     }
 }
@@ -187,8 +190,15 @@ impl GroupIndicatorWindow {
     pub fn clear(&self) -> Result<(), CgsWindowError> {
         self.clear_layers();
         self.state.borrow_mut().group_data = None;
+        self.state.borrow_mut().space_id = None;
         self.present();
         self.cgs_window.order_out()
+    }
+
+    pub fn space_id(&self) -> Option<SpaceId> { self.state.borrow().space_id }
+
+    pub fn set_space_id(&self, space_id: SpaceId) {
+        self.state.borrow_mut().space_id = Some(space_id);
     }
 
     pub fn set_frame(&self, frame: CGRect) -> Result<(), CgsWindowError> {
