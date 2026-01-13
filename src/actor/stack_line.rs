@@ -120,20 +120,18 @@ impl StackLine {
 
         let group_nodes: std::collections::HashSet<NodeId> =
             groups.iter().map(|g| g.node_id).collect();
-        self.indicators.retain(|&node_id, indicator| {
-            match indicator.space_id() {
-                Some(indicator_space_id) if indicator_space_id == space_id => {
-                    if group_nodes.contains(&node_id) {
-                        true
-                    } else {
-                        if let Err(err) = indicator.clear() {
-                            tracing::warn!(?err, "failed to clear stack line indicator");
-                        }
-                        false
+        self.indicators.retain(|&node_id, indicator| match indicator.space_id() {
+            Some(indicator_space_id) if indicator_space_id == space_id => {
+                if group_nodes.contains(&node_id) {
+                    true
+                } else {
+                    if let Err(err) = indicator.clear() {
+                        tracing::warn!(?err, "failed to clear stack line indicator");
                     }
+                    false
                 }
-                _ => true,
             }
+            _ => true,
         });
 
         for group in groups {
