@@ -199,8 +199,8 @@ impl Apps {
             debug!(?request);
             match request {
                 Request::Terminate => break,
-                Request::MarkWindowsNeedingInfo(_) => {}
-                Request::GetVisibleWindows { .. } => {
+                Request::WindowMaybeDestroyed(_) => {}
+                Request::GetVisibleWindows => {
                     if got_visible_windows {
                         continue;
                     }

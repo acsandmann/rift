@@ -385,7 +385,7 @@ fn it_preserves_layout_after_login_screen() {
     let requests = apps.requests();
     for request in requests {
         match request {
-            Request::GetVisibleWindows { .. } => {
+            Request::GetVisibleWindows => {
                 // Simulate the login screen condition: No windows are
                 // considered visible by the accessibility API, but they are
                 // from the window server API in the event above.
@@ -454,6 +454,12 @@ fn it_retains_windows_without_server_ids_after_login_visibility_failure() {
 
     reactor.handle_event(Event::ActiveSpacesChanged(vec![None]));
     reactor.handle_event(Event::SpaceChanged(vec![None], vec![]));
+
+    // Simulate a native fullscreen transition: space temporarily becomes a fullscreen
+    // space id (reactor suppresses it to None), then returns to the original space.
+    let fullscreen_space = SpaceId::new(0x400000000 + space.get());
+    reactor.handle_event(Event::SpaceChanged(vec![Some(fullscreen_space)], vec![]));
+
     reactor.handle_event(Event::ActiveSpacesChanged(vec![Some(space)]));
     reactor.handle_event(Event::SpaceChanged(vec![Some(space)], vec![]));
 
@@ -466,7 +472,7 @@ fn it_retains_windows_without_server_ids_after_login_visibility_failure() {
         let mut other_requests = Vec::new();
         for request in requests {
             match request {
-                Request::GetVisibleWindows { .. } => {
+                Request::GetVisibleWindows => {
                     reactor.handle_event(Event::WindowsDiscovered {
                         pid: 1,
                         new: vec![],

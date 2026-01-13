@@ -6,8 +6,8 @@ use tracing::{debug, info, trace, warn};
 
 use crate::actor::app::Request;
 use crate::actor::reactor::{
-    Event, FullscreenTrack, MissionControlState, PendingSpaceChange, Reactor, Screen,
-    ScreenSnapshot, StaleCleanupState,
+    Event, FullscreenSpaceTrack, FullscreenWindowTrack, MissionControlState, PendingSpaceChange,
+    Reactor, Screen, ScreenSnapshot, StaleCleanupState,
 };
 use crate::actor::wm_controller::WmEvent;
 use crate::sys::app::AppInfo;
@@ -23,62 +23,58 @@ impl SpaceEventHandler {
         sid: SpaceId,
     ) {
         if crate::sys::window_server::space_is_fullscreen(sid.get()) {
-            let entry = match reactor.space_manager.fullscreen_by_space.entry(sid.get()) {
-                Entry::Occupied(o) => o.into_mut(),
-                Entry::Vacant(v) => v.insert(FullscreenTrack::default()),
-            };
-            if let Some(&wid) = reactor.window_manager.window_ids.get(&wsid) {
-                entry.pids.insert(wid.pid);
-                if entry.last_removed.len() >= 5 {
-                    entry.last_removed.pop_front();
-                }
-                entry.last_removed.push_back(wsid);
-                if let Some(app_state) = reactor.app_manager.apps.get(&wid.pid) {
-                    if let Err(e) =
-                        app_state.handle.send(Request::MarkWindowsNeedingInfo(vec![wid]))
-                    {
-                        warn!("Failed to send MarkWindowsNeedingInfo: {}", e);
-                    }
-                }
-                return;
+            let (pid, window_id) = if let Some(&wid) = reactor.window_manager.window_ids.get(&wsid)
+            {
+                (wid.pid, Some(wid))
             } else if let Some(info) =
                 reactor.window_server_info_manager.window_server_info.get(&wsid)
             {
-                entry.pids.insert(info.pid);
-                if entry.last_removed.len() >= 5 {
-                    entry.last_removed.pop_front();
-                }
-                entry.last_removed.push_back(wsid);
+                (info.pid, None)
+            } else {
+                // We don't know who owned this fullscreen window.
                 return;
+            };
+
+            let last_known_user_space = window_id
+                .and_then(|wid| reactor.best_space_for_window_id(wid))
+                .filter(|space| crate::sys::window_server::space_is_user(space.get()))
+                .or_else(|| {
+                    reactor
+                        .space_manager
+                        .iter_known_spaces()
+                        .find(|space| crate::sys::window_server::space_is_user(space.get()))
+                });
+
+            let entry = match reactor.space_manager.fullscreen_by_space.entry(sid.get()) {
+                Entry::Occupied(o) => o.into_mut(),
+                Entry::Vacant(v) => v.insert(FullscreenSpaceTrack::default()),
+            };
+
+            entry.windows.push(FullscreenWindowTrack {
+                pid,
+                window_id,
+                last_known_user_space,
+                _last_seen_fullscreen_space: sid,
+            });
+
+            if let Some(wid) = window_id
+                && let Some(app_state) = reactor.app_manager.apps.get(&wid.pid)
+            {
+                if let Err(e) = app_state.handle.send(Request::WindowMaybeDestroyed(wid)) {
+                    warn!("Failed to send WindowMaybeDestroyed: {}", e);
+                }
             }
+
             return;
         } else if crate::sys::window_server::space_is_user(sid.get()) {
             if let Some(&wid) = reactor.window_manager.window_ids.get(&wsid) {
-                // During display churn the window server can emit transient "destroyed"
-                // notifications while the window is being migrated between spaces/displays.
-                // Avoid tearing down reactor state; force an app-level refresh instead.
-                if reactor.is_display_churn_active() {
-                    reactor.window_manager.visible_windows.remove(&wsid);
-                    if let Some(app_state) = reactor.app_manager.apps.get(&wid.pid) {
-                        if let Err(e) =
-                            app_state.handle.send(Request::MarkWindowsNeedingInfo(vec![wid]))
-                        {
-                            warn!("Failed to send MarkWindowsNeedingInfo: {}", e);
-                        }
-                    }
-                    return;
-                }
                 reactor.window_manager.window_ids.remove(&wsid);
                 reactor.window_server_info_manager.window_server_info.remove(&wsid);
                 reactor.window_manager.visible_windows.remove(&wsid);
                 if let Some(app_state) = reactor.app_manager.apps.get(&wid.pid) {
-                    if let Err(e) =
-                        app_state.handle.send(Request::MarkWindowsNeedingInfo(vec![wid]))
-                    {
-                        warn!("Failed to send MarkWindowsNeedingInfo: {}", e);
+                    if let Err(e) = app_state.handle.send(Request::WindowMaybeDestroyed(wid)) {
+                        warn!("Failed to send WindowMaybeDestroyed: {}", e);
                     }
-                    let _ =
-                        app_state.handle.send(Request::GetVisibleWindows { force_refresh: true });
                 }
                 if let Some(tx) = reactor.communication_manager.events_tx.as_ref() {
                     tx.send(Event::WindowDestroyed(wid));
@@ -137,41 +133,38 @@ impl SpaceEventHandler {
             }
 
             if crate::sys::window_server::space_is_fullscreen(sid.get()) {
+                let last_known_user_space = reactor
+                    .window_manager
+                    .window_ids
+                    .get(&wsid)
+                    .copied()
+                    .and_then(|wid| reactor.best_space_for_window_id(wid))
+                    .filter(|space| crate::sys::window_server::space_is_user(space.get()))
+                    .or_else(|| {
+                        reactor
+                            .space_manager
+                            .iter_known_spaces()
+                            .find(|space| crate::sys::window_server::space_is_user(space.get()))
+                    });
+
                 let entry = match reactor.space_manager.fullscreen_by_space.entry(sid.get()) {
                     Entry::Occupied(o) => o.into_mut(),
-                    Entry::Vacant(v) => v.insert(FullscreenTrack::default()),
+                    Entry::Vacant(v) => v.insert(FullscreenSpaceTrack::default()),
                 };
-                entry.pids.insert(window_server_info.pid);
-                if entry.last_removed.len() >= 5 {
-                    entry.last_removed.pop_front();
-                }
-                entry.last_removed.push_back(wsid);
-                if let Some(&wid) = reactor.window_manager.window_ids.get(&wsid) {
-                    if let Some(app_state) = reactor.app_manager.apps.get(&wid.pid) {
-                        if let Err(e) =
-                            app_state.handle.send(Request::MarkWindowsNeedingInfo(vec![wid]))
-                        {
-                            warn!("Failed to send MarkWindowsNeedingInfo: {}", e);
-                        }
-                    }
-                } else if let Some(app_state) =
-                    reactor.app_manager.apps.get(&window_server_info.pid)
-                {
-                    let resync: Vec<_> = reactor
-                        .window_manager
-                        .windows
-                        .keys()
-                        .copied()
-                        .filter(|wid| wid.pid == window_server_info.pid)
-                        .collect();
-                    if !resync.is_empty() {
-                        if let Err(e) =
-                            app_state.handle.send(Request::MarkWindowsNeedingInfo(resync))
-                        {
-                            warn!("Failed to send MarkWindowsNeedingInfo: {}", e);
-                        }
+
+                entry.windows.push(FullscreenWindowTrack {
+                    pid: window_server_info.pid,
+                    window_id: reactor.window_manager.window_ids.get(&wsid).copied(),
+                    last_known_user_space,
+                    _last_seen_fullscreen_space: sid,
+                });
+
+                if let Some(app_state) = reactor.app_manager.apps.get(&window_server_info.pid) {
+                    if let Err(e) = app_state.handle.send(Request::GetVisibleWindows) {
+                        warn!("Failed to refresh after fullscreen appearance: {}", e);
                     }
                 }
+
                 return;
             }
 
@@ -190,9 +183,7 @@ impl SpaceEventHandler {
                     });
                 }
             } else if let Some(app) = reactor.app_manager.apps.get(&window_server_info.pid) {
-                if let Err(err) =
-                    app.handle.send(Request::GetVisibleWindows { force_refresh: false })
-                {
+                if let Err(err) = app.handle.send(Request::GetVisibleWindows) {
                     warn!(
                         pid = window_server_info.pid,
                         ?wsid,

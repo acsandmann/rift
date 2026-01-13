@@ -31,7 +31,7 @@ use events::system::SystemEventHandler;
 use events::window::WindowEventHandler;
 use main_window::MainWindowTracker;
 use managers::LayoutManager;
-use objc2_core_foundation::{CGPoint, CGRect};
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 pub use replay::{Record, replay};
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -64,7 +64,7 @@ use crate::sys::window_server::{
 
 pub type Sender = actor::Sender<Event>;
 type Receiver = actor::Receiver<Event>;
-use std::collections::VecDeque;
+
 use std::path::PathBuf;
 
 use crate::model::server::{
@@ -300,10 +300,21 @@ pub enum ReactorCommand {
     },
 }
 
-#[derive(Default, Debug, Clone)]
-struct FullscreenTrack {
-    pids: HashSet<pid_t>,
-    last_removed: VecDeque<WindowServerId>,
+#[derive(Debug, Clone)]
+struct FullscreenWindowTrack {
+    pid: pid_t,
+    window_id: Option<WindowId>,
+    last_known_user_space: Option<SpaceId>,
+    _last_seen_fullscreen_space: SpaceId,
+}
+
+#[derive(Debug, Clone)]
+struct FullscreenSpaceTrack {
+    windows: Vec<FullscreenWindowTrack>,
+}
+
+impl Default for FullscreenSpaceTrack {
+    fn default() -> Self { FullscreenSpaceTrack { windows: Vec::new() } }
 }
 
 #[derive(Debug, Clone)]
@@ -711,8 +722,6 @@ impl Reactor {
         }
     }
 
-    pub(crate) fn is_display_churn_active(&self) -> bool { self.display_churn_active }
-
     fn is_query_event(event: &Event) -> bool {
         matches!(
             event,
@@ -1085,7 +1094,7 @@ impl Reactor {
         for app in self.app_manager.apps.values_mut() {
             // Errors mean the app terminated (and a termination event
             // is coming); ignore.
-            _ = app.handle.send(Request::GetVisibleWindows { force_refresh: false });
+            _ = app.handle.send(Request::GetVisibleWindows);
         }
     }
 
@@ -1118,15 +1127,41 @@ impl Reactor {
             if let Some(track) = self.space_manager.fullscreen_by_space.remove(&space.get()) {
                 wait_for_native_fullscreen_transition();
                 Timer::sleep(Duration::from_millis(50));
-                for pid in track.pids {
-                    if let Some(app) = self.app_manager.apps.get(&pid) {
-                        if let Err(e) =
-                            app.handle.send(Request::GetVisibleWindows { force_refresh: true })
+
+                for window in track.windows {
+                    if let Some(app) = self.app_manager.apps.get(&window.pid) {
+                        if let Err(e) = app.handle.send(Request::GetVisibleWindows) {
+                            warn!("Failed to send GetVisibleWindows to app {}: {}", window.pid, e);
+                        }
+                    }
+
+                    if let (Some(window_id), Some(target_space)) =
+                        (window.window_id, window.last_known_user_space)
+                    {
+                        if let Some(source_space) = self
+                            .best_space_for_window_id(window_id)
+                            .or(window.last_known_user_space)
                         {
-                            warn!("Failed to send GetVisibleWindows to app {}: {}", pid, e);
+                            if source_space != target_space {
+                                let target_screen_size = self
+                                    .space_manager
+                                    .screen_by_space(target_space)
+                                    .map(|screen| screen.frame.size)
+                                    .unwrap_or_else(|| CGSize::new(0.0, 0.0));
+
+                                let response =
+                                    self.layout_manager.layout_engine.move_window_to_space(
+                                        source_space,
+                                        target_space,
+                                        target_screen_size,
+                                        window_id,
+                                    );
+                                self.handle_layout_response(response, None);
+                            }
                         }
                     }
                 }
+
                 self.refocus_manager.refocus_state = RefocusState::Pending(space);
                 self.update_layout_or_warn(false, false);
                 self.update_focus_follows_mouse_state();
@@ -2516,7 +2551,7 @@ impl Reactor {
 
     fn force_refresh_all_windows(&mut self) {
         for (&pid, app) in &self.app_manager.apps {
-            if app.handle.send(Request::GetVisibleWindows { force_refresh: true }).is_ok() {
+            if app.handle.send(Request::GetVisibleWindows).is_ok() {
                 self.mission_control_manager.pending_mission_control_refresh.insert(pid);
             }
         }

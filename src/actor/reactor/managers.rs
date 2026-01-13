@@ -5,7 +5,7 @@ use tracing::trace;
 
 use super::replay::Record;
 use super::{
-    AppState, Event, FullscreenTrack, PendingSpaceChange, Screen, WindowState,
+    AppState, Event, FullscreenSpaceTrack, PendingSpaceChange, Screen, WindowState,
     WorkspaceSwitchOrigin, WorkspaceSwitchState,
 };
 use crate::actor;
@@ -79,7 +79,7 @@ impl AppManager {
 /// Manages space and screen state
 pub struct SpaceManager {
     pub screens: Vec<Screen>,
-    pub fullscreen_by_space: HashMap<u64, FullscreenTrack>,
+    pub fullscreen_by_space: HashMap<u64, FullscreenSpaceTrack>,
     pub changing_screens: HashSet<WindowServerId>,
     pub screen_space_by_id: HashMap<ScreenId, SpaceId>,
 }

@@ -69,7 +69,7 @@ impl AppEventHandler {
             if let Some(app_state) = reactor.app_manager.apps.get(&wid.pid) {
                 if let Err(e) = app_state
                     .handle
-                    .send(crate::actor::app::Request::GetVisibleWindows { force_refresh: true })
+                    .send(crate::actor::app::Request::GetVisibleWindows)
                 {
                     warn!("Failed to send GetVisibleWindows to app {}: {}", wid.pid, e);
                 }
@@ -84,7 +84,7 @@ impl AppEventHandler {
             if let Some(app_state) = reactor.app_manager.apps.get(&info.pid) {
                 if let Err(e) = app_state
                     .handle
-                    .send(crate::actor::app::Request::GetVisibleWindows { force_refresh: true })
+                    .send(crate::actor::app::Request::GetVisibleWindows)
                 {
                     warn!("Failed to send GetVisibleWindows to app {}: {}", info.pid, e);
                 }

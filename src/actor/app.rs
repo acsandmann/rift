@@ -25,7 +25,7 @@ use tracing::{Instrument, Span, debug, error, info, instrument, trace, warn};
 use crate::actor;
 use crate::actor::reactor::transaction_manager::TransactionId;
 use crate::actor::reactor::{self, Event, Requested};
-use crate::common::collections::{HashMap, HashSet};
+use crate::common::collections::HashMap;
 use crate::model::tx_store::WindowTxStore;
 use crate::sys::app::NSRunningApplicationExt;
 pub use crate::sys::app::{AppInfo, WindowInfo, pid_t};
@@ -196,10 +196,8 @@ impl Debug for AppThreadHandle {
 #[derive(Debug)]
 pub enum Request {
     Terminate,
-    GetVisibleWindows {
-        force_refresh: bool,
-    },
-    MarkWindowsNeedingInfo(Vec<WindowId>),
+    GetVisibleWindows,
+    WindowMaybeDestroyed(WindowId),
     CloseWindow(WindowId),
 
     SetWindowFrame(WindowId, CGRect, TransactionId, bool),
@@ -247,7 +245,6 @@ struct State {
     observer: Observer,
     events_tx: reactor::Sender,
     windows: HashMap<WindowId, WindowState>,
-    needs_resync: HashSet<WindowId>,
     last_window_idx: u32,
     main_window: Option<WindowId>,
     last_activated: Option<(Instant, Quiet, Option<WindowId>, r#continue::Sender<()>)>,
@@ -452,12 +449,21 @@ impl State {
                 self.send_event(Event::ApplicationThreadTerminated(self.pid));
                 return Ok(true);
             }
-            Request::MarkWindowsNeedingInfo(wids) => {
-                for wid in wids.iter().copied() {
-                    if wid.pid == self.pid && self.windows.contains_key(&wid) {
-                        self.needs_resync.insert(wid);
-                    }
+            Request::WindowMaybeDestroyed(wid) => {
+                let wid = *wid;
+                if wid.pid != self.pid {
+                    return Ok(false);
                 }
+
+                // If we don't know this window, nothing to verify.
+                if !self.windows.contains_key(&wid) {
+                    return Ok(false);
+                }
+
+                // Trigger a visible windows refresh. If the window is gone, the reactor
+                // will detect it via missing membership and tear down state.
+                *request = Request::GetVisibleWindows;
+                return self.handle_request(request);
             }
             Request::CloseWindow(wid) => {
                 if let Some(window) = self.windows.get(wid)
@@ -466,7 +472,7 @@ impl State {
                     warn!(?wid, error = ?err, "Failed to close window");
                 }
             }
-            Request::GetVisibleWindows { force_refresh } => {
+            Request::GetVisibleWindows => {
                 let window_elems = match self.app.windows() {
                     Ok(elems) => elems,
                     Err(e) => {
@@ -484,22 +490,16 @@ impl State {
                     let elem = elem.clone();
                     if let Ok(id) = self.id(&elem) {
                         known_visible.push(id);
-                        let needs_refresh = *force_refresh || self.needs_resync.contains(&id);
-                        if needs_refresh {
-                            match WindowInfo::from_ax_element(&elem, None) {
-                                Ok((info, _)) => {
-                                    if info.sys_id.is_some() {
-                                        self.needs_resync.remove(&id);
-                                    }
-                                    new.push((id, info));
-                                }
-                                Err(err) => {
-                                    trace!(
-                                        ?id,
-                                        ?err,
-                                        "Failed to refresh window info; will retry later"
-                                    );
-                                }
+                        match WindowInfo::from_ax_element(&elem, None) {
+                            Ok((info, _)) => {
+                                new.push((id, info));
+                            }
+                            Err(err) => {
+                                trace!(
+                                    ?id,
+                                    ?err,
+                                    "Failed to refresh window info; will retry later"
+                                );
                             }
                         }
                         continue;
@@ -507,18 +507,7 @@ impl State {
                     let Some((info, wid, _)) = self.register_window(elem, None) else {
                         continue;
                     };
-                    self.needs_resync.remove(&wid);
                     new.push((wid, info));
-                }
-                if !*force_refresh {
-                    for wid in self.needs_resync.iter().copied() {
-                        if wid.pid == self.pid
-                            && self.windows.contains_key(&wid)
-                            && !known_visible.contains(&wid)
-                        {
-                            known_visible.push(wid);
-                        }
-                    }
                 }
                 self.send_event(Event::WindowsDiscovered {
                     pid: self.pid,
@@ -728,7 +717,6 @@ impl State {
                     return;
                 };
                 self.windows.remove(&wid);
-                self.needs_resync.remove(&wid);
                 self.send_event(Event::WindowDestroyed(wid));
 
                 self.on_main_window_changed(Some(wid));
@@ -1062,7 +1050,6 @@ impl State {
                 continue;
             }
             let wid = *wid;
-            self.needs_resync.insert(wid);
             to_restore.push(wid);
         }
 
@@ -1186,7 +1173,6 @@ impl State {
     fn handle_ax_error(&mut self, wid: WindowId, err: &AXError) -> bool {
         if matches!(*err, AXError::InvalidUIElement) {
             if self.windows.remove(&wid).is_some() {
-                self.needs_resync.remove(&wid);
                 self.send_event(Event::WindowDestroyed(wid));
                 self.on_main_window_changed(Some(wid));
             }
@@ -1319,7 +1305,6 @@ fn app_thread_main(
         observer,
         events_tx,
         windows: HashMap::default(),
-        needs_resync: HashSet::default(),
         last_window_idx: 0,
         main_window: None,
         last_activated: None,
