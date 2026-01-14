@@ -2,7 +2,7 @@ use std::ffi::{CStr, c_char};
 use std::time::Duration;
 
 use r#continue::continuation;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, trace};
 
 pub mod cli_exec;
 pub mod protocol;
@@ -182,7 +182,7 @@ impl MachHandler {
     }
 
     fn handle_request(&self, request: RiftRequest, client_port: ClientPort) -> RiftResponse {
-        debug!("Handling request: {:?} from client {}", request, client_port);
+        trace!("Handling request: {:?} from client {}", request, client_port);
 
         match request {
             RiftRequest::Subscribe { event } => {
@@ -454,8 +454,6 @@ unsafe extern "C" fn handle_mach_request_c(
             return;
         }
     };
-
-    debug!("Received message: {}", message_str);
 
     let client_port = unsafe { (*original_msg).msgh_remote_port };
 

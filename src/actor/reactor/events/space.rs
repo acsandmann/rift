@@ -236,7 +236,38 @@ impl SpaceEventHandler {
                 })
                 .collect();
             reactor.update_screen_space_map();
-            reactor.set_active_spaces(&spaces);
+
+            let cfg = crate::actor::reactor::managers::space_activation::SpaceActivationConfig {
+                default_disable: reactor.config.settings.default_disable,
+                one_space: reactor.one_space,
+            };
+            // IMPORTANT: Do not reset login-window state here. When the lock screen / fast user
+            // switching activates the login window, WM emits raw space snapshots and global
+            // activation events. The activation policy must preserve the current login-window
+            // flag across screen parameter changes so it can keep all spaces disabled while
+            // login window is active.
+            let inputs: Vec<
+                crate::actor::reactor::managers::space_activation::ScreenActivationInput,
+            > = reactor
+                .space_manager
+                .screens
+                .iter()
+                .map(
+                    |s| crate::actor::reactor::managers::space_activation::ScreenActivationInput {
+                        screen_id: s.screen_id,
+                        space: s.space,
+                        display_uuid: if s.display_uuid.is_empty() {
+                            None
+                        } else {
+                            Some(s.display_uuid.clone())
+                        },
+                    },
+                )
+                .collect();
+            reactor.space_activation_policy.on_spaces_updated(cfg, &inputs);
+
+            reactor.recompute_and_set_active_spaces(&spaces);
+
             // Do not remap layout state across reconnects; new space ids can churn and
             // remapping has caused windows to oscillate. Keep existing state and only
             // update the screen→space mapping.
