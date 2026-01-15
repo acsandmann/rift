@@ -297,6 +297,7 @@ impl LayoutManager {
                                 frame: g.frame,
                                 total_count: g.total_count,
                                 selected_index: g.selected_index,
+                                window_ids: g.window_ids,
                             })
                             .collect();
                         if let Err(e) =

@@ -1070,6 +1070,16 @@ impl TraditionalLayoutSystem {
                     frame: rect,
                     total_count: children.len(),
                     selected_index: ui_selected_index,
+                    window_ids: {
+                        let mut ids = children
+                            .iter()
+                            .filter_map(|&child| self.window_at(child))
+                            .collect::<Vec<_>>();
+                        if matches!(kind, VerticalStack) {
+                            ids.reverse();
+                        }
+                        ids
+                    },
                 });
 
                 let mut container_rect = rect;

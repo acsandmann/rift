@@ -25,6 +25,7 @@ pub struct GroupContainerInfo {
     pub frame: CGRect,
     pub total_count: usize,
     pub selected_index: usize,
+    pub window_ids: Vec<crate::actor::app::WindowId>,
 }
 
 #[non_exhaustive]

@@ -238,6 +238,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         events_tx.clone(),
         event_tap_rx,
         Some(wm_controller_sender.clone()),
+        Some(stack_line_tx.clone()),
     );
     let menu = Menu::new(config.clone(), menu_rx, mtm);
     let stack_line = StackLine::new(
