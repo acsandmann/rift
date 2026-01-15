@@ -1,7 +1,7 @@
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
-use tracing::debug;
+use tracing::{debug, trace};
 
 use super::reactor::{self, Event};
 use crate::actor::app::WindowId;
@@ -169,6 +169,7 @@ impl WindowNotify {
 
         std::thread::spawn(move || {
             while let Some((_span, evt)) = rx.blocking_recv() {
+                trace!(?event, ?evt, "got event");
                 if let Some(window_id) = evt.window_id {
                     match event {
                         CGSEventType::Known(KnownCGSEvent::SpaceWindowDestroyed) => {
