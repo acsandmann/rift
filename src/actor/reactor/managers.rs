@@ -3,6 +3,8 @@ use std::time::Instant;
 use objc2_core_foundation::CGRect;
 use tracing::trace;
 
+pub mod space_activation;
+
 use super::replay::Record;
 use super::{
     AppState, Event, FullscreenSpaceTrack, PendingSpaceChange, Screen, WindowState,
@@ -18,7 +20,7 @@ use crate::actor::{event_tap, menu_bar, raise_manager, stack_line, window_notify
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::WindowSnappingSettings;
 use crate::layout_engine::LayoutEngine;
-use crate::sys::screen::{ScreenId, SpaceId};
+use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 
 /// Manages window state and lifecycle
@@ -81,20 +83,16 @@ pub struct SpaceManager {
     pub screens: Vec<Screen>,
     pub fullscreen_by_space: HashMap<u64, FullscreenSpaceTrack>,
     pub changing_screens: HashSet<WindowServerId>,
-    pub screen_space_by_id: HashMap<ScreenId, SpaceId>,
+    pub has_seen_display_set: bool,
 }
 
 impl SpaceManager {
-    pub fn space_for_screen(&self, screen: &Screen) -> Option<SpaceId> {
-        screen.space.or_else(|| self.screen_space_by_id.get(&screen.screen_id).copied())
-    }
-
     pub fn screen_by_space(&self, space: SpaceId) -> Option<&Screen> {
-        self.screens.iter().find(|screen| self.space_for_screen(screen) == Some(space))
+        self.screens.iter().find(|screen| screen.space == Some(space))
     }
 
     pub fn iter_known_spaces(&self) -> impl Iterator<Item = SpaceId> + '_ {
-        self.screens.iter().filter_map(|screen| self.space_for_screen(screen))
+        self.screens.iter().filter_map(|screen| screen.space)
     }
 
     pub fn first_known_space(&self) -> Option<SpaceId> { self.iter_known_spaces().next() }
@@ -213,7 +211,7 @@ impl LayoutManager {
         let mut layout_result = LayoutResult::new();
 
         for screen in screens {
-            let Some(space) = reactor.space_manager.space_for_screen(&screen) else {
+            let Some(space) = screen.space else {
                 continue;
             };
             let display_uuid_opt = if screen.display_uuid.is_empty() {

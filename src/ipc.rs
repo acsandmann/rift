@@ -2,7 +2,7 @@ use std::ffi::{CStr, c_char};
 use std::time::Duration;
 
 use r#continue::continuation;
-use tracing::{debug, error, info, trace};
+use tracing::{error, info, trace};
 
 pub mod cli_exec;
 pub mod protocol;

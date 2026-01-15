@@ -94,10 +94,7 @@ define_class! {
                 cache.mark_sleeping(false);
                 cache.mark_dirty();
             }
-            // On wake, refresh state immediately so display swaps while asleep
-            // are reflected as soon as possible.
             self.send_event(WmEvent::SystemWoke);
-            self.send_screen_parameters();
         }
 
         #[unsafe(method(recvSleepEvent:))]
@@ -255,7 +252,10 @@ impl NotificationCenterInner {
             trace!("Skipping current space update during display reconfig/refresh");
             return;
         }
-        if let Some((_, _, spaces)) = self.collect_state() {
+
+        if let Some((_, _, spaces)) = self.collect_state()
+            && !spaces.is_empty()
+        {
             self.send_event(WmEvent::SpaceChanged(spaces));
         }
     }

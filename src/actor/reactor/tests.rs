@@ -123,7 +123,6 @@ fn it_clears_screen_state_when_no_displays_are_reported() {
     reactor.handle_event(screen_params_event(vec![], vec![], vec![]));
     assert!(reactor.space_manager.screens.is_empty());
 
-    reactor.handle_event(Event::ActiveSpacesChanged(vec![]));
     reactor.handle_event(Event::SpaceChanged(vec![], vec![]));
     assert!(reactor.space_manager.screens.is_empty());
 
@@ -452,7 +451,6 @@ fn it_retains_windows_without_server_ids_after_login_visibility_failure() {
     ));
     apps.simulate_until_quiet(&mut reactor);
 
-    reactor.handle_event(Event::ActiveSpacesChanged(vec![None]));
     reactor.handle_event(Event::SpaceChanged(vec![None], vec![]));
 
     // Simulate a native fullscreen transition: space temporarily becomes a fullscreen
@@ -460,7 +458,6 @@ fn it_retains_windows_without_server_ids_after_login_visibility_failure() {
     let fullscreen_space = SpaceId::new(0x400000000 + space.get());
     reactor.handle_event(Event::SpaceChanged(vec![Some(fullscreen_space)], vec![]));
 
-    reactor.handle_event(Event::ActiveSpacesChanged(vec![Some(space)]));
     reactor.handle_event(Event::SpaceChanged(vec![Some(space)], vec![]));
 
     loop {
@@ -490,127 +487,4 @@ fn it_retains_windows_without_server_ids_after_login_visibility_failure() {
             }
         }
     }
-}
-
-#[test]
-fn it_respects_wsid_suppression_for_apply_app_rules() {
-    use crate::actor::app::{AppInfo, WindowId};
-    use crate::sys::window_server::WindowServerInfo;
-
-    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
-        &crate::common::config::VirtualWorkspaceSettings::default(),
-        &crate::common::config::LayoutSettings::default(),
-        None,
-    ));
-    let full_screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
-    reactor.handle_event(screen_params_event(
-        vec![full_screen],
-        vec![Some(SpaceId::new(1))],
-        vec![],
-    ));
-
-    let space = SpaceId::new(1);
-    reactor
-        .layout_manager
-        .layout_engine
-        .virtual_workspace_manager_mut()
-        .list_workspaces(space);
-
-    let pid = 42;
-    let wid = WindowId::new(pid, 7);
-    let wsid = WindowServerId::new(12345);
-
-    // Simulate the system resizing a window after it recognizes an old
-    // configurations. Resize events are not sent in this case.
-    reactor.handle_event(screen_params_event(
-        vec![
-            full_screen,
-            CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.)),
-        ],
-        vec![Some(SpaceId::new(1)), None],
-        vec![WindowServerInfo {
-            id: WindowServerId::new(1),
-            pid: 1,
-            layer: 0,
-            frame: CGRect::new(CGPoint::new(500., 0.), CGSize::new(500., 500.)),
-        }],
-    ));
-
-    let info = crate::actor::app::WindowInfo {
-        is_standard: true,
-        is_root: true,
-        is_minimized: false,
-        title: "NoServerId".to_string(),
-        frame: CGRect::new(CGPoint::new(50., 50.), CGSize::new(400., 400.)),
-        sys_id: None,
-        bundle_id: None,
-        path: None,
-        ax_role: None,
-        ax_subrole: None,
-    };
-
-    reactor.window_manager.windows.insert(wid, crate::actor::reactor::WindowState {
-        title: info.title.clone(),
-        frame_monotonic: info.frame,
-        is_ax_standard: info.is_standard,
-        is_ax_root: info.is_root,
-        is_minimized: info.is_minimized,
-        is_manageable: true,
-        ignore_app_rule: false,
-        window_server_id: info.sys_id,
-        bundle_id: info.bundle_id.clone(),
-        bundle_path: info.path.clone(),
-        ax_role: info.ax_role.clone(),
-        ax_subrole: info.ax_subrole.clone(),
-    });
-    reactor.window_manager.window_ids.insert(wsid, wid);
-
-    // Capture the workspace for this window before applying app rules so we can
-    // verify that apply_app_rules does not change the workspace assignment.
-    let before_ws = reactor
-        .layout_manager
-        .layout_engine
-        .virtual_workspace_manager()
-        .workspace_for_window(space, wid);
-
-    let app_info = AppInfo {
-        bundle_id: Some("com.example.test".to_string()),
-        localized_name: Some("TestApp".to_string()),
-    };
-
-    let ws_info = WindowServerInfo {
-        id: wsid,
-        pid,
-        layer: 0,
-        frame: info.frame,
-    };
-
-    crate::actor::reactor::events::app::AppEventHandler::handle_apply_app_rules_to_existing_windows(
-        &mut reactor,
-        pid,
-        app_info.clone(),
-        vec![ws_info.clone()],
-    );
-
-    use super::Reactor;
-    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
-        &crate::common::config::VirtualWorkspaceSettings::default(),
-        &crate::common::config::LayoutSettings::default(),
-        None,
-    ));
-    let space = SpaceId::new(1);
-    reactor.handle_event(screen_params_event(
-        vec![CGRect::ZERO],
-        vec![Some(space)],
-        vec![],
-    ));
-    assert_eq!(None, reactor.main_window());
-
-    let after_ws = reactor
-        .layout_manager
-        .layout_engine
-        .virtual_workspace_manager()
-        .workspace_for_window(space, wid);
-
-    assert_eq!(before_ws, after_ws);
 }

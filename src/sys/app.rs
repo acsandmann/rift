@@ -5,8 +5,6 @@ use std::ffi::c_void;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use dispatchr::queue;
-use dispatchr::time::Time;
 pub use nix::libc::pid_t;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -23,7 +21,6 @@ use super::window_server::{WindowServerId, WindowServerInfo};
 use crate::sys::axuielement::{
     AX_STANDARD_WINDOW_SUBROLE, AX_WINDOW_ROLE, AXUIElement, Error as AxError,
 };
-use crate::sys::dispatch::DispatchExt;
 
 const NS_KEY_VALUE_OBSERVING_OPTION_NEW: usize = 1 << 0;
 const NS_KEY_VALUE_OBSERVING_OPTION_INITIAL: usize = 1 << 2;
@@ -102,8 +99,11 @@ impl ActivationPolicyObserver {
             ivars.notified.set(true);
             (ivars.handler.clone(), ivars.info.clone(), ivars.pid)
         };
+
+        remove_activation_policy_observer(pid);
+        remove_finished_launching_observer(pid);
+
         callback(pid, info);
-        schedule_observer_cleanup(pid);
     }
 }
 
@@ -192,8 +192,11 @@ impl FinishedLaunchingObserver {
             ivars.notified.set(true);
             (ivars.handler.clone(), ivars.info.clone(), ivars.pid)
         };
+
+        remove_finished_launching_observer(pid);
+        remove_activation_policy_observer(pid);
+
         callback(pid, info);
-        schedule_observer_cleanup(pid);
     }
 }
 
@@ -208,32 +211,6 @@ impl Drop for FinishedLaunchingObserver {
             ];
         }
     }
-}
-
-struct CleanupCtx(pid_t);
-
-extern "C" fn cleanup_observer(ctx: *mut c_void) {
-    if ctx.is_null() {
-        return;
-    }
-    let pid = unsafe { Box::from_raw(ctx as *mut CleanupCtx).0 };
-    if let Some(observer) = ACTIVATION_POLICY_OBSERVERS.lock().remove(&pid) {
-        unsafe {
-            let ptr = observer as *mut ActivationPolicyObserver;
-            let _ = Retained::from_raw(ptr);
-        }
-    }
-    if let Some(observer) = FINISHED_LAUNCHING_OBSERVERS.lock().remove(&pid) {
-        unsafe {
-            let ptr = observer as *mut FinishedLaunchingObserver;
-            let _ = Retained::from_raw(ptr);
-        }
-    }
-}
-
-fn schedule_observer_cleanup(pid: pid_t) {
-    let ctx = Box::new(CleanupCtx(pid));
-    queue::main().after_f(Time::NOW, Box::into_raw(ctx) as *mut c_void, cleanup_observer);
 }
 
 static ACTIVATION_POLICY_CALLBACK: Lazy<Mutex<Option<ActivationPolicyCallback>>> =
@@ -273,6 +250,7 @@ pub fn ensure_activation_policy_observer(pid: pid_t, info: AppInfo) {
     }
     let Some(app) = NSRunningApplication::with_process_id(pid) else {
         drop(observers);
+        remove_activation_policy_observer(pid);
         callback(pid, info);
         return;
     };
@@ -295,6 +273,7 @@ pub fn ensure_finished_launching_observer(pid: pid_t, info: AppInfo) {
     };
     if app.isFinishedLaunching() {
         drop(observers);
+        remove_finished_launching_observer(pid);
         callback(pid, info);
         return;
     };

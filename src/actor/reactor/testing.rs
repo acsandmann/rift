@@ -19,7 +19,7 @@ impl Reactor {
         config.settings.animate = false;
         let record = Record::new_for_test(tempfile::NamedTempFile::new().unwrap());
         let (broadcast_tx, _) = actor::channel();
-        Reactor::new(config, layout, record, broadcast_tx, None)
+        Reactor::new(config, layout, record, broadcast_tx, None, false)
     }
 
     pub fn handle_events(&mut self, events: Vec<Event>) {

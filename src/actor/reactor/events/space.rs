@@ -205,9 +205,24 @@ impl SpaceEventHandler {
         let new_displays: HashSet<String> =
             screens.iter().map(|s| s.display_uuid.clone()).collect();
         let displays_changed = previous_displays != new_displays;
+
+        // IMPORTANT:
+        // Only treat display UUID set changes as a "topology change" once we have a prior known set.
+        // On startup (previous_displays is empty), we'll always see displays_changed=true, but that
+        // should not trigger topology relayout pending. If it does, we can get stuck in a state where
+        // SpaceChanged updates are suppressed/dropped around login window transitions.
+        //
+        // Once we've seen a non-empty display set, allow topology changes that pass through empty
+        // (all displays unplugged/replugged).
+        let should_trigger_topology = displays_changed
+            && (reactor.space_manager.has_seen_display_set || !previous_displays.is_empty());
+
         if displays_changed {
             let active_list: Vec<String> = new_displays.iter().cloned().collect();
             reactor.layout_manager.layout_engine.prune_display_state(&active_list);
+        }
+        if !new_displays.is_empty() {
+            reactor.space_manager.has_seen_display_set = true;
         }
 
         let spaces: Vec<Option<SpaceId>> = screens.iter().map(|s| s.space).collect();
@@ -221,9 +236,10 @@ impl SpaceEventHandler {
         if screens.is_empty() {
             if !reactor.space_manager.screens.is_empty() {
                 reactor.space_manager.screens.clear();
-                reactor.space_manager.screen_space_by_id.clear();
                 reactor.expose_all_spaces();
             }
+
+            reactor.recompute_and_set_active_spaces(&[]);
         } else {
             reactor.space_manager.screens = screens
                 .into_iter()
@@ -235,7 +251,6 @@ impl SpaceEventHandler {
                     screen_id: ScreenId::new(snapshot.screen_id),
                 })
                 .collect();
-            reactor.update_screen_space_map();
 
             let cfg = crate::actor::reactor::managers::space_activation::SpaceActivationConfig {
                 default_disable: reactor.config.settings.default_disable,
@@ -283,7 +298,7 @@ impl SpaceEventHandler {
 
         // Mark that we should perform a one-shot relayout after spaces are applied,
         // so windows return to their prior displays post-topology change.
-        if displays_changed {
+        if should_trigger_topology {
             reactor.pending_space_change_manager.topology_relayout_pending = true;
         }
     }
@@ -298,8 +313,8 @@ impl SpaceEventHandler {
         if reactor.pending_space_change_manager.topology_relayout_pending
             && spaces.len() != reactor.space_manager.screens.len()
         {
-            println!(
-                "[rift][space_changed] drop mismatch during topology change (screens={}, spaces_len={})",
+            warn!(
+                "Dropping space change during topology change (screens={}, spaces_len={})",
                 reactor.space_manager.screens.len(),
                 spaces.len()
             );
@@ -308,8 +323,8 @@ impl SpaceEventHandler {
         // Also drop any space update that reports more spaces than screens; these are
         // transient and can reorder active workspaces across displays.
         if spaces.len() > reactor.space_manager.screens.len() {
-            println!(
-                "[rift][space_changed] drop oversize spaces vector (screens={}, spaces_len={})",
+            warn!(
+                "Dropping oversize spaces vector (screens={}, spaces_len={})",
                 reactor.space_manager.screens.len(),
                 spaces.len()
             );
@@ -338,6 +353,7 @@ impl SpaceEventHandler {
             if spaces.len() == reactor.space_manager.screens.len() {
                 reactor.set_screen_spaces(&spaces);
             }
+            reactor.recompute_and_set_active_spaces(&spaces);
             return;
         }
         if spaces.len() != reactor.space_manager.screens.len() {
@@ -348,6 +364,33 @@ impl SpaceEventHandler {
             );
             return;
         }
+
+        let cfg = crate::actor::reactor::managers::space_activation::SpaceActivationConfig {
+            default_disable: reactor.config.settings.default_disable,
+            one_space: reactor.one_space,
+        };
+        let inputs: Vec<crate::actor::reactor::managers::space_activation::ScreenActivationInput> =
+            reactor
+                .space_manager
+                .screens
+                .iter()
+                .zip(spaces.iter().copied())
+                .map(|(screen, space)| {
+                    crate::actor::reactor::managers::space_activation::ScreenActivationInput {
+                        screen_id: screen.screen_id,
+                        space,
+                        display_uuid: if screen.display_uuid.is_empty() {
+                            None
+                        } else {
+                            Some(screen.display_uuid.clone())
+                        },
+                    }
+                })
+                .collect();
+        reactor.space_activation_policy.on_spaces_updated(cfg, &inputs);
+
+        reactor.recompute_and_set_active_spaces(&spaces);
+
         reactor.reconcile_spaces_with_display_history(&spaces, false);
         info!("space changed");
         reactor.set_screen_spaces(&spaces);
@@ -378,9 +421,5 @@ impl SpaceEventHandler {
             reactor.set_mission_control_active(false);
         }
         reactor.refresh_windows_after_mission_control();
-    }
-
-    pub fn handle_active_spaces_changed(reactor: &mut Reactor, spaces: Vec<Option<SpaceId>>) {
-        reactor.set_active_spaces(&spaces);
     }
 }

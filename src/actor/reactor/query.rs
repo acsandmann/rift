@@ -198,7 +198,7 @@ impl Reactor {
             .screens
             .iter()
             .map(|screen| {
-                let space_for_screen = self.space_manager.space_for_screen(screen);
+                let space_for_screen = screen.space;
                 DisplayData {
                     uuid: screen.display_uuid.clone(),
                     name: screen.name.clone(),
@@ -340,7 +340,7 @@ impl Reactor {
         )> = Vec::new();
 
         for screen in &self.space_manager.screens {
-            if let Some(space) = self.space_manager.space_for_screen(screen) {
+            if let Some(space) = screen.space {
                 let workspaces = vwm.list_workspaces(space);
                 let active_ws = vwm.active_workspace(space);
 

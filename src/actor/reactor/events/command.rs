@@ -24,11 +24,19 @@ impl CommandEventHandler {
             .screens
             .iter()
             .filter_map(|screen| {
-                let space = reactor.space_manager.space_for_screen(screen)?;
+                let space = screen.space?;
+                if !reactor.is_space_active(space) {
+                    return None;
+                }
                 let center = screen.frame.mid();
                 Some((space, center))
             })
             .collect();
+
+        if visible_spaces_input.is_empty() {
+            warn!("Layout command ignored: no active spaces");
+            return;
+        }
 
         let mut visible_space_centers = HashMap::default();
         for (space, center) in &visible_spaces_input {
@@ -140,7 +148,7 @@ impl CommandEventHandler {
 
     pub fn handle_command_reactor_debug(reactor: &mut Reactor) {
         for screen in &reactor.space_manager.screens {
-            if let Some(space) = reactor.space_manager.space_for_screen(screen) {
+            if let Some(space) = screen.space {
                 reactor.layout_manager.layout_engine.debug_tree_desc(space, "", true);
             }
         }
@@ -175,13 +183,17 @@ impl CommandEventHandler {
         window_server_id: Option<WindowServerId>,
     ) {
         if reactor.window_manager.windows.contains_key(&window_id) {
-            if let Some(space) =
-                reactor.window_manager.windows.get(&window_id).and_then(|w| {
-                    reactor.best_space_for_window(&w.frame_monotonic, w.window_server_id)
-                })
-            {
-                reactor.send_layout_event(LayoutEvent::WindowFocused(space, window_id));
+            let Some(space) = reactor.window_manager.windows.get(&window_id).and_then(|w| {
+                reactor.best_space_for_window(&w.frame_monotonic, w.window_server_id)
+            }) else {
+                warn!(?window_id, "Focus window ignored: space unknown");
+                return;
+            };
+            if !reactor.is_space_active(space) {
+                warn!(?window_id, ?space, "Focus window ignored: space is inactive");
+                return;
             }
+            reactor.send_layout_event(LayoutEvent::WindowFocused(space, window_id));
 
             let mut app_handles: HashMap<i32, AppThreadHandle> = HashMap::default();
             if let Some(app) = reactor.app_manager.apps.get(&window_id.pid) {
@@ -236,7 +248,10 @@ impl CommandEventHandler {
     }
 
     fn focus_first_window_on_screen(reactor: &mut Reactor, screen: &Screen) -> bool {
-        if let Some(space) = reactor.space_manager.space_for_screen(screen) {
+        if let Some(space) = screen.space {
+            if !reactor.is_space_active(space) {
+                return false;
+            }
             let focus_target = reactor.last_focused_window_in_space(space).or_else(|| {
                 reactor
                     .layout_manager
@@ -260,6 +275,16 @@ impl CommandEventHandler {
         let target_screen = reactor.screen_for_selector(selector, None).cloned();
 
         if let Some(screen) = target_screen {
+            if let Some(space) = screen.space {
+                if !reactor.is_space_active(space) {
+                    warn!(
+                        ?selector,
+                        ?space,
+                        "Move mouse ignored: target display space is inactive"
+                    );
+                    return;
+                }
+            }
             let center = screen.frame.mid();
             if let Some(event_tap_tx) = reactor.communication_manager.event_tap_tx.as_ref() {
                 event_tap_tx.send(crate::actor::event_tap::Request::Warp(center));
@@ -273,6 +298,16 @@ impl CommandEventHandler {
             Some(s) => s,
             None => return,
         };
+        if let Some(space) = screen.space {
+            if !reactor.is_space_active(space) {
+                warn!(
+                    ?selector,
+                    ?space,
+                    "Focus display ignored: target display space is inactive"
+                );
+                return;
+            }
+        }
 
         if Self::focus_first_window_on_screen(reactor, &screen) {
             return;
@@ -300,15 +335,11 @@ impl CommandEventHandler {
                     if let Some(space) = reactor.workspace_command_space() {
                         vwm.find_window_by_idx(space, idx).or_else(|| {
                             reactor
-                                .space_manager
-                                .iter_known_spaces()
+                                .iter_active_spaces()
                                 .find_map(|sp| vwm.find_window_by_idx(sp, idx))
                         })
                     } else {
-                        reactor
-                            .space_manager
-                            .iter_known_spaces()
-                            .find_map(|sp| vwm.find_window_by_idx(sp, idx))
+                        reactor.iter_active_spaces().find_map(|sp| vwm.find_window_by_idx(sp, idx))
                     }
                 }
                 None => reactor.main_window().or_else(|| reactor.window_id_under_cursor()).or_else(
@@ -343,6 +374,14 @@ impl CommandEventHandler {
             );
             return;
         };
+        if !reactor.is_space_active(source_space) {
+            warn!(
+                ?window_id,
+                ?source_space,
+                "Move window to display ignored: source space is inactive"
+            );
+            return;
+        }
 
         let origin_screen = reactor.space_manager.screen_by_space(source_space);
 
@@ -357,8 +396,18 @@ impl CommandEventHandler {
             );
             return;
         };
+        if let Some(space) = target_screen.space {
+            if !reactor.is_space_active(space) {
+                warn!(
+                    ?selector,
+                    ?space,
+                    "Move window to display ignored: target display space is inactive"
+                );
+                return;
+            }
+        }
 
-        let Some(target_space) = reactor.space_manager.space_for_screen(&target_screen) else {
+        let Some(target_space) = target_screen.space else {
             warn!(
                 uuid = ?target_screen.display_uuid,
                 "Move window to display ignored: display has no active space"

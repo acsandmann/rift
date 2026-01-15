@@ -164,6 +164,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         menu_tx.clone(),
         stack_line_tx.clone(),
         Some((wnd_tx.clone(), window_tx_store.clone())),
+        opt.one,
     );
 
     let config_tx =
@@ -212,7 +213,6 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
     });
 
     let wm_config = wm_controller::Config {
-        one_space: opt.one,
         restore_file: restore_file(),
         config: config.clone(),
     };

@@ -32,7 +32,7 @@ impl DragEventHandler {
                     .screens
                     .iter()
                     .filter_map(|screen| {
-                        let space = reactor.space_manager.space_for_screen(screen)?;
+                        let space = screen.space?;
                         let center = screen.frame.mid();
                         Some((space, center))
                     })

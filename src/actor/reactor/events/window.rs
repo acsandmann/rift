@@ -296,8 +296,18 @@ impl WindowEventHandler {
                 }
                 return false;
             }
+            let server_id = window.window_server_id;
             let old_frame = std::mem::replace(&mut window.frame_monotonic, new_frame);
             if old_frame == new_frame {
+                return false;
+            }
+
+            let old_space = reactor.best_space_for_window(&old_frame, server_id);
+            let new_space = reactor.best_space_for_window(&new_frame, server_id);
+            let old_active = old_space.map(|space| reactor.is_space_active(space)).unwrap_or(false);
+            let new_active = new_space.map(|space| reactor.is_space_active(space)).unwrap_or(false);
+
+            if !old_active && !new_active {
                 return false;
             }
 
@@ -324,7 +334,7 @@ impl WindowEventHandler {
                     .screens
                     .iter()
                     .filter_map(|screen| {
-                        let space = reactor.space_manager.space_for_screen(screen)?;
+                        let space = screen.space?;
                         let display_uuid = if screen.display_uuid.is_empty() {
                             None
                         } else {
@@ -333,10 +343,6 @@ impl WindowEventHandler {
                         Some((space, screen.frame, display_uuid))
                     })
                     .collect::<Vec<_>>();
-
-                let server_id = window.window_server_id;
-                let old_space = reactor.best_space_for_window(&old_frame, server_id);
-                let new_space = reactor.best_space_for_window(&new_frame, server_id);
 
                 if old_space != new_space {
                     if matches!(
@@ -417,6 +423,9 @@ impl WindowEventHandler {
         let Some(&wid) = reactor.window_manager.window_ids.get(&wsid) else {
             return;
         };
+        if !reactor.is_window_on_active_space(wid) {
+            return;
+        }
         if !reactor.should_raise_on_mouse_over(wid) {
             return;
         }
