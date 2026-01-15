@@ -259,6 +259,7 @@ struct WindowState {
     last_seen_txid: TransactionId,
     hidden_by_app: bool,
     window_server_id: Option<WindowServerId>,
+    is_animating: bool,
 }
 
 const APP_NOTIFICATIONS: &[&str] = &[
@@ -278,11 +279,7 @@ const WINDOW_NOTIFICATIONS: &[&str] = &[
     kAXWindowResizedNotification,
     kAXWindowMiniaturizedNotification,
     kAXWindowDeminiaturizedNotification,
-    kAXTitleChangedNotification,
 ];
-
-const WINDOW_ANIMATION_NOTIFICATIONS: &[&str] = //&[];
-    &[kAXWindowMovedNotification, kAXWindowResizedNotification];
 
 impl State {
     fn txid_from_store(&self, wsid: Option<WindowServerId>) -> Option<TransactionId> {
@@ -642,8 +639,8 @@ impl State {
                 }
             }
             &mut Request::BeginWindowAnimation(wid) => {
-                let window = self.window(wid)?;
-                self.stop_notifications_for_animation(&window.elem);
+                let window = self.window_mut(wid)?;
+                window.is_animating = true;
             }
             &mut Request::EndWindowAnimation(wid) => {
                 let (elem, txid) = match self.window(wid) {
@@ -658,7 +655,9 @@ impl State {
                         AxError::NotFound => return Ok(false),
                     },
                 };
-                self.restart_notifications_after_animation(&elem);
+                if let Ok(window) = self.window_mut(wid) {
+                    window.is_animating = false;
+                }
                 let frame =
                     match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
                         Some(frame) => frame,
@@ -729,6 +728,13 @@ impl State {
                 let Ok(wid) = self.id(&elem) else {
                     return;
                 };
+
+                if let Ok(window) = self.window(wid) {
+                    if window.is_animating {
+                        trace!(?wid, ?notif, "Ignoring notification during animation");
+                        return;
+                    }
+                }
                 let txid = match self.window(wid) {
                     Ok(window) => self.txid_for_window_state(window),
                     Err(err) => {
@@ -1145,6 +1151,7 @@ impl State {
             last_seen_txid,
             hidden_by_app,
             window_server_id,
+            is_animating: false,
         });
         debug_assert!(old.is_none(), "Duplicate window id {wid:?}");
         if hidden_by_app {
@@ -1270,24 +1277,6 @@ impl State {
             return Ok(wid);
         }
         Err(AxError::NotFound)
-    }
-
-    fn stop_notifications_for_animation(&self, elem: &AXUIElement) {
-        for notif in WINDOW_ANIMATION_NOTIFICATIONS {
-            let res = self.observer.remove_notification(elem, notif);
-            if let Err(err) = res {
-                debug!(?notif, ?elem, "Removing notification failed with error {err}");
-            }
-        }
-    }
-
-    fn restart_notifications_after_animation(&self, elem: &AXUIElement) {
-        for notif in WINDOW_ANIMATION_NOTIFICATIONS {
-            let res = self.observer.add_notification(elem, notif);
-            if let Err(err) = res {
-                debug!(?notif, ?elem, "Adding notification failed with error {err}");
-            }
-        }
     }
 }
 
