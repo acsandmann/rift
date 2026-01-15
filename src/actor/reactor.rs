@@ -715,25 +715,32 @@ impl Reactor {
 
     fn refresh_window_server_snapshot_for_active_spaces(&mut self) {
         let ws_info = window_server::get_visible_windows_with_layer(None);
-        let active_space_ids = self.active_space_ids();
-        let ws_info = if active_space_ids.is_empty() {
-            Vec::new()
-        } else {
-            let active_window_ids: std::collections::HashSet<u32> =
-                crate::sys::window_server::space_window_list_for_connection(
-                    &active_space_ids,
-                    0,
-                    false,
-                )
-                .into_iter()
-                .collect();
-
-            ws_info
-                .into_iter()
-                .filter(|w| active_window_ids.contains(&w.id.as_u32()))
-                .collect()
-        };
+        let ws_info = self.filter_ws_info_to_active_spaces(ws_info);
         self.update_complete_window_server_info(ws_info);
+    }
+
+    fn filter_ws_info_to_active_spaces(
+        &self,
+        ws_info: Vec<WindowServerInfo>,
+    ) -> Vec<WindowServerInfo> {
+        let active_space_ids = self.active_space_ids();
+        if active_space_ids.is_empty() {
+            return Vec::new();
+        }
+
+        let active_window_ids: std::collections::HashSet<u32> =
+            crate::sys::window_server::space_window_list_for_connection(
+                &active_space_ids,
+                0,
+                false,
+            )
+            .into_iter()
+            .collect();
+
+        ws_info
+            .into_iter()
+            .filter(|w| active_window_ids.contains(&w.id.as_u32()))
+            .collect()
     }
 
     fn is_login_window_pid(&self, pid: pid_t) -> bool {
@@ -1425,6 +1432,7 @@ impl Reactor {
                 self.send_layout_event(LayoutEvent::WindowFocused(space, main_window));
             }
         }
+        let ws_info = self.filter_ws_info_to_active_spaces(ws_info);
         self.update_complete_window_server_info(ws_info);
         self.check_for_new_windows();
 
