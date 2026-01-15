@@ -25,7 +25,7 @@ use tracing::{Instrument, Span, debug, error, info, instrument, trace, warn};
 use crate::actor;
 use crate::actor::reactor::transaction_manager::TransactionId;
 use crate::actor::reactor::{self, Event, Requested};
-use crate::common::collections::HashMap;
+use crate::common::collections::{HashMap, HashSet};
 use crate::model::tx_store::WindowTxStore;
 use crate::sys::app::NSRunningApplicationExt;
 pub use crate::sys::app::{AppInfo, WindowInfo, pid_t};
@@ -691,6 +691,10 @@ impl State {
                 _ = self.on_activation_changed();
             }
             kAXMainWindowChangedNotification => {
+                // NOTE(acsandmann):
+                // because of apps like firefox that send delayed(or dont send at all) axuielementdestroyed/windowserverdisappeared
+                // this is a fallback to ensure we handle windows being closed
+                self.remove_stale_windows();
                 self.on_main_window_changed(None);
             }
             kAXWindowCreatedNotification => {
@@ -1204,6 +1208,40 @@ impl State {
                 }
             }
             Err(AxError::NotFound) => Ok(None),
+        }
+    }
+
+    fn remove_stale_windows(&mut self) {
+        let current_window_ids: HashSet<WindowId> = match self.app.windows() {
+            Ok(elems) => elems.iter().filter_map(|elem| self.id(&elem).ok()).collect(),
+            Err(e) => {
+                trace!(?e, "Failed to get windows; checking each tracked window");
+                let mut to_remove = Vec::new();
+                for (&wid, window) in self.windows.iter() {
+                    // InvalidUIElement means the window is gone
+                    if matches!(window.elem.role(), Err(AxError::Ax(AXError::InvalidUIElement))) {
+                        to_remove.push(wid);
+                    }
+                }
+                for wid in to_remove {
+                    self.remove_tracked_window(wid, "Removed stale window (individual check)");
+                }
+                return;
+            }
+        };
+
+        let tracked_wids: Vec<WindowId> = self.windows.keys().copied().collect();
+        for wid in tracked_wids {
+            if !current_window_ids.contains(&wid) {
+                self.remove_tracked_window(wid, "Removed stale window (not in current list)");
+            }
+        }
+    }
+
+    fn remove_tracked_window(&mut self, wid: WindowId, reason: &'static str) {
+        if self.windows.remove(&wid).is_some() {
+            debug!(?wid, reason);
+            self.send_event(Event::WindowDestroyed(wid));
         }
     }
 
