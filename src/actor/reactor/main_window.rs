@@ -86,7 +86,7 @@ impl MainWindowTracker {
 
 #[cfg(test)]
 mod tests {
-    use objc2_core_foundation::{CGRect, CGPoint, CGSize};
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
     use test_log::test;
 
     use super::super::testing::{Apps, make_windows, screen_params_event};
