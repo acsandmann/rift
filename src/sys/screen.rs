@@ -704,8 +704,8 @@ mod test {
         let frames: Vec<CGRect> = descriptors.iter().map(|d| d.frame).collect();
         assert_eq!(
             vec![
-                CGRect::new(CGPoint::new(0.0, 25.0), CGSize::new(3840.0, 2059.0)),
-                CGRect::new(CGPoint::new(3840.0, 1112.0), CGSize::new(1512.0, 950.0)),
+                CGRect::new(CGPoint::new(3840.0, 1080.0), CGSize::new(1512.0, 982.0)),
+                CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(3840.0, 2160.0)),
             ],
             frames
         );
@@ -736,6 +736,7 @@ mod test {
         assert_eq!(descriptors.len(), 1);
         assert_eq!(cache.uuids.len(), 1);
 
+        cache.mark_dirty();
         let (descriptors, converter, _) = cache.refresh().unwrap();
         assert!(descriptors.is_empty());
         assert!(cache.uuids.is_empty());
