@@ -11,13 +11,10 @@ use crate::common::config::AnimationEasing;
 use crate::sys::geometry::{Round, SameAs};
 use crate::sys::power;
 use crate::sys::screen::SpaceId;
-use crate::sys::timer::Timer;
 use crate::sys::window_server::WindowServerId;
 
 #[derive(Debug)]
 pub struct Animation<'a> {
-    //start: CFAbsoluteTime,
-    //interval: CFTimeInterval,
     start: Instant,
     interval: Duration,
     frames: u32,
@@ -35,10 +32,10 @@ pub struct Animation<'a> {
 impl<'a> Animation<'a> {
     pub fn new(fps: f64, duration: f64, _: AnimationEasing) -> Self {
         let interval = Duration::from_secs_f64(1.0 / fps);
-        // let now = unsafe { CFAbsoluteTimeGetCurrent() };
         let now = Instant::now();
+
         Animation {
-            start: now, // + interval, // not necessary, provide one extra frame to get things going
+            start: now,
             interval,
             frames: (duration * fps).round() as u32,
             windows: vec![],
@@ -88,7 +85,8 @@ impl<'a> Animation<'a> {
             if duration < Duration::ZERO {
                 continue;
             }
-            Timer::sleep(duration);
+
+            std::thread::sleep(duration);
 
             for (&(handle, wid, _, to, _, txid), rect) in self.windows.iter().zip(&next_frames) {
                 let mut rect = *rect;
