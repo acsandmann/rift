@@ -212,26 +212,35 @@ impl WindowEventHandler {
         let effective_mouse_state = mouse_state.or_else(|| get_mouse_state());
         let event_mouse_state = mouse_state;
         let result = (|| -> bool {
-            let Some(window) = reactor.window_manager.windows.get_mut(&wid) else {
-                return false;
+            let (server_id, old_frame) = {
+                let Some(window) = reactor.window_manager.windows.get_mut(&wid) else {
+                    return false;
+                };
+
+                if matches!(
+                    reactor.mission_control_manager.mission_control_state,
+                    MissionControlState::Active
+                ) || window
+                    .window_server_id
+                    .is_some_and(|wsid| reactor.space_manager.changing_screens.contains(&wsid))
+                {
+                    return false;
+                }
+
+                let server_id = window.window_server_id;
+                let old_frame = window.frame_monotonic;
+
+                (server_id, old_frame)
             };
-            if matches!(
-                reactor.mission_control_manager.mission_control_state,
-                MissionControlState::Active
-            ) || window
-                .window_server_id
-                .is_some_and(|wsid| reactor.space_manager.changing_screens.contains(&wsid))
-            {
-                return false;
-            }
-            let pending_target = window.window_server_id.and_then(|wsid| {
+
+            let pending_target = server_id.and_then(|wsid| {
                 reactor.transaction_manager.get_target_frame(wsid).map(|target| (wsid, target))
             });
 
-            let last_sent_txid = window
-                .window_server_id
+            let last_sent_txid = server_id
                 .map(|wsid| reactor.transaction_manager.get_last_sent_txid(wsid))
                 .unwrap_or_default();
+
             let mut has_pending_request = pending_target.is_some();
             let mut triggered_by_rift =
                 has_pending_request && last_seen.is_some_and(|seen| seen == last_sent_txid);
@@ -243,24 +252,25 @@ impl WindowEventHandler {
                 triggered_by_rift = false;
                 has_pending_request = false;
             }
+
             if has_pending_request {
                 if let Some(last_seen) = last_seen
                     && last_seen != last_sent_txid
                 {
-                    // Ignore events that happened before the last time we
-                    // changed the size or position of this window. Otherwise
-                    // we would update the layout model incorrectly.
                     debug!(?last_seen, ?last_sent_txid, "Ignoring frame change");
                     return false;
                 }
             }
+
             if requested.0 {
-                // TODO: If the size is different from requested, applying a
-                // correction to the model can result in weird feedback
-                // loops, so we ignore these for now.
                 return false;
             }
+
             if triggered_by_rift {
+                let Some(window) = reactor.window_manager.windows.get_mut(&wid) else {
+                    return false;
+                };
+
                 if let Some((wsid, target)) = pending_target {
                     if new_frame.same_as(target) {
                         if !window.frame_monotonic.same_as(new_frame) {
@@ -294,11 +304,7 @@ impl WindowEventHandler {
                     );
                     window.frame_monotonic = new_frame;
                 }
-                return false;
-            }
-            let server_id = window.window_server_id;
-            let old_frame = std::mem::replace(&mut window.frame_monotonic, new_frame);
-            if old_frame == new_frame {
+
                 return false;
             }
 
@@ -310,6 +316,17 @@ impl WindowEventHandler {
             if !old_active && !new_active {
                 return false;
             }
+
+            let window_server_id = {
+                let Some(window) = reactor.window_manager.windows.get_mut(&wid) else {
+                    return false;
+                };
+                let old_frame2 = std::mem::replace(&mut window.frame_monotonic, new_frame);
+                if old_frame2 == new_frame {
+                    return false;
+                }
+                window.window_server_id
+            };
 
             let dragging = event_mouse_state == Some(MouseState::Down)
                 || matches!(
@@ -324,10 +341,34 @@ impl WindowEventHandler {
             if dragging {
                 reactor.ensure_active_drag(wid, &old_frame);
                 reactor.update_active_drag(wid, &new_frame);
-                if old_frame.size != new_frame.size {
-                    reactor.mark_drag_dirty(wid);
+                let is_resize = old_frame.size != new_frame.size;
+                if is_resize {
+                    let screens = reactor
+                        .space_manager
+                        .screens
+                        .iter()
+                        .filter_map(|screen| {
+                            let display_uuid = if screen.display_uuid.is_empty() {
+                                None
+                            } else {
+                                Some(screen.display_uuid.clone())
+                            };
+                            Some((screen.space?, screen.frame, display_uuid))
+                        })
+                        .collect::<Vec<_>>();
+                    if let Some(space) = reactor.best_space_for_window(&new_frame, window_server_id)
+                        && reactor.is_space_active(space)
+                    {
+                        reactor.send_layout_event(LayoutEvent::WindowResized {
+                            wid,
+                            old_frame,
+                            new_frame,
+                            screens,
+                        });
+                    }
+                } else {
+                    reactor.maybe_swap_on_drag(wid, new_frame);
                 }
-                reactor.maybe_swap_on_drag(wid, new_frame);
             } else {
                 let screens = reactor
                     .space_manager

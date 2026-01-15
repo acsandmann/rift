@@ -1648,17 +1648,6 @@ impl Reactor {
         }
     }
 
-    fn mark_drag_dirty(&mut self, wid: WindowId) {
-        if let Some(session) = self.get_active_drag_session_mut() {
-            if session.window == wid {
-                session.layout_dirty = true;
-                if self.drag_manager.skip_layout_for_window != Some(wid) {
-                    self.drag_manager.skip_layout_for_window = Some(wid);
-                }
-            }
-        }
-    }
-
     fn drag_space_candidate(&self, frame: &CGRect) -> Option<SpaceId> {
         let center = frame.mid();
         self.space_manager.screens.iter().find_map(|screen| {
