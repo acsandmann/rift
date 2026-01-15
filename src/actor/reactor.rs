@@ -1597,7 +1597,7 @@ impl Reactor {
                     .filter_map(|screen| {
                         let space = screen.space?;
                         let area = screen.frame.intersection(frame).area() as i64;
-                        Some((area, space))
+                        if area > 0 { Some((area, space)) } else { None }
                     })
                     .max_by_key(|(area, _)| *area)
                     .map(|(_, space)| space)
