@@ -377,6 +377,8 @@ comb1 = "Alt + Shift"
 # this will show the mission control view shown in the readme
 # "Alt + Ctrl + M" = "show_mission_control_all"
 
+"Alt + Enter" = { "exec" = ["/bin/bash", "-c", "open -a \"/System/Applications/Utilities/Terminal.app\""] }
+
 "Alt + Shift + D" = "debug" # prints layout tree
 
 "Alt + Ctrl + S" = "serialize"
