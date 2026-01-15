@@ -443,22 +443,17 @@ impl WindowDiscoveryHandler {
                 Option<String>,
             )> = windows_for_space
                 .iter()
-                .filter(|&&wid| {
-                    reactor
-                        .window_manager
-                        .windows
-                        .get(&wid)
-                        .map(|window| window.is_effectively_manageable())
-                        .unwrap_or(false)
-                })
-                .map(|&wid| {
-                    let title_opt =
-                        reactor.window_manager.windows.get(&wid).map(|w| w.title.clone());
-                    let ax_role =
-                        reactor.window_manager.windows.get(&wid).and_then(|w| w.ax_role.clone());
-                    let ax_subrole =
-                        reactor.window_manager.windows.get(&wid).and_then(|w| w.ax_subrole.clone());
-                    (wid, title_opt, ax_role, ax_subrole)
+                .filter_map(|&wid| {
+                    let window = reactor.window_manager.windows.get(&wid)?;
+                    if !window.is_effectively_manageable() {
+                        return None;
+                    }
+                    Some((
+                        wid,
+                        Some(window.title.clone()),
+                        window.ax_role.clone(),
+                        window.ax_subrole.clone(),
+                    ))
                 })
                 .collect();
 
