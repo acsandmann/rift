@@ -214,6 +214,9 @@ impl LayoutManager {
             let Some(space) = screen.space else {
                 continue;
             };
+            if !reactor.is_space_active(space) {
+                continue;
+            }
             let display_uuid_opt = if screen.display_uuid.is_empty() {
                 None
             } else {
