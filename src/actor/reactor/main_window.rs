@@ -86,7 +86,7 @@ impl MainWindowTracker {
 
 #[cfg(test)]
 mod tests {
-    use objc2_core_foundation::CGRect;
+    use objc2_core_foundation::{CGRect, CGPoint, CGSize};
     use test_log::test;
 
     use super::super::testing::{Apps, make_windows, screen_params_event};
@@ -103,8 +103,9 @@ mod tests {
             None,
         ));
         let space = SpaceId::new(1);
+        let screen_frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1920., 1080.));
         reactor.handle_event(screen_params_event(
-            vec![CGRect::ZERO],
+            vec![screen_frame],
             vec![Some(space)],
             vec![],
         ));
@@ -178,8 +179,9 @@ mod tests {
             None,
         ));
         let space = SpaceId::new(1);
+        let screen_frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1920., 1080.));
         reactor.handle_event(screen_params_event(
-            vec![CGRect::ZERO],
+            vec![screen_frame],
             vec![Some(space)],
             vec![],
         ));
@@ -264,8 +266,9 @@ mod tests {
         let pid = 3;
         let windows = make_windows(2);
         let space = SpaceId::new(1);
+        let screen_frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1920., 1080.));
         reactor.handle_event(screen_params_event(
-            vec![CGRect::ZERO],
+            vec![screen_frame],
             vec![Some(space)],
             vec![],
         ));
