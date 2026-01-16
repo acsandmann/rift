@@ -271,6 +271,7 @@ const APP_NOTIFICATIONS: &[&str] = &[
     kAXWindowCreatedNotification,
     kAXMenuOpenedNotification,
     kAXMenuClosedNotification,
+    kAXTitleChangedNotification,
 ];
 
 const WINDOW_NOTIFICATIONS: &[&str] = &[
@@ -280,6 +281,9 @@ const WINDOW_NOTIFICATIONS: &[&str] = &[
     kAXWindowMiniaturizedNotification,
     kAXWindowDeminiaturizedNotification,
 ];
+
+const WINDOW_ANIMATION_NOTIFICATIONS: &[&str] =
+    &[kAXWindowMovedNotification, kAXWindowResizedNotification];
 
 impl State {
     fn txid_from_store(&self, wsid: Option<WindowServerId>) -> Option<TransactionId> {
@@ -642,6 +646,7 @@ impl State {
             &mut Request::BeginWindowAnimation(wid) => {
                 let window = self.window_mut(wid)?;
                 window.is_animating = true;
+                self.stop_notifications_for_animation(&self.window(wid)?.elem);
             }
             &mut Request::EndWindowAnimation(wid) => {
                 let (elem, txid) = match self.window(wid) {
@@ -659,6 +664,7 @@ impl State {
                 if let Ok(window) = self.window_mut(wid) {
                     window.is_animating = false;
                 }
+                self.restart_notifications_after_animation(&elem);
                 let frame =
                     match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
                         Some(frame) => frame,
@@ -1278,6 +1284,24 @@ impl State {
             return Ok(wid);
         }
         Err(AxError::NotFound)
+    }
+
+    fn stop_notifications_for_animation(&self, elem: &AXUIElement) {
+        for notif in WINDOW_ANIMATION_NOTIFICATIONS {
+            let res = self.observer.remove_notification(elem, notif);
+            if let Err(err) = res {
+                debug!(?notif, ?elem, "Removing notification failed with error {err}");
+            }
+        }
+    }
+
+    fn restart_notifications_after_animation(&self, elem: &AXUIElement) {
+        for notif in WINDOW_ANIMATION_NOTIFICATIONS {
+            let res = self.observer.add_notification(elem, notif);
+            if let Err(err) = res {
+                debug!(?notif, ?elem, "Adding notification failed with error {err}");
+            }
+        }
     }
 }
 
