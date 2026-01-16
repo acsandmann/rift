@@ -177,7 +177,7 @@ impl WindowNotify {
                             let space_type =
                                 unsafe { SLSSpaceGetType(SLSMainConnectionID(), space_id) };
                             if space_type == 0 || space_type == 4 {
-                                events_tx.send(Event::SpaceCreated(SpaceId::new(space_id)));
+                                events_tx.send(Event::SpaceDestroyed(SpaceId::new(space_id)));
                             }
                         }
                     }
@@ -186,7 +186,7 @@ impl WindowNotify {
                             let space_type =
                                 unsafe { SLSSpaceGetType(SLSMainConnectionID(), space_id) };
                             if space_type == 0 || space_type == 4 {
-                                events_tx.send(Event::SpaceDestroyed(SpaceId::new(space_id)));
+                                events_tx.send(Event::SpaceCreated(SpaceId::new(space_id)));
                             }
                         }
                     }
