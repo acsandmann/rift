@@ -202,7 +202,6 @@ pub enum Request {
     SetWindowFrame(WindowId, CGRect, TransactionId, bool),
     SetBatchWindowFrame(Vec<(WindowId, CGRect)>, TransactionId),
     SetWindowPos(WindowId, CGPoint, TransactionId, bool),
-    SetBatchWindowPos(Vec<(WindowId, CGPoint)>, TransactionId, bool),
 
     BeginWindowAnimation(WindowId),
     EndWindowAnimation(WindowId),
@@ -536,7 +535,7 @@ impl State {
                 };
 
                 if eui {
-                    let _ = with_enhanced_ui_disabled(&self.app, || elem.set_position(pos));
+                    let _ = with_enhanced_ui_disabled(&elem, || elem.set_position(pos));
                 } else {
                     let _ = elem.set_position(pos);
                 };
@@ -637,57 +636,6 @@ impl State {
                     }
                     Ok(())
                 });
-                if let Err(err) = result {
-                    return Err(err);
-                }
-            }
-            &mut Request::SetBatchWindowPos(ref mut positions, txid, eui) => {
-                let app = self.app.clone();
-                let mut do_positions =
-                    |positions: &Vec<(WindowId, CGPoint)>| -> Result<(), AxError> {
-                        for (wid, pos) in positions.iter() {
-                            let (elem, is_animating) = match self.window_mut(*wid) {
-                                Ok(window) => {
-                                    window.last_seen_txid = txid;
-                                    (window.elem.clone(), window.is_animating)
-                                }
-                                Err(err) => match err {
-                                    AxError::Ax(code) => {
-                                        if self.handle_ax_error(*wid, &code) {
-                                            continue;
-                                        }
-                                        return Err(AxError::Ax(code));
-                                    }
-                                    AxError::NotFound => continue,
-                                },
-                            };
-
-                            let _ = elem.set_position(*pos);
-
-                            let frame = match self
-                                .handle_ax_result(*wid, trace("frame", &elem, || elem.frame()))?
-                            {
-                                Some(frame) => frame,
-                                None => continue,
-                            };
-
-                            if !is_animating {
-                                self.send_event(Event::WindowFrameChanged(
-                                    *wid,
-                                    frame,
-                                    Some(txid),
-                                    Requested(true),
-                                    None,
-                                ));
-                            }
-                        }
-                        Ok(())
-                    };
-                let result = if eui {
-                    with_enhanced_ui_disabled(&app, || do_positions(positions))
-                } else {
-                    do_positions(positions)
-                };
                 if let Err(err) = result {
                     return Err(err);
                 }

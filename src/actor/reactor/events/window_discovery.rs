@@ -245,7 +245,6 @@ impl WindowDiscoveryHandler {
                     let mut state: WindowState = WindowState {
                         title: info.title.clone(),
                         frame_monotonic: info.frame,
-                        anim_state: None,
                         is_ax_standard: info.is_standard,
                         is_ax_root: info.is_root,
                         is_minimized: info.is_minimized,

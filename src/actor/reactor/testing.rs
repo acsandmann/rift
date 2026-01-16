@@ -249,23 +249,6 @@ impl Apps {
                         }
                     }
                 }
-                Request::SetBatchWindowPos(positions, txid, _) => {
-                    for (wid, pos) in positions {
-                        let window = self.windows.entry(wid).or_default();
-                        window.last_seen_txid = txid;
-                        let old_frame = window.frame;
-                        window.frame.origin = pos;
-                        if !window.animating && !old_frame.same_as(window.frame) {
-                            events.push(Event::WindowFrameChanged(
-                                wid,
-                                window.frame,
-                                Some(txid),
-                                Requested(true),
-                                None,
-                            ));
-                        }
-                    }
-                }
                 Request::SetWindowPos(wid, pos, txid, _) => {
                     let window = self.windows.entry(wid).or_default();
                     window.last_seen_txid = txid;
