@@ -147,6 +147,10 @@ pub enum Event {
     WindowServerDestroyed(crate::sys::window_server::WindowServerId, SpaceId),
     #[serde(skip)]
     WindowServerAppeared(crate::sys::window_server::WindowServerId, SpaceId),
+    #[serde(skip)]
+    SpaceCreated(SpaceId),
+    #[serde(skip)]
+    SpaceDestroyed(SpaceId),
     WindowMinimized(WindowId),
     WindowDeminiaturized(WindowId),
     WindowFrameChanged(
@@ -413,6 +417,20 @@ struct Screen {
     screen_id: ScreenId,
 }
 
+impl Screen {
+    fn display_uuid_opt(&self) -> Option<&str> {
+        if self.display_uuid.is_empty() {
+            None
+        } else {
+            Some(self.display_uuid.as_str())
+        }
+    }
+
+    fn display_uuid_owned(&self) -> Option<String> {
+        self.display_uuid_opt().map(|uuid| uuid.to_string())
+    }
+}
+
 #[derive(Debug)]
 struct WindowState {
     #[allow(unused)]
@@ -619,16 +637,46 @@ impl Reactor {
         }
     }
 
-    fn display_uuid_for_screen(screen: &Screen) -> Option<String> {
-        if screen.display_uuid.is_empty() {
-            None
-        } else {
-            Some(screen.display_uuid.clone())
-        }
+    fn activation_inputs_for_current_screens(
+        &self,
+    ) -> Vec<crate::actor::reactor::managers::space_activation::ScreenActivationInput> {
+        self.space_manager
+            .screens
+            .iter()
+            .map(|screen| {
+                crate::actor::reactor::managers::space_activation::ScreenActivationInput {
+                    screen_id: screen.screen_id,
+                    space: screen.space,
+                    display_uuid: screen.display_uuid_owned(),
+                }
+            })
+            .collect()
+    }
+
+    fn activation_inputs_for_spaces(
+        &self,
+        spaces: &[Option<SpaceId>],
+    ) -> Vec<crate::actor::reactor::managers::space_activation::ScreenActivationInput> {
+        self.space_manager
+            .screens
+            .iter()
+            .zip(spaces.iter().copied())
+            .map(|(screen, space)| {
+                crate::actor::reactor::managers::space_activation::ScreenActivationInput {
+                    screen_id: screen.screen_id,
+                    space,
+                    display_uuid: screen.display_uuid_owned(),
+                }
+            })
+            .collect()
     }
 
     fn display_uuids_for_current_screens(&self) -> Vec<Option<String>> {
-        self.space_manager.screens.iter().map(Self::display_uuid_for_screen).collect()
+        self.space_manager
+            .screens
+            .iter()
+            .map(|screen| screen.display_uuid_owned())
+            .collect()
     }
 
     fn raw_spaces_for_current_screens(&self) -> Vec<Option<SpaceId>> {
@@ -1014,6 +1062,14 @@ impl Reactor {
             Event::WindowServerAppeared(wsid, sid) => {
                 SpaceEventHandler::handle_window_server_appeared(self, wsid, sid);
             }
+            Event::SpaceCreated(space) => {
+                self.space_activation_policy.on_space_created(space);
+                self.recompute_and_set_active_spaces_from_current_screens();
+            }
+            Event::SpaceDestroyed(space) => {
+                self.space_activation_policy.on_space_destroyed(space);
+                self.recompute_and_set_active_spaces_from_current_screens();
+            }
             Event::WindowMinimized(wid) => {
                 WindowEventHandler::handle_window_minimized(self, wid);
             }
@@ -1095,7 +1151,7 @@ impl Reactor {
                 let display_uuid = self
                     .space_manager
                     .screen_by_space(space)
-                    .and_then(Self::display_uuid_for_screen);
+                    .and_then(|screen| screen.display_uuid_owned());
 
                 self.space_activation_policy.toggle_space_activated(
                     cfg,
@@ -1381,19 +1437,16 @@ impl Reactor {
             let Some(space) = space_opt else {
                 continue;
             };
-            if screen.display_uuid.is_empty() {
+            let Some(display_uuid) = screen.display_uuid_opt() else {
                 continue;
-            }
-            if !seen_displays.insert(screen.display_uuid.clone()) {
+            };
+            if !seen_displays.insert(display_uuid.to_string()) {
                 continue;
             }
 
-            let seen_before =
-                self.layout_manager.layout_engine.display_seen_before(&screen.display_uuid);
+            let seen_before = self.layout_manager.layout_engine.display_seen_before(display_uuid);
             let last_space = if allow_remap && seen_before {
-                self.layout_manager
-                    .layout_engine
-                    .last_space_for_display_uuid(&screen.display_uuid)
+                self.layout_manager.layout_engine.last_space_for_display_uuid(display_uuid)
             } else {
                 None
             };
@@ -1411,7 +1464,7 @@ impl Reactor {
             }
             self.layout_manager
                 .layout_engine
-                .update_space_display(*space, Some(screen.display_uuid.clone()));
+                .update_space_display(*space, Some(display_uuid.to_string()));
         }
     }
 
@@ -1445,13 +1498,10 @@ impl Reactor {
                     .layout_engine
                     .workspace_name(space, workspace_id)
                     .unwrap_or_else(|| format!("Workspace {:?}", workspace_id));
-                let display_uuid = self.space_manager.screen_by_space(space).and_then(|screen| {
-                    if screen.display_uuid.is_empty() {
-                        None
-                    } else {
-                        Some(screen.display_uuid.clone())
-                    }
-                });
+                let display_uuid = self
+                    .space_manager
+                    .screen_by_space(space)
+                    .and_then(|screen| screen.display_uuid_owned());
                 let broadcast_event = BroadcastEvent::WorkspaceChanged {
                     workspace_id,
                     workspace_name,
@@ -1482,13 +1532,10 @@ impl Reactor {
                 .workspace_name(space, workspace_id)
                 .unwrap_or_else(|| format!("Workspace {:?}", workspace_id));
 
-            let display_uuid = self.space_manager.screen_by_space(space).and_then(|screen| {
-                if screen.display_uuid.is_empty() {
-                    None
-                } else {
-                    Some(screen.display_uuid.clone())
-                }
-            });
+            let display_uuid = self
+                .space_manager
+                .screen_by_space(space)
+                .and_then(|screen| screen.display_uuid_owned());
 
             let event = BroadcastEvent::WindowTitleChanged {
                 window_id,
@@ -1568,7 +1615,9 @@ impl Reactor {
     ) -> Option<SpaceId> {
         if let Some(server_id) = window_server_id {
             if let Some(space) = crate::sys::window_server::window_space(server_id) {
-                if self.space_manager.screen_by_space(space).is_some() {
+                if self.space_manager.screen_by_space(space).is_some()
+                    || crate::sys::window_server::space_is_user(space.get())
+                {
                     return Some(space);
                 }
             }

@@ -145,16 +145,19 @@ extern "C" fn connection_callback(
                     space_id = Some(sid);
                     window_id = Some(wid);
                 } else {
-                    warn!(
-                        "Skylight event {} payload too short for window id (len={})",
-                        kind, len
-                    );
+                    warn!("Skylight event {kind} payload too short for window id (len={len})");
                 }
             } else {
-                warn!(
-                    "Skylight event {} payload too short for space id (len={})",
-                    kind, len
-                );
+                warn!("Skylight event {kind} payload too short for space id (len={len})");
+            }
+        }
+
+        CGSEventType::Known(KnownCGSEvent::SpaceCreated)
+        | CGSEventType::Known(KnownCGSEvent::SpaceDestroyed) => {
+            if let Some(sid) = read::<u64>(bytes, 0) {
+                space_id = Some(sid)
+            } else {
+                warn!("no space_id on {kind}");
             }
         }
 
@@ -168,10 +171,7 @@ extern "C" fn connection_callback(
             if let Some(wid) = read::<u32>(bytes, 0) {
                 window_id = Some(wid);
             } else {
-                warn!(
-                    "Skylight event {} payload too short for window id (len={})",
-                    kind, len
-                );
+                warn!("Skylight event {kind} payload too short for window id (len={len})");
             }
         }
 
@@ -195,6 +195,6 @@ extern "C" fn connection_callback(
     trace!("received raw event: {:?}", event_data);
 
     if let Err(e) = sender.try_send(event_data) {
-        debug!("Failed to send event {}: {}", kind, e);
+        debug!("Failed to send event {kind}: {e}");
     }
 }

@@ -6,7 +6,9 @@ use std::ptr::NonNull;
 use objc2::rc::Retained;
 use objc2::{ClassType, msg_send};
 use objc2_app_kit::NSScreen;
-use objc2_core_foundation::{CFRetained, CFString, CGPoint, CGRect, CGSize};
+use objc2_core_foundation::{
+    CFArray, CFDictionary, CFNumber, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize,
+};
 use objc2_core_graphics::{CGDisplayBounds, CGError, CGGetActiveDisplayList, CGMainDisplayID};
 use objc2_foundation::{MainThreadMarker, NSArray, NSNumber, ns_string};
 use serde::{Deserialize, Serialize};
@@ -20,6 +22,7 @@ use super::skylight::{
     SLSGetDisplayMenubarHeight, SLSGetDockRectWithReason, SLSGetMenuBarAutohideEnabled,
     SLSGetSpaceManagementMode, SLSMainConnectionID,
 };
+use crate::common::collections::HashMap;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[repr(transparent)]
@@ -597,6 +600,62 @@ pub fn order_visible_spaces_by_position(
     });
 
     spaces.into_iter().map(|(space, _)| space).collect()
+}
+
+pub fn managed_display_space_ids() -> HashMap<String, Vec<SpaceId>> {
+    let mut out: HashMap<String, Vec<SpaceId>> = HashMap::default();
+    unsafe {
+        let raw = CGSCopyManagedDisplaySpaces(SLSMainConnectionID());
+        if raw.is_null() {
+            return out;
+        }
+
+        let displays: CFRetained<CFArray<CFDictionary<CFString, CFType>>> =
+            CFRetained::from_raw(std::ptr::NonNull::new_unchecked(raw.cast()));
+        let display_id_key = CFString::from_static_str("Display Identifier");
+        let spaces_key = CFString::from_static_str("Spaces");
+        let managed_space_id_key = CFString::from_static_str("ManagedSpaceID");
+
+        for idx in 0..displays.len() {
+            let Some(display_entry) = displays.get(idx) else {
+                continue;
+            };
+            let display_id = display_entry
+                .get(&display_id_key)
+                .and_then(|v| v.downcast::<CFString>().ok())
+                .map(|v| v.to_string())
+                .unwrap_or_default();
+            if display_id.is_empty() {
+                continue;
+            }
+
+            let mut space_ids = Vec::new();
+            if let Some(spaces_value) = display_entry.get(&spaces_key) {
+                if let Ok(spaces) = spaces_value.downcast::<CFArray>() {
+                    let spaces = CFRetained::cast_unchecked::<CFArray<CFType>>(spaces);
+                    for space_entry in spaces.iter() {
+                        if let Ok(space_dict) = space_entry.downcast::<CFDictionary>() {
+                            let space_dict = CFRetained::cast_unchecked::<
+                                CFDictionary<CFString, CFType>,
+                            >(space_dict);
+                            let space_id = space_dict
+                                .get(&managed_space_id_key)
+                                .and_then(|v| v.downcast::<CFNumber>().ok())
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or(0);
+                            if space_id != 0 {
+                                space_ids.push(SpaceId::new(space_id as u64));
+                            }
+                        }
+                    }
+                }
+            }
+
+            out.insert(display_id, space_ids);
+        }
+    }
+
+    out
 }
 
 #[cfg(test)]

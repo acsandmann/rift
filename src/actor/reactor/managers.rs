@@ -217,11 +217,7 @@ impl LayoutManager {
             if !reactor.is_space_active(space) {
                 continue;
             }
-            let display_uuid_opt = if screen.display_uuid.is_empty() {
-                None
-            } else {
-                Some(screen.display_uuid.clone())
-            };
+            let display_uuid_opt = screen.display_uuid_owned();
             let gaps = reactor
                 .config
                 .settings
@@ -269,11 +265,7 @@ impl LayoutManager {
                 if let Some(tx) = &reactor.communication_manager.stack_line_tx {
                     let screen = reactor.space_manager.screen_by_space(space);
                     if let Some(screen) = screen {
-                        let display_uuid = if screen.display_uuid.is_empty() {
-                            None
-                        } else {
-                            Some(screen.display_uuid.as_str())
-                        };
+                        let display_uuid = screen.display_uuid_opt();
                         let gaps =
                             reactor.config.settings.layout.gaps.effective_for_display(display_uuid);
                         let group_infos = reactor

@@ -9,7 +9,7 @@ use crate::actor::reactor::Requested;
 use crate::common::collections::{HashMap, HashSet};
 use crate::model::tx_store::WindowTxStore;
 use crate::sys::screen::SpaceId;
-use crate::sys::skylight::{CGSEventType, KnownCGSEvent};
+use crate::sys::skylight::{CGSEventType, KnownCGSEvent, SLSMainConnectionID, SLSSpaceGetType};
 use crate::sys::window_server::{WindowQuery, WindowServerId};
 use crate::sys::{event, window_notify};
 
@@ -170,59 +170,78 @@ impl WindowNotify {
         std::thread::spawn(move || {
             while let Some((_span, evt)) = rx.blocking_recv() {
                 trace!(?event, ?evt, "got event");
-                if let Some(window_id) = evt.window_id {
-                    match event {
-                        CGSEventType::Known(KnownCGSEvent::SpaceWindowDestroyed) => {
-                            events_tx.send(Event::WindowServerDestroyed(
-                                WindowServerId::new(window_id),
-                                SpaceId::new(evt.space_id.unwrap()),
-                            ))
+
+                match event {
+                    CGSEventType::Known(KnownCGSEvent::SpaceDestroyed) => {
+                        if let Some(space_id) = evt.space_id {
+                            let space_type =
+                                unsafe { SLSSpaceGetType(SLSMainConnectionID(), space_id) };
+                            if space_type == 0 || space_type == 4 {
+                                events_tx.send(Event::SpaceCreated(SpaceId::new(space_id)));
+                            }
                         }
-                        CGSEventType::Known(KnownCGSEvent::SpaceWindowCreated) => {
-                            events_tx.send(Event::WindowServerAppeared(
-                                WindowServerId::new(window_id),
-                                SpaceId::new(evt.space_id.unwrap()),
-                            ))
-                        }
-                        CGSEventType::Known(KnownCGSEvent::WorkspaceWindowIsViewable)
-                        | CGSEventType::Known(KnownCGSEvent::WorkspaceWindowIsNotViewable)
-                        | CGSEventType::Known(
-                            KnownCGSEvent::WorkspacesWindowDidOrderInOnNonCurrentManagedSpacesOnly,
-                        )
-                        | CGSEventType::Known(
-                            KnownCGSEvent::WorkspacesWindowDidOrderOutOnNonCurrentManagedSpaces,
-                        ) => {
-                            events_tx
-                                .send(Event::ResyncAppForWindow(WindowServerId::new(window_id)));
-                        }
-                        CGSEventType::Known(KnownCGSEvent::WindowMoved)
-                        | CGSEventType::Known(KnownCGSEvent::WindowResized) => {
-                            // TODO: suppress move/resize while Mission Control is active
-                            let mouse_state = event::get_mouse_state();
-                            let wsid = WindowServerId::new(window_id);
-                            if let Some(query) = WindowQuery::new(&[wsid]) {
-                                if query.advance().is_none() {
-                                    continue;
-                                }
-                                let bounds = query.bounds();
-                                let pid = query.pid();
-                                if let Some(idx) = NonZeroU32::new(window_id) {
-                                    let last_seen = tx_store
-                                        .as_ref()
-                                        .and_then(|store| store.get(&wsid))
-                                        .map(|record| record.txid);
-                                    events_tx.send(Event::WindowFrameChanged(
-                                        WindowId { idx, pid },
-                                        bounds,
-                                        last_seen,
-                                        Requested(false),
-                                        mouse_state,
-                                    ));
-                                }
-                            };
-                        }
-                        _ => {}
                     }
+                    CGSEventType::Known(KnownCGSEvent::SpaceCreated) => {
+                        if let Some(space_id) = evt.space_id {
+                            let space_type =
+                                unsafe { SLSSpaceGetType(SLSMainConnectionID(), space_id) };
+                            if space_type == 0 || space_type == 4 {
+                                events_tx.send(Event::SpaceDestroyed(SpaceId::new(space_id)));
+                            }
+                        }
+                    }
+                    CGSEventType::Known(KnownCGSEvent::SpaceWindowDestroyed) => {
+                        events_tx.send(Event::WindowServerDestroyed(
+                            WindowServerId::new(evt.window_id.unwrap()),
+                            SpaceId::new(evt.space_id.unwrap()),
+                        ))
+                    }
+                    CGSEventType::Known(KnownCGSEvent::SpaceWindowCreated) => {
+                        events_tx.send(Event::WindowServerAppeared(
+                            WindowServerId::new(evt.window_id.unwrap()),
+                            SpaceId::new(evt.space_id.unwrap()),
+                        ))
+                    }
+                    CGSEventType::Known(KnownCGSEvent::WorkspaceWindowIsViewable)
+                    | CGSEventType::Known(KnownCGSEvent::WorkspaceWindowIsNotViewable)
+                    | CGSEventType::Known(
+                        KnownCGSEvent::WorkspacesWindowDidOrderInOnNonCurrentManagedSpacesOnly,
+                    )
+                    | CGSEventType::Known(
+                        KnownCGSEvent::WorkspacesWindowDidOrderOutOnNonCurrentManagedSpaces,
+                    ) => {
+                        events_tx.send(Event::ResyncAppForWindow(WindowServerId::new(
+                            evt.window_id.unwrap(),
+                        )));
+                    }
+                    CGSEventType::Known(KnownCGSEvent::WindowMoved)
+                    | CGSEventType::Known(KnownCGSEvent::WindowResized) => {
+                        // TODO: suppress move/resize while Mission Control is active
+                        let mouse_state = event::get_mouse_state();
+                        let window_id = evt.window_id.unwrap();
+                        let wsid = WindowServerId::new(window_id);
+                        if let Some(query) = WindowQuery::new(&[wsid]) {
+                            if query.advance().is_none() {
+                                continue;
+                            }
+                            let bounds = query.bounds();
+                            let pid = query.pid();
+                            if let Some(idx) = NonZeroU32::new(window_id) {
+                                let last_seen = tx_store
+                                    .as_ref()
+                                    .and_then(|store| store.get(&wsid))
+                                    .map(|record| record.txid);
+                                events_tx.send(Event::WindowFrameChanged(
+                                    WindowId { idx, pid },
+                                    bounds,
+                                    last_seen,
+                                    Requested(false),
+                                    mouse_state,
+                                ));
+                            }
+                        };
+                    }
+                    _ => {}
                 }
             }
         });

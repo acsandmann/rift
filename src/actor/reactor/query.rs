@@ -8,7 +8,7 @@ use crate::model::server::{
     ApplicationData, DisplayData, LayoutStateData, WindowData, WorkspaceData,
 };
 use crate::model::virtual_workspace::VirtualWorkspaceId;
-use crate::sys::screen::{SpaceId, get_active_space_number};
+use crate::sys::screen::{SpaceId, get_active_space_number, managed_display_space_ids};
 
 impl Reactor {
     pub(super) fn handle_query(&mut self, event: Event) {
@@ -128,11 +128,7 @@ impl Reactor {
                         .or_else(|| self.space_manager.screens.first().cloned());
 
                     if let Some(screen) = screen_info {
-                        let display_uuid = if screen.display_uuid.is_empty() {
-                            None
-                        } else {
-                            Some(screen.display_uuid.as_str())
-                        };
+                        let display_uuid = screen.display_uuid_opt();
                         let gaps =
                             self.config.settings.layout.gaps.effective_for_display(display_uuid);
                         self.layout_manager.layout_engine.calculate_layout_for_workspace(
@@ -194,21 +190,43 @@ impl Reactor {
 
     fn handle_displays_query(&self) -> Vec<DisplayData> {
         let active_context_space = self.workspace_command_space();
+        let active_space_ids = self.active_space_ids();
+        let active_space_set: HashSet<u64> = active_space_ids.iter().copied().collect();
+        let display_space_ids = managed_display_space_ids();
         self.space_manager
             .screens
             .iter()
             .map(|screen| {
                 let space_for_screen = screen.space;
+                let all_space_ids = display_space_ids
+                    .get(&screen.display_uuid)
+                    .cloned()
+                    .unwrap_or_else(|| space_for_screen.map(|s| vec![s]).unwrap_or_default());
+                let per_display_active_space_ids: Vec<u64> = all_space_ids
+                    .iter()
+                    .filter(|space| active_space_set.contains(&space.get()))
+                    .map(|space| space.get())
+                    .collect();
+                let per_display_inactive_space_ids: Vec<u64> = all_space_ids
+                    .iter()
+                    .filter(|space| !active_space_set.contains(&space.get()))
+                    .map(|space| space.get())
+                    .collect();
                 DisplayData {
                     uuid: screen.display_uuid.clone(),
                     name: screen.name.clone(),
                     screen_id: screen.screen_id.as_u32(),
                     frame: screen.frame,
                     space: space_for_screen.map(|s: SpaceId| s.get()),
+                    is_active_space: space_for_screen
+                        .map(|s| active_space_set.contains(&s.get()))
+                        .unwrap_or(false),
                     is_active_context: match (space_for_screen, active_context_space) {
                         (Some(s1), Some(s2)) => s1 == s2,
                         _ => false,
                     },
+                    active_space_ids: per_display_active_space_ids,
+                    inactive_space_ids: per_display_inactive_space_ids,
                 }
             })
             .collect()

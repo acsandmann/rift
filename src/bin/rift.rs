@@ -180,6 +180,8 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         &[
             CGSEventType::Known(KnownCGSEvent::SpaceWindowDestroyed),
             CGSEventType::Known(KnownCGSEvent::SpaceWindowCreated),
+            CGSEventType::Known(KnownCGSEvent::SpaceCreated),
+            CGSEventType::Known(KnownCGSEvent::SpaceDestroyed),
             //CGSEventType::Known(KnownCGSEvent::WindowMoved),
             //CGSEventType::Known(KnownCGSEvent::WindowResized),
         ],
