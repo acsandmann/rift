@@ -64,14 +64,10 @@ impl SpaceActivationPolicy {
     pub fn set_login_window_active(&mut self, active: bool) { self.login_window_active = active; }
 
     #[allow(dead_code)]
-    pub fn on_space_created(&mut self, space: SpaceId) {
-        self.known_user_spaces.insert(space);
-    }
+    pub fn on_space_created(&mut self, space: SpaceId) { self.known_user_spaces.insert(space); }
 
     #[allow(dead_code)]
-    pub fn on_space_destroyed(&mut self, space: SpaceId) {
-        self.known_user_spaces.remove(&space);
-    }
+    pub fn on_space_destroyed(&mut self, space: SpaceId) { self.known_user_spaces.remove(&space); }
 
     /// Note: this emits no events; Reactor should call this and then recompute active spaces.
     pub fn on_spaces_updated(
