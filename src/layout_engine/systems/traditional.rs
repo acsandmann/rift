@@ -1568,44 +1568,51 @@ impl TraditionalLayoutSystem {
             let mut count = 0;
             let mut first_direction: Option<Direction> = None;
             let mut good = true;
-            let deltas = [
-                (
-                    Direction::Left,
-                    old_frame.min().x - new_frame.min().x,
-                    screen.size.width,
-                ),
-                (
-                    Direction::Right,
-                    new_frame.max().x - old_frame.max().x,
-                    screen.size.width,
-                ),
-                (
-                    Direction::Up,
-                    old_frame.min().y - new_frame.min().y,
-                    screen.size.height,
-                ),
-                (
-                    Direction::Down,
-                    new_frame.max().y - old_frame.max().y,
-                    screen.size.height,
-                ),
-            ];
-            for (direction, delta, whole) in deltas {
-                if delta != 0.0 {
-                    count += 1;
-                    if count > 2 {
+            let left_delta = old_frame.min().x - new_frame.min().x;
+            let right_delta = new_frame.max().x - old_frame.max().x;
+            let up_delta = old_frame.min().y - new_frame.min().y;
+            let down_delta = new_frame.max().y - old_frame.max().y;
+
+            let mut effective = Vec::new();
+
+            let horiz_size = left_delta + right_delta;
+            if left_delta != 0.0 || right_delta != 0.0 {
+                if horiz_size != 0.0 {
+                    let direction = if left_delta.abs() >= right_delta.abs() {
+                        Direction::Left
+                    } else {
+                        Direction::Right
+                    };
+                    effective.push((direction, horiz_size, screen.size.width));
+                }
+            }
+
+            let vert_size = up_delta + down_delta;
+            if up_delta != 0.0 || down_delta != 0.0 {
+                if vert_size != 0.0 {
+                    let direction = if up_delta.abs() >= down_delta.abs() {
+                        Direction::Up
+                    } else {
+                        Direction::Down
+                    };
+                    effective.push((direction, vert_size, screen.size.height));
+                }
+            }
+
+            for (direction, delta, whole) in effective {
+                count += 1;
+                if count > 2 {
+                    good = false;
+                }
+                if let Some(first) = first_direction {
+                    if first.orientation() == direction.orientation() {
                         good = false;
                     }
-                    if let Some(first) = first_direction {
-                        if first.orientation() == direction.orientation() {
-                            good = false;
-                        }
-                    } else {
-                        first_direction = Some(direction);
-                    }
-                    if resize {
-                        self.resize_internal(node, f64::from(delta) / f64::from(whole), direction);
-                    }
+                } else {
+                    first_direction = Some(direction);
+                }
+                if resize {
+                    self.resize_internal(node, f64::from(delta) / f64::from(whole), direction);
                 }
             }
             good

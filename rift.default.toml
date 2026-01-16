@@ -5,7 +5,7 @@
 # Animations
 # - animate: master switch for all window animations
 # - animation_duration: seconds per animation (>= 0.0, typical 0.15–0.35)
-# - animation_fps: frames per second (> 0.0). 60–120 recommended.
+# - animation_fps: frames per second (0.0 = display refresh rate). 60–120 recommended.
 # - animation_easing: easing curve. One of:
 #   linear,
 #   ease_in_out,

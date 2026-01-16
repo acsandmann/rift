@@ -37,7 +37,6 @@ use crate::sys::event;
 use crate::sys::executor::Executor;
 use crate::sys::observer::Observer;
 use crate::sys::process::ProcessInfo;
-use crate::sys::skylight::{G_CONNECTION, SLSDisableUpdate, SLSReenableUpdate};
 use crate::sys::window_server::{self, WindowServerId, WindowServerInfo};
 
 const kAXApplicationActivatedNotification: &str = "AXApplicationActivated";
@@ -203,6 +202,7 @@ pub enum Request {
     SetWindowFrame(WindowId, CGRect, TransactionId, bool),
     SetBatchWindowFrame(Vec<(WindowId, CGRect)>, TransactionId),
     SetWindowPos(WindowId, CGPoint, TransactionId, bool),
+    SetBatchWindowPos(Vec<(WindowId, CGPoint)>, TransactionId, bool),
 
     BeginWindowAnimation(WindowId),
     EndWindowAnimation(WindowId),
@@ -599,7 +599,6 @@ impl State {
                 ));
             }
             &mut Request::SetBatchWindowFrame(ref mut frames, txid) => {
-                unsafe { SLSDisableUpdate(*G_CONNECTION) };
                 let app = self.app.clone();
                 let result = with_enhanced_ui_disabled(&app, || -> Result<(), AxError> {
                     for (wid, desired) in frames.iter() {
@@ -638,7 +637,57 @@ impl State {
                     }
                     Ok(())
                 });
-                unsafe { SLSReenableUpdate(*G_CONNECTION) };
+                if let Err(err) = result {
+                    return Err(err);
+                }
+            }
+            &mut Request::SetBatchWindowPos(ref mut positions, txid, eui) => {
+                let app = self.app.clone();
+                let mut do_positions =
+                    |positions: &Vec<(WindowId, CGPoint)>| -> Result<(), AxError> {
+                        for (wid, pos) in positions.iter() {
+                            let (elem, is_animating) = match self.window_mut(*wid) {
+                                Ok(window) => {
+                                    window.last_seen_txid = txid;
+                                    (window.elem.clone(), window.is_animating)
+                                }
+                                Err(err) => match err {
+                                    AxError::Ax(code) => {
+                                        if self.handle_ax_error(*wid, &code) {
+                                            continue;
+                                        }
+                                        return Err(AxError::Ax(code));
+                                    }
+                                    AxError::NotFound => continue,
+                                },
+                            };
+
+                            let _ = elem.set_position(*pos);
+
+                            let frame = match self
+                                .handle_ax_result(*wid, trace("frame", &elem, || elem.frame()))?
+                            {
+                                Some(frame) => frame,
+                                None => continue,
+                            };
+
+                            if !is_animating {
+                                self.send_event(Event::WindowFrameChanged(
+                                    *wid,
+                                    frame,
+                                    Some(txid),
+                                    Requested(true),
+                                    None,
+                                ));
+                            }
+                        }
+                        Ok(())
+                    };
+                let result = if eui {
+                    with_enhanced_ui_disabled(&app, || do_positions(positions))
+                } else {
+                    do_positions(positions)
+                };
                 if let Err(err) = result {
                     return Err(err);
                 }

@@ -20,9 +20,12 @@ mod testing;
 #[cfg(test)]
 mod tests;
 
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::thread;
 use std::time::Duration;
 
+use animation::AnimationState;
 use events::app::AppEventHandler;
 use events::command::CommandEventHandler;
 use events::drag::DragEventHandler;
@@ -382,6 +385,7 @@ pub struct Reactor {
     communication_manager: managers::CommunicationManager,
     notification_manager: managers::NotificationManager,
     transaction_manager: transaction_manager::TransactionManager,
+    animation_generation: Arc<AtomicU64>,
     menu_manager: managers::MenuManager,
     mission_control_manager: managers::MissionControlManager,
     refocus_manager: managers::RefocusManager,
@@ -422,6 +426,7 @@ struct WindowState {
     /// This value only updates monotonically with respect to writes; in other
     /// words, we only accept reads when we know they come after the last write.
     frame_monotonic: CGRect,
+    anim_state: Option<AnimationState>,
     is_ax_standard: bool,
     is_ax_root: bool,
     is_minimized: bool,
@@ -441,6 +446,7 @@ impl From<WindowInfo> for WindowState {
         WindowState {
             title: info.title,
             frame_monotonic: info.frame,
+            anim_state: None,
             is_ax_standard: info.is_standard,
             is_ax_root: info.is_root,
             is_minimized: info.is_minimized,
@@ -559,6 +565,7 @@ impl Reactor {
                 _window_notify_tx: window_notify_tx,
             },
             transaction_manager: transaction_manager::TransactionManager::new(window_tx_store),
+            animation_generation: Arc::new(AtomicU64::new(0)),
             menu_manager: managers::MenuManager {
                 menu_state: MenuState::Closed,
                 menu_tx: None,
