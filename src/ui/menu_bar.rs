@@ -14,14 +14,15 @@ use objc2_core_foundation::{
 use objc2_core_graphics::{CGBlendMode, CGContext};
 use objc2_core_text::CTLine;
 use objc2_foundation::{
-    MainThreadMarker, NSAttributedStringKey, NSDictionary, NSMutableDictionary, NSRect, NSSize,
-    NSString,
+    MainThreadMarker, NSAttributedStringKey, NSDictionary, NSMutableDictionary, NSObject, NSRect,
+    NSSize, NSString,
 };
 use tracing::debug;
 
 use crate::common::config::{
     ActiveWorkspaceLabel, MenuBarDisplayMode, MenuBarSettings, WorkspaceDisplayStyle,
 };
+use crate::ipc::RiftMachClient;
 use crate::model::VirtualWorkspaceId;
 use crate::model::server::{WindowData, WorkspaceData};
 use crate::sys::screen::SpaceId;
@@ -39,28 +40,65 @@ pub struct MenuIcon {
     view: Retained<MenuIconView>,
     mtm: MainThreadMarker,
     prev_width: f64,
+    _action_handler: Retained<MenuActionHandler>,
 }
 
-fn menu_items(mtm: MainThreadMarker) -> Vec<Retained<NSMenuItem>> {
-    let quit_item = unsafe {
-        NSMenuItem::initWithTitle_action_keyEquivalent(
+struct MenuActionHandlerIvars {
+    _client: RiftMachClient,
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "RiftMenuActionHandler"]
+    #[ivars = MenuActionHandlerIvars]
+    struct MenuActionHandler;
+
+    impl MenuActionHandler {
+        #[unsafe(method(onShowMissionControlAll:))]
+        fn show_mission_control_all(&self, _sender: Option<&NSObject>) {
+            std::process::Command::new("rift-cli").args(["execute", "mission_ctrl", "show-all"]).spawn().unwrap();
+        }
+    }
+);
+
+impl MenuActionHandler {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let obj = mtm.alloc().set_ivars(MenuActionHandlerIvars {
+            _client: RiftMachClient::connect().unwrap(),
+        });
+        unsafe { msg_send![super(obj), init] }
+    }
+}
+
+fn menu_items(mtm: MainThreadMarker, menu: &Retained<NSMenu>, handler: &MenuActionHandler) {
+    unsafe {
+        let mission_ctrl = NSMenuItem::initWithTitle_action_keyEquivalent(
+            mtm.alloc(),
+            &NSString::from_str("Mission Control.."),
+            Some(sel!(onShowMissionControlAll:)),
+            &NSString::from_str(""),
+        );
+        mission_ctrl.setTarget(Some(handler));
+
+        menu.addItem(&mission_ctrl);
+
+        let quit = NSMenuItem::initWithTitle_action_keyEquivalent(
             mtm.alloc(),
             &NSString::from_str("Quit Rift"),
             Some(sel!(terminate:)),
             &NSString::from_str("q"),
-        )
-    };
+        );
 
-    vec![quit_item]
+        menu.addItem(&quit);
+    }
 }
 
 impl MenuIcon {
     pub fn new(mtm: MainThreadMarker) -> Self {
         let menu = NSMenu::new(mtm);
+        let handler = MenuActionHandler::new(mtm);
 
-        for item in menu_items(mtm) {
-            menu.addItem(&item);
-        }
+        menu_items(mtm, &menu, &handler);
 
         let status_bar = NSStatusBar::systemStatusBar();
         let status_item = status_bar.statusItemWithLength(NSVariableStatusItemLength);
@@ -79,6 +117,7 @@ impl MenuIcon {
             view,
             mtm,
             prev_width: 0.0,
+            _action_handler: handler,
         }
     }
 
