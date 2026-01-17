@@ -958,7 +958,14 @@ impl State {
             Some(wid) => wid,
             None => {
                 if !allow_register {
-                    warn!(?self.pid, "Got MainWindowChanged on unknown window; skipping");
+                    warn!(?self.pid, "Got MainWindowChanged on unknown window; clearing main window");
+                    if self.main_window.take().is_some() {
+                        self.send_event(Event::ApplicationMainWindowChanged(
+                            self.pid,
+                            None,
+                            Quiet::No,
+                        ));
+                    }
                     return None;
                 }
                 let Some((info, wid, window_server_info)) = self.register_window(elem, None) else {
