@@ -55,6 +55,12 @@ pub struct DisplayData {
     #[serde_as(as = "CGRectDef")]
     pub frame: CGRect,
     pub space: Option<u64>,
+    /// True if this display's space is active per the activation policy.
+    pub is_active_space: bool,
     /// True if this display corresponds to the context Rift uses when no space_id is provided
     pub is_active_context: bool,
+    /// Active space ids for this display (empty if none).
+    pub active_space_ids: Vec<u64>,
+    /// Inactive space ids for this display (empty if none).
+    pub inactive_space_ids: Vec<u64>,
 }

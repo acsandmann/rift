@@ -348,11 +348,7 @@ impl WindowEventHandler {
                         .screens
                         .iter()
                         .filter_map(|screen| {
-                            let display_uuid = if screen.display_uuid.is_empty() {
-                                None
-                            } else {
-                                Some(screen.display_uuid.clone())
-                            };
+                            let display_uuid = screen.display_uuid_owned();
                             Some((screen.space?, screen.frame, display_uuid))
                         })
                         .collect::<Vec<_>>();
@@ -376,11 +372,7 @@ impl WindowEventHandler {
                     .iter()
                     .filter_map(|screen| {
                         let space = screen.space?;
-                        let display_uuid = if screen.display_uuid.is_empty() {
-                            None
-                        } else {
-                            Some(screen.display_uuid.clone())
-                        };
+                        let display_uuid = screen.display_uuid_owned();
                         Some((space, screen.frame, display_uuid))
                     })
                     .collect::<Vec<_>>();

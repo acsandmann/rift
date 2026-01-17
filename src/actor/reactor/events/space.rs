@@ -252,33 +252,13 @@ impl SpaceEventHandler {
                 })
                 .collect();
 
-            let cfg = crate::actor::reactor::managers::space_activation::SpaceActivationConfig {
-                default_disable: reactor.config.settings.default_disable,
-                one_space: reactor.one_space,
-            };
+            let cfg = reactor.activation_cfg();
             // IMPORTANT: Do not reset login-window state here. When the lock screen / fast user
             // switching activates the login window, WM emits raw space snapshots and global
             // activation events. The activation policy must preserve the current login-window
             // flag across screen parameter changes so it can keep all spaces disabled while
             // login window is active.
-            let inputs: Vec<
-                crate::actor::reactor::managers::space_activation::ScreenActivationInput,
-            > = reactor
-                .space_manager
-                .screens
-                .iter()
-                .map(
-                    |s| crate::actor::reactor::managers::space_activation::ScreenActivationInput {
-                        screen_id: s.screen_id,
-                        space: s.space,
-                        display_uuid: if s.display_uuid.is_empty() {
-                            None
-                        } else {
-                            Some(s.display_uuid.clone())
-                        },
-                    },
-                )
-                .collect();
+            let inputs = reactor.activation_inputs_for_current_screens();
             reactor.space_activation_policy.on_spaces_updated(cfg, &inputs);
 
             reactor.recompute_and_set_active_spaces(&spaces);
@@ -365,28 +345,8 @@ impl SpaceEventHandler {
             return;
         }
 
-        let cfg = crate::actor::reactor::managers::space_activation::SpaceActivationConfig {
-            default_disable: reactor.config.settings.default_disable,
-            one_space: reactor.one_space,
-        };
-        let inputs: Vec<crate::actor::reactor::managers::space_activation::ScreenActivationInput> =
-            reactor
-                .space_manager
-                .screens
-                .iter()
-                .zip(spaces.iter().copied())
-                .map(|(screen, space)| {
-                    crate::actor::reactor::managers::space_activation::ScreenActivationInput {
-                        screen_id: screen.screen_id,
-                        space,
-                        display_uuid: if screen.display_uuid.is_empty() {
-                            None
-                        } else {
-                            Some(screen.display_uuid.clone())
-                        },
-                    }
-                })
-                .collect();
+        let cfg = reactor.activation_cfg();
+        let inputs = reactor.activation_inputs_for_spaces(&spaces);
         reactor.space_activation_policy.on_spaces_updated(cfg, &inputs);
 
         reactor.recompute_and_set_active_spaces(&spaces);

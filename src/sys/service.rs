@@ -54,14 +54,32 @@ fn plist_path() -> io::Result<PathBuf> {
     Ok(home.join("Library").join("LaunchAgents").join(format!("{RIFT_PLIST}.plist")))
 }
 
-fn find_rift_executable() -> io::Result<PathBuf> {
-    if let Ok(path_env) = env::var("PATH") {
-        for dir in env::split_paths(&path_env) {
-            let candidate = dir.join("rift");
-            if candidate.is_file() {
-                let real = fs::canonicalize(&candidate).unwrap_or(candidate);
-                return Ok(real);
+fn find_rift_executable_in_path(path_env: &std::ffi::OsStr) -> io::Result<Option<PathBuf>> {
+    let mut current_dir: Option<PathBuf> = None;
+    for dir in env::split_paths(path_env) {
+        let candidate = dir.join("rift");
+        if candidate.is_file() {
+            if candidate.is_absolute() {
+                return Ok(Some(candidate));
             }
+
+            let base = match current_dir.as_ref() {
+                Some(dir) => dir,
+                None => {
+                    current_dir = Some(env::current_dir()?);
+                    current_dir.as_ref().expect("just set")
+                }
+            };
+            return Ok(Some(base.join(candidate)));
+        }
+    }
+    Ok(None)
+}
+
+fn find_rift_executable() -> io::Result<PathBuf> {
+    if let Some(path_env) = env::var_os("PATH") {
+        if let Some(candidate) = find_rift_executable_in_path(&path_env)? {
+            return Ok(candidate);
         }
     }
 
@@ -73,8 +91,7 @@ fn find_rift_executable() -> io::Result<PathBuf> {
     })?;
     let sibling = exe_path.with_file_name("rift");
     if sibling.is_file() {
-        let real = fs::canonicalize(&sibling).unwrap_or(sibling);
-        return Ok(real);
+        return Ok(sibling);
     }
 
     Err(io::Error::new(
@@ -207,6 +224,22 @@ pub fn service_install_internal(plist_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+fn ensure_plist_up_to_date(plist_path: &Path) -> io::Result<bool> {
+    let desired = plist_contents()?;
+    match fs::read_to_string(plist_path) {
+        Ok(existing) if existing == desired => Ok(false),
+        Ok(_) => {
+            write_file_atomic(plist_path, &desired)?;
+            Ok(true)
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            write_file_atomic(plist_path, &desired)?;
+            Ok(true)
+        }
+        Err(err) => Err(err),
+    }
+}
+
 pub fn service_install() -> io::Result<()> {
     let plist_path = plist_path()?;
     if plist_path.is_file() {
@@ -255,6 +288,12 @@ pub fn service_start() -> io::Result<()> {
     let service_target = format!("gui/{}/{}", uid, RIFT_PLIST);
     let domain_target = format!("gui/{}", uid);
 
+    let plist_changed = if env::var_os("USER").is_some() && env::var_os("PATH").is_some() {
+        ensure_plist_up_to_date(&plist_path)?
+    } else {
+        false
+    };
+
     let is_bootstrapped = run_launchctl(&["print", &service_target], true).unwrap_or(1);
     if is_bootstrapped != 0 {
         let _ = run_launchctl(&["enable", &service_target], true);
@@ -273,7 +312,25 @@ pub fn service_start() -> io::Result<()> {
     } else {
         let code = run_launchctl(&["kickstart", &service_target], false)?;
         if code == 0 {
-            Ok(())
+            return Ok(());
+        }
+
+        if plist_changed {
+            let _ = run_launchctl(&["bootout", &domain_target, plist_path.to_str().unwrap()], true);
+            let _ = spawn_launchctl(&["bootstrap", &domain_target, plist_path.to_str().unwrap()]);
+            let _ = std::thread::sleep(std::time::Duration::from_millis(150));
+            let code2 = run_launchctl(&["kickstart", &service_target], false)?;
+            if code2 == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!(
+                        "kickstart failed (exit {}), reload+kickstart failed (exit {})",
+                        code, code2
+                    ),
+                ))
+            }
         } else {
             Err(io::Error::new(
                 io::ErrorKind::Other,
@@ -343,5 +400,36 @@ pub fn service_stop() -> io::Result<()> {
                 format!("bootout exit {}, disable exit {}", code1, code2),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs as unix_fs;
+
+    use super::*;
+
+    #[test]
+    fn find_rift_executable_prefers_stable_symlink_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+
+        let real = dir.join("rift-real");
+        fs::write(&real, b"#!/bin/sh\nexit 0\n").unwrap();
+        let mut perms = fs::metadata(&real).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o755);
+            fs::set_permissions(&real, perms).unwrap();
+        }
+
+        let link = dir.join("rift");
+        unix_fs::symlink(&real, &link).unwrap();
+
+        let found = find_rift_executable_in_path(dir.as_os_str())
+            .unwrap()
+            .expect("expected to find rift in PATH");
+        assert_eq!(found, link);
     }
 }

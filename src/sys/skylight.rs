@@ -218,6 +218,9 @@ unsafe extern "C" {
         user_info: *mut c_void,
     );
 
+    pub safe fn CGSetLocalEventsSuppressionInterval(int: f32);
+    pub safe fn CGEnableEventStateCombining(enable: bool);
+
     pub fn SLSMainConnectionID() -> cid_t;
     pub fn SLSDisableUpdate(cid: cid_t) -> i32;
     pub fn SLSReenableUpdate(cid: cid_t) -> i32;

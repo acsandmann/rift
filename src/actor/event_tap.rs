@@ -13,6 +13,7 @@ use objc2_core_graphics::{
 use tracing::{debug, error, trace, warn};
 
 use super::reactor::{self, Event};
+use super::stack_line;
 use crate::actor;
 use crate::actor::wm_controller::{self, WmCommand, WmEvent};
 use crate::common::collections::{HashMap, HashSet};
@@ -49,6 +50,7 @@ pub struct EventTap {
     swipe: Option<SwipeHandler>,
     hotkeys: RefCell<HashMap<Hotkey, Vec<WmCommand>>>,
     wm_sender: Option<wm_controller::Sender>,
+    stack_line_tx: Option<stack_line::Sender>,
 }
 
 struct State {
@@ -161,6 +163,7 @@ impl EventTap {
         events_tx: reactor::Sender,
         requests_rx: Receiver,
         wm_sender: Option<wm_controller::Sender>,
+        stack_line_tx: Option<stack_line::Sender>,
     ) -> Self {
         let disable_hotkey = config
             .settings
@@ -186,6 +189,7 @@ impl EventTap {
             swipe,
             hotkeys: RefCell::new(HashMap::default()),
             wm_sender,
+            stack_line_tx,
         }
     }
 
@@ -309,6 +313,11 @@ impl EventTap {
         match event_type {
             CGEventType::LeftMouseDown | CGEventType::RightMouseDown => {
                 set_mouse_state(MouseState::Down);
+
+                if let Some(tx) = &self.stack_line_tx {
+                    let loc = CGEvent::location(Some(event));
+                    let _ = tx.try_send(stack_line::Event::MouseDown(loc));
+                }
             }
             CGEventType::LeftMouseDragged | CGEventType::RightMouseDragged => {
                 set_mouse_state(MouseState::Down);
@@ -342,14 +351,22 @@ impl EventTap {
             CGEventType::RightMouseUp | CGEventType::LeftMouseUp => {
                 _ = self.events_tx.send(Event::MouseUp);
             }
-            CGEventType::MouseMoved
+            CGEventType::MouseMoved => {
+                let loc = CGEvent::location(Some(event));
+
+                // stack line hover feedback
+                if let Some(tx) = &self.stack_line_tx {
+                    let _ = tx.try_send(stack_line::Event::MouseMoved(loc));
+                }
+
+                // ffm
                 if self.config.settings.focus_follows_mouse
                     && state.focus_follows_mouse_enabled
-                    && !state.disable_hotkey_active =>
-            {
-                let loc = CGEvent::location(Some(event));
-                if let Some(wsid) = state.track_mouse_move(loc) {
-                    _ = self.events_tx.send(Event::MouseMovedOverWindow(wsid));
+                    && !state.disable_hotkey_active
+                {
+                    if let Some(wsid) = state.track_mouse_move(loc) {
+                        _ = self.events_tx.send(Event::MouseMovedOverWindow(wsid));
+                    }
                 }
             }
             _ => (),

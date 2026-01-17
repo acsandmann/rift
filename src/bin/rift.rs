@@ -26,7 +26,9 @@ use rift_wm::sys::accessibility::ensure_accessibility_permission;
 use rift_wm::sys::executor::Executor;
 use rift_wm::sys::screen::{CoordinateConverter, displays_have_separate_spaces};
 use rift_wm::sys::service::{ServiceCommands, handle_service_command};
-use rift_wm::sys::skylight::{CGSEventType, KnownCGSEvent};
+use rift_wm::sys::skylight::{
+    CGEnableEventStateCombining, CGSEventType, CGSetLocalEventsSuppressionInterval, KnownCGSEvent,
+};
 use tokio::join;
 
 embed_plist::embed_info_plist!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/Info.plist"));
@@ -178,6 +180,8 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         &[
             CGSEventType::Known(KnownCGSEvent::SpaceWindowDestroyed),
             CGSEventType::Known(KnownCGSEvent::SpaceWindowCreated),
+            CGSEventType::Known(KnownCGSEvent::SpaceCreated),
+            CGSEventType::Known(KnownCGSEvent::SpaceDestroyed),
             //CGSEventType::Known(KnownCGSEvent::WindowMoved),
             //CGSEventType::Known(KnownCGSEvent::WindowResized),
         ],
@@ -238,6 +242,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         events_tx.clone(),
         event_tap_rx,
         Some(wm_controller_sender.clone()),
+        Some(stack_line_tx.clone()),
     );
     let menu = Menu::new(config.clone(), menu_rx, mtm);
     let stack_line = StackLine::new(
@@ -258,6 +263,9 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
     );
 
     unsafe { AXUIElement::new_system_wide().set_messaging_timeout(1.0) };
+
+    CGSetLocalEventsSuppressionInterval(0.0);
+    CGEnableEventStateCombining(false);
 
     let _executor_session = Executor::run_main(mtm, async move {
         join!(

@@ -3,12 +3,13 @@ use std::ptr;
 use std::rc::Rc;
 
 use objc2::rc::Retained;
-use objc2_app_kit::NSNormalWindowLevel;
+use objc2_app_kit::NSStatusWindowLevel;
 use objc2_core_foundation::{CFType, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::CGContext;
 use objc2_quartz_core::{CALayer, CATransaction};
 use tracing::warn;
 
+use crate::actor::app::WindowId;
 use crate::common::config::{HorizontalPlacement, VerticalPlacement};
 use crate::sys::cgs_window::{CgsWindow, CgsWindowError};
 use crate::sys::screen::SpaceId;
@@ -100,6 +101,7 @@ pub struct GroupDisplayData {
     pub group_kind: GroupKind,
     pub total_count: usize,
     pub selected_index: usize,
+    pub window_ids: Vec<WindowId>,
 }
 
 pub type SegmentClickCallback = Rc<dyn Fn(usize)>;
@@ -150,7 +152,7 @@ impl GroupIndicatorWindow {
         if let Err(err) = cgs_window.set_alpha(1.0) {
             warn!(error=?err, "failed to set stack line window alpha");
         }
-        if let Err(err) = cgs_window.set_level(NSNormalWindowLevel as i32) {
+        if let Err(err) = cgs_window.set_level(NSStatusWindowLevel as i32) {
             warn!(error=?err, "failed to set stack line window level");
         }
 
@@ -213,11 +215,17 @@ impl GroupIndicatorWindow {
 
     pub fn recommended_thickness(&self) -> f64 { self.state.borrow().config.bar_thickness }
 
+    pub fn frame(&self) -> CGRect { *self.frame.borrow() }
+
     pub fn set_click_callback(&self, callback: SegmentClickCallback) {
         self.state.borrow_mut().click_callback = Some(callback);
     }
 
     pub fn group_data(&self) -> Option<GroupDisplayData> { self.state.borrow().group_data.clone() }
+
+    pub fn window_ids(&self) -> Vec<WindowId> {
+        self.group_data().map(|d| d.window_ids).unwrap_or_default()
+    }
 
     pub fn click_segment(&self, segment_index: usize) -> Result<(), CgsWindowError> {
         let Some(group_data) = self.group_data() else {

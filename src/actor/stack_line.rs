@@ -2,9 +2,12 @@ use std::collections::hash_map::Entry;
 use std::rc::Rc;
 
 use objc2::MainThreadMarker;
+use objc2_app_kit::NSCursor;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use tracing::instrument;
 
+use crate::actor::app::WindowId;
+use crate::actor::reactor::{Command, ReactorCommand};
 use crate::actor::{self, reactor};
 use crate::common::collections::HashMap;
 use crate::common::config::{Config, HorizontalPlacement, VerticalPlacement};
@@ -21,6 +24,7 @@ pub struct GroupInfo {
     pub frame: CGRect,
     pub total_count: usize,
     pub selected_index: usize,
+    pub window_ids: Vec<WindowId>,
 }
 
 #[derive(Debug)]
@@ -31,6 +35,8 @@ pub enum Event {
     },
     ScreenParametersChanged(CoordinateConverter),
     ConfigUpdated(Config),
+    MouseDown(CGPoint),
+    MouseMoved(CGPoint),
 }
 
 pub struct StackLine {
@@ -43,6 +49,7 @@ pub struct StackLine {
     reactor_tx: reactor::Sender,
     coordinate_converter: CoordinateConverter,
     group_sigs_by_space: HashMap<SpaceId, Vec<GroupSig>>,
+    cursor_over_indicator: bool,
 }
 
 pub type Sender = actor::Sender<Event>;
@@ -64,6 +71,7 @@ impl StackLine {
             reactor_tx,
             coordinate_converter,
             group_sigs_by_space: HashMap::default(),
+            cursor_over_indicator: false,
         }
     }
 
@@ -85,7 +93,10 @@ impl StackLine {
         if !self.is_enabled()
             && !matches!(
                 event,
-                Event::ConfigUpdated(_) | Event::ScreenParametersChanged(_)
+                Event::ConfigUpdated(_)
+                    | Event::ScreenParametersChanged(_)
+                    | Event::MouseDown(_)
+                    | Event::MouseMoved(_)
             )
         {
             return;
@@ -99,6 +110,12 @@ impl StackLine {
             }
             Event::ConfigUpdated(config) => {
                 self.handle_config_updated(config);
+            }
+            Event::MouseDown(point) => {
+                self.handle_mouse_down(point);
+            }
+            Event::MouseMoved(point) => {
+                self.handle_mouse_moved(point);
             }
         }
     }
@@ -178,12 +195,97 @@ impl StackLine {
         tracing::debug!("Updated stack line configuration");
     }
 
-    // TODO: make this work
+    fn handle_mouse_down(&mut self, screen_point: CGPoint) {
+        if !self.is_enabled() {
+            return;
+        }
+
+        for (&node_id, indicator) in &self.indicators {
+            let frame = indicator.frame();
+            let (mx, my) = hit_margins(frame, indicator.recommended_thickness());
+
+            if point_in_hit_area(screen_point, frame, mx, my) {
+                let local_point =
+                    CGPoint::new(screen_point.x - frame.origin.x, screen_point.y - frame.origin.y);
+
+                if let Some(segment_index) = indicator.check_click(local_point) {
+                    tracing::debug!(
+                        ?node_id,
+                        segment_index,
+                        "Detected click on stack line indicator segment"
+                    );
+                    self.handle_indicator_clicked(node_id, segment_index);
+                    return;
+                }
+            }
+        }
+    }
+
+    // this is very hacky but we don't use nswindow so we have to roll this ourselves
+    fn handle_mouse_moved(&mut self, screen_point: CGPoint) {
+        let over_indicator = if self.is_enabled() {
+            self.indicators.values().any(|indicator| {
+                let frame = indicator.frame();
+                let (mx, my) = hit_margins(frame, indicator.recommended_thickness());
+                let enter_mul = 1.0;
+                let exit_mul = 0.65;
+
+                // enter hitbox is larger than exit
+                let (mx, my) = if self.cursor_over_indicator {
+                    (mx * exit_mul, my * exit_mul)
+                } else {
+                    (mx * enter_mul, my * enter_mul)
+                };
+
+                point_in_hit_area(screen_point, frame, mx, my)
+            })
+        } else {
+            false
+        };
+
+        // the hack
+        if over_indicator != self.cursor_over_indicator {
+            self.cursor_over_indicator = over_indicator;
+            if over_indicator {
+                NSCursor::pointingHandCursor().set();
+                tracing::trace!("Set pointing hand cursor over indicator");
+            } else {
+                NSCursor::arrowCursor().set();
+                tracing::trace!("Reset to arrow cursor");
+            }
+        }
+    }
+
     fn handle_indicator_clicked(&mut self, node_id: NodeId, segment_index: usize) {
-        // TODO: Send event to reactor when indicators are clicked
-        // For now just log the click
-        tracing::debug!(?node_id, segment_index, "Group indicator clicked");
-        // self.reactor_tx.send(reactor::Event::GroupIndicatorClicked { node_id, segment_index });
+        if let Some(indicator) = self.indicators.get(&node_id) {
+            let window_ids = indicator.window_ids();
+            if let Some(window_id) = window_ids.get(segment_index) {
+                tracing::debug!(
+                    ?node_id,
+                    segment_index,
+                    ?window_id,
+                    "Group indicator clicked - focusing window"
+                );
+                let _ = self.reactor_tx.send(reactor::Event::Command(Command::Reactor(
+                    ReactorCommand::FocusWindow {
+                        window_id: *window_id,
+                        window_server_id: None,
+                    },
+                )));
+            } else {
+                tracing::debug!(
+                    ?node_id,
+                    segment_index,
+                    "Group indicator clicked with invalid segment index"
+                );
+            }
+        } else {
+            tracing::debug!(
+                ?node_id,
+                segment_index,
+                "Group indicator clicked but not found in map"
+            );
+        }
     }
 
     fn update_or_create_indicator(&mut self, group: GroupInfo) {
@@ -201,6 +303,7 @@ impl StackLine {
             group_kind,
             total_count: group.total_count,
             selected_index: group.selected_index,
+            window_ids: group.window_ids,
         };
 
         let indicator_frame = Self::calculate_indicator_frame(
@@ -323,6 +426,32 @@ impl GroupSig {
             selected_index: g.selected_index,
         }
     }
+}
+
+fn hit_margins(frame: CGRect, thickness: f64) -> (f64, f64) {
+    let base = (thickness * 0.25).clamp(1.0, 5.0);
+    let target_short = 14.0;
+
+    if frame.size.width < frame.size.height {
+        // vertical: widen hitbox more in X
+        let mx =
+            (base + ((target_short - frame.size.width as f64) * 0.5).max(0.0)).clamp(1.0, 10.0);
+        let my = base.clamp(1.0, 4.0);
+        (mx, my)
+    } else {
+        // horizontal: expand more in Y
+        let mx = base.clamp(1.0, 4.0);
+        let my =
+            (base + ((target_short - frame.size.height as f64) * 0.5).max(0.0)).clamp(1.0, 10.0);
+        (mx, my)
+    }
+}
+
+fn point_in_hit_area(point: CGPoint, frame: CGRect, mx: f64, my: f64) -> bool {
+    point.x >= frame.origin.x - mx
+        && point.x < frame.origin.x + frame.size.width + mx
+        && point.y >= frame.origin.y - my
+        && point.y < frame.origin.y + frame.size.height + my
 }
 
 #[cfg(test)]
