@@ -698,7 +698,7 @@ impl State {
                 // because of apps like firefox that send delayed(or dont send at all) axuielementdestroyed/windowserverdisappeared
                 // this is a fallback to ensure we handle windows being closed
                 self.remove_stale_windows();
-                self.on_main_window_changed(None);
+                self.on_main_window_changed(None, false);
             }
             kAXWindowCreatedNotification => {
                 if self.id(&elem).is_ok() {
@@ -726,7 +726,7 @@ impl State {
                 self.windows.remove(&wid);
                 self.send_event(Event::WindowDestroyed(wid));
 
-                self.on_main_window_changed(Some(wid));
+                self.on_main_window_changed(Some(wid), false);
             }
             kAXWindowMovedNotification | kAXWindowResizedNotification => {
                 let Ok(wid) = self.id(&elem) else {
@@ -924,7 +924,7 @@ impl State {
             };
 
             if is_last {
-                let main_window = this.on_main_window_changed(quiet_if);
+                let main_window = this.on_main_window_changed(quiet_if, true);
                 if main_window != Some(wid) {
                     warn!(
                         "Raise request failed to raise {desired:?}; instead got main_window={main_window:?}",
@@ -937,7 +937,11 @@ impl State {
         Ok(())
     }
 
-    fn on_main_window_changed(&mut self, quiet_if: Option<WindowId>) -> Option<WindowId> {
+    fn on_main_window_changed(
+        &mut self,
+        quiet_if: Option<WindowId>,
+        allow_register: bool,
+    ) -> Option<WindowId> {
         let elem = match trace("main_window", &self.app, || self.app.main_window()) {
             Ok(elem) => elem,
             Err(e) => {
@@ -953,6 +957,10 @@ impl State {
         let wid = match self.id(&elem).ok() {
             Some(wid) => wid,
             None => {
+                if !allow_register {
+                    warn!(?self.pid, "Got MainWindowChanged on unknown window; skipping");
+                    return None;
+                }
                 let Some((info, wid, window_server_info)) = self.register_window(elem, None) else {
                     warn!(?self.pid, "Got MainWindowChanged on unknown window");
                     return None;
@@ -1010,7 +1018,7 @@ impl State {
                 }
             };
 
-            self.on_main_window_changed(quiet_window_change);
+            self.on_main_window_changed(quiet_window_change, true);
 
             Event::ApplicationActivated(self.pid, quiet_activation)
         };
@@ -1189,7 +1197,7 @@ impl State {
         if matches!(*err, AXError::InvalidUIElement) {
             if self.windows.remove(&wid).is_some() {
                 self.send_event(Event::WindowDestroyed(wid));
-                self.on_main_window_changed(Some(wid));
+                self.on_main_window_changed(Some(wid), false);
             }
             return true;
         }
