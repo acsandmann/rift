@@ -19,10 +19,11 @@ use objc2_foundation::{
 };
 use tracing::debug;
 
+use crate::actor::reactor;
 use crate::common::config::{
     ActiveWorkspaceLabel, MenuBarDisplayMode, MenuBarSettings, WorkspaceDisplayStyle,
 };
-use crate::ipc::RiftMachClient;
+use crate::ipc::{RiftCommand, RiftMachClient, RiftRequest};
 use crate::model::VirtualWorkspaceId;
 use crate::model::server::{WindowData, WorkspaceData};
 use crate::sys::screen::SpaceId;
@@ -47,6 +48,18 @@ struct MenuActionHandlerIvars {
     _client: RiftMachClient,
 }
 
+fn build_show_all_mission_control_command() -> RiftRequest {
+    let rift_command = RiftCommand::Reactor(reactor::Command::Reactor(
+        reactor::ReactorCommand::ShowMissionControlAll,
+    ));
+
+    RiftRequest::ExecuteCommand {
+        command: serde_json::to_string(&rift_command)
+            .expect("Unable to serialize predetermined command"),
+        args: vec![],
+    }
+}
+
 define_class!(
     #[unsafe(super(NSObject))]
     #[name = "RiftMenuActionHandler"]
@@ -56,7 +69,12 @@ define_class!(
     impl MenuActionHandler {
         #[unsafe(method(onShowMissionControlAll:))]
         fn show_mission_control_all(&self, _sender: Option<&NSObject>) {
-            std::process::Command::new("rift-cli").args(["execute", "mission_ctrl", "show-all"]).spawn().unwrap();
+                RiftMachClient::connect()
+                    .unwrap()
+                    .send_request(
+                        &build_show_all_mission_control_command()
+                    )
+                .unwrap();
         }
     }
 );
