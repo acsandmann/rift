@@ -1,12 +1,12 @@
 // many ideas for how this works were taken from https://github.com/xiamaz/YabaiIndicator
 use std::cell::RefCell;
 
-use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send};
+use objc2::{rc::Retained, sel};
 use objc2_app_kit::{
     NSColor, NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSGraphicsContext,
-    NSStatusBar, NSStatusItem, NSVariableStatusItemLength, NSView,
+    NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength, NSView,
 };
 use objc2_core_foundation::{
     CFAttributedString, CFDictionary, CFRetained, CFString, CGFloat, CGPoint, CGRect, CGSize,
@@ -41,10 +41,32 @@ pub struct MenuIcon {
     prev_width: f64,
 }
 
+fn menu_items(mtm: MainThreadMarker) -> Vec<Retained<NSMenuItem>> {
+    let quit_item = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            mtm.alloc(),
+            &NSString::from_str("Quit Rift"),
+            Some(sel!(terminate:)),
+            &NSString::from_str("q"),
+        )
+    };
+
+    vec![quit_item]
+}
+
 impl MenuIcon {
     pub fn new(mtm: MainThreadMarker) -> Self {
+        let menu = NSMenu::new(mtm);
+
+        for item in menu_items(mtm) {
+            menu.addItem(&item);
+        }
+
         let status_bar = NSStatusBar::systemStatusBar();
         let status_item = status_bar.statusItemWithLength(NSVariableStatusItemLength);
+
+        status_item.setMenu(Some(&menu));
+
         let view = MenuIconView::new(mtm);
         if let Some(btn) = status_item.button(mtm) {
             btn.addSubview(&*view);
