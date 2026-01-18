@@ -1042,6 +1042,12 @@ impl Reactor {
                     self.reconcile_spaces_with_display_history(&raw_spaces, false);
 
                     self.force_refresh_all_windows();
+                } else if self.space_activation_policy.login_window_active {
+                    // macOS sometimes activates loginwindow during wake without sending a
+                    // corresponding deactivation. Any subsequent non-login activation
+                    // indicates the user is back, so clear suppression.
+                    self.space_activation_policy.set_login_window_active(false);
+                    self.recompute_and_set_active_spaces_from_current_screens();
                 }
             }
             Event::RegisterWmSender(sender) => {
