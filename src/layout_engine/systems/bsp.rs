@@ -217,6 +217,30 @@ impl BspLayoutSystem {
         }
     }
 
+    /// Calculates the depth of a node in the BSP tree by counting parent levels.
+    /// The root node has depth 0, its direct children have depth 1, and so on.
+    fn node_depth(&self, node: NodeId) -> usize {
+        let mut depth = 0;
+        let mut current = node;
+        while let Some(parent) = current.parent(&self.tree.map) {
+            depth += 1;
+            current = parent;
+        }
+        depth
+    }
+
+    /// Returns the orientation for a new split based on the node's depth.
+    /// Creates a fibonacci spiral pattern by alternating orientations:
+    /// - Even depth (0, 2, 4, ...) → Horizontal split
+    /// - Odd depth (1, 3, 5, ...) → Vertical split
+    fn orientation_for_depth(&self, depth: usize) -> Orientation {
+        if depth % 2 == 0 {
+            Orientation::Horizontal
+        } else {
+            Orientation::Vertical
+        }
+    }
+
     fn collect_windows_under(&self, node: NodeId, out: &mut Vec<WindowId>) {
         match self.kind.get(node) {
             Some(NodeKind::Leaf { window, .. }) => {
@@ -340,10 +364,10 @@ impl BspLayoutSystem {
                     if let Some(w) = existing {
                         self.window_to_node.insert(w, left);
                     }
-                    self.kind.insert(sel, NodeKind::Split {
-                        orientation: Orientation::Horizontal,
-                        ratio: 0.5,
-                    });
+                    // Use alternating orientations based on depth for fibonacci spiral
+                    let depth = self.node_depth(sel);
+                    let orientation = self.orientation_for_depth(depth);
+                    self.kind.insert(sel, NodeKind::Split { orientation, ratio: 0.5 });
                     left.detach(&mut self.tree).push_back(sel);
                     right.detach(&mut self.tree).push_back(sel);
                     self.tree.data.selection.select(&self.tree.map, right);
@@ -526,6 +550,47 @@ mod tests {
 
         assert_eq!(system.window_in_direction(layout, Direction::Down), Some(w(1)));
         assert_eq!(system.window_in_direction(layout, Direction::Up), Some(w(2)));
+    }
+
+    #[test]
+    fn fibonacci_spiral_alternates_split_orientation() {
+        let mut system = BspLayoutSystem::default();
+        let layout = system.create_layout();
+
+        // Add first window - it takes the full layout
+        system.add_window_after_selection(layout, w(1));
+
+        // Add second window - should split horizontally (depth 0)
+        system.add_window_after_selection(layout, w(2));
+        let tree = system.draw_tree(layout);
+        assert!(
+            tree.contains("Horizontal"),
+            "Second window should create horizontal split at depth 0"
+        );
+
+        // Add third window - should split vertically (depth 1)
+        system.add_window_after_selection(layout, w(3));
+        let tree = system.draw_tree(layout);
+        let horizontal_count = tree.matches("Horizontal").count();
+        let vertical_count = tree.matches("Vertical").count();
+        assert_eq!(horizontal_count, 1, "Should have 1 horizontal split");
+        assert_eq!(vertical_count, 1, "Should have 1 vertical split");
+
+        // Add fourth window - should split horizontally (depth 2)
+        system.add_window_after_selection(layout, w(4));
+        let tree = system.draw_tree(layout);
+        let horizontal_count = tree.matches("Horizontal").count();
+        let vertical_count = tree.matches("Vertical").count();
+        assert_eq!(horizontal_count, 2, "Should have 2 horizontal splits");
+        assert_eq!(vertical_count, 1, "Should have 1 vertical split");
+
+        // Add fifth window - should split vertically (depth 3)
+        system.add_window_after_selection(layout, w(5));
+        let tree = system.draw_tree(layout);
+        let horizontal_count = tree.matches("Horizontal").count();
+        let vertical_count = tree.matches("Vertical").count();
+        assert_eq!(horizontal_count, 2, "Should have 2 horizontal splits");
+        assert_eq!(vertical_count, 2, "Should have 2 vertical splits");
     }
 }
 
