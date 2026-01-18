@@ -293,6 +293,8 @@ pub enum ReactorCommand {
         selector: DisplaySelector,
         window_id: Option<u32>,
     },
+    /// Toggle whether rift manages the current macOS space
+    ToggleSpaceActivated,
 }
 
 #[derive(Debug, Clone)]
@@ -1198,6 +1200,9 @@ impl Reactor {
             }
             Event::Command(Command::Reactor(ReactorCommand::CloseWindow { window_server_id })) => {
                 CommandEventHandler::handle_command_reactor_close_window(self, window_server_id)
+            }
+            Event::Command(Command::Reactor(ReactorCommand::ToggleSpaceActivated)) => {
+                CommandEventHandler::handle_command_reactor_toggle_space_activated(self)
             }
             _ => (),
         }
