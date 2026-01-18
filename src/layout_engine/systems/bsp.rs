@@ -367,10 +367,7 @@ impl BspLayoutSystem {
                     // Use alternating orientations based on depth for fibonacci spiral
                     let depth = self.node_depth(sel);
                     let orientation = self.orientation_for_depth(depth);
-                    self.kind.insert(sel, NodeKind::Split {
-                        orientation,
-                        ratio: 0.5,
-                    });
+                    self.kind.insert(sel, NodeKind::Split { orientation, ratio: 0.5 });
                     left.detach(&mut self.tree).push_back(sel);
                     right.detach(&mut self.tree).push_back(sel);
                     self.tree.data.selection.select(&self.tree.map, right);
@@ -559,15 +556,18 @@ mod tests {
     fn fibonacci_spiral_alternates_split_orientation() {
         let mut system = BspLayoutSystem::default();
         let layout = system.create_layout();
-        
+
         // Add first window - it takes the full layout
         system.add_window_after_selection(layout, w(1));
-        
+
         // Add second window - should split horizontally (depth 0)
         system.add_window_after_selection(layout, w(2));
         let tree = system.draw_tree(layout);
-        assert!(tree.contains("Horizontal"), "Second window should create horizontal split at depth 0");
-        
+        assert!(
+            tree.contains("Horizontal"),
+            "Second window should create horizontal split at depth 0"
+        );
+
         // Add third window - should split vertically (depth 1)
         system.add_window_after_selection(layout, w(3));
         let tree = system.draw_tree(layout);
@@ -575,7 +575,7 @@ mod tests {
         let vertical_count = tree.matches("Vertical").count();
         assert_eq!(horizontal_count, 1, "Should have 1 horizontal split");
         assert_eq!(vertical_count, 1, "Should have 1 vertical split");
-        
+
         // Add fourth window - should split horizontally (depth 2)
         system.add_window_after_selection(layout, w(4));
         let tree = system.draw_tree(layout);
@@ -583,7 +583,7 @@ mod tests {
         let vertical_count = tree.matches("Vertical").count();
         assert_eq!(horizontal_count, 2, "Should have 2 horizontal splits");
         assert_eq!(vertical_count, 1, "Should have 1 vertical split");
-        
+
         // Add fifth window - should split vertically (depth 3)
         system.add_window_after_selection(layout, w(5));
         let tree = system.draw_tree(layout);
