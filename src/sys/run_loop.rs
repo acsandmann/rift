@@ -18,11 +18,13 @@ use objc2_core_foundation::{
 pub struct WakeupHandle(CFRetained<CFRunLoopSource>, CFRetained<CFRunLoop>);
 
 // SAFETY:
-// - CFRunLoopSource and CFRunLoop are ObjC objects which are allowed to be used
+// - CFRunLoopSource and CFRunLoop are CoreFoundation/ObjC objects which are allowed to be used
 //   from multiple threads.
-// - We only allow signaling the source from this handle. No access to the
-//   underlying handler is given, so it does not need to be Send or Sync.
+// - This handle only exposes `wake()` (signal + wake_up). It does not expose the underlying
+//   handler or allow mutation of the run loop/source beyond signaling.
+// - Therefore it is safe to treat this as Send + Sync for the purposes of a Waker hot path.
 unsafe impl Send for WakeupHandle {}
+unsafe impl Sync for WakeupHandle {}
 
 struct Handler<F> {
     ref_count: isize,

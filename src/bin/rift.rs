@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::path::PathBuf;
 use std::process;
 
@@ -79,6 +80,14 @@ enum Commands {
         #[command(subcommand)]
         service: ServiceCommands,
     },
+}
+
+/// this is okay because there is no recovery mechanism for actors
+/// so we want to immediately exit (and most likely restart since
+/// rift runs as a service most of the time)
+async fn supervise(name: &'static str, fut: impl Future<Output = ()>) {
+    fut.await;
+    panic!("{name} exited");
 }
 
 fn main() {
@@ -267,17 +276,20 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
     CGSetLocalEventsSuppressionInterval(0.0);
     CGEnableEventStateCombining(false);
 
-    let _executor_session = Executor::run_main(mtm, async move {
+    Executor::run_main(mtm, async move {
         join!(
-            wm_controller.run(),
-            notification_center.watch_for_notifications(),
-            event_tap.run(),
-            menu.run(),
-            stack_line.run(),
-            wn_actor.run(),
-            mission_control_native.run(),
-            mission_control.run(),
-            process_actor.run()
+            supervise("wm_controller", wm_controller.run()),
+            supervise(
+                "notification_center",
+                notification_center.watch_for_notifications()
+            ),
+            supervise("event_tap", event_tap.run()),
+            supervise("menu", menu.run()),
+            supervise("stack_line", stack_line.run()),
+            supervise("window_notify", wn_actor.run()),
+            supervise("mc_native", mission_control_native.run()),
+            supervise("mission_control", mission_control.run()),
+            supervise("process_actor", process_actor.run()),
         );
     });
 }

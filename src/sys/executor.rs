@@ -2,7 +2,6 @@
 
 use std::cell::RefCell;
 use std::future::Future;
-use std::mem;
 use std::pin::Pin;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
@@ -11,7 +10,6 @@ use std::task::{Context, Poll, Wake};
 use objc2::MainThreadMarker;
 use objc2_app_kit::NSApp;
 use objc2_core_foundation::CFRunLoop;
-use parking_lot::Mutex;
 
 use super::run_loop::WakeupHandle;
 
@@ -32,19 +30,18 @@ impl Drop for Session {
 }
 
 impl Executor {
-    pub fn run(task: impl Future<Output = ()>) { Self::run_with_loop_fn(task, CFRunLoop::run); }
+    pub fn run(task: impl Future<Output = ()> + 'static) {
+        Self::run_with_loop_fn(task, CFRunLoop::run);
+    }
 
-    pub fn run_main(mtm: MainThreadMarker, task: impl Future<Output = ()>) {
+    pub fn run_main(mtm: MainThreadMarker, task: impl Future<Output = ()> + 'static) {
         // In macOS some events do not fire unless we call this function.
         // https://github.com/koekeishiya/yabai/issues/2680
         Self::run_with_loop_fn(task, || NSApp(mtm).run());
     }
 
-    fn run_with_loop_fn(task: impl Future<Output = ()>, loop_fn: impl Fn()) {
-        let task: Pin<Box<dyn Future<Output = ()> + '_>> = Box::pin(task);
-        // Extend the lifetime.
-        // Safety: We only poll the task within this function, then it is dropped.
-        let task: Pin<Box<dyn Future<Output = ()> + 'static>> = unsafe { mem::transmute(task) };
+    fn run_with_loop_fn(task: impl Future<Output = ()> + 'static, loop_fn: impl Fn()) {
+        let task: Pin<Box<dyn Future<Output = ()> + 'static>> = Box::pin(task);
 
         HANDLE.with(move |handle| {
             struct Guard;
@@ -85,7 +82,7 @@ impl Handle {
                 }
             });
             let state = State {
-                wakeup: Arc::new(WakerImpl(Mutex::new(wakeup))),
+                wakeup: Arc::new(WakerImpl(wakeup)),
                 main_task: None,
             };
             RefCell::new(state)
@@ -95,13 +92,14 @@ impl Handle {
 
 struct State {
     wakeup: Arc<WakerImpl>,
-    main_task: Option<Pin<Box<dyn Future<Output = ()>>>>,
+    main_task: Option<Pin<Box<dyn Future<Output = ()> + 'static>>>,
 }
 
 impl State {
     fn process_tasks(&mut self) {
         let waker = self.wakeup.clone().into();
         let mut context = Context::from_waker(&waker);
+
         if self.main_task.as_mut().unwrap().as_mut().poll(&mut context) == Poll::Ready(()) {
             self.main_task.take();
             if let Some(rl) = CFRunLoop::current() {
@@ -111,16 +109,17 @@ impl State {
     }
 }
 
-struct WakerImpl(Mutex<WakeupHandle>);
+struct WakerImpl(WakeupHandle);
 
 impl Wake for WakerImpl {
-    fn wake(self: Arc<Self>) { self.0.lock().wake(); }
+    fn wake(self: Arc<Self>) { self.0.wake(); }
 }
 
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
     use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::rc::Rc;
     use std::time::Duration;
     use std::{future, thread};
 
@@ -147,13 +146,14 @@ mod tests {
         Executor::run(future::ready(()));
         Executor::run(PendingThenReady::default());
 
-        let mut x = 0;
-        Executor::run(async {
-            x += 1;
+        let x = Rc::new(Cell::new(0));
+        let x2 = x.clone();
+        Executor::run(async move {
+            x2.set(x2.get() + 1);
             PendingThenReady::default().await;
-            x += 1;
+            x2.set(x2.get() + 1);
         });
-        assert_eq!(2, x);
+        assert_eq!(2, x.get());
     }
 
     #[test]
@@ -191,14 +191,16 @@ mod tests {
             drop(tx);
         });
 
-        let mut msgs = 0;
-        Executor::run(async {
+        let msgs = Rc::new(Cell::new(0));
+        let msgs2 = msgs.clone();
+
+        Executor::run(async move {
             while let Some(_msg) = rx.recv().await {
-                msgs += 1;
+                msgs2.set(msgs2.get() + 1);
                 PendingThenReady::default().await;
             }
         });
 
-        assert_eq!(2, msgs);
+        assert_eq!(2, msgs.get());
     }
 }

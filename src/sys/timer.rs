@@ -424,9 +424,8 @@ mod tests {
 
     #[test]
     fn repeating_timer_works() {
-        let start = Instant::now();
-
         Executor::run(async {
+            let start = Instant::now();
             let mut timer = Timer::repeating(
                 Duration::from_millis(20), // initial delay
                 Duration::from_millis(10), // repeat interval
