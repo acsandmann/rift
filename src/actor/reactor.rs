@@ -950,7 +950,9 @@ impl Reactor {
         self.refresh_window_server_snapshot_after_churn();
         self.resync_windows_after_churn();
         self.force_refresh_all_windows();
-        self.update_layout_or_warn_with(false, false, "Layout update failed after display churn");
+        if let Err(_) = LayoutManager::update_layout(self, false, false) {
+            warn!("Layout update failed after display churn");
+        }
     }
 
     fn note_windowserver_activity_during_display_churn(event: &Event) {
@@ -3038,18 +3040,9 @@ impl Reactor {
         is_workspace_switch: bool,
         context: &'static str,
     ) -> bool {
-        self.update_layout(is_resize, is_workspace_switch).unwrap_or_else(|e| {
+        LayoutManager::update_layout(self, is_resize, is_workspace_switch).unwrap_or_else(|e| {
             warn!(error = ?e, "{}", context);
             false
         })
-    }
-
-    #[instrument(skip(self), fields())]
-    pub fn update_layout(
-        &mut self,
-        is_resize: bool,
-        is_workspace_switch: bool,
-    ) -> Result<bool, error::ReactorError> {
-        LayoutManager::update_layout(self, is_resize, is_workspace_switch)
     }
 }
