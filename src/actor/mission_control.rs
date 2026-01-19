@@ -66,6 +66,9 @@ impl MissionControlActor {
                 let _guard = span.enter();
                 self.handle_event(event);
             }
+        } else {
+            // Keep the receiver alive so the supervisor doesn't treat this actor as exited.
+            while let Some((_span, _event)) = self.rx.recv().await {}
         }
     }
 
