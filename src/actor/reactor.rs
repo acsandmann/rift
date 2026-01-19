@@ -51,7 +51,7 @@ use crate::common::config::Config;
 use crate::common::log::MetricsCommand;
 use crate::layout_engine::{self as layout, Direction, LayoutCommand, LayoutEngine, LayoutEvent};
 use crate::model::tx_store::WindowTxStore;
-use crate::model::virtual_workspace::AppRuleResult;
+use crate::model::virtual_workspace::{AppRuleResult, HideCorner};
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt};
@@ -297,7 +297,9 @@ struct FullscreenSpaceTrack {
 }
 
 impl Default for FullscreenSpaceTrack {
-    fn default() -> Self { FullscreenSpaceTrack { windows: Vec::new() } }
+    fn default() -> Self {
+        FullscreenSpaceTrack { windows: Vec::new() }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -462,7 +464,9 @@ impl From<WindowInfo> for WindowState {
 }
 
 impl WindowState {
-    fn is_effectively_manageable(&self) -> bool { self.is_manageable && !self.ignore_app_rule }
+    fn is_effectively_manageable(&self) -> bool {
+        self.is_manageable && !self.ignore_app_rule
+    }
 }
 
 impl Reactor {
@@ -598,7 +602,9 @@ impl Reactor {
         }
     }
 
-    fn is_space_active(&self, space: SpaceId) -> bool { self.active_spaces.contains(&space) }
+    fn is_space_active(&self, space: SpaceId) -> bool {
+        self.active_spaces.contains(&space)
+    }
 
     fn iter_active_spaces(&self) -> impl Iterator<Item = SpaceId> + '_ {
         self.active_spaces.iter().copied()
@@ -2254,7 +2260,66 @@ impl Reactor {
         let layout::EventResponse {
             raise_windows,
             mut focus_window,
+            hide_windows,
         } = response;
+
+        for wid in hide_windows {
+            if let Some(app) = self.app_manager.apps.get(&wid.pid) {
+                let wsid = self
+                    .window_manager
+                    .windows
+                    .get(&wid)
+                    .and_then(|w| w.window_server_id)
+                    .unwrap_or(crate::sys::window_server::WindowServerId(0));
+                let txid = self.transaction_manager.generate_next_txid(wsid);
+
+                // Calculate hidden position using virtual workspace logic
+                let mut offscreen = CGPoint { x: 20000.0, y: 20000.0 };
+
+                if let Some(w) = self.window_manager.windows.get(&wid) {
+                    if let Some(space) = self.best_space_for_window_id(wid) {
+                        if let Some(screen) = self.space_manager.screen_by_space(space) {
+                            let bundle_id = app.info.bundle_id.as_deref();
+                            let hidden_rect = self
+                                .layout_manager
+                                .layout_engine
+                                .virtual_workspace_manager
+                                .calculate_hidden_position(
+                                    screen.frame,
+                                    0,
+                                    w.frame_monotonic.size,
+                                    HideCorner::BottomRight,
+                                    bundle_id,
+                                );
+                            offscreen = hidden_rect.origin;
+                        }
+                    }
+                }
+
+                tracing::info!("Hiding window {:?} by moving it to {:?}", wid, offscreen);
+                // eui=true to ensure consistent behavior with other moves
+                let _ = app.handle.send(Request::SetWindowPos(wid, offscreen, txid, true));
+
+                // Update local cache to reflect it's hidden/moved
+                if let Some(w) = self.window_manager.windows.get_mut(&wid) {
+                    w.frame_monotonic.origin = offscreen;
+                }
+
+                // If we're hiding the currently focused window and no replacement focus is provided,
+                // try to focus Finder/Desktop to ensure the hidden window loses focus.
+                if focus_window.is_none() && self.main_window() == Some(wid) {
+                    tracing::info!("Focusing Finder/Desktop after hiding focused window {:?}", wid);
+                    if let Some((_, finder_app)) =
+                        self.app_manager.apps.iter().find(|(_, app)| {
+                            app.info.bundle_id.as_deref() == Some("com.apple.finder")
+                        })
+                    {
+                        let _ = finder_app.handle.send(Request::Activate(Quiet::No));
+                    }
+                }
+            }
+        }
+
         let original_focus = focus_window;
 
         let focus_quiet = if workspace_switch_space.is_some() {
@@ -2830,7 +2895,9 @@ impl Reactor {
         }
     }
 
-    fn main_window(&self) -> Option<WindowId> { self.main_window_tracker.main_window() }
+    fn main_window(&self) -> Option<WindowId> {
+        self.main_window_tracker.main_window()
+    }
 
     fn main_window_space(&self) -> Option<SpaceId> {
         // TODO: Optimize this with a cache or something.

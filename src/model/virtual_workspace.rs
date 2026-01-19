@@ -39,15 +39,16 @@ pub enum WorkspaceError {
 }
 
 /// Details about an app rule assignment when Rift will manage the window.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct AppRuleAssignment {
     pub workspace_id: VirtualWorkspaceId,
     pub floating: bool,
+    pub scratchpad: Option<String>,
     pub prev_rule_decision: bool,
 }
 
 /// Result of evaluating app rules for a window.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum AppRuleResult {
     Managed(AppRuleAssignment),
     Unmanaged,
@@ -113,6 +114,8 @@ pub struct VirtualWorkspaceManager {
     #[serde(skip)]
     window_rule_floating: HashMap<(SpaceId, WindowId), bool>,
     #[serde(skip)]
+    window_rule_scratchpad: HashMap<(SpaceId, WindowId), String>,
+    #[serde(skip)]
     last_rule_decision: HashMap<(SpaceId, WindowId), bool>,
     floating_positions: HashMap<(SpaceId, VirtualWorkspaceId), FloatingWindowPositions>,
     workspace_counter: usize,
@@ -156,6 +159,7 @@ impl VirtualWorkspaceManager {
             active_workspace_per_space: HashMap::default(),
             window_to_workspace: HashMap::default(),
             window_rule_floating: HashMap::default(),
+            window_rule_scratchpad: HashMap::default(),
             last_rule_decision: HashMap::default(),
             floating_positions: HashMap::default(),
             workspace_counter: 1,
@@ -886,6 +890,7 @@ impl VirtualWorkspaceManager {
         let default_workspace_id = self.get_default_workspace(space)?;
         if self.assign_window_to_workspace(space, window_id, default_workspace_id) {
             self.window_rule_floating.remove(&(space, window_id));
+            self.window_rule_scratchpad.remove(&(space, window_id));
             Ok(default_workspace_id)
         } else {
             Err(WorkspaceError::AssignmentFailed)
@@ -980,9 +985,23 @@ impl VirtualWorkspaceManager {
                 } else {
                     self.window_rule_floating.remove(&(space, window_id));
                 }
+
+                let scratchpad_name = match &rule.scratchpad {
+                    crate::common::config::ScratchpadConfig::Boolean(true) => Some("_default_".to_string()),
+                    crate::common::config::ScratchpadConfig::Boolean(false) => None,
+                    crate::common::config::ScratchpadConfig::Named(n) => Some(n.clone()),
+                };
+
+                if let Some(ref name) = scratchpad_name {
+                    self.window_rule_scratchpad.insert((space, window_id), name.clone());
+                } else {
+                    self.window_rule_scratchpad.remove(&(space, window_id));
+                }
+
                 return Ok(AppRuleResult::Managed(AppRuleAssignment {
                     workspace_id: existing_ws,
                     floating: rule.floating,
+                    scratchpad: scratchpad_name,
                     prev_rule_decision,
                 }));
             }
@@ -993,9 +1012,28 @@ impl VirtualWorkspaceManager {
                 } else {
                     self.window_rule_floating.remove(&(space, window_id));
                 }
+
+                let scratchpad_name = match &rule.scratchpad {
+                    crate::common::config::ScratchpadConfig::Boolean(true) => Some("_default_".to_string()),
+                    crate::common::config::ScratchpadConfig::Boolean(false) => None,
+                    crate::common::config::ScratchpadConfig::Named(n) => Some(n.clone()),
+                };
+                
+                if let Some(ref name) = scratchpad_name {
+                tracing::info!(
+                    "Assigning window {:?} to scratchpad {:?} based on app rule",
+                    window_id,
+                    scratchpad_name
+                );
+                    self.window_rule_scratchpad.insert((space, window_id), name.clone());
+                } else {
+                    self.window_rule_scratchpad.remove(&(space, window_id));
+                }
+
                 return Ok(AppRuleResult::Managed(AppRuleAssignment {
                     workspace_id: target_workspace_id,
                     floating: rule.floating,
+                    scratchpad: scratchpad_name,
                     prev_rule_decision,
                 }));
             } else {
@@ -1005,9 +1043,11 @@ impl VirtualWorkspaceManager {
 
         if let Some(existing_ws) = existing_assignment {
             self.window_rule_floating.remove(&(space, window_id));
+            self.window_rule_scratchpad.remove(&(space, window_id));
             return Ok(AppRuleResult::Managed(AppRuleAssignment {
                 workspace_id: existing_ws,
                 floating: false,
+                scratchpad: None,
                 prev_rule_decision,
             }));
         }
@@ -1015,9 +1055,11 @@ impl VirtualWorkspaceManager {
         let default_workspace_id = self.get_default_workspace(space)?;
         if self.assign_window_to_workspace(space, window_id, default_workspace_id) {
             self.window_rule_floating.remove(&(space, window_id));
+            self.window_rule_scratchpad.remove(&(space, window_id));
             Ok(AppRuleResult::Managed(AppRuleAssignment {
                 workspace_id: default_workspace_id,
                 floating: false,
+                scratchpad: None,
                 prev_rule_decision,
             }))
         } else {
@@ -1472,6 +1514,7 @@ mod tests {
                 app_id: Some("com.example.test".into()),
                 workspace: None,
                 floating: true,
+                scratchpad: crate::common::config::ScratchpadConfig::Boolean(false),
                 manage: true,
                 app_name: None,
                 title_regex: None,
@@ -1484,6 +1527,7 @@ mod tests {
                 app_id: None,
                 workspace: Some(WorkspaceSelector::Index(1)),
                 floating: false,
+                scratchpad: crate::common::config::ScratchpadConfig::Boolean(false),
                 manage: true,
                 app_name: Some("Calendar".into()),
                 title_regex: None,
@@ -1496,6 +1540,7 @@ mod tests {
                 app_id: Some("com.example.foo".into()),
                 workspace: Some(WorkspaceSelector::Index(0)),
                 floating: false,
+                scratchpad: crate::common::config::ScratchpadConfig::Boolean(false),
                 manage: true,
                 app_name: None,
                 title_regex: None,
@@ -1508,6 +1553,7 @@ mod tests {
                 app_id: Some("com.example.foo".into()),
                 workspace: Some(WorkspaceSelector::Index(2)),
                 floating: false,
+                scratchpad: crate::common::config::ScratchpadConfig::Boolean(false),
                 manage: true,
                 app_name: None,
                 title_regex: Some(r"Dialog\s+\d+".into()),
@@ -1520,6 +1566,7 @@ mod tests {
                 app_id: Some("com.example.special".into()),
                 workspace: None,
                 floating: true,
+                scratchpad: crate::common::config::ScratchpadConfig::Boolean(false),
                 manage: true,
                 app_name: None,
                 title_regex: None,
@@ -1532,6 +1579,7 @@ mod tests {
                 app_id: Some("com.example.name".into()),
                 workspace: Some(WorkspaceSelector::Name("coding".into())),
                 floating: false,
+                scratchpad: crate::common::config::ScratchpadConfig::Boolean(false),
                 manage: true,
                 app_name: None,
                 title_regex: None,
@@ -1544,6 +1592,7 @@ mod tests {
                 app_id: Some("com.example.tie".into()),
                 workspace: Some(WorkspaceSelector::Index(0)),
                 floating: false,
+                scratchpad: crate::common::config::ScratchpadConfig::Boolean(false),
                 manage: true,
                 app_name: None,
                 title_regex: None,
@@ -1555,6 +1604,7 @@ mod tests {
                 app_id: Some("com.example.tie".into()),
                 workspace: Some(WorkspaceSelector::Index(2)),
                 floating: false,
+                scratchpad: crate::common::config::ScratchpadConfig::Boolean(false),
                 manage: true,
                 app_name: None,
                 title_regex: None,
@@ -1567,6 +1617,7 @@ mod tests {
                 app_id: Some("app.zen-browser.zen".into()),
                 workspace: None,
                 floating: true,
+                scratchpad: crate::common::config::ScratchpadConfig::Boolean(false),
                 manage: true,
                 app_name: None,
                 title_regex: None,
@@ -1578,6 +1629,7 @@ mod tests {
                 app_id: Some("app.zen-browser.zen".into()),
                 workspace: Some(WorkspaceSelector::Index(2)),
                 floating: false,
+                scratchpad: crate::common::config::ScratchpadConfig::Boolean(false),
                 manage: true,
                 app_name: None,
                 title_regex: None,
@@ -1590,6 +1642,7 @@ mod tests {
                 app_id: Some("app.zen-browser.zen".into()),
                 workspace: Some(WorkspaceSelector::Index(1)),
                 floating: false,
+                scratchpad: crate::common::config::ScratchpadConfig::Boolean(false),
                 manage: true,
                 app_name: None,
                 title_regex: None,
@@ -1601,6 +1654,7 @@ mod tests {
                 app_id: Some("app.zen-browser.zen".into()),
                 workspace: Some(WorkspaceSelector::Index(3)),
                 floating: true,
+                scratchpad: crate::common::config::ScratchpadConfig::Boolean(false),
                 manage: true,
                 app_name: None,
                 title_regex: None,
