@@ -1953,6 +1953,10 @@ impl Reactor {
             let Some(state) = self.window_manager.windows.get(&wid) else {
                 continue;
             };
+            // Skip minimized or otherwise unmanageable windows when applying app rules.
+            if !state.is_manageable {
+                continue;
+            }
             let Some(space) =
                 self.best_space_for_window(&state.frame_monotonic, state.window_server_id)
             else {
