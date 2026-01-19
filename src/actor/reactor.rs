@@ -20,6 +20,7 @@ mod testing;
 #[cfg(test)]
 mod tests;
 
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -32,9 +33,9 @@ use events::window::WindowEventHandler;
 use main_window::MainWindowTracker;
 use managers::LayoutManager;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use parking_lot::RwLock;
 pub use replay::{Record, replay};
 use serde::{Deserialize, Serialize};
-use serde_json;
 use serde_with::serde_as;
 use tracing::{debug, instrument, trace, warn};
 use transaction_manager::TransactionId;
@@ -49,7 +50,6 @@ use crate::common::collections::{BTreeMap, HashMap, HashSet};
 use crate::common::config::Config;
 use crate::common::log::MetricsCommand;
 use crate::layout_engine::{self as layout, Direction, LayoutCommand, LayoutEngine, LayoutEvent};
-use crate::model::VirtualWorkspaceId;
 use crate::model::tx_store::WindowTxStore;
 use crate::model::virtual_workspace::AppRuleResult;
 use crate::sys::event::MouseState;
@@ -64,12 +64,38 @@ use crate::sys::window_server::{
 
 pub type Sender = actor::Sender<Event>;
 type Receiver = actor::Receiver<Event>;
+pub use query::ReactorQueryHandle;
+
+#[derive(Clone)]
+pub struct ReactorHandle {
+    sender: Sender,
+    queries: ReactorQueryHandle,
+}
+
+impl ReactorHandle {
+    pub fn new(sender: Sender, queries: ReactorQueryHandle) -> Self { Self { sender, queries } }
+
+    pub fn sender(&self) -> Sender { self.sender.clone() }
+
+    pub fn send(&self, event: Event) { self.sender.send(event) }
+
+    pub fn try_send(
+        &self,
+        event: Event,
+    ) -> Result<(), tokio::sync::mpsc::error::SendError<(tracing::Span, Event)>> {
+        self.sender.try_send(event)
+    }
+}
+
+impl std::ops::Deref for ReactorHandle {
+    type Target = ReactorQueryHandle;
+
+    fn deref(&self) -> &Self::Target { &self.queries }
+}
 
 use std::path::PathBuf;
 
-use crate::model::server::{
-    ApplicationData, DisplayData, LayoutStateData, WindowData, WorkspaceData,
-};
+use crate::model::server::WindowData;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScreenSnapshot {
@@ -207,44 +233,6 @@ pub enum Event {
 
     #[serde(skip)]
     RegisterWmSender(crate::actor::wm_controller::Sender),
-
-    // Query events with response channels (not serialized)
-    #[serde(skip)]
-    QueryWorkspaces {
-        space_id: Option<SpaceId>,
-        #[serde(skip)]
-        response: r#continue::Sender<Vec<WorkspaceData>>,
-    },
-    #[serde(skip)]
-    QueryWindows {
-        space_id: Option<SpaceId>,
-        #[serde(skip)]
-        response: r#continue::Sender<Vec<WindowData>>,
-    },
-    #[serde(skip)]
-    QueryActiveWorkspace {
-        space_id: Option<SpaceId>,
-        #[serde(skip)]
-        response: r#continue::Sender<Option<VirtualWorkspaceId>>,
-    },
-    #[serde(skip)]
-    QueryDisplays(r#continue::Sender<Vec<DisplayData>>),
-    #[serde(skip)]
-    QueryWindowInfo {
-        window_id: WindowId,
-        #[serde(skip)]
-        response: r#continue::Sender<Option<WindowData>>,
-    },
-    #[serde(skip)]
-    QueryApplications(r#continue::Sender<Vec<ApplicationData>>),
-    #[serde(skip)]
-    QueryLayoutState {
-        space_id: u64,
-        #[serde(skip)]
-        response: r#continue::Sender<Option<LayoutStateData>>,
-    },
-    #[serde(skip)]
-    QueryMetrics(r#continue::Sender<serde_json::Value>),
 
     #[serde(skip)]
     ConfigUpdated(Config),
@@ -488,28 +476,32 @@ impl Reactor {
         stack_line_tx: stack_line::Sender,
         window_notify: Option<(crate::actor::window_notify::Sender, WindowTxStore)>,
         one_space: bool,
-    ) -> Sender {
+    ) -> ReactorHandle {
         let (events_tx, events) = actor::channel();
         let events_tx_clone = events_tx.clone();
+        let reactor = Arc::new(RwLock::new(Reactor::new(
+            config,
+            layout_engine,
+            record,
+            broadcast_tx,
+            window_notify,
+            one_space,
+        )));
+        {
+            let mut reactor = reactor.write();
+            reactor.communication_manager.event_tap_tx = Some(event_tap_tx);
+            reactor.menu_manager.menu_tx = Some(menu_tx);
+            reactor.communication_manager.stack_line_tx = Some(stack_line_tx);
+            reactor.communication_manager.events_tx = Some(events_tx_clone.clone());
+        }
+        let query_handle = ReactorQueryHandle::new(reactor.clone());
         thread::Builder::new()
             .name("reactor".to_string())
             .spawn(move || {
-                let mut reactor = Reactor::new(
-                    config,
-                    layout_engine,
-                    record,
-                    broadcast_tx,
-                    window_notify,
-                    one_space,
-                );
-                reactor.communication_manager.event_tap_tx = Some(event_tap_tx);
-                reactor.menu_manager.menu_tx = Some(menu_tx);
-                reactor.communication_manager.stack_line_tx = Some(stack_line_tx);
-                reactor.communication_manager.events_tx = Some(events_tx_clone.clone());
-                Executor::run(reactor.run(events, events_tx_clone));
+                Executor::run(Reactor::run_shared(reactor, events, events_tx_clone));
             })
             .unwrap();
-        events_tx
+        ReactorHandle::new(events_tx, query_handle)
     }
 
     pub fn new(
@@ -857,6 +849,55 @@ impl Reactor {
         }
     }
 
+    pub async fn run_shared(reactor: Arc<RwLock<Reactor>>, events: Receiver, events_tx: Sender) {
+        let (raise_manager_tx, raise_manager_rx) = actor::channel();
+        let event_tap_tx = {
+            let mut reactor = reactor.write();
+            reactor.communication_manager.raise_manager_tx = raise_manager_tx.clone();
+            reactor.communication_manager.event_tap_tx.clone()
+        };
+        let reactor_task = Self::run_reactor_loop_shared(reactor, events);
+        let raise_manager_task = RaiseManager::run(raise_manager_rx, events_tx, event_tap_tx);
+        let _ = tokio::join!(reactor_task, raise_manager_task);
+    }
+
+    async fn run_reactor_loop_shared(reactor: Arc<RwLock<Reactor>>, mut events: Receiver) {
+        while let Some((span, event)) = events.recv().await {
+            let _guard = span.enter();
+            let mut reactor = reactor.write();
+            let is_screen_params_changed = matches!(event, Event::ScreenParametersChanged(..));
+            if reactor.display_churn_active
+                && !matches!(
+                    event,
+                    Event::ScreenParametersChanged(..)
+                        | Event::DisplayChurnBegin
+                        | Event::DisplayChurnEnd
+                )
+            {
+                Self::note_windowserver_activity_during_display_churn(&event);
+                if matches!(
+                    event,
+                    Event::WindowServerDestroyed(..)
+                        | Event::WindowServerAppeared(..)
+                        | Event::ResyncAppForWindow(..)
+                ) {
+                    trace!("reactor_drop event={:?}", event);
+                }
+                reactor.display_churn_pending_full_refresh = true;
+                continue;
+            }
+
+            reactor.handle_event(event);
+
+            if is_screen_params_changed
+                && reactor.display_churn_pending_full_refresh
+                && !reactor.display_churn_active
+            {
+                reactor.recover_from_display_churn();
+            }
+        }
+    }
+
     pub async fn run(mut self, events: Receiver, events_tx: Sender) {
         let (raise_manager_tx, raise_manager_rx) = actor::channel();
         self.communication_manager.raise_manager_tx = raise_manager_tx.clone();
@@ -873,7 +914,6 @@ impl Reactor {
             let _guard = span.enter();
             let is_screen_params_changed = matches!(event, Event::ScreenParametersChanged(..));
             if self.display_churn_active
-                && !Self::is_query_event(&event)
                 && !matches!(
                     event,
                     Event::ScreenParametersChanged(..)
@@ -931,20 +971,6 @@ impl Reactor {
         }
     }
 
-    fn is_query_event(event: &Event) -> bool {
-        matches!(
-            event,
-            Event::QueryApplications(..)
-                | Event::QueryLayoutState { .. }
-                | Event::QueryMetrics(..)
-                | Event::QueryWindowInfo { .. }
-                | Event::QueryWindows { .. }
-                | Event::QueryWorkspaces { .. }
-                | Event::QueryActiveWorkspace { .. }
-                | Event::QueryDisplays(..)
-        )
-    }
-
     fn log_event(&self, event: &Event) {
         match event {
             Event::WindowFrameChanged(..) | Event::MouseUp => trace!(?event, "Event"),
@@ -956,10 +982,6 @@ impl Reactor {
     fn handle_event(&mut self, event: Event) {
         self.log_event(&event);
         self.recording_manager.record.on_event(&event);
-
-        if Self::is_query_event(&event) {
-            return self.handle_query(event);
-        }
 
         match event {
             Event::DisplayChurnBegin => {

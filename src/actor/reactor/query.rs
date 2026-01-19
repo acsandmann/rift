@@ -1,8 +1,11 @@
+use std::sync::Arc;
+
 use objc2_core_foundation::CGRect;
+use parking_lot::RwLock;
 
 use crate::actor::app::WindowId;
 use crate::actor::menu_bar;
-use crate::actor::reactor::{Event, Reactor};
+use crate::actor::reactor::Reactor;
 use crate::common::collections::HashSet;
 use crate::model::server::{
     ApplicationData, DisplayData, LayoutStateData, WindowData, WorkspaceData,
@@ -10,44 +13,86 @@ use crate::model::server::{
 use crate::model::virtual_workspace::VirtualWorkspaceId;
 use crate::sys::screen::{SpaceId, get_active_space_number, managed_display_space_ids};
 
-impl Reactor {
-    pub(super) fn handle_query(&mut self, event: Event) {
-        match event {
-            Event::QueryWorkspaces { space_id, response } => {
-                let workspaces = self.handle_workspace_query(space_id);
-                response.send(workspaces);
-            }
-            Event::QueryWindows { space_id, response } => {
-                let windows = self.handle_windows_query(space_id);
-                response.send(windows);
-            }
-            Event::QueryActiveWorkspace { space_id, response } => {
-                let active = self.handle_active_workspace_query(space_id);
-                let _ = response.send(active);
-            }
-            Event::QueryWindowInfo { window_id, response } => {
-                let window_info = self.handle_window_info_query(window_id);
-                response.send(window_info);
-            }
-            Event::QueryApplications(response) => {
-                let apps = self.handle_applications_query();
-                response.send(apps);
-            }
-            Event::QueryLayoutState { space_id, response } => {
-                let layout_state = self.handle_layout_state_query(space_id);
-                response.send(layout_state);
-            }
-            Event::QueryMetrics(response) => {
-                let metrics = self.handle_metrics_query();
-                response.send(metrics);
-            }
-            Event::QueryDisplays(response) => {
-                let displays = self.handle_displays_query();
-                response.send(displays);
-            }
-            _ => {}
-        }
+#[derive(Clone)]
+pub struct ReactorQueryHandle {
+    inner: Arc<RwLock<Reactor>>,
+}
+
+impl ReactorQueryHandle {
+    pub fn new(inner: Arc<RwLock<Reactor>>) -> Self { Self { inner } }
+
+    pub fn query_workspaces(&self, space_id: Option<SpaceId>) -> Vec<WorkspaceData> {
+        let mut reactor = self.inner.write();
+        reactor.query_workspaces(space_id)
     }
+
+    pub fn query_windows(&self, space_id: Option<SpaceId>) -> Vec<WindowData> {
+        let mut reactor = self.inner.write();
+        reactor.query_windows(space_id)
+    }
+
+    pub fn query_active_workspace(&self, space_id: Option<SpaceId>) -> Option<VirtualWorkspaceId> {
+        let mut reactor = self.inner.write();
+        reactor.query_active_workspace(space_id)
+    }
+
+    pub fn query_displays(&self) -> Vec<DisplayData> {
+        let mut reactor = self.inner.write();
+        reactor.query_displays()
+    }
+
+    pub fn query_window_info(&self, window_id: WindowId) -> Option<WindowData> {
+        let mut reactor = self.inner.write();
+        reactor.query_window_info(window_id)
+    }
+
+    pub fn query_applications(&self) -> Vec<ApplicationData> {
+        let mut reactor = self.inner.write();
+        reactor.query_applications()
+    }
+
+    pub fn query_layout_state(&self, space_id: u64) -> Option<LayoutStateData> {
+        let mut reactor = self.inner.write();
+        reactor.query_layout_state(space_id)
+    }
+
+    pub fn query_metrics(&self) -> serde_json::Value {
+        let mut reactor = self.inner.write();
+        reactor.query_metrics()
+    }
+}
+
+impl Reactor {
+    pub fn query_workspaces(&mut self, space_id: Option<SpaceId>) -> Vec<WorkspaceData> {
+        self.handle_workspace_query(space_id)
+    }
+
+    pub fn query_windows(&mut self, space_id: Option<SpaceId>) -> Vec<WindowData> {
+        self.handle_windows_query(space_id)
+    }
+
+    pub fn query_active_workspace(
+        &mut self,
+        space_id: Option<SpaceId>,
+    ) -> Option<VirtualWorkspaceId> {
+        self.handle_active_workspace_query(space_id)
+    }
+
+    pub fn query_displays(&mut self) -> Vec<DisplayData> { self.handle_displays_query() }
+
+    pub fn query_window_info(&mut self, window_id: WindowId) -> Option<WindowData> {
+        self.handle_window_info_query(window_id)
+    }
+
+    pub fn query_applications(&mut self) -> Vec<ApplicationData> {
+        self.handle_applications_query()
+    }
+
+    pub fn query_layout_state(&mut self, space_id: u64) -> Option<LayoutStateData> {
+        self.handle_layout_state_query(space_id)
+    }
+
+    pub fn query_metrics(&mut self) -> serde_json::Value { self.handle_metrics_query() }
 
     pub(super) fn maybe_send_menu_update(&mut self) {
         let menu_tx = match self.menu_manager.menu_tx.as_ref() {

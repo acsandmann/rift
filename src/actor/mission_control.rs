@@ -1,6 +1,5 @@
 use std::rc::Rc;
 
-use r#continue::continuation;
 use objc2_app_kit::NSScreen;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::MainThreadMarker;
@@ -8,9 +7,6 @@ use tracing::instrument;
 
 use crate::actor::{self, reactor};
 use crate::common::config::Config;
-use crate::model::server::{WindowData, WorkspaceData};
-use crate::model::virtual_workspace::VirtualWorkspaceId;
-use crate::sys::dispatch::block_on;
 use crate::ui::mission_control::{MissionControlAction, MissionControlMode, MissionControlOverlay};
 
 #[derive(Debug)]
@@ -33,7 +29,7 @@ pub type Receiver = actor::Receiver<Event>;
 pub struct MissionControlActor {
     config: Config,
     rx: Receiver,
-    reactor_tx: reactor::Sender,
+    reactor: reactor::ReactorHandle,
     overlay: Option<MissionControlOverlay>,
     mtm: MainThreadMarker,
     mission_control_active: bool,
@@ -44,13 +40,13 @@ impl MissionControlActor {
     pub fn new(
         config: Config,
         rx: Receiver,
-        reactor_tx: reactor::Sender,
+        reactor: reactor::ReactorHandle,
         mtm: MainThreadMarker,
     ) -> Self {
         Self {
             config,
             rx,
-            reactor_tx,
+            reactor,
             overlay: None,
             mtm,
             mission_control_active: false,
@@ -106,17 +102,15 @@ impl MissionControlActor {
                 self.dispose_overlay();
             }
             MissionControlAction::SwitchToWorkspace(index) => {
-                let _ =
-                    self.reactor_tx.try_send(reactor::Event::Command(reactor::Command::Layout(
-                        crate::layout_engine::LayoutCommand::SwitchToWorkspace(index),
-                    )));
+                let _ = self.reactor.try_send(reactor::Event::Command(reactor::Command::Layout(
+                    crate::layout_engine::LayoutCommand::SwitchToWorkspace(index),
+                )));
                 self.dispose_overlay();
             }
             MissionControlAction::FocusWindow { window_id, window_server_id } => {
-                let _ =
-                    self.reactor_tx.try_send(reactor::Event::Command(reactor::Command::Reactor(
-                        reactor::ReactorCommand::FocusWindow { window_id, window_server_id },
-                    )));
+                let _ = self.reactor.try_send(reactor::Event::Command(reactor::Command::Reactor(
+                    reactor::ReactorCommand::FocusWindow { window_id, window_server_id },
+                )));
                 self.dispose_overlay();
             }
         }
@@ -164,23 +158,9 @@ impl MissionControlActor {
             overlay.update(MissionControlMode::AllWorkspaces(Vec::new()));
         }
 
-        let (tx, fut) = continuation::<Vec<WorkspaceData>>();
-        let event = reactor::Event::QueryWorkspaces { space_id: None, response: tx };
-        if let Err(e) = self.reactor_tx.try_send(event) {
-            let tokio::sync::mpsc::error::SendError((_span, event)) = e;
-            if let reactor::Event::QueryWorkspaces { response, .. } = event {
-                std::mem::forget(response);
-            }
-            tracing::warn!("workspace query send failed");
-            return;
-        }
-        match block_on(fut, std::time::Duration::from_secs_f32(0.75)) {
-            Ok(resp) => {
-                let overlay = self.ensure_overlay();
-                overlay.update(MissionControlMode::AllWorkspaces(resp));
-            }
-            Err(_) => tracing::warn!("workspace query timed out"),
-        }
+        let resp = self.reactor.query_workspaces(None);
+        let overlay = self.ensure_overlay();
+        overlay.update(MissionControlMode::AllWorkspaces(resp));
     }
 
     fn show_current_workspace(&mut self) {
@@ -192,51 +172,16 @@ impl MissionControlActor {
         }
 
         let active_space = crate::sys::screen::get_active_space_number();
-        let (tx, fut) = continuation::<Vec<WindowData>>();
-        let event = reactor::Event::QueryWindows {
-            space_id: active_space,
-            response: tx,
-        };
-        if let Err(e) = self.reactor_tx.try_send(event) {
-            let tokio::sync::mpsc::error::SendError((_span, event)) = e;
-            if let reactor::Event::QueryWindows { response, .. } = event {
-                std::mem::forget(response);
-            }
-            tracing::warn!("windows query send failed");
-            return;
-        }
-        let windows = match block_on(fut, std::time::Duration::from_secs_f32(0.75)) {
-            Ok(windows) => windows,
-            Err(_) => {
-                tracing::warn!("windows query timed out");
-                return;
-            }
-        };
+        let windows = self.reactor.query_windows(active_space);
 
         let overlay = self.ensure_overlay();
         overlay.update(MissionControlMode::CurrentWorkspace(windows));
     }
 
     fn refresh_all_workspaces_highlight(&mut self) {
-        let (tx, fut) = continuation::<Option<VirtualWorkspaceId>>();
-        let event = reactor::Event::QueryActiveWorkspace { space_id: None, response: tx };
-        if let Err(e) = self.reactor_tx.try_send(event) {
-            let tokio::sync::mpsc::error::SendError((_span, event)) = e;
-            if let reactor::Event::QueryActiveWorkspace { response, .. } = event {
-                std::mem::forget(response);
-            }
-            tracing::warn!("active workspace query send failed");
-            return;
-        }
-        match block_on(fut, std::time::Duration::from_secs_f32(0.75)) {
-            Ok(active_workspace) => {
-                if let Some(overlay) = self.overlay.as_ref() {
-                    overlay.refresh_active_workspace(active_workspace);
-                }
-            }
-            Err(_) => {
-                tracing::warn!("active workspace query timed out");
-            }
+        let active_workspace = self.reactor.query_active_workspace(None);
+        if let Some(overlay) = self.overlay.as_ref() {
+            overlay.refresh_active_workspace(active_workspace);
         }
     }
 }

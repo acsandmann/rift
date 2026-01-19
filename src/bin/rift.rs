@@ -166,7 +166,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
     let (stack_line_tx, stack_line_rx) = rift_wm::actor::channel();
     let (wnd_tx, wnd_rx) = rift_wm::actor::channel();
     let window_tx_store = WindowTxStore::new();
-    let events_tx = Reactor::spawn(
+    let reactor = Reactor::spawn(
         config.clone(),
         layout,
         reactor::Record::new(opt.record.as_deref()),
@@ -177,6 +177,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         Some((wnd_tx.clone(), window_tx_store.clone())),
         opt.one,
     );
+    let events_tx = reactor.sender();
 
     let config_tx =
         ConfigActor::spawn_with_path(config.clone(), events_tx.clone(), config_path.clone());
@@ -197,8 +198,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         Some(window_tx_store.clone()),
     );
 
-    let events_tx_mach = events_tx.clone();
-    let server_state = match ipc::run_mach_server(events_tx_mach, config_tx.clone()) {
+    let server_state = match ipc::run_mach_server(reactor.clone(), config_tx.clone()) {
         Ok(state) => state,
         Err(err) => {
             eprintln!("{}", err);
@@ -262,7 +262,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         CoordinateConverter::default(),
     );
 
-    let mission_control = MissionControlActor::new(config.clone(), mc_rx, events_tx.clone(), mtm);
+    let mission_control = MissionControlActor::new(config.clone(), mc_rx, reactor.clone(), mtm);
     let mission_control_native = NativeMissionControl::new(events_tx.clone(), mc_native_rx);
 
     println!(
