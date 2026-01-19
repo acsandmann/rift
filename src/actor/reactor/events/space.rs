@@ -2,12 +2,13 @@ use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 
 use objc2_app_kit::NSRunningApplication;
+use objc2_core_foundation::CGSize;
 use tracing::{debug, info, trace, warn};
 
 use crate::actor::app::Request;
 use crate::actor::reactor::{
-    Event, FullscreenSpaceTrack, FullscreenWindowTrack, MissionControlState, PendingSpaceChange,
-    Reactor, Screen, ScreenSnapshot, StaleCleanupState,
+    Event, FullscreenSpaceTrack, FullscreenWindowTrack, LayoutEvent, MissionControlState,
+    PendingSpaceChange, Reactor, Screen, ScreenSnapshot, StaleCleanupState,
 };
 use crate::actor::wm_controller::WmEvent;
 use crate::sys::app::AppInfo;
@@ -200,6 +201,12 @@ impl SpaceEventHandler {
         screens: Vec<ScreenSnapshot>,
         ws_info: Vec<WindowServerInfo>,
     ) {
+        let previous_sizes: HashMap<ScreenId, CGSize> = reactor
+            .space_manager
+            .screens
+            .iter()
+            .map(|screen| (screen.screen_id, screen.frame.size))
+            .collect();
         let previous_displays: HashSet<String> =
             reactor.space_manager.screens.iter().map(|s| s.display_uuid.clone()).collect();
         let new_displays: HashSet<String> =
@@ -251,6 +258,28 @@ impl SpaceEventHandler {
                     screen_id: ScreenId::new(snapshot.screen_id),
                 })
                 .collect();
+            let resized_screens: HashSet<ScreenId> = reactor
+                .space_manager
+                .screens
+                .iter()
+                .filter_map(|screen| {
+                    let new_size = screen.frame.size;
+                    match previous_sizes.get(&screen.screen_id) {
+                        Some(previous) => {
+                            let width_changed =
+                                previous.width.round() as i32 != new_size.width.round() as i32;
+                            let height_changed =
+                                previous.height.round() as i32 != new_size.height.round() as i32;
+                            if width_changed || height_changed {
+                                Some(screen.screen_id)
+                            } else {
+                                None
+                            }
+                        }
+                        None => Some(screen.screen_id),
+                    }
+                })
+                .collect();
 
             let cfg = reactor.activation_cfg();
             // IMPORTANT: Do not reset login-window state here. When the lock screen / fast user
@@ -267,6 +296,25 @@ impl SpaceEventHandler {
             // remapping has caused windows to oscillate. Keep existing state and only
             // update the screen→space mapping.
             reactor.reconcile_spaces_with_display_history(&spaces, false);
+            if !resized_screens.is_empty() {
+                for screen in &reactor.space_manager.screens {
+                    if !resized_screens.contains(&screen.screen_id) {
+                        continue;
+                    }
+                    let Some(space) = screen.space else {
+                        continue;
+                    };
+                    if !reactor.is_space_active(space) {
+                        continue;
+                    }
+                    reactor
+                        .layout_manager
+                        .layout_engine
+                        .virtual_workspace_manager_mut()
+                        .list_workspaces(space);
+                    reactor.send_layout_event(LayoutEvent::SpaceExposed(space, screen.frame.size));
+                }
+            }
             if let Some(info) = ws_info_opt.take() {
                 reactor.finalize_space_change(&spaces, info);
             }
