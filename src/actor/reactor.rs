@@ -2809,13 +2809,32 @@ impl Reactor {
     }
 
     fn workspace_command_space(&self) -> Option<SpaceId> {
-        let candidate = self
-            .space_for_cursor_screen()
-            .or_else(|| self.main_window_space())
-            .or_else(|| get_active_space_number())
-            .or_else(|| self.space_manager.first_known_space());
+        let under_cursor_space = self
+            .window_id_under_cursor()
+            .and_then(|wid| self.best_space_for_window_id(wid));
+        let cursor_space = self.space_for_cursor_screen();
+        let main_space = self.main_window_space();
+        let active_space = get_active_space_number();
+        let first_space = self.space_manager.first_known_space();
 
-        candidate.filter(|space| self.is_space_active(*space))
+        let candidate = under_cursor_space
+            .filter(|space| self.is_space_active(*space))
+            .or_else(|| cursor_space.filter(|space| self.is_space_active(*space)))
+            .or_else(|| main_space.filter(|space| self.is_space_active(*space)))
+            .or_else(|| active_space.filter(|space| self.is_space_active(*space)))
+            .or_else(|| first_space.filter(|space| self.is_space_active(*space)));
+
+        tracing::trace!(
+            ?under_cursor_space,
+            ?cursor_space,
+            ?main_space,
+            ?active_space,
+            ?first_space,
+            ?candidate,
+            "workspace_command_space"
+        );
+
+        candidate
     }
 
     fn space_for_cursor_screen(&self) -> Option<SpaceId> {

@@ -1176,6 +1176,7 @@ impl LayoutEngine {
         &mut self,
         space: SpaceId,
         screen: CGRect,
+        hide_corner: crate::model::HideCorner,
         gaps: &crate::common::config::GapSettings,
         stack_line_thickness: f64,
         stack_line_horiz: crate::common::config::HorizontalPlacement,
@@ -1208,17 +1209,16 @@ impl LayoutEngine {
             candidate: Option<CGRect>,
             store_if_absent: bool,
             screen: &CGRect,
+            hide_corner: HideCorner,
             center_rect: &impl Fn(CGSize) -> CGRect,
             window_size: &impl Fn(WindowId) -> CGSize,
         ) {
             let existing = positions.get(&wid).copied();
             let bundle_id = engine.get_app_bundle_id_for_window(wid);
             let visible = candidate.or(existing).filter(|rect| {
-                !engine.virtual_workspace_manager.is_hidden_position(
-                    screen,
-                    rect,
-                    bundle_id.as_deref(),
-                )
+                !engine
+                    .virtual_workspace_manager
+                    .is_hidden_position(screen, rect, hide_corner, bundle_id.as_deref())
             });
             let rect = visible.unwrap_or_else(|| center_rect(window_size(wid)));
             positions.insert(wid, rect);
@@ -1269,6 +1269,7 @@ impl LayoutEngine {
                         Some(stored_position),
                         false,
                         &screen,
+                        hide_corner,
                         &center_rect,
                         &window_size,
                     );
@@ -1286,6 +1287,7 @@ impl LayoutEngine {
                     None,
                     false,
                     &screen,
+                    hide_corner,
                     &center_rect,
                     &window_size,
                 );
@@ -1309,6 +1311,7 @@ impl LayoutEngine {
                         original_frame,
                         true,
                         &screen,
+                        hide_corner,
                         &center_rect,
                         &window_size,
                     );
@@ -1322,7 +1325,7 @@ impl LayoutEngine {
                 screen,
                 index,
                 original_size,
-                HideCorner::BottomRight,
+                hide_corner,
                 app_bundle_id.as_deref(),
             );
             positions.insert(wid, hidden_rect);

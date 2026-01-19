@@ -209,6 +209,12 @@ impl LayoutManager {
         }
         let screens = reactor.space_manager.screens.clone();
         let mut layout_result = LayoutResult::new();
+        let mut min_x = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        for screen in &screens {
+            min_x = min_x.min(screen.frame.origin.x);
+            max_x = max_x.max(screen.frame.max().x);
+        }
 
         for screen in screens {
             let Some(space) = screen.space else {
@@ -224,6 +230,14 @@ impl LayoutManager {
                 .layout
                 .gaps
                 .effective_for_display(display_uuid_opt.as_deref());
+            let screen_mid_x = screen.frame.mid().x;
+            let distance_left = (screen_mid_x - min_x).abs();
+            let distance_right = (max_x - screen_mid_x).abs();
+            let hide_corner = if distance_left <= distance_right {
+                crate::model::HideCorner::BottomLeft
+            } else {
+                crate::model::HideCorner::BottomRight
+            };
             reactor
                 .layout_manager
                 .layout_engine
@@ -232,6 +246,7 @@ impl LayoutManager {
                 reactor.layout_manager.layout_engine.calculate_layout_with_virtual_workspaces(
                     space,
                     screen.frame.clone(),
+                    hide_corner,
                     &gaps,
                     reactor.config.settings.ui.stack_line.thickness(),
                     reactor.config.settings.ui.stack_line.horiz_placement,
