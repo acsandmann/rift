@@ -97,7 +97,9 @@ pub fn make_window(idx: usize) -> WindowInfo {
     }
 }
 
-pub fn make_windows(count: usize) -> Vec<WindowInfo> { (1..=count).map(make_window).collect() }
+pub fn make_windows(count: usize) -> Vec<WindowInfo> {
+    (1..=count).map(make_window).collect()
+}
 
 pub struct Apps {
     tx: actor::Sender<Request>,
@@ -137,10 +139,13 @@ impl Apps {
         with_ws_info: bool,
     ) -> Vec<Event> {
         for (id, info) in (1..).map(|idx| WindowId::new(pid, idx)).zip(&windows) {
-            self.windows.insert(id, WindowState {
-                frame: info.frame,
-                ..Default::default()
-            });
+            self.windows.insert(
+                id,
+                WindowState {
+                    frame: info.frame,
+                    ..Default::default()
+                },
+            );
         }
         let handle = AppThreadHandle::new_for_test(self.tx.clone());
         vec![Event::ApplicationLaunched {
@@ -278,6 +283,7 @@ impl Apps {
                         None,
                     ));
                 }
+                Request::Activate(..) => todo!(),
                 Request::Raise(..) => todo!(),
                 Request::CloseWindow(..) => todo!(),
             }

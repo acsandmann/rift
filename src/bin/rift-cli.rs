@@ -149,6 +149,14 @@ enum WindowCommands {
         #[arg(long)]
         window_id: String,
     },
+    /// Add current window to scratchpad
+    AddScratchpad,
+    /// Toggle scratchpad window
+    ToggleScratchpad {
+        /// Optional name to filter scratchpad toggle
+        #[arg(long)]
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -519,6 +527,14 @@ fn map_window_command(cmd: WindowCommands) -> Result<RiftCommand, String> {
                 reactor::ReactorCommand::CloseWindow { window_server_id: Some(wsid) },
             )))
         }
+        WindowCommands::AddScratchpad => Ok(RiftCommand::Reactor(reactor::Command::Layout(
+            LC::AddScratchpad,
+        ))),
+        WindowCommands::ToggleScratchpad { name } =>
+             Ok(RiftCommand::Reactor(reactor::Command::Layout(
+                LC::ToggleScratchpadNamed(name),
+            )))
+                    ,
     }
 }
 

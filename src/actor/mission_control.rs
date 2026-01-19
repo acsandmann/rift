@@ -61,11 +61,14 @@ impl MissionControlActor {
     pub async fn run(mut self) {
         if self.config.settings.ui.mission_control.enabled {
             let _ = self.ensure_overlay();
+        }
 
-            while let Some((span, event)) = self.rx.recv().await {
-                let _guard = span.enter();
-                self.handle_event(event);
+        while let Some((span, event)) = self.rx.recv().await {
+            if !self.config.settings.ui.mission_control.enabled {
+                continue;
             }
+            let _guard = span.enter();
+            self.handle_event(event);
         }
     }
 
