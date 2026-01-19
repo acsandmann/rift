@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 
 use objc2_app_kit::NSRunningApplication;
@@ -11,6 +10,7 @@ use crate::actor::reactor::{
     PendingSpaceChange, Reactor, Screen, ScreenSnapshot, StaleCleanupState,
 };
 use crate::actor::wm_controller::WmEvent;
+use crate::common::collections::{HashMap, HashSet};
 use crate::sys::app::AppInfo;
 use crate::sys::screen::{ScreenId, SpaceId};
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
@@ -297,13 +297,15 @@ impl SpaceEventHandler {
             // update the screen→space mapping.
             reactor.reconcile_spaces_with_display_history(&spaces, false);
             if !resized_screens.is_empty() {
-                for screen in &reactor.space_manager.screens {
-                    if !resized_screens.contains(&screen.screen_id) {
-                        continue;
-                    }
-                    let Some(space) = screen.space else {
-                        continue;
-                    };
+                let resized_info: Vec<(SpaceId, CGSize)> = reactor
+                    .space_manager
+                    .screens
+                    .iter()
+                    .filter(|screen| resized_screens.contains(&screen.screen_id))
+                    .filter_map(|screen| screen.space.map(|s| (s, screen.frame.size)))
+                    .collect();
+
+                for (space, size) in resized_info {
                     if !reactor.is_space_active(space) {
                         continue;
                     }
@@ -312,7 +314,7 @@ impl SpaceEventHandler {
                         .layout_engine
                         .virtual_workspace_manager_mut()
                         .list_workspaces(space);
-                    reactor.send_layout_event(LayoutEvent::SpaceExposed(space, screen.frame.size));
+                    reactor.send_layout_event(LayoutEvent::SpaceExposed(space, size));
                 }
             }
             if let Some(info) = ws_info_opt.take() {
