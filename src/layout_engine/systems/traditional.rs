@@ -197,7 +197,6 @@ impl TraditionalLayoutSystem {
 
     fn find_direct_sibling_target(&self, from: NodeId, direction: Direction) -> Option<NodeId> {
         let _parent = from.parent(self.map())?;
-
         match direction {
             Direction::Right | Direction::Down => from.next_sibling(self.map()),
             Direction::Left | Direction::Up => from.prev_sibling(self.map()),
@@ -338,6 +337,89 @@ impl TraditionalLayoutSystem {
         let container_layout = LayoutKind::from(direction.orientation());
         self.set_layout(common_parent, container_layout);
         self.select(common_parent);
+    }
+}
+
+#[derive(Serialize, Deserialize, Default)]
+#[serde(transparent)]
+pub struct AerospaceLayoutSystem {
+    inner: TraditionalLayoutSystem,
+}
+
+impl AerospaceLayoutSystem {
+    fn find_aerospace_join_target(&self, from: NodeId, direction: Direction) -> Option<NodeId> {
+        let map = self.inner.map();
+        let mut current = from;
+        loop {
+            let parent = current.parent(map)?;
+            let parent_layout = self.inner.layout(parent);
+            if parent_layout.orientation() == direction.orientation() && !parent_layout.is_group() {
+                let neighbor = match direction {
+                    Direction::Right | Direction::Down => current.next_sibling(map),
+                    Direction::Left | Direction::Up => current.prev_sibling(map),
+                };
+                if let Some(target) = neighbor {
+                    return Some(target);
+                }
+            }
+            current = parent;
+        }
+    }
+
+    fn join_selection_with_direction_aerospace(&mut self, layout: LayoutId, direction: Direction) {
+        let selection = self.inner.selection(layout);
+        let join_node = if self.inner.window_at(selection).is_some() {
+            selection
+        } else if let Some((node, _)) = self.inner.find_best_focus_target(selection) {
+            node
+        } else {
+            return;
+        };
+        let Some(target) = self.find_aerospace_join_target(join_node, direction) else {
+            return;
+        };
+
+        let (node1, node2) = match direction {
+            Direction::Right | Direction::Down => (join_node, target),
+            Direction::Left | Direction::Up => (target, join_node),
+        };
+
+        let new_container = self
+            .inner
+            .find_or_create_common_parent_internal(layout, node1, node2);
+
+        let container_layout = match direction.orientation() {
+            Orientation::Horizontal => LayoutKind::Vertical,
+            Orientation::Vertical => LayoutKind::Horizontal,
+        };
+        self.inner.set_layout(new_container, container_layout);
+
+        if self.inner.window_at(selection).is_some() {
+            self.inner.select(selection);
+        } else {
+            let _ = self.inner.descend_selection(layout);
+        }
+    }
+
+    pub(crate) fn collect_group_containers_in_selection_path(
+        &self,
+        layout: LayoutId,
+        screen: CGRect,
+        stack_offset: f64,
+        gaps: &crate::common::config::GapSettings,
+        stack_line_thickness: f64,
+        stack_line_horiz: crate::common::config::HorizontalPlacement,
+        stack_line_vert: crate::common::config::VerticalPlacement,
+    ) -> Vec<crate::layout_engine::engine::GroupContainerInfo> {
+        self.inner.collect_group_containers_in_selection_path(
+            layout,
+            screen,
+            stack_offset,
+            gaps,
+            stack_line_thickness,
+            stack_line_horiz,
+            stack_line_vert,
+        )
     }
 }
 
@@ -2340,6 +2422,173 @@ fn adjust_stack_container_rect(
     container_rect
 }
 
+impl LayoutSystem for AerospaceLayoutSystem {
+    fn create_layout(&mut self) -> LayoutId { self.inner.create_layout() }
+
+    fn clone_layout(&mut self, layout: LayoutId) -> LayoutId { self.inner.clone_layout(layout) }
+
+    fn remove_layout(&mut self, layout: LayoutId) { self.inner.remove_layout(layout) }
+
+    fn draw_tree(&self, layout: LayoutId) -> String { self.inner.draw_tree(layout) }
+
+    fn calculate_layout(
+        &self,
+        layout: LayoutId,
+        screen: CGRect,
+        stack_offset: f64,
+        gaps: &crate::common::config::GapSettings,
+        stack_line_thickness: f64,
+        stack_line_horiz: crate::common::config::HorizontalPlacement,
+        stack_line_vert: crate::common::config::VerticalPlacement,
+    ) -> Vec<(WindowId, CGRect)> {
+        self.inner.calculate_layout(
+            layout,
+            screen,
+            stack_offset,
+            gaps,
+            stack_line_thickness,
+            stack_line_horiz,
+            stack_line_vert,
+        )
+    }
+
+    fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
+        self.inner.selected_window(layout)
+    }
+
+    fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
+        self.inner.visible_windows_in_layout(layout)
+    }
+
+    fn visible_windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId> {
+        self.inner.visible_windows_under_selection(layout)
+    }
+
+    fn ascend_selection(&mut self, layout: LayoutId) -> bool {
+        self.inner.ascend_selection(layout)
+    }
+
+    fn descend_selection(&mut self, layout: LayoutId) -> bool {
+        self.inner.descend_selection(layout)
+    }
+
+    fn move_focus(
+        &mut self,
+        layout: LayoutId,
+        direction: Direction,
+    ) -> (Option<WindowId>, Vec<WindowId>) {
+        self.inner.move_focus(layout, direction)
+    }
+
+    fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
+        self.inner.window_in_direction(layout, direction)
+    }
+
+    fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId) {
+        self.inner.add_window_after_selection(layout, wid)
+    }
+
+    fn remove_window(&mut self, wid: WindowId) { self.inner.remove_window(wid) }
+
+    fn remove_windows_for_app(&mut self, pid: pid_t) { self.inner.remove_windows_for_app(pid) }
+
+    fn set_windows_for_app(&mut self, layout: LayoutId, pid: pid_t, desired: Vec<WindowId>) {
+        self.inner.set_windows_for_app(layout, pid, desired)
+    }
+
+    fn has_windows_for_app(&self, layout: LayoutId, pid: pid_t) -> bool {
+        self.inner.has_windows_for_app(layout, pid)
+    }
+
+    fn contains_window(&self, layout: LayoutId, wid: WindowId) -> bool {
+        self.inner.contains_window(layout, wid)
+    }
+
+    fn select_window(&mut self, layout: LayoutId, wid: WindowId) -> bool {
+        self.inner.select_window(layout, wid)
+    }
+
+    fn on_window_resized(
+        &mut self,
+        layout: LayoutId,
+        wid: WindowId,
+        old_frame: CGRect,
+        new_frame: CGRect,
+        screen: CGRect,
+        gaps: &crate::common::config::GapSettings,
+    ) {
+        self.inner
+            .on_window_resized(layout, wid, old_frame, new_frame, screen, gaps)
+    }
+
+    fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
+        self.inner.swap_windows(layout, a, b)
+    }
+
+    fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool {
+        self.inner.move_selection(layout, direction)
+    }
+
+    fn move_selection_to_layout_after_selection(
+        &mut self,
+        from_layout: LayoutId,
+        to_layout: LayoutId,
+    ) {
+        self.inner
+            .move_selection_to_layout_after_selection(from_layout, to_layout)
+    }
+
+    fn split_selection(&mut self, layout: LayoutId, kind: LayoutKind) {
+        self.inner.split_selection(layout, kind)
+    }
+
+    fn toggle_fullscreen_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
+        self.inner.toggle_fullscreen_of_selection(layout)
+    }
+
+    fn toggle_fullscreen_within_gaps_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
+        self.inner.toggle_fullscreen_within_gaps_of_selection(layout)
+    }
+
+    fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) {
+        self.join_selection_with_direction_aerospace(layout, direction)
+    }
+
+    fn apply_stacking_to_parent_of_selection(
+        &mut self,
+        layout: LayoutId,
+        default_orientation: crate::common::config::StackDefaultOrientation,
+    ) -> Vec<WindowId> {
+        self.inner
+            .apply_stacking_to_parent_of_selection(layout, default_orientation)
+    }
+
+    fn unstack_parent_of_selection(
+        &mut self,
+        layout: LayoutId,
+        default_orientation: crate::common::config::StackDefaultOrientation,
+    ) -> Vec<WindowId> {
+        self.inner
+            .unstack_parent_of_selection(layout, default_orientation)
+    }
+
+    fn parent_of_selection_is_stacked(&self, layout: LayoutId) -> bool {
+        self.inner.parent_of_selection_is_stacked(layout)
+    }
+
+    fn unjoin_selection(&mut self, layout: LayoutId) { self.inner.unjoin_selection(layout) }
+
+    fn resize_selection_by(&mut self, layout: LayoutId, amount: f64) {
+        self.inner.resize_selection_by(layout, amount)
+    }
+
+    fn rebalance(&mut self, layout: LayoutId) { self.inner.rebalance(layout) }
+
+    fn toggle_tile_orientation(&mut self, layout: LayoutId) {
+        self.inner.toggle_tile_orientation(layout)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use objc2_core_foundation::{CGPoint, CGRect, CGSize};
@@ -2690,6 +2939,51 @@ mod tests {
             3,
             "expected the joined stack to grow instead of being replaced"
         );
+    }
+
+    #[test]
+    fn aerospace_join_uses_focused_window_not_container() {
+        let mut system = AerospaceLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.inner.root(layout);
+        system.inner.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
+
+        system.inner.add_window_after_selection(layout, w(1));
+        system.inner.add_window_after_selection(layout, w(2));
+
+        system.inner.select_window(layout, w(1));
+        system.inner.split_selection(layout, LayoutKind::Vertical);
+        system.inner.add_window_after_selection(layout, w(3));
+
+        let node_w1 = system.inner.tree.data.window.node_for(layout, w(1)).unwrap();
+        let node_w2 = system.inner.tree.data.window.node_for(layout, w(2)).unwrap();
+        let node_w3 = system.inner.tree.data.window.node_for(layout, w(3)).unwrap();
+        let container = {
+            let map = system.inner.map();
+            node_w1.parent(map).unwrap()
+        };
+
+        {
+            let tree = &mut system.inner.tree;
+            node_w3.detach(tree).insert_before(node_w1);
+            let selection = &mut tree.data.selection;
+            selection.select(&tree.map, container);
+        }
+
+        crate::layout_engine::systems::LayoutSystem::join_selection_with_direction(
+            &mut system,
+            layout,
+            Direction::Right,
+        );
+
+        let map = system.inner.map();
+        let parent_w1 = node_w1.parent(map).unwrap();
+        let parent_w2 = node_w2.parent(map).unwrap();
+        let parent_w3 = node_w3.parent(map).unwrap();
+
+        assert_eq!(parent_w2, parent_w3);
+        assert_ne!(parent_w1, parent_w2);
+        assert_eq!(system.inner.layout(parent_w2), LayoutKind::Vertical);
     }
 
     // Tests for StackLayoutResult::get_focused_frame_for_index

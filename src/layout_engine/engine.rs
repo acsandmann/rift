@@ -131,6 +131,7 @@ impl LayoutEngine {
         match &self.tree {
             LayoutSystemKind::Traditional(_) => "traditional",
             LayoutSystemKind::Bsp(_) => "bsp",
+            LayoutSystemKind::Aerospace(_) => "aerospace",
         }
     }
 
@@ -594,6 +595,9 @@ impl LayoutEngine {
             crate::common::config::LayoutMode::Bsp => {
                 LayoutSystemKind::Bsp(crate::layout_engine::BspLayoutSystem::default())
             }
+            crate::common::config::LayoutMode::Aerospace => LayoutSystemKind::Aerospace(
+                crate::layout_engine::AerospaceLayoutSystem::default(),
+            ),
         };
 
         LayoutEngine {
@@ -1111,6 +1115,25 @@ impl LayoutEngine {
                             EventResponse::default()
                         }
                     }
+                    LayoutSystemKind::Aerospace(s) => {
+                        if s.parent_of_selection_is_stacked(layout) {
+                            let default_orientation: crate::common::config::StackDefaultOrientation =
+                                self.layout_settings.stack.default_orientation;
+                            let toggled_windows = s
+                                .apply_stacking_to_parent_of_selection(layout, default_orientation);
+                            if !toggled_windows.is_empty() {
+                                EventResponse {
+                                    raise_windows: toggled_windows,
+                                    focus_window: None,
+                                }
+                            } else {
+                                EventResponse::default()
+                            }
+                        } else {
+                            s.toggle_tile_orientation(layout);
+                            EventResponse::default()
+                        }
+                    }
                     LayoutSystemKind::Bsp(s) => {
                         s.toggle_tile_orientation(layout);
                         EventResponse::default()
@@ -1346,6 +1369,15 @@ impl LayoutEngine {
         let layout_id = self.layout(space);
         match &self.tree {
             LayoutSystemKind::Traditional(s) => s.collect_group_containers_in_selection_path(
+                layout_id,
+                screen,
+                self.layout_settings.stack.stack_offset,
+                gaps,
+                stack_line_thickness,
+                stack_line_horiz,
+                stack_line_vert,
+            ),
+            LayoutSystemKind::Aerospace(s) => s.collect_group_containers_in_selection_path(
                 layout_id,
                 screen,
                 self.layout_settings.stack.stack_offset,

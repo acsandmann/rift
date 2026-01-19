@@ -86,7 +86,7 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
 }
 
 mod traditional;
-pub use traditional::TraditionalLayoutSystem;
+pub use traditional::{AerospaceLayoutSystem, TraditionalLayoutSystem};
 mod bsp;
 pub use bsp::BspLayoutSystem;
 
@@ -96,4 +96,5 @@ pub use bsp::BspLayoutSystem;
 pub enum LayoutSystemKind {
     Traditional(TraditionalLayoutSystem),
     Bsp(BspLayoutSystem),
+    Aerospace(AerospaceLayoutSystem),
 }
