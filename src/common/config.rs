@@ -529,7 +529,7 @@ impl StackLineSettings {
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct LayoutSettings {
-    /// Layout mode: "traditional" (i3/sway style containers)
+    /// Layout mode: "traditional" (i3/sway style containers), "aerospace" (traditional + join-with semantics), or "bsp"
     #[serde(default)]
     pub mode: LayoutMode,
     /// Stack system configuration
@@ -549,6 +549,8 @@ pub enum LayoutMode {
     Traditional,
     /// Binary space partitioning tiling
     Bsp,
+    /// AeroSpace-inspired join behavior with traditional layout semantics
+    Aerospace,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
