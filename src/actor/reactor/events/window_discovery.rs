@@ -1,7 +1,7 @@
 use tracing::{trace, warn};
 
 use crate::actor::app::{AppInfo, WindowId, WindowInfo, pid_t};
-use crate::actor::reactor::{Event, LayoutEvent, Reactor, WindowState, utils};
+use crate::actor::reactor::{Event, LayoutEvent, Reactor, WindowFilter, WindowState, utils};
 use crate::common::collections::{BTreeMap, HashSet};
 use crate::model::virtual_workspace::AppRuleResult;
 use crate::sys::screen::SpaceId;
@@ -445,7 +445,7 @@ impl WindowDiscoveryHandler {
                 .iter()
                 .filter_map(|&wid| {
                     let window = reactor.window_manager.windows.get(&wid)?;
-                    if !window.is_effectively_manageable() {
+                    if !window.matches_filter(WindowFilter::EffectivelyManageable) {
                         return None;
                     }
                     Some((

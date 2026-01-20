@@ -463,6 +463,19 @@ impl From<WindowInfo> for WindowState {
 
 impl WindowState {
     fn is_effectively_manageable(&self) -> bool { self.is_manageable && !self.ignore_app_rule }
+
+    fn matches_filter(&self, filter: WindowFilter) -> bool {
+        match filter {
+            WindowFilter::Manageable => self.is_manageable,
+            WindowFilter::EffectivelyManageable => self.is_effectively_manageable(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum WindowFilter {
+    Manageable,
+    EffectivelyManageable,
 }
 
 impl Reactor {
@@ -731,6 +744,9 @@ impl Reactor {
         let mut windows_by_pid: HashMap<pid_t, Vec<WindowId>> = HashMap::default();
 
         for (&wid, state) in &self.window_manager.windows {
+            if !state.matches_filter(WindowFilter::Manageable) {
+                continue;
+            }
             let Some(space) =
                 self.best_space_for_window(&state.frame_monotonic, state.window_server_id)
             else {
@@ -1306,7 +1322,7 @@ impl Reactor {
 
     fn create_window_data(&self, window_id: WindowId) -> Option<WindowData> {
         let window_state = self.window_manager.windows.get(&window_id)?;
-        if window_state.is_minimized {
+        if !window_state.matches_filter(WindowFilter::EffectivelyManageable) {
             return None;
         }
         let app = self.app_manager.apps.get(&window_id.pid)?;
@@ -1594,7 +1610,10 @@ impl Reactor {
         }
 
         let (is_manageable, wsid) = match self.window_manager.windows.get(&window_id) {
-            Some(window_state) => (window_state.is_manageable, window_state.window_server_id),
+            Some(window_state) => (
+                window_state.matches_filter(WindowFilter::Manageable),
+                window_state.window_server_id,
+            ),
             None => return,
         };
 
@@ -1860,11 +1879,15 @@ impl Reactor {
         }
     }
 
-    fn window_is_standard(&self, id: WindowId) -> bool {
+    fn window_matches_filter(&self, id: WindowId, filter: WindowFilter) -> bool {
         self.window_manager
             .windows
             .get(&id)
-            .map_or(false, |window| window.is_effectively_manageable())
+            .map_or(false, |window| window.matches_filter(filter))
+    }
+
+    fn window_is_standard(&self, id: WindowId) -> bool {
+        self.window_matches_filter(id, WindowFilter::EffectivelyManageable)
     }
 
     fn send_layout_event(&mut self, event: LayoutEvent) {
@@ -1884,7 +1907,7 @@ impl Reactor {
             return false;
         };
 
-        if !window.is_effectively_manageable()
+        if !window.matches_filter(WindowFilter::EffectivelyManageable)
             && !self.layout_manager.layout_engine.is_window_floating(wid)
         {
             return false;
@@ -1983,6 +2006,9 @@ impl Reactor {
             let Some(state) = self.window_manager.windows.get(&wid) else {
                 continue;
             };
+            if !state.matches_filter(WindowFilter::Manageable) {
+                continue;
+            }
             let Some(space) =
                 self.best_space_for_window(&state.frame_monotonic, state.window_server_id)
             else {
@@ -2613,7 +2639,7 @@ impl Reactor {
             return None;
         }
         let window = self.window_manager.windows.get(&wid)?;
-        if window.is_effectively_manageable() {
+        if window.matches_filter(WindowFilter::EffectivelyManageable) {
             return None;
         }
         Some(wsid)

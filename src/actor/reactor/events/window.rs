@@ -4,7 +4,8 @@ use tracing::{debug, trace, warn};
 use crate::actor::app::WindowId;
 use crate::actor::reactor::events::drag::DragEventHandler;
 use crate::actor::reactor::{
-    DragState, MissionControlState, Quiet, Reactor, Requested, TransactionId, WindowState, utils,
+    DragState, MissionControlState, Quiet, Reactor, Requested, TransactionId, WindowFilter,
+    WindowState, utils,
 };
 use crate::layout_engine::LayoutEvent;
 use crate::sys::app::WindowInfo as Window;
@@ -68,7 +69,7 @@ impl WindowEventHandler {
                         .window_manager
                         .windows
                         .get(&wid)
-                        .map(|window| window.is_effectively_manageable())
+                        .map(|window| window.matches_filter(WindowFilter::EffectivelyManageable))
                         .unwrap_or(false);
                     if should_dispatch {
                         reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
@@ -181,7 +182,7 @@ impl WindowEventHandler {
                         .window_manager
                         .windows
                         .get(&wid)
-                        .map(|window| window.is_effectively_manageable())
+                        .map(|window| window.matches_filter(WindowFilter::EffectivelyManageable))
                         .unwrap_or(false);
                     if should_dispatch {
                         reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
