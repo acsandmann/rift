@@ -11,9 +11,9 @@ use objc2::msg_send;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::AnyObject;
 use objc2_app_kit::{NSApplication, NSColor, NSPopUpMenuWindowLevel, NSScreen};
-use objc2_core_foundation::{CFRetained, CFString, CFType, CGPoint, CGRect, CGSize};
+use objc2_core_foundation::{CFRetained, CFString, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
-    CGColor, CGContext, CGDisplayBounds, CGEvent, CGEventField, CGEventFlags, CGEventTapOptions,
+    CGColor, CGDisplayBounds, CGEvent, CGEventField, CGEventFlags, CGEventTapOptions,
     CGEventTapProxy, CGEventType,
 };
 use objc2_foundation::MainThreadMarker;
@@ -32,19 +32,9 @@ use crate::sys::dispatch::DispatchExt;
 use crate::sys::event::current_cursor_location;
 use crate::sys::geometry::CGRectExt;
 use crate::sys::screen::{CoordinateConverter, NSScreenExt, ScreenCache, ScreenId};
-use crate::sys::skylight::{
-    CFRelease, G_CONNECTION, SLSFlushWindowContentRegion, SLWindowContextCreate,
-};
+use crate::ui::render_layer_to_cgs_window;
 use crate::sys::window_server::{CapturedWindowImage, WindowServerId};
-
-unsafe extern "C" {
-    fn CGContextFlush(ctx: *mut CGContext);
-    fn CGContextClearRect(ctx: *mut CGContext, rect: CGRect);
-    fn CGContextSaveGState(ctx: *mut CGContext);
-    fn CGContextRestoreGState(ctx: *mut CGContext);
-    fn CGContextTranslateCTM(ctx: *mut CGContext, tx: f64, ty: f64);
-    fn CGContextScaleCTM(ctx: *mut CGContext, sx: f64, sy: f64);
-}
+use crate::ui::{compute_window_layout_metrics, with_disabled_actions};
 
 #[derive(Debug, Clone)]
 struct CaptureTask {
@@ -536,45 +526,10 @@ impl WorkspaceGrid {
     }
 }
 
-struct WindowLayoutMetrics {
-    scale: f64,
-    x_offset: f64,
-    y_offset: f64,
-    min_x: f64,
-    min_y: f64,
-    disp_h: f64,
-}
-
 #[derive(Clone, Copy)]
 enum WindowLayoutKind {
     PreserveOriginal,
     Exploded,
-}
-
-impl WindowLayoutMetrics {
-    fn rect_for(&self, window: &WindowData) -> CGRect {
-        let wx = window.frame.origin.x - self.min_x;
-        let wy_top = window.frame.origin.y - self.min_y + window.frame.size.height;
-        let wy = self.disp_h - wy_top;
-        let ww = window.frame.size.width;
-        let wh = window.frame.size.height;
-
-        let mut rx = self.x_offset + wx * self.scale;
-        let mut ry = self.y_offset + wy * self.scale;
-        let mut rw = (ww * self.scale).max(WINDOW_TILE_MIN_SIZE);
-        let mut rh = (wh * self.scale).max(WINDOW_TILE_MIN_SIZE);
-
-        if rw > (WINDOW_TILE_MIN_SIZE + WINDOW_TILE_GAP) {
-            rx += WINDOW_TILE_GAP / 2.0;
-            rw -= WINDOW_TILE_GAP;
-        }
-        if rh > (WINDOW_TILE_MIN_SIZE + WINDOW_TILE_GAP) {
-            ry += WINDOW_TILE_GAP / 2.0;
-            rh -= WINDOW_TILE_GAP;
-        }
-
-        CGRect::new(CGPoint::new(rx, ry), CGSize::new(rw, rh))
-    }
 }
 
 struct FadeState {
@@ -688,61 +643,6 @@ impl MissionControlOverlay {
             }
         }
         None
-    }
-
-    fn compute_window_layout(
-        windows: &[WindowData],
-        bounds: CGRect,
-    ) -> Option<WindowLayoutMetrics> {
-        if windows.is_empty() {
-            return None;
-        }
-
-        let mut min_x = f64::INFINITY;
-        let mut min_y = f64::INFINITY;
-        let mut max_x = f64::NEG_INFINITY;
-        let mut max_y = f64::NEG_INFINITY;
-
-        for w in windows {
-            let x0 = w.frame.origin.x;
-            let y0 = w.frame.origin.y;
-            let x1 = x0 + w.frame.size.width;
-            let y1 = y0 + w.frame.size.height;
-            if x0 < min_x {
-                min_x = x0;
-            }
-            if y0 < min_y {
-                min_y = y0;
-            }
-            if x1 > max_x {
-                max_x = x1;
-            }
-            if y1 > max_y {
-                max_y = y1;
-            }
-        }
-
-        let disp_w = (max_x - min_x).max(1.0);
-        let disp_h = (max_y - min_y).max(1.0);
-
-        let cx = bounds.origin.x + WINDOW_TILE_INSET;
-        let cy = bounds.origin.y + WINDOW_TILE_INSET;
-        let cw = (bounds.size.width - 2.0 * WINDOW_TILE_INSET).max(1.0);
-        let ch = (bounds.size.height - 2.0 * WINDOW_TILE_INSET).max(1.0);
-
-        let scale =
-            (cw / disp_w).min(ch / disp_h).min(WINDOW_TILE_MAX_SCALE) * WINDOW_TILE_SCALE_FACTOR;
-        let x_offset = cx + (cw - disp_w * scale) / 2.0;
-        let y_offset = cy + (ch - disp_h * scale) / 2.0;
-
-        Some(WindowLayoutMetrics {
-            scale,
-            x_offset,
-            y_offset,
-            min_x,
-            min_y,
-            disp_h,
-        })
     }
 
     fn compute_exploded_layout(windows: &[WindowData], bounds: CGRect) -> Option<Vec<CGRect>> {
@@ -861,8 +761,19 @@ impl MissionControlOverlay {
     ) -> Option<Vec<CGRect>> {
         match kind {
             WindowLayoutKind::PreserveOriginal => {
-                let layout = Self::compute_window_layout(windows, bounds)?;
-                Some(windows.iter().map(|w| layout.rect_for(w)).collect())
+                let layout = compute_window_layout_metrics(
+                    windows,
+                    bounds,
+                    WINDOW_TILE_INSET,
+                    WINDOW_TILE_SCALE_FACTOR,
+                    Some(WINDOW_TILE_MAX_SCALE),
+                )?;
+                Some(
+                    windows
+                        .iter()
+                        .map(|w| layout.rect_for(w, WINDOW_TILE_MIN_SIZE, WINDOW_TILE_GAP))
+                        .collect(),
+                )
             }
             WindowLayoutKind::Exploded => Self::compute_exploded_layout(windows, bounds),
         }
@@ -1202,10 +1113,9 @@ impl MissionControlOverlay {
         let parent_layer = parent_layer;
         let mut visible_ids: HashSet<String> = HashSet::default();
         visible_ids.reserve(visible.len());
-        CATransaction::begin();
-        CATransaction::setDisableActions(true);
-        for (order_idx, (original_idx, _)) in visible.iter().enumerate() {
-            autoreleasepool(|_| {
+        with_disabled_actions(|| {
+            for (order_idx, (original_idx, _)) in visible.iter().enumerate() {
+                autoreleasepool(|_| {
                 let ws = &workspaces[*original_idx];
                 let rect = grid.rect_for(order_idx);
                 visible_ids.insert(ws.id.clone());
@@ -1286,9 +1196,9 @@ impl MissionControlOverlay {
                 label_layer.setForegroundColor(Some(&fg.CGColor()));
 
                 label_layer.setZPosition(2.0);
-            });
-        }
-        CATransaction::commit();
+                });
+            }
+        });
         {
             let mut st = state.borrow_mut();
             let visible_ids = &visible_ids;
@@ -1329,11 +1239,9 @@ impl MissionControlOverlay {
 
         let parent_layer = parent_layer;
 
-        CATransaction::begin();
-        CATransaction::setDisableActions(true);
-
-        for idx in (0..windows.len()).rev() {
-            autoreleasepool(|_| {
+        with_disabled_actions(|| {
+            for idx in (0..windows.len()).rev() {
+                autoreleasepool(|_| {
                 let window = &windows[idx];
                 let rect = rects[idx];
                 let is_selected = selected_idx.map_or(false, |s| s == idx);
@@ -1406,10 +1314,9 @@ impl MissionControlOverlay {
                     };
                     self.schedule_capture(state, window, tw, th);
                 }
-            });
-        }
-
-        CATransaction::commit();
+                });
+            }
+        });
     }
 
     fn draw_window_outline(_rect: CGRect, _is_selected: bool) {}
@@ -1605,10 +1512,7 @@ impl MissionControlOverlay {
 
         let mut ready_ids: Vec<WindowId> = Vec::new();
 
-        CATransaction::begin();
-        CATransaction::setDisableActions(true);
-
-        {
+        with_disabled_actions(|| {
             let cache = cache_arc.read();
             for (wid, layer) in layers.iter() {
                 if let Some(img) = cache.get(wid) {
@@ -1619,9 +1523,7 @@ impl MissionControlOverlay {
                     ready_ids.push(*wid);
                 }
             }
-        }
-
-        CATransaction::commit();
+        });
 
         if !ready_ids.is_empty() {
             if let Ok(mut st) = state_cell.try_borrow_mut() {
@@ -1632,29 +1534,7 @@ impl MissionControlOverlay {
                     if let (Some(root), Some(wid), Some(size)) =
                         (st.render_root.clone(), st.render_window_id, st.render_size)
                     {
-                        unsafe {
-                            let ctx: *mut CGContext = SLWindowContextCreate(
-                                *G_CONNECTION,
-                                wid,
-                                core::ptr::null_mut() as *mut CFType,
-                            );
-                            if !ctx.is_null() {
-                                let clear = CGRect::new(CGPoint::new(0.0, 0.0), size);
-                                CGContextClearRect(ctx, clear);
-                                CGContextSaveGState(ctx);
-                                CGContextTranslateCTM(ctx, 0.0, size.height);
-                                CGContextScaleCTM(ctx, 1.0, -1.0);
-                                root.renderInContext(&*ctx);
-                                CGContextRestoreGState(ctx);
-                                CGContextFlush(ctx);
-                                SLSFlushWindowContentRegion(
-                                    *G_CONNECTION,
-                                    wid,
-                                    std::ptr::null_mut(),
-                                );
-                                CFRelease(ctx as *mut CFType);
-                            }
-                        }
+                        render_layer_to_cgs_window(wid, size, &root);
                     }
                 }
             }
@@ -2002,43 +1882,17 @@ impl MissionControlOverlay {
     }
 
     fn draw_and_present(&self) {
-        CATransaction::begin();
-        CATransaction::setDisableActions(true);
+        with_disabled_actions(|| {
+            self.root_layer.setFrame(CGRect::new(CGPoint::new(0.0, 0.0), self.frame.size));
+            self.root_layer.setGeometryFlipped(true);
 
-        self.root_layer.setFrame(CGRect::new(CGPoint::new(0.0, 0.0), self.frame.size));
-        self.root_layer.setGeometryFlipped(true);
+            self.draw_contents_into_layer(
+                CGRect::new(CGPoint::new(0.0, 0.0), self.frame.size),
+                &self.root_layer,
+            );
+        });
 
-        self.draw_contents_into_layer(
-            CGRect::new(CGPoint::new(0.0, 0.0), self.frame.size),
-            &self.root_layer,
-        );
-        CATransaction::commit();
-
-        let ctx: *mut CGContext = unsafe {
-            SLWindowContextCreate(
-                *G_CONNECTION,
-                self.cgs_window.id(),
-                core::ptr::null_mut() as *mut CFType,
-            )
-        };
-        if !ctx.is_null() {
-            unsafe {
-                let clear = CGRect::new(CGPoint::new(0.0, 0.0), self.frame.size);
-                CGContextClearRect(ctx, clear);
-                CGContextSaveGState(ctx);
-                CGContextTranslateCTM(ctx, 0.0, self.frame.size.height);
-                CGContextScaleCTM(ctx, 1.0, -1.0);
-                self.root_layer.renderInContext(&*ctx);
-                CGContextRestoreGState(ctx);
-                CGContextFlush(ctx);
-                SLSFlushWindowContentRegion(
-                    *G_CONNECTION,
-                    self.cgs_window.id(),
-                    std::ptr::null_mut(),
-                );
-                CFRelease(ctx as *mut CFType);
-            }
-        }
+        render_layer_to_cgs_window(self.cgs_window.id(), self.frame.size, &self.root_layer);
     }
 
     fn emit_action(&self, action: MissionControlAction) {

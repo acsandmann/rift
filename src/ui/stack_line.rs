@@ -1,30 +1,17 @@
 use std::cell::RefCell;
-use std::ptr;
 use std::rc::Rc;
 
 use objc2::rc::Retained;
 use objc2_app_kit::NSStatusWindowLevel;
-use objc2_core_foundation::{CFType, CGPoint, CGRect, CGSize};
-use objc2_core_graphics::CGContext;
-use objc2_quartz_core::{CALayer, CATransaction};
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_quartz_core::CALayer;
 use tracing::warn;
 
 use crate::actor::app::WindowId;
 use crate::common::config::{HorizontalPlacement, VerticalPlacement};
 use crate::sys::cgs_window::{CgsWindow, CgsWindowError};
 use crate::sys::screen::SpaceId;
-use crate::sys::skylight::{
-    CFRelease, G_CONNECTION, SLSFlushWindowContentRegion, SLWindowContextCreate,
-};
-
-unsafe extern "C" {
-    fn CGContextFlush(ctx: *mut CGContext);
-    fn CGContextClearRect(ctx: *mut CGContext, rect: CGRect);
-    fn CGContextSaveGState(ctx: *mut CGContext);
-    fn CGContextRestoreGState(ctx: *mut CGContext);
-    fn CGContextTranslateCTM(ctx: *mut CGContext, tx: f64, ty: f64);
-    fn CGContextScaleCTM(ctx: *mut CGContext, sx: f64, sy: f64);
-}
+use crate::ui::{render_layer_to_cgs_window, with_disabled_actions};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Color {
@@ -260,10 +247,7 @@ impl GroupIndicatorWindow {
     }
 
     fn clear_layers(&self) {
-        CATransaction::begin();
-        CATransaction::setDisableActions(true);
-        unsafe { self.root_layer.setSublayers(None) };
-        CATransaction::commit();
+        with_disabled_actions(|| unsafe { self.root_layer.setSublayers(None) });
 
         let mut state = self.state.borrow_mut();
         state.background_layer = None;
@@ -279,20 +263,20 @@ impl GroupIndicatorWindow {
 
         let bounds = self.bounds();
 
-        CATransaction::begin();
-        CATransaction::setDisableActions(true);
-        self.ensure_separator_layers(group_data.total_count);
-        self.update_background_layer(bounds, group_data.group_kind);
+        with_disabled_actions(|| {
+            self.ensure_separator_layers(group_data.total_count);
+            self.update_background_layer(bounds, group_data.group_kind);
 
-        let config = {
-            let state = self.state.borrow();
-            state.config
-        };
-        let adjusted_bounds = self.calculate_adjusted_bounds(bounds, config, group_data.group_kind);
-        self.update_separator_layers(&group_data, adjusted_bounds);
+            let config = {
+                let state = self.state.borrow();
+                state.config
+            };
+            let adjusted_bounds =
+                self.calculate_adjusted_bounds(bounds, config, group_data.group_kind);
+            self.update_separator_layers(&group_data, adjusted_bounds);
 
-        self.update_selected_layer(&group_data, bounds);
-        CATransaction::commit();
+            self.update_selected_layer(&group_data, bounds);
+        });
     }
 
     fn ensure_separator_layers(&self, total_count: usize) {
@@ -674,28 +658,6 @@ impl GroupIndicatorWindow {
 
     fn present(&self) {
         let frame = *self.frame.borrow();
-        let ctx: *mut CGContext = unsafe {
-            SLWindowContextCreate(
-                *G_CONNECTION,
-                self.cgs_window.id(),
-                ptr::null_mut() as *mut CFType,
-            )
-        };
-        if ctx.is_null() {
-            return;
-        }
-
-        unsafe {
-            let clear = CGRect::new(CGPoint::new(0.0, 0.0), frame.size);
-            CGContextClearRect(ctx, clear);
-            CGContextSaveGState(ctx);
-            CGContextTranslateCTM(ctx, 0.0, frame.size.height);
-            CGContextScaleCTM(ctx, 1.0, -1.0);
-            self.root_layer.renderInContext(&*ctx);
-            CGContextRestoreGState(ctx);
-            CGContextFlush(ctx);
-            SLSFlushWindowContentRegion(*G_CONNECTION, self.cgs_window.id(), ptr::null_mut());
-            CFRelease(ctx as *mut CFType);
-        }
+        render_layer_to_cgs_window(self.cgs_window.id(), frame.size, &self.root_layer);
     }
 }
