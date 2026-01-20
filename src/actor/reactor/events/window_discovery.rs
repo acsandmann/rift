@@ -318,6 +318,101 @@ impl WindowDiscoveryHandler {
             state.is_manageable = manageable;
             reactor.window_manager.windows.insert(wid, state);
         }
+
+        // Update existing window states for refreshed window info
+        for (wid, info) in updated_windows {
+            let (was_effectively_manageable, was_minimized) = reactor
+                .window_manager
+                .windows
+                .get(&wid)
+                .map(|window| (window.is_effectively_manageable(), window.is_minimized))
+                .unwrap_or((false, false));
+
+            let WindowInfo {
+                is_standard,
+                is_root,
+                is_minimized,
+                title,
+                frame,
+                sys_id,
+                bundle_id,
+                path,
+                ax_role,
+                ax_subrole,
+            } = info;
+
+            let manageable = utils::compute_window_manageability(
+                sys_id,
+                is_minimized,
+                is_standard,
+                is_root,
+                &reactor.window_server_info_manager.window_server_info,
+            );
+
+            let mut should_remove = false;
+            let mut remove_visible_wsid = None;
+
+            if let Some(existing) = reactor.window_manager.windows.get_mut(&wid) {
+                existing.title = title;
+                if frame.size.width != 0.0 || frame.size.height != 0.0 {
+                    existing.frame_monotonic = frame;
+                }
+                existing.is_ax_standard = is_standard;
+                existing.is_ax_root = is_root;
+                existing.is_minimized = is_minimized;
+                existing.window_server_id = sys_id;
+                existing.bundle_id = bundle_id;
+                existing.bundle_path = path;
+                existing.ax_role = ax_role;
+                existing.ax_subrole = ax_subrole;
+                existing.is_manageable = manageable;
+
+                if is_minimized {
+                    remove_visible_wsid = sys_id;
+                }
+
+                let is_effectively_manageable = existing.is_effectively_manageable();
+                should_remove = (was_effectively_manageable && !is_effectively_manageable)
+                    || (is_minimized && !was_minimized);
+            } else {
+                let state = WindowState {
+                    title,
+                    frame_monotonic: frame,
+                    is_ax_standard: is_standard,
+                    is_ax_root: is_root,
+                    is_minimized,
+                    is_manageable: manageable,
+                    ignore_app_rule: false,
+                    window_server_id: sys_id,
+                    bundle_id,
+                    bundle_path: path,
+                    ax_role,
+                    ax_subrole,
+                };
+                reactor.window_manager.windows.insert(wid, state);
+            }
+
+            if should_remove {
+                if let Some(wsid) = remove_visible_wsid {
+                    reactor.window_manager.visible_windows.remove(&wsid);
+                }
+                reactor.send_layout_event(LayoutEvent::WindowRemoved(wid));
+            } else if let Some(wsid) = remove_visible_wsid {
+                reactor.window_manager.visible_windows.remove(&wsid);
+            }
+
+            if !is_minimized && was_minimized && manageable {
+                if let Some(window) = reactor.window_manager.windows.get(&wid) {
+                    if let Some(space) =
+                        reactor.best_space_for_window(&window.frame_monotonic, window.window_server_id)
+                    {
+                        if reactor.is_space_active(space) {
+                            reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Send layout events for discovered windows.
