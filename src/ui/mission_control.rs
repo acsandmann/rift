@@ -1705,7 +1705,12 @@ impl MissionControlOverlay {
 
         {
             let (screen, scale, converter) = self.current_screen_metrics();
-            let new_frame = screen.frame;
+            let screen_id = screen.id.as_u32();
+            let new_frame = if screen_id == 0 {
+                self.frame
+            } else {
+                CGDisplayBounds(screen_id)
+            };
             let new_scale = scale;
 
             let frame_changed = new_frame.origin.x != self.frame.origin.x
