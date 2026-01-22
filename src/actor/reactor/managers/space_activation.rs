@@ -1,5 +1,5 @@
 use crate::common::collections::{HashMap, HashSet};
-use crate::sys::screen::{ScreenId, SpaceId};
+use crate::sys::screen::{ScreenId, ScreenInfo, SpaceId};
 
 /// this is how we decide which macos spaces (and/or displays) are considered active.
 ///
@@ -33,14 +33,6 @@ pub struct SpaceActivationConfig {
 }
 
 #[derive(Debug, Clone)]
-pub struct ScreenActivationInput {
-    pub screen_id: ScreenId,
-    /// can be None during transitions
-    pub space: Option<SpaceId>,
-    pub display_uuid: Option<String>,
-}
-
-#[derive(Debug, Clone)]
 pub struct ToggleSpaceContext {
     pub space: SpaceId,
     pub display_uuid: Option<String>,
@@ -70,14 +62,10 @@ impl SpaceActivationPolicy {
     pub fn on_space_destroyed(&mut self, space: SpaceId) { self.known_user_spaces.remove(&space); }
 
     /// Note: this emits no events; Reactor should call this and then recompute active spaces.
-    pub fn on_spaces_updated(
-        &mut self,
-        cfg: SpaceActivationConfig,
-        screens: &[ScreenActivationInput],
-    ) {
+    pub fn on_spaces_updated(&mut self, cfg: SpaceActivationConfig, screens: &[ScreenInfo]) {
         // rebuild to prune old activation states
         let active_spaces: HashSet<SpaceId> = screens.iter().filter_map(|s| s.space).collect();
-        let active_screen_ids: HashSet<ScreenId> = screens.iter().map(|s| s.screen_id).collect();
+        let active_screen_ids: HashSet<ScreenId> = screens.iter().map(|s| s.id).collect();
 
         self.last_known_space_by_screen.retain(|sid, _| active_screen_ids.contains(sid));
         self.last_known_display_by_screen
@@ -90,7 +78,7 @@ impl SpaceActivationPolicy {
             // Capture "previous" space per screen from the last known snapshot (not current inputs).
             // Using current `screens[..].space` here would make `previous_space == new_space` and
             // prevent activation transfer from ever triggering.
-            let previous_space = self.last_known_space_by_screen.get(&screen.screen_id).copied();
+            let previous_space = self.last_known_space_by_screen.get(&screen.id).copied();
 
             if let Some(previous_space) = previous_space
                 && previous_space != new_space
@@ -103,33 +91,32 @@ impl SpaceActivationPolicy {
             }
 
             self.known_user_spaces.insert(new_space);
-            self.last_known_space_by_screen.insert(screen.screen_id, new_space);
+            self.last_known_space_by_screen.insert(screen.id, new_space);
         }
 
         // transfer activation across display UUID churns (e.g. wake/reconnect)
         for screen in screens.iter() {
-            let Some(new_display) = screen.display_uuid.as_deref() else {
+            let Some(new_display) = screen.display_uuid_opt() else {
                 continue;
             };
             if let Some(previous_display) =
-                self.last_known_display_by_screen.get(&screen.screen_id).cloned()
+                self.last_known_display_by_screen.get(&screen.id).cloned()
             {
                 if previous_display != new_display {
                     self.transfer_display_activation(cfg, &previous_display, new_display);
                 }
             }
-            self.last_known_display_by_screen
-                .insert(screen.screen_id, new_display.to_string());
+            self.last_known_display_by_screen.insert(screen.id, new_display.to_string());
         }
 
         let mut active_displays: HashSet<String> = HashSet::default();
         for screen in screens {
-            if let Some(display_uuid) = screen.display_uuid.as_deref() {
+            if let Some(display_uuid) = screen.display_uuid_opt() {
                 active_displays.insert(display_uuid.to_string());
-                if let Some(prev) = self.last_known_display_by_screen.get(&screen.screen_id) {
+                if let Some(prev) = self.last_known_display_by_screen.get(&screen.id) {
                     active_displays.insert(prev.clone());
                 }
-            } else if let Some(prev) = self.last_known_display_by_screen.get(&screen.screen_id) {
+            } else if let Some(prev) = self.last_known_display_by_screen.get(&screen.id) {
                 active_displays.insert(prev.clone());
             }
         }
@@ -140,9 +127,9 @@ impl SpaceActivationPolicy {
         // apply display level activation status
         for screen in screens {
             let Some(space) = screen.space else { continue };
-            let display_uuid = screen.display_uuid.as_deref().or_else(|| {
-                self.last_known_display_by_screen.get(&screen.screen_id).map(|v| v.as_str())
-            });
+            let display_uuid = screen
+                .display_uuid_opt()
+                .or_else(|| self.last_known_display_by_screen.get(&screen.id).map(|v| v.as_str()));
             let Some(display_uuid) = display_uuid else { continue };
 
             if cfg.default_disable {
@@ -271,17 +258,17 @@ impl SpaceActivationPolicy {
 
 #[cfg(test)]
 mod tests {
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+
     use super::*;
 
-    fn input(
-        screen_id: u32,
-        space: Option<u64>,
-        display_uuid: Option<&str>,
-    ) -> ScreenActivationInput {
-        ScreenActivationInput {
-            screen_id: ScreenId::new(screen_id),
+    fn input(screen_id: u32, space: Option<u64>, display_uuid: Option<&str>) -> ScreenInfo {
+        ScreenInfo {
+            id: ScreenId::new(screen_id),
+            frame: CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(0.0, 0.0)),
+            display_uuid: display_uuid.unwrap_or_default().to_string(),
+            name: None,
             space: space.map(SpaceId::new),
-            display_uuid: display_uuid.map(|v| v.to_string()),
         }
     }
 

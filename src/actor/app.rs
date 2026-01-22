@@ -243,7 +243,7 @@ struct State {
     app: AXUIElement,
     observer: Observer,
     events_tx: reactor::Sender,
-    windows: HashMap<WindowId, WindowState>,
+    windows: HashMap<WindowId, AppWindowState>,
     last_window_idx: u32,
     main_window: Option<WindowId>,
     last_activated: Option<(Instant, Quiet, Option<WindowId>, r#continue::Sender<()>)>,
@@ -253,7 +253,7 @@ struct State {
     tx_store: Option<WindowTxStore>,
 }
 
-struct WindowState {
+struct AppWindowState {
     pub elem: AXUIElement,
     last_seen_txid: TransactionId,
     hidden_by_app: bool,
@@ -291,7 +291,7 @@ impl State {
         store.get(&wsid).map(|record| record.txid)
     }
 
-    fn txid_for_window_state(&self, window: &WindowState) -> Option<TransactionId> {
+    fn txid_for_window_state(&self, window: &AppWindowState) -> Option<TransactionId> {
         self.txid_from_store(window.window_server_id)
             .or_else(|| Self::some_txid(window.last_seen_txid))
     }
@@ -1165,7 +1165,7 @@ impl State {
         let hidden_by_app = self.is_hidden;
         let last_seen_txid = self.txid_from_store(window_server_id).unwrap_or_default();
 
-        let old = self.windows.insert(wid, WindowState {
+        let old = self.windows.insert(wid, AppWindowState {
             elem,
             last_seen_txid,
             hidden_by_app,
@@ -1273,12 +1273,12 @@ impl State {
 
     fn send_event(&self, event: Event) { self.events_tx.send(event); }
 
-    fn window(&self, wid: WindowId) -> Result<&WindowState, AxError> {
+    fn window(&self, wid: WindowId) -> Result<&AppWindowState, AxError> {
         assert_eq!(wid.pid, self.pid);
         self.windows.get(&wid).ok_or(AxError::NotFound)
     }
 
-    fn window_mut(&mut self, wid: WindowId) -> Result<&mut WindowState, AxError> {
+    fn window_mut(&mut self, wid: WindowId) -> Result<&mut AppWindowState, AxError> {
         assert_eq!(wid.pid, self.pid);
         self.windows.get_mut(&wid).ok_or(AxError::NotFound)
     }

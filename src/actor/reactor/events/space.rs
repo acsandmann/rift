@@ -7,7 +7,7 @@ use tracing::{debug, info, trace, warn};
 use crate::actor::app::Request;
 use crate::actor::reactor::{
     Event, FullscreenSpaceTrack, FullscreenWindowTrack, LayoutEvent, MissionControlState,
-    PendingSpaceChange, Reactor, Screen, ScreenSnapshot, StaleCleanupState,
+    PendingSpaceChange, Reactor, ScreenInfo, StaleCleanupState,
 };
 use crate::actor::wm_controller::WmEvent;
 use crate::common::collections::{HashMap, HashSet};
@@ -198,14 +198,14 @@ impl SpaceEventHandler {
 
     pub fn handle_screen_parameters_changed(
         reactor: &mut Reactor,
-        screens: Vec<ScreenSnapshot>,
+        screens: Vec<ScreenInfo>,
         ws_info: Vec<WindowServerInfo>,
     ) {
         let previous_sizes: HashMap<ScreenId, CGSize> = reactor
             .space_manager
             .screens
             .iter()
-            .map(|screen| (screen.screen_id, screen.frame.size))
+            .map(|screen| (screen.id, screen.frame.size))
             .collect();
         let previous_displays: HashSet<String> =
             reactor.space_manager.screens.iter().map(|s| s.display_uuid.clone()).collect();
@@ -248,35 +248,26 @@ impl SpaceEventHandler {
 
             reactor.recompute_and_set_active_spaces(&[]);
         } else {
-            reactor.space_manager.screens = screens
-                .into_iter()
-                .map(|snapshot| Screen {
-                    frame: snapshot.frame,
-                    space: snapshot.space,
-                    display_uuid: snapshot.display_uuid,
-                    name: snapshot.name,
-                    screen_id: ScreenId::new(snapshot.screen_id),
-                })
-                .collect();
+            reactor.space_manager.screens = screens;
             let resized_screens: HashSet<ScreenId> = reactor
                 .space_manager
                 .screens
                 .iter()
                 .filter_map(|screen| {
                     let new_size = screen.frame.size;
-                    match previous_sizes.get(&screen.screen_id) {
+                    match previous_sizes.get(&screen.id) {
                         Some(previous) => {
                             let width_changed =
                                 previous.width.round() as i32 != new_size.width.round() as i32;
                             let height_changed =
                                 previous.height.round() as i32 != new_size.height.round() as i32;
                             if width_changed || height_changed {
-                                Some(screen.screen_id)
+                                Some(screen.id)
                             } else {
                                 None
                             }
                         }
-                        None => Some(screen.screen_id),
+                        None => Some(screen.id),
                     }
                 })
                 .collect();
@@ -287,8 +278,8 @@ impl SpaceEventHandler {
             // activation events. The activation policy must preserve the current login-window
             // flag across screen parameter changes so it can keep all spaces disabled while
             // login window is active.
-            let inputs = reactor.activation_inputs_for_current_screens();
-            reactor.space_activation_policy.on_spaces_updated(cfg, &inputs);
+            let screens = reactor.screens_for_current_spaces();
+            reactor.space_activation_policy.on_spaces_updated(cfg, &screens);
 
             reactor.recompute_and_set_active_spaces(&spaces);
 
@@ -301,7 +292,7 @@ impl SpaceEventHandler {
                     .space_manager
                     .screens
                     .iter()
-                    .filter(|screen| resized_screens.contains(&screen.screen_id))
+                    .filter(|screen| resized_screens.contains(&screen.id))
                     .filter_map(|screen| screen.space.map(|s| (s, screen.frame.size)))
                     .collect();
 
@@ -396,8 +387,8 @@ impl SpaceEventHandler {
         }
 
         let cfg = reactor.activation_cfg();
-        let inputs = reactor.activation_inputs_for_spaces(&spaces);
-        reactor.space_activation_policy.on_spaces_updated(cfg, &inputs);
+        let screens = reactor.screens_for_spaces(&spaces);
+        reactor.space_activation_policy.on_spaces_updated(cfg, &screens);
 
         reactor.recompute_and_set_active_spaces(&spaces);
 

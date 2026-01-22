@@ -51,11 +51,11 @@ pub struct WindowLayoutMetrics {
 
 impl WindowLayoutMetrics {
     pub fn rect_for(&self, window: &WindowData, min_size: f64, gap: f64) -> CGRect {
-        let wx = window.frame.origin.x - self.min_x;
-        let wy_top = window.frame.origin.y - self.min_y + window.frame.size.height;
+        let wx = window.info.frame.origin.x - self.min_x;
+        let wy_top = window.info.frame.origin.y - self.min_y + window.info.frame.size.height;
         let wy = self.disp_h - wy_top;
-        let ww = window.frame.size.width;
-        let wh = window.frame.size.height;
+        let ww = window.info.frame.size.width;
+        let wh = window.info.frame.size.height;
 
         let mut rx = self.x_offset + wx * self.scale;
         let mut ry = self.y_offset + wy * self.scale;
@@ -92,10 +92,10 @@ pub fn compute_window_layout_metrics(
     let mut max_y = f64::NEG_INFINITY;
 
     for w in windows {
-        let x0 = w.frame.origin.x;
-        let y0 = w.frame.origin.y;
-        let x1 = x0 + w.frame.size.width;
-        let y1 = y0 + w.frame.size.height;
+        let x0 = w.info.frame.origin.x;
+        let y0 = w.info.frame.origin.y;
+        let x1 = x0 + w.info.frame.size.width;
+        let y1 = y0 + w.info.frame.size.height;
         if x0 < min_x {
             min_x = x0;
         }

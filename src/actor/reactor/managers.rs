@@ -7,7 +7,7 @@ pub mod space_activation;
 
 use super::replay::Record;
 use super::{
-    AppState, Event, FullscreenSpaceTrack, PendingSpaceChange, Screen, WindowState,
+    AppState, Event, FullscreenSpaceTrack, PendingSpaceChange, ScreenInfo, WindowState,
     WorkspaceSwitchOrigin, WorkspaceSwitchState,
 };
 use crate::actor;
@@ -80,14 +80,14 @@ impl AppManager {
 
 /// Manages space and screen state
 pub struct SpaceManager {
-    pub screens: Vec<Screen>,
+    pub screens: Vec<ScreenInfo>,
     pub fullscreen_by_space: HashMap<u64, FullscreenSpaceTrack>,
     pub changing_screens: HashSet<WindowServerId>,
     pub has_seen_display_set: bool,
 }
 
 impl SpaceManager {
-    pub fn screen_by_space(&self, space: SpaceId) -> Option<&Screen> {
+    pub fn screen_by_space(&self, space: SpaceId) -> Option<&ScreenInfo> {
         self.screens.iter().find(|screen| screen.space == Some(space))
     }
 

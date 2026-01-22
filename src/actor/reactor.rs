@@ -48,14 +48,14 @@ use crate::actor::reactor::events::window_discovery::WindowDiscoveryHandler;
 use crate::actor::{self, menu_bar, stack_line};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
 use crate::common::config::Config;
-use crate::common::log::MetricsCommand;
-use crate::layout_engine::{self as layout, Direction, LayoutCommand, LayoutEngine, LayoutEvent};
+use crate::layout_engine::{self as layout, Direction, LayoutEngine, LayoutEvent};
 use crate::model::tx_store::WindowTxStore;
 use crate::model::virtual_workspace::AppRuleResult;
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt};
-use crate::sys::screen::{ScreenId, SpaceId, get_active_space_number};
+pub use crate::sys::screen::ScreenInfo;
+use crate::sys::screen::{SpaceId, get_active_space_number};
 use crate::sys::timer::Timer;
 use crate::sys::window_server::{
     self, WindowServerId, WindowServerInfo, current_cursor_location, space_is_fullscreen,
@@ -65,6 +65,16 @@ use crate::sys::window_server::{
 pub type Sender = actor::Sender<Event>;
 type Receiver = actor::Receiver<Event>;
 pub use query::ReactorQueryHandle;
+
+pub(crate) use crate::model::reactor::{
+    AppState, FullscreenSpaceTrack, FullscreenWindowTrack, PendingSpaceChange, WindowFilter,
+    WindowState,
+};
+pub use crate::model::reactor::{
+    Command, DisplaySelector, DragSession, DragState, MenuState, MissionControlState,
+    ReactorCommand, RefocusState, Requested, StaleCleanupState, WorkspaceSwitchOrigin,
+    WorkspaceSwitchState,
+};
 
 #[derive(Clone)]
 pub struct ReactorHandle {
@@ -93,19 +103,7 @@ impl std::ops::Deref for ReactorHandle {
     fn deref(&self) -> &Self::Target { &self.queries }
 }
 
-use std::path::PathBuf;
-
 use crate::model::server::WindowData;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScreenSnapshot {
-    #[serde(with = "CGRectDef")]
-    pub frame: CGRect,
-    pub space: Option<SpaceId>,
-    pub display_uuid: String,
-    pub name: Option<String>,
-    pub screen_id: u32,
-}
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
@@ -113,11 +111,9 @@ pub enum Event {
     /// The screen layout, including resolution, changed. This is always the
     /// first event sent on startup.
     ///
-    /// The first vec is the frame for each screen. The main screen is always
+    /// The first vec is the snapshot for each screen. The main screen is always
     /// first in the list.
-    ///
-    /// See the `SpaceChanged` event for an explanation of the other parameters.
-    ScreenParametersChanged(Vec<ScreenSnapshot>, Vec<WindowServerInfo>),
+    ScreenParametersChanged(Vec<ScreenInfo>, Vec<WindowServerInfo>),
 
     /// The current space changed.
     ///
@@ -238,126 +234,6 @@ pub enum Event {
     ConfigUpdated(Config),
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct Requested(pub bool);
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-#[serde(untagged)]
-pub enum Command {
-    Layout(LayoutCommand),
-    Metrics(MetricsCommand),
-    Reactor(ReactorCommand),
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[serde(untagged)]
-pub enum DisplaySelector {
-    Direction(Direction),
-    Index(usize),
-    Uuid(String),
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ReactorCommand {
-    Debug,
-    Serialize,
-    SaveAndExit,
-    SwitchSpace(Direction),
-    ToggleSpaceActivated,
-    FocusWindow {
-        window_id: WindowId,
-        window_server_id: Option<WindowServerId>,
-    },
-    ShowMissionControlAll,
-    ShowMissionControlCurrent,
-    DismissMissionControl,
-    MoveMouseToDisplay(DisplaySelector),
-    FocusDisplay(DisplaySelector),
-    CloseWindow {
-        window_server_id: Option<WindowServerId>,
-    },
-    MoveWindowToDisplay {
-        selector: DisplaySelector,
-        window_id: Option<u32>,
-    },
-}
-
-#[derive(Debug, Clone)]
-struct FullscreenWindowTrack {
-    pid: pid_t,
-    window_id: Option<WindowId>,
-    last_known_user_space: Option<SpaceId>,
-    _last_seen_fullscreen_space: SpaceId,
-}
-
-#[derive(Debug, Clone)]
-struct FullscreenSpaceTrack {
-    windows: Vec<FullscreenWindowTrack>,
-}
-
-impl Default for FullscreenSpaceTrack {
-    fn default() -> Self { FullscreenSpaceTrack { windows: Vec::new() } }
-}
-
-#[derive(Debug, Clone)]
-pub struct DragSession {
-    window: WindowId,
-    last_frame: CGRect,
-    origin_space: Option<SpaceId>,
-    settled_space: Option<SpaceId>,
-    layout_dirty: bool,
-}
-
-#[derive(Debug, Clone)]
-pub enum DragState {
-    Inactive,
-    Active {
-        session: DragSession,
-    },
-    PendingSwap {
-        session: DragSession,
-        target: WindowId,
-    },
-}
-
-#[derive(Debug, Clone)]
-pub enum MissionControlState {
-    Inactive,
-    Active,
-    Transitioning,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MenuState {
-    Closed,
-    Open(usize),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WorkspaceSwitchState {
-    Inactive,
-    Active,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkspaceSwitchOrigin {
-    Manual,
-    Auto,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StaleCleanupState {
-    Enabled,
-    Suppressed,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum RefocusState {
-    None,
-    Pending(SpaceId),
-}
-
 pub struct Reactor {
     pub config: Config,
     pub one_space: bool,
@@ -381,101 +257,6 @@ pub struct Reactor {
     active_spaces: HashSet<SpaceId>,
     display_churn_active: bool,
     display_churn_pending_full_refresh: bool,
-}
-
-#[derive(Debug)]
-struct AppState {
-    #[allow(unused)]
-    pub info: AppInfo,
-    pub handle: AppThreadHandle,
-}
-
-#[derive(Debug, Clone)]
-struct PendingSpaceChange {
-    spaces: Vec<Option<SpaceId>>,
-    ws_info: Vec<WindowServerInfo>,
-}
-
-#[derive(Clone, Debug)]
-struct Screen {
-    frame: CGRect,
-    space: Option<SpaceId>,
-    display_uuid: String,
-    name: Option<String>,
-    screen_id: ScreenId,
-}
-
-impl Screen {
-    fn display_uuid_opt(&self) -> Option<&str> {
-        if self.display_uuid.is_empty() {
-            None
-        } else {
-            Some(self.display_uuid.as_str())
-        }
-    }
-
-    fn display_uuid_owned(&self) -> Option<String> {
-        self.display_uuid_opt().map(|uuid| uuid.to_string())
-    }
-}
-
-#[derive(Debug)]
-struct WindowState {
-    #[allow(unused)]
-    title: String,
-    /// The last known frame of the window. Always includes the last write.
-    ///
-    /// This value only updates monotonically with respect to writes; in other
-    /// words, we only accept reads when we know they come after the last write.
-    frame_monotonic: CGRect,
-    is_ax_standard: bool,
-    is_ax_root: bool,
-    is_minimized: bool,
-    is_manageable: bool,
-    ignore_app_rule: bool,
-    window_server_id: Option<WindowServerId>,
-    #[allow(unused)]
-    bundle_id: Option<String>,
-    #[allow(unused)]
-    bundle_path: Option<PathBuf>,
-    ax_role: Option<String>,
-    ax_subrole: Option<String>,
-}
-
-impl From<WindowInfo> for WindowState {
-    fn from(info: WindowInfo) -> WindowState {
-        WindowState {
-            title: info.title,
-            frame_monotonic: info.frame,
-            is_ax_standard: info.is_standard,
-            is_ax_root: info.is_root,
-            is_minimized: info.is_minimized,
-            is_manageable: false,
-            ignore_app_rule: false,
-            window_server_id: info.sys_id,
-            bundle_id: info.bundle_id,
-            bundle_path: info.path,
-            ax_role: info.ax_role,
-            ax_subrole: info.ax_subrole,
-        }
-    }
-}
-
-impl WindowState {
-    fn is_effectively_manageable(&self) -> bool { self.is_manageable && !self.ignore_app_rule }
-
-    fn matches_filter(&self, filter: WindowFilter) -> bool {
-        match filter {
-            WindowFilter::Manageable => self.is_manageable,
-            WindowFilter::EffectivelyManageable => self.is_effectively_manageable(),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-enum WindowFilter {
-    Manageable,
-    EffectivelyManageable,
 }
 
 impl Reactor {
@@ -625,8 +406,7 @@ impl Reactor {
         let Some(window) = self.window_manager.windows.get(&wid) else {
             return false;
         };
-        let Some(space) =
-            self.best_space_for_window(&window.frame_monotonic, window.window_server_id)
+        let Some(space) = self.best_space_for_window(&window.frame_monotonic, window.info.sys_id)
         else {
             return false;
         };
@@ -642,37 +422,14 @@ impl Reactor {
         }
     }
 
-    fn activation_inputs_for_current_screens(
-        &self,
-    ) -> Vec<crate::actor::reactor::managers::space_activation::ScreenActivationInput> {
-        self.space_manager
-            .screens
-            .iter()
-            .map(|screen| {
-                crate::actor::reactor::managers::space_activation::ScreenActivationInput {
-                    screen_id: screen.screen_id,
-                    space: screen.space,
-                    display_uuid: screen.display_uuid_owned(),
-                }
-            })
-            .collect()
-    }
+    fn screens_for_current_spaces(&self) -> Vec<ScreenInfo> { self.space_manager.screens.clone() }
 
-    fn activation_inputs_for_spaces(
-        &self,
-        spaces: &[Option<SpaceId>],
-    ) -> Vec<crate::actor::reactor::managers::space_activation::ScreenActivationInput> {
+    fn screens_for_spaces(&self, spaces: &[Option<SpaceId>]) -> Vec<ScreenInfo> {
         self.space_manager
             .screens
             .iter()
             .zip(spaces.iter().copied())
-            .map(|(screen, space)| {
-                crate::actor::reactor::managers::space_activation::ScreenActivationInput {
-                    screen_id: screen.screen_id,
-                    space,
-                    display_uuid: screen.display_uuid_owned(),
-                }
-            })
+            .map(|(screen, space)| ScreenInfo { space, ..screen.clone() })
             .collect()
     }
 
@@ -747,8 +504,7 @@ impl Reactor {
             if !state.matches_filter(WindowFilter::Manageable) {
                 continue;
             }
-            let Some(space) =
-                self.best_space_for_window(&state.frame_monotonic, state.window_server_id)
+            let Some(space) = self.best_space_for_window(&state.frame_monotonic, state.info.sys_id)
             else {
                 continue;
             };
@@ -1268,10 +1024,11 @@ impl Reactor {
         }
 
         if let Some(raised_window) = raised_window {
-            if let Some(space) =
-                self.window_manager.windows.get(&raised_window).and_then(|w| {
-                    self.best_space_for_window(&w.frame_monotonic, w.window_server_id)
-                })
+            if let Some(space) = self
+                .window_manager
+                .windows
+                .get(&raised_window)
+                .and_then(|w| self.best_space_for_window(&w.frame_monotonic, w.info.sys_id))
             {
                 self.send_layout_event(LayoutEvent::WindowFocused(space, raised_window));
             }
@@ -1331,12 +1088,14 @@ impl Reactor {
 
         Some(WindowData {
             id: window_id,
-            title: window_state.title.clone(),
-            frame: window_state.frame_monotonic,
             is_floating: self.layout_manager.layout_engine.is_window_floating(window_id),
             is_focused: self.main_window() == Some(window_id),
-            bundle_id: preferred_name,
-            window_server_id: window_state.window_server_id.map(|wsid| wsid.as_u32()),
+            info: WindowInfo {
+                title: window_state.info.title.clone(),
+                frame: window_state.frame_monotonic,
+                bundle_id: preferred_name,
+                ..window_state.info.clone()
+            },
         })
     }
 
@@ -1361,10 +1120,10 @@ impl Reactor {
                             window.frame_monotonic = info.frame;
                         }
                         (
-                            window.window_server_id,
-                            window.is_minimized,
-                            window.is_ax_standard,
-                            window.is_ax_root,
+                            window.info.sys_id,
+                            window.info.is_minimized,
+                            window.info.is_standard,
+                            window.info.is_root,
                         )
                     } else {
                         continue;
@@ -1612,7 +1371,7 @@ impl Reactor {
         let (is_manageable, wsid) = match self.window_manager.windows.get(&window_id) {
             Some(window_state) => (
                 window_state.matches_filter(WindowFilter::Manageable),
-                window_state.window_server_id,
+                window_state.info.sys_id,
             ),
             None => return,
         };
@@ -1707,7 +1466,7 @@ impl Reactor {
             self.get_active_drag_session().map_or(true, |session| session.window != wid);
         if needs_new_session {
             let server_id =
-                self.window_manager.windows.get(&wid).and_then(|window| window.window_server_id);
+                self.window_manager.windows.get(&wid).and_then(|window| window.info.sys_id);
             let origin_space = self.best_space_for_window(frame, server_id);
             let session = DragSession {
                 window: wid,
@@ -1763,7 +1522,7 @@ impl Reactor {
             .window_manager
             .windows
             .get(&session.window)
-            .and_then(|window| window.window_server_id);
+            .and_then(|window| window.info.sys_id);
         if frame.area() <= 0.0 {
             return session.settled_space.or_else(|| self.best_space_for_window(frame, server_id));
         }
@@ -1775,7 +1534,7 @@ impl Reactor {
 
     fn best_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
         self.window_manager.windows.get(&wid).and_then(|window| {
-            self.best_space_for_window(&window.frame_monotonic, window.window_server_id)
+            self.best_space_for_window(&window.frame_monotonic, window.info.sys_id)
         })
     }
 
@@ -1920,8 +1679,7 @@ impl Reactor {
             return false;
         }
 
-        let Some(space) = self.best_space_for_window(&candidate_frame, window.window_server_id)
-        else {
+        let Some(space) = self.best_space_for_window(&candidate_frame, window.info.sys_id) else {
             return false;
         };
         if !self.is_space_active(space) {
@@ -1933,7 +1691,7 @@ impl Reactor {
             return false;
         }
 
-        let Some(candidate_wsid) = window.window_server_id else {
+        let Some(candidate_wsid) = window.info.sys_id else {
             return true;
         };
 
@@ -1941,7 +1699,7 @@ impl Reactor {
             if let Some(&child_wid) = self.window_manager.window_ids.get(&child_wsid)
                 && let Some(child_state) = self.window_manager.windows.get(&child_wid)
                 && matches!(
-                    child_state.ax_role.as_deref(),
+                    child_state.info.ax_role.as_deref(),
                     Some("AXSheet") | Some("AXDrawer")
                 )
             {
@@ -2009,8 +1767,7 @@ impl Reactor {
             if !state.matches_filter(WindowFilter::Manageable) {
                 continue;
             }
-            let Some(space) =
-                self.best_space_for_window(&state.frame_monotonic, state.window_server_id)
+            let Some(space) = self.best_space_for_window(&state.frame_monotonic, state.info.sys_id)
             else {
                 continue;
             };
@@ -2034,9 +1791,9 @@ impl Reactor {
                             space,
                             app_info.bundle_id.as_deref(),
                             app_info.localized_name.as_deref(),
-                            window.map(|w| w.title.as_str()),
-                            window.and_then(|w| w.ax_role.as_deref()),
-                            window.and_then(|w| w.ax_subrole.as_deref()),
+                            window.map(|w| w.info.title.as_str()),
+                            window.and_then(|w| w.info.ax_role.as_deref()),
+                            window.and_then(|w| w.info.ax_subrole.as_deref()),
                         )
                 };
 
@@ -2086,11 +1843,15 @@ impl Reactor {
             )> = manageable_windows
                 .iter()
                 .map(|&wid| {
-                    let title_opt = self.window_manager.windows.get(&wid).map(|w| w.title.clone());
+                    let title_opt =
+                        self.window_manager.windows.get(&wid).map(|w| w.info.title.clone());
                     let ax_role =
-                        self.window_manager.windows.get(&wid).and_then(|w| w.ax_role.clone());
-                    let ax_subrole =
-                        self.window_manager.windows.get(&wid).and_then(|w| w.ax_subrole.clone());
+                        self.window_manager.windows.get(&wid).and_then(|w| w.info.ax_role.clone());
+                    let ax_subrole = self
+                        .window_manager
+                        .windows
+                        .get(&wid)
+                        .and_then(|w| w.info.ax_subrole.clone());
                     (wid, title_opt, ax_role, ax_subrole)
                 })
                 .collect();
@@ -2150,10 +1911,9 @@ impl Reactor {
                 if wid.pid != pid {
                     return false;
                 }
-                if let Some(space) = self.best_space_for_window(
-                    &window_state.frame_monotonic,
-                    window_state.window_server_id,
-                ) {
+                if let Some(space) = self
+                    .best_space_for_window(&window_state.frame_monotonic, window_state.info.sys_id)
+                {
                     if visible_spaces.contains(&space) {
                         if let Some(active_workspace) =
                             self.layout_manager.layout_engine.active_workspace(space)
@@ -2216,8 +1976,8 @@ impl Reactor {
         let Some(window_state) = self.window_manager.windows.get(&app_window_id) else {
             return;
         };
-        let Some(window_space) = self
-            .best_space_for_window(&window_state.frame_monotonic, window_state.window_server_id)
+        let Some(window_space) =
+            self.best_space_for_window(&window_state.frame_monotonic, window_state.info.sys_id)
         else {
             return;
         };
@@ -2364,14 +2124,14 @@ impl Reactor {
 
         if let Some(wid) = focus_window {
             if let Some(state) = self.window_manager.windows.get(&wid) {
-                if let Some(wsid) = state.window_server_id {
+                if let Some(wsid) = state.info.sys_id {
                     if self.space_manager.changing_screens.contains(&wsid)
                         || (require_visible_focus
                             && !self.window_manager.visible_windows.contains(&wsid))
                     {
                         focus_window = None;
                     } else if let Some(space) =
-                        self.best_space_for_window(&state.frame_monotonic, state.window_server_id)
+                        self.best_space_for_window(&state.frame_monotonic, state.info.sys_id)
                     {
                         if !self.is_space_active(space) {
                             focus_window = None;
@@ -2432,7 +2192,7 @@ impl Reactor {
             windows_by_app_and_screen
                 .entry((
                     wid.pid,
-                    self.best_space_for_window(&window.frame_monotonic, window.window_server_id),
+                    self.best_space_for_window(&window.frame_monotonic, window.info.sys_id),
                 ))
                 .or_insert(vec![])
                 .push(wid);
@@ -2493,14 +2253,15 @@ impl Reactor {
             };
 
             if window
-                .window_server_id
+                .info
+                .sys_id
                 .is_some_and(|wsid| self.space_manager.changing_screens.contains(&wsid))
             {
                 trace!(?wid, "Skipping swap: window is changing screens");
                 return;
             }
 
-            window.window_server_id
+            window.info.sys_id
         };
 
         let Some(space) = (if self.is_in_drag() {
@@ -2557,8 +2318,8 @@ impl Reactor {
                 continue;
             }
 
-            let Some(other_space) = self
-                .best_space_for_window(&other_state.frame_monotonic, other_state.window_server_id)
+            let Some(other_space) =
+                self.best_space_for_window(&other_state.frame_monotonic, other_state.info.sys_id)
             else {
                 continue;
             };
@@ -2674,7 +2435,7 @@ impl Reactor {
         let window = self.window_manager.windows.get(&wid)?;
 
         if let Some(actual_space) =
-            self.best_space_for_window(&window.frame_monotonic, window.window_server_id)
+            self.best_space_for_window(&window.frame_monotonic, window.info.sys_id)
         {
             if actual_space != space {
                 return None;
@@ -2682,7 +2443,7 @@ impl Reactor {
         } else {
             return None;
         }
-        if let Some(wsid) = window.window_server_id {
+        if let Some(wsid) = window.info.sys_id {
             if self.space_manager.changing_screens.contains(&wsid) {
                 return None;
             }
@@ -2808,7 +2569,7 @@ impl Reactor {
             windows_by_pid.entry(wid.pid).or_default().push(wid);
 
             let Some(actual_space) =
-                self.best_space_for_window(&state.frame_monotonic, state.window_server_id)
+                self.best_space_for_window(&state.frame_monotonic, state.info.sys_id)
             else {
                 continue;
             };
@@ -2884,11 +2645,11 @@ impl Reactor {
             .and_then(|screen| screen.space)
     }
 
-    fn screen_for_point(&self, point: CGPoint) -> Option<&Screen> {
+    fn screen_for_point(&self, point: CGPoint) -> Option<&ScreenInfo> {
         self.space_manager.screens.iter().find(|screen| screen.frame.contains(point))
     }
 
-    fn closest_screen_to_point(&self, point: CGPoint) -> Option<&Screen> {
+    fn closest_screen_to_point(&self, point: CGPoint) -> Option<&ScreenInfo> {
         self.space_manager.screens.iter().min_by(|a, b| {
             let da = Self::rectangle_distance_sq(a.frame, point);
             let db = Self::rectangle_distance_sq(b.frame, point);
@@ -2949,7 +2710,7 @@ impl Reactor {
         &self,
         origin: CGPoint,
         direction: Direction,
-    ) -> Option<&Screen> {
+    ) -> Option<&ScreenInfo> {
         fn interval_gap(a_min: f64, a_max: f64, b_min: f64, b_max: f64) -> f64 {
             if a_max < b_min {
                 b_min - a_max
@@ -2960,7 +2721,7 @@ impl Reactor {
             }
         }
 
-        let mut best: Option<(f64, f64, &Screen)> = None;
+        let mut best: Option<(f64, f64, &ScreenInfo)> = None;
 
         for screen in &self.space_manager.screens {
             let frame = screen.frame;
@@ -3017,7 +2778,7 @@ impl Reactor {
         &self,
         selector: &DisplaySelector,
         origin_override: Option<CGPoint>,
-    ) -> Option<&Screen> {
+    ) -> Option<&ScreenInfo> {
         match selector {
             DisplaySelector::Direction(direction) => {
                 let origin = origin_override.or_else(|| self.current_screen_center())?;

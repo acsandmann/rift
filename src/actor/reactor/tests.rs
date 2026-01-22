@@ -4,7 +4,7 @@ use test_log::test;
 use super::testing::*;
 use super::*;
 use crate::actor::app::Request;
-use crate::layout_engine::{Direction, LayoutEngine};
+use crate::layout_engine::{Direction, LayoutCommand, LayoutEngine};
 use crate::sys::app::WindowInfo;
 use crate::sys::window_server::WindowServerId;
 

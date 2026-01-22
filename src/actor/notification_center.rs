@@ -19,7 +19,7 @@ use super::wm_controller::{self, WmEvent};
 use crate::sys::app::NSRunningApplicationExt;
 use crate::sys::dispatch::DispatchExt;
 use crate::sys::power::{init_power_state, set_low_power_mode_state};
-use crate::sys::screen::{CoordinateConverter, ScreenCache, ScreenDescriptor, SpaceId};
+use crate::sys::screen::{CoordinateConverter, ScreenCache, ScreenInfo, SpaceId};
 use crate::sys::skylight::{CGDisplayRegisterReconfigurationCallback, DisplayReconfigFlags};
 use crate::sys::window_server;
 
@@ -175,9 +175,7 @@ impl NotificationCenterInner {
         }
     }
 
-    fn collect_state(
-        &self,
-    ) -> Option<(Vec<ScreenDescriptor>, CoordinateConverter, Vec<Option<SpaceId>>)> {
+    fn collect_state(&self) -> Option<(Vec<ScreenInfo>, CoordinateConverter)> {
         let mut screen_cache = self.ivars().screen_cache.borrow_mut();
         screen_cache.refresh().or_else(|| {
             warn!("Unable to refresh screen configuration; skipping update");
@@ -203,7 +201,7 @@ impl NotificationCenterInner {
             return;
         }
 
-        let Some((descriptors, converter, spaces)) = self.collect_state() else {
+        let Some((screens, converter)) = self.collect_state() else {
             if allow_retry && attempt < REFRESH_MAX_RETRIES {
                 trace!(attempt, "Screen state not ready; retrying refresh");
                 self.schedule_screen_refresh_after(REFRESH_RETRY_DELAY_NS, attempt + 1);
@@ -214,7 +212,7 @@ impl NotificationCenterInner {
             return;
         };
 
-        if descriptors.is_empty() {
+        if screens.is_empty() {
             if allow_retry && attempt < REFRESH_MAX_RETRIES {
                 trace!(attempt, "No displays yet; retrying refresh");
                 self.schedule_screen_refresh_after(REFRESH_RETRY_DELAY_NS, attempt + 1);
@@ -225,7 +223,7 @@ impl NotificationCenterInner {
             return;
         }
 
-        if spaces.iter().any(|space| space.is_none()) {
+        if screens.iter().any(|screen| screen.space.is_none()) {
             if allow_retry && attempt < REFRESH_MAX_RETRIES {
                 trace!(attempt, "Spaces not yet available; retrying refresh");
                 self.schedule_screen_refresh_after(REFRESH_RETRY_DELAY_NS, attempt + 1);
@@ -237,7 +235,7 @@ impl NotificationCenterInner {
             );
         }
 
-        self.send_event(WmEvent::ScreenParametersChanged(descriptors, converter, spaces));
+        self.send_event(WmEvent::ScreenParametersChanged(screens, converter));
         ivars.refresh_pending.set(false);
     }
 
@@ -253,10 +251,11 @@ impl NotificationCenterInner {
             return;
         }
 
-        if let Some((_, _, spaces)) = self.collect_state()
-            && !spaces.is_empty()
-        {
-            self.send_event(WmEvent::SpaceChanged(spaces));
+        if let Some((screens, _)) = self.collect_state() {
+            let spaces: Vec<Option<SpaceId>> = screens.iter().map(|s| s.space).collect();
+            if !spaces.is_empty() {
+                self.send_event(WmEvent::SpaceChanged(spaces));
+            }
         }
     }
 
@@ -332,7 +331,7 @@ impl NotificationCenterInner {
             return;
         }
 
-        let Some((descriptors, _, _)) = self.collect_state() else {
+        let Some((screens, _)) = self.collect_state() else {
             self.retry_or_finish_display_churn(
                 expected_epoch,
                 attempt,
@@ -341,7 +340,7 @@ impl NotificationCenterInner {
             return;
         };
 
-        if descriptors.is_empty() {
+        if screens.is_empty() {
             self.retry_or_finish_display_churn(
                 expected_epoch,
                 attempt,
@@ -350,7 +349,7 @@ impl NotificationCenterInner {
             return;
         }
 
-        let fingerprint = Self::fingerprint_displays(&descriptors);
+        let fingerprint = Self::fingerprint_displays(&screens);
         let mut state = ivars.display_topology_state.borrow_mut();
         let hits = match state.as_mut() {
             Some(existing) if existing.fingerprint == fingerprint => {
@@ -518,9 +517,9 @@ impl NotificationCenterInner {
         );
     }
 
-    fn fingerprint_displays(descriptors: &[ScreenDescriptor]) -> DisplayTopologyFingerprint {
+    fn fingerprint_displays(screens: &[ScreenInfo]) -> DisplayTopologyFingerprint {
         DisplayTopologyFingerprint(
-            descriptors
+            screens
                 .iter()
                 .map(|d| {
                     (

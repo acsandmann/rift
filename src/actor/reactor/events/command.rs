@@ -1,6 +1,6 @@
 use tracing::{error, info, warn};
 
-use super::super::Screen;
+use super::super::ScreenInfo;
 use crate::actor::app::{AppThreadHandle, Quiet, WindowId};
 use crate::actor::reactor::transaction_manager::TransactionId;
 use crate::actor::reactor::{DisplaySelector, Reactor, WorkspaceSwitchOrigin};
@@ -183,9 +183,12 @@ impl CommandEventHandler {
         window_server_id: Option<WindowServerId>,
     ) {
         if reactor.window_manager.windows.contains_key(&window_id) {
-            let Some(space) = reactor.window_manager.windows.get(&window_id).and_then(|w| {
-                reactor.best_space_for_window(&w.frame_monotonic, w.window_server_id)
-            }) else {
+            let Some(space) = reactor
+                .window_manager
+                .windows
+                .get(&window_id)
+                .and_then(|w| reactor.best_space_for_window(&w.frame_monotonic, w.info.sys_id))
+            else {
                 warn!(?window_id, "Focus window ignored: space unknown");
                 return;
             };
@@ -247,7 +250,7 @@ impl CommandEventHandler {
         }
     }
 
-    fn focus_first_window_on_screen(reactor: &mut Reactor, screen: &Screen) -> bool {
+    fn focus_first_window_on_screen(reactor: &mut Reactor, screen: &ScreenInfo) -> bool {
         if let Some(space) = screen.space {
             if !reactor.is_space_active(space) {
                 return false;
@@ -359,7 +362,7 @@ impl CommandEventHandler {
 
         let (window_server_id, window_frame) = match reactor.window_manager.windows.get(&window_id)
         {
-            Some(state) => (state.window_server_id, state.frame_monotonic),
+            Some(state) => (state.info.sys_id, state.frame_monotonic),
             None => {
                 warn!(?window_id, "Move window to display ignored: unknown window");
                 return;

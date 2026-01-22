@@ -1,7 +1,7 @@
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use tracing::debug;
 
-use super::{Event, Reactor, Record, Requested, ScreenSnapshot, TransactionId};
+use super::{Event, Reactor, Record, Requested, ScreenInfo, TransactionId};
 use crate::actor;
 use crate::actor::app::{AppThreadHandle, Request, WindowId};
 use crate::common::collections::BTreeMap;
@@ -29,21 +29,18 @@ impl Reactor {
     }
 }
 
-pub fn make_screen_snapshots(
-    frames: Vec<CGRect>,
-    spaces: Vec<Option<SpaceId>>,
-) -> Vec<ScreenSnapshot> {
+pub fn make_screen_snapshots(frames: Vec<CGRect>, spaces: Vec<Option<SpaceId>>) -> Vec<ScreenInfo> {
     assert_eq!(frames.len(), spaces.len());
     frames
         .into_iter()
         .zip(spaces.into_iter())
         .enumerate()
-        .map(|(idx, (frame, space))| ScreenSnapshot {
+        .map(|(idx, (frame, space))| ScreenInfo {
+            id: crate::sys::screen::ScreenId::new(idx as u32),
             frame,
             space,
             display_uuid: format!("test-display-{idx}"),
             name: None,
-            screen_id: idx as u32,
         })
         .collect()
 }
@@ -102,11 +99,11 @@ pub fn make_windows(count: usize) -> Vec<WindowInfo> { (1..=count).map(make_wind
 pub struct Apps {
     tx: actor::Sender<Request>,
     rx: actor::Receiver<Request>,
-    pub windows: BTreeMap<WindowId, WindowState>,
+    pub windows: BTreeMap<WindowId, TestWindowState>,
 }
 
 #[derive(Default, PartialEq, Debug, Clone)]
-pub struct WindowState {
+pub struct TestWindowState {
     pub last_seen_txid: TransactionId,
     pub last_sent_txid: TransactionId,
     pub animating: bool,
@@ -137,7 +134,7 @@ impl Apps {
         with_ws_info: bool,
     ) -> Vec<Event> {
         for (id, info) in (1..).map(|idx| WindowId::new(pid, idx)).zip(&windows) {
-            self.windows.insert(id, WindowState {
+            self.windows.insert(id, TestWindowState {
                 frame: info.frame,
                 ..Default::default()
             });

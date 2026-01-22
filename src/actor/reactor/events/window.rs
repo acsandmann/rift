@@ -36,14 +36,14 @@ impl WindowEventHandler {
         let frame = window.frame;
         let mut window_state: WindowState = window.into();
         let is_manageable = utils::compute_window_manageability(
-            window_state.window_server_id,
-            window_state.is_minimized,
-            window_state.is_ax_standard,
-            window_state.is_ax_root,
+            window_state.info.sys_id,
+            window_state.info.is_minimized,
+            window_state.info.is_standard,
+            window_state.info.is_root,
             &reactor.window_server_info_manager.window_server_info,
         );
         window_state.is_manageable = is_manageable;
-        if let Some(wsid) = window_state.window_server_id {
+        if let Some(wsid) = window_state.info.sys_id {
             reactor.transaction_manager.store_txid(
                 wsid,
                 reactor.transaction_manager.get_last_sent_txid(wsid),
@@ -51,7 +51,7 @@ impl WindowEventHandler {
             );
         }
 
-        let server_id = window_state.window_server_id;
+        let server_id = window_state.info.sys_id;
         reactor.window_manager.windows.insert(wid, window_state);
 
         if is_manageable {
@@ -87,8 +87,7 @@ impl WindowEventHandler {
         if !reactor.window_manager.windows.contains_key(&wid) {
             return false;
         }
-        let window_server_id =
-            reactor.window_manager.windows.get(&wid).and_then(|w| w.window_server_id);
+        let window_server_id = reactor.window_manager.windows.get(&wid).and_then(|w| w.info.sys_id);
         if let Some(ws_id) = window_server_id {
             reactor.transaction_manager.remove_for_window(ws_id);
             reactor.window_manager.window_ids.remove(&ws_id);
@@ -127,12 +126,12 @@ impl WindowEventHandler {
 
     pub fn handle_window_minimized(reactor: &mut Reactor, wid: WindowId) {
         if let Some(window) = reactor.window_manager.windows.get_mut(&wid) {
-            if window.is_minimized {
+            if window.info.is_minimized {
                 return;
             }
-            window.is_minimized = true;
+            window.info.is_minimized = true;
             window.is_manageable = false;
-            if let Some(ws_id) = window.window_server_id {
+            if let Some(ws_id) = window.info.sys_id {
                 reactor.window_manager.visible_windows.remove(&ws_id);
             }
             reactor.send_layout_event(LayoutEvent::WindowRemoved(wid));
@@ -145,15 +144,15 @@ impl WindowEventHandler {
         let (frame, server_id, is_ax_standard, is_ax_root) =
             match reactor.window_manager.windows.get_mut(&wid) {
                 Some(window) => {
-                    if !window.is_minimized {
+                    if !window.info.is_minimized {
                         return;
                     }
-                    window.is_minimized = false;
+                    window.info.is_minimized = false;
                     (
                         window.frame_monotonic,
-                        window.window_server_id,
-                        window.is_ax_standard,
-                        window.is_ax_root,
+                        window.info.sys_id,
+                        window.info.is_standard,
+                        window.info.is_root,
                     )
                 }
                 None => {
@@ -222,13 +221,14 @@ impl WindowEventHandler {
                     reactor.mission_control_manager.mission_control_state,
                     MissionControlState::Active
                 ) || window
-                    .window_server_id
+                    .info
+                    .sys_id
                     .is_some_and(|wsid| reactor.space_manager.changing_screens.contains(&wsid))
                 {
                     return false;
                 }
 
-                let server_id = window.window_server_id;
+                let server_id = window.info.sys_id;
                 let old_frame = window.frame_monotonic;
 
                 (server_id, old_frame)
@@ -294,7 +294,7 @@ impl WindowEventHandler {
                         "Rift frame event missing tx record; updating state"
                     );
                     window.frame_monotonic = new_frame;
-                    if let Some(wsid) = window.window_server_id {
+                    if let Some(wsid) = window.info.sys_id {
                         reactor.transaction_manager.remove_for_window(wsid);
                     }
                 } else if !window.frame_monotonic.same_as(new_frame) {
@@ -326,7 +326,7 @@ impl WindowEventHandler {
                 if old_frame2 == new_frame {
                     return false;
                 }
-                window.window_server_id
+                window.info.sys_id
             };
 
             let dragging = event_mouse_state == Some(MouseState::Down)
@@ -443,11 +443,11 @@ impl WindowEventHandler {
 
     pub fn handle_window_title_changed(reactor: &mut Reactor, wid: WindowId, new_title: String) {
         if let Some(window) = reactor.window_manager.windows.get_mut(&wid) {
-            let previous_title = window.title.clone();
+            let previous_title = window.info.title.clone();
             if previous_title == new_title {
                 return;
             }
-            window.title = new_title.clone();
+            window.info.title = new_title.clone();
             reactor.broadcast_window_title_changed(wid, previous_title, new_title);
             reactor.maybe_reapply_app_rules_for_window(wid);
         }
@@ -467,7 +467,7 @@ impl WindowEventHandler {
         reactor.raise_window(wid, Quiet::No, None);
 
         let space = reactor.window_manager.windows.get(&wid).and_then(|window| {
-            reactor.best_space_for_window(&window.frame_monotonic, window.window_server_id)
+            reactor.best_space_for_window(&window.frame_monotonic, window.info.sys_id)
         });
 
         if let Some(space) = space {

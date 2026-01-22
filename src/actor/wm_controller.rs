@@ -29,7 +29,7 @@ use crate::common::collections::HashSet;
 use crate::model::tx_store::WindowTxStore;
 use crate::sys::dispatch::DispatchExt;
 use crate::sys::event::Hotkey;
-use crate::sys::screen::{CoordinateConverter, ScreenDescriptor, SpaceId};
+use crate::sys::screen::{CoordinateConverter, ScreenInfo, SpaceId};
 use crate::sys::window_server::WindowServerInfo;
 use crate::{layout_engine as layout, sys};
 
@@ -44,7 +44,7 @@ pub enum WmEvent {
     DisplayChurnBegin,
     DisplayChurnEnd,
     SpaceChanged(Vec<Option<SpaceId>>),
-    ScreenParametersChanged(Vec<ScreenDescriptor>, CoordinateConverter, Vec<Option<SpaceId>>),
+    ScreenParametersChanged(Vec<ScreenInfo>, CoordinateConverter),
     SystemWoke,
     PowerStateChanged(bool),
     ConfigUpdated(crate::common::config::Config),
@@ -259,22 +259,12 @@ impl WmController {
                     self.register_hotkeys();
                 }
             }
-            ScreenParametersChanged(screens, converter, spaces) => {
+            ScreenParametersChanged(screens, converter) => {
                 let frames: Vec<CGRect> = screens.iter().map(|s| s.frame).collect();
-                let snapshots: Vec<reactor::ScreenSnapshot> = screens
-                    .into_iter()
-                    .zip(spaces.iter().copied())
-                    .map(|(descriptor, space)| reactor::ScreenSnapshot {
-                        screen_id: descriptor.id.as_u32(),
-                        frame: descriptor.frame,
-                        space,
-                        display_uuid: descriptor.display_uuid,
-                        name: descriptor.name,
-                    })
-                    .collect();
+                let spaces: Vec<Option<SpaceId>> = screens.iter().map(|s| s.space).collect();
 
                 self.events_tx.send(Event::ScreenParametersChanged(
-                    snapshots,
+                    screens,
                     self.get_windows_for_spaces(&spaces),
                 ));
 

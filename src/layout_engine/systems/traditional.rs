@@ -1731,7 +1731,7 @@ impl TraditionalLayoutSystem {
 struct Components {
     selection: Selection,
     layout: Layout,
-    window: Window,
+    window: WindowIndex,
 }
 
 impl tree::Observer for Components {
@@ -1769,7 +1769,7 @@ impl tree::Observer for Components {
 }
 
 #[derive(Default, Serialize, Deserialize)]
-struct Window {
+struct WindowIndex {
     windows: slotmap::SecondaryMap<NodeId, WindowId>,
     window_nodes: crate::common::collections::BTreeMap<WindowId, WindowNodeInfoVec>,
 }
@@ -1783,7 +1783,7 @@ struct WindowNodeInfo {
 #[derive(Serialize, Deserialize, Default)]
 struct WindowNodeInfoVec(Vec<WindowNodeInfo>);
 
-impl Window {
+impl WindowIndex {
     fn at(&self, node: NodeId) -> Option<WindowId> { self.windows.get(node).copied() }
 
     fn node_for(&self, layout: LayoutId, wid: WindowId) -> Option<NodeId> {
@@ -2074,7 +2074,7 @@ impl Layout {
         }
     }
 
-    fn is_focused_in_subtree(&self, map: &NodeMap, window: &Window, node: NodeId) -> bool {
+    fn is_focused_in_subtree(&self, map: &NodeMap, window: &WindowIndex, node: NodeId) -> bool {
         if window.at(node).is_some() {
             if let Some(parent) = node.parent(map) {
                 return parent.first_child(map) == Some(node);
@@ -2091,7 +2091,7 @@ impl Layout {
     fn apply_with_gaps(
         &self,
         map: &NodeMap,
-        window: &Window,
+        window: &WindowIndex,
         node: NodeId,
         rect: CGRect,
         screen: CGRect,
@@ -2199,7 +2199,7 @@ impl Layout {
     fn layout_axis(
         &self,
         map: &NodeMap,
-        window: &Window,
+        window: &WindowIndex,
         node: NodeId,
         rect: CGRect,
         screen: CGRect,

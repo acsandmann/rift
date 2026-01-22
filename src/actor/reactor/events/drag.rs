@@ -50,9 +50,7 @@ impl DragEventHandler {
                     .window_manager
                     .windows
                     .get(&dragged_wid)
-                    .and_then(|w| {
-                        reactor.best_space_for_window(&w.frame_monotonic, w.window_server_id)
-                    })
+                    .and_then(|w| reactor.best_space_for_window(&w.frame_monotonic, w.info.sys_id))
                     .or_else(|| {
                         reactor
                             .drag_manager

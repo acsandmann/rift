@@ -375,7 +375,7 @@ impl From<&NSRunningApplication> for AppInfo {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct WindowInfo {
     pub is_standard: bool,
     #[serde(default)]

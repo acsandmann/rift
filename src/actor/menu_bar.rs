@@ -212,10 +212,10 @@ fn sig(active_space: u64, active_workspace: Option<u64>, windows: &[WindowData])
 
     for w in windows {
         let v = (w.id.idx.get() as u64)
-            ^ w.frame.origin.x.to_bits().rotate_left(11)
-            ^ w.frame.origin.y.to_bits().rotate_left(23)
-            ^ w.frame.size.width.to_bits().rotate_left(37)
-            ^ w.frame.size.height.to_bits().rotate_left(51);
+            ^ w.info.frame.origin.x.to_bits().rotate_left(11)
+            ^ w.info.frame.origin.y.to_bits().rotate_left(23)
+            ^ w.info.frame.size.width.to_bits().rotate_left(37)
+            ^ w.info.frame.size.height.to_bits().rotate_left(51);
 
         x ^= v;
         s = s.wrapping_add(v);

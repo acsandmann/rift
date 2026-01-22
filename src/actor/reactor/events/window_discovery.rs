@@ -103,11 +103,11 @@ impl WindowDiscoveryHandler {
                                 return None;
                             }
 
-                            if state.is_minimized {
+                            if state.info.is_minimized {
                                 return None;
                             }
 
-                            let Some(ws_id) = state.window_server_id else {
+                            let Some(ws_id) = state.info.sys_id else {
                                 trace!(
                                     ?wid,
                                     "Skipping stale cleanup for window without window server id"
@@ -227,40 +227,27 @@ impl WindowDiscoveryHandler {
                         &reactor.window_server_info_manager.window_server_info,
                     );
                     if let Some(existing) = reactor.window_manager.windows.get_mut(wid) {
-                        existing.title = info.title.clone();
+                        existing.info.title = info.title.clone();
                         if info.frame.size.width != 0.0 || info.frame.size.height != 0.0 {
                             existing.frame_monotonic = info.frame;
                         }
-                        existing.is_ax_standard = info.is_standard;
-                        existing.is_ax_root = info.is_root;
-                        existing.is_minimized = info.is_minimized;
-                        existing.window_server_id = info.sys_id;
-                        existing.bundle_id = info.bundle_id.clone();
-                        existing.bundle_path = info.path.clone();
-                        existing.ax_role = info.ax_role.clone();
-                        existing.ax_subrole = info.ax_subrole.clone();
+                        existing.info.is_standard = info.is_standard;
+                        existing.info.is_root = info.is_root;
+                        existing.info.is_minimized = info.is_minimized;
+                        existing.info.sys_id = info.sys_id;
+                        existing.info.bundle_id = info.bundle_id.clone();
+                        existing.info.path = info.path.clone();
+                        existing.info.ax_role = info.ax_role.clone();
+                        existing.info.ax_subrole = info.ax_subrole.clone();
                         existing.is_manageable = manageable;
                     }
                 } else {
-                    let mut state: WindowState = WindowState {
-                        title: info.title.clone(),
-                        frame_monotonic: info.frame,
-                        is_ax_standard: info.is_standard,
-                        is_ax_root: info.is_root,
-                        is_minimized: info.is_minimized,
-                        is_manageable: false,
-                        ignore_app_rule: false,
-                        window_server_id: info.sys_id,
-                        bundle_id: info.bundle_id.clone(),
-                        bundle_path: info.path.clone(),
-                        ax_role: info.ax_role.clone(),
-                        ax_subrole: info.ax_subrole.clone(),
-                    };
+                    let mut state: WindowState = WindowState::from((*info).clone());
                     let manageable = utils::compute_window_manageability(
-                        state.window_server_id,
-                        state.is_minimized,
-                        state.is_ax_standard,
-                        state.is_ax_root,
+                        state.info.sys_id,
+                        state.info.is_minimized,
+                        state.info.is_standard,
+                        state.info.is_root,
                         &reactor.window_server_info_manager.window_server_info,
                     );
                     state.is_manageable = manageable;
@@ -309,10 +296,10 @@ impl WindowDiscoveryHandler {
         for (wid, info) in new_windows {
             let mut state: WindowState = info.into();
             let manageable = utils::compute_window_manageability(
-                state.window_server_id,
-                state.is_minimized,
-                state.is_ax_standard,
-                state.is_ax_root,
+                state.info.sys_id,
+                state.info.is_minimized,
+                state.info.is_standard,
+                state.info.is_root,
                 &reactor.window_server_info_manager.window_server_info,
             );
             state.is_manageable = manageable;
@@ -361,7 +348,7 @@ impl WindowDiscoveryHandler {
                 continue;
             };
             let Some(space) =
-                reactor.best_space_for_window(&state.frame_monotonic, state.window_server_id)
+                reactor.best_space_for_window(&state.frame_monotonic, state.info.sys_id)
             else {
                 continue;
             };
@@ -386,7 +373,7 @@ impl WindowDiscoveryHandler {
             if !windows_for_space.is_empty() {
                 for wid in &windows_for_space {
                     let title_opt =
-                        reactor.window_manager.windows.get(wid).map(|w| w.title.clone());
+                        reactor.window_manager.windows.get(wid).map(|w| w.info.title.clone());
                     let assign_result = reactor
                         .layout_manager
                         .layout_engine
@@ -401,12 +388,12 @@ impl WindowDiscoveryHandler {
                                 .window_manager
                                 .windows
                                 .get(wid)
-                                .and_then(|w| w.ax_role.as_deref()),
+                                .and_then(|w| w.info.ax_role.as_deref()),
                             reactor
                                 .window_manager
                                 .windows
                                 .get(wid)
-                                .and_then(|w| w.ax_subrole.as_deref()),
+                                .and_then(|w| w.info.ax_subrole.as_deref()),
                         );
 
                     match assign_result {
@@ -450,9 +437,9 @@ impl WindowDiscoveryHandler {
                     }
                     Some((
                         wid,
-                        Some(window.title.clone()),
-                        window.ax_role.clone(),
-                        window.ax_subrole.clone(),
+                        Some(window.info.title.clone()),
+                        window.info.ax_role.clone(),
+                        window.info.ax_subrole.clone(),
                     ))
                 })
                 .collect();

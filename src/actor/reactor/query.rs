@@ -11,7 +11,7 @@ use crate::model::server::{
     ApplicationData, DisplayData, LayoutStateData, WindowData, WorkspaceData,
 };
 use crate::model::virtual_workspace::VirtualWorkspaceId;
-use crate::sys::screen::{SpaceId, get_active_space_number, managed_display_space_ids};
+use crate::sys::screen::{ScreenInfo, SpaceId, get_active_space_number, managed_display_space_ids};
 
 #[derive(Clone)]
 pub struct ReactorQueryHandle {
@@ -203,7 +203,7 @@ impl Reactor {
                 if let Some(mut wd) = self.create_window_data(wid) {
                     if !is_active {
                         if let Some(pred) = predicted_map.get(&wid).copied() {
-                            wd.frame = pred;
+                            wd.info.frame = pred;
                         }
                     }
                     windows.push(wd);
@@ -258,11 +258,10 @@ impl Reactor {
                     .map(|space| space.get())
                     .collect();
                 DisplayData {
-                    uuid: screen.display_uuid.clone(),
-                    name: screen.name.clone(),
-                    screen_id: screen.screen_id.as_u32(),
-                    frame: screen.frame,
-                    space: space_for_screen.map(|s: SpaceId| s.get()),
+                    info: ScreenInfo {
+                        space: space_for_screen,
+                        ..screen.clone()
+                    },
                     is_active_space: space_for_screen
                         .map(|s| active_space_set.contains(&s.get()))
                         .unwrap_or(false),

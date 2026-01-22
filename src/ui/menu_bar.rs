@@ -24,8 +24,8 @@ use crate::common::config::{
 };
 use crate::model::VirtualWorkspaceId;
 use crate::model::server::{WindowData, WorkspaceData};
-use crate::ui::compute_window_layout_metrics;
 use crate::sys::screen::SpaceId;
+use crate::ui::compute_window_layout_metrics;
 
 const CELL_WIDTH: f64 = 20.0;
 const CELL_HEIGHT: f64 = 15.0;
@@ -202,7 +202,7 @@ struct MenuIconLayout {
 struct WorkspaceRenderData {
     bg_rect: CGRect,
     fill_alpha: f64,
-    windows: Vec<WindowRenderRect>,
+    windows: Vec<CGRect>,
     label_line: Option<CachedTextLine>,
     show_windows: bool,
 }
@@ -211,13 +211,6 @@ struct WorkspaceRenderInput {
     workspace: WorkspaceData,
     label: String,
     show_windows: bool,
-}
-
-struct WindowRenderRect {
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
 }
 
 struct CachedTextLine {
@@ -339,20 +332,20 @@ fn build_layout(
         };
 
         let windows = if input.show_windows && !workspace.windows.is_empty() {
-            let layout =
-                compute_window_layout_metrics(&workspace.windows, bg_rect, CONTENT_INSET, 1.0, None);
+            let layout = compute_window_layout_metrics(
+                &workspace.windows,
+                bg_rect,
+                CONTENT_INSET,
+                1.0,
+                None,
+            );
             if let Some(layout) = layout {
                 const MIN_TILE_SIZE: f64 = 2.0;
                 const WIN_GAP: f64 = 0.75;
                 let mut rects = Vec::with_capacity(workspace.windows.len());
                 for window in workspace.windows.iter().rev() {
                     let rect = layout.rect_for(window, MIN_TILE_SIZE, WIN_GAP);
-                    rects.push(WindowRenderRect {
-                        x: rect.origin.x,
-                        y: rect.origin.y,
-                        width: rect.size.width,
-                        height: rect.size.height,
-                    });
+                    rects.push(rect);
                 }
                 rects
             } else {
@@ -465,10 +458,10 @@ define_class!(
                         for window in workspace.windows.iter() {
                             add_rounded_rect(
                                 cg,
-                                window.x,
-                                window.y + y_offset,
-                                window.width,
-                                window.height,
+                                window.origin.x,
+                                window.origin.y + y_offset,
+                                window.size.width,
+                                window.size.height,
                                 1.5,
                             );
                             CGContext::set_rgb_fill_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
@@ -480,10 +473,10 @@ define_class!(
                             CGContext::set_line_width(Some(cg), 1.5);
                             add_rounded_rect(
                                 cg,
-                                window.x,
-                                window.y,
-                                window.width,
-                                window.height,
+                                window.origin.x,
+                                window.origin.y,
+                                window.size.width,
+                                window.size.height,
                                 1.5,
                             );
                             CGContext::stroke_path(Some(cg));
