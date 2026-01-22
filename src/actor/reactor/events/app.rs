@@ -39,12 +39,7 @@ impl AppEventHandler {
 
     pub fn handle_resync_app_for_window(reactor: &mut Reactor, wsid: WindowServerId) {
         if let Some(&wid) = reactor.window_manager.window_ids.get(&wsid) {
-            if let Some(app_state) = reactor.app_manager.apps.get(&wid.pid) {
-                if let Err(e) = app_state.handle.send(crate::actor::app::Request::GetVisibleWindows)
-                {
-                    warn!("Failed to send GetVisibleWindows to app {}: {}", wid.pid, e);
-                }
-            }
+            request_visible_windows(reactor, wid.pid);
         } else if let Some(info) = reactor
             .window_server_info_manager
             .window_server_info
@@ -52,12 +47,7 @@ impl AppEventHandler {
             .cloned()
             .or_else(|| window_server::get_window(wsid))
         {
-            if let Some(app_state) = reactor.app_manager.apps.get(&info.pid) {
-                if let Err(e) = app_state.handle.send(crate::actor::app::Request::GetVisibleWindows)
-                {
-                    warn!("Failed to send GetVisibleWindows to app {}: {}", info.pid, e);
-                }
-            }
+            request_visible_windows(reactor, info.pid);
         }
     }
 
@@ -80,5 +70,13 @@ impl AppEventHandler {
         known_visible: Vec<WindowId>,
     ) {
         reactor.on_windows_discovered_with_app_info(pid, new, known_visible, None);
+    }
+}
+
+fn request_visible_windows(reactor: &Reactor, pid: i32) {
+    if let Some(app_state) = reactor.app_manager.apps.get(&pid) {
+        if let Err(e) = app_state.handle.send(crate::actor::app::Request::GetVisibleWindows) {
+            warn!("Failed to send GetVisibleWindows to app {}: {}", pid, e);
+        }
     }
 }

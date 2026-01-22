@@ -1,9 +1,7 @@
 use tracing::trace;
 
 use crate::actor::reactor::{DragState, Reactor};
-use crate::common::collections::HashMap;
 use crate::layout_engine::LayoutCommand;
-use crate::sys::screen::{SpaceId, order_visible_spaces_by_position};
 
 pub struct DragEventHandler;
 
@@ -27,24 +25,8 @@ impl DragEventHandler {
                     "Skipping deferred swap; one of the windows no longer exists"
                 );
             } else {
-                let visible_spaces_input: Vec<(SpaceId, _)> = reactor
-                    .space_manager
-                    .screens
-                    .iter()
-                    .filter_map(|screen| {
-                        let space = screen.space?;
-                        let center = screen.frame.mid();
-                        Some((space, center))
-                    })
-                    .collect();
-
-                let mut visible_space_centers = HashMap::default();
-                for (space, center) in &visible_spaces_input {
-                    visible_space_centers.insert(*space, *center);
-                }
-
-                let visible_spaces =
-                    order_visible_spaces_by_position(visible_spaces_input.iter().cloned());
+                let (visible_spaces, visible_space_centers) =
+                    reactor.visible_spaces_for_layout(true);
 
                 let swap_space = reactor
                     .window_manager
@@ -76,10 +58,7 @@ impl DragEventHandler {
         reactor.drag_manager.reset();
         reactor.drag_manager.drag_state = DragState::Inactive;
 
-        if finalize_needs_layout
-            || reactor.is_in_drag()
-            || reactor.drag_manager.skip_layout_for_window.is_some()
-        {
+        if finalize_needs_layout || reactor.drag_manager.skip_layout_for_window.is_some() {
             need_layout_refresh = true;
         }
 

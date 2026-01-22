@@ -42,16 +42,21 @@ impl SystemEventHandler {
     }
 
     pub fn handle_raise_completed(reactor: &mut Reactor, window_id: WindowId, sequence_id: u64) {
-        let msg = raise_manager::Event::RaiseCompleted { window_id, sequence_id };
-        _ = reactor.communication_manager.raise_manager_tx.send(msg);
+        send_raise_event(reactor, raise_manager::Event::RaiseCompleted {
+            window_id,
+            sequence_id,
+        });
     }
 
     pub fn handle_raise_timeout(reactor: &mut Reactor, sequence_id: u64) {
-        let msg = raise_manager::Event::RaiseTimeout { sequence_id };
-        _ = reactor.communication_manager.raise_manager_tx.send(msg);
+        send_raise_event(reactor, raise_manager::Event::RaiseTimeout { sequence_id });
     }
 
     pub fn handle_register_wm_sender(reactor: &mut Reactor, sender: WmSender) {
         reactor.communication_manager.wm_sender = Some(sender);
     }
+}
+
+fn send_raise_event(reactor: &mut Reactor, event: raise_manager::Event) {
+    _ = reactor.communication_manager.raise_manager_tx.send(event);
 }

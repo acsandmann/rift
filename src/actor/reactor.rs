@@ -55,7 +55,7 @@ use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt};
 pub use crate::sys::screen::ScreenInfo;
-use crate::sys::screen::{SpaceId, get_active_space_number};
+use crate::sys::screen::{SpaceId, get_active_space_number, order_visible_spaces_by_position};
 use crate::sys::timer::Timer;
 use crate::sys::window_server::{
     self, WindowServerId, WindowServerInfo, current_cursor_location, space_is_fullscreen,
@@ -637,36 +637,7 @@ impl Reactor {
         while let Some((span, event)) = events.recv().await {
             let _guard = span.enter();
             let mut reactor = reactor.write();
-            let is_screen_params_changed = matches!(event, Event::ScreenParametersChanged(..));
-            if reactor.display_churn_active
-                && !matches!(
-                    event,
-                    Event::ScreenParametersChanged(..)
-                        | Event::DisplayChurnBegin
-                        | Event::DisplayChurnEnd
-                )
-            {
-                Self::note_windowserver_activity_during_display_churn(&event);
-                if matches!(
-                    event,
-                    Event::WindowServerDestroyed(..)
-                        | Event::WindowServerAppeared(..)
-                        | Event::ResyncAppForWindow(..)
-                ) {
-                    trace!("reactor_drop event={:?}", event);
-                }
-                reactor.display_churn_pending_full_refresh = true;
-                continue;
-            }
-
-            reactor.handle_event(event);
-
-            if is_screen_params_changed
-                && reactor.display_churn_pending_full_refresh
-                && !reactor.display_churn_active
-            {
-                reactor.recover_from_display_churn();
-            }
+            reactor.handle_loop_event(event);
         }
     }
 
@@ -684,36 +655,40 @@ impl Reactor {
     async fn run_reactor_loop(mut self, mut events: Receiver) {
         while let Some((span, event)) = events.recv().await {
             let _guard = span.enter();
-            let is_screen_params_changed = matches!(event, Event::ScreenParametersChanged(..));
-            if self.display_churn_active
-                && !matches!(
-                    event,
-                    Event::ScreenParametersChanged(..)
-                        | Event::DisplayChurnBegin
-                        | Event::DisplayChurnEnd
-                )
-            {
-                Self::note_windowserver_activity_during_display_churn(&event);
-                if matches!(
-                    event,
-                    Event::WindowServerDestroyed(..)
-                        | Event::WindowServerAppeared(..)
-                        | Event::ResyncAppForWindow(..)
-                ) {
-                    trace!("reactor_drop event={:?}", event);
-                }
-                self.display_churn_pending_full_refresh = true;
-                continue;
-            }
+            self.handle_loop_event(event);
+        }
+    }
 
-            self.handle_event(event);
-
-            if is_screen_params_changed
-                && self.display_churn_pending_full_refresh
-                && !self.display_churn_active
-            {
-                self.recover_from_display_churn();
+    fn handle_loop_event(&mut self, event: Event) {
+        let is_screen_params_changed = matches!(event, Event::ScreenParametersChanged(..));
+        if self.display_churn_active
+            && !matches!(
+                event,
+                Event::ScreenParametersChanged(..)
+                    | Event::DisplayChurnBegin
+                    | Event::DisplayChurnEnd
+            )
+        {
+            Self::note_windowserver_activity_during_display_churn(&event);
+            if matches!(
+                event,
+                Event::WindowServerDestroyed(..)
+                    | Event::WindowServerAppeared(..)
+                    | Event::ResyncAppForWindow(..)
+            ) {
+                trace!("reactor_drop event={:?}", event);
             }
+            self.display_churn_pending_full_refresh = true;
+            return;
+        }
+
+        self.handle_event(event);
+
+        if is_screen_params_changed
+            && self.display_churn_pending_full_refresh
+            && !self.display_churn_active
+        {
+            self.recover_from_display_churn();
         }
     }
 
@@ -752,6 +727,36 @@ impl Reactor {
         }
     }
 
+    fn should_update_notifications(event: &Event) -> bool {
+        matches!(
+            event,
+            Event::WindowCreated(..)
+                | Event::WindowDestroyed(..)
+                | Event::WindowServerDestroyed(..)
+                | Event::WindowServerAppeared(..)
+                | Event::WindowsDiscovered { .. }
+                | Event::ApplicationLaunched { .. }
+                | Event::ApplicationTerminated(..)
+                | Event::ApplicationThreadTerminated(..)
+                | Event::SpaceChanged(..)
+                | Event::ScreenParametersChanged(..)
+        )
+    }
+
+    fn set_login_window_active(&mut self, active: bool) {
+        self.space_activation_policy.set_login_window_active(active);
+        self.recompute_and_set_active_spaces_from_current_screens();
+    }
+
+    fn handle_space_lifecycle(&mut self, space: SpaceId, created: bool) {
+        if created {
+            self.space_activation_policy.on_space_created(space);
+        } else {
+            self.space_activation_policy.on_space_destroyed(space);
+        }
+        self.recompute_and_set_active_spaces_from_current_screens();
+    }
+
     #[instrument(name = "reactor::handle_event", skip(self), fields(event=?event))]
     fn handle_event(&mut self, event: Event) {
         self.log_event(&event);
@@ -770,19 +775,7 @@ impl Reactor {
             _ => {}
         }
 
-        let should_update_notifications = matches!(
-            &event,
-            Event::WindowCreated(..)
-                | Event::WindowDestroyed(..)
-                | Event::WindowServerDestroyed(..)
-                | Event::WindowServerAppeared(..)
-                | Event::WindowsDiscovered { .. }
-                | Event::ApplicationLaunched { .. }
-                | Event::ApplicationTerminated(..)
-                | Event::ApplicationThreadTerminated(..)
-                | Event::SpaceChanged(..)
-                | Event::ScreenParametersChanged(..)
-        );
+        let should_update_notifications = Self::should_update_notifications(&event);
 
         let raised_window = self.main_window_tracker.handle_event(&event);
         let mut is_resize = false;
@@ -818,12 +811,9 @@ impl Reactor {
             Event::ApplicationActivated(pid, quiet) => {
                 AppEventHandler::handle_application_activated(self, pid, quiet);
             }
-            Event::ApplicationDeactivated(..) | Event::ApplicationMainWindowChanged(..) => {}
             Event::ApplicationGloballyDeactivated(pid) => {
                 if self.is_login_window_pid(pid) {
-                    self.space_activation_policy.set_login_window_active(false);
-
-                    self.recompute_and_set_active_spaces_from_current_screens();
+                    self.set_login_window_active(false);
                 }
             }
             Event::ResyncAppForWindow(wsid) => {
@@ -831,8 +821,7 @@ impl Reactor {
             }
             Event::ApplicationGloballyActivated(pid) => {
                 if self.is_login_window_pid(pid) {
-                    self.space_activation_policy.set_login_window_active(true);
-                    self.recompute_and_set_active_spaces_from_current_screens();
+                    self.set_login_window_active(true);
 
                     let raw_spaces = self.raw_spaces_for_current_screens();
                     self.reconcile_spaces_with_display_history(&raw_spaces, false);
@@ -842,8 +831,7 @@ impl Reactor {
                     // macOS sometimes activates loginwindow during wake without sending a
                     // corresponding deactivation. Any subsequent non-login activation
                     // indicates the user is back, so clear suppression.
-                    self.space_activation_policy.set_login_window_active(false);
-                    self.recompute_and_set_active_spaces_from_current_screens();
+                    self.set_login_window_active(false);
                 }
             }
             Event::RegisterWmSender(sender) => {
@@ -865,12 +853,10 @@ impl Reactor {
                 SpaceEventHandler::handle_window_server_appeared(self, wsid, sid);
             }
             Event::SpaceCreated(space) => {
-                self.space_activation_policy.on_space_created(space);
-                self.recompute_and_set_active_spaces_from_current_screens();
+                self.handle_space_lifecycle(space, true);
             }
             Event::SpaceDestroyed(space) => {
-                self.space_activation_policy.on_space_destroyed(space);
-                self.recompute_and_set_active_spaces_from_current_screens();
+                self.handle_space_lifecycle(space, false);
             }
             Event::WindowMinimized(wid) => {
                 WindowEventHandler::handle_window_minimized(self, wid);
@@ -918,88 +904,11 @@ impl Reactor {
             Event::RaiseTimeout { sequence_id } => {
                 SystemEventHandler::handle_raise_timeout(self, sequence_id);
             }
-            Event::Command(Command::Layout(cmd)) => {
-                CommandEventHandler::handle_command_layout(self, cmd);
-            }
-            Event::Command(Command::Metrics(cmd)) => {
-                CommandEventHandler::handle_command_metrics(self, cmd);
-            }
             Event::ConfigUpdated(new_cfg) => {
                 CommandEventHandler::handle_config_updated(self, new_cfg);
             }
-            Event::Command(Command::Reactor(ReactorCommand::Debug)) => {
-                CommandEventHandler::handle_command_reactor_debug(self);
-            }
-            Event::Command(Command::Reactor(ReactorCommand::Serialize)) => {
-                CommandEventHandler::handle_command_reactor_serialize(self);
-            }
-            Event::Command(Command::Reactor(ReactorCommand::SaveAndExit)) => {
-                CommandEventHandler::handle_command_reactor_save_and_exit(self);
-            }
-            Event::Command(Command::Reactor(ReactorCommand::SwitchSpace(dir))) => {
-                CommandEventHandler::handle_command_reactor_switch_space(self, dir);
-            }
-            Event::Command(Command::Reactor(ReactorCommand::ToggleSpaceActivated)) => {
-                let cfg = self.activation_cfg();
-
-                let focused_space = self
-                    .space_for_cursor_screen()
-                    .or_else(|| self.space_manager.first_known_space());
-
-                let Some(space) = focused_space else {
-                    return;
-                };
-
-                let display_uuid = self
-                    .space_manager
-                    .screen_by_space(space)
-                    .and_then(|screen| screen.display_uuid_owned());
-
-                self.space_activation_policy.toggle_space_activated(
-                    cfg,
-                    crate::actor::reactor::managers::space_activation::ToggleSpaceContext {
-                        space,
-                        display_uuid,
-                    },
-                );
-
-                self.recompute_and_set_active_spaces_from_current_screens();
-            }
-            Event::Command(Command::Reactor(ReactorCommand::FocusWindow {
-                window_id: wid,
-                window_server_id,
-            })) => {
-                CommandEventHandler::handle_command_reactor_focus_window(
-                    self,
-                    wid,
-                    window_server_id,
-                );
-            }
-            Event::Command(Command::Reactor(ReactorCommand::ShowMissionControlAll)) => {
-                CommandEventHandler::handle_command_reactor_show_mission_control_all(self);
-            }
-            Event::Command(Command::Reactor(ReactorCommand::ShowMissionControlCurrent)) => {
-                CommandEventHandler::handle_command_reactor_show_mission_control_current(self);
-            }
-            Event::Command(Command::Reactor(ReactorCommand::DismissMissionControl)) => {
-                CommandEventHandler::handle_command_reactor_dismiss_mission_control(self);
-            }
-            Event::Command(Command::Reactor(ReactorCommand::MoveMouseToDisplay(selector))) => {
-                CommandEventHandler::handle_command_reactor_move_mouse_to_display(self, &selector);
-            }
-            Event::Command(Command::Reactor(ReactorCommand::FocusDisplay(selector))) => {
-                CommandEventHandler::handle_command_reactor_focus_display(self, &selector);
-            }
-            Event::Command(Command::Reactor(ReactorCommand::MoveWindowToDisplay {
-                selector,
-                window_id,
-            })) => {
-                CommandEventHandler::handle_command_reactor_move_window_to_display(
-                    self, &selector, window_id,
-                );
-            }
-            Event::Command(Command::Reactor(ReactorCommand::CloseWindow { window_server_id })) => {
-                CommandEventHandler::handle_command_reactor_close_window(self, window_server_id)
+            Event::Command(cmd) => {
+                CommandEventHandler::handle_command(self, cmd);
             }
             _ => (),
         }
@@ -1647,6 +1556,33 @@ impl Reactor {
 
     fn window_is_standard(&self, id: WindowId) -> bool {
         self.window_matches_filter(id, WindowFilter::EffectivelyManageable)
+    }
+
+    pub(crate) fn visible_spaces_for_layout(
+        &self,
+        include_inactive: bool,
+    ) -> (Vec<SpaceId>, HashMap<SpaceId, CGPoint>) {
+        let visible_spaces_input: Vec<(SpaceId, CGPoint)> = self
+            .space_manager
+            .screens
+            .iter()
+            .filter_map(|screen| {
+                let space = screen.space?;
+                if !include_inactive && !self.is_space_active(space) {
+                    return None;
+                }
+                Some((space, screen.frame.mid()))
+            })
+            .collect();
+
+        let mut visible_space_centers = HashMap::default();
+        for (space, center) in &visible_spaces_input {
+            visible_space_centers.insert(*space, *center);
+        }
+
+        let visible_spaces = order_visible_spaces_by_position(visible_spaces_input.iter().cloned());
+
+        (visible_spaces, visible_space_centers)
     }
 
     fn send_layout_event(&mut self, event: LayoutEvent) {
@@ -2533,11 +2469,7 @@ impl Reactor {
         } else {
             MissionControlState::Inactive
         };
-        if matches!(
-            self.mission_control_manager.mission_control_state,
-            MissionControlState::Active
-        ) == active
-        {
+        if self.is_mission_control_active() == active {
             return;
         }
         self.mission_control_manager.mission_control_state = new_state;
