@@ -266,6 +266,7 @@ impl EventTap {
             }
             Request::SetEventProcessing(enabled) => {
                 state.event_processing_enabled = enabled;
+                state.reset(enabled);
             }
             Request::SetFocusFollowsMouseEnabled(enabled) => {
                 debug!(
@@ -273,6 +274,7 @@ impl EventTap {
                     if enabled { "enabled" } else { "disabled" }
                 );
                 state.focus_follows_mouse_enabled = enabled;
+                state.reset(enabled);
             }
             Request::SetHotkeys(bindings) => {
                 let mut map = self.hotkeys.borrow_mut();
@@ -652,6 +654,13 @@ impl State {
         }
 
         new_window
+    }
+
+    fn reset(&mut self, enabled: bool) {
+        if enabled {
+            self.above_window = None;
+            self.above_window_level = NSWindowLevel::MIN;
+        }
     }
 }
 
