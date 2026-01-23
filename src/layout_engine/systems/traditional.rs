@@ -36,7 +36,13 @@ impl TraditionalLayoutSystem {
             return None;
         }
 
-        if let Some(selected) = self.tree.data.selection.local_selection(self.map(), node) {
+        if let Some(selected) = self
+            .tree
+            .data
+            .selection
+            .local_selection(self.map(), node)
+            .or_else(|| self.tree.data.selection.last_selection(self.map(), node))
+        {
             if let Some(target) = self.find_best_focus_target(selected) {
                 return Some(target);
             }
@@ -464,11 +470,6 @@ impl LayoutSystem for TraditionalLayoutSystem {
             for (node, parent) in focus_node.ancestors_with_parent(map) {
                 let Some(parent) = parent else { break };
                 let parent_layout = self.layout(parent);
-                if parent_layout.is_stacked()
-                    && parent_layout.orientation() != direction.orientation()
-                {
-                    continue;
-                }
                 if self.tree.data.selection.select_locally(map, node) {
                     if parent_layout.is_group() {
                         highest_revealed = node;
