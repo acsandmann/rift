@@ -3,8 +3,6 @@ use std::time::Instant;
 use objc2_core_foundation::CGRect;
 use tracing::trace;
 
-pub mod space_activation;
-
 use super::replay::Record;
 use super::{
     AppState, Event, FullscreenSpaceTrack, PendingSpaceChange, ScreenInfo, WindowState,
@@ -198,7 +196,7 @@ impl LayoutManager {
         reactor: &mut Reactor,
         is_resize: bool,
         is_workspace_switch: bool,
-    ) -> Result<bool, super::error::ReactorError> {
+    ) -> Result<bool, crate::model::reactor::ReactorError> {
         let layout_result = Self::calculate_layout(reactor);
         Self::apply_layout(reactor, layout_result, is_resize, is_workspace_switch)
     }
@@ -249,7 +247,7 @@ impl LayoutManager {
         layout_result: LayoutResult,
         is_resize: bool,
         is_workspace_switch: bool,
-    ) -> Result<bool, super::error::ReactorError> {
+    ) -> Result<bool, crate::model::reactor::ReactorError> {
         let main_window = reactor.main_window();
         trace!(?main_window);
         let skip_wid = reactor

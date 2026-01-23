@@ -5,7 +5,6 @@
 //! changes by sending requests out to the other actors in the system.
 
 mod animation;
-mod error;
 mod events;
 mod main_window;
 mod managers;
@@ -49,6 +48,7 @@ use crate::actor::{self, menu_bar, stack_line};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
 use crate::common::config::Config;
 use crate::layout_engine::{self as layout, Direction, LayoutEngine, LayoutEvent};
+use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy};
 use crate::model::tx_store::WindowTxStore;
 use crate::model::virtual_workspace::AppRuleResult;
 use crate::sys::event::MouseState;
@@ -242,7 +242,7 @@ pub struct Reactor {
     window_manager: managers::WindowManager,
     window_server_info_manager: managers::WindowServerInfoManager,
     space_manager: managers::SpaceManager,
-    space_activation_policy: managers::space_activation::SpaceActivationPolicy,
+    space_activation_policy: SpaceActivationPolicy,
     main_window_tracker: MainWindowTracker,
     drag_manager: managers::DragManager,
     workspace_switch_manager: managers::WorkspaceSwitchManager,
@@ -333,7 +333,7 @@ impl Reactor {
                 changing_screens: HashSet::default(),
                 has_seen_display_set: false,
             },
-            space_activation_policy: managers::space_activation::SpaceActivationPolicy::new(),
+            space_activation_policy: SpaceActivationPolicy::new(),
             main_window_tracker: MainWindowTracker::default(),
             drag_manager: managers::DragManager {
                 drag_state: DragState::Inactive,
@@ -413,10 +413,8 @@ impl Reactor {
         self.is_space_active(space)
     }
 
-    fn activation_cfg(
-        &self,
-    ) -> crate::actor::reactor::managers::space_activation::SpaceActivationConfig {
-        crate::actor::reactor::managers::space_activation::SpaceActivationConfig {
+    fn activation_cfg(&self) -> SpaceActivationConfig {
+        SpaceActivationConfig {
             default_disable: self.config.settings.default_disable,
             one_space: self.one_space,
         }

@@ -7,3 +7,4 @@ pub use virtual_workspace::{
     HideCorner, VirtualWorkspace, VirtualWorkspaceId, VirtualWorkspaceManager,
 };
 pub mod reactor;
+pub mod space_activation;

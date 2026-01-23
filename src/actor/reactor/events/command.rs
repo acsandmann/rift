@@ -226,10 +226,7 @@ impl CommandEventHandler {
 
         reactor.space_activation_policy.toggle_space_activated(
             cfg,
-            crate::actor::reactor::managers::space_activation::ToggleSpaceContext {
-                space,
-                display_uuid,
-            },
+            crate::model::space_activation::ToggleSpaceContext { space, display_uuid },
         );
 
         reactor.recompute_and_set_active_spaces_from_current_screens();
