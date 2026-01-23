@@ -509,6 +509,7 @@ impl EventTap {
                     debug!(?target, "focus_follows_mouse disabled while hotkey held");
                 } else {
                     debug!(?target, "focus_follows_mouse re-enabled after hotkey release");
+                    state.reset(true);
                 }
             }
         }
