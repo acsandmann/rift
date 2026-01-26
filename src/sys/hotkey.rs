@@ -47,11 +47,15 @@ impl Modifiers {
         let mut variants = vec![Modifiers::empty()];
 
         for m in MOD_FAMILIES {
+            let has_generic = self.contains(m.generic);
             let has_left = self.contains(m.left);
             let has_right = self.contains(m.right);
 
-            if has_left && has_right {
-                let mut new_variants = Vec::with_capacity(variants.len() * 2);
+            let left_allowed = has_left || has_generic;
+            let right_allowed = has_right || has_generic;
+
+            if left_allowed && right_allowed {
+                let mut new_variants = Vec::with_capacity(variants.len() * 3);
                 for v in &variants {
                     let mut vl = *v;
                     vl.insert(m.left);
@@ -60,13 +64,18 @@ impl Modifiers {
                     let mut vr = *v;
                     vr.insert(m.right);
                     new_variants.push(vr);
+
+                    let mut vboth = *v;
+                    vboth.insert(m.left);
+                    vboth.insert(m.right);
+                    new_variants.push(vboth);
                 }
                 variants = new_variants;
-            } else if has_left {
+            } else if left_allowed {
                 for v in &mut variants {
                     v.insert(m.left);
                 }
-            } else if has_right {
+            } else if right_allowed {
                 for v in &mut variants {
                     v.insert(m.right);
                 }
