@@ -1,12 +1,12 @@
 // many ideas for how this works were taken from https://github.com/xiamaz/YabaiIndicator
 use std::cell::RefCell;
 
-use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send};
+use objc2::{rc::Retained, sel};
 use objc2_app_kit::{
     NSColor, NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSGraphicsContext,
-    NSStatusBar, NSStatusItem, NSVariableStatusItemLength, NSView,
+    NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength, NSView,
 };
 use objc2_core_foundation::{
     CFAttributedString, CFDictionary, CFRetained, CFString, CGFloat, CGPoint, CGRect, CGSize,
@@ -14,14 +14,16 @@ use objc2_core_foundation::{
 use objc2_core_graphics::{CGBlendMode, CGContext};
 use objc2_core_text::CTLine;
 use objc2_foundation::{
-    MainThreadMarker, NSAttributedStringKey, NSDictionary, NSMutableDictionary, NSRect, NSSize,
-    NSString,
+    MainThreadMarker, NSAttributedStringKey, NSDictionary, NSMutableDictionary, NSObject, NSRect,
+    NSSize, NSString,
 };
 use tracing::debug;
 
+use crate::actor::reactor;
 use crate::common::config::{
     ActiveWorkspaceLabel, MenuBarDisplayMode, MenuBarSettings, WorkspaceDisplayStyle,
 };
+use crate::ipc::{RiftCommand, RiftMachClient, RiftRequest};
 use crate::model::VirtualWorkspaceId;
 use crate::model::server::{WindowData, WorkspaceData};
 use crate::sys::screen::SpaceId;
@@ -40,12 +42,88 @@ pub struct MenuIcon {
     view: Retained<MenuIconView>,
     mtm: MainThreadMarker,
     prev_width: f64,
+    _action_handler: Retained<MenuActionHandler>,
+}
+
+struct MenuActionHandlerIvars {
+    _client: RiftMachClient,
+}
+
+fn build_show_all_mission_control_command() -> RiftRequest {
+    let rift_command = RiftCommand::Reactor(reactor::Command::Reactor(
+        reactor::ReactorCommand::ShowMissionControlAll,
+    ));
+
+    RiftRequest::ExecuteCommand {
+        command: serde_json::to_string(&rift_command)
+            .expect("Unable to serialize predetermined command"),
+        args: vec![],
+    }
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "RiftMenuActionHandler"]
+    #[ivars = MenuActionHandlerIvars]
+    struct MenuActionHandler;
+
+    impl MenuActionHandler {
+        #[unsafe(method(onShowMissionControlAll:))]
+        fn show_mission_control_all(&self, _sender: Option<&NSObject>) {
+                RiftMachClient::connect()
+                    .unwrap()
+                    .send_request(
+                        &build_show_all_mission_control_command()
+                    )
+                .unwrap();
+        }
+    }
+);
+
+impl MenuActionHandler {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let obj = mtm.alloc().set_ivars(MenuActionHandlerIvars {
+            _client: RiftMachClient::connect().unwrap(),
+        });
+        unsafe { msg_send![super(obj), init] }
+    }
+}
+
+fn menu_items(mtm: MainThreadMarker, menu: &Retained<NSMenu>, handler: &MenuActionHandler) {
+    unsafe {
+        let mission_ctrl = NSMenuItem::initWithTitle_action_keyEquivalent(
+            mtm.alloc(),
+            &NSString::from_str("Mission Control.."),
+            Some(sel!(onShowMissionControlAll:)),
+            &NSString::from_str(""),
+        );
+        mission_ctrl.setTarget(Some(handler));
+
+        menu.addItem(&mission_ctrl);
+
+        let quit = NSMenuItem::initWithTitle_action_keyEquivalent(
+            mtm.alloc(),
+            &NSString::from_str("Quit Rift"),
+            Some(sel!(terminate:)),
+            &NSString::from_str("q"),
+        );
+
+        menu.addItem(&quit);
+    }
 }
 
 impl MenuIcon {
     pub fn new(mtm: MainThreadMarker) -> Self {
+        let menu = NSMenu::new(mtm);
+        let handler = MenuActionHandler::new(mtm);
+
+        menu_items(mtm, &menu, &handler);
+
         let status_bar = NSStatusBar::systemStatusBar();
         let status_item = status_bar.statusItemWithLength(NSVariableStatusItemLength);
+
+        status_item.setMenu(Some(&menu));
+
         let view = MenuIconView::new(mtm);
         if let Some(btn) = status_item.button(mtm) {
             btn.addSubview(&*view);
@@ -58,6 +136,7 @@ impl MenuIcon {
             view,
             mtm,
             prev_width: 0.0,
+            _action_handler: handler,
         }
     }
 
