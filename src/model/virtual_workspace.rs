@@ -692,13 +692,14 @@ impl VirtualWorkspaceManager {
         &self,
         screen_frame: &CGRect,
         rect: &CGRect,
+        corner: HideCorner,
         app_bundle_id: Option<&str>,
     ) -> bool {
         let hidden_rect = self.calculate_hidden_position(
             *screen_frame,
             0,
             rect.size,
-            HideCorner::BottomRight,
+            corner,
             app_bundle_id,
         );
 

@@ -131,6 +131,7 @@ impl LayoutEngine {
         match &self.tree {
             LayoutSystemKind::Traditional(_) => "traditional",
             LayoutSystemKind::Bsp(_) => "bsp",
+            LayoutSystemKind::Aerospace(_) => "aerospace",
         }
     }
 
@@ -594,6 +595,9 @@ impl LayoutEngine {
             crate::common::config::LayoutMode::Bsp => {
                 LayoutSystemKind::Bsp(crate::layout_engine::BspLayoutSystem::default())
             }
+            crate::common::config::LayoutMode::Aerospace => LayoutSystemKind::Aerospace(
+                crate::layout_engine::AerospaceLayoutSystem::default(),
+            ),
         };
 
         LayoutEngine {
@@ -1111,6 +1115,25 @@ impl LayoutEngine {
                             EventResponse::default()
                         }
                     }
+                    LayoutSystemKind::Aerospace(s) => {
+                        if s.parent_of_selection_is_stacked(layout) {
+                            let default_orientation: crate::common::config::StackDefaultOrientation =
+                                self.layout_settings.stack.default_orientation;
+                            let toggled_windows = s
+                                .apply_stacking_to_parent_of_selection(layout, default_orientation);
+                            if !toggled_windows.is_empty() {
+                                EventResponse {
+                                    raise_windows: toggled_windows,
+                                    focus_window: None,
+                                }
+                            } else {
+                                EventResponse::default()
+                            }
+                        } else {
+                            s.toggle_tile_orientation(layout);
+                            EventResponse::default()
+                        }
+                    }
                     LayoutSystemKind::Bsp(s) => {
                         s.toggle_tile_orientation(layout);
                         EventResponse::default()
@@ -1176,6 +1199,7 @@ impl LayoutEngine {
         &mut self,
         space: SpaceId,
         screen: CGRect,
+        hide_corner: crate::model::HideCorner,
         gaps: &crate::common::config::GapSettings,
         stack_line_thickness: f64,
         stack_line_horiz: crate::common::config::HorizontalPlacement,
@@ -1208,17 +1232,16 @@ impl LayoutEngine {
             candidate: Option<CGRect>,
             store_if_absent: bool,
             screen: &CGRect,
+            hide_corner: HideCorner,
             center_rect: &impl Fn(CGSize) -> CGRect,
             window_size: &impl Fn(WindowId) -> CGSize,
         ) {
             let existing = positions.get(&wid).copied();
             let bundle_id = engine.get_app_bundle_id_for_window(wid);
             let visible = candidate.or(existing).filter(|rect| {
-                !engine.virtual_workspace_manager.is_hidden_position(
-                    screen,
-                    rect,
-                    bundle_id.as_deref(),
-                )
+                !engine
+                    .virtual_workspace_manager
+                    .is_hidden_position(screen, rect, hide_corner, bundle_id.as_deref())
             });
             let rect = visible.unwrap_or_else(|| center_rect(window_size(wid)));
             positions.insert(wid, rect);
@@ -1269,6 +1292,7 @@ impl LayoutEngine {
                         Some(stored_position),
                         false,
                         &screen,
+                        hide_corner,
                         &center_rect,
                         &window_size,
                     );
@@ -1286,6 +1310,7 @@ impl LayoutEngine {
                     None,
                     false,
                     &screen,
+                    hide_corner,
                     &center_rect,
                     &window_size,
                 );
@@ -1309,6 +1334,7 @@ impl LayoutEngine {
                         original_frame,
                         true,
                         &screen,
+                        hide_corner,
                         &center_rect,
                         &window_size,
                     );
@@ -1322,7 +1348,7 @@ impl LayoutEngine {
                 screen,
                 index,
                 original_size,
-                HideCorner::BottomRight,
+                hide_corner,
                 app_bundle_id.as_deref(),
             );
             positions.insert(wid, hidden_rect);
@@ -1343,6 +1369,15 @@ impl LayoutEngine {
         let layout_id = self.layout(space);
         match &self.tree {
             LayoutSystemKind::Traditional(s) => s.collect_group_containers_in_selection_path(
+                layout_id,
+                screen,
+                self.layout_settings.stack.stack_offset,
+                gaps,
+                stack_line_thickness,
+                stack_line_horiz,
+                stack_line_vert,
+            ),
+            LayoutSystemKind::Aerospace(s) => s.collect_group_containers_in_selection_path(
                 layout_id,
                 screen,
                 self.layout_settings.stack.stack_offset,
