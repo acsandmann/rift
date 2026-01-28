@@ -1123,6 +1123,108 @@ impl TraditionalLayoutSystem {
         out
     }
 
+    pub(crate) fn collect_group_containers(
+        &self,
+        layout: LayoutId,
+        screen: CGRect,
+        stack_offset: f64,
+        gaps: &crate::common::config::GapSettings,
+        stack_line_thickness: f64,
+        stack_line_horiz: crate::common::config::HorizontalPlacement,
+        stack_line_vert: crate::common::config::VerticalPlacement,
+    ) -> Vec<crate::layout_engine::engine::GroupContainerInfo> {
+        use self::StackLayoutResult;
+        use crate::layout_engine::LayoutKind::*;
+
+        let mut out = Vec::new();
+        let map = &self.tree.map;
+
+        let tiling_area = compute_tiling_area(screen, gaps);
+
+        let mut stack: Vec<(NodeId, CGRect)> = vec![(self.root(layout), tiling_area)];
+
+        while let Some((node, rect)) = stack.pop() {
+            if self.tree.data.layout.is_effectively_fullscreen(node) {
+                continue;
+            }
+
+            let kind = self.tree.data.layout.kind(node);
+            let children: Vec<_> = node.children(map).collect();
+
+            if matches!(kind, HorizontalStack | VerticalStack) {
+                if children.is_empty() {
+                    continue;
+                }
+
+                let local_sel =
+                    self.tree.data.selection.local_selection(map, node).unwrap_or(children[0]);
+                let selected_index = children.iter().position(|&c| c == local_sel).unwrap_or(0);
+
+                let ui_selected_index = if matches!(kind, VerticalStack) {
+                    children.len().saturating_sub(1).saturating_sub(selected_index)
+                } else {
+                    selected_index
+                };
+
+                out.push(crate::layout_engine::engine::GroupContainerInfo {
+                    node_id: node,
+                    container_kind: kind,
+                    frame: rect,
+                    total_count: children.len(),
+                    selected_index: ui_selected_index,
+                    window_ids: {
+                        let mut ids = children
+                            .iter()
+                            .filter_map(|&child| self.window_at(child))
+                            .collect::<Vec<_>>();
+                        if matches!(kind, VerticalStack) {
+                            ids.reverse();
+                        }
+                        ids
+                    },
+                });
+
+                let mut container_rect = rect;
+                let reserve = stack_line_thickness.max(0.0);
+                let is_horizontal = matches!(kind, HorizontalStack);
+                container_rect = adjust_stack_container_rect(
+                    container_rect,
+                    is_horizontal,
+                    reserve,
+                    stack_line_horiz,
+                    stack_line_vert,
+                );
+
+                let layout_res = StackLayoutResult::new(
+                    container_rect,
+                    children.len(),
+                    stack_offset,
+                    is_horizontal,
+                );
+
+                for (i, &child) in children.iter().enumerate().rev() {
+                    if self.tree.data.layout.is_effectively_fullscreen(child) {
+                        continue;
+                    }
+                    let child_rect = layout_res.get_focused_frame_for_index(i, i);
+                    stack.push((child, child_rect));
+                }
+
+                continue;
+            }
+
+            if !children.is_empty() {
+                for &child in children.iter().rev() {
+                    let child_rect =
+                        self.calculate_child_frame_in_container(node, child, rect, gaps);
+                    stack.push((child, child_rect));
+                }
+            }
+        }
+
+        out
+    }
+
     fn calculate_child_frame_in_axis(
         &self,
         parent_rect: CGRect,

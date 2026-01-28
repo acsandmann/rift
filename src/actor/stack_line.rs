@@ -30,6 +30,7 @@ pub struct GroupInfo {
 #[derive(Debug)]
 pub enum Event {
     GroupsUpdated {
+        active_space_ids: Vec<SpaceId>,
         space_id: SpaceId,
         groups: Vec<GroupInfo>,
     },
@@ -102,8 +103,12 @@ impl StackLine {
             return;
         }
         match event {
-            Event::GroupsUpdated { space_id, groups } => {
-                self.handle_groups_updated(space_id, groups);
+            Event::GroupsUpdated {
+                active_space_ids,
+                space_id,
+                groups,
+            } => {
+                self.handle_groups_updated(active_space_ids, space_id, groups);
             }
             Event::ScreenParametersChanged(converter) => {
                 self.handle_screen_parameters_changed(converter);
@@ -120,7 +125,26 @@ impl StackLine {
         }
     }
 
-    fn handle_groups_updated(&mut self, space_id: SpaceId, groups: Vec<GroupInfo>) {
+    fn handle_groups_updated(
+        &mut self,
+        active_space_ids: Vec<SpaceId>,
+        space_id: SpaceId,
+        groups: Vec<GroupInfo>,
+    ) {
+        let active: crate::common::collections::HashSet<SpaceId> =
+            active_space_ids.iter().copied().collect();
+
+        self.indicators.retain(|_node_id, indicator| match indicator.space_id() {
+            Some(indicator_space_id) if !active.contains(&indicator_space_id) => {
+                if let Err(err) = indicator.clear() {
+                    tracing::warn!(?err, "failed to clear stack line indicator for inactive space");
+                }
+                false
+            }
+            _ => true,
+        });
+        self.group_sigs_by_space.retain(|sid, _| active.contains(sid));
+
         let sigs: Vec<GroupSig> = groups.iter().map(GroupSig::from_group_info).collect();
 
         match self.group_sigs_by_space.entry(space_id) {

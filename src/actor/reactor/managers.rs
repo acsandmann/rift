@@ -266,10 +266,8 @@ impl LayoutManager {
                         let display_uuid = screen.display_uuid_opt();
                         let gaps =
                             reactor.config.settings.layout.gaps.effective_for_display(display_uuid);
-                        let group_infos = reactor
-                            .layout_manager
-                            .layout_engine
-                            .collect_group_containers_in_selection_path(
+                        let group_infos =
+                            reactor.layout_manager.layout_engine.collect_group_containers(
                                 space,
                                 screen.frame,
                                 &gaps,
@@ -290,8 +288,12 @@ impl LayoutManager {
                                 window_ids: g.window_ids,
                             })
                             .collect();
+                        let active_space_ids: Vec<crate::sys::screen::SpaceId> =
+                            reactor.iter_active_spaces().collect();
+
                         if let Err(e) =
                             tx.try_send(crate::actor::stack_line::Event::GroupsUpdated {
+                                active_space_ids,
                                 space_id: space,
                                 groups,
                             })

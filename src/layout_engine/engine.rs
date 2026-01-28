@@ -1355,6 +1355,30 @@ impl LayoutEngine {
         }
     }
 
+    pub fn collect_group_containers(
+        &mut self,
+        space: SpaceId,
+        screen: CGRect,
+        gaps: &crate::common::config::GapSettings,
+        stack_line_thickness: f64,
+        stack_line_horiz: crate::common::config::HorizontalPlacement,
+        stack_line_vert: crate::common::config::VerticalPlacement,
+    ) -> Vec<GroupContainerInfo> {
+        let layout_id = self.layout(space);
+        match &self.tree {
+            LayoutSystemKind::Traditional(s) => s.collect_group_containers(
+                layout_id,
+                screen,
+                self.layout_settings.stack.stack_offset,
+                gaps,
+                stack_line_thickness,
+                stack_line_horiz,
+                stack_line_vert,
+            ),
+            _ => Vec::new(),
+        }
+    }
+
     pub fn calculate_layout_for_workspace(
         &self,
         space: SpaceId,
