@@ -76,7 +76,7 @@ hot_reload = true
 
 [settings.layout]
 # Layout system
-# - mode: "traditional" (i3/sway-like containers) or "bsp" (binary space partitioning)
+# - mode: "traditional" (i3/sway-like containers), "aerospace" (traditional + join-with semantics), or "bsp" (binary space partitioning)
 #   defaults to "traditional" if omitted
 mode = "traditional"
 
