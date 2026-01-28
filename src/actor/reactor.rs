@@ -1305,11 +1305,45 @@ impl Reactor {
                 if self.handle_fullscreen_space_transition(&mut pending.spaces) {
                     return;
                 }
+                // A pending space change is queued specifically when Mission Control is active.
+                // When we apply it later, we must also recompute active spaces (normally done in
+                // the regular SpaceChanged handler) to avoid staying "space-less" until the next
+                // user-initiated space switch.
+                self.recompute_and_set_active_spaces(&pending.spaces);
                 self.set_screen_spaces(&pending.spaces);
                 self.finalize_space_change(&pending.spaces, pending.ws_info);
             } else {
                 self.pending_space_change_manager.pending_space_change = Some(pending);
             }
+        }
+    }
+
+    fn repair_spaces_after_mission_control(&mut self) {
+        // First, apply any SpaceChanged that arrived while MC was active.
+        self.try_apply_pending_space_change();
+
+        // If we still have missing space ids (or no active spaces), proactively rebuild
+        // per-display current spaces via CGS. This covers the common case where macOS emits
+        // a transient "all None" spaces vector during Mission Control and then doesn't emit
+        // a corresponding steady-state update when exiting back to the same space.
+        let needs_repair = self.active_spaces.is_empty()
+            || self.space_manager.screens.iter().all(|s| s.space.is_none());
+        if !needs_repair || self.space_manager.screens.is_empty() {
+            return;
+        }
+
+        let spaces: Vec<Option<SpaceId>> = self
+            .space_manager
+            .screens
+            .iter()
+            .map(|s| {
+                crate::sys::screen::current_space_for_display_uuid(&s.display_uuid).or(s.space)
+            })
+            .collect();
+
+        if spaces.iter().any(|s| s.is_some()) && spaces.len() == self.space_manager.screens.len() {
+            self.set_screen_spaces(&spaces);
+            self.recompute_and_set_active_spaces(&spaces);
         }
     }
 

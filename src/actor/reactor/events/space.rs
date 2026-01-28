@@ -367,6 +367,7 @@ impl SpaceEventHandler {
         if reactor.is_mission_control_active() {
             reactor.set_mission_control_active(false);
         }
+        reactor.repair_spaces_after_mission_control();
         reactor.refresh_windows_after_mission_control();
     }
 }
