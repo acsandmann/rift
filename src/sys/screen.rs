@@ -19,8 +19,8 @@ use super::skylight::{
     CGDisplayGetDisplayIDFromUUID, CGSCopyBestManagedDisplayForRect, CGSCopyManagedDisplaySpaces,
     CGSCopyManagedDisplays, CGSCopySpaces, CGSGetActiveSpace, CGSManagedDisplayGetCurrentSpace,
     CGSSpaceMask, CoreDockGetAutoHideEnabled, CoreDockGetOrientationAndPinning, G_CONNECTION,
-    SLSGetDisplayMenubarHeight, SLSGetDockRectWithReason, SLSGetMenuBarAutohideEnabled,
-    SLSGetSpaceManagementMode, SLSMainConnectionID,
+    SLSCopyActiveMenuBarDisplayIdentifier, SLSGetDisplayMenubarHeight, SLSGetDockRectWithReason,
+    SLSGetMenuBarAutohideEnabled, SLSGetSpaceManagementMode, SLSMainConnectionID,
 };
 use crate::common::collections::HashMap;
 use crate::sys::geometry::CGRectDef;
@@ -564,11 +564,33 @@ impl NSScreenExt for NSScreen {
 }
 
 pub fn get_active_space_number() -> Option<SpaceId> {
-    let active_id = unsafe { CGSGetActiveSpace(SLSMainConnectionID()) };
-    if active_id == 0 {
+    current_space_for_display_uuid(
+        &unsafe {
+            CFRetained::<CFString>::from_raw(NonNull::new(SLSCopyActiveMenuBarDisplayIdentifier(
+                SLSMainConnectionID(),
+            ))?)
+        }
+        .to_string(),
+    )
+}
+
+pub fn current_space_for_display_uuid(display_uuid: &str) -> Option<SpaceId> {
+    if display_uuid.is_empty() {
+        return None;
+    }
+
+    let uuid = CFString::from_str(display_uuid);
+    let id = unsafe {
+        CGSManagedDisplayGetCurrentSpace(
+            SLSMainConnectionID(),
+            CFRetained::<CFString>::as_ptr(&uuid).as_ptr(),
+        )
+    };
+
+    if id == 0 {
         None
     } else {
-        Some(SpaceId::new(active_id))
+        Some(SpaceId::new(id as u64))
     }
 }
 

@@ -1709,7 +1709,10 @@ impl Reactor {
             }
 
             let above_level = window_level(above_u32);
-            if candidate_level == above_level {
+            if candidate_level
+                .zip(above_level)
+                .is_some_and(|(candidate, above)| candidate == above)
+            {
                 return false;
             }
         }
@@ -2490,7 +2493,8 @@ impl Reactor {
     }
 
     fn update_focus_follows_mouse_state(&self) {
-        let should_enable = matches!(self.menu_manager.menu_state, MenuState::Closed)
+        let should_enable = self.config.settings.focus_follows_mouse
+            && matches!(self.menu_manager.menu_state, MenuState::Closed)
             && !self.is_mission_control_active();
         self.set_focus_follows_mouse_enabled(should_enable);
     }
