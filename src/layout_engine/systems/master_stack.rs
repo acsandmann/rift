@@ -89,9 +89,7 @@ impl MasterStackLayoutSystem {
         let root = self.inner.root(layout);
         let children: Vec<_> = root.children(self.inner.map()).collect();
         if children.len() != 2
-            || children
-                .iter()
-                .any(|&child| self.inner.window_at(child).is_some())
+            || children.iter().any(|&child| self.inner.window_at(child).is_some())
         {
             return None;
         }

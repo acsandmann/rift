@@ -607,11 +607,11 @@ impl LayoutEngine {
             crate::common::config::LayoutMode::Bsp => {
                 LayoutSystemKind::Bsp(crate::layout_engine::BspLayoutSystem::default())
             }
-            crate::common::config::LayoutMode::MasterStack => LayoutSystemKind::MasterStack(
-                crate::layout_engine::MasterStackLayoutSystem::new(
+            crate::common::config::LayoutMode::MasterStack => {
+                LayoutSystemKind::MasterStack(crate::layout_engine::MasterStackLayoutSystem::new(
                     layout_settings.master_stack.clone(),
-                ),
-            ),
+                ))
+            }
         };
 
         LayoutEngine {
