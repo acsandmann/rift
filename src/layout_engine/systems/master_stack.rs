@@ -34,9 +34,16 @@ impl MasterStackLayoutSystem {
         if self.settings == settings {
             return;
         }
+        let old_master_first = self.master_first();
         self.settings = settings;
         let layouts: Vec<_> = self.inner.layout_roots.keys().collect();
         for layout in layouts {
+            if let Some(windows) =
+                self.windows_in_layout_by_container_with_order(layout, old_master_first)
+            {
+                self.rebuild_layout_with_windows(layout, &windows);
+                continue;
+            }
             self.rebuild_layout(layout);
         }
     }
@@ -70,6 +77,15 @@ impl MasterStackLayoutSystem {
     }
 
     fn windows_in_layout_by_container(&self, layout: LayoutId) -> Vec<WindowId> {
+        self.windows_in_layout_by_container_with_order(layout, self.master_first())
+            .unwrap_or_else(|| self.all_windows_in_layout(layout))
+    }
+
+    fn windows_in_layout_by_container_with_order(
+        &self,
+        layout: LayoutId,
+        master_first: bool,
+    ) -> Option<Vec<WindowId>> {
         let root = self.inner.root(layout);
         let children: Vec<_> = root.children(self.inner.map()).collect();
         if children.len() != 2
@@ -77,16 +93,16 @@ impl MasterStackLayoutSystem {
                 .iter()
                 .any(|&child| self.inner.window_at(child).is_some())
         {
-            return self.all_windows_in_layout(layout);
+            return None;
         }
-        let (master, stack) = if self.master_first() {
+        let (master, stack) = if master_first {
             (children[0], children[1])
         } else {
             (children[1], children[0])
         };
         let mut ordered = self.windows_in_container(master);
         ordered.extend(self.windows_in_container(stack));
-        ordered
+        Some(ordered)
     }
 
     fn windows_in_container(&self, container: NodeId) -> Vec<WindowId> {
@@ -151,6 +167,10 @@ impl MasterStackLayoutSystem {
 
     fn rebuild_layout(&mut self, layout: LayoutId) {
         let windows = self.windows_in_layout_by_container(layout);
+        self.rebuild_layout_with_windows(layout, &windows);
+    }
+
+    fn rebuild_layout_with_windows(&mut self, layout: LayoutId, windows: &[WindowId]) {
         let selected = self.inner.selected_window(layout);
         let root = self.inner.root(layout);
         let children: Vec<_> = root.children(self.inner.map()).collect();
