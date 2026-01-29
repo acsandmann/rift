@@ -75,10 +75,20 @@ run_on_start = []
 hot_reload = true
 
 [settings.layout]
-# Layout system
-# - mode: "traditional" (i3/sway-like containers) or "bsp" (binary space partitioning)
-#   defaults to "traditional" if omitted
+# Layout Types:
+# 	- "traditional" (i3/sway-like containers)
+#	- "bsp" (binary space partitioning),
+#   - "master_stack" (master area + stack area)
+# defaults to "traditional" if omitted
 mode = "traditional"
+
+[settings.layout.master_stack]
+# Fraction of space reserved for the master area (0.05..0.95)
+master_ratio = 0.6
+# Number of windows kept in the master area (>= 1)
+master_count = 1
+# Which side the master area occupies (left | right | top | bottom)
+master_side = "left"
 
 [settings.layout.stack]
 # How much of each stacked window sticks out (in pixels)

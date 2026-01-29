@@ -65,6 +65,15 @@ pub enum LayoutCommand {
     SwitchToLastWorkspace,
 
     SwapWindows(crate::actor::app::WindowId, crate::actor::app::WindowId),
+
+    AdjustMasterRatio {
+        delta: f64,
+    },
+    AdjustMasterCount {
+        delta: i32,
+    },
+    PromoteToMaster,
+    SwapMasterStack,
 }
 
 #[non_exhaustive]
@@ -118,6 +127,9 @@ pub struct LayoutEngine {
 impl LayoutEngine {
     pub fn set_layout_settings(&mut self, settings: &LayoutSettings) {
         self.layout_settings = settings.clone();
+        if let LayoutSystemKind::MasterStack(system) = &mut self.tree {
+            system.update_settings(settings.master_stack.clone());
+        }
     }
 
     pub fn update_virtual_workspace_settings(
@@ -131,6 +143,7 @@ impl LayoutEngine {
         match &self.tree {
             LayoutSystemKind::Traditional(_) => "traditional",
             LayoutSystemKind::Bsp(_) => "bsp",
+            LayoutSystemKind::MasterStack(_) => "master_stack",
         }
     }
 
@@ -594,6 +607,11 @@ impl LayoutEngine {
             crate::common::config::LayoutMode::Bsp => {
                 LayoutSystemKind::Bsp(crate::layout_engine::BspLayoutSystem::default())
             }
+            crate::common::config::LayoutMode::MasterStack => LayoutSystemKind::MasterStack(
+                crate::layout_engine::MasterStackLayoutSystem::new(
+                    layout_settings.master_stack.clone(),
+                ),
+            ),
         };
 
         LayoutEngine {
@@ -1115,6 +1133,25 @@ impl LayoutEngine {
                         s.toggle_tile_orientation(layout);
                         EventResponse::default()
                     }
+                    LayoutSystemKind::MasterStack(s) => {
+                        if s.parent_of_selection_is_stacked(layout) {
+                            let default_orientation: crate::common::config::StackDefaultOrientation =
+                                self.layout_settings.stack.default_orientation;
+                            let toggled_windows = s
+                                .apply_stacking_to_parent_of_selection(layout, default_orientation);
+                            if !toggled_windows.is_empty() {
+                                EventResponse {
+                                    raise_windows: toggled_windows,
+                                    focus_window: None,
+                                }
+                            } else {
+                                EventResponse::default()
+                            }
+                        } else {
+                            s.toggle_tile_orientation(layout);
+                            EventResponse::default()
+                        }
+                    }
                 };
 
                 resp
@@ -1146,6 +1183,34 @@ impl LayoutEngine {
 
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
                 self.tree.resize_selection_by(layout, amount);
+                EventResponse::default()
+            }
+            LayoutCommand::AdjustMasterRatio { delta } => {
+                self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
+                if let LayoutSystemKind::MasterStack(s) = &mut self.tree {
+                    s.adjust_master_ratio(layout, delta);
+                }
+                EventResponse::default()
+            }
+            LayoutCommand::AdjustMasterCount { delta } => {
+                self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
+                if let LayoutSystemKind::MasterStack(s) = &mut self.tree {
+                    s.adjust_master_count(layout, delta);
+                }
+                EventResponse::default()
+            }
+            LayoutCommand::PromoteToMaster => {
+                self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
+                if let LayoutSystemKind::MasterStack(s) = &mut self.tree {
+                    s.promote_to_master(layout);
+                }
+                EventResponse::default()
+            }
+            LayoutCommand::SwapMasterStack => {
+                self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
+                if let LayoutSystemKind::MasterStack(s) = &mut self.tree {
+                    s.swap_master_stack(layout);
+                }
                 EventResponse::default()
             }
         }
@@ -1351,6 +1416,15 @@ impl LayoutEngine {
                 stack_line_horiz,
                 stack_line_vert,
             ),
+            LayoutSystemKind::MasterStack(s) => s.collect_group_containers_in_selection_path(
+                layout_id,
+                screen,
+                self.layout_settings.stack.stack_offset,
+                gaps,
+                stack_line_thickness,
+                stack_line_horiz,
+                stack_line_vert,
+            ),
             _ => Vec::new(),
         }
     }
@@ -1367,6 +1441,15 @@ impl LayoutEngine {
         let layout_id = self.layout(space);
         match &self.tree {
             LayoutSystemKind::Traditional(s) => s.collect_group_containers(
+                layout_id,
+                screen,
+                self.layout_settings.stack.stack_offset,
+                gaps,
+                stack_line_thickness,
+                stack_line_horiz,
+                stack_line_vert,
+            ),
+            LayoutSystemKind::MasterStack(s) => s.collect_group_containers(
                 layout_id,
                 screen,
                 self.layout_settings.stack.stack_offset,

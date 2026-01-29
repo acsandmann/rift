@@ -12,8 +12,8 @@ use crate::sys::geometry::Round;
 
 #[derive(Serialize, Deserialize)]
 pub struct TraditionalLayoutSystem {
-    tree: Tree<Components>,
-    layout_roots: slotmap::SlotMap<LayoutId, OwnedNode>,
+    pub(crate) tree: Tree<Components>,
+    pub(crate) layout_roots: slotmap::SlotMap<LayoutId, OwnedNode>,
 }
 
 impl Default for TraditionalLayoutSystem {
@@ -110,18 +110,50 @@ impl TraditionalLayoutSystem {
         self.find_or_create_common_parent_internal(layout, node1, node2)
     }
 
-    fn root(&self, layout: LayoutId) -> NodeId { self.layout_roots[layout].id() }
+    pub(crate) fn root(&self, layout: LayoutId) -> NodeId { self.layout_roots[layout].id() }
 
     fn selection(&self, layout: LayoutId) -> NodeId {
         self.tree.data.selection.current_selection(self.root(layout))
     }
 
-    fn map(&self) -> &NodeMap { &self.tree.map }
+    pub(crate) fn map(&self) -> &NodeMap { &self.tree.map }
 
-    fn layout(&self, node: NodeId) -> LayoutKind { self.tree.data.layout.kind(node) }
+    pub(crate) fn layout(&self, node: NodeId) -> LayoutKind { self.tree.data.layout.kind(node) }
 
-    fn set_layout(&mut self, node: NodeId, kind: LayoutKind) {
+    pub(crate) fn layouts_for_window(&self, wid: WindowId) -> Vec<LayoutId> {
+        self.tree.data.window.layouts_for(wid)
+    }
+
+    pub(crate) fn set_layout(&mut self, node: NodeId, kind: LayoutKind) {
         self.tree.data.layout.set_kind(node, kind);
+    }
+
+    pub(crate) fn calculate_layout_for_node(
+        &self,
+        node: NodeId,
+        screen: CGRect,
+        rect: CGRect,
+        stack_offset: f64,
+        gaps: &crate::common::config::GapSettings,
+        stack_line_thickness: f64,
+        stack_line_horiz: crate::common::config::HorizontalPlacement,
+        stack_line_vert: crate::common::config::VerticalPlacement,
+    ) -> Vec<(WindowId, CGRect)> {
+        let mut sizes = vec![];
+        self.tree.data.layout.apply_with_gaps(
+            &self.tree.map,
+            &self.tree.data.window,
+            node,
+            rect,
+            screen,
+            &mut sizes,
+            stack_offset,
+            gaps,
+            stack_line_thickness,
+            stack_line_horiz,
+            stack_line_vert,
+        );
+        sizes
     }
 
     fn find_natural_join_target(&self, from: NodeId, direction: Direction) -> Option<NodeId> {
@@ -1318,6 +1350,14 @@ impl TraditionalLayoutSystem {
 
 impl TraditionalLayoutSystem {
     fn get_ascii_tree(&self, node: NodeId) -> ascii_tree::Tree {
+        self.get_ascii_tree_with_labels(node, None)
+    }
+
+    fn get_ascii_tree_with_labels(
+        &self,
+        node: NodeId,
+        labels: Option<&std::collections::HashMap<NodeId, &'static str>>,
+    ) -> ascii_tree::Tree {
         let status = match node.parent(&self.tree.map) {
             None => "",
             Some(parent)
@@ -1333,8 +1373,15 @@ impl TraditionalLayoutSystem {
             Some(wid) => format!("{desc} {:?} {}", wid, self.tree.data.layout.debug(node, false)),
             None => format!("{desc} {}", self.tree.data.layout.debug(node, true)),
         };
-        let children: Vec<_> =
-            node.children(&self.tree.map).map(|c| self.get_ascii_tree(c)).collect();
+        let desc = if let Some(label) = labels.and_then(|labels| labels.get(&node).copied()) {
+            format!("{desc} [{label}]")
+        } else {
+            desc
+        };
+        let children: Vec<_> = node
+            .children(&self.tree.map)
+            .map(|c| self.get_ascii_tree_with_labels(c, labels))
+            .collect();
         if children.is_empty() {
             ascii_tree::Tree::Leaf(vec![desc])
         } else {
@@ -1342,13 +1389,35 @@ impl TraditionalLayoutSystem {
         }
     }
 
-    fn add_window_under(&mut self, layout: LayoutId, parent: NodeId, wid: WindowId) -> NodeId {
+    pub(crate) fn add_window_under(
+        &mut self,
+        layout: LayoutId,
+        parent: NodeId,
+        wid: WindowId,
+    ) -> NodeId {
         let node = self.tree.mk_node().push_back(parent);
         self.tree.data.window.set_window(layout, node, wid);
         node
     }
 
-    fn window_at(&self, node: NodeId) -> Option<WindowId> { self.tree.data.window.at(node) }
+    pub(crate) fn window_at(&self, node: NodeId) -> Option<WindowId> {
+        self.tree.data.window.at(node)
+    }
+
+    pub(crate) fn visible_windows_in_subtree(&self, node: NodeId) -> Vec<WindowId> {
+        self.visible_windows_under_internal(node)
+    }
+
+    pub(crate) fn draw_tree_with_labels(
+        &self,
+        layout: LayoutId,
+        labels: &std::collections::HashMap<NodeId, &'static str>,
+    ) -> String {
+        let tree = self.get_ascii_tree_with_labels(self.root(layout), Some(labels));
+        let mut out = String::new();
+        ascii_tree::write_tree(&mut out, &tree).unwrap();
+        out
+    }
 
     fn window_in_direction_from(&self, node: NodeId, direction: Direction) -> Option<WindowId> {
         if let Some(window) = self.window_at(node) {
@@ -1388,7 +1457,7 @@ impl TraditionalLayoutSystem {
         }
     }
 
-    fn select(&mut self, selection: NodeId) {
+    pub(crate) fn select(&mut self, selection: NodeId) {
         self.tree.data.selection.select(&self.tree.map, selection)
     }
 
@@ -1831,10 +1900,10 @@ impl TraditionalLayoutSystem {
 }
 
 #[derive(Default, Serialize, Deserialize)]
-struct Components {
+pub(crate) struct Components {
     selection: Selection,
-    layout: Layout,
-    window: WindowIndex,
+    pub(crate) layout: Layout,
+    pub(crate) window: WindowIndex,
 }
 
 impl tree::Observer for Components {
@@ -1872,7 +1941,7 @@ impl tree::Observer for Components {
 }
 
 #[derive(Default, Serialize, Deserialize)]
-struct WindowIndex {
+pub(crate) struct WindowIndex {
     windows: slotmap::SecondaryMap<NodeId, WindowId>,
     window_nodes: crate::common::collections::BTreeMap<WindowId, WindowNodeInfoVec>,
 }
@@ -1887,9 +1956,16 @@ struct WindowNodeInfo {
 struct WindowNodeInfoVec(Vec<WindowNodeInfo>);
 
 impl WindowIndex {
-    fn at(&self, node: NodeId) -> Option<WindowId> { self.windows.get(node).copied() }
+    pub(crate) fn at(&self, node: NodeId) -> Option<WindowId> { self.windows.get(node).copied() }
 
-    fn node_for(&self, layout: LayoutId, wid: WindowId) -> Option<NodeId> {
+    fn layouts_for(&self, wid: WindowId) -> Vec<LayoutId> {
+        self.window_nodes
+            .get(&wid)
+            .map(|nodes| nodes.0.iter().map(|info| info.layout).collect())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn node_for(&self, layout: LayoutId, wid: WindowId) -> Option<NodeId> {
         self.window_nodes.get(&wid).and_then(|nodes| {
             nodes.0.iter().find(|info| info.layout == layout).map(|info| info.node)
         })
@@ -2063,20 +2139,20 @@ impl StackLayoutResult {
 }
 
 #[derive(Default, Serialize, Deserialize)]
-struct Layout {
-    info: slotmap::SecondaryMap<NodeId, LayoutInfo>,
+pub(crate) struct Layout {
+    pub(crate) info: slotmap::SecondaryMap<NodeId, LayoutInfo>,
 }
 
 #[allow(unused)]
 #[derive(Default, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-struct LayoutInfo {
-    size: f32,
-    total: f32,
+pub(crate) struct LayoutInfo {
+    pub(crate) size: f32,
+    pub(crate) total: f32,
     kind: LayoutKind,
     last_ungrouped_kind: LayoutKind,
     #[serde(default)]
-    is_fullscreen: bool,
+    pub(crate) is_fullscreen: bool,
     #[serde(default)]
     is_fullscreen_within_gaps: bool,
 }
