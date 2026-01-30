@@ -24,6 +24,8 @@
 - Multiple layout styles
   - Tiling (i3/sway-like)
   - Binary Space Partitioning (bspwm-like)
+  - Master-stack (dwm-like)
+  - Scrolling columns (niri-style)
 - Menubar icon that shows all of the workspaces and the layouts within <details> <summary><sup>click to see the menu bar icon</sup></summary><img src="assets/menubar.png" alt="Rift menu bar icon" /></details>
 - MacOS-style mission control that allows you to visually navigate between workspaces <details><summary><sup>click to see mission control</sup></summary><img src="assets/mission_control.png" alt="Rift Mission Control view" /></details>
 - Focus follows the mouse with auto raise

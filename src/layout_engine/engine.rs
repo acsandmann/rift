@@ -54,6 +54,13 @@ pub enum LayoutCommand {
         amount: f64,
     },
 
+    /// Scroll the strip by a normalized delta (scaled by column step width)
+    ScrollStrip {
+        delta: f64,
+    },
+    /// Snap the strip to the nearest column boundary
+    SnapStrip,
+
     NextWorkspace(Option<bool>),
     PrevWorkspace(Option<bool>),
     SwitchToWorkspace(usize),
@@ -127,8 +134,15 @@ pub struct LayoutEngine {
 impl LayoutEngine {
     pub fn set_layout_settings(&mut self, settings: &LayoutSettings) {
         self.layout_settings = settings.clone();
-        if let LayoutSystemKind::MasterStack(system) = &mut self.tree {
-            system.update_settings(settings.master_stack.clone());
+
+        match &mut self.tree {
+            LayoutSystemKind::MasterStack(system) => {
+                system.update_settings(settings.master_stack.clone());
+            }
+            LayoutSystemKind::Scrolling(system) => {
+                system.update_settings(&settings.scrolling);
+            }
+            _ => {}
         }
     }
 
@@ -144,6 +158,7 @@ impl LayoutEngine {
             LayoutSystemKind::Traditional(_) => "traditional",
             LayoutSystemKind::Bsp(_) => "bsp",
             LayoutSystemKind::MasterStack(_) => "master_stack",
+            LayoutSystemKind::Scrolling(_) => "scrolling",
         }
     }
 
@@ -612,6 +627,9 @@ impl LayoutEngine {
                     layout_settings.master_stack.clone(),
                 ))
             }
+            crate::common::config::LayoutMode::Scrolling => LayoutSystemKind::Scrolling(
+                crate::layout_engine::ScrollingLayoutSystem::new(&layout_settings.scrolling),
+            ),
         };
 
         LayoutEngine {
@@ -1152,6 +1170,10 @@ impl LayoutEngine {
                             EventResponse::default()
                         }
                     }
+                    LayoutSystemKind::Scrolling(s) => {
+                        s.toggle_tile_orientation(layout);
+                        EventResponse::default()
+                    }
                 };
 
                 resp
@@ -1210,6 +1232,18 @@ impl LayoutEngine {
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
                 if let LayoutSystemKind::MasterStack(s) = &mut self.tree {
                     s.swap_master_stack(layout);
+                }
+                EventResponse::default()
+            }
+            LayoutCommand::ScrollStrip { delta } => {
+                if let LayoutSystemKind::Scrolling(system) = &mut self.tree {
+                    system.scroll_by_delta(layout, delta);
+                }
+                EventResponse::default()
+            }
+            LayoutCommand::SnapStrip => {
+                if let LayoutSystemKind::Scrolling(system) = &mut self.tree {
+                    system.snap_to_nearest_column(layout);
                 }
                 EventResponse::default()
             }
