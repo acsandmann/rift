@@ -1971,7 +1971,7 @@ impl WindowIndex {
         })
     }
 
-    fn set_window(&mut self, layout: LayoutId, node: NodeId, wid: WindowId) {
+    pub(crate) fn set_window(&mut self, layout: LayoutId, node: NodeId, wid: WindowId) {
         let existing = self.windows.insert(node, wid);
         assert!(
             existing.is_none(),

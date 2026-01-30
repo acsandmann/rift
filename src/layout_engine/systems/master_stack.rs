@@ -214,8 +214,8 @@ impl MasterStackLayoutSystem {
 
         if master_windows.len() > desired {
             let overflow = master_windows.split_off(desired);
-            for wid in overflow {
-                if let Some(node) = self.move_window_to_container(layout, wid, stack) {
+            for wid in overflow.into_iter().rev() {
+                if let Some(node) = self.move_window_to_container_front(layout, wid, stack) {
                     if Some(wid) == selected {
                         self.inner.select(node);
                     }
@@ -253,6 +253,24 @@ impl MasterStackLayoutSystem {
         Some(node.detach(&mut self.inner.tree).push_back(container).finish())
     }
 
+    fn add_window_to_container_front(
+        &mut self,
+        layout: LayoutId,
+        container: NodeId,
+        wid: WindowId,
+    ) -> Option<NodeId> {
+        if !self.inner.map().contains(container) {
+            return None;
+        }
+        let first_child = container.children(self.inner.map()).next();
+        let node = match first_child {
+            Some(first_child) => self.inner.tree.mk_node().insert_before(first_child),
+            None => self.inner.tree.mk_node().push_back(container),
+        };
+        self.inner.tree.data.window.set_window(layout, node, wid);
+        Some(node)
+    }
+
     fn move_window_to_container_front(
         &mut self,
         layout: LayoutId,
@@ -285,7 +303,7 @@ impl MasterStackLayoutSystem {
         self.enforce_master_count(layout, master, stack);
     }
 
-    pub fn adjust_master_ratio(&mut self, layout: LayoutId, delta: f64) {
+    pub fn adjust_master_ratio(&mut self, _layout: LayoutId, delta: f64) {
         let next = (self.settings.master_ratio + delta).clamp(0.05, 0.95);
         if (next - self.settings.master_ratio).abs() < f64::EPSILON {
             return;
@@ -297,7 +315,7 @@ impl MasterStackLayoutSystem {
         }
     }
 
-    pub fn adjust_master_count(&mut self, layout: LayoutId, delta: i32) {
+    pub fn adjust_master_count(&mut self, _layout: LayoutId, delta: i32) {
         let current = self.settings.master_count as i32;
         let next = (current + delta).max(1) as usize;
         if next == self.settings.master_count {
@@ -315,17 +333,18 @@ impl MasterStackLayoutSystem {
         let Some(wid) = self.inner.selected_window(layout) else {
             return;
         };
-        let node = self.inner.tree.data.window.node_for(layout, wid);
-        if node.and_then(|n| n.parent(self.inner.map())) == Some(master) {
+        let master_windows = self.windows_in_container(master);
+        let Some(&master_wid) = master_windows.first() else {
+            return;
+        };
+        if wid == master_wid {
             return;
         }
-        let moved = self.move_window_to_container_front(layout, wid, master);
-        self.enforce_master_count(layout, master, stack);
-        if let Some(node) = moved {
-            self.inner.select(node);
-        } else {
+        let swapped = self.inner.swap_windows(layout, wid, master_wid);
+        if swapped {
             let _ = self.inner.select_window(layout, wid);
         }
+        self.enforce_master_count(layout, master, stack);
     }
 
     pub fn swap_master_stack(&mut self, layout: LayoutId) {
@@ -496,13 +515,9 @@ impl LayoutSystem for MasterStackLayoutSystem {
 
     fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId) {
         let (_root, master, stack) = self.ensure_structure(layout);
-        let master_windows = self.windows_in_container(master);
-        let target = if master_windows.len() < self.settings.master_count {
-            master
-        } else {
-            stack
-        };
-        let node = self.inner.add_window_under(layout, target, wid);
+        let node = self
+            .add_window_to_container_front(layout, master, wid)
+            .unwrap_or_else(|| self.inner.add_window_under(layout, master, wid));
         self.inner.select(node);
         self.enforce_master_count(layout, master, stack);
     }
