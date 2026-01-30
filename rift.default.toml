@@ -82,6 +82,7 @@ hot_reload = true
 # defaults to "traditional" if omitted
 mode = "traditional"
 
+# these settings only apply when layout mode == "master_stack"
 [settings.layout.master_stack]
 # Fraction of space reserved for the master area (0.05..0.95)
 master_ratio = 0.6
