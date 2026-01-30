@@ -506,6 +506,10 @@ fn default_mission_control_fade_duration_ms() -> f64 { 180.0 }
 
 fn default_drag_swap_fraction() -> f64 { 0.3 }
 
+fn default_master_stack_ratio() -> f64 { 0.6 }
+
+fn default_master_stack_count() -> usize { 1 }
+
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum HorizontalPlacement {
@@ -535,6 +539,9 @@ pub struct LayoutSettings {
     /// Stack system configuration
     #[serde(default)]
     pub stack: StackSettings,
+    /// Master/stack layout configuration
+    #[serde(default)]
+    pub master_stack: MasterStackSettings,
     /// Gap configuration for window spacing
     #[serde(default)]
     pub gaps: GapSettings,
@@ -549,6 +556,43 @@ pub enum LayoutMode {
     Traditional,
     /// Binary space partitioning tiling
     Bsp,
+    /// Master/stack layout (master area + stack area)
+    MasterStack,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MasterStackSide {
+    #[default]
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct MasterStackSettings {
+    /// Fraction of space reserved for the master area (0.05..0.95)
+    #[serde(default = "default_master_stack_ratio")]
+    pub master_ratio: f64,
+    /// Number of windows kept in the master area (>= 1)
+    #[serde(default = "default_master_stack_count")]
+    pub master_count: usize,
+    /// Which side the master area occupies
+    #[serde(default)]
+    pub master_side: MasterStackSide,
+    /// Where new windows are inserted when the master area is already full
+    #[serde(default = "default_master_stack_new_window_placement")]
+    pub new_window_placement: MasterStackNewWindowPlacement,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum MasterStackNewWindowPlacement {
+    Master,
+    Stack,
+    Focused,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
@@ -645,6 +689,17 @@ impl Default for StackSettings {
     }
 }
 
+impl Default for MasterStackSettings {
+    fn default() -> Self {
+        Self {
+            master_ratio: default_master_stack_ratio(),
+            master_count: default_master_stack_count(),
+            master_side: MasterStackSide::Left,
+            new_window_placement: default_master_stack_new_window_placement(),
+        }
+    }
+}
+
 impl Settings {
     pub fn validate(&self) -> Vec<String> {
         let mut issues = Vec::new();
@@ -682,6 +737,8 @@ impl LayoutSettings {
 
         issues.extend(self.stack.validate());
 
+        issues.extend(self.master_stack.validate());
+
         issues.extend(self.gaps.validate());
 
         issues
@@ -697,6 +754,25 @@ impl StackSettings {
                 "stack_offset must be non-negative, got {}",
                 self.stack_offset
             ));
+        }
+
+        issues
+    }
+}
+
+impl MasterStackSettings {
+    pub fn validate(&self) -> Vec<String> {
+        let mut issues = Vec::new();
+
+        if !(0.05..=0.95).contains(&self.master_ratio) {
+            issues.push(format!(
+                "master_stack.master_ratio must be between 0.05 and 0.95, got {}",
+                self.master_ratio
+            ));
+        }
+
+        if self.master_count == 0 {
+            issues.push("master_stack.master_count must be at least 1".to_string());
         }
 
         issues
@@ -808,6 +884,10 @@ fn yes() -> bool { true }
 fn default_stack_offset() -> f64 { 40.0 }
 
 fn default_stack_orientation() -> StackDefaultOrientation { StackDefaultOrientation::Perpendicular }
+
+fn default_master_stack_new_window_placement() -> MasterStackNewWindowPlacement {
+    MasterStackNewWindowPlacement::Master
+}
 
 fn default_animation_duration() -> f64 { 0.3 }
 

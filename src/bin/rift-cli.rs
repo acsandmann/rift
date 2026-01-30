@@ -188,6 +188,14 @@ enum LayoutCommands {
     Unjoin,
     /// Toggle floating on the focused selection (tree focus)
     ToggleFocusFloat,
+    /// Adjust master ratio by a delta (master/stack layout only)
+    AdjustMasterRatio { delta: f64 },
+    /// Adjust master count by a delta (master/stack layout only)
+    AdjustMasterCount { delta: i32 },
+    /// Promote the selected window into the master area (master/stack layout only)
+    PromoteToMaster,
+    /// Swap the first master with the first stack window (master/stack layout only)
+    SwapMasterStack,
 }
 
 #[derive(Subcommand)]
@@ -586,6 +594,18 @@ fn map_layout_command(cmd: LayoutCommands) -> Result<RiftCommand, String> {
         }
         LayoutCommands::ToggleFocusFloat => Ok(RiftCommand::Reactor(reactor::Command::Layout(
             LC::ToggleFocusFloating,
+        ))),
+        LayoutCommands::AdjustMasterRatio { delta } => Ok(RiftCommand::Reactor(
+            reactor::Command::Layout(LC::AdjustMasterRatio { delta }),
+        )),
+        LayoutCommands::AdjustMasterCount { delta } => Ok(RiftCommand::Reactor(
+            reactor::Command::Layout(LC::AdjustMasterCount { delta }),
+        )),
+        LayoutCommands::PromoteToMaster => Ok(RiftCommand::Reactor(reactor::Command::Layout(
+            LC::PromoteToMaster,
+        ))),
+        LayoutCommands::SwapMasterStack => Ok(RiftCommand::Reactor(reactor::Command::Layout(
+            LC::SwapMasterStack,
         ))),
     }
 }
