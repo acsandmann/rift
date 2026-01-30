@@ -5,9 +5,7 @@ use objc2_core_foundation::CGRect;
 use serde::{Deserialize, Serialize};
 
 use crate::actor::app::WindowId;
-use crate::common::config::{
-    MasterStackNewWindowPlacement, MasterStackSettings, MasterStackSide,
-};
+use crate::common::config::{MasterStackNewWindowPlacement, MasterStackSettings, MasterStackSide};
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{
     Direction, LayoutId, LayoutKind, LayoutSystem, Orientation, TraditionalLayoutSystem,
@@ -130,9 +128,7 @@ impl MasterStackLayoutSystem {
         let selection = self.inner.local_selection(container);
         let candidate = selection.or_else(|| container.first_child(map));
         let candidate = candidate?;
-        candidate
-            .traverse_preorder(map)
-            .find_map(|node| self.inner.window_at(node))
+        candidate.traverse_preorder(map).find_map(|node| self.inner.window_at(node))
     }
 
     fn create_containers(&mut self, root: NodeId) -> (NodeId, NodeId) {
@@ -684,8 +680,7 @@ impl LayoutSystem for MasterStackLayoutSystem {
         layout: LayoutId,
         default_orientation: crate::common::config::StackDefaultOrientation,
     ) -> Vec<WindowId> {
-        self.inner
-            .apply_stacking_to_parent_of_selection(layout, default_orientation)
+        self.inner.apply_stacking_to_parent_of_selection(layout, default_orientation)
     }
 
     fn unstack_parent_of_selection(
@@ -693,25 +688,20 @@ impl LayoutSystem for MasterStackLayoutSystem {
         layout: LayoutId,
         default_orientation: crate::common::config::StackDefaultOrientation,
     ) -> Vec<WindowId> {
-        self.inner
-            .unstack_parent_of_selection(layout, default_orientation)
+        self.inner.unstack_parent_of_selection(layout, default_orientation)
     }
 
     fn parent_of_selection_is_stacked(&self, layout: LayoutId) -> bool {
         self.inner.parent_of_selection_is_stacked(layout)
     }
 
-    fn unjoin_selection(&mut self, layout: LayoutId) {
-        self.inner.unjoin_selection(layout);
-    }
+    fn unjoin_selection(&mut self, layout: LayoutId) { self.inner.unjoin_selection(layout); }
 
     fn resize_selection_by(&mut self, layout: LayoutId, amount: f64) {
         self.inner.resize_selection_by(layout, amount);
     }
 
-    fn rebalance(&mut self, layout: LayoutId) {
-        self.inner.rebalance(layout);
-    }
+    fn rebalance(&mut self, layout: LayoutId) { self.inner.rebalance(layout); }
 
     fn toggle_tile_orientation(&mut self, layout: LayoutId) {
         self.inner.toggle_tile_orientation(layout);
