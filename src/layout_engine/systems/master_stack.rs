@@ -291,7 +291,10 @@ impl MasterStackLayoutSystem {
             return;
         }
         self.settings.master_ratio = next;
-        self.normalize_layout(layout);
+        let layouts: Vec<_> = self.inner.layout_roots.keys().collect();
+        for layout in layouts {
+            self.normalize_layout(layout);
+        }
     }
 
     pub fn adjust_master_count(&mut self, layout: LayoutId, delta: i32) {
@@ -301,7 +304,10 @@ impl MasterStackLayoutSystem {
             return;
         }
         self.settings.master_count = next;
-        self.normalize_layout(layout);
+        let layouts: Vec<_> = self.inner.layout_roots.keys().collect();
+        for layout in layouts {
+            self.normalize_layout(layout);
+        }
     }
 
     pub fn promote_to_master(&mut self, layout: LayoutId) {
