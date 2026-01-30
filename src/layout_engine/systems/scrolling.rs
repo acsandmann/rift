@@ -1,6 +1,7 @@
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashSet;
@@ -161,9 +162,7 @@ impl LayoutState {
             }
             target = target.min(self.columns.len());
             if target >= self.columns.len() {
-                self.columns.push(Column {
-                    windows: vec![window],
-                });
+                self.columns.push(Column { windows: vec![window] });
             } else {
                 self.columns[target].windows.push(window);
             }
@@ -225,13 +224,18 @@ impl ScrollingLayoutSystem {
 
     fn clamp_ratio(&self, ratio: f64) -> f64 {
         ratio
-            .clamp(self.settings.min_column_width_ratio, self.settings.max_column_width_ratio)
+            .clamp(
+                self.settings.min_column_width_ratio,
+                self.settings.max_column_width_ratio,
+            )
             .max(0.05)
             .min(0.98)
     }
 
     pub fn scroll_by_delta(&mut self, layout: LayoutId, delta: f64) {
-        let Some(state) = self.layout_state_mut(layout) else { return };
+        let Some(state) = self.layout_state_mut(layout) else {
+            return;
+        };
         let step = f64::from_bits(state.last_step_px.load(Ordering::Relaxed));
         if step <= 0.0 {
             return;
@@ -239,13 +243,13 @@ impl ScrollingLayoutSystem {
         let max_offset = (state.columns.len().saturating_sub(1) as f64) * step;
         let current = f64::from_bits(state.scroll_offset_px.load(Ordering::Relaxed));
         let next = (current + delta * step).clamp(0.0, max_offset);
-        state
-            .scroll_offset_px
-            .store(next.to_bits(), Ordering::Relaxed);
+        state.scroll_offset_px.store(next.to_bits(), Ordering::Relaxed);
     }
 
     pub fn snap_to_nearest_column(&mut self, layout: LayoutId) {
-        let Some(state) = self.layout_state_mut(layout) else { return };
+        let Some(state) = self.layout_state_mut(layout) else {
+            return;
+        };
         let step = f64::from_bits(state.last_step_px.load(Ordering::Relaxed));
         if step <= 0.0 {
             return;
@@ -254,9 +258,7 @@ impl ScrollingLayoutSystem {
         let current = f64::from_bits(state.scroll_offset_px.load(Ordering::Relaxed));
         let target_idx = (current / step).round().max(0.0);
         let next = (target_idx * step).clamp(0.0, max_offset);
-        state
-            .scroll_offset_px
-            .store(next.to_bits(), Ordering::Relaxed);
+        state.scroll_offset_px.store(next.to_bits(), Ordering::Relaxed);
     }
 
     fn layout_state(&self, layout: LayoutId) -> Option<&LayoutState> { self.layouts.get(layout) }
@@ -332,18 +334,13 @@ impl ScrollingLayoutSystem {
     }
 
     fn all_windows(state: &LayoutState) -> Vec<WindowId> {
-        state
-            .columns
-            .iter()
-            .flat_map(|c| c.windows.iter().copied())
-            .collect()
+        state.columns.iter().flat_map(|c| c.windows.iter().copied()).collect()
     }
 }
 
 impl LayoutSystem for ScrollingLayoutSystem {
     fn create_layout(&mut self) -> LayoutId {
-        self.layouts
-            .insert(LayoutState::new(self.settings.column_width_ratio))
+        self.layouts.insert(LayoutState::new(self.settings.column_width_ratio))
     }
 
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
@@ -355,12 +352,12 @@ impl LayoutSystem for ScrollingLayoutSystem {
         self.layouts.insert(cloned)
     }
 
-    fn remove_layout(&mut self, layout: LayoutId) {
-        self.layouts.remove(layout);
-    }
+    fn remove_layout(&mut self, layout: LayoutId) { self.layouts.remove(layout); }
 
     fn draw_tree(&self, layout: LayoutId) -> String {
-        let Some(state) = self.layouts.get(layout) else { return String::new() };
+        let Some(state) = self.layouts.get(layout) else {
+            return String::new();
+        };
         let mut out = String::new();
         for (idx, col) in state.columns.iter().enumerate() {
             out.push_str(&format!("Column {idx}:"));
@@ -386,35 +383,29 @@ impl LayoutSystem for ScrollingLayoutSystem {
         _stack_line_horiz: crate::common::config::HorizontalPlacement,
         _stack_line_vert: crate::common::config::VerticalPlacement,
     ) -> Vec<(WindowId, CGRect)> {
-        let Some(state) = self.layouts.get(layout) else { return Vec::new() };
+        let Some(state) = self.layouts.get(layout) else {
+            return Vec::new();
+        };
         let tiling = compute_tiling_area(screen, gaps);
         let gap_x = gaps.inner.horizontal;
         let gap_y = gaps.inner.vertical;
-        let column_width = (tiling.size.width * self.clamp_ratio(state.column_width_ratio))
-            .max(1.0);
+        let column_width =
+            (tiling.size.width * self.clamp_ratio(state.column_width_ratio)).max(1.0);
         let step = column_width + gap_x;
-        state
-            .last_screen_width
-            .store(tiling.size.width.to_bits(), Ordering::Relaxed);
-        state
-            .last_step_px
-            .store(step.to_bits(), Ordering::Relaxed);
+        state.last_screen_width.store(tiling.size.width.to_bits(), Ordering::Relaxed);
+        state.last_step_px.store(step.to_bits(), Ordering::Relaxed);
         if state.pending_align.load(Ordering::Relaxed) {
             let offset = state
                 .selected_location()
                 .map(|(col_idx, _)| col_idx as f64 * step)
                 .unwrap_or(0.0);
-            state
-                .scroll_offset_px
-                .store(offset.to_bits(), Ordering::Relaxed);
+            state.scroll_offset_px.store(offset.to_bits(), Ordering::Relaxed);
             state.pending_align.store(false, Ordering::Relaxed);
         }
         let current = f64::from_bits(state.scroll_offset_px.load(Ordering::Relaxed));
         let max_offset = (state.columns.len().saturating_sub(1) as f64) * step;
         let clamped = current.clamp(0.0, max_offset);
-        state
-            .scroll_offset_px
-            .store(clamped.to_bits(), Ordering::Relaxed);
+        state.scroll_offset_px.store(clamped.to_bits(), Ordering::Relaxed);
 
         let anchor_x = match self.settings.alignment {
             crate::common::config::ScrollingAlignment::Left => tiling.origin.x,
@@ -443,10 +434,8 @@ impl LayoutSystem for ScrollingLayoutSystem {
 
             for (row_idx, wid) in col.windows.iter().enumerate() {
                 let y = tiling.origin.y + (row_idx as f64) * (row_height + gap_y);
-                let mut frame = CGRect::new(
-                    CGPoint::new(x, y),
-                    CGSize::new(column_width, row_height),
-                );
+                let mut frame =
+                    CGRect::new(CGPoint::new(x, y), CGSize::new(column_width, row_height));
                 if state.fullscreen.contains(wid) {
                     frame = screen;
                 } else if state.fullscreen_within_gaps.contains(wid) {
@@ -463,24 +452,30 @@ impl LayoutSystem for ScrollingLayoutSystem {
     }
 
     fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
-        self.layout_state(layout)
-            .map(Self::all_windows)
-            .unwrap_or_default()
+        self.layout_state(layout).map(Self::all_windows).unwrap_or_default()
     }
 
     fn visible_windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId> {
-        let Some(state) = self.layout_state(layout) else { return Vec::new() };
-        let Some((col_idx, _)) = state.selected_location() else { return Vec::new() };
+        let Some(state) = self.layout_state(layout) else {
+            return Vec::new();
+        };
+        let Some((col_idx, _)) = state.selected_location() else {
+            return Vec::new();
+        };
         state.columns[col_idx].windows.clone()
     }
 
     fn ascend_selection(&mut self, layout: LayoutId) -> bool {
-        let Some(state) = self.layout_state_mut(layout) else { return false };
+        let Some(state) = self.layout_state_mut(layout) else {
+            return false;
+        };
         Self::move_focus_vertical(state, Direction::Up).is_some()
     }
 
     fn descend_selection(&mut self, layout: LayoutId) -> bool {
-        let Some(state) = self.layout_state_mut(layout) else { return false };
+        let Some(state) = self.layout_state_mut(layout) else {
+            return false;
+        };
         Self::move_focus_vertical(state, Direction::Down).is_some()
     }
 
@@ -489,7 +484,9 @@ impl LayoutSystem for ScrollingLayoutSystem {
         layout: LayoutId,
         direction: Direction,
     ) -> (Option<WindowId>, Vec<WindowId>) {
-        let Some(state) = self.layout_state_mut(layout) else { return (None, vec![]) };
+        let Some(state) = self.layout_state_mut(layout) else {
+            return (None, vec![]);
+        };
         let new_sel = match direction {
             Direction::Left | Direction::Right => Self::move_focus_horizontal(state, direction),
             Direction::Up | Direction::Down => Self::move_focus_vertical(state, direction),
@@ -509,26 +506,26 @@ impl LayoutSystem for ScrollingLayoutSystem {
             Direction::Left => {
                 let target = col_idx.checked_sub(1)?;
                 state.columns.get(target).and_then(|col| {
-                    col.windows
-                        .get(row_idx.min(col.windows.len().saturating_sub(1)))
-                        .copied()
+                    col.windows.get(row_idx.min(col.windows.len().saturating_sub(1))).copied()
                 })
             }
             Direction::Right => {
                 let target = col_idx + 1;
                 state.columns.get(target).and_then(|col| {
-                    col.windows
-                        .get(row_idx.min(col.windows.len().saturating_sub(1)))
-                        .copied()
+                    col.windows.get(row_idx.min(col.windows.len().saturating_sub(1))).copied()
                 })
             }
-            Direction::Up => state.columns.get(col_idx)?.windows.get(row_idx.checked_sub(1)?).copied(),
+            Direction::Up => {
+                state.columns.get(col_idx)?.windows.get(row_idx.checked_sub(1)?).copied()
+            }
             Direction::Down => state.columns.get(col_idx)?.windows.get(row_idx + 1).copied(),
         }
     }
 
     fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId) {
-        let Some(state) = self.layout_state_mut(layout) else { return };
+        let Some(state) = self.layout_state_mut(layout) else {
+            return;
+        };
         if let Some((col_idx, _)) = state.selected_location() {
             state.insert_column_after(col_idx, wid);
         } else if !state.columns.is_empty() {
@@ -559,7 +556,9 @@ impl LayoutSystem for ScrollingLayoutSystem {
     }
 
     fn set_windows_for_app(&mut self, layout: LayoutId, pid: pid_t, desired: Vec<WindowId>) {
-        let Some(state) = self.layout_state_mut(layout) else { return };
+        let Some(state) = self.layout_state_mut(layout) else {
+            return;
+        };
         let mut desired = desired;
         desired.sort_unstable();
         let current: Vec<_> = state
@@ -597,13 +596,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
 
     fn has_windows_for_app(&self, layout: LayoutId, pid: pid_t) -> bool {
         self.layout_state(layout)
-            .map(|state| {
-                state
-                    .columns
-                    .iter()
-                    .flat_map(|c| c.windows.iter())
-                    .any(|w| w.pid == pid)
-            })
+            .map(|state| state.columns.iter().flat_map(|c| c.windows.iter()).any(|w| w.pid == pid))
             .unwrap_or(false)
     }
 
@@ -614,7 +607,9 @@ impl LayoutSystem for ScrollingLayoutSystem {
     }
 
     fn select_window(&mut self, layout: LayoutId, wid: WindowId) -> bool {
-        let Some(state) = self.layout_state_mut(layout) else { return false };
+        let Some(state) = self.layout_state_mut(layout) else {
+            return false;
+        };
         if state.locate(wid).is_some() {
             state.selected = Some(wid);
             state.align_scroll_to_selected();
@@ -635,7 +630,9 @@ impl LayoutSystem for ScrollingLayoutSystem {
     ) {
         let min_ratio = self.settings.min_column_width_ratio;
         let max_ratio = self.settings.max_column_width_ratio;
-        let Some(state) = self.layout_state_mut(layout) else { return };
+        let Some(state) = self.layout_state_mut(layout) else {
+            return;
+        };
         if state.selected != Some(wid) {
             return;
         }
@@ -648,7 +645,9 @@ impl LayoutSystem for ScrollingLayoutSystem {
     }
 
     fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
-        let Some(state) = self.layout_state_mut(layout) else { return false };
+        let Some(state) = self.layout_state_mut(layout) else {
+            return false;
+        };
         let (a_col, a_row) = match state.locate(a) {
             Some(loc) => loc,
             None => return false,
@@ -669,10 +668,16 @@ impl LayoutSystem for ScrollingLayoutSystem {
     }
 
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool {
-        let Some(state) = self.layout_state_mut(layout) else { return false };
+        let Some(state) = self.layout_state_mut(layout) else {
+            return false;
+        };
         let moved = match direction {
-            Direction::Left | Direction::Right => Self::move_selected_window_horizontal(state, direction),
-            Direction::Up | Direction::Down => Self::move_selected_window_vertical(state, direction),
+            Direction::Left | Direction::Right => {
+                Self::move_selected_window_horizontal(state, direction)
+            }
+            Direction::Up | Direction::Down => {
+                Self::move_selected_window_vertical(state, direction)
+            }
         };
         if moved {
             state.align_scroll_to_selected();
@@ -685,7 +690,9 @@ impl LayoutSystem for ScrollingLayoutSystem {
         from_layout: LayoutId,
         to_layout: LayoutId,
     ) {
-        let Some(selected) = self.selected_window(from_layout) else { return };
+        let Some(selected) = self.selected_window(from_layout) else {
+            return;
+        };
         if let Some(state) = self.layout_state_mut(from_layout) {
             state.remove_window(selected);
             state.align_scroll_to_selected();
@@ -705,8 +712,12 @@ impl LayoutSystem for ScrollingLayoutSystem {
     }
 
     fn toggle_fullscreen_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
-        let Some(state) = self.layout_state_mut(layout) else { return Vec::new() };
-        let Some(selected) = state.selected_or_first() else { return Vec::new() };
+        let Some(state) = self.layout_state_mut(layout) else {
+            return Vec::new();
+        };
+        let Some(selected) = state.selected_or_first() else {
+            return Vec::new();
+        };
         if state.fullscreen.remove(&selected) {
             return vec![selected];
         }
@@ -716,8 +727,12 @@ impl LayoutSystem for ScrollingLayoutSystem {
     }
 
     fn toggle_fullscreen_within_gaps_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
-        let Some(state) = self.layout_state_mut(layout) else { return Vec::new() };
-        let Some(selected) = state.selected_or_first() else { return Vec::new() };
+        let Some(state) = self.layout_state_mut(layout) else {
+            return Vec::new();
+        };
+        let Some(selected) = state.selected_or_first() else {
+            return Vec::new();
+        };
         if state.fullscreen_within_gaps.remove(&selected) {
             return vec![selected];
         }
@@ -727,7 +742,9 @@ impl LayoutSystem for ScrollingLayoutSystem {
     }
 
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) {
-        let Some(state) = self.layout_state_mut(layout) else { return };
+        let Some(state) = self.layout_state_mut(layout) else {
+            return;
+        };
         let Some(selected) = state.selected else { return };
         let (col_idx, _) = match state.selected_location() {
             Some(loc) => loc,
@@ -747,7 +764,9 @@ impl LayoutSystem for ScrollingLayoutSystem {
         layout: LayoutId,
         _default_orientation: crate::common::config::StackDefaultOrientation,
     ) -> Vec<WindowId> {
-        let Some(state) = self.layout_state_mut(layout) else { return Vec::new() };
+        let Some(state) = self.layout_state_mut(layout) else {
+            return Vec::new();
+        };
         let (col_idx, _) = match state.selected_location() {
             Some(loc) => loc,
             None => return Vec::new(),
@@ -774,7 +793,9 @@ impl LayoutSystem for ScrollingLayoutSystem {
         layout: LayoutId,
         _default_orientation: crate::common::config::StackDefaultOrientation,
     ) -> Vec<WindowId> {
-        let Some(state) = self.layout_state_mut(layout) else { return Vec::new() };
+        let Some(state) = self.layout_state_mut(layout) else {
+            return Vec::new();
+        };
         let (col_idx, row_idx) = match state.selected_location() {
             Some(loc) => loc,
             None => return Vec::new(),
@@ -802,13 +823,19 @@ impl LayoutSystem for ScrollingLayoutSystem {
     }
 
     fn parent_of_selection_is_stacked(&self, layout: LayoutId) -> bool {
-        let Some(state) = self.layout_state(layout) else { return false };
-        let Some((col_idx, _)) = state.selected_location() else { return false };
+        let Some(state) = self.layout_state(layout) else {
+            return false;
+        };
+        let Some((col_idx, _)) = state.selected_location() else {
+            return false;
+        };
         state.columns[col_idx].windows.len() > 1
     }
 
     fn unjoin_selection(&mut self, layout: LayoutId) {
-        let Some(state) = self.layout_state_mut(layout) else { return };
+        let Some(state) = self.layout_state_mut(layout) else {
+            return;
+        };
         let (col_idx, row_idx) = match state.selected_location() {
             Some(loc) => loc,
             None => return,
@@ -827,7 +854,9 @@ impl LayoutSystem for ScrollingLayoutSystem {
     fn resize_selection_by(&mut self, layout: LayoutId, amount: f64) {
         let min_ratio = self.settings.min_column_width_ratio;
         let max_ratio = self.settings.max_column_width_ratio;
-        let Some(state) = self.layout_state_mut(layout) else { return };
+        let Some(state) = self.layout_state_mut(layout) else {
+            return;
+        };
         let ratio = state.column_width_ratio + amount;
         state.column_width_ratio = ratio.clamp(min_ratio, max_ratio).max(0.05).min(0.98);
     }
@@ -844,8 +873,8 @@ mod tests {
     use super::ScrollingLayoutSystem;
     use crate::actor::app::{WindowId, pid_t};
     use crate::common::config::ScrollingLayoutSettings;
-    use crate::layout_engine::systems::LayoutSystem;
     use crate::layout_engine::Direction;
+    use crate::layout_engine::systems::LayoutSystem;
 
     fn wid(pid: pid_t, idx: u32) -> WindowId {
         WindowId {
@@ -889,7 +918,15 @@ mod tests {
 
         let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
         let gaps = crate::common::config::GapSettings::default();
-        let frames = system.calculate_layout(layout, screen, 0.0, &gaps, 0.0, Default::default(), Default::default());
+        let frames = system.calculate_layout(
+            layout,
+            screen,
+            0.0,
+            &gaps,
+            0.0,
+            Default::default(),
+            Default::default(),
+        );
 
         assert_eq!(frames.len(), 2);
         let width = frames[1].1.size.width;
