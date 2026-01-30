@@ -9,7 +9,6 @@ use crate::common::config::ScrollingLayoutSettings;
 use crate::layout_engine::systems::LayoutSystem;
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{Direction, LayoutId, LayoutKind};
-use crate::sys::geometry::Round;
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 struct Column {
@@ -434,14 +433,17 @@ impl LayoutSystem for ScrollingLayoutSystem {
 
             for (row_idx, wid) in col.windows.iter().enumerate() {
                 let y = tiling.origin.y + (row_idx as f64) * (row_height + gap_y);
-                let mut frame =
-                    CGRect::new(CGPoint::new(x, y), CGSize::new(column_width, row_height));
+                // round position and size independently to avoid size jitter from min/max rounding.
+                let mut frame = CGRect::new(
+                    CGPoint::new(x.round(), y.round()),
+                    CGSize::new(column_width.round(), row_height.round()),
+                );
                 if state.fullscreen.contains(wid) {
                     frame = screen;
                 } else if state.fullscreen_within_gaps.contains(wid) {
                     frame = tiling;
                 }
-                out.push((*wid, frame.round()));
+                out.push((*wid, frame));
             }
         }
         out
