@@ -602,30 +602,30 @@ impl EventTap {
 
         let mut st = state.borrow_mut();
 
+        let phase = nsevent.phase();
+        if [
+            NSEventPhase::Ended,
+            NSEventPhase::Cancelled,
+            NSEventPhase::Began,
+        ]
+        .contains(&phase)
+        {
+            st.reset();
+            return;
+        }
+
         // let phase = nsevent.phase();
-        // if [
-        //     NSEventPhase::Ended,
-        //     NSEventPhase::Cancelled,
-        //     NSEventPhase::Began,
-        // ]
-        // .contains(&phase)
-        // {
+        // if [NSEventPhase::Ended, NSEventPhase::Cancelled].contains(&phase) {
+        //     wm_sender.send(WmEvent::Command(WmCommand::ReactorCommand(
+        //         reactor::Command::Layout(LC::SnapStrip),
+        //     )));
         //     st.reset();
         //     return;
         // }
-
-        let phase = nsevent.phase();
-        if [NSEventPhase::Ended, NSEventPhase::Cancelled].contains(&phase) {
-            wm_sender.send(WmEvent::Command(WmCommand::ReactorCommand(
-                reactor::Command::Layout(LC::SnapStrip),
-            )));
-            st.reset();
-            return;
-        }
-        if phase == NSEventPhase::Began {
-            st.reset();
-            return;
-        }
+        // if phase == NSEventPhase::Began {
+        //     st.reset();
+        //     return;
+        // }
 
         let touches = nsevent.allTouches();
         let mut sum_x = 0.0f64;
