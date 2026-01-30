@@ -5,7 +5,9 @@ use objc2_core_foundation::CGRect;
 use serde::{Deserialize, Serialize};
 
 use crate::actor::app::WindowId;
-use crate::common::config::{MasterStackSettings, MasterStackSide};
+use crate::common::config::{
+    MasterStackNewWindowPlacement, MasterStackSettings, MasterStackSide,
+};
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{
     Direction, LayoutId, LayoutKind, LayoutSystem, Orientation, TraditionalLayoutSystem,
@@ -108,6 +110,29 @@ impl MasterStackLayoutSystem {
             .traverse_preorder(self.inner.map())
             .filter_map(|node| self.inner.window_at(node))
             .collect()
+    }
+
+    fn focused_container(&self, layout: LayoutId, master: NodeId, stack: NodeId) -> Option<NodeId> {
+        let wid = self.inner.selected_window(layout)?;
+        let node = self.inner.tree.data.window.node_for(layout, wid)?;
+        let map = self.inner.map();
+        if node.ancestors(map).any(|ancestor| ancestor == master) {
+            Some(master)
+        } else if node.ancestors(map).any(|ancestor| ancestor == stack) {
+            Some(stack)
+        } else {
+            None
+        }
+    }
+
+    fn focused_window_in_container(&self, container: NodeId) -> Option<WindowId> {
+        let map = self.inner.map();
+        let selection = self.inner.local_selection(container);
+        let candidate = selection.or_else(|| container.first_child(map));
+        let candidate = candidate?;
+        candidate
+            .traverse_preorder(map)
+            .find_map(|node| self.inner.window_at(node))
     }
 
     fn create_containers(&mut self, root: NodeId) -> (NodeId, NodeId) {
@@ -334,29 +359,28 @@ impl MasterStackLayoutSystem {
             return;
         };
         let master_windows = self.windows_in_container(master);
-        let Some(&master_wid) = master_windows.first() else {
-            return;
-        };
-        if wid == master_wid {
+        if master_windows.first().copied() == Some(wid) {
             return;
         }
-        let swapped = self.inner.swap_windows(layout, wid, master_wid);
-        if swapped {
-            let _ = self.inner.select_window(layout, wid);
+        if let Some(node) = self.move_window_to_container_front(layout, wid, master) {
+            self.inner.select(node);
         }
         self.enforce_master_count(layout, master, stack);
     }
 
     pub fn swap_master_stack(&mut self, layout: LayoutId) {
         let (_root, master, stack) = self.ensure_structure(layout);
-        let master_windows = self.windows_in_container(master);
-        let stack_windows = self.windows_in_container(stack);
-        let (Some(&master_wid), Some(&stack_wid)) = (master_windows.first(), stack_windows.first())
-        else {
+        let (Some(master_wid), Some(stack_wid)) = (
+            self.focused_window_in_container(master),
+            self.focused_window_in_container(stack),
+        ) else {
             return;
         };
+        let selected = self.inner.selected_window(layout);
         let _ = self.inner.swap_windows(layout, master_wid, stack_wid);
-        self.normalize_layout(layout);
+        if let Some(wid) = selected {
+            let _ = self.inner.select_window(layout, wid);
+        }
     }
 
     pub(crate) fn collect_group_containers_in_selection_path(
@@ -515,9 +539,22 @@ impl LayoutSystem for MasterStackLayoutSystem {
 
     fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId) {
         let (_root, master, stack) = self.ensure_structure(layout);
+        let master_windows = self.windows_in_container(master);
+        let master_has_capacity = master_windows.len() < self.settings.master_count;
+        let target = if master_has_capacity {
+            master
+        } else {
+            match self.settings.new_window_placement {
+                MasterStackNewWindowPlacement::Master => master,
+                MasterStackNewWindowPlacement::Stack => stack,
+                MasterStackNewWindowPlacement::Focused => {
+                    self.focused_container(layout, master, stack).unwrap_or(master)
+                }
+            }
+        };
         let node = self
-            .add_window_to_container_front(layout, master, wid)
-            .unwrap_or_else(|| self.inner.add_window_under(layout, master, wid));
+            .add_window_to_container_front(layout, target, wid)
+            .unwrap_or_else(|| self.inner.add_window_under(layout, target, wid));
         self.inner.select(node);
         self.enforce_master_count(layout, master, stack);
     }
@@ -609,19 +646,11 @@ impl LayoutSystem for MasterStackLayoutSystem {
     }
 
     fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
-        let swapped = self.inner.swap_windows(layout, a, b);
-        if swapped {
-            self.normalize_layout(layout);
-        }
-        swapped
+        self.inner.swap_windows(layout, a, b)
     }
 
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool {
-        let moved = self.inner.move_selection(layout, direction);
-        if moved {
-            self.normalize_layout(layout);
-        }
-        moved
+        self.inner.move_selection(layout, direction)
     }
 
     fn move_selection_to_layout_after_selection(
@@ -630,15 +659,12 @@ impl LayoutSystem for MasterStackLayoutSystem {
         to_layout: LayoutId,
     ) {
         self.inner.move_selection_to_layout_after_selection(from_layout, to_layout);
-        let (_root, master, stack) = self.ensure_structure(from_layout);
-        self.enforce_master_count(from_layout, master, stack);
-        let (_root, master, stack) = self.ensure_structure(to_layout);
-        self.enforce_master_count(to_layout, master, stack);
+        let _ = self.ensure_structure(from_layout);
+        let _ = self.ensure_structure(to_layout);
     }
 
     fn split_selection(&mut self, layout: LayoutId, kind: LayoutKind) {
         self.inner.split_selection(layout, kind);
-        self.normalize_layout(layout);
     }
 
     fn toggle_fullscreen_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
@@ -651,7 +677,6 @@ impl LayoutSystem for MasterStackLayoutSystem {
 
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) {
         self.inner.join_selection_with_direction(layout, direction);
-        self.normalize_layout(layout);
     }
 
     fn apply_stacking_to_parent_of_selection(
@@ -659,9 +684,8 @@ impl LayoutSystem for MasterStackLayoutSystem {
         layout: LayoutId,
         default_orientation: crate::common::config::StackDefaultOrientation,
     ) -> Vec<WindowId> {
-        let windows = self.inner.apply_stacking_to_parent_of_selection(layout, default_orientation);
-        self.normalize_layout(layout);
-        windows
+        self.inner
+            .apply_stacking_to_parent_of_selection(layout, default_orientation)
     }
 
     fn unstack_parent_of_selection(
@@ -669,9 +693,8 @@ impl LayoutSystem for MasterStackLayoutSystem {
         layout: LayoutId,
         default_orientation: crate::common::config::StackDefaultOrientation,
     ) -> Vec<WindowId> {
-        let windows = self.inner.unstack_parent_of_selection(layout, default_orientation);
-        self.normalize_layout(layout);
-        windows
+        self.inner
+            .unstack_parent_of_selection(layout, default_orientation)
     }
 
     fn parent_of_selection_is_stacked(&self, layout: LayoutId) -> bool {
@@ -680,21 +703,17 @@ impl LayoutSystem for MasterStackLayoutSystem {
 
     fn unjoin_selection(&mut self, layout: LayoutId) {
         self.inner.unjoin_selection(layout);
-        self.normalize_layout(layout);
     }
 
     fn resize_selection_by(&mut self, layout: LayoutId, amount: f64) {
         self.inner.resize_selection_by(layout, amount);
-        self.normalize_layout(layout);
     }
 
     fn rebalance(&mut self, layout: LayoutId) {
         self.inner.rebalance(layout);
-        self.normalize_layout(layout);
     }
 
     fn toggle_tile_orientation(&mut self, layout: LayoutId) {
         self.inner.toggle_tile_orientation(layout);
-        self.normalize_layout(layout);
     }
 }

@@ -582,6 +582,17 @@ pub struct MasterStackSettings {
     /// Which side the master area occupies
     #[serde(default)]
     pub master_side: MasterStackSide,
+    /// Where new windows are inserted when the master area is already full
+    #[serde(default = "default_master_stack_new_window_placement")]
+    pub new_window_placement: MasterStackNewWindowPlacement,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum MasterStackNewWindowPlacement {
+    Master,
+    Stack,
+    Focused,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
@@ -684,6 +695,7 @@ impl Default for MasterStackSettings {
             master_ratio: default_master_stack_ratio(),
             master_count: default_master_stack_count(),
             master_side: MasterStackSide::Left,
+            new_window_placement: default_master_stack_new_window_placement(),
         }
     }
 }
@@ -872,6 +884,10 @@ fn yes() -> bool { true }
 fn default_stack_offset() -> f64 { 40.0 }
 
 fn default_stack_orientation() -> StackDefaultOrientation { StackDefaultOrientation::Perpendicular }
+
+fn default_master_stack_new_window_placement() -> MasterStackNewWindowPlacement {
+    MasterStackNewWindowPlacement::Master
+}
 
 fn default_animation_duration() -> f64 { 0.3 }
 

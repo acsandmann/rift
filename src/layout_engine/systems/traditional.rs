@@ -118,6 +118,14 @@ impl TraditionalLayoutSystem {
 
     pub(crate) fn map(&self) -> &NodeMap { &self.tree.map }
 
+    pub(crate) fn local_selection(&self, node: NodeId) -> Option<NodeId> {
+        self.tree
+            .data
+            .selection
+            .local_selection(self.map(), node)
+            .or_else(|| self.tree.data.selection.last_selection(self.map(), node))
+    }
+
     pub(crate) fn layout(&self, node: NodeId) -> LayoutKind { self.tree.data.layout.kind(node) }
 
     pub(crate) fn layouts_for_window(&self, wid: WindowId) -> Vec<LayoutId> {

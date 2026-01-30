@@ -90,6 +90,8 @@ master_ratio = 0.6
 master_count = 1
 # Which side the master area occupies (left | right | top | bottom)
 master_side = "left"
+# Where new windows go when the master area is already full (master | stack | focused)
+new_window_placement = "master"
 
 [settings.layout.stack]
 # How much of each stacked window sticks out (in pixels)
