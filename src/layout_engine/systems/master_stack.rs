@@ -110,6 +110,12 @@ impl MasterStackLayoutSystem {
             .collect()
     }
 
+    fn container_is_flat(&self, container: NodeId) -> bool {
+        container
+            .children(self.inner.map())
+            .all(|child| self.inner.window_at(child).is_some())
+    }
+
     fn focused_container(&self, layout: LayoutId, master: NodeId, stack: NodeId) -> Option<NodeId> {
         let wid = self.inner.selected_window(layout)?;
         let node = self.inner.tree.data.window.node_for(layout, wid)?;
@@ -158,8 +164,9 @@ impl MasterStackLayoutSystem {
     fn ensure_structure(&mut self, layout: LayoutId) -> (NodeId, NodeId, NodeId) {
         let root = self.inner.root(layout);
         let children: Vec<_> = root.children(self.inner.map()).collect();
-        let valid =
-            children.len() == 2 && children.iter().all(|&c| self.inner.window_at(c).is_none());
+        let valid = children.len() == 2
+            && children.iter().all(|&c| self.inner.window_at(c).is_none())
+            && children.iter().all(|&c| self.container_is_flat(c));
         if !valid {
             self.rebuild_layout(layout);
         }
@@ -646,7 +653,42 @@ impl LayoutSystem for MasterStackLayoutSystem {
     }
 
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool {
-        self.inner.move_selection(layout, direction)
+        let (_root, master, stack) = self.ensure_structure(layout);
+        let Some(container) = self.focused_container(layout, master, stack) else {
+            return false;
+        };
+        let container_axis = self.container_orientation();
+        let (towards_master, towards_stack) = match self.settings.master_side {
+            MasterStackSide::Left => (direction == Direction::Left, direction == Direction::Right),
+            MasterStackSide::Right => (direction == Direction::Right, direction == Direction::Left),
+            MasterStackSide::Top => (direction == Direction::Up, direction == Direction::Down),
+            MasterStackSide::Bottom => (direction == Direction::Down, direction == Direction::Up),
+        };
+
+        if towards_master && container == stack {
+            self.promote_to_master(layout);
+            self.normalize_layout(layout);
+            return true;
+        }
+        if towards_stack && container == master {
+            if self.focused_window_in_container(master).is_some()
+                && self.focused_window_in_container(stack).is_some()
+            {
+                self.swap_master_stack(layout);
+                self.normalize_layout(layout);
+                return true;
+            }
+            return false;
+        }
+        if direction.orientation() != container_axis {
+            return false;
+        }
+
+        let moved = self.inner.move_selection(layout, direction);
+        if moved {
+            self.normalize_layout(layout);
+        }
+        moved
     }
 
     fn move_selection_to_layout_after_selection(
@@ -660,7 +702,8 @@ impl LayoutSystem for MasterStackLayoutSystem {
     }
 
     fn split_selection(&mut self, layout: LayoutId, kind: LayoutKind) {
-        self.inner.split_selection(layout, kind);
+        let _ = kind;
+        self.normalize_layout(layout);
     }
 
     fn toggle_fullscreen_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
@@ -672,7 +715,8 @@ impl LayoutSystem for MasterStackLayoutSystem {
     }
 
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) {
-        self.inner.join_selection_with_direction(layout, direction);
+        let _ = direction;
+        self.normalize_layout(layout);
     }
 
     fn apply_stacking_to_parent_of_selection(
@@ -680,7 +724,9 @@ impl LayoutSystem for MasterStackLayoutSystem {
         layout: LayoutId,
         default_orientation: crate::common::config::StackDefaultOrientation,
     ) -> Vec<WindowId> {
-        self.inner.apply_stacking_to_parent_of_selection(layout, default_orientation)
+        let _ = default_orientation;
+        self.normalize_layout(layout);
+        vec![]
     }
 
     fn unstack_parent_of_selection(
@@ -688,22 +734,25 @@ impl LayoutSystem for MasterStackLayoutSystem {
         layout: LayoutId,
         default_orientation: crate::common::config::StackDefaultOrientation,
     ) -> Vec<WindowId> {
-        self.inner.unstack_parent_of_selection(layout, default_orientation)
+        let _ = default_orientation;
+        self.normalize_layout(layout);
+        vec![]
     }
 
     fn parent_of_selection_is_stacked(&self, layout: LayoutId) -> bool {
         self.inner.parent_of_selection_is_stacked(layout)
     }
 
-    fn unjoin_selection(&mut self, layout: LayoutId) { self.inner.unjoin_selection(layout); }
+    fn unjoin_selection(&mut self, layout: LayoutId) { self.normalize_layout(layout); }
 
     fn resize_selection_by(&mut self, layout: LayoutId, amount: f64) {
-        self.inner.resize_selection_by(layout, amount);
+        let _ = amount;
+        self.normalize_layout(layout);
     }
 
-    fn rebalance(&mut self, layout: LayoutId) { self.inner.rebalance(layout); }
+    fn rebalance(&mut self, layout: LayoutId) { self.normalize_layout(layout); }
 
     fn toggle_tile_orientation(&mut self, layout: LayoutId) {
-        self.inner.toggle_tile_orientation(layout);
+        self.normalize_layout(layout);
     }
 }
