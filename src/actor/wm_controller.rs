@@ -238,6 +238,10 @@ impl WmController {
 
                 self.config.config = new_cfg;
 
+                _ = self
+                    .event_tap_tx
+                    .send(event_tap::Request::ConfigUpdated(self.config.config.clone()));
+
                 if !self.hotkeys_installed {
                     debug!(
                         "hotkeys not yet installed; deferring hotkey update until AppEventsRegistered"
