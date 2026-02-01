@@ -489,12 +489,11 @@ impl LayoutSystem for ScrollingLayoutSystem {
         }
         let current = f64::from_bits(state.scroll_offset_px.load(Ordering::Relaxed));
         let base_max_offset = (state.columns.len().saturating_sub(1) as f64) * step;
-        let (min_offset, max_offset) =
-            if state.center_override_active.load(Ordering::Relaxed) {
-                (center_offset_delta, base_max_offset + center_offset_delta)
-            } else {
-                (0.0, base_max_offset)
-            };
+        let (min_offset, max_offset) = if state.center_override_active.load(Ordering::Relaxed) {
+            (center_offset_delta, base_max_offset + center_offset_delta)
+        } else {
+            (0.0, base_max_offset)
+        };
         let clamped = current.clamp(min_offset, max_offset);
         state.scroll_offset_px.store(clamped.to_bits(), Ordering::Relaxed);
 
@@ -957,9 +956,9 @@ mod tests {
     use super::ScrollingLayoutSystem;
     use crate::actor::app::{WindowId, pid_t};
     use crate::common::config::ScrollingLayoutSettings;
-    use crate::layout_engine::utils::compute_tiling_area;
     use crate::layout_engine::Direction;
     use crate::layout_engine::systems::LayoutSystem;
+    use crate::layout_engine::utils::compute_tiling_area;
 
     fn wid(pid: pid_t, idx: u32) -> WindowId {
         WindowId {
