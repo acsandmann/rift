@@ -24,10 +24,16 @@ struct LayoutState {
     scroll_offset_px: AtomicU64,
     #[serde(skip, default = "default_atomic_bool")]
     pending_align: AtomicBool,
+    #[serde(skip, default = "default_atomic_bool")]
+    pending_center_align: AtomicBool,
+    #[serde(skip, default = "default_atomic_bool")]
+    center_override_active: AtomicBool,
     #[serde(skip, default = "default_atomic")]
     last_screen_width: AtomicU64,
     #[serde(skip, default = "default_atomic")]
     last_step_px: AtomicU64,
+    #[serde(skip, default = "default_atomic")]
+    last_center_offset_delta_px: AtomicU64,
     fullscreen: HashSet<WindowId>,
     fullscreen_within_gaps: HashSet<WindowId>,
 }
@@ -40,8 +46,11 @@ impl LayoutState {
             column_width_ratio,
             scroll_offset_px: AtomicU64::new(0.0f64.to_bits()),
             pending_align: AtomicBool::new(false),
+            pending_center_align: AtomicBool::new(false),
+            center_override_active: AtomicBool::new(false),
             last_screen_width: AtomicU64::new(0.0f64.to_bits()),
             last_step_px: AtomicU64::new(0.0f64.to_bits()),
+            last_center_offset_delta_px: AtomicU64::new(0.0f64.to_bits()),
             fullscreen: HashSet::default(),
             fullscreen_within_gaps: HashSet::default(),
         }
@@ -71,6 +80,8 @@ impl LayoutState {
     }
 
     fn align_scroll_to_selected(&mut self) {
+        self.center_override_active.store(false, Ordering::Relaxed);
+        self.pending_center_align.store(false, Ordering::Relaxed);
         let Some((col_idx, _)) = self.selected_location() else {
             self.scroll_offset_px.store(0.0f64.to_bits(), Ordering::Relaxed);
             return;
@@ -85,15 +96,29 @@ impl LayoutState {
         }
     }
 
+    fn request_center_on_selected(&mut self) {
+        if self.selected_location().is_some() {
+            self.pending_center_align.store(true, Ordering::Relaxed);
+            self.center_override_active.store(true, Ordering::Relaxed);
+        }
+    }
+
     fn clamp_scroll_offset(&mut self) {
         let step = f64::from_bits(self.last_step_px.load(Ordering::Relaxed));
         if step <= 0.0 {
             self.scroll_offset_px.store(0.0f64.to_bits(), Ordering::Relaxed);
             return;
         }
-        let max_offset = (self.columns.len().saturating_sub(1) as f64) * step;
+        let base_max_offset = (self.columns.len().saturating_sub(1) as f64) * step;
+        let center_offset_delta =
+            f64::from_bits(self.last_center_offset_delta_px.load(Ordering::Relaxed));
+        let (min_offset, max_offset) = if self.center_override_active.load(Ordering::Relaxed) {
+            (center_offset_delta, base_max_offset + center_offset_delta)
+        } else {
+            (0.0, base_max_offset)
+        };
         let offset = f64::from_bits(self.scroll_offset_px.load(Ordering::Relaxed));
-        let clamped = offset.clamp(0.0, max_offset);
+        let clamped = offset.clamp(min_offset, max_offset);
         self.scroll_offset_px.store(clamped.to_bits(), Ordering::Relaxed);
     }
 
@@ -179,8 +204,17 @@ impl Clone for LayoutState {
             column_width_ratio: self.column_width_ratio,
             scroll_offset_px: AtomicU64::new(self.scroll_offset_px.load(Ordering::Relaxed)),
             pending_align: AtomicBool::new(self.pending_align.load(Ordering::Relaxed)),
+            pending_center_align: AtomicBool::new(
+                self.pending_center_align.load(Ordering::Relaxed),
+            ),
+            center_override_active: AtomicBool::new(
+                self.center_override_active.load(Ordering::Relaxed),
+            ),
             last_screen_width: AtomicU64::new(self.last_screen_width.load(Ordering::Relaxed)),
             last_step_px: AtomicU64::new(self.last_step_px.load(Ordering::Relaxed)),
+            last_center_offset_delta_px: AtomicU64::new(
+                self.last_center_offset_delta_px.load(Ordering::Relaxed),
+            ),
             fullscreen: self.fullscreen.clone(),
             fullscreen_within_gaps: self.fullscreen_within_gaps.clone(),
         }
@@ -239,9 +273,16 @@ impl ScrollingLayoutSystem {
         if step <= 0.0 {
             return;
         }
-        let max_offset = (state.columns.len().saturating_sub(1) as f64) * step;
+        let base_max_offset = (state.columns.len().saturating_sub(1) as f64) * step;
+        let center_offset_delta =
+            f64::from_bits(state.last_center_offset_delta_px.load(Ordering::Relaxed));
+        let (min_offset, max_offset) = if state.center_override_active.load(Ordering::Relaxed) {
+            (center_offset_delta, base_max_offset + center_offset_delta)
+        } else {
+            (0.0, base_max_offset)
+        };
         let current = f64::from_bits(state.scroll_offset_px.load(Ordering::Relaxed));
-        let next = (current + delta * step).clamp(0.0, max_offset);
+        let next = (current + delta * step).clamp(min_offset, max_offset);
         state.scroll_offset_px.store(next.to_bits(), Ordering::Relaxed);
     }
 
@@ -253,11 +294,31 @@ impl ScrollingLayoutSystem {
         if step <= 0.0 {
             return;
         }
-        let max_offset = (state.columns.len().saturating_sub(1) as f64) * step;
+        let base_max_offset = (state.columns.len().saturating_sub(1) as f64) * step;
+        let center_offset_delta =
+            f64::from_bits(state.last_center_offset_delta_px.load(Ordering::Relaxed));
+        let (min_offset, max_offset, baseline) =
+            if state.center_override_active.load(Ordering::Relaxed) {
+                (
+                    center_offset_delta,
+                    base_max_offset + center_offset_delta,
+                    center_offset_delta,
+                )
+            } else {
+                (0.0, base_max_offset, 0.0)
+            };
         let current = f64::from_bits(state.scroll_offset_px.load(Ordering::Relaxed));
-        let target_idx = (current / step).round().max(0.0);
-        let next = (target_idx * step).clamp(0.0, max_offset);
+        let max_idx = state.columns.len().saturating_sub(1) as f64;
+        let target_idx = ((current - baseline) / step).round().clamp(0.0, max_idx);
+        let next = (baseline + target_idx * step).clamp(min_offset, max_offset);
         state.scroll_offset_px.store(next.to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn center_selected_column(&mut self, layout: LayoutId) {
+        let Some(state) = self.layout_state_mut(layout) else {
+            return;
+        };
+        state.request_center_on_selected();
     }
 
     fn layout_state(&self, layout: LayoutId) -> Option<&LayoutState> { self.layouts.get(layout) }
@@ -327,8 +388,9 @@ impl ScrollingLayoutSystem {
             _ => None,
         };
         let Some(target_col) = target_col else { return false };
+        state.columns.swap(col_idx, target_col);
         let Some(selected) = state.selected else { return false };
-        state.move_window_to_column_end(selected, target_col);
+        state.selected = Some(selected);
         true
     }
 
@@ -393,18 +455,6 @@ impl LayoutSystem for ScrollingLayoutSystem {
         let step = column_width + gap_x;
         state.last_screen_width.store(tiling.size.width.to_bits(), Ordering::Relaxed);
         state.last_step_px.store(step.to_bits(), Ordering::Relaxed);
-        if state.pending_align.load(Ordering::Relaxed) {
-            let offset = state
-                .selected_location()
-                .map(|(col_idx, _)| col_idx as f64 * step)
-                .unwrap_or(0.0);
-            state.scroll_offset_px.store(offset.to_bits(), Ordering::Relaxed);
-            state.pending_align.store(false, Ordering::Relaxed);
-        }
-        let current = f64::from_bits(state.scroll_offset_px.load(Ordering::Relaxed));
-        let max_offset = (state.columns.len().saturating_sub(1) as f64) * step;
-        let clamped = current.clamp(0.0, max_offset);
-        state.scroll_offset_px.store(clamped.to_bits(), Ordering::Relaxed);
 
         let anchor_x = match self.settings.alignment {
             crate::common::config::ScrollingAlignment::Left => tiling.origin.x,
@@ -415,6 +465,38 @@ impl LayoutSystem for ScrollingLayoutSystem {
                 tiling.origin.x + tiling.size.width - column_width
             }
         };
+        let center_anchor_x = tiling.origin.x + (tiling.size.width - column_width) / 2.0;
+        let center_offset_delta = anchor_x - center_anchor_x;
+        state
+            .last_center_offset_delta_px
+            .store(center_offset_delta.to_bits(), Ordering::Relaxed);
+
+        if state.pending_center_align.load(Ordering::Relaxed) {
+            let offset = state
+                .selected_location()
+                .map(|(col_idx, _)| center_offset_delta + (col_idx as f64) * step)
+                .unwrap_or(0.0);
+            state.scroll_offset_px.store(offset.to_bits(), Ordering::Relaxed);
+            state.pending_center_align.store(false, Ordering::Relaxed);
+            state.pending_align.store(false, Ordering::Relaxed);
+        } else if state.pending_align.load(Ordering::Relaxed) {
+            let offset = state
+                .selected_location()
+                .map(|(col_idx, _)| col_idx as f64 * step)
+                .unwrap_or(0.0);
+            state.scroll_offset_px.store(offset.to_bits(), Ordering::Relaxed);
+            state.pending_align.store(false, Ordering::Relaxed);
+        }
+        let current = f64::from_bits(state.scroll_offset_px.load(Ordering::Relaxed));
+        let base_max_offset = (state.columns.len().saturating_sub(1) as f64) * step;
+        let (min_offset, max_offset) =
+            if state.center_override_active.load(Ordering::Relaxed) {
+                (center_offset_delta, base_max_offset + center_offset_delta)
+            } else {
+                (0.0, base_max_offset)
+            };
+        let clamped = current.clamp(min_offset, max_offset);
+        state.scroll_offset_px.store(clamped.to_bits(), Ordering::Relaxed);
 
         let mut out = Vec::new();
         for (col_idx, col) in state.columns.iter().enumerate() {
@@ -875,6 +957,7 @@ mod tests {
     use super::ScrollingLayoutSystem;
     use crate::actor::app::{WindowId, pid_t};
     use crate::common::config::ScrollingLayoutSettings;
+    use crate::layout_engine::utils::compute_tiling_area;
     use crate::layout_engine::Direction;
     use crate::layout_engine::systems::LayoutSystem;
 
@@ -907,6 +990,28 @@ mod tests {
     }
 
     #[test]
+    fn move_selection_swaps_columns_horizontally() {
+        let settings = ScrollingLayoutSettings::default();
+        let mut system = ScrollingLayoutSystem::new(&settings);
+        let layout = system.create_layout();
+
+        let w1 = wid(1, 1);
+        let w2 = wid(1, 2);
+        let w3 = wid(1, 3);
+
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+        system.add_window_after_selection(layout, w3);
+
+        assert!(system.move_selection(layout, Direction::Left));
+
+        let state = system.layouts.get(layout).expect("layout state missing");
+        assert_eq!(state.columns.len(), 3);
+        assert_eq!(state.columns[1].windows, vec![w3]);
+        assert_eq!(state.columns[2].windows, vec![w2]);
+    }
+
+    #[test]
     fn calculates_centered_columns() {
         let settings = ScrollingLayoutSettings::default();
         let mut system = ScrollingLayoutSystem::new(&settings);
@@ -933,5 +1038,49 @@ mod tests {
         assert_eq!(frames.len(), 2);
         let width = frames[1].1.size.width;
         assert!((width - 700.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn centers_selected_column_without_changing_alignment() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.alignment = crate::common::config::ScrollingAlignment::Left;
+        let mut system = ScrollingLayoutSystem::new(&settings);
+        let layout = system.create_layout();
+
+        let w1 = wid(1, 1);
+        let w2 = wid(1, 2);
+
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+        system.center_selected_column(layout);
+
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
+        let gaps = crate::common::config::GapSettings::default();
+        let frames = system.calculate_layout(
+            layout,
+            screen,
+            0.0,
+            &gaps,
+            0.0,
+            Default::default(),
+            Default::default(),
+        );
+
+        let tiling = compute_tiling_area(screen, &gaps);
+        let selected_frame = frames
+            .iter()
+            .find(|(wid, _)| *wid == w2)
+            .map(|(_, frame)| *frame)
+            .expect("missing selected frame");
+
+        let column_width = selected_frame.size.width;
+        let expected_x = tiling.origin.x + (tiling.size.width - column_width) / 2.0;
+
+        assert!(
+            (selected_frame.origin.x - expected_x.round()).abs() < 1.0,
+            "expected centered x={}, got x={}",
+            expected_x.round(),
+            selected_frame.origin.x
+        );
     }
 }

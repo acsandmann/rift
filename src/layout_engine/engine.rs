@@ -60,6 +60,8 @@ pub enum LayoutCommand {
     },
     /// Snap the strip to the nearest column boundary
     SnapStrip,
+    /// Center the selected column without changing alignment settings
+    CenterSelection,
 
     NextWorkspace(Option<bool>),
     PrevWorkspace(Option<bool>),
@@ -1244,6 +1246,12 @@ impl LayoutEngine {
             LayoutCommand::SnapStrip => {
                 if let LayoutSystemKind::Scrolling(system) = &mut self.tree {
                     system.snap_to_nearest_column(layout);
+                }
+                EventResponse::default()
+            }
+            LayoutCommand::CenterSelection => {
+                if let LayoutSystemKind::Scrolling(system) = &mut self.tree {
+                    system.center_selected_column(layout);
                 }
                 EventResponse::default()
             }
