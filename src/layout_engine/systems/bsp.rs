@@ -264,9 +264,9 @@ impl BspLayoutSystem {
                 fullscreen_within_gaps,
                 ..
             }) => *fullscreen || *fullscreen_within_gaps,
-            Some(NodeKind::Split { .. }) => node
-                .children(&self.tree.map)
-                .any(|child| self.has_fullscreen_in_subtree(child)),
+            Some(NodeKind::Split { .. }) => {
+                node.children(&self.tree.map).any(|child| self.has_fullscreen_in_subtree(child))
+            }
             None => false,
         }
     }
