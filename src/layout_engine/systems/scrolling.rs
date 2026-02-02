@@ -80,7 +80,12 @@ impl LayoutState {
     }
 
     fn align_scroll_to_selected(&mut self) {
-        self.center_override_active.store(false, Ordering::Relaxed);
+        // When user has centered the selected column, preserve that: re-apply center alignment
+        // on the next layout pass instead of reverting to default alignment.
+        if self.center_override_active.load(Ordering::Relaxed) {
+            self.pending_center_align.store(true, Ordering::Relaxed);
+            return;
+        }
         self.pending_center_align.store(false, Ordering::Relaxed);
         let Some((col_idx, _)) = self.selected_location() else {
             self.scroll_offset_px.store(0.0f64.to_bits(), Ordering::Relaxed);
