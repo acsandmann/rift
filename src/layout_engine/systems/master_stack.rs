@@ -714,6 +714,10 @@ impl LayoutSystem for MasterStackLayoutSystem {
         self.inner.toggle_fullscreen_within_gaps_of_selection(layout)
     }
 
+    fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
+        self.inner.has_any_fullscreen_node(layout)
+    }
+
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) {
         let _ = direction;
         self.normalize_layout(layout);

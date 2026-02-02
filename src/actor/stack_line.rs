@@ -33,6 +33,7 @@ pub enum Event {
         active_space_ids: Vec<SpaceId>,
         space_id: SpaceId,
         groups: Vec<GroupInfo>,
+        active_workspace_for_space_has_fullscreen: bool,
     },
     ScreenParametersChanged(CoordinateConverter),
     ConfigUpdated(Config),
@@ -107,8 +108,14 @@ impl StackLine {
                 active_space_ids,
                 space_id,
                 groups,
+                active_workspace_for_space_has_fullscreen,
             } => {
-                self.handle_groups_updated(active_space_ids, space_id, groups);
+                self.handle_groups_updated(
+                    active_space_ids,
+                    space_id,
+                    groups,
+                    active_workspace_for_space_has_fullscreen,
+                );
             }
             Event::ScreenParametersChanged(converter) => {
                 self.handle_screen_parameters_changed(converter);
@@ -130,6 +137,7 @@ impl StackLine {
         active_space_ids: Vec<SpaceId>,
         space_id: SpaceId,
         groups: Vec<GroupInfo>,
+        space_has_fullscreen: bool,
     ) {
         let active: crate::common::collections::HashSet<SpaceId> =
             active_space_ids.iter().copied().collect();
@@ -147,36 +155,43 @@ impl StackLine {
 
         let sigs: Vec<GroupSig> = groups.iter().map(GroupSig::from_group_info).collect();
 
-        match self.group_sigs_by_space.entry(space_id) {
-            Entry::Occupied(mut prev) => {
-                if prev.get() == &sigs {
-                    return;
-                }
-                let _ = prev.insert(sigs);
-            }
-            Entry::Vacant(v) => {
-                let _ = v.insert(sigs);
-            }
+        let groups_unchanged = match self.group_sigs_by_space.entry(space_id) {
+            Entry::Occupied(ref prev) => prev.get() == &sigs,
+            Entry::Vacant(_) => false,
         };
 
-        let group_nodes: std::collections::HashSet<NodeId> =
-            groups.iter().map(|g| g.node_id).collect();
-        self.indicators.retain(|&node_id, indicator| match indicator.space_id() {
-            Some(indicator_space_id) if indicator_space_id == space_id => {
-                if group_nodes.contains(&node_id) {
-                    true
-                } else {
-                    if let Err(err) = indicator.clear() {
-                        tracing::warn!(?err, "failed to clear stack line indicator");
+        if !groups_unchanged {
+            let _ = self.group_sigs_by_space.insert(space_id, sigs);
+
+            let group_nodes: std::collections::HashSet<NodeId> =
+                groups.iter().map(|g| g.node_id).collect();
+            self.indicators.retain(|&node_id, indicator| match indicator.space_id() {
+                Some(indicator_space_id) if indicator_space_id == space_id => {
+                    if group_nodes.contains(&node_id) {
+                        true
+                    } else {
+                        if let Err(err) = indicator.clear() {
+                            tracing::warn!(?err, "failed to clear stack line indicator");
+                        }
+                        false
                     }
-                    false
+                }
+                _ => true,
+            });
+
+            for group in groups {
+                self.update_or_create_indicator(group);
+            }
+        } else {
+            let _ = self.group_sigs_by_space.insert(space_id, sigs);
+        }
+
+        for indicator in self.indicators.values() {
+            if indicator.space_id() == Some(space_id) {
+                if let Err(err) = indicator.set_visibility(space_has_fullscreen) {
+                    tracing::warn!(?err, "failed to set stack line indicator visibility");
                 }
             }
-            _ => true,
-        });
-
-        for group in groups {
-            self.update_or_create_indicator(group);
         }
     }
 
@@ -434,6 +449,7 @@ struct GroupSig {
     h_q2: i64,
     total: usize,
     selected_index: usize,
+    window_ids: Vec<WindowId>,
 }
 
 impl GroupSig {
@@ -448,6 +464,7 @@ impl GroupSig {
             h_q2: quant(g.frame.size.height),
             total: g.total_count,
             selected_index: g.selected_index,
+            window_ids: g.window_ids.clone(),
         }
     }
 }

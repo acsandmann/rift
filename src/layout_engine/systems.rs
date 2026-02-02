@@ -66,6 +66,7 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
 
     fn toggle_fullscreen_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId>;
     fn toggle_fullscreen_within_gaps_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId>;
+    fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool;
 
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction);
     fn apply_stacking_to_parent_of_selection(

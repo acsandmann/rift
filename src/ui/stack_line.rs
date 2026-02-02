@@ -200,6 +200,14 @@ impl GroupIndicatorWindow {
         Ok(())
     }
 
+    pub fn set_visibility(&self, fullscreen: bool) -> Result<(), CgsWindowError> {
+        if fullscreen {
+            self.cgs_window.order_out()
+        } else {
+            self.cgs_window.order_above(None)
+        }
+    }
+
     pub fn recommended_thickness(&self) -> f64 { self.state.borrow().config.bar_thickness }
 
     pub fn frame(&self) -> CGRect { *self.frame.borrow() }

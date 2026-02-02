@@ -257,6 +257,7 @@ impl LayoutManager {
             .or(reactor.drag_manager.drag_swap_manager.dragged());
         let mut any_frame_changed = false;
 
+        let active_space = reactor.main_window_space();
         for (space, layout) in layout_result {
             // Handle stack_line
             if reactor.config.settings.ui.stack_line.enabled {
@@ -266,6 +267,11 @@ impl LayoutManager {
                         let display_uuid = screen.display_uuid_opt();
                         let gaps =
                             reactor.config.settings.layout.gaps.effective_for_display(display_uuid);
+                        let active_workspace_for_space_has_fullscreen = active_space == Some(space)
+                            && reactor
+                                .layout_manager
+                                .layout_engine
+                                .active_workspace_for_space_has_fullscreen(space);
                         let group_infos =
                             reactor.layout_manager.layout_engine.collect_group_containers(
                                 space,
@@ -296,6 +302,7 @@ impl LayoutManager {
                                 active_space_ids,
                                 space_id: space,
                                 groups,
+                                active_workspace_for_space_has_fullscreen,
                             })
                         {
                             tracing::warn!("Failed to send groups update to stack_line: {}", e);

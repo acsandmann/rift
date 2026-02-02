@@ -1429,6 +1429,11 @@ impl LayoutEngine {
         }
     }
 
+    pub fn active_workspace_for_space_has_fullscreen(&mut self, space: SpaceId) -> bool {
+        let layout_id = self.layout(space);
+        self.tree.has_any_fullscreen_node(layout_id)
+    }
+
     pub fn collect_group_containers(
         &mut self,
         space: SpaceId,

@@ -695,6 +695,12 @@ impl LayoutSystem for TraditionalLayoutSystem {
         }
     }
 
+    fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
+        let root = self.root(layout);
+        root.traverse_preorder(&self.tree.map)
+            .any(|node| self.tree.data.layout.is_effectively_fullscreen(node))
+    }
+
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) {
         let mut selection = self.selection(layout);
 
