@@ -265,11 +265,13 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
     let mission_control = MissionControlActor::new(config.clone(), mc_rx, reactor.clone(), mtm);
     let mission_control_native = NativeMissionControl::new(events_tx.clone(), mc_native_rx);
 
-    println!(
-        "NOTICE: by default rift starts in a deactivated state.
-        you must activate it by using the toggle_spaces_activated command.
-        by default this is bound to Alt+Z but can be changed in the config file."
-    );
+    if config.settings.default_disable {
+        println!(
+            "NOTICE: by default rift starts in a deactivated state.
+            you must activate it by using the toggle_spaces_activated command.
+            by default this is bound to Alt+Z but can be changed in the config file."
+        );
+    }
 
     unsafe { AXUIElement::new_system_wide().set_messaging_timeout(1.0) };
 
