@@ -1251,31 +1251,25 @@ pub struct FloatingWindowPositions {
 }
 
 impl FloatingWindowPositions {
-    pub fn store_position(&mut self, window_id: WindowId, position: CGRect) {
+    fn store_position(&mut self, window_id: WindowId, position: CGRect) {
         self.positions.insert(window_id, position);
     }
 
-    pub fn store_if_absent(&mut self, window_id: WindowId, position: CGRect) {
+    fn store_if_absent(&mut self, window_id: WindowId, position: CGRect) {
         self.positions.entry(window_id).or_insert(position);
     }
 
-    pub fn get_position(&self, window_id: WindowId) -> Option<CGRect> {
+    fn get_position(&self, window_id: WindowId) -> Option<CGRect> {
         self.positions.get(&window_id).copied()
     }
 
-    pub fn remove_position(&mut self, window_id: WindowId) -> Option<CGRect> {
+    fn remove_position(&mut self, window_id: WindowId) -> Option<CGRect> {
         self.positions.remove(&window_id)
     }
 
-    pub fn windows(&self) -> impl Iterator<Item = WindowId> + '_ { self.positions.keys().copied() }
+    fn windows(&self) -> impl Iterator<Item = WindowId> + '_ { self.positions.keys().copied() }
 
-    pub fn clear(&mut self) { self.positions.clear(); }
-
-    pub fn contains_window(&self, window_id: WindowId) -> bool {
-        self.positions.contains_key(&window_id)
-    }
-
-    pub fn remove_app_windows(&mut self, pid: pid_t) {
+    fn remove_app_windows(&mut self, pid: pid_t) {
         self.positions.retain(|window_id, _| window_id.pid != pid);
     }
 }
