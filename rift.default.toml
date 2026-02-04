@@ -311,22 +311,28 @@ comb1 = "Alt + Shift"
 # Commands
 # - toggle_space_activated
 # - next_workspace / prev_workspace
+# - next_workspace = true|false (optional skip-empty override)
+# - prev_workspace = true|false (optional skip-empty override)
 # - switch_to_workspace = N
-# - move_window_to_workspace = N
+# - move_window_to_workspace = N / move_window_to_workspace = { workspace = N, window_id = 123 } (optional window id)
 # - create_workspace
 # - switch_to_last_workspace
 # - move_focus = "left"|"right"|"up"|"down"
 # - move_node = "left"|"right"|"up"|"down"
 # - join_window = "left"|"right"|"up"|"down"
-# - stack_windows / unstack_windows / unjoin_windows
-# - toggle_focus_floating / toggle_window_floating / toggle_fullscreen
-# - resize_window_grow / resize_window_shrink
-# - move_mouse_to_display = N or UUID
-# - focus_display = { direction = "left"|"right"|"up"|"down" }
-# - focus_display = { index = N }
-# - focus_display = { uuid = "<display_uuid>" }
-# - debug / serialize / save_and_exit
-# - show_timing
+# - toggle_stack / toggle_orientation / unjoin_windows
+# - toggle_focus_floating / toggle_window_floating / toggle_fullscreen / toggle_fullscreen_within_gaps
+# - resize_window_grow / resize_window_shrink / resize_window_by = 0.05
+# - swap_windows = [123, 456]
+# - exec = "command" | exec = ["cmd", "arg1", "..."]
+# - move_mouse_to_display = "left"|"right"|"up"|"down"|N|"<display_uuid>"
+# - move_window_to_display = { selector = "left"|"right"|"up"|"down"|N|"<display_uuid>", window_id = 123 }
+# - close_window = { window_server_id = 123 }
+# - focus_window = { window_id = 123, window_server_id = 456 }
+# - show_mission_control_all / show_mission_control_current / dismiss_mission_control (this is rift's own mission control, not macOS's)
+# the following commands *only* work when the master stack layout is active
+# - adjust_master_ratio = 0.05 / adjust_master_count = 1
+# - promote_to_master / swap_master_stack
 
 "Alt + Z" = "toggle_space_activated"
 
@@ -375,7 +381,7 @@ comb1 = "Alt + Shift"
 # "Alt + Shift + S" = { move_mouse_to_display = 1 }
 # "Alt + Shift + D" = { move_mouse_to_display = "e9a4f5a1-2f8b-45c1-9f4e-5a6b7c8d9e0f" }
 # Focus another display (direction/index/uuid)
-# "Alt + Shift + F" = { focus_display = { direction = "right" } }
+# "Alt + Shift + F" = { focus_display = "right" }
 
 # Move a window to a display (by index, UUID, or direction)
 # "Alt + Ctrl + Up" = { move_window_to_display = { selector = "up" } }
