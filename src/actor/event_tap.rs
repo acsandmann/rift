@@ -398,6 +398,19 @@ impl EventTap {
                     .clone()
                     .and_then(|spec| spec.to_hotkey());
                 *self.disable_hotkey.borrow_mut() = disable_hotkey;
+                {
+                    let mut state = self.state.borrow_mut();
+                    let prev_active = state.disable_hotkey_active;
+                    state.disable_hotkey_active = self
+                        .disable_hotkey
+                        .borrow()
+                        .as_ref()
+                        .map(|target| state.compute_disable_hotkey_active(target.clone()))
+                        .unwrap_or(false);
+                    if prev_active && !state.disable_hotkey_active {
+                        state.reset(true);
+                    }
+                }
                 self.update_gesture_handlers();
             }
         }
