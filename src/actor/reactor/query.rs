@@ -63,6 +63,12 @@ impl ReactorQueryHandle {
 }
 
 impl Reactor {
+    fn default_query_space(&self) -> Option<SpaceId> {
+        self.workspace_command_space()
+            .or_else(|| get_active_space_number())
+            .or_else(|| self.space_manager.screens.first().and_then(|s| s.space))
+    }
+
     pub fn query_workspaces(&mut self, space_id: Option<SpaceId>) -> Vec<WorkspaceData> {
         self.handle_workspace_query(space_id)
     }
@@ -100,10 +106,7 @@ impl Reactor {
             None => return,
         };
 
-        let active_space = match self
-            .main_window_space()
-            .or_else(|| self.space_manager.screens.first().and_then(|s| s.space))
-        {
+        let active_space = match self.default_query_space() {
             Some(space) => space,
             None => return,
         };
@@ -126,9 +129,7 @@ impl Reactor {
     fn handle_workspace_query(&mut self, space_id_param: Option<SpaceId>) -> Vec<WorkspaceData> {
         let mut workspaces = Vec::new();
 
-        let space_id = space_id_param
-            .or_else(|| get_active_space_number())
-            .or_else(|| self.space_manager.screens.first().and_then(|s| s.space));
+        let space_id = space_id_param.or_else(|| self.default_query_space());
         let workspace_list: Vec<(crate::model::VirtualWorkspaceId, String)> =
             if let Some(space) = space_id {
                 self.layout_manager
@@ -227,9 +228,7 @@ impl Reactor {
         &self,
         space_id_param: Option<SpaceId>,
     ) -> Option<VirtualWorkspaceId> {
-        let space_id = space_id_param
-            .or_else(|| get_active_space_number())
-            .or_else(|| self.space_manager.screens.first().and_then(|s| s.space))?;
+        let space_id = space_id_param.or_else(|| self.default_query_space())?;
         self.layout_manager.layout_engine.active_workspace(space_id)
     }
 
@@ -277,7 +276,9 @@ impl Reactor {
     }
 
     fn handle_windows_query(&self, space_id: Option<SpaceId>) -> Vec<WindowData> {
-        let target_space = space_id.or_else(|| self.space_manager.first_known_space());
+        let target_space = space_id
+            .or_else(|| self.default_query_space())
+            .or_else(|| self.space_manager.first_known_space());
 
         if let Some(space) = target_space {
             let active_windows =

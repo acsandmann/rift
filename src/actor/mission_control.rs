@@ -7,6 +7,9 @@ use tracing::instrument;
 
 use crate::actor::{self, reactor};
 use crate::common::config::Config;
+use crate::sys::event::current_cursor_location;
+use crate::sys::geometry::CGRectExt;
+use crate::sys::screen::{NSScreenExt, ScreenCache, get_active_space_number};
 use crate::ui::mission_control::{MissionControlAction, MissionControlMode, MissionControlOverlay};
 
 #[derive(Debug)]
@@ -69,16 +72,7 @@ impl MissionControlActor {
 
     fn ensure_overlay(&mut self) -> &MissionControlOverlay {
         if self.overlay.is_none() {
-            let (frame, scale) = if let Some(screen) = NSScreen::mainScreen(self.mtm) {
-                let frame = screen.frame();
-                let scale = screen.backingScaleFactor();
-                (frame, scale)
-            } else {
-                (
-                    CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1280.0, 800.0)),
-                    1.0,
-                )
-            };
+            let (frame, scale) = self.initial_overlay_geometry();
             let overlay = MissionControlOverlay::new(self.config.clone(), self.mtm, frame, scale);
             let self_ptr: *mut MissionControlActor = self as *mut _;
             overlay.set_action_handler(Rc::new(move |action| unsafe {
@@ -88,6 +82,44 @@ impl MissionControlActor {
             self.overlay = Some(overlay);
         }
         self.overlay.as_ref().unwrap()
+    }
+
+    fn initial_overlay_geometry(&self) -> (CGRect, f64) {
+        let fallback = (
+            CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1280.0, 800.0)),
+            1.0,
+        );
+        let mut cache = ScreenCache::new(self.mtm);
+        let Some((screens, _)) = cache.refresh() else {
+            return fallback;
+        };
+
+        let selected = current_cursor_location()
+            .ok()
+            .and_then(|cursor| screens.iter().find(|screen| screen.frame.contains(cursor)))
+            .or_else(|| {
+                let active_space = get_active_space_number()?;
+                screens.iter().find(|screen| screen.space == Some(active_space))
+            })
+            .or_else(|| screens.first());
+
+        let Some(selected) = selected else {
+            return fallback;
+        };
+
+        let scale = NSScreen::screens(self.mtm)
+            .iter()
+            .find_map(|ns| {
+                let id = ns.get_number().ok()?;
+                if id == selected.id {
+                    Some(ns.backingScaleFactor())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(1.0);
+
+        (selected.frame, scale)
     }
 
     fn dispose_overlay(&mut self) {
@@ -173,8 +205,7 @@ impl MissionControlActor {
             overlay.update(MissionControlMode::CurrentWorkspace(Vec::new()));
         }
 
-        let active_space = crate::sys::screen::get_active_space_number();
-        let windows = self.reactor.query_windows(active_space);
+        let windows = self.reactor.query_windows(None);
 
         let overlay = self.ensure_overlay();
         overlay.update(MissionControlMode::CurrentWorkspace(windows));

@@ -488,3 +488,25 @@ fn it_retains_windows_without_server_ids_after_login_visibility_failure() {
         }
     }
 }
+
+#[test]
+fn display_index_selector_uses_physical_left_to_right_order() {
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let right = CGRect::new(CGPoint::new(200000., 0.), CGSize::new(1000., 1000.));
+    let left = CGRect::new(CGPoint::new(100000., 0.), CGSize::new(1000., 1000.));
+    reactor.handle_event(screen_params_event(
+        vec![right, left],
+        vec![Some(SpaceId::new(1)), Some(SpaceId::new(2))],
+        vec![],
+    ));
+
+    let selected = reactor
+        .screen_for_selector(&DisplaySelector::Index(0), None)
+        .expect("expected display index 0 to resolve");
+
+    assert_eq!(selected.frame, left);
+}

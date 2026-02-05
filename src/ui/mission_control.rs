@@ -31,7 +31,9 @@ use crate::sys::cgs_window::CgsWindow;
 use crate::sys::dispatch::DispatchExt;
 use crate::sys::event::current_cursor_location;
 use crate::sys::geometry::CGRectExt;
-use crate::sys::screen::{CoordinateConverter, NSScreenExt, ScreenCache, ScreenId, ScreenInfo};
+use crate::sys::screen::{
+    CoordinateConverter, NSScreenExt, ScreenCache, ScreenId, ScreenInfo, get_active_space_number,
+};
 use crate::sys::window_server::{CapturedWindowImage, WindowServerId};
 use crate::ui::{compute_window_layout_metrics, render_layer_to_cgs_window, with_disabled_actions};
 
@@ -577,15 +579,28 @@ impl MissionControlOverlay {
         None
     }
 
-    fn main_screen_metric(
+    fn active_space_metric_with(
         &self,
         metrics: &[(ScreenInfo, f64, CGRect)],
     ) -> Option<(ScreenInfo, f64)> {
-        let screen = NSScreen::mainScreen(self.mtm)?;
-        let screen_id = screen.get_number().ok()?;
+        let active_space = get_active_space_number()?;
         metrics
             .iter()
-            .find(|(info, _, _)| info.id == screen_id)
+            .find(|(info, _, _)| info.space == Some(active_space))
+            .map(|(info, scale, _)| (info.clone(), *scale))
+    }
+
+    fn current_overlay_metric(
+        &self,
+        metrics: &[(ScreenInfo, f64, CGRect)],
+    ) -> Option<(ScreenInfo, f64)> {
+        let center = CGPoint::new(
+            self.frame.origin.x + self.frame.size.width / 2.0,
+            self.frame.origin.y + self.frame.size.height / 2.0,
+        );
+        metrics
+            .iter()
+            .find(|(_, _, frame)| frame.contains(center))
             .map(|(info, scale, _)| (info.clone(), *scale))
     }
 
@@ -1611,14 +1626,28 @@ impl MissionControlOverlay {
         let mut scale = scale;
         let mut coordinate_converter = CoordinateConverter::default();
 
-        if let Some(screen) = NSScreen::mainScreen(mtm) {
-            let mut cache = ScreenCache::new(mtm);
-            if let Some((_screens, converter)) = cache.refresh() {
-                coordinate_converter = converter;
-            }
-            scale = screen.backingScaleFactor();
-            if let Ok(screen_id) = screen.get_number() {
-                frame = CGDisplayBounds(screen_id.as_u32());
+        let mut cache = ScreenCache::new(mtm);
+        if let Some((screens, converter)) = cache.refresh() {
+            coordinate_converter = converter;
+
+            let active_space = get_active_space_number();
+            if let Some(target) = screens
+                .iter()
+                .find(|screen| screen.space == active_space)
+                .or_else(|| screens.first())
+            {
+                frame = CGDisplayBounds(target.id.as_u32());
+                scale = NSScreen::screens(mtm)
+                    .iter()
+                    .find_map(|ns| {
+                        let id = ns.get_number().ok()?;
+                        if id == target.id {
+                            Some(ns.backingScaleFactor())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(scale);
             }
         }
 
@@ -1680,9 +1709,18 @@ impl MissionControlOverlay {
                 return (screen, scale, converter);
             }
 
-            if let Some(main_metric) = self.main_screen_metric(&metrics) {
-                let (screen, scale) = main_metric;
+            if let Some(space_metric) = self.active_space_metric_with(&metrics) {
+                let (screen, scale) = space_metric;
                 return (screen, scale, converter);
+            }
+
+            if let Some(overlay_metric) = self.current_overlay_metric(&metrics) {
+                let (screen, scale) = overlay_metric;
+                return (screen, scale, converter);
+            }
+
+            if let Some((screen, scale, _)) = metrics.first() {
+                return (screen.clone(), *scale, converter);
             }
         }
 

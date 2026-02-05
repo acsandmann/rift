@@ -2752,11 +2752,24 @@ impl Reactor {
                 let origin = origin_override.or_else(|| self.current_screen_center())?;
                 self.screen_for_direction_from_point(origin, *direction)
             }
-            DisplaySelector::Index(index) => self.space_manager.screens.get(*index),
+            DisplaySelector::Index(index) => self.screens_in_physical_order().get(*index).copied(),
             DisplaySelector::Uuid(uuid) => {
                 self.space_manager.screens.iter().find(|screen| screen.display_uuid == *uuid)
             }
         }
+    }
+
+    fn screens_in_physical_order(&self) -> Vec<&ScreenInfo> {
+        let mut screens: Vec<&ScreenInfo> = self.space_manager.screens.iter().collect();
+        screens.sort_by(|a, b| {
+            let x_order = a.frame.origin.x.total_cmp(&b.frame.origin.x);
+            if x_order == std::cmp::Ordering::Equal {
+                a.frame.origin.y.total_cmp(&b.frame.origin.y)
+            } else {
+                x_order
+            }
+        });
+        screens
     }
 
     fn store_current_floating_positions(&mut self, space: SpaceId) {

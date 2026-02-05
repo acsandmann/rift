@@ -23,7 +23,6 @@ impl WindowEventHandler {
         ws_info: Option<WindowServerInfo>,
         _mouse_state: Option<MouseState>,
     ) {
-        // FIXME: We assume all windows are on the main screen.
         if let Some(wsid) = window.sys_id {
             reactor.window_manager.window_ids.insert(wsid, wid);
             reactor.window_manager.observed_window_server_ids.remove(&wsid);
@@ -429,9 +428,18 @@ fn active_space_for_window(
     frame: &CGRect,
     server_id: Option<WindowServerId>,
 ) -> Option<SpaceId> {
-    reactor
-        .best_space_for_window(frame, server_id)
-        .filter(|space| reactor.is_space_active(*space))
+    let best = reactor.best_space_for_window(frame, server_id);
+    if let Some(space) = best.filter(|space| reactor.is_space_active(*space)) {
+        return Some(space);
+    }
+
+    // Some apps publish AX windows before the window server id/space is ready.
+    // Fall back to the active command context so new windows land on the intended display.
+    if server_id.is_none() {
+        return reactor.workspace_command_space();
+    }
+
+    None
 }
 
 fn maybe_dispatch_window_added_in_space(reactor: &mut Reactor, wid: WindowId, space: SpaceId) {

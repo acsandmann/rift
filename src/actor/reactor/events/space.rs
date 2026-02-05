@@ -18,6 +18,8 @@ use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 pub struct SpaceEventHandler;
 
 impl SpaceEventHandler {
+    // spacewindowappeared/destroyed happen a lot when a display is connected/disconnected
+    // since they are literally when a window enters or leaves a space and each display has its own space(s)
     pub fn handle_window_server_destroyed(
         reactor: &mut Reactor,
         wsid: WindowServerId,
