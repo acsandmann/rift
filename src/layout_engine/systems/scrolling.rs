@@ -13,6 +13,7 @@ use crate::layout_engine::{Direction, LayoutId, LayoutKind};
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 struct Column {
     windows: Vec<WindowId>,
+    width_offset: f64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
@@ -162,7 +163,10 @@ impl LayoutState {
     }
 
     fn insert_column_after(&mut self, index: usize, wid: WindowId) {
-        let column = Column { windows: vec![wid] };
+        let column = Column {
+            windows: vec![wid],
+            width_offset: 0.0,
+        };
         let insert_at = (index + 1).min(self.columns.len());
         self.columns.insert(insert_at, column);
         self.selected = Some(wid);
@@ -170,7 +174,10 @@ impl LayoutState {
     }
 
     fn insert_column_at_end(&mut self, wid: WindowId) {
-        self.columns.push(Column { windows: vec![wid] });
+        self.columns.push(Column {
+            windows: vec![wid],
+            width_offset: 0.0,
+        });
         self.selected = Some(wid);
         self.align_scroll_to_selected();
     }
@@ -191,7 +198,10 @@ impl LayoutState {
             }
             target = target.min(self.columns.len());
             if target >= self.columns.len() {
-                self.columns.push(Column { windows: vec![window] });
+                self.columns.push(Column {
+                    windows: vec![window],
+                    width_offset: 0.0,
+                });
             } else {
                 self.columns[target].windows.push(window);
             }
@@ -455,22 +465,36 @@ impl LayoutSystem for ScrollingLayoutSystem {
         let tiling = compute_tiling_area(screen, gaps);
         let gap_x = gaps.inner.horizontal;
         let gap_y = gaps.inner.vertical;
-        let column_width =
-            (tiling.size.width * self.clamp_ratio(state.column_width_ratio)).max(1.0);
-        let step = column_width + gap_x;
+        let base_ratio = self.clamp_ratio(state.column_width_ratio);
+
+        let mut max_ratio = base_ratio;
+        let mut column_ratios = Vec::with_capacity(state.columns.len());
+        for col in state.columns.iter() {
+            let ratio = self.clamp_ratio(base_ratio + col.width_offset);
+            max_ratio = max_ratio.max(ratio);
+            column_ratios.push(ratio);
+        }
+
+        let spacing_ratio = if state.columns.is_empty() {
+            base_ratio
+        } else {
+            max_ratio
+        };
+        let spacing_width = (tiling.size.width * spacing_ratio).max(1.0);
+        let step = spacing_width + gap_x;
         state.last_screen_width.store(tiling.size.width.to_bits(), Ordering::Relaxed);
         state.last_step_px.store(step.to_bits(), Ordering::Relaxed);
 
         let anchor_x = match self.settings.alignment {
             crate::common::config::ScrollingAlignment::Left => tiling.origin.x,
             crate::common::config::ScrollingAlignment::Center => {
-                tiling.origin.x + (tiling.size.width - column_width) / 2.0
+                tiling.origin.x + (tiling.size.width - spacing_width) / 2.0
             }
             crate::common::config::ScrollingAlignment::Right => {
-                tiling.origin.x + tiling.size.width - column_width
+                tiling.origin.x + tiling.size.width - spacing_width
             }
         };
-        let center_anchor_x = tiling.origin.x + (tiling.size.width - column_width) / 2.0;
+        let center_anchor_x = tiling.origin.x + (tiling.size.width - spacing_width) / 2.0;
         let center_offset_delta = anchor_x - center_anchor_x;
         state
             .last_center_offset_delta_px
@@ -505,6 +529,8 @@ impl LayoutSystem for ScrollingLayoutSystem {
         let mut out = Vec::new();
         for (col_idx, col) in state.columns.iter().enumerate() {
             let offset = f64::from_bits(state.scroll_offset_px.load(Ordering::Relaxed));
+            let ratio = column_ratios.get(col_idx).copied().unwrap_or(base_ratio);
+            let column_width = (tiling.size.width * ratio).max(1.0);
             let x = anchor_x + (col_idx as f64) * step - offset;
             if col.windows.is_empty() {
                 continue;
@@ -718,6 +744,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
     ) {
         let min_ratio = self.settings.min_column_width_ratio;
         let max_ratio = self.settings.max_column_width_ratio;
+
         let Some(state) = self.layout_state_mut(layout) else {
             return;
         };
@@ -729,7 +756,14 @@ impl LayoutSystem for ScrollingLayoutSystem {
             return;
         }
         let ratio = new_frame.size.width / tiling.size.width;
-        state.column_width_ratio = ratio.clamp(min_ratio, max_ratio).max(0.05).min(0.98);
+        let clamped = ratio.clamp(min_ratio, max_ratio).max(0.05).min(0.98);
+
+        let base_ratio = state.column_width_ratio;
+        if let Some((col_idx, _)) = state.selected_location() {
+            state.columns[col_idx].width_offset = clamped - base_ratio;
+        } else {
+            state.column_width_ratio = clamped;
+        }
     }
 
     fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
@@ -904,7 +938,10 @@ impl LayoutSystem for ScrollingLayoutSystem {
         state.columns[col_idx].windows = remaining;
         let mut insert_at = col_idx + 1;
         for wid in moved.iter().copied() {
-            state.columns.insert(insert_at, Column { windows: vec![wid] });
+            state.columns.insert(insert_at, Column {
+                windows: vec![wid],
+                width_offset: 0.0,
+            });
             insert_at += 1;
         }
         moved
@@ -933,7 +970,10 @@ impl LayoutSystem for ScrollingLayoutSystem {
         }
         let wid = state.columns[col_idx].windows.remove(row_idx);
         let insert_at = (col_idx + 1).min(state.columns.len());
-        state.columns.insert(insert_at, Column { windows: vec![wid] });
+        state.columns.insert(insert_at, Column {
+            windows: vec![wid],
+            width_offset: 0.0,
+        });
         state.selected = Some(wid);
         state.align_scroll_to_selected();
         state.clamp_scroll_offset();
@@ -945,8 +985,18 @@ impl LayoutSystem for ScrollingLayoutSystem {
         let Some(state) = self.layout_state_mut(layout) else {
             return;
         };
-        let ratio = state.column_width_ratio + amount;
-        state.column_width_ratio = ratio.clamp(min_ratio, max_ratio).max(0.05).min(0.98);
+        let base_ratio = state.column_width_ratio;
+
+        let Some((col_idx, _)) = state.selected_location() else {
+            let ratio = base_ratio + amount;
+            state.column_width_ratio = ratio.clamp(min_ratio, max_ratio).max(0.05).min(0.98);
+            return;
+        };
+
+        let current = base_ratio + state.columns[col_idx].width_offset;
+        let next = current + amount;
+        let clamped = next.clamp(min_ratio, max_ratio).max(0.05).min(0.98);
+        state.columns[col_idx].width_offset = clamped - base_ratio;
     }
 
     fn rebalance(&mut self, _layout: LayoutId) {}
