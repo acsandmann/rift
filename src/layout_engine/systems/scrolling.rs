@@ -1056,6 +1056,13 @@ impl LayoutSystem for ScrollingLayoutSystem {
         vec![selected]
     }
 
+    fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
+        let Some(state) = self.layout_state(layout) else {
+            return false;
+        };
+        !state.fullscreen.is_empty() || !state.fullscreen_within_gaps.is_empty()
+    }
+
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) {
         let Some(state) = self.layout_state_mut(layout) else {
             return;
