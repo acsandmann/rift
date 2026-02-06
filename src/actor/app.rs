@@ -535,7 +535,7 @@ impl State {
                 };
 
                 if eui {
-                    let _ = with_enhanced_ui_disabled(&elem, || elem.set_position(pos));
+                    let _ = with_enhanced_ui_disabled(&self.app, || elem.set_position(pos));
                 } else {
                     let _ = elem.set_position(pos);
                 };
@@ -573,12 +573,10 @@ impl State {
 
                 if eui {
                     with_enhanced_ui_disabled(&self.app, || {
-                        let _ = elem.set_size(desired.size);
                         let _ = elem.set_position(desired.origin);
                         let _ = elem.set_size(desired.size);
                     });
                 } else {
-                    let _ = elem.set_size(desired.size);
                     let _ = elem.set_position(desired.origin);
                     let _ = elem.set_size(desired.size);
                 }
