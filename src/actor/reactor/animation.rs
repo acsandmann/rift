@@ -238,7 +238,13 @@ impl AnimationManager {
 
         if animated_count > 0 {
             let low_power = power::is_low_power_mode_enabled();
-            if is_resize || !reactor.config.settings.animate || low_power {
+            let layout_animate = reactor
+                .layout_manager
+                .layout_engine
+                .layout_specific_animate_settings(space)
+                .unwrap_or(reactor.config.settings.animate);
+
+            if is_resize || !layout_animate || low_power {
                 anim.skip_to_end();
             } else {
                 anim.run();

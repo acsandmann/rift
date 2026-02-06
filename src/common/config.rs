@@ -586,6 +586,9 @@ pub enum LayoutMode {
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ScrollingLayoutSettings {
+    /// Whether to animate window transitions in this layout.
+    #[serde(default)]
+    pub animate: Option<bool>,
     /// Default width of the active column, as a fraction of the screen width.
     #[serde(default = "default_scrolling_column_width_ratio")]
     pub column_width_ratio: f64,
@@ -611,6 +614,7 @@ pub struct ScrollingLayoutSettings {
 impl Default for ScrollingLayoutSettings {
     fn default() -> Self {
         Self {
+            animate: None,
             column_width_ratio: default_scrolling_column_width_ratio(),
             min_column_width_ratio: default_scrolling_min_column_width_ratio(),
             max_column_width_ratio: default_scrolling_max_column_width_ratio(),

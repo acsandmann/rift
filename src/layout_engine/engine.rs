@@ -211,6 +211,17 @@ impl LayoutEngine {
         }
     }
 
+    pub fn layout_specific_animate_settings(&self, space: SpaceId) -> Option<bool> {
+        if let Some(ws_id) = self.virtual_workspace_manager.active_workspace(space) {
+            match self.workspace_tree(ws_id) {
+                LayoutSystemKind::Scrolling(_) => self.layout_settings.scrolling.animate,
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+
     fn active_floating_windows_in_workspace(&self, space: SpaceId) -> Vec<WindowId> {
         self.floating
             .active_flat(space)
