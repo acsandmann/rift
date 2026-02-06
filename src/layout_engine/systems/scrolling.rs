@@ -901,6 +901,10 @@ impl LayoutSystem for ScrollingLayoutSystem {
             return false;
         };
         if state.locate(wid).is_some() {
+            // refocusing the same centered window should keep the center override
+            if state.selected == Some(wid) && state.center_override_window == Some(wid) {
+                return true;
+            }
             state.selected = Some(wid);
             if niri_navigation {
                 state.reveal_selected_without_direction();
