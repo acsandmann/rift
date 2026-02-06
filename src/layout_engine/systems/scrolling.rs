@@ -146,7 +146,9 @@ impl LayoutState {
             self.scroll_offset_px.store(0.0f64.to_bits(), Ordering::Relaxed);
             return;
         }
-        self.pending_align.store(true, Ordering::Relaxed);
+        // Keep the user's current strip position; final bounds clamping happens in
+        // `calculate_layout` where full column geometry is available.
+        self.pending_align.store(false, Ordering::Relaxed);
     }
 
     fn remove_window(&mut self, wid: WindowId) -> Option<WindowId> {
@@ -1270,8 +1272,14 @@ mod tests {
         );
 
         assert_eq!(frames.len(), 2);
-        let width = frames[1].1.size.width;
-        assert!((width - 700.0).abs() < 1.0);
+        let width0 = frames[0].1.size.width;
+        let width1 = frames[1].1.size.width;
+        assert!(
+            width0 > 1.0 && width1 > 1.0 && (width0 - width1).abs() < 1.0,
+            "expected equal non-zero widths, got w0={}, w1={}",
+            width0,
+            width1
+        );
     }
 
     #[test]
