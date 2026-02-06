@@ -423,8 +423,10 @@ impl EventTap {
             if let Some(nsevent) = NSEvent::eventWithCGEvent(event)
                 && nsevent.r#type() == NSEventType::Gesture
             {
-                let is_scrolling_mode =
-                    matches!(state.active_layout_mode, crate::common::config::LayoutMode::Scrolling);
+                let is_scrolling_mode = matches!(
+                    state.active_layout_mode,
+                    crate::common::config::LayoutMode::Scrolling
+                );
                 let scroll_handler = self.scroll.borrow();
                 if is_scrolling_mode && let Some(handler) = scroll_handler.as_ref() {
                     self.handle_scroll_gesture_event(handler, &nsevent);

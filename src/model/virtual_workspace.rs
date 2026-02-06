@@ -10,8 +10,8 @@ use crate::common::config::{
     AppWorkspaceRule, LayoutMode, LayoutSettings, VirtualWorkspaceSettings, WorkspaceSelector,
 };
 use crate::common::log::trace_misc;
-use crate::layout_engine::systems::LayoutSystemKind;
 use crate::layout_engine::Direction;
+use crate::layout_engine::systems::LayoutSystemKind;
 use crate::sys::app::pid_t;
 use crate::sys::geometry::CGRectDef;
 use crate::sys::screen::SpaceId;
@@ -87,9 +87,9 @@ impl VirtualWorkspace {
 
     pub fn create_layout_system(mode: LayoutMode, settings: &LayoutSettings) -> LayoutSystemKind {
         match mode {
-            LayoutMode::Traditional => {
-                LayoutSystemKind::Traditional(crate::layout_engine::systems::TraditionalLayoutSystem::default())
-            }
+            LayoutMode::Traditional => LayoutSystemKind::Traditional(
+                crate::layout_engine::systems::TraditionalLayoutSystem::default(),
+            ),
             LayoutMode::Bsp => {
                 LayoutSystemKind::Bsp(crate::layout_engine::systems::BspLayoutSystem::default())
             }
@@ -180,7 +180,10 @@ impl VirtualWorkspaceManager {
         Self::new_with_config(&VirtualWorkspaceSettings::default(), &LayoutSettings::default())
     }
 
-    pub fn new_with_rules(app_rules: Vec<AppWorkspaceRule>, layout_settings: LayoutSettings) -> Self {
+    pub fn new_with_rules(
+        app_rules: Vec<AppWorkspaceRule>,
+        layout_settings: LayoutSettings,
+    ) -> Self {
         let mut cfg = VirtualWorkspaceSettings::default();
         cfg.app_rules = app_rules;
         Self::new_with_config(&cfg, &layout_settings)
@@ -398,7 +401,11 @@ impl VirtualWorkspaceManager {
         name: Option<String>,
     ) -> Result<VirtualWorkspaceId, WorkspaceError> {
         self.ensure_space_initialized(space);
-        let count = self.workspaces_by_space.get(&space).map(|v: &Vec<VirtualWorkspaceId>| v.len()).unwrap_or(0);
+        let count = self
+            .workspaces_by_space
+            .get(&space)
+            .map(|v: &Vec<VirtualWorkspaceId>| v.len())
+            .unwrap_or(0);
         if count >= self.max_workspaces {
             return Err(WorkspaceError::InconsistentState(format!(
                 "Maximum workspace limit ({}) reached for space {:?}",
@@ -412,7 +419,11 @@ impl VirtualWorkspaceManager {
             name
         });
 
-        let idx = self.workspaces_by_space.get(&space).map(|v: &Vec<VirtualWorkspaceId>| v.len()).unwrap_or(0);
+        let idx = self
+            .workspaces_by_space
+            .get(&space)
+            .map(|v: &Vec<VirtualWorkspaceId>| v.len())
+            .unwrap_or(0);
         let mode = self.resolve_layout_mode_for_workspace(idx, &name);
 
         let workspace = VirtualWorkspace::new(name, space, mode, &self.layout_settings);
@@ -619,7 +630,11 @@ impl VirtualWorkspaceManager {
 
     pub fn workspace_for_window_any(&self, window_id: WindowId) -> Option<VirtualWorkspaceId> {
         self.window_to_workspace.iter().find_map(|((_, wid), ws_id)| {
-            if *wid == window_id { Some(*ws_id) } else { None }
+            if *wid == window_id {
+                Some(*ws_id)
+            } else {
+                None
+            }
         })
     }
 
@@ -987,7 +1002,12 @@ impl VirtualWorkspaceManager {
             self.last_rule_decision.get(&(space, window_id)).copied().unwrap_or(false);
 
         self.ensure_space_initialized(space);
-        if self.workspaces_by_space.get(&space).map(|v: &Vec<VirtualWorkspaceId>| v.is_empty()).unwrap_or(true) {
+        if self
+            .workspaces_by_space
+            .get(&space)
+            .map(|v: &Vec<VirtualWorkspaceId>| v.is_empty())
+            .unwrap_or(true)
+        {
             return Err(WorkspaceError::NoWorkspacesAvailable);
         }
 
@@ -1023,7 +1043,11 @@ impl VirtualWorkspaceManager {
                 };
 
                 if let Some(workspace_idx) = maybe_idx {
-                    let len = self.workspaces_by_space.get(&space).map(|v: &Vec<VirtualWorkspaceId>| v.len()).unwrap_or(0);
+                    let len = self
+                        .workspaces_by_space
+                        .get(&space)
+                        .map(|v: &Vec<VirtualWorkspaceId>| v.len())
+                        .unwrap_or(0);
                     if workspace_idx >= len {
                         tracing::warn!(
                             "App rule references non-existent workspace index {}, falling back to active workspace",
@@ -1501,7 +1525,8 @@ mod tests {
         settings.default_workspace_count = 5;
         settings.default_workspace = 3;
 
-        let mut manager = VirtualWorkspaceManager::new_with_config(&settings, &LayoutSettings::default());
+        let mut manager =
+            VirtualWorkspaceManager::new_with_config(&settings, &LayoutSettings::default());
 
         let space = SpaceId::new(42);
         let workspaces = manager.list_workspaces(space);
@@ -1685,7 +1710,8 @@ mod tests {
             },
         ];
 
-        let mut manager = VirtualWorkspaceManager::new_with_config(&settings, &LayoutSettings::default());
+        let mut manager =
+            VirtualWorkspaceManager::new_with_config(&settings, &LayoutSettings::default());
 
         // 1. Floating persistence via app_id (case-insensitive)
         let w_float = WindowId::new(10, 1);
