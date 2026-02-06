@@ -33,6 +33,8 @@ struct LayoutState {
     #[serde(skip, default = "default_atomic")]
     last_screen_width: AtomicU64,
     #[serde(skip, default = "default_atomic")]
+    last_gap_x: AtomicU64,
+    #[serde(skip, default = "default_atomic")]
     last_step_px: AtomicU64,
     #[serde(skip, default = "default_atomic")]
     last_center_offset_delta_px: AtomicU64,
@@ -52,6 +54,7 @@ impl LayoutState {
             pending_reveal_direction: AtomicI8::new(0),
             center_override_window: None,
             last_screen_width: AtomicU64::new(0.0f64.to_bits()),
+            last_gap_x: AtomicU64::new(0.0f64.to_bits()),
             last_step_px: AtomicU64::new(0.0f64.to_bits()),
             last_center_offset_delta_px: AtomicU64::new(0.0f64.to_bits()),
             fullscreen: HashSet::default(),
@@ -87,23 +90,17 @@ impl LayoutState {
         if self.center_override_window.is_some() && self.center_override_window == self.selected {
             self.pending_center_align.store(true, Ordering::Relaxed);
             self.pending_reveal_direction.store(0, Ordering::Relaxed);
+            self.pending_align.store(false, Ordering::Relaxed);
             return;
         }
         self.center_override_window = None;
         self.pending_center_align.store(false, Ordering::Relaxed);
         self.pending_reveal_direction.store(0, Ordering::Relaxed);
-        let Some((col_idx, _)) = self.selected_location() else {
+        let Some((_col_idx, _)) = self.selected_location() else {
             self.scroll_offset_px.store(0.0f64.to_bits(), Ordering::Relaxed);
             return;
         };
-        let step = f64::from_bits(self.last_step_px.load(Ordering::Relaxed));
-        if step > 0.0 {
-            let offset = col_idx as f64 * step;
-            self.scroll_offset_px.store(offset.to_bits(), Ordering::Relaxed);
-            self.pending_align.store(false, Ordering::Relaxed);
-        } else {
-            self.pending_align.store(true, Ordering::Relaxed);
-        }
+        self.pending_align.store(true, Ordering::Relaxed);
     }
 
     fn request_center_on_selected(&mut self) {
@@ -136,23 +133,20 @@ impl LayoutState {
         self.pending_reveal_direction.store(dir_code, Ordering::Relaxed);
     }
 
+    fn reveal_selected_without_direction(&mut self) {
+        self.center_override_window = None;
+        self.pending_center_align.store(false, Ordering::Relaxed);
+        self.pending_align.store(false, Ordering::Relaxed);
+        // 2 = neutral reveal: keep current offset unless selected would be clipped.
+        self.pending_reveal_direction.store(2, Ordering::Relaxed);
+    }
+
     fn clamp_scroll_offset(&mut self) {
-        let step = f64::from_bits(self.last_step_px.load(Ordering::Relaxed));
-        if step <= 0.0 {
+        if self.columns.is_empty() {
             self.scroll_offset_px.store(0.0f64.to_bits(), Ordering::Relaxed);
             return;
         }
-        let base_max_offset = (self.columns.len().saturating_sub(1) as f64) * step;
-        let center_offset_delta =
-            f64::from_bits(self.last_center_offset_delta_px.load(Ordering::Relaxed));
-        let (min_offset, max_offset) = if self.center_override_window.is_some() {
-            (center_offset_delta, base_max_offset + center_offset_delta)
-        } else {
-            (0.0, base_max_offset)
-        };
-        let offset = f64::from_bits(self.scroll_offset_px.load(Ordering::Relaxed));
-        let clamped = offset.clamp(min_offset, max_offset);
-        self.scroll_offset_px.store(clamped.to_bits(), Ordering::Relaxed);
+        self.pending_align.store(true, Ordering::Relaxed);
     }
 
     fn remove_window(&mut self, wid: WindowId) -> Option<WindowId> {
@@ -257,6 +251,7 @@ impl Clone for LayoutState {
             ),
             center_override_window: self.center_override_window,
             last_screen_width: AtomicU64::new(self.last_screen_width.load(Ordering::Relaxed)),
+            last_gap_x: AtomicU64::new(self.last_gap_x.load(Ordering::Relaxed)),
             last_step_px: AtomicU64::new(self.last_step_px.load(Ordering::Relaxed)),
             last_center_offset_delta_px: AtomicU64::new(
                 self.last_center_offset_delta_px.load(Ordering::Relaxed),
@@ -311,15 +306,55 @@ impl ScrollingLayoutSystem {
             .min(0.98)
     }
 
+    fn clamp_ratio_with_bounds(ratio: f64, min_ratio: f64, max_ratio: f64) -> f64 {
+        ratio.clamp(min_ratio, max_ratio).max(0.05).min(0.98)
+    }
+
+    fn column_widths_and_starts(
+        state: &LayoutState,
+        screen_width: f64,
+        gap_x: f64,
+        min_ratio: f64,
+        max_ratio: f64,
+    ) -> (Vec<f64>, Vec<f64>) {
+        let base_ratio =
+            Self::clamp_ratio_with_bounds(state.column_width_ratio, min_ratio, max_ratio);
+        let mut widths = Vec::with_capacity(state.columns.len());
+        let mut starts = Vec::with_capacity(state.columns.len());
+        let mut cursor = 0.0;
+        for col in &state.columns {
+            starts.push(cursor);
+            let ratio =
+                Self::clamp_ratio_with_bounds(base_ratio + col.width_offset, min_ratio, max_ratio);
+            let width = (screen_width * ratio).max(1.0);
+            widths.push(width);
+            cursor += width + gap_x;
+        }
+        (widths, starts)
+    }
+
     pub fn scroll_by_delta(&mut self, layout: LayoutId, delta: f64) {
+        let min_ratio = self.settings.min_column_width_ratio;
+        let max_ratio = self.settings.max_column_width_ratio;
         let Some(state) = self.layout_state_mut(layout) else {
             return;
         };
-        let step = f64::from_bits(state.last_step_px.load(Ordering::Relaxed));
+        let screen_width = f64::from_bits(state.last_screen_width.load(Ordering::Relaxed));
+        let gap_x = f64::from_bits(state.last_gap_x.load(Ordering::Relaxed));
+        if screen_width <= 0.0 {
+            return;
+        }
+        let (widths, starts) =
+            Self::column_widths_and_starts(state, screen_width, gap_x, min_ratio, max_ratio);
+        if starts.is_empty() {
+            return;
+        }
+        let selected_idx = state.selected_location().map(|(idx, _)| idx).unwrap_or(0);
+        let step = widths.get(selected_idx).copied().unwrap_or(1.0) + gap_x;
         if step <= 0.0 {
             return;
         }
-        let base_max_offset = (state.columns.len().saturating_sub(1) as f64) * step;
+        let base_max_offset = starts.last().copied().unwrap_or(0.0);
         let center_offset_delta =
             f64::from_bits(state.last_center_offset_delta_px.load(Ordering::Relaxed));
         let (min_offset, max_offset) = if state.center_override_window.is_some() {
@@ -333,14 +368,22 @@ impl ScrollingLayoutSystem {
     }
 
     pub fn snap_to_nearest_column(&mut self, layout: LayoutId) {
+        let min_ratio = self.settings.min_column_width_ratio;
+        let max_ratio = self.settings.max_column_width_ratio;
         let Some(state) = self.layout_state_mut(layout) else {
             return;
         };
-        let step = f64::from_bits(state.last_step_px.load(Ordering::Relaxed));
-        if step <= 0.0 {
+        let screen_width = f64::from_bits(state.last_screen_width.load(Ordering::Relaxed));
+        let gap_x = f64::from_bits(state.last_gap_x.load(Ordering::Relaxed));
+        if screen_width <= 0.0 {
             return;
         }
-        let base_max_offset = (state.columns.len().saturating_sub(1) as f64) * step;
+        let (_widths, starts) =
+            Self::column_widths_and_starts(state, screen_width, gap_x, min_ratio, max_ratio);
+        if starts.is_empty() {
+            return;
+        }
+        let base_max_offset = starts.last().copied().unwrap_or(0.0);
         let center_offset_delta =
             f64::from_bits(state.last_center_offset_delta_px.load(Ordering::Relaxed));
         let (min_offset, max_offset, baseline) = if state.center_override_window.is_some() {
@@ -353,9 +396,17 @@ impl ScrollingLayoutSystem {
             (0.0, base_max_offset, 0.0)
         };
         let current = f64::from_bits(state.scroll_offset_px.load(Ordering::Relaxed));
-        let max_idx = state.columns.len().saturating_sub(1) as f64;
-        let target_idx = ((current - baseline) / step).round().clamp(0.0, max_idx);
-        let next = (baseline + target_idx * step).clamp(min_offset, max_offset);
+        let strip_offset = current - baseline;
+        let target = starts
+            .iter()
+            .min_by(|a, b| {
+                let da = (*a - strip_offset).abs();
+                let db = (*b - strip_offset).abs();
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .copied()
+            .unwrap_or(0.0);
+        let next = (baseline + target).clamp(min_offset, max_offset);
         state.scroll_offset_px.store(next.to_bits(), Ordering::Relaxed);
     }
 
@@ -423,10 +474,27 @@ impl ScrollingLayoutSystem {
     }
 
     fn move_selected_window_horizontal(state: &mut LayoutState, dir: Direction) -> bool {
-        let (col_idx, _row_idx) = match state.selected_location() {
+        let (col_idx, row_idx) = match state.selected_location() {
             Some(loc) => loc,
             None => return false,
         };
+        // If the current column is stacked, horizontal move should extract the selected
+        // window into its own neighbor column. This is a faster way to undo accidental stacks.
+        if state.columns[col_idx].windows.len() > 1 {
+            let wid = state.columns[col_idx].windows.remove(row_idx);
+            let insert_at = match dir {
+                Direction::Left => col_idx,
+                Direction::Right => (col_idx + 1).min(state.columns.len()),
+                _ => return false,
+            };
+            state.columns.insert(insert_at, Column {
+                windows: vec![wid],
+                width_offset: 0.0,
+            });
+            state.selected = Some(wid);
+            return true;
+        }
+
         let target_col = match dir {
             Direction::Left => col_idx.checked_sub(1),
             Direction::Right => (col_idx + 1 < state.columns.len()).then_some(col_idx + 1),
@@ -519,15 +587,26 @@ impl LayoutSystem for ScrollingLayoutSystem {
             .unwrap_or((tiling.size.width * base_ratio).max(1.0));
         let step = selected_width + gap_x;
         state.last_screen_width.store(tiling.size.width.to_bits(), Ordering::Relaxed);
+        state.last_gap_x.store(gap_x.to_bits(), Ordering::Relaxed);
         state.last_step_px.store(step.to_bits(), Ordering::Relaxed);
 
-        let anchor_x = match self.settings.alignment {
-            crate::common::config::ScrollingAlignment::Left => tiling.origin.x,
-            crate::common::config::ScrollingAlignment::Center => {
-                tiling.origin.x + (tiling.size.width - selected_width) / 2.0
-            }
-            crate::common::config::ScrollingAlignment::Right => {
-                tiling.origin.x + tiling.size.width - selected_width
+        let niri_navigation = matches!(
+            self.settings.focus_navigation_style,
+            ScrollingFocusNavigationStyle::Niri
+        );
+        let anchor_x = if niri_navigation && state.center_override_window.is_none() {
+            // Keep strip anchoring stable in niri mode so focus changes do not
+            // shift unrelated columns when selected widths differ.
+            tiling.origin.x
+        } else {
+            match self.settings.alignment {
+                crate::common::config::ScrollingAlignment::Left => tiling.origin.x,
+                crate::common::config::ScrollingAlignment::Center => {
+                    tiling.origin.x + (tiling.size.width - selected_width) / 2.0
+                }
+                crate::common::config::ScrollingAlignment::Right => {
+                    tiling.origin.x + tiling.size.width - selected_width
+                }
             }
         };
         let center_anchor_x = tiling.origin.x + (tiling.size.width - selected_width) / 2.0;
@@ -580,6 +659,13 @@ impl LayoutSystem for ScrollingLayoutSystem {
                             offset = anchor_x + selected_start + selected_width - visible_right;
                         } else if selected_x < visible_left {
                             offset = anchor_x + selected_start - visible_left;
+                        }
+                    }
+                    2 => {
+                        if selected_x < visible_left {
+                            offset = anchor_x + selected_start - visible_left;
+                        } else if selected_x + selected_width > visible_right {
+                            offset = anchor_x + selected_start + selected_width - visible_right;
                         }
                     }
                     _ => {}
@@ -681,11 +767,12 @@ impl LayoutSystem for ScrollingLayoutSystem {
             Direction::Left | Direction::Right => Self::move_focus_horizontal(state, direction),
             Direction::Up | Direction::Down => Self::move_focus_vertical(state, direction),
         };
-        if new_sel.is_some()
-            && matches!(direction, Direction::Left | Direction::Right)
-            && niri_navigation
-        {
-            state.reveal_selected_in_direction(direction);
+        if new_sel.is_some() && niri_navigation {
+            if matches!(direction, Direction::Left | Direction::Right) {
+                state.reveal_selected_in_direction(direction);
+            } else {
+                state.reveal_selected_without_direction();
+            }
         } else {
             state.align_scroll_to_selected();
         }
@@ -804,12 +891,20 @@ impl LayoutSystem for ScrollingLayoutSystem {
     }
 
     fn select_window(&mut self, layout: LayoutId, wid: WindowId) -> bool {
+        let niri_navigation = matches!(
+            self.settings.focus_navigation_style,
+            ScrollingFocusNavigationStyle::Niri
+        );
         let Some(state) = self.layout_state_mut(layout) else {
             return false;
         };
         if state.locate(wid).is_some() {
             state.selected = Some(wid);
-            state.align_scroll_to_selected();
+            if niri_navigation {
+                state.reveal_selected_without_direction();
+            } else {
+                state.align_scroll_to_selected();
+            }
             true
         } else {
             false
@@ -1500,5 +1595,162 @@ mod tests {
             expected_w2_x,
             w2_frame.origin.x
         );
+    }
+
+    #[test]
+    fn selecting_column_in_niri_mode_reveals_without_centering() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.alignment = crate::common::config::ScrollingAlignment::Center;
+        settings.focus_navigation_style =
+            crate::common::config::ScrollingFocusNavigationStyle::Niri;
+        settings.column_width_ratio = 0.45;
+        settings.min_column_width_ratio = 0.2;
+        settings.max_column_width_ratio = 0.9;
+        let mut system = ScrollingLayoutSystem::new(&settings);
+        let layout = system.create_layout();
+
+        let w1 = wid(1, 1);
+        let w2 = wid(1, 2);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
+        let gaps = crate::common::config::GapSettings::default();
+        let _ = system.calculate_layout(
+            layout,
+            screen,
+            0.0,
+            &gaps,
+            0.0,
+            Default::default(),
+            Default::default(),
+        );
+
+        assert!(system.select_window(layout, w1));
+        let frames = system.calculate_layout(
+            layout,
+            screen,
+            0.0,
+            &gaps,
+            0.0,
+            Default::default(),
+            Default::default(),
+        );
+
+        let w1_frame = frames
+            .iter()
+            .find(|(wid, _)| *wid == w1)
+            .map(|(_, frame)| *frame)
+            .expect("missing w1 frame");
+        let center_x = (screen.size.width - w1_frame.size.width) / 2.0;
+        assert!(
+            (w1_frame.origin.x - center_x).abs() > 5.0,
+            "expected niri mode select to avoid centering, got centered x={} (center x={})",
+            w1_frame.origin.x,
+            center_x
+        );
+    }
+
+    #[test]
+    fn niri_focus_between_different_width_columns_keeps_strip_stable() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.alignment = crate::common::config::ScrollingAlignment::Center;
+        settings.focus_navigation_style =
+            crate::common::config::ScrollingFocusNavigationStyle::Niri;
+        settings.column_width_ratio = 0.42;
+        settings.min_column_width_ratio = 0.2;
+        settings.max_column_width_ratio = 0.9;
+        let mut system = ScrollingLayoutSystem::new(&settings);
+        let layout = system.create_layout();
+
+        let w1 = wid(1, 1);
+        let w2 = wid(1, 2);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+
+        // Make focused-left column wider so selected widths differ across focus moves.
+        let _ = system.move_focus(layout, Direction::Left);
+        system.resize_selection_by(layout, 0.15);
+
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1200.0, 800.0));
+        let gaps = crate::common::config::GapSettings::default();
+
+        let frames_left = system.calculate_layout(
+            layout,
+            screen,
+            0.0,
+            &gaps,
+            0.0,
+            Default::default(),
+            Default::default(),
+        );
+        let w1_x_left = frames_left
+            .iter()
+            .find(|(wid, _)| *wid == w1)
+            .map(|(_, frame)| frame.origin.x)
+            .expect("missing w1 frame");
+
+        let _ = system.move_focus(layout, Direction::Right);
+        let frames_right = system.calculate_layout(
+            layout,
+            screen,
+            0.0,
+            &gaps,
+            0.0,
+            Default::default(),
+            Default::default(),
+        );
+        let w1_x_right = frames_right
+            .iter()
+            .find(|(wid, _)| *wid == w1)
+            .map(|(_, frame)| frame.origin.x)
+            .expect("missing w1 frame");
+
+        assert!(
+            (w1_x_left - w1_x_right).abs() < 1.0,
+            "expected stable strip position in niri mode, got x shift {} -> {}",
+            w1_x_left,
+            w1_x_right
+        );
+    }
+
+    #[test]
+    fn move_selection_right_extracts_selected_from_stacked_column() {
+        let settings = ScrollingLayoutSettings::default();
+        let mut system = ScrollingLayoutSystem::new(&settings);
+        let layout = system.create_layout();
+
+        let w1 = wid(1, 1);
+        let w2 = wid(1, 2);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+        system.join_selection_with_direction(layout, Direction::Left);
+
+        assert!(system.move_selection(layout, Direction::Right));
+        let state = system.layouts.get(layout).expect("layout state missing");
+        assert_eq!(state.columns.len(), 2);
+        assert_eq!(state.columns[0].windows, vec![w1]);
+        assert_eq!(state.columns[1].windows, vec![w2]);
+        assert_eq!(state.selected, Some(w2));
+    }
+
+    #[test]
+    fn move_selection_left_extracts_selected_from_stacked_column_at_edge() {
+        let settings = ScrollingLayoutSettings::default();
+        let mut system = ScrollingLayoutSystem::new(&settings);
+        let layout = system.create_layout();
+
+        let w1 = wid(1, 1);
+        let w2 = wid(1, 2);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+        system.join_selection_with_direction(layout, Direction::Left);
+
+        assert!(system.move_selection(layout, Direction::Left));
+        let state = system.layouts.get(layout).expect("layout state missing");
+        assert_eq!(state.columns.len(), 2);
+        assert_eq!(state.columns[0].windows, vec![w2]);
+        assert_eq!(state.columns[1].windows, vec![w1]);
+        assert_eq!(state.selected, Some(w2));
     }
 }
