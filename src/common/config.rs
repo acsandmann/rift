@@ -691,6 +691,12 @@ pub struct ScrollingGestureSettings {
     /// Normalized horizontal distance (0..1) required to fire a scroll step
     #[serde(default = "default_distance_pct")]
     pub distance_pct: f64,
+    /// If true, scrolling past the end of the strip will trigger a workspace switch
+    #[serde(default = "no")]
+    pub propagate_to_workspace_swipe: bool,
+    /// Amount of overscroll (in steps) required to trigger a workspace switch
+    #[serde(default = "default_overscroll_threshold")]
+    pub workspace_switch_threshold: f64,
 }
 
 impl Default for ScrollingGestureSettings {
@@ -701,6 +707,8 @@ impl Default for ScrollingGestureSettings {
             vertical_tolerance: default_swipe_vertical_tolerance(),
             fingers: default_swipe_fingers(),
             distance_pct: default_distance_pct(),
+            propagate_to_workspace_swipe: false,
+            workspace_switch_threshold: default_overscroll_threshold(),
         }
     }
 }
@@ -1076,6 +1084,7 @@ fn default_workspace_names() -> Vec<String> {
 fn default_swipe_vertical_tolerance() -> f64 { 0.4 }
 fn default_swipe_fingers() -> usize { 3 }
 fn default_distance_pct() -> f64 { 0.08 }
+fn default_overscroll_threshold() -> f64 { 0.75 }
 
 fn default_stack_line_spacing() -> f64 { 0.0 }
 

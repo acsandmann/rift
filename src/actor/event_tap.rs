@@ -39,6 +39,7 @@ pub enum Request {
     SetFocusFollowsMouseEnabled(bool),
     SetHotkeys(Vec<(Hotkey, WmCommand)>),
     ConfigUpdated(Config),
+    LayoutModeChanged(crate::common::config::LayoutMode),
 }
 
 pub struct EventTap {
@@ -66,6 +67,7 @@ struct State {
     disable_hotkey_active: bool,
     pressed_keys: HashSet<KeyCode>,
     current_flags: CGEventFlags,
+    active_layout_mode: crate::common::config::LayoutMode,
 }
 
 impl Default for State {
@@ -81,6 +83,7 @@ impl Default for State {
             disable_hotkey_active: false,
             pressed_keys: HashSet::default(),
             current_flags: CGEventFlags::empty(),
+            active_layout_mode: crate::common::config::LayoutMode::default(),
         }
     }
 }
@@ -219,34 +222,27 @@ impl EventTap {
         config: &Config,
         has_wm: bool,
     ) -> (Option<SwipeHandler>, Option<ScrollHandler>) {
-        let is_scrolling = matches!(
-            config.settings.layout.mode,
-            crate::common::config::LayoutMode::Scrolling
-        );
-
-        if is_scrolling {
-            let scroll_cfg = ScrollConfig::from_config(config);
-            let scroll = if scroll_cfg.enabled && has_wm {
-                Some(ScrollHandler {
-                    cfg: scroll_cfg,
-                    state: RefCell::new(ScrollState::default()),
-                })
-            } else {
-                None
-            };
-            (None, scroll)
+        let swipe_cfg = SwipeConfig::from_config(config);
+        let swipe = if swipe_cfg.enabled && has_wm {
+            Some(SwipeHandler {
+                cfg: swipe_cfg,
+                state: RefCell::new(SwipeState::default()),
+            })
         } else {
-            let swipe_cfg = SwipeConfig::from_config(config);
-            let swipe = if swipe_cfg.enabled && has_wm {
-                Some(SwipeHandler {
-                    cfg: swipe_cfg,
-                    state: RefCell::new(SwipeState::default()),
-                })
-            } else {
-                None
-            };
-            (swipe, None)
-        }
+            None
+        };
+
+        let scroll_cfg = ScrollConfig::from_config(config);
+        let scroll = if scroll_cfg.enabled && has_wm {
+            Some(ScrollHandler {
+                cfg: scroll_cfg,
+                state: RefCell::new(ScrollState::default()),
+            })
+        } else {
+            None
+        };
+
+        (swipe, scroll)
     }
 
     fn update_gesture_handlers(&self) {
@@ -413,22 +409,25 @@ impl EventTap {
                 }
                 self.update_gesture_handlers();
             }
+            Request::LayoutModeChanged(mode) => {
+                state.active_layout_mode = mode;
+                debug!("Layout mode changed to {:?}", state.active_layout_mode);
+            }
         }
     }
 
     fn on_event(self: &Rc<Self>, event_type: CGEventType, event: &CGEvent) -> bool {
+        let mut state = self.state.borrow_mut();
+
         if event_type.0 == NSEventType::Gesture.0 as u32 {
             if let Some(nsevent) = NSEvent::eventWithCGEvent(event)
                 && nsevent.r#type() == NSEventType::Gesture
             {
-                let is_scrolling = matches!(
-                    self.config.borrow().settings.layout.mode,
-                    crate::common::config::LayoutMode::Scrolling
-                );
-                if is_scrolling {
-                    if let Some(handler) = self.scroll.borrow().as_ref() {
-                        self.handle_scroll_gesture_event(handler, &nsevent);
-                    }
+                let is_scrolling_mode =
+                    matches!(state.active_layout_mode, crate::common::config::LayoutMode::Scrolling);
+                let scroll_handler = self.scroll.borrow();
+                if is_scrolling_mode && let Some(handler) = scroll_handler.as_ref() {
+                    self.handle_scroll_gesture_event(handler, &nsevent);
                 } else if let Some(handler) = self.swipe.borrow().as_ref() {
                     self.handle_gesture_event(handler, &nsevent);
                 }
@@ -451,8 +450,6 @@ impl EventTap {
             CGEventType::LeftMouseUp | CGEventType::RightMouseUp => set_mouse_state(MouseState::Up),
             _ => {}
         }
-
-        let mut state = self.state.borrow_mut();
 
         if matches!(
             event_type,

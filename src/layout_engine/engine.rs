@@ -114,6 +114,7 @@ pub enum LayoutEvent {
 pub struct EventResponse {
     pub raise_windows: Vec<WindowId>,
     pub focus_window: Option<WindowId>,
+    pub boundary_hit: Option<Direction>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -197,9 +198,17 @@ impl LayoutEngine {
         }
     }
 
-    pub fn layout_mode(&self) -> &'static str {
-        // Fallback or default layout mode for global queries
-        "traditional"
+    pub fn active_layout_mode_at(&self, space: SpaceId) -> crate::common::config::LayoutMode {
+        if let Some(ws_id) = self.virtual_workspace_manager.active_workspace(space) {
+            match self.workspace_tree(ws_id) {
+                LayoutSystemKind::Traditional(_) => crate::common::config::LayoutMode::Traditional,
+                LayoutSystemKind::Bsp(_) => crate::common::config::LayoutMode::Bsp,
+                LayoutSystemKind::MasterStack(_) => crate::common::config::LayoutMode::MasterStack,
+                LayoutSystemKind::Scrolling(_) => crate::common::config::LayoutMode::Scrolling,
+            }
+        } else {
+            crate::common::config::LayoutMode::default()
+        }
     }
 
     fn active_floating_windows_in_workspace(&self, space: SpaceId) -> Vec<WindowId> {
@@ -225,14 +234,19 @@ impl LayoutEngine {
 
         if focus_window.is_none() {
             if let Some(layout) = self.workspace_layouts.active(space, workspace_id) {
-                let selected = self.workspace_tree(workspace_id).selected_window(layout).filter(|wid| {
-                    self.virtual_workspace_manager.workspace_for_window(space, *wid)
-                        == Some(workspace_id)
-                });
-                let visible = self.workspace_tree(workspace_id).visible_windows_in_layout(layout).into_iter().find(|wid| {
-                    self.virtual_workspace_manager.workspace_for_window(space, *wid)
-                        == Some(workspace_id)
-                });
+                let selected =
+                    self.workspace_tree(workspace_id).selected_window(layout).filter(|wid| {
+                        self.virtual_workspace_manager.workspace_for_window(space, *wid)
+                            == Some(workspace_id)
+                    });
+                let visible = self
+                    .workspace_tree(workspace_id)
+                    .visible_windows_in_layout(layout)
+                    .into_iter()
+                    .find(|wid| {
+                        self.virtual_workspace_manager.workspace_for_window(space, *wid)
+                            == Some(workspace_id)
+                    });
                 focus_window = selected.or(visible);
             }
         }
@@ -262,6 +276,7 @@ impl LayoutEngine {
         EventResponse {
             focus_window,
             raise_windows: vec![],
+            boundary_hit: None,
         }
     }
 
@@ -360,6 +375,7 @@ impl LayoutEngine {
                             let response = EventResponse {
                                 focus_window,
                                 raise_windows: vec![],
+                                boundary_hit: None,
                             };
                             self.apply_focus_response(space, ws_id, layout, &response);
                             return response;
@@ -387,6 +403,7 @@ impl LayoutEngine {
                 let response = EventResponse {
                     focus_window: tiled_windows.first().copied(),
                     raise_windows: tiled_windows,
+                    boundary_hit: None,
                 };
                 self.apply_focus_response(space, ws_id, layout, &response);
                 return response;
@@ -403,7 +420,11 @@ impl LayoutEngine {
         let focus_window = self.filter_active_workspace_window(space, focus_window_raw);
         let raise_windows = self.filter_active_workspace_windows(space, raise_windows);
         if focus_window.is_some() {
-            let response = EventResponse { focus_window, raise_windows };
+            let response = EventResponse {
+                focus_window,
+                raise_windows,
+                boundary_hit: None,
+            };
             self.apply_focus_response(space, ws_id, layout, &response);
             response
         } else {
@@ -428,10 +449,12 @@ impl LayoutEngine {
                     )
                     .or_else(|| windows_in_new_space.first().copied())
                 {
-                    let _ = self.workspace_tree_mut(new_ws_id).select_window(new_layout, target_window);
+                    let _ =
+                        self.workspace_tree_mut(new_ws_id).select_window(new_layout, target_window);
                     let response = EventResponse {
                         focus_window: Some(target_window),
                         raise_windows: windows_in_new_space,
+                        boundary_hit: None,
                     };
                     self.apply_focus_response(new_space, new_ws_id, new_layout, &response);
                     return response;
@@ -445,6 +468,7 @@ impl LayoutEngine {
                 let response = EventResponse {
                     focus_window,
                     raise_windows: vec![],
+                    boundary_hit: None,
                 };
                 self.apply_focus_response(space, ws_id, layout, &response);
                 return response;
@@ -462,6 +486,7 @@ impl LayoutEngine {
                 let response = EventResponse {
                     focus_window: Some(fallback_focus),
                     raise_windows: visible_windows,
+                    boundary_hit: None,
                 };
                 self.apply_focus_response(space, ws_id, layout, &response);
                 return response;
@@ -892,11 +917,7 @@ impl LayoutEngine {
                 } else {
                     let (ws_id, layout) = self.workspace_and_layout(space);
                     let _ = self.workspace_tree_mut(ws_id).select_window(layout, wid);
-                    self.virtual_workspace_manager.set_last_focused_window(
-                        space,
-                        ws_id,
-                        Some(wid),
-                    );
+                    self.virtual_workspace_manager.set_last_focused_window(space, ws_id, Some(wid));
                 }
             }
             LayoutEvent::WindowResized {
@@ -1012,7 +1033,11 @@ impl LayoutEngine {
                 let mut raise_windows =
                     self.workspace_tree(workspace_id).visible_windows_in_layout(layout);
                 let focus_window = selection.or_else(|| raise_windows.pop());
-                let response = EventResponse { raise_windows, focus_window };
+                let response = EventResponse {
+                    raise_windows,
+                    focus_window,
+                    boundary_hit: None,
+                };
                 self.apply_focus_response(space, workspace_id, layout, &response);
                 return response;
             } else {
@@ -1024,7 +1049,11 @@ impl LayoutEngine {
                     .filter(|wid| Some(*wid) != self.floating.last_focus())
                     .collect();
                 let focus_window = self.floating.last_focus().or_else(|| raise_windows.pop());
-                let response = EventResponse { raise_windows, focus_window };
+                let response = EventResponse {
+                    raise_windows,
+                    focus_window,
+                    boundary_hit: None,
+                };
                 self.apply_focus_response(space, workspace_id, layout, &response);
                 return response;
             }
@@ -1096,11 +1125,8 @@ impl LayoutEngine {
                             self.workspace_tree_mut(workspace_id).remove_window(wid);
                             self.workspace_tree_mut(new_ws_id)
                                 .add_window_after_selection(new_layout, wid);
-                            self.virtual_workspace_manager.assign_window_to_workspace(
-                                new_space,
-                                wid,
-                                new_ws_id,
-                            );
+                            self.virtual_workspace_manager
+                                .assign_window_to_workspace(new_space, wid, new_ws_id);
                         }
                     }
                 }
@@ -1115,6 +1141,7 @@ impl LayoutEngine {
                     EventResponse {
                         raise_windows,
                         focus_window: None,
+                        boundary_hit: None,
                     }
                 }
             }
@@ -1128,6 +1155,7 @@ impl LayoutEngine {
                     EventResponse {
                         raise_windows,
                         focus_window: None,
+                        boundary_hit: None,
                     }
                 }
             }
@@ -1140,29 +1168,34 @@ impl LayoutEngine {
             | LayoutCommand::SwitchToLastWorkspace => EventResponse::default(),
             LayoutCommand::JoinWindow(direction) => {
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
-                self.workspace_tree_mut(workspace_id).join_selection_with_direction(layout, direction);
+                self.workspace_tree_mut(workspace_id)
+                    .join_selection_with_direction(layout, direction);
                 EventResponse::default()
             }
             LayoutCommand::ToggleStack => {
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
                 let default_orientation: crate::common::config::StackDefaultOrientation =
                     self.layout_settings.stack.default_orientation;
-                let unstacked_windows = self.workspace_tree_mut(workspace_id)
+                let unstacked_windows = self
+                    .workspace_tree_mut(workspace_id)
                     .unstack_parent_of_selection(layout, default_orientation);
 
                 if !unstacked_windows.is_empty() {
                     return EventResponse {
                         raise_windows: unstacked_windows,
                         focus_window: None,
+                        boundary_hit: None,
                     };
                 }
 
-                let stacked_windows = self.workspace_tree_mut(workspace_id)
+                let stacked_windows = self
+                    .workspace_tree_mut(workspace_id)
                     .apply_stacking_to_parent_of_selection(layout, default_orientation);
                 if !stacked_windows.is_empty() {
                     return EventResponse {
                         raise_windows: stacked_windows,
                         focus_window: None,
+                        boundary_hit: None,
                     };
                 }
 
@@ -1172,6 +1205,7 @@ impl LayoutEngine {
                     EventResponse {
                         raise_windows: visible_windows,
                         focus_window: None,
+                        boundary_hit: None,
                     }
                 } else {
                     EventResponse::default()
@@ -1196,6 +1230,7 @@ impl LayoutEngine {
                                 EventResponse {
                                     raise_windows: toggled_windows,
                                     focus_window: None,
+                                    boundary_hit: None,
                                 }
                             } else {
                                 EventResponse::default()
@@ -1217,6 +1252,7 @@ impl LayoutEngine {
                                 EventResponse {
                                     raise_windows: toggled_windows,
                                     focus_window: None,
+                                    boundary_hit: None,
                                 }
                             } else {
                                 EventResponse::default()
@@ -1292,10 +1328,11 @@ impl LayoutEngine {
                 EventResponse::default()
             }
             LayoutCommand::ScrollStrip { delta } => {
+                let mut resp = EventResponse::default();
                 if let LayoutSystemKind::Scrolling(system) = self.workspace_tree_mut(workspace_id) {
-                    system.scroll_by_delta(layout, delta);
+                    resp.boundary_hit = system.scroll_by_delta(layout, delta);
                 }
-                EventResponse::default()
+                resp
             }
             LayoutCommand::SnapStrip => {
                 if let LayoutSystemKind::Scrolling(system) = self.workspace_tree_mut(workspace_id) {
@@ -1621,12 +1658,12 @@ impl LayoutEngine {
         if let Some(layout) = self.workspace_layouts.active(space, workspace_id) {
             layout
         } else {
-            let workspaces =
-                self.virtual_workspace_manager_mut().list_workspaces(space).to_vec();
+            let workspaces = self.virtual_workspace_manager_mut().list_workspaces(space).to_vec();
             let default_size = CGSize::new(1000.0, 1000.0);
             for (id, _) in workspaces {
                 let tree = &mut self.virtual_workspace_manager.workspaces[id].layout_system;
-                self.workspace_layouts.ensure_active_for_workspace(space, default_size, id, tree);
+                self.workspace_layouts
+                    .ensure_active_for_workspace(space, default_size, id, tree);
             }
 
             self.workspace_layouts
@@ -1822,6 +1859,7 @@ impl LayoutEngine {
                     return EventResponse {
                         focus_window: Some(focused_window),
                         raise_windows: vec![],
+                        boundary_hit: None,
                     };
                 } else if Some(current_workspace_id) == active_workspace {
                     self.focused_window = None;
@@ -1837,6 +1875,7 @@ impl LayoutEngine {
                         return EventResponse {
                             focus_window: Some(new_focus),
                             raise_windows: vec![],
+                            boundary_hit: None,
                         };
                     }
                 }
@@ -1905,6 +1944,7 @@ impl LayoutEngine {
             return EventResponse {
                 raise_windows: vec![window_id],
                 focus_window: Some(window_id),
+                boundary_hit: None,
             };
         }
 
@@ -1966,7 +2006,12 @@ impl LayoutEngine {
             let workspace_ids = self.virtual_workspace_manager.list_workspaces(target_space);
             for (id, _) in workspace_ids {
                 let tree = &mut self.virtual_workspace_manager.workspaces[id].layout_system;
-                self.workspace_layouts.ensure_active_for_workspace(target_space, target_screen_size, id, tree);
+                self.workspace_layouts.ensure_active_for_workspace(
+                    target_space,
+                    target_screen_size,
+                    id,
+                    tree,
+                );
             }
         }
 
@@ -2009,6 +2054,7 @@ impl LayoutEngine {
         EventResponse {
             raise_windows: vec![window_id],
             focus_window: Some(window_id),
+            boundary_hit: None,
         }
     }
 
