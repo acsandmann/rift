@@ -1214,10 +1214,10 @@ mod tests {
 
     use super::ScrollingLayoutSystem;
     use crate::actor::app::{WindowId, pid_t};
-    use crate::common::config::ScrollingLayoutSettings;
-    use crate::layout_engine::Direction;
+    use crate::common::config::{GapSettings, ScrollingLayoutSettings};
     use crate::layout_engine::systems::LayoutSystem;
     use crate::layout_engine::utils::compute_tiling_area;
+    use crate::layout_engine::{Direction, LayoutId};
 
     fn wid(pid: pid_t, idx: u32) -> WindowId {
         WindowId {
@@ -1226,12 +1226,62 @@ mod tests {
         }
     }
 
-    #[test]
-    fn creates_columns_and_moves_focus() {
-        let settings = ScrollingLayoutSettings::default();
+    fn screen(width: f64, height: f64) -> CGRect {
+        CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(width, height))
+    }
+
+    fn render(
+        system: &ScrollingLayoutSystem,
+        layout: LayoutId,
+        screen: CGRect,
+        gaps: &GapSettings,
+    ) -> Vec<(WindowId, CGRect)> {
+        system.calculate_layout(
+            layout,
+            screen,
+            0.0,
+            gaps,
+            0.0,
+            Default::default(),
+            Default::default(),
+        )
+    }
+
+    fn frame_for(frames: &[(WindowId, CGRect)], wid: WindowId) -> CGRect {
+        frames
+            .iter()
+            .find(|(id, _)| *id == wid)
+            .map(|(_, frame)| *frame)
+            .expect("missing frame")
+    }
+
+    fn scroll_offset(system: &ScrollingLayoutSystem, layout: LayoutId) -> f64 {
+        f64::from_bits(
+            system
+                .layouts
+                .get(layout)
+                .expect("layout state missing")
+                .scroll_offset_px
+                .load(Ordering::Relaxed),
+        )
+    }
+
+    fn setup_two_windows(
+        settings: ScrollingLayoutSettings,
+    ) -> (ScrollingLayoutSystem, LayoutId, WindowId, WindowId) {
         let mut system = ScrollingLayoutSystem::new(&settings);
         let layout = system.create_layout();
+        let w1 = wid(1, 1);
+        let w2 = wid(1, 2);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+        (system, layout, w1, w2)
+    }
 
+    #[test]
+    fn creates_columns_and_moves_focus() {
+        let mut system = ScrollingLayoutSystem::new(&ScrollingLayoutSettings::default());
+        let layout = system.create_layout();
         let w1 = wid(1, 1);
         let w2 = wid(1, 2);
         let w3 = wid(1, 3);
@@ -1249,10 +1299,8 @@ mod tests {
 
     #[test]
     fn move_selection_swaps_columns_horizontally() {
-        let settings = ScrollingLayoutSettings::default();
-        let mut system = ScrollingLayoutSystem::new(&settings);
+        let mut system = ScrollingLayoutSystem::new(&ScrollingLayoutSettings::default());
         let layout = system.create_layout();
-
         let w1 = wid(1, 1);
         let w2 = wid(1, 2);
         let w3 = wid(1, 3);
@@ -1271,27 +1319,8 @@ mod tests {
 
     #[test]
     fn calculates_centered_columns() {
-        let settings = ScrollingLayoutSettings::default();
-        let mut system = ScrollingLayoutSystem::new(&settings);
-        let layout = system.create_layout();
-
-        let w1 = wid(1, 1);
-        let w2 = wid(1, 2);
-
-        system.add_window_after_selection(layout, w1);
-        system.add_window_after_selection(layout, w2);
-
-        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
-        let gaps = crate::common::config::GapSettings::default();
-        let frames = system.calculate_layout(
-            layout,
-            screen,
-            0.0,
-            &gaps,
-            0.0,
-            Default::default(),
-            Default::default(),
-        );
+        let (system, layout, _, _) = setup_two_windows(ScrollingLayoutSettings::default());
+        let frames = render(&system, layout, screen(1000.0, 800.0), &GapSettings::default());
 
         assert_eq!(frames.len(), 2);
         let width0 = frames[0].1.size.width;
@@ -1308,34 +1337,15 @@ mod tests {
     fn centers_selected_column_without_changing_alignment() {
         let mut settings = ScrollingLayoutSettings::default();
         settings.alignment = crate::common::config::ScrollingAlignment::Left;
-        let mut system = ScrollingLayoutSystem::new(&settings);
-        let layout = system.create_layout();
-
-        let w1 = wid(1, 1);
-        let w2 = wid(1, 2);
-
-        system.add_window_after_selection(layout, w1);
-        system.add_window_after_selection(layout, w2);
+        let (mut system, layout, _, w2) = setup_two_windows(settings);
         system.center_selected_column(layout);
 
-        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
-        let gaps = crate::common::config::GapSettings::default();
-        let frames = system.calculate_layout(
-            layout,
-            screen,
-            0.0,
-            &gaps,
-            0.0,
-            Default::default(),
-            Default::default(),
-        );
+        let screen = screen(1000.0, 800.0);
+        let gaps = GapSettings::default();
+        let frames = render(&system, layout, screen, &gaps);
 
         let tiling = compute_tiling_area(screen, &gaps);
-        let selected_frame = frames
-            .iter()
-            .find(|(wid, _)| *wid == w2)
-            .map(|(_, frame)| *frame)
-            .expect("missing selected frame");
+        let selected_frame = frame_for(&frames, w2);
 
         let column_width = selected_frame.size.width;
         let expected_x = tiling.origin.x + (tiling.size.width - column_width) / 2.0;
@@ -1352,14 +1362,7 @@ mod tests {
     fn center_selection_clears_when_focus_moves() {
         let mut settings = ScrollingLayoutSettings::default();
         settings.alignment = crate::common::config::ScrollingAlignment::Left;
-        let mut system = ScrollingLayoutSystem::new(&settings);
-        let layout = system.create_layout();
-
-        let w1 = wid(1, 1);
-        let w2 = wid(1, 2);
-
-        system.add_window_after_selection(layout, w1);
-        system.add_window_after_selection(layout, w2);
+        let (mut system, layout, _, _) = setup_two_windows(settings);
         system.center_selected_column(layout);
         let _ = system.move_focus(layout, Direction::Left);
 
@@ -1371,37 +1374,18 @@ mod tests {
     fn center_selection_toggles_back_to_layout_alignment() {
         let mut settings = ScrollingLayoutSettings::default();
         settings.alignment = crate::common::config::ScrollingAlignment::Left;
-        let mut system = ScrollingLayoutSystem::new(&settings);
-        let layout = system.create_layout();
-
-        let w1 = wid(1, 1);
-        let w2 = wid(1, 2);
-
-        system.add_window_after_selection(layout, w1);
-        system.add_window_after_selection(layout, w2);
+        let (mut system, layout, _, w2) = setup_two_windows(settings);
 
         // First call centers the current selection.
         system.center_selected_column(layout);
         // Second call on the same selection toggles centering off.
         system.center_selected_column(layout);
 
-        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
-        let gaps = crate::common::config::GapSettings::default();
-        let frames = system.calculate_layout(
-            layout,
-            screen,
-            0.0,
-            &gaps,
-            0.0,
-            Default::default(),
-            Default::default(),
-        );
+        let screen = screen(1000.0, 800.0);
+        let gaps = GapSettings::default();
+        let frames = render(&system, layout, screen, &gaps);
         let tiling = compute_tiling_area(screen, &gaps);
-        let selected_frame = frames
-            .iter()
-            .find(|(wid, _)| *wid == w2)
-            .map(|(_, frame)| *frame)
-            .expect("missing selected frame");
+        let selected_frame = frame_for(&frames, w2);
         assert!(
             (selected_frame.origin.x - tiling.origin.x.round()).abs() < 1.0,
             "expected left-aligned x={}, got x={}",
@@ -1419,76 +1403,24 @@ mod tests {
         settings.column_width_ratio = 0.45;
         settings.min_column_width_ratio = 0.2;
         settings.max_column_width_ratio = 0.9;
-        let mut system = ScrollingLayoutSystem::new(&settings);
-        let layout = system.create_layout();
+        let (mut system, layout, w1, w2) = setup_two_windows(settings);
 
-        let w1 = wid(1, 1);
-        let w2 = wid(1, 2);
-        system.add_window_after_selection(layout, w1);
-        system.add_window_after_selection(layout, w2);
-
-        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
-        let gaps = crate::common::config::GapSettings::default();
+        let screen = screen(1000.0, 800.0);
+        let gaps = GapSettings::default();
 
         // Apply the default initial alignment (selected = w2) so w1 starts off-screen.
-        let _ = system.calculate_layout(
-            layout,
-            screen,
-            0.0,
-            &gaps,
-            0.0,
-            Default::default(),
-            Default::default(),
-        );
+        let _ = render(&system, layout, screen, &gaps);
 
         let _ = system.move_focus(layout, Direction::Left);
-        let left_frames = system.calculate_layout(
-            layout,
-            screen,
-            0.0,
-            &gaps,
-            0.0,
-            Default::default(),
-            Default::default(),
-        );
-        let offset_after_left = f64::from_bits(
-            system
-                .layouts
-                .get(layout)
-                .expect("layout state missing")
-                .scroll_offset_px
-                .load(Ordering::Relaxed),
-        );
+        let left_frames = render(&system, layout, screen, &gaps);
+        let offset_after_left = scroll_offset(&system, layout);
 
         let _ = system.move_focus(layout, Direction::Right);
-        let right_frames = system.calculate_layout(
-            layout,
-            screen,
-            0.0,
-            &gaps,
-            0.0,
-            Default::default(),
-            Default::default(),
-        );
-        let offset_after_right = f64::from_bits(
-            system
-                .layouts
-                .get(layout)
-                .expect("layout state missing")
-                .scroll_offset_px
-                .load(Ordering::Relaxed),
-        );
+        let right_frames = render(&system, layout, screen, &gaps);
+        let offset_after_right = scroll_offset(&system, layout);
 
-        let w1_x_after_left = left_frames
-            .iter()
-            .find(|(wid, _)| *wid == w1)
-            .map(|(_, frame)| frame.origin.x)
-            .expect("missing w1 frame");
-        let w2_x_after_right = right_frames
-            .iter()
-            .find(|(wid, _)| *wid == w2)
-            .map(|(_, frame)| frame.origin.x)
-            .expect("missing w2 frame");
+        let w1_x_after_left = frame_for(&left_frames, w1).origin.x;
+        let w2_x_after_right = frame_for(&right_frames, w2).origin.x;
 
         assert!(
             (offset_after_left - offset_after_right).abs() < 1.0,
@@ -1513,63 +1445,19 @@ mod tests {
         settings.column_width_ratio = 0.45;
         settings.min_column_width_ratio = 0.2;
         settings.max_column_width_ratio = 0.9;
-        let mut system = ScrollingLayoutSystem::new(&settings);
-        let layout = system.create_layout();
+        let (mut system, layout, _, _) = setup_two_windows(settings);
 
-        let w1 = wid(1, 1);
-        let w2 = wid(1, 2);
-        system.add_window_after_selection(layout, w1);
-        system.add_window_after_selection(layout, w2);
-
-        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
-        let gaps = crate::common::config::GapSettings::default();
-        let _ = system.calculate_layout(
-            layout,
-            screen,
-            0.0,
-            &gaps,
-            0.0,
-            Default::default(),
-            Default::default(),
-        );
+        let screen = screen(1000.0, 800.0);
+        let gaps = GapSettings::default();
+        let _ = render(&system, layout, screen, &gaps);
 
         let _ = system.move_focus(layout, Direction::Left);
-        let _ = system.calculate_layout(
-            layout,
-            screen,
-            0.0,
-            &gaps,
-            0.0,
-            Default::default(),
-            Default::default(),
-        );
-        let offset_after_left = f64::from_bits(
-            system
-                .layouts
-                .get(layout)
-                .expect("layout state missing")
-                .scroll_offset_px
-                .load(Ordering::Relaxed),
-        );
+        let _ = render(&system, layout, screen, &gaps);
+        let offset_after_left = scroll_offset(&system, layout);
 
         let _ = system.move_focus(layout, Direction::Right);
-        let _ = system.calculate_layout(
-            layout,
-            screen,
-            0.0,
-            &gaps,
-            0.0,
-            Default::default(),
-            Default::default(),
-        );
-        let offset_after_right = f64::from_bits(
-            system
-                .layouts
-                .get(layout)
-                .expect("layout state missing")
-                .scroll_offset_px
-                .load(Ordering::Relaxed),
-        );
+        let _ = render(&system, layout, screen, &gaps);
+        let offset_after_right = scroll_offset(&system, layout);
 
         assert!(
             (offset_after_left - offset_after_right).abs() > 1.0,
@@ -1585,38 +1473,15 @@ mod tests {
         settings.alignment = crate::common::config::ScrollingAlignment::Left;
         settings.focus_navigation_style =
             crate::common::config::ScrollingFocusNavigationStyle::Anchored;
-        let mut system = ScrollingLayoutSystem::new(&settings);
-        let layout = system.create_layout();
-
-        let w1 = wid(1, 1);
-        let w2 = wid(1, 2);
-        system.add_window_after_selection(layout, w1);
-        system.add_window_after_selection(layout, w2);
+        let (mut system, layout, w1, w2) = setup_two_windows(settings);
         let _ = system.move_focus(layout, Direction::Left);
         system.resize_selection_by(layout, 0.12);
 
-        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
-        let gaps = crate::common::config::GapSettings::default();
-        let frames = system.calculate_layout(
-            layout,
-            screen,
-            0.0,
-            &gaps,
-            0.0,
-            Default::default(),
-            Default::default(),
-        );
+        let gaps = GapSettings::default();
+        let frames = render(&system, layout, screen(1000.0, 800.0), &gaps);
 
-        let w1_frame = frames
-            .iter()
-            .find(|(wid, _)| *wid == w1)
-            .map(|(_, frame)| *frame)
-            .expect("missing w1 frame");
-        let w2_frame = frames
-            .iter()
-            .find(|(wid, _)| *wid == w2)
-            .map(|(_, frame)| *frame)
-            .expect("missing w2 frame");
+        let w1_frame = frame_for(&frames, w1);
+        let w2_frame = frame_for(&frames, w2);
 
         let expected_w2_x = w1_frame.origin.x + w1_frame.size.width + gaps.inner.horizontal;
         assert!(
@@ -1636,42 +1501,15 @@ mod tests {
         settings.column_width_ratio = 0.45;
         settings.min_column_width_ratio = 0.2;
         settings.max_column_width_ratio = 0.9;
-        let mut system = ScrollingLayoutSystem::new(&settings);
-        let layout = system.create_layout();
+        let (mut system, layout, w1, _) = setup_two_windows(settings);
 
-        let w1 = wid(1, 1);
-        let w2 = wid(1, 2);
-        system.add_window_after_selection(layout, w1);
-        system.add_window_after_selection(layout, w2);
-
-        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
-        let gaps = crate::common::config::GapSettings::default();
-        let _ = system.calculate_layout(
-            layout,
-            screen,
-            0.0,
-            &gaps,
-            0.0,
-            Default::default(),
-            Default::default(),
-        );
+        let screen = screen(1000.0, 800.0);
+        let gaps = GapSettings::default();
+        let _ = render(&system, layout, screen, &gaps);
 
         assert!(system.select_window(layout, w1));
-        let frames = system.calculate_layout(
-            layout,
-            screen,
-            0.0,
-            &gaps,
-            0.0,
-            Default::default(),
-            Default::default(),
-        );
-
-        let w1_frame = frames
-            .iter()
-            .find(|(wid, _)| *wid == w1)
-            .map(|(_, frame)| *frame)
-            .expect("missing w1 frame");
+        let frames = render(&system, layout, screen, &gaps);
+        let w1_frame = frame_for(&frames, w1);
         let center_x = (screen.size.width - w1_frame.size.width) / 2.0;
         assert!(
             (w1_frame.origin.x - center_x).abs() > 5.0,
@@ -1690,51 +1528,21 @@ mod tests {
         settings.column_width_ratio = 0.42;
         settings.min_column_width_ratio = 0.2;
         settings.max_column_width_ratio = 0.9;
-        let mut system = ScrollingLayoutSystem::new(&settings);
-        let layout = system.create_layout();
-
-        let w1 = wid(1, 1);
-        let w2 = wid(1, 2);
-        system.add_window_after_selection(layout, w1);
-        system.add_window_after_selection(layout, w2);
+        let (mut system, layout, w1, _) = setup_two_windows(settings);
 
         // Make focused-left column wider so selected widths differ across focus moves.
         let _ = system.move_focus(layout, Direction::Left);
         system.resize_selection_by(layout, 0.15);
 
-        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1200.0, 800.0));
-        let gaps = crate::common::config::GapSettings::default();
+        let screen = screen(1200.0, 800.0);
+        let gaps = GapSettings::default();
 
-        let frames_left = system.calculate_layout(
-            layout,
-            screen,
-            0.0,
-            &gaps,
-            0.0,
-            Default::default(),
-            Default::default(),
-        );
-        let w1_x_left = frames_left
-            .iter()
-            .find(|(wid, _)| *wid == w1)
-            .map(|(_, frame)| frame.origin.x)
-            .expect("missing w1 frame");
+        let frames_left = render(&system, layout, screen, &gaps);
+        let w1_x_left = frame_for(&frames_left, w1).origin.x;
 
         let _ = system.move_focus(layout, Direction::Right);
-        let frames_right = system.calculate_layout(
-            layout,
-            screen,
-            0.0,
-            &gaps,
-            0.0,
-            Default::default(),
-            Default::default(),
-        );
-        let w1_x_right = frames_right
-            .iter()
-            .find(|(wid, _)| *wid == w1)
-            .map(|(_, frame)| frame.origin.x)
-            .expect("missing w1 frame");
+        let frames_right = render(&system, layout, screen, &gaps);
+        let w1_x_right = frame_for(&frames_right, w1).origin.x;
 
         assert!(
             (w1_x_left - w1_x_right).abs() < 1.0,
@@ -1746,14 +1554,7 @@ mod tests {
 
     #[test]
     fn move_selection_right_extracts_selected_from_stacked_column() {
-        let settings = ScrollingLayoutSettings::default();
-        let mut system = ScrollingLayoutSystem::new(&settings);
-        let layout = system.create_layout();
-
-        let w1 = wid(1, 1);
-        let w2 = wid(1, 2);
-        system.add_window_after_selection(layout, w1);
-        system.add_window_after_selection(layout, w2);
+        let (mut system, layout, w1, w2) = setup_two_windows(ScrollingLayoutSettings::default());
         system.join_selection_with_direction(layout, Direction::Left);
 
         assert!(system.move_selection(layout, Direction::Right));
@@ -1766,14 +1567,7 @@ mod tests {
 
     #[test]
     fn move_selection_left_extracts_selected_from_stacked_column_at_edge() {
-        let settings = ScrollingLayoutSettings::default();
-        let mut system = ScrollingLayoutSystem::new(&settings);
-        let layout = system.create_layout();
-
-        let w1 = wid(1, 1);
-        let w2 = wid(1, 2);
-        system.add_window_after_selection(layout, w1);
-        system.add_window_after_selection(layout, w2);
+        let (mut system, layout, w1, w2) = setup_two_windows(ScrollingLayoutSettings::default());
         system.join_selection_with_direction(layout, Direction::Left);
 
         assert!(system.move_selection(layout, Direction::Left));
@@ -1793,48 +1587,18 @@ mod tests {
         settings.column_width_ratio = 0.45;
         settings.min_column_width_ratio = 0.2;
         settings.max_column_width_ratio = 0.95;
-        let mut system = ScrollingLayoutSystem::new(&settings);
-        let layout = system.create_layout();
+        let (mut system, layout, _, w2) = setup_two_windows(settings); // selected rightmost
 
-        let w1 = wid(1, 1);
-        let w2 = wid(1, 2);
-        system.add_window_after_selection(layout, w1);
-        system.add_window_after_selection(layout, w2); // selected rightmost
+        let screen = screen(1000.0, 800.0);
+        let gaps = GapSettings::default();
 
-        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
-        let gaps = crate::common::config::GapSettings::default();
-
-        let before = system.calculate_layout(
-            layout,
-            screen,
-            0.0,
-            &gaps,
-            0.0,
-            Default::default(),
-            Default::default(),
-        );
-        let before_frame = before
-            .iter()
-            .find(|(wid, _)| *wid == w2)
-            .map(|(_, frame)| *frame)
-            .expect("missing w2 frame");
+        let before = render(&system, layout, screen, &gaps);
+        let before_frame = frame_for(&before, w2);
 
         system.resize_selection_by(layout, 0.08);
 
-        let after = system.calculate_layout(
-            layout,
-            screen,
-            0.0,
-            &gaps,
-            0.0,
-            Default::default(),
-            Default::default(),
-        );
-        let after_frame = after
-            .iter()
-            .find(|(wid, _)| *wid == w2)
-            .map(|(_, frame)| *frame)
-            .expect("missing w2 frame");
+        let after = render(&system, layout, screen, &gaps);
+        let after_frame = frame_for(&after, w2);
 
         let visible_width = |frame: CGRect| {
             let left = frame.origin.x.max(screen.origin.x);
@@ -1849,6 +1613,33 @@ mod tests {
             "expected visible width to grow, before={} after={}",
             before_visible,
             after_visible
+        );
+    }
+
+    #[test]
+    fn center_override_persists_on_refocus_of_same_window_in_niri_mode() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.alignment = crate::common::config::ScrollingAlignment::Left;
+        settings.focus_navigation_style =
+            crate::common::config::ScrollingFocusNavigationStyle::Niri;
+        let (mut system, layout, _, w2) = setup_two_windows(settings);
+
+        system.center_selected_column(layout);
+
+        let screen = screen(1000.0, 800.0);
+        let gaps = GapSettings::default();
+        let before = frame_for(&render(&system, layout, screen, &gaps), w2);
+
+        assert!(system.select_window(layout, w2));
+        assert!(system.select_window(layout, w2));
+
+        let after = frame_for(&render(&system, layout, screen, &gaps), w2);
+
+        assert!(
+            (before.origin.x - after.origin.x).abs() < 1.0,
+            "expected centered x to persist, got {} -> {}",
+            before.origin.x,
+            after.origin.x
         );
     }
 }
