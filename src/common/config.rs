@@ -586,6 +586,11 @@ pub struct ScrollingLayoutSettings {
     /// Alignment for the focused column (left, center, right).
     #[serde(default)]
     pub alignment: ScrollingAlignment,
+    /// Horizontal focus navigation behavior:
+    /// - niri: reveal only as needed based on navigation direction.
+    /// - anchored: always align focused column to `alignment`.
+    #[serde(default)]
+    pub focus_navigation_style: ScrollingFocusNavigationStyle,
     /// Trackpad gestures for scrolling layout
     #[serde(default)]
     pub gestures: ScrollingGestureSettings,
@@ -608,6 +613,14 @@ pub enum ScrollingAlignment {
     #[default]
     Center,
     Right,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ScrollingFocusNavigationStyle {
+    #[default]
+    Niri,
+    Anchored,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]

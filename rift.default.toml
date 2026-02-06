@@ -102,6 +102,10 @@ min_column_width_ratio = 0.3
 max_column_width_ratio = 0.9
 # Alignment for the focused column: "left", "center", or "right"
 alignment = "center"
+# Horizontal focus behavior:
+# - "niri": reveal columns only when needed based on navigation direction
+# - "anchored": always align focused column according to `alignment`
+focus_navigation_style = "niri"
 
 [settings.layout.scrolling.gestures]
 # Enable horizontal scroll gestures to switch columns
