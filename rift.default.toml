@@ -104,6 +104,7 @@ max_column_width_ratio = 0.9
 alignment = "center"
 # Horizontal focus behavior:
 # - "niri": reveal columns only when needed based on navigation direction
+# 			(disrespects alignment setting above)
 # - "anchored": always align focused column according to `alignment`
 focus_navigation_style = "niri"
 
