@@ -93,6 +93,28 @@ master_side = "left"
 # Where new windows go when the master area is already full (master | stack | focused)
 new_window_placement = "master"
 
+# these settings only apply when layout mode == "scrolling"
+[settings.layout.scrolling]
+# width of the active column (0..1 of screen width)
+column_width_ratio = 0.7
+# min_column_width_ratio / max_column_width_ratio: clamp bounds used by resize commands
+min_column_width_ratio = 0.3
+max_column_width_ratio = 0.9
+# Alignment for the focused column: "left", "center", or "right"
+alignment = "center"
+# Horizontal focus behavior:
+# - "niri": reveal columns only when needed based on navigation direction
+# - "anchored": always align focused column according to `alignment`
+focus_navigation_style = "niri"
+
+[settings.layout.scrolling.gestures]
+# Enable horizontal scroll gestures to switch columns
+enabled = false
+# Invert horizontal direction (swap left/right)
+invert_horizontal = false
+# Number of fingers required for gesture
+fingers = 3
+
 [settings.layout.stack]
 # How much of each stacked window sticks out (in pixels)
 # Set to 0.0 to have them directly on top of each other.

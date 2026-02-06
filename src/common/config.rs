@@ -510,6 +510,12 @@ fn default_master_stack_ratio() -> f64 { 0.6 }
 
 fn default_master_stack_count() -> usize { 1 }
 
+fn default_scrolling_column_width_ratio() -> f64 { 0.7 }
+
+fn default_scrolling_min_column_width_ratio() -> f64 { 0.3 }
+
+fn default_scrolling_max_column_width_ratio() -> f64 { 0.9 }
+
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum HorizontalPlacement {
@@ -545,6 +551,9 @@ pub struct LayoutSettings {
     /// Gap configuration for window spacing
     #[serde(default)]
     pub gaps: GapSettings,
+    /// Scrolling layout configuration (niri-style columns)
+    #[serde(default)]
+    pub scrolling: ScrollingLayoutSettings,
 }
 
 /// Layout mode enum
@@ -558,6 +567,33 @@ pub enum LayoutMode {
     Bsp,
     /// Master/stack layout (master area + stack area)
     MasterStack,
+    /// Scrolling column layout (niri-style)
+    Scrolling,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ScrollingLayoutSettings {
+    /// Default width of the active column, as a fraction of the screen width.
+    #[serde(default = "default_scrolling_column_width_ratio")]
+    pub column_width_ratio: f64,
+    /// Minimum column width ratio allowed by resize commands.
+    #[serde(default = "default_scrolling_min_column_width_ratio")]
+    pub min_column_width_ratio: f64,
+    /// Maximum column width ratio allowed by resize commands.
+    #[serde(default = "default_scrolling_max_column_width_ratio")]
+    pub max_column_width_ratio: f64,
+    /// Alignment for the focused column (left, center, right).
+    #[serde(default)]
+    pub alignment: ScrollingAlignment,
+    /// Horizontal focus navigation behavior:
+    /// - niri: reveal only as needed based on navigation direction.
+    /// - anchored: always align focused column to `alignment`.
+    #[serde(default)]
+    pub focus_navigation_style: ScrollingFocusNavigationStyle,
+    /// Trackpad gestures for scrolling layout
+    #[serde(default)]
+    pub gestures: ScrollingGestureSettings,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
@@ -568,6 +604,23 @@ pub enum MasterStackSide {
     Right,
     Top,
     Bottom,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ScrollingAlignment {
+    Left,
+    #[default]
+    Center,
+    Right,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ScrollingFocusNavigationStyle {
+    #[default]
+    Niri,
+    Anchored,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
@@ -593,6 +646,38 @@ pub enum MasterStackNewWindowPlacement {
     Master,
     Stack,
     Focused,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub struct ScrollingGestureSettings {
+    /// Enable horizontal scroll gestures to switch columns
+    #[serde(default = "no")]
+    pub enabled: bool,
+    /// Invert horizontal direction (swap left/right)
+    #[serde(default)]
+    pub invert_horizontal: bool,
+    /// Maximum absolute Y delta allowed for the gesture to count as horizontal
+    #[serde(default = "default_swipe_vertical_tolerance")]
+    pub vertical_tolerance: f64,
+    /// Number of fingers required for scroll gesture
+    #[serde(default = "default_swipe_fingers")]
+    pub fingers: usize,
+    /// Normalized horizontal distance (0..1) required to fire a scroll step
+    #[serde(default = "default_distance_pct")]
+    pub distance_pct: f64,
+}
+
+impl Default for ScrollingGestureSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            invert_horizontal: false,
+            vertical_tolerance: default_swipe_vertical_tolerance(),
+            fingers: default_swipe_fingers(),
+            distance_pct: default_distance_pct(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
@@ -740,6 +825,60 @@ impl LayoutSettings {
         issues.extend(self.master_stack.validate());
 
         issues.extend(self.gaps.validate());
+
+        issues.extend(self.scrolling.validate());
+
+        issues
+    }
+}
+
+impl ScrollingLayoutSettings {
+    pub fn validate(&self) -> Vec<String> {
+        let mut issues = Vec::new();
+
+        if !(0.0..=1.0).contains(&self.column_width_ratio) {
+            issues.push(format!(
+                "layout.scrolling.column_width_ratio must be between 0.0 and 1.0, got {}",
+                self.column_width_ratio
+            ));
+        }
+
+        if !(0.0..=1.0).contains(&self.min_column_width_ratio) {
+            issues.push(format!(
+                "layout.scrolling.min_column_width_ratio must be between 0.0 and 1.0, got {}",
+                self.min_column_width_ratio
+            ));
+        }
+
+        if !(0.0..=1.0).contains(&self.max_column_width_ratio) {
+            issues.push(format!(
+                "layout.scrolling.max_column_width_ratio must be between 0.0 and 1.0, got {}",
+                self.max_column_width_ratio
+            ));
+        }
+
+        if self.min_column_width_ratio > self.max_column_width_ratio {
+            issues.push(format!(
+                "layout.scrolling.min_column_width_ratio ({}) must be <= max_column_width_ratio ({})",
+                self.min_column_width_ratio, self.max_column_width_ratio
+            ));
+        }
+
+        if !(self.min_column_width_ratio..=self.max_column_width_ratio)
+            .contains(&self.column_width_ratio)
+        {
+            issues.push(format!(
+                "layout.scrolling.column_width_ratio ({}) must be within min/max bounds",
+                self.column_width_ratio
+            ));
+        }
+
+        if self.gestures.vertical_tolerance < 0.0 {
+            issues.push(format!(
+                "layout.scrolling.gestures.vertical_tolerance must be non-negative, got {}",
+                self.gestures.vertical_tolerance
+            ));
+        }
 
         issues
     }

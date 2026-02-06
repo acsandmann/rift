@@ -196,6 +196,9 @@ enum LayoutCommands {
     PromoteToMaster,
     /// Swap the first master with the first stack window (master/stack layout only)
     SwapMasterStack,
+    /// Toggle centering of the selected column in scrolling layout.
+    /// If invoked again on the same selection, centering is removed.
+    CenterSelection,
 }
 
 #[derive(Subcommand)]
@@ -606,6 +609,9 @@ fn map_layout_command(cmd: LayoutCommands) -> Result<RiftCommand, String> {
         ))),
         LayoutCommands::SwapMasterStack => Ok(RiftCommand::Reactor(reactor::Command::Layout(
             LC::SwapMasterStack,
+        ))),
+        LayoutCommands::CenterSelection => Ok(RiftCommand::Reactor(reactor::Command::Layout(
+            LC::CenterSelection,
         ))),
     }
 }

@@ -92,6 +92,8 @@ mod bsp;
 pub use bsp::BspLayoutSystem;
 mod master_stack;
 pub use master_stack::MasterStackLayoutSystem;
+mod scrolling;
+pub use scrolling::ScrollingLayoutSystem;
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -100,4 +102,5 @@ pub enum LayoutSystemKind {
     Traditional(TraditionalLayoutSystem),
     Bsp(BspLayoutSystem),
     MasterStack(MasterStackLayoutSystem),
+    Scrolling(ScrollingLayoutSystem),
 }
