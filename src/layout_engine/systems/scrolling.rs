@@ -924,6 +924,10 @@ impl LayoutSystem for ScrollingLayoutSystem {
     ) {
         let min_ratio = self.settings.min_column_width_ratio;
         let max_ratio = self.settings.max_column_width_ratio;
+        let niri_navigation = matches!(
+            self.settings.focus_navigation_style,
+            ScrollingFocusNavigationStyle::Niri
+        );
 
         let Some(state) = self.layout_state_mut(layout) else {
             return;
@@ -941,6 +945,11 @@ impl LayoutSystem for ScrollingLayoutSystem {
         let base_ratio = state.column_width_ratio;
         if let Some((col_idx, _)) = state.selected_location() {
             state.columns[col_idx].width_offset = clamped - base_ratio;
+            if niri_navigation {
+                state.reveal_selected_without_direction();
+            } else {
+                state.align_scroll_to_selected();
+            }
         } else {
             state.column_width_ratio = clamped;
         }
@@ -1162,6 +1171,10 @@ impl LayoutSystem for ScrollingLayoutSystem {
     fn resize_selection_by(&mut self, layout: LayoutId, amount: f64) {
         let min_ratio = self.settings.min_column_width_ratio;
         let max_ratio = self.settings.max_column_width_ratio;
+        let niri_navigation = matches!(
+            self.settings.focus_navigation_style,
+            ScrollingFocusNavigationStyle::Niri
+        );
         let Some(state) = self.layout_state_mut(layout) else {
             return;
         };
@@ -1177,6 +1190,11 @@ impl LayoutSystem for ScrollingLayoutSystem {
         let next = current + amount;
         let clamped = next.clamp(min_ratio, max_ratio).max(0.05).min(0.98);
         state.columns[col_idx].width_offset = clamped - base_ratio;
+        if niri_navigation {
+            state.reveal_selected_without_direction();
+        } else {
+            state.align_scroll_to_selected();
+        }
     }
 
     fn rebalance(&mut self, _layout: LayoutId) {}
@@ -1760,5 +1778,73 @@ mod tests {
         assert_eq!(state.columns[0].windows, vec![w2]);
         assert_eq!(state.columns[1].windows, vec![w1]);
         assert_eq!(state.selected, Some(w2));
+    }
+
+    #[test]
+    fn niri_rightmost_resize_grow_increases_visible_width() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.alignment = crate::common::config::ScrollingAlignment::Center;
+        settings.focus_navigation_style =
+            crate::common::config::ScrollingFocusNavigationStyle::Niri;
+        settings.column_width_ratio = 0.45;
+        settings.min_column_width_ratio = 0.2;
+        settings.max_column_width_ratio = 0.95;
+        let mut system = ScrollingLayoutSystem::new(&settings);
+        let layout = system.create_layout();
+
+        let w1 = wid(1, 1);
+        let w2 = wid(1, 2);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2); // selected rightmost
+
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
+        let gaps = crate::common::config::GapSettings::default();
+
+        let before = system.calculate_layout(
+            layout,
+            screen,
+            0.0,
+            &gaps,
+            0.0,
+            Default::default(),
+            Default::default(),
+        );
+        let before_frame = before
+            .iter()
+            .find(|(wid, _)| *wid == w2)
+            .map(|(_, frame)| *frame)
+            .expect("missing w2 frame");
+
+        system.resize_selection_by(layout, 0.08);
+
+        let after = system.calculate_layout(
+            layout,
+            screen,
+            0.0,
+            &gaps,
+            0.0,
+            Default::default(),
+            Default::default(),
+        );
+        let after_frame = after
+            .iter()
+            .find(|(wid, _)| *wid == w2)
+            .map(|(_, frame)| *frame)
+            .expect("missing w2 frame");
+
+        let visible_width = |frame: CGRect| {
+            let left = frame.origin.x.max(screen.origin.x);
+            let right =
+                (frame.origin.x + frame.size.width).min(screen.origin.x + screen.size.width);
+            (right - left).max(0.0)
+        };
+        let before_visible = visible_width(before_frame);
+        let after_visible = visible_width(after_frame);
+        assert!(
+            after_visible > before_visible + 1.0,
+            "expected visible width to grow, before={} after={}",
+            before_visible,
+            after_visible
+        );
     }
 }
