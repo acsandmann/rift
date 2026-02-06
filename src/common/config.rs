@@ -571,7 +571,7 @@ pub enum LayoutMode {
     Scrolling,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ScrollingLayoutSettings {
     /// Default width of the active column, as a fraction of the screen width.
@@ -594,6 +594,19 @@ pub struct ScrollingLayoutSettings {
     /// Trackpad gestures for scrolling layout
     #[serde(default)]
     pub gestures: ScrollingGestureSettings,
+}
+
+impl Default for ScrollingLayoutSettings {
+    fn default() -> Self {
+        Self {
+            column_width_ratio: default_scrolling_column_width_ratio(),
+            min_column_width_ratio: default_scrolling_min_column_width_ratio(),
+            max_column_width_ratio: default_scrolling_max_column_width_ratio(),
+            alignment: ScrollingAlignment::default(),
+            focus_navigation_style: ScrollingFocusNavigationStyle::default(),
+            gestures: ScrollingGestureSettings::default(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
