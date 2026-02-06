@@ -12,7 +12,7 @@ use crate::layout_engine::{
 };
 use crate::model::tree::NodeId;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct MasterStackLayoutSystem {
     inner: TraditionalLayoutSystem,
     settings: MasterStackSettings,

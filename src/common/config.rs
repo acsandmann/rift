@@ -83,6 +83,17 @@ pub struct VirtualWorkspaceSettings {
     pub reapply_app_rules_on_title_change: bool,
     #[serde(default)]
     pub app_rules: Vec<AppWorkspaceRule>,
+    #[serde(default)]
+    pub workspace_rules: Vec<WorkspaceLayoutRule>,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceLayoutRule {
+    /// Target workspace by index or name
+    pub workspace: WorkspaceSelector,
+    /// Layout mode to use for this workspace
+    pub layout: LayoutMode,
 }
 
 // Allow specifying a workspace by numeric index or by name in the config.
@@ -145,6 +156,7 @@ impl Default for VirtualWorkspaceSettings {
             default_workspace: 0,
             reapply_app_rules_on_title_change: false,
             app_rules: Vec::new(),
+            workspace_rules: Vec::new(),
         }
     }
 }
@@ -557,7 +569,7 @@ pub struct LayoutSettings {
 }
 
 /// Layout mode enum
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum LayoutMode {
     /// Traditional container-based tiling (i3/sway style)

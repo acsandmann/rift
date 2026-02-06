@@ -268,7 +268,7 @@ fn default_atomic_bool() -> AtomicBool { AtomicBool::new(false) }
 fn default_atomic_i8() -> AtomicI8 { AtomicI8::new(0) }
 fn default_atomic() -> AtomicU64 { AtomicU64::new(0.0f64.to_bits()) }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct ScrollingLayoutSystem {
     layouts: slotmap::SlotMap<LayoutId, LayoutState>,
     #[serde(skip, default = "default_scrolling_settings")]
