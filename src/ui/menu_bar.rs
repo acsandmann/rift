@@ -25,7 +25,7 @@ use crate::common::config::{
 use crate::model::VirtualWorkspaceId;
 use crate::model::server::{WindowData, WorkspaceData};
 use crate::sys::screen::SpaceId;
-use crate::ui::compute_window_layout_metrics;
+use crate::ui::common::compute_window_layout_metrics;
 
 const CELL_WIDTH: f64 = 20.0;
 const CELL_HEIGHT: f64 = 15.0;

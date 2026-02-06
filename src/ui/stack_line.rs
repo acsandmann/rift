@@ -11,7 +11,7 @@ use crate::actor::app::WindowId;
 use crate::common::config::{HorizontalPlacement, VerticalPlacement};
 use crate::sys::cgs_window::{CgsWindow, CgsWindowError};
 use crate::sys::screen::SpaceId;
-use crate::ui::{render_layer_to_cgs_window, with_disabled_actions};
+use crate::ui::common::{render_layer_to_cgs_window, with_disabled_actions};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Color {

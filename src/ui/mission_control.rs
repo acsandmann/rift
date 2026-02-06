@@ -35,7 +35,9 @@ use crate::sys::screen::{
     CoordinateConverter, NSScreenExt, ScreenCache, ScreenId, ScreenInfo, get_active_space_number,
 };
 use crate::sys::window_server::{CapturedWindowImage, WindowServerId};
-use crate::ui::{compute_window_layout_metrics, render_layer_to_cgs_window, with_disabled_actions};
+use crate::ui::common::{
+    compute_window_layout_metrics, render_layer_to_cgs_window, with_disabled_actions,
+};
 
 #[derive(Debug, Clone)]
 struct CaptureTask {
