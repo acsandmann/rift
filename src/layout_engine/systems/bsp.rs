@@ -9,7 +9,7 @@ use crate::layout_engine::{Direction, LayoutId, LayoutKind, Orientation};
 use crate::model::selection::*;
 use crate::model::tree::{NodeId, NodeMap, Tree};
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 enum NodeKind {
     Split {
         orientation: Orientation,
@@ -23,12 +23,12 @@ enum NodeKind {
     },
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
 struct LayoutState {
     root: NodeId,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct BspLayoutSystem {
     layouts: slotmap::SlotMap<crate::layout_engine::LayoutId, LayoutState>,
     tree: Tree<Components>,
@@ -506,7 +506,7 @@ impl BspLayoutSystem {
     }
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize, Debug)]
 struct Components {
     selection: Selection,
 }

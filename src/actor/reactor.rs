@@ -982,6 +982,7 @@ impl Reactor {
                 self.notification_manager.last_sls_notification_ids = ids;
             }
         }
+        self.update_event_tap_layout_mode();
     }
 
     fn create_window_data(&self, window_id: WindowId) -> Option<WindowData> {
@@ -2011,7 +2012,39 @@ impl Reactor {
         let layout::EventResponse {
             raise_windows,
             mut focus_window,
+            boundary_hit,
         } = response;
+
+        if let Some(dir) = boundary_hit
+            && self.config.settings.layout.scrolling.gestures.propagate_to_workspace_swipe
+        {
+            let skip_empty = self.config.settings.gestures.skip_empty;
+            let cmd = match dir {
+                Direction::Left => Some(layout::LayoutCommand::PrevWorkspace(Some(skip_empty))),
+                Direction::Right => Some(layout::LayoutCommand::NextWorkspace(Some(skip_empty))),
+                _ => None,
+            };
+            if let Some(cmd) = cmd {
+                let space = workspace_switch_space.or_else(|| self.workspace_command_space());
+                if let Some(space) = space {
+                    let resp = self
+                        .layout_manager
+                        .layout_engine
+                        .handle_virtual_workspace_command(space, &cmd);
+
+                    if self.config.settings.gestures.haptics_enabled {
+                        let _ = crate::sys::haptics::perform_haptic(
+                            self.config.settings.gestures.haptic_pattern,
+                        );
+                    }
+
+                    // Recurse to handle the new response (e.g. focus window on the new workspace)
+                    self.handle_layout_response(resp, Some(space));
+                    return;
+                }
+            }
+        }
+
         let original_focus = focus_window;
 
         let focus_quiet = if workspace_switch_space.is_some() {
@@ -2497,6 +2530,30 @@ impl Reactor {
             && matches!(self.menu_manager.menu_state, MenuState::Closed)
             && !self.is_mission_control_active();
         self.set_focus_follows_mouse_enabled(should_enable);
+    }
+
+    fn update_event_tap_layout_mode(&self) {
+        if let Some(event_tap_tx) = self.communication_manager.event_tap_tx.as_ref() {
+            let cursor_loc = crate::sys::window_server::current_cursor_location().ok();
+            let cursor_space = cursor_loc.and_then(|loc| {
+                self.space_manager.screens.iter().find_map(|screen| {
+                    if screen.frame.contains(loc) {
+                        screen.space
+                    } else {
+                        None
+                    }
+                })
+            });
+
+            let space = cursor_space
+                .or_else(|| self.main_window_space())
+                .or_else(|| self.space_manager.screens.iter().find_map(|s| s.space));
+
+            if let Some(space) = space {
+                let mode = self.layout_manager.layout_engine.active_layout_mode_at(space);
+                event_tap_tx.send(crate::actor::event_tap::Request::LayoutModeChanged(mode));
+            }
+        }
     }
 
     fn set_mission_control_active(&mut self, active: bool) {

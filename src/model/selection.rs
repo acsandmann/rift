@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::layout_engine::LayoutId;
 use crate::model::tree::{NodeId, NodeMap};
 
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub enum TreeEvent {
     AddedToForest(NodeId),
     AddedToParent(NodeId),
@@ -16,12 +16,12 @@ pub enum TreeEvent {
     RemovedFromForest(NodeId),
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Selection {
     nodes: slotmap::SecondaryMap<NodeId, SelectionInfo>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct SelectionInfo {
     selected_child: NodeId,
     stop_here: bool,

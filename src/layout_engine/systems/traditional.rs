@@ -10,7 +10,7 @@ use crate::model::selection::*;
 use crate::model::tree::{self, NodeId, NodeMap, OwnedNode, Tree};
 use crate::sys::geometry::Round;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct TraditionalLayoutSystem {
     pub(crate) tree: Tree<Components>,
     pub(crate) layout_roots: slotmap::SlotMap<LayoutId, OwnedNode>,
@@ -1913,7 +1913,7 @@ impl TraditionalLayoutSystem {
     }
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize, Debug)]
 pub(crate) struct Components {
     selection: Selection,
     pub(crate) layout: Layout,
@@ -1954,19 +1954,19 @@ impl tree::Observer for Components {
     }
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize, Debug)]
 pub(crate) struct WindowIndex {
     windows: slotmap::SecondaryMap<NodeId, WindowId>,
     window_nodes: crate::common::collections::BTreeMap<WindowId, WindowNodeInfoVec>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 struct WindowNodeInfo {
     layout: LayoutId,
     node: NodeId,
 }
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Default, Debug)]
 struct WindowNodeInfoVec(Vec<WindowNodeInfo>);
 
 impl WindowIndex {
@@ -2152,7 +2152,7 @@ impl StackLayoutResult {
     }
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize, Debug)]
 pub(crate) struct Layout {
     pub(crate) info: slotmap::SecondaryMap<NodeId, LayoutInfo>,
 }

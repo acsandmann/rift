@@ -161,11 +161,34 @@ impl WorkspaceLayouts {
             .collect()
     }
 
-    pub(crate) fn for_each_active(&self, mut f: impl FnMut(LayoutId)) {
-        for info in self.map.values() {
-            if let Some(l) = info.active() {
-                f(l);
-            }
+    pub(crate) fn active_layouts_with_workspace(
+        &self,
+    ) -> Vec<(crate::model::VirtualWorkspaceId, LayoutId)> {
+        self.map
+            .iter()
+            .filter_map(|(&(_, ws_id), info)| info.active().map(|l| (ws_id, l)))
+            .collect()
+    }
+
+    pub(crate) fn ensure_active_for_workspace(
+        &mut self,
+        space: SpaceId,
+        size: CGSize,
+        workspace_id: crate::model::VirtualWorkspaceId,
+        tree: &mut impl LayoutSystem,
+    ) {
+        self.ensure_active_for_space(space, size, std::iter::once(workspace_id), tree);
+    }
+
+    pub(crate) fn replace_layout(
+        &mut self,
+        space: SpaceId,
+        workspace_id: crate::model::VirtualWorkspaceId,
+        new_layout: LayoutId,
+    ) {
+        if let Some(info) = self.map.get_mut(&(space, workspace_id)) {
+            info.configurations.insert(info.active_size, new_layout);
+            info.last_saved = Some(new_layout);
         }
     }
 
