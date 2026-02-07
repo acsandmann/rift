@@ -196,10 +196,8 @@ impl LayoutEngine {
                 .map(|layout| workspace.layout_system.visible_windows_in_layout(layout))
                 .unwrap_or_default();
             // Keep windows hidden by stack/group selection when rebuilding into a new mode.
-            let mut hidden_windows: Vec<_> = workspace
-                .windows()
-                .filter(|wid| !ordered.contains(wid))
-                .collect();
+            let mut hidden_windows: Vec<_> =
+                workspace.windows().filter(|wid| !ordered.contains(wid)).collect();
             hidden_windows.sort();
             ordered.extend(hidden_windows);
             (workspace.layout_mode, selected, ordered)
