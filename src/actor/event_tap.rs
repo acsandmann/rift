@@ -27,19 +27,19 @@ use crate::sys::hotkey::{
     Modifiers, is_modifier_key, key_code_from_event, modifier_flag_for_key,
     modifiers_from_flags_with_keys,
 };
-use crate::sys::screen::CoordinateConverter;
+use crate::sys::screen::{CoordinateConverter, SpaceId};
 use crate::sys::window_server::{self, WindowServerId, window_level};
 
 #[derive(Debug)]
 pub enum Request {
     Warp(CGPoint),
     EnforceHidden,
-    ScreenParametersChanged(Vec<CGRect>, CoordinateConverter),
+    ScreenParametersChanged(Vec<(CGRect, Option<SpaceId>)>, CoordinateConverter),
     SetEventProcessing(bool),
     SetFocusFollowsMouseEnabled(bool),
     SetHotkeys(Vec<(Hotkey, WmCommand)>),
     ConfigUpdated(Config),
-    LayoutModeChanged(crate::common::config::LayoutMode),
+    LayoutModesChanged(Vec<(SpaceId, crate::common::config::LayoutMode)>),
 }
 
 pub struct EventTap {
@@ -67,7 +67,8 @@ struct State {
     disable_hotkey_active: bool,
     pressed_keys: HashSet<KeyCode>,
     current_flags: CGEventFlags,
-    active_layout_mode: crate::common::config::LayoutMode,
+    screen_spaces: Vec<(CGRect, SpaceId)>,
+    layout_mode_by_space: HashMap<SpaceId, crate::common::config::LayoutMode>,
 }
 
 impl Default for State {
@@ -83,7 +84,8 @@ impl Default for State {
             disable_hotkey_active: false,
             pressed_keys: HashSet::default(),
             current_flags: CGEventFlags::empty(),
-            active_layout_mode: crate::common::config::LayoutMode::default(),
+            screen_spaces: Vec::new(),
+            layout_mode_by_space: HashMap::default(),
         }
     }
 }
@@ -347,8 +349,12 @@ impl EventTap {
                     }
                 }
             }
-            Request::ScreenParametersChanged(frames, converter) => {
-                state.screens = frames;
+            Request::ScreenParametersChanged(screens_with_spaces, converter) => {
+                state.screens = screens_with_spaces.iter().map(|(frame, _)| *frame).collect();
+                state.screen_spaces = screens_with_spaces
+                    .into_iter()
+                    .filter_map(|(frame, maybe_space)| maybe_space.map(|space| (frame, space)))
+                    .collect();
                 state.converter = converter;
             }
             Request::SetEventProcessing(enabled) => {
@@ -409,9 +415,15 @@ impl EventTap {
                 }
                 self.update_gesture_handlers();
             }
-            Request::LayoutModeChanged(mode) => {
-                state.active_layout_mode = mode;
-                debug!("Layout mode changed to {:?}", state.active_layout_mode);
+            Request::LayoutModesChanged(modes) => {
+                state.layout_mode_by_space.clear();
+                for (space, mode) in modes {
+                    state.layout_mode_by_space.insert(space, mode);
+                }
+                debug!(
+                    "Updated layout modes for {} spaces",
+                    state.layout_mode_by_space.len()
+                );
             }
         }
     }
@@ -423,10 +435,11 @@ impl EventTap {
             if let Some(nsevent) = NSEvent::eventWithCGEvent(event)
                 && nsevent.r#type() == NSEventType::Gesture
             {
-                let is_scrolling_mode = matches!(
-                    state.active_layout_mode,
-                    crate::common::config::LayoutMode::Scrolling
-                );
+                let cursor = CGEvent::location(Some(event));
+                let default_mode = self.config.borrow().settings.layout.mode;
+                let mode = state.layout_mode_at_point(cursor).unwrap_or(default_mode);
+                let is_scrolling_mode =
+                    matches!(mode, crate::common::config::LayoutMode::Scrolling);
                 let scroll_handler = self.scroll.borrow();
                 if is_scrolling_mode && let Some(handler) = scroll_handler.as_ref() {
                     self.handle_scroll_gesture_event(handler, &nsevent);
@@ -844,6 +857,13 @@ unsafe extern "C-unwind" fn mouse_callback(
 }
 
 impl State {
+    fn layout_mode_at_point(&self, loc: CGPoint) -> Option<crate::common::config::LayoutMode> {
+        self.screen_spaces
+            .iter()
+            .find(|(frame, _)| frame.contains(loc))
+            .and_then(|(_, space)| self.layout_mode_by_space.get(space).copied())
+    }
+
     fn note_key_down(&mut self, key_code: KeyCode) { self.pressed_keys.insert(key_code); }
 
     fn note_key_up(&mut self, key_code: KeyCode) { self.pressed_keys.remove(&key_code); }
@@ -978,4 +998,41 @@ fn build_event_mask(swipe_enabled: bool) -> CGEventMask {
         *&mut m |= 1u64 << (NSEventType::Gesture.0 as u64);
     }
     m
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layout_mode_at_point_uses_space_mapping() {
+        let mut state = State::default();
+        let left = CGRect::new(
+            CGPoint::new(0.0, 0.0),
+            objc2_core_foundation::CGSize::new(100.0, 100.0),
+        );
+        let right = CGRect::new(
+            CGPoint::new(100.0, 0.0),
+            objc2_core_foundation::CGSize::new(100.0, 100.0),
+        );
+
+        let left_space = SpaceId::new(1);
+        let right_space = SpaceId::new(2);
+        state.screen_spaces = vec![(left, left_space), (right, right_space)];
+        state
+            .layout_mode_by_space
+            .insert(left_space, crate::common::config::LayoutMode::Traditional);
+        state
+            .layout_mode_by_space
+            .insert(right_space, crate::common::config::LayoutMode::Scrolling);
+
+        assert_eq!(
+            state.layout_mode_at_point(CGPoint::new(50.0, 50.0)),
+            Some(crate::common::config::LayoutMode::Traditional)
+        );
+        assert_eq!(
+            state.layout_mode_at_point(CGPoint::new(150.0, 50.0)),
+            Some(crate::common::config::LayoutMode::Scrolling)
+        );
+    }
 }

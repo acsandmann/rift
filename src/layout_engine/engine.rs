@@ -1037,9 +1037,16 @@ impl LayoutEngine {
         command: LayoutCommand,
     ) -> EventResponse {
         if let Some(space) = space {
-            let (ws_id, layout) = self.workspace_and_layout(space);
-            debug!("Tree:\n{}", self.workspace_tree(ws_id).draw_tree(layout).trim());
-            debug!(selection_window = ?self.workspace_tree(ws_id).selected_window(layout));
+            if let Some(ws_id) = self.virtual_workspace_manager.active_workspace(space) {
+                if let Some(layout) = self.workspace_layouts.active(space, ws_id) {
+                    debug!("Tree:\n{}", self.workspace_tree(ws_id).draw_tree(layout).trim());
+                    debug!(selection_window = ?self.workspace_tree(ws_id).selected_window(layout));
+                } else {
+                    debug!("No active layout for workspace {:?} on space {:?}", ws_id, space);
+                }
+            } else {
+                debug!("No active workspace for space {:?}", space);
+            }
         }
         let is_floating = if let Some(focus) = self.focused_window {
             self.floating.is_floating(focus)
@@ -2293,6 +2300,8 @@ impl LayoutEngine {
 
 #[cfg(test)]
 mod tests {
+    use std::panic::AssertUnwindSafe;
+
     use objc2_core_foundation::CGPoint;
 
     use super::*;
@@ -2342,6 +2351,28 @@ mod tests {
         assert_eq!(
             engine.next_space_for_direction(middle, Direction::Up, &visible_spaces, &centers),
             None
+        );
+    }
+
+    #[test]
+    fn handle_command_does_not_panic_before_layout_initialization() {
+        let mut engine = test_engine();
+        let space = SpaceId::new(42);
+        let visible_spaces = vec![space];
+        let visible_space_centers = HashMap::default();
+
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            engine.handle_command(
+                Some(space),
+                &visible_spaces,
+                &visible_space_centers,
+                LayoutCommand::NextWindow,
+            )
+        }));
+
+        assert!(
+            result.is_ok(),
+            "handle_command should not panic before SpaceExposed"
         );
     }
 }

@@ -2534,24 +2534,19 @@ impl Reactor {
 
     fn update_event_tap_layout_mode(&self) {
         if let Some(event_tap_tx) = self.communication_manager.event_tap_tx.as_ref() {
-            let cursor_loc = crate::sys::window_server::current_cursor_location().ok();
-            let cursor_space = cursor_loc.and_then(|loc| {
-                self.space_manager.screens.iter().find_map(|screen| {
-                    if screen.frame.contains(loc) {
-                        screen.space
-                    } else {
-                        None
+            let mut modes = Vec::new();
+            for screen in &self.space_manager.screens {
+                if let Some(space) = screen.space {
+                    if modes.iter().any(|(existing_space, _)| *existing_space == space) {
+                        continue;
                     }
-                })
-            });
+                    let mode = self.layout_manager.layout_engine.active_layout_mode_at(space);
+                    modes.push((space, mode));
+                }
+            }
 
-            let space = cursor_space
-                .or_else(|| self.main_window_space())
-                .or_else(|| self.space_manager.screens.iter().find_map(|s| s.space));
-
-            if let Some(space) = space {
-                let mode = self.layout_manager.layout_engine.active_layout_mode_at(space);
-                event_tap_tx.send(crate::actor::event_tap::Request::LayoutModeChanged(mode));
+            if !modes.is_empty() {
+                event_tap_tx.send(crate::actor::event_tap::Request::LayoutModesChanged(modes));
             }
         }
     }
