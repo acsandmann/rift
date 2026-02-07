@@ -18,6 +18,10 @@ pub enum RiftRequest {
     GetLayoutState {
         space_id: u64,
     },
+    GetWorkspaceLayouts {
+        space_id: Option<u64>,
+        workspace_id: Option<usize>,
+    },
     GetApplications,
     GetMetrics,
     GetConfig,

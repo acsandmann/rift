@@ -11,10 +11,10 @@ use super::{Direction, FloatingManager, LayoutId, LayoutSystemKind, WorkspaceLay
 use crate::actor::app::{AppInfo, WindowId, pid_t};
 use crate::actor::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::common::collections::{HashMap, HashSet};
-use crate::common::config::LayoutSettings;
+use crate::common::config::{LayoutMode, LayoutSettings};
 use crate::layout_engine::LayoutSystem;
 use crate::model::virtual_workspace::{
-    AppRuleAssignment, AppRuleResult, VirtualWorkspaceId, VirtualWorkspaceManager,
+    AppRuleAssignment, AppRuleResult, VirtualWorkspace, VirtualWorkspaceId, VirtualWorkspaceManager,
 };
 use crate::sys::screen::SpaceId;
 
@@ -70,6 +70,10 @@ pub enum LayoutCommand {
     MoveWindowToWorkspace {
         workspace: usize,
         window_id: Option<u32>,
+    },
+    SetWorkspaceLayout {
+        workspace: Option<usize>,
+        mode: LayoutMode,
     },
     CreateWorkspace,
     SwitchToLastWorkspace,
@@ -158,6 +162,76 @@ impl LayoutEngine {
             .active(space, ws_id)
             .expect("No active layout for workspace");
         (ws_id, layout)
+    }
+
+    fn workspace_id_for_index(
+        &mut self,
+        space: SpaceId,
+        workspace: Option<usize>,
+    ) -> Option<VirtualWorkspaceId> {
+        if let Some(index) = workspace {
+            let workspaces = self.virtual_workspace_manager.list_workspaces(space);
+            workspaces.get(index).map(|(workspace_id, _)| *workspace_id)
+        } else {
+            self.virtual_workspace_manager.active_workspace(space)
+        }
+    }
+
+    fn switch_workspace_layout_mode(
+        &mut self,
+        space: SpaceId,
+        workspace_id: VirtualWorkspaceId,
+        mode: LayoutMode,
+    ) -> bool {
+        let old_layout = self.workspace_layouts.active(space, workspace_id);
+        let (current_mode, selected_window, mut window_order) = {
+            let Some(workspace) =
+                self.virtual_workspace_manager.workspace_info(space, workspace_id)
+            else {
+                return false;
+            };
+            let selected =
+                old_layout.and_then(|layout| workspace.layout_system.selected_window(layout));
+            let mut ordered = old_layout
+                .map(|layout| workspace.layout_system.visible_windows_in_layout(layout))
+                .unwrap_or_default();
+            // Keep windows hidden by stack/group selection when rebuilding into a new mode.
+            let mut hidden_windows: Vec<_> = workspace
+                .windows()
+                .filter(|wid| !ordered.contains(wid))
+                .collect();
+            hidden_windows.sort();
+            ordered.extend(hidden_windows);
+            (workspace.layout_mode, selected, ordered)
+        };
+
+        if current_mode == mode {
+            return false;
+        }
+
+        window_order.retain(|wid| !self.floating.is_floating(*wid));
+
+        let Some(workspace) = self.virtual_workspace_manager.workspaces.get_mut(workspace_id)
+        else {
+            return false;
+        };
+        workspace.layout_mode = mode;
+        workspace.layout_system =
+            VirtualWorkspace::create_layout_system(mode, &self.layout_settings);
+
+        let new_layout = workspace.layout_system.create_layout();
+        self.workspace_layouts
+            .replace_layouts_for_workspace(space, workspace_id, new_layout);
+
+        for wid in window_order {
+            workspace.layout_system.add_window_after_selection(new_layout, wid);
+        }
+
+        if let Some(selected) = selected_window.filter(|wid| !self.floating.is_floating(*wid)) {
+            let _ = workspace.layout_system.select_window(new_layout, selected);
+        }
+
+        true
     }
 }
 
@@ -1175,6 +1249,7 @@ impl LayoutEngine {
             | LayoutCommand::PrevWorkspace(_)
             | LayoutCommand::SwitchToWorkspace(_)
             | LayoutCommand::MoveWindowToWorkspace { .. }
+            | LayoutCommand::SetWorkspaceLayout { .. }
             | LayoutCommand::CreateWorkspace
             | LayoutCommand::SwitchToLastWorkspace => EventResponse::default(),
             LayoutCommand::JoinWindow(direction) => {
@@ -1923,6 +1998,25 @@ impl LayoutEngine {
                     return self.refocus_workspace(space, last_workspace);
                 }
                 EventResponse::default()
+            }
+            LayoutCommand::SetWorkspaceLayout { workspace, mode } => {
+                let Some(workspace_id) = self.workspace_id_for_index(space, *workspace) else {
+                    return EventResponse::default();
+                };
+
+                if !self.switch_workspace_layout_mode(space, workspace_id, *mode) {
+                    return EventResponse::default();
+                }
+
+                let raise_windows = self.windows_in_active_workspace(space);
+                self.broadcast_workspace_changed(space);
+                self.broadcast_windows_changed(space);
+
+                EventResponse {
+                    raise_windows,
+                    focus_window: self.focused_window,
+                    boundary_hit: None,
+                }
             }
             _ => EventResponse::default(),
         }

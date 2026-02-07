@@ -358,6 +358,8 @@ comb1 = "Alt + Shift"
 # - move_window_to_workspace = N / move_window_to_workspace = { workspace = N, window_id = 123 } (optional window id)
 # - create_workspace
 # - switch_to_last_workspace
+# - set_workspace_layout = { mode = "traditional"|"bsp"|"master_stack"|"scrolling" } (active workspace)
+# - set_workspace_layout = { workspace = N, mode = "traditional"|"bsp"|"master_stack"|"scrolling" }
 # - next_window / prev_window
 # - ascend / descend
 # - move_focus = "left"|"right"|"up"|"down"
@@ -405,6 +407,12 @@ comb1 = "Alt + Shift"
 "comb1 + 3" = { move_window_to_workspace = 3 }
 
 "Alt + Tab" = "switch_to_last_workspace"
+
+# commands to change the layout engine of the active workspace
+# "Alt + Ctrl + 1" = { set_workspace_layout = { mode = "traditional" } }
+# "Alt + Ctrl + 2" = { set_workspace_layout = { mode = "bsp" } }
+# "Alt + Ctrl + 3" = { set_workspace_layout = { mode = "master_stack" } }
+# "Alt + Ctrl + 4" = { set_workspace_layout = { mode = "scrolling" } }
 
 "Alt + Shift + Left" = { join_window = "left" }
 "Alt + Shift + Right" = { join_window = "right" }

@@ -240,6 +240,15 @@ impl MachHandler {
                     },
                 }
             }
+            RiftRequest::GetWorkspaceLayouts { space_id, workspace_id } => {
+                let workspace_layouts = self.reactor.query_workspace_layouts(
+                    space_id.map(crate::sys::screen::SpaceId::new),
+                    workspace_id,
+                );
+                RiftResponse::Success {
+                    data: serde_json::to_value(workspace_layouts).unwrap(),
+                }
+            }
 
             RiftRequest::GetApplications => {
                 let applications = self.reactor.query_applications();

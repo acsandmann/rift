@@ -583,6 +583,17 @@ pub enum LayoutMode {
     Scrolling,
 }
 
+impl ToString for LayoutMode {
+    fn to_string(&self) -> String {
+        match self {
+            LayoutMode::Traditional => "traditional".to_string(),
+            LayoutMode::Bsp => "bsp".to_string(),
+            LayoutMode::MasterStack => "master_stack".to_string(),
+            LayoutMode::Scrolling => "scrolling".to_string(),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ScrollingLayoutSettings {

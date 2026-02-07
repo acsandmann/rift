@@ -180,16 +180,29 @@ impl WorkspaceLayouts {
         self.ensure_active_for_space(space, size, std::iter::once(workspace_id), tree);
     }
 
-    pub(crate) fn replace_layout(
+    pub(crate) fn replace_layouts_for_workspace(
         &mut self,
         space: SpaceId,
         workspace_id: crate::model::VirtualWorkspaceId,
         new_layout: LayoutId,
     ) {
-        if let Some(info) = self.map.get_mut(&(space, workspace_id)) {
-            info.configurations.insert(info.active_size, new_layout);
-            info.last_saved = Some(new_layout);
-        }
+        let active_size = self
+            .map
+            .get(&(space, workspace_id))
+            .map(|info| info.active_size)
+            .unwrap_or_else(|| Size::from(CGSize::new(1000.0, 1000.0)));
+
+        let mut configurations = crate::common::collections::HashMap::default();
+        configurations.insert(active_size, new_layout);
+
+        self.map.insert(
+            (space, workspace_id),
+            SpaceLayoutInfo {
+                configurations,
+                active_size,
+                last_saved: Some(new_layout),
+            },
+        );
     }
 
     pub(crate) fn spaces(&self) -> crate::common::collections::BTreeSet<SpaceId> {
