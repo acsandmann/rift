@@ -261,9 +261,8 @@ impl LayoutEngine {
         for space in spaces {
             let workspaces = self.virtual_workspace_manager.list_workspaces(space).to_vec();
             for (index, (workspace_id, name)) in workspaces.iter().enumerate() {
-                let desired_mode = self
-                    .virtual_workspace_manager
-                    .desired_layout_mode_for_workspace(index, name);
+                let desired_mode =
+                    self.virtual_workspace_manager.desired_layout_mode_for_workspace(index, name);
                 let current_mode = self
                     .virtual_workspace_manager
                     .workspace_info(space, *workspace_id)
@@ -2336,7 +2335,8 @@ mod tests {
     use super::*;
     use crate::common::collections::HashMap;
     use crate::common::config::{
-        LayoutMode, LayoutSettings, VirtualWorkspaceSettings, WorkspaceLayoutRule, WorkspaceSelector,
+        LayoutMode, LayoutSettings, VirtualWorkspaceSettings, WorkspaceLayoutRule,
+        WorkspaceSelector,
     };
 
     fn test_engine() -> LayoutEngine {
@@ -2445,17 +2445,13 @@ mod tests {
         let window_id = WindowId::new(999, 1);
 
         let _ = engine.virtual_workspace_manager_mut().list_workspaces(space);
-        let _ = engine
-            .virtual_workspace_manager_mut()
-            .auto_assign_window(window_id, space);
+        let _ = engine.virtual_workspace_manager_mut().auto_assign_window(window_id, space);
 
-        let response = engine.handle_virtual_workspace_command(
-            space,
-            &LayoutCommand::SetWorkspaceLayout {
+        let response =
+            engine.handle_virtual_workspace_command(space, &LayoutCommand::SetWorkspaceLayout {
                 workspace: Some(1),
                 mode: LayoutMode::Bsp,
-            },
-        );
+            });
 
         assert!(response.raise_windows.is_empty());
         assert_eq!(response.focus_window, None);

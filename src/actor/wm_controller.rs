@@ -291,6 +291,7 @@ impl WmController {
             }
             PowerStateChanged(is_low_power_mode) => {
                 info!("Power state changed: low power mode = {}", is_low_power_mode);
+                _ = self.event_tap_tx.send(event_tap::Request::SetLowPowerMode(is_low_power_mode));
             }
             Command(Wm(crate::actor::wm_controller::WmCmd::ToggleSpaceActivated)) => {
                 self.events_tx.send(reactor::Event::Command(reactor::Command::Reactor(

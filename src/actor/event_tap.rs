@@ -8,7 +8,8 @@ use objc2_app_kit::{
 };
 use objc2_core_foundation::{CGPoint, CGRect};
 use objc2_core_graphics::{
-    CGEvent, CGEventFlags, CGEventMask, CGEventTapOptions as CGTapOpt, CGEventTapProxy, CGEventType,
+    CGEvent, CGEventField, CGEventFlags, CGEventMask, CGEventTapOptions as CGTapOpt,
+    CGEventTapProxy, CGEventType,
 };
 use tracing::{debug, error, trace, warn};
 
@@ -22,13 +23,21 @@ use crate::common::log::trace_misc;
 use crate::layout_engine::LayoutCommand as LC;
 use crate::sys::event::{self, Hotkey, KeyCode, MouseState, set_mouse_state};
 use crate::sys::geometry::CGRectExt;
-use crate::sys::haptics;
 use crate::sys::hotkey::{
     Modifiers, is_modifier_key, key_code_from_event, modifier_flag_for_key,
     modifiers_from_flags_with_keys,
 };
 use crate::sys::screen::{CoordinateConverter, SpaceId};
 use crate::sys::window_server::{self, WindowServerId, window_level};
+use crate::sys::{haptics, power};
+
+// Window levels can change for transient UI windows; cache briefly to reduce
+// query overhead without pinning stale values for long.
+const WINDOW_LEVEL_CACHE_TTL_NS: u64 = 300_000_000; // 300ms
+const MOUSE_MOVE_MIN_INTERVAL_NS_NORMAL: u64 = 8_000_000; // 8ms ~= 125 Hz
+const MOUSE_MOVE_MIN_DISTANCE_PX_SQ_NORMAL: f64 = 4.0; // 2px^2
+const MOUSE_MOVE_MIN_INTERVAL_NS_LOW_POWER: u64 = 16_000_000; // 16ms ~= 62 Hz
+const MOUSE_MOVE_MIN_DISTANCE_PX_SQ_LOW_POWER: f64 = 9.0; // 3px^2
 
 #[derive(Debug)]
 pub enum Request {
@@ -40,6 +49,7 @@ pub enum Request {
     SetHotkeys(Vec<(Hotkey, WmCommand)>),
     ConfigUpdated(Config),
     LayoutModesChanged(Vec<(SpaceId, crate::common::config::LayoutMode)>),
+    SetLowPowerMode(bool),
 }
 
 pub struct EventTap {
@@ -65,10 +75,20 @@ struct State {
     event_processing_enabled: bool,
     focus_follows_mouse_enabled: bool,
     disable_hotkey_active: bool,
+    low_power_mode: bool,
     pressed_keys: HashSet<KeyCode>,
     current_flags: CGEventFlags,
     screen_spaces: Vec<(CGRect, SpaceId)>,
     layout_mode_by_space: HashMap<SpaceId, crate::common::config::LayoutMode>,
+    last_mouse_move_loc: Option<CGPoint>,
+    last_mouse_move_timestamp: u64,
+    window_level_cache: HashMap<WindowServerId, CachedWindowLevel>,
+}
+
+#[derive(Debug, Copy, Clone)]
+struct CachedWindowLevel {
+    level: NSWindowLevel,
+    observed_at: u64,
 }
 
 impl Default for State {
@@ -82,10 +102,14 @@ impl Default for State {
             event_processing_enabled: false,
             focus_follows_mouse_enabled: true,
             disable_hotkey_active: false,
+            low_power_mode: power::is_low_power_mode_enabled(),
             pressed_keys: HashSet::default(),
             current_flags: CGEventFlags::empty(),
             screen_spaces: Vec::new(),
             layout_mode_by_space: HashMap::default(),
+            last_mouse_move_loc: None,
+            last_mouse_move_timestamp: 0,
+            window_level_cache: HashMap::default(),
         }
     }
 }
@@ -356,6 +380,7 @@ impl EventTap {
                     .filter_map(|(frame, maybe_space)| maybe_space.map(|space| (frame, space)))
                     .collect();
                 state.converter = converter;
+                state.window_level_cache.clear();
             }
             Request::SetEventProcessing(enabled) => {
                 state.event_processing_enabled = enabled;
@@ -425,6 +450,14 @@ impl EventTap {
                     state.layout_mode_by_space.len()
                 );
             }
+            Request::SetLowPowerMode(enabled) => {
+                if state.low_power_mode != enabled {
+                    debug!("low_power_mode changed in event tap: {}", enabled);
+                    state.low_power_mode = enabled;
+                    state.last_mouse_move_loc = None;
+                    state.last_mouse_move_timestamp = 0;
+                }
+            }
         }
     }
 
@@ -491,6 +524,11 @@ impl EventTap {
             }
             CGEventType::MouseMoved => {
                 let loc = CGEvent::location(Some(event));
+                let ts = CGEvent::timestamp(Some(event));
+                let sampling = mouse_move_sampling_profile(state.low_power_mode);
+                if !state.should_sample_mouse_move(loc, ts, sampling) {
+                    return true;
+                }
 
                 // stack line hover feedback
                 if let Some(tx) = &self.stack_line_tx {
@@ -502,7 +540,9 @@ impl EventTap {
                     && state.focus_follows_mouse_enabled
                     && !state.disable_hotkey_active
                 {
-                    if let Some(wsid) = state.track_mouse_move(loc) {
+                    if let Some(wsid) =
+                        state.track_mouse_move(loc, window_from_mouse_event(event), ts)
+                    {
                         _ = self.events_tx.send(Event::MouseMovedOverWindow(wsid));
                     }
                 }
@@ -857,6 +897,33 @@ unsafe extern "C-unwind" fn mouse_callback(
 }
 
 impl State {
+    #[inline]
+    fn should_sample_mouse_move(
+        &mut self,
+        loc: CGPoint,
+        timestamp: u64,
+        sampling: (u64, f64),
+    ) -> bool {
+        let Some(last_loc) = self.last_mouse_move_loc else {
+            self.last_mouse_move_loc = Some(loc);
+            self.last_mouse_move_timestamp = timestamp;
+            return true;
+        };
+
+        let dx = loc.x - last_loc.x;
+        let dy = loc.y - last_loc.y;
+        let dist_sq = dx * dx + dy * dy;
+        let elapsed = timestamp.saturating_sub(self.last_mouse_move_timestamp);
+
+        if dist_sq < sampling.1 && elapsed < sampling.0 {
+            return false;
+        }
+
+        self.last_mouse_move_loc = Some(loc);
+        self.last_mouse_move_timestamp = timestamp;
+        true
+    }
+
     fn layout_mode_at_point(&self, loc: CGPoint) -> Option<crate::common::config::LayoutMode> {
         self.screen_spaces
             .iter()
@@ -916,8 +983,13 @@ impl State {
         }
     }
 
-    fn track_mouse_move(&mut self, loc: CGPoint) -> Option<WindowServerId> {
-        let new_window = window_server::get_window_at_point(loc);
+    fn track_mouse_move(
+        &mut self,
+        loc: CGPoint,
+        hinted_window: Option<WindowServerId>,
+        event_timestamp: u64,
+    ) -> Option<WindowServerId> {
+        let new_window = hinted_window.or_else(|| window_server::get_window_at_point(loc));
         if self.above_window == new_window {
             return None;
         }
@@ -945,7 +1017,7 @@ impl State {
         let old_window = replace(&mut self.above_window, new_window);
 
         let new_window_level = new_window
-            .and_then(|id| trace_misc("window_level", || window_level(id.into())))
+            .map(|id| self.cached_window_level(id, event_timestamp))
             .unwrap_or(NSWindowLevel::MIN);
         let old_window_level = replace(&mut self.above_window_level, new_window_level);
         debug!(?old_window, ?old_window_level, ?new_window, ?new_window_level);
@@ -967,7 +1039,50 @@ impl State {
         if enabled {
             self.above_window = None;
             self.above_window_level = NSWindowLevel::MIN;
+            self.last_mouse_move_loc = None;
+            self.last_mouse_move_timestamp = 0;
+            self.window_level_cache.clear();
         }
+    }
+
+    #[inline]
+    fn cached_window_level(&mut self, id: WindowServerId, event_timestamp: u64) -> NSWindowLevel {
+        if let Some(cached) = self.window_level_cache.get(&id) {
+            if event_timestamp.saturating_sub(cached.observed_at) <= WINDOW_LEVEL_CACHE_TTL_NS {
+                return cached.level;
+            }
+        }
+
+        let level =
+            trace_misc("window_level", || window_level(id.into())).unwrap_or(NSWindowLevel::MIN);
+        self.window_level_cache.insert(id, CachedWindowLevel {
+            level,
+            observed_at: event_timestamp,
+        });
+        level
+    }
+}
+
+#[inline]
+fn window_from_mouse_event(event: &CGEvent) -> Option<WindowServerId> {
+    let field_value =
+        CGEvent::integer_value_field(Some(event), CGEventField::MouseEventWindowUnderMousePointer);
+    let id = u32::try_from(field_value).ok()?;
+    (id != 0).then(|| WindowServerId::new(id))
+}
+
+#[inline]
+fn mouse_move_sampling_profile(low_power_mode: bool) -> (u64, f64) {
+    if low_power_mode {
+        (
+            MOUSE_MOVE_MIN_INTERVAL_NS_LOW_POWER,
+            MOUSE_MOVE_MIN_DISTANCE_PX_SQ_LOW_POWER,
+        )
+    } else {
+        (
+            MOUSE_MOVE_MIN_INTERVAL_NS_NORMAL,
+            MOUSE_MOVE_MIN_DISTANCE_PX_SQ_NORMAL,
+        )
     }
 }
 
