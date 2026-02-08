@@ -255,6 +255,25 @@ impl LayoutEngine {
         settings: &crate::common::config::VirtualWorkspaceSettings,
     ) {
         self.virtual_workspace_manager.update_settings(settings, &self.layout_settings);
+
+        // Re-apply workspace layout rules to already-existing workspaces on hot reload.
+        let spaces = self.virtual_workspace_manager.initialized_spaces();
+        for space in spaces {
+            let workspaces = self.virtual_workspace_manager.list_workspaces(space).to_vec();
+            for (index, (workspace_id, name)) in workspaces.iter().enumerate() {
+                let desired_mode = self
+                    .virtual_workspace_manager
+                    .desired_layout_mode_for_workspace(index, name);
+                let current_mode = self
+                    .virtual_workspace_manager
+                    .workspace_info(space, *workspace_id)
+                    .map(|ws| ws.layout_mode())
+                    .unwrap_or_default();
+                if current_mode != desired_mode {
+                    let _ = self.switch_workspace_layout_mode(space, *workspace_id, desired_mode);
+                }
+            }
+        }
     }
 
     pub fn layout_mode_at(&self, space: SpaceId) -> &'static str {
@@ -2013,13 +2032,23 @@ impl LayoutEngine {
                     return EventResponse::default();
                 }
 
-                let raise_windows = self.windows_in_active_workspace(space);
+                let is_active_workspace =
+                    self.virtual_workspace_manager.active_workspace(space) == Some(workspace_id);
+                let raise_windows = if is_active_workspace {
+                    self.windows_in_active_workspace(space)
+                } else {
+                    Vec::new()
+                };
                 self.broadcast_workspace_changed(space);
                 self.broadcast_windows_changed(space);
 
                 EventResponse {
                     raise_windows,
-                    focus_window: self.focused_window,
+                    focus_window: if is_active_workspace {
+                        self.focused_window
+                    } else {
+                        None
+                    },
                     boundary_hit: None,
                 }
             }
@@ -2306,7 +2335,9 @@ mod tests {
 
     use super::*;
     use crate::common::collections::HashMap;
-    use crate::common::config::{LayoutSettings, VirtualWorkspaceSettings};
+    use crate::common::config::{
+        LayoutMode, LayoutSettings, VirtualWorkspaceSettings, WorkspaceLayoutRule, WorkspaceSelector,
+    };
 
     fn test_engine() -> LayoutEngine {
         LayoutEngine::new(
@@ -2374,5 +2405,59 @@ mod tests {
             result.is_ok(),
             "handle_command should not panic before SpaceExposed"
         );
+    }
+
+    #[test]
+    fn update_virtual_workspace_settings_reapplies_workspace_rules() {
+        let mut engine = test_engine();
+        let space = SpaceId::new(7);
+        let workspace_list = engine.virtual_workspace_manager_mut().list_workspaces(space);
+        let (workspace_id, workspace_name) = workspace_list[0].clone();
+        assert_eq!(
+            engine
+                .virtual_workspace_manager()
+                .workspace_info(space, workspace_id)
+                .map(|ws| ws.layout_mode()),
+            Some(LayoutMode::Traditional)
+        );
+
+        let mut settings = VirtualWorkspaceSettings::default();
+        settings.workspace_rules = vec![WorkspaceLayoutRule {
+            workspace: WorkspaceSelector::Name(workspace_name),
+            layout: LayoutMode::Scrolling,
+        }];
+
+        engine.update_virtual_workspace_settings(&settings);
+
+        assert_eq!(
+            engine
+                .virtual_workspace_manager()
+                .workspace_info(space, workspace_id)
+                .map(|ws| ws.layout_mode()),
+            Some(LayoutMode::Scrolling)
+        );
+    }
+
+    #[test]
+    fn set_workspace_layout_for_inactive_workspace_does_not_raise_active_windows() {
+        let mut engine = test_engine();
+        let space = SpaceId::new(8);
+        let window_id = WindowId::new(999, 1);
+
+        let _ = engine.virtual_workspace_manager_mut().list_workspaces(space);
+        let _ = engine
+            .virtual_workspace_manager_mut()
+            .auto_assign_window(window_id, space);
+
+        let response = engine.handle_virtual_workspace_command(
+            space,
+            &LayoutCommand::SetWorkspaceLayout {
+                workspace: Some(1),
+                mode: LayoutMode::Bsp,
+            },
+        );
+
+        assert!(response.raise_windows.is_empty());
+        assert_eq!(response.focus_window, None);
     }
 }

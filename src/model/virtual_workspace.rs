@@ -62,8 +62,14 @@ pub struct VirtualWorkspace {
     pub space: SpaceId,
     windows: HashSet<WindowId>,
     last_focused: Option<WindowId>,
+    #[serde(default = "default_layout_system_kind")]
     pub layout_system: LayoutSystemKind,
+    #[serde(default)]
     pub layout_mode: LayoutMode,
+}
+
+fn default_layout_system_kind() -> LayoutSystemKind {
+    VirtualWorkspace::create_layout_system(LayoutMode::default(), &LayoutSettings::default())
 }
 
 impl VirtualWorkspace {
@@ -318,6 +324,14 @@ impl VirtualWorkspaceManager {
         }
         // Fall back to global default
         self.default_layout_mode
+    }
+
+    pub fn desired_layout_mode_for_workspace(&self, index: usize, name: &str) -> LayoutMode {
+        self.resolve_layout_mode_for_workspace(index, name)
+    }
+
+    pub fn initialized_spaces(&self) -> Vec<SpaceId> {
+        self.workspaces_by_space.keys().copied().collect()
     }
 
     pub fn remap_space(&mut self, old_space: SpaceId, new_space: SpaceId) {

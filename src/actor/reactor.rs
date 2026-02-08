@@ -360,6 +360,7 @@ impl Reactor {
             },
             notification_manager: managers::NotificationManager {
                 last_sls_notification_ids: Vec::new(),
+                last_layout_modes_by_space: HashMap::default(),
                 _window_notify_tx: window_notify_tx,
             },
             transaction_manager: transaction_manager::TransactionManager::new(window_tx_store),
@@ -2532,22 +2533,29 @@ impl Reactor {
         self.set_focus_follows_mouse_enabled(should_enable);
     }
 
-    fn update_event_tap_layout_mode(&self) {
+    fn update_event_tap_layout_mode(&mut self) {
         if let Some(event_tap_tx) = self.communication_manager.event_tap_tx.as_ref() {
             let mut modes = Vec::new();
+            let mut modes_by_space = HashMap::default();
             for screen in &self.space_manager.screens {
                 if let Some(space) = screen.space {
-                    if modes.iter().any(|(existing_space, _)| *existing_space == space) {
+                    if modes_by_space.contains_key(&space) {
                         continue;
                     }
                     let mode = self.layout_manager.layout_engine.active_layout_mode_at(space);
+                    modes_by_space.insert(space, mode);
                     modes.push((space, mode));
                 }
             }
 
-            if !modes.is_empty() {
-                event_tap_tx.send(crate::actor::event_tap::Request::LayoutModesChanged(modes));
+            if modes_by_space.is_empty()
+                || self.notification_manager.last_layout_modes_by_space == modes_by_space
+            {
+                return;
             }
+
+            self.notification_manager.last_layout_modes_by_space = modes_by_space;
+            event_tap_tx.send(crate::actor::event_tap::Request::LayoutModesChanged(modes));
         }
     }
 

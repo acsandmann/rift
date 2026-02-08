@@ -120,6 +120,7 @@ impl DragManager {
 /// Manages window notifications
 pub struct NotificationManager {
     pub last_sls_notification_ids: Vec<u32>,
+    pub last_layout_modes_by_space: HashMap<SpaceId, crate::common::config::LayoutMode>,
     pub _window_notify_tx: Option<window_notify::Sender>,
 }
 
