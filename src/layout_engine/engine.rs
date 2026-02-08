@@ -10,7 +10,7 @@ use tracing::{debug, info, warn};
 use super::{
     Direction, FloatingManager, LayoutId, LayoutSystemKind, WindowConstraint, WorkspaceLayouts,
 };
-use crate::actor::app::{AppInfo, WindowId, pid_t};
+use crate::actor::app::{pid_t, AppInfo, WindowId};
 use crate::actor::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::LayoutSettings;
@@ -506,19 +506,35 @@ impl LayoutEngine {
         match direction {
             Direction::Left => {
                 let delta = current.x - candidate.x;
-                if delta > 0.0 { Some(delta) } else { None }
+                if delta > 0.0 {
+                    Some(delta)
+                } else {
+                    None
+                }
             }
             Direction::Right => {
                 let delta = candidate.x - current.x;
-                if delta > 0.0 { Some(delta) } else { None }
+                if delta > 0.0 {
+                    Some(delta)
+                } else {
+                    None
+                }
             }
             Direction::Up => {
                 let delta = candidate.y - current.y;
-                if delta > 0.0 { Some(delta) } else { None }
+                if delta > 0.0 {
+                    Some(delta)
+                } else {
+                    None
+                }
             }
             Direction::Down => {
                 let delta = current.y - candidate.y;
-                if delta > 0.0 { Some(delta) } else { None }
+                if delta > 0.0 {
+                    Some(delta)
+                } else {
+                    None
+                }
             }
         }
     }
