@@ -7,8 +7,10 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-use super::{Direction, FloatingManager, LayoutId, LayoutSystemKind, WorkspaceLayouts};
-use crate::actor::app::{AppInfo, WindowId, pid_t};
+use super::{
+    Direction, FloatingManager, LayoutId, LayoutSystemKind, WindowConstraint, WorkspaceLayouts,
+};
+use crate::actor::app::{pid_t, AppInfo, WindowId};
 use crate::actor::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::LayoutSettings;
@@ -146,6 +148,36 @@ impl LayoutEngine {
                 system.update_settings(&settings.scrolling);
             }
             _ => {}
+        }
+    }
+
+    pub fn set_window_constraint(&mut self, wid: WindowId, constraint: WindowConstraint) {
+        match &mut self.tree {
+            LayoutSystemKind::Traditional(system) => {
+                system.set_window_constraint(wid, constraint);
+            }
+            LayoutSystemKind::Bsp(system) => {
+                system.set_window_constraint(wid, constraint);
+            }
+            LayoutSystemKind::MasterStack(system) => {
+                system.set_window_constraint(wid, constraint);
+            }
+        }
+    }
+
+    pub fn clear_window_constraint(&mut self, wid: WindowId) {
+        match &mut self.tree {
+            LayoutSystemKind::Traditional(system) => system.clear_window_constraint(wid),
+            LayoutSystemKind::Bsp(system) => system.clear_window_constraint(wid),
+            LayoutSystemKind::MasterStack(system) => system.clear_window_constraint(wid),
+        }
+    }
+
+    pub fn window_constraint(&self, wid: WindowId) -> Option<WindowConstraint> {
+        match &self.tree {
+            LayoutSystemKind::Traditional(system) => system.window_constraint(wid),
+            LayoutSystemKind::Bsp(system) => system.window_constraint(wid),
+            LayoutSystemKind::MasterStack(system) => system.window_constraint(wid),
         }
     }
 
@@ -474,19 +506,35 @@ impl LayoutEngine {
         match direction {
             Direction::Left => {
                 let delta = current.x - candidate.x;
-                if delta > 0.0 { Some(delta) } else { None }
+                if delta > 0.0 {
+                    Some(delta)
+                } else {
+                    None
+                }
             }
             Direction::Right => {
                 let delta = candidate.x - current.x;
-                if delta > 0.0 { Some(delta) } else { None }
+                if delta > 0.0 {
+                    Some(delta)
+                } else {
+                    None
+                }
             }
             Direction::Up => {
                 let delta = candidate.y - current.y;
-                if delta > 0.0 { Some(delta) } else { None }
+                if delta > 0.0 {
+                    Some(delta)
+                } else {
+                    None
+                }
             }
             Direction::Down => {
                 let delta = current.y - candidate.y;
-                if delta > 0.0 { Some(delta) } else { None }
+                if delta > 0.0 {
+                    Some(delta)
+                } else {
+                    None
+                }
             }
         }
     }
@@ -495,6 +543,7 @@ impl LayoutEngine {
         let affected_space: Option<SpaceId> = self.space_with_window(wid);
 
         self.tree.remove_window(wid);
+        self.clear_window_constraint(wid);
 
         if preserve_floating {
             self.floating.remove_active_for_window(wid);

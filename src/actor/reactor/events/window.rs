@@ -4,12 +4,13 @@ use tracing::{debug, trace, warn};
 use crate::actor::app::WindowId;
 use crate::actor::reactor::events::drag::DragEventHandler;
 use crate::actor::reactor::{
-    DragState, Quiet, Reactor, Requested, TransactionId, WindowFilter, WindowState, utils,
+    DragState, FrameChangeKind, Quiet, Reactor, Requested, TransactionId, WindowFilter,
+    WindowState, utils,
 };
-use crate::layout_engine::LayoutEvent;
+use crate::layout_engine::{LayoutEvent, WindowConstraint};
 use crate::sys::app::WindowInfo as Window;
 use crate::sys::event::{MouseState, get_mouse_state};
-use crate::sys::geometry::SameAs;
+use crate::sys::geometry::{IsWithin, SameAs};
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 
@@ -87,6 +88,7 @@ impl WindowEventHandler {
             debug!(?wid, "Received WindowDestroyed for unknown window - ignoring");
         }
         reactor.window_manager.windows.remove(&wid);
+        reactor.constraint_probes.remove(&wid);
         reactor.send_layout_event(LayoutEvent::WindowRemoved(wid));
 
         if let DragState::PendingSwap { session, target } = &reactor.drag_manager.drag_state {
@@ -124,6 +126,7 @@ impl WindowEventHandler {
             if let Some(ws_id) = window.info.sys_id {
                 reactor.window_manager.visible_windows.remove(&ws_id);
             }
+            reactor.constraint_probes.remove(&wid);
             reactor.send_layout_event(LayoutEvent::WindowRemoved(wid));
         } else {
             debug!(?wid, "Received WindowMinimized for unknown window - ignoring");
@@ -178,6 +181,7 @@ impl WindowEventHandler {
         new_frame: CGRect,
         last_seen: Option<TransactionId>,
         requested: Requested,
+        change_kind: FrameChangeKind,
         mouse_state: Option<MouseState>,
     ) -> bool {
         debug!(
@@ -208,6 +212,44 @@ impl WindowEventHandler {
 
                 (window.info.sys_id, window.frame_monotonic)
             };
+
+            if let Some(probe) = reactor.constraint_probes.get(&wid).copied() {
+                if last_seen.is_some_and(|seen| seen == probe.txid) {
+                    if let Some(window) = reactor.window_manager.windows.get_mut(&wid) {
+                        window.frame_monotonic = new_frame;
+                    }
+                    if let Some(wsid) = server_id {
+                        reactor.transaction_manager.remove_for_window(wsid);
+                    }
+                    let max_w = if new_frame.size.width.is_within(0.1, probe.target.size.width) {
+                        None
+                    } else if new_frame.size.width < probe.target.size.width {
+                        Some(new_frame.size.width)
+                    } else {
+                        None
+                    };
+                    let max_h = if new_frame.size.height.is_within(0.1, probe.target.size.height) {
+                        None
+                    } else if new_frame.size.height < probe.target.size.height {
+                        Some(new_frame.size.height)
+                    } else {
+                        None
+                    };
+                    let constraint = WindowConstraint { max_w, max_h };
+                    reactor.layout_manager.layout_engine.set_window_constraint(wid, constraint);
+                    reactor.constraint_probes.remove(&wid);
+                    if let Some(app_info) =
+                        reactor.app_manager.apps.get(&wid.pid).map(|app| app.info.clone())
+                    {
+                        reactor.process_windows_for_app_rules(wid.pid, vec![wid], app_info);
+                    } else if let Some(space) =
+                        active_space_for_window(reactor, &new_frame, server_id)
+                    {
+                        maybe_dispatch_window_added_in_space(reactor, wid, space);
+                    }
+                    return true;
+                }
+            }
 
             let pending_target = server_id.and_then(|wsid| {
                 reactor.transaction_manager.get_target_frame(wsid).map(|target| (wsid, target))
@@ -246,6 +288,33 @@ impl WindowEventHandler {
                             window.frame_monotonic = new_frame;
                         }
                         reactor.transaction_manager.remove_for_window(wsid);
+                    } else if change_kind == FrameChangeKind::Resize
+                        && !new_frame.size.same_as(target.size)
+                    {
+                        debug!(?wid, ?new_frame, ?target, "Resize constrained by window");
+                        window.frame_monotonic = new_frame;
+                        reactor.transaction_manager.remove_for_window(wsid);
+                        let _ = window;
+
+                        if active_space_for_window(reactor, &new_frame, server_id).is_some() {
+                            let screens = reactor
+                                .space_manager
+                                .screens
+                                .iter()
+                                .filter_map(|screen| {
+                                    let display_uuid = screen.display_uuid_owned();
+                                    Some((screen.space?, screen.frame, display_uuid))
+                                })
+                                .collect::<Vec<_>>();
+                            let resize_from = target;
+                            reactor.send_layout_event(LayoutEvent::WindowResized {
+                                wid,
+                                old_frame: resize_from,
+                                new_frame,
+                                screens,
+                            });
+                            return true;
+                        }
                     } else {
                         trace!(
                             ?wid,
@@ -356,7 +425,7 @@ impl WindowEventHandler {
                                     );
                                 }
                             }
-                            reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+                            maybe_dispatch_window_added_in_space(reactor, wid, space);
                         }
                     }
                     let _ = reactor.update_layout_or_warn(false, false);
@@ -450,6 +519,9 @@ fn maybe_dispatch_window_added_in_space(reactor: &mut Reactor, wid: WindowId, sp
         .map(|window| window.matches_filter(WindowFilter::EffectivelyManageable))
         .unwrap_or(false);
     if should_dispatch {
+        if reactor.maybe_start_constraint_probe(wid, space) {
+            return;
+        }
         reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
     }
 }

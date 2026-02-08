@@ -5,7 +5,7 @@ use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::{HashMap, HashSet};
 use crate::layout_engine::systems::LayoutSystem;
 use crate::layout_engine::utils::compute_tiling_area;
-use crate::layout_engine::{Direction, LayoutId, LayoutKind, Orientation};
+use crate::layout_engine::{Direction, LayoutId, LayoutKind, Orientation, WindowConstraint};
 use crate::model::selection::*;
 use crate::model::tree::{NodeId, NodeMap, Tree};
 
@@ -34,9 +34,21 @@ pub struct BspLayoutSystem {
     tree: Tree<Components>,
     kind: slotmap::SecondaryMap<NodeId, NodeKind>,
     window_to_node: HashMap<WindowId, NodeId>,
+    #[serde(skip)]
+    constraints: HashMap<WindowId, WindowConstraint>,
 }
 
 impl BspLayoutSystem {
+    pub fn set_window_constraint(&mut self, wid: WindowId, constraint: WindowConstraint) {
+        self.constraints.insert(wid, constraint);
+    }
+
+    pub fn clear_window_constraint(&mut self, wid: WindowId) { self.constraints.remove(&wid); }
+
+    pub fn window_constraint(&self, wid: WindowId) -> Option<WindowConstraint> {
+        self.constraints.get(&wid).copied()
+    }
+
     fn find_neighbor_leaf(&self, from_leaf: NodeId, direction: Direction) -> Option<NodeId> {
         let mut current = from_leaf;
 
@@ -182,6 +194,7 @@ impl Default for BspLayoutSystem {
             tree: Tree::with_observer(Components::default()),
             kind: Default::default(),
             window_to_node: Default::default(),
+            constraints: Default::default(),
         }
     }
 }
@@ -452,19 +465,33 @@ impl BspLayoutSystem {
                     let gap = gaps.inner.horizontal as f64;
                     let total = rect.size.width;
                     let available = (total - gap).max(0.0);
-                    let first_w_f = available * (*ratio as f64);
-                    let first_w = first_w_f.max(0.0);
-                    let second_w = (available - first_w).max(0.0);
-                    let r1 = CGRect::new(rect.origin, CGSize::new(first_w, rect.size.height));
-                    let r2 = CGRect::new(
-                        CGPoint::new(rect.origin.x + first_w + gap, rect.origin.y),
-                        CGSize::new(second_w, rect.size.height),
-                    );
                     let mut it = node.children(&self.tree.map);
-                    if let Some(first) = it.next() {
+                    if let (Some(first), Some(second)) = (it.next(), it.next()) {
+                        let mut first_w = (available * (*ratio as f64)).max(0.0);
+                        let mut first_capped = false;
+                        if let Some(first_cap) = self.max_len_for_node(first, gaps, true) {
+                            if first_cap < first_w {
+                                first_w = first_cap.max(0.0);
+                                first_capped = true;
+                            }
+                        }
+                        let mut second_w = (available - first_w).max(0.0);
+                        let mut second_capped = false;
+                        if let Some(second_cap) = self.max_len_for_node(second, gaps, true) {
+                            if second_cap < second_w {
+                                second_w = second_cap.max(0.0);
+                                second_capped = true;
+                            }
+                        }
+                        if second_capped && !first_capped {
+                            first_w = (available - second_w).max(0.0);
+                        }
+                        let r1 = CGRect::new(rect.origin, CGSize::new(first_w, rect.size.height));
+                        let r2 = CGRect::new(
+                            CGPoint::new(rect.origin.x + first_w + gap, rect.origin.y),
+                            CGSize::new(second_w, rect.size.height),
+                        );
                         self.calculate_layout_recursive(first, r1, screen, gaps, out);
-                    }
-                    if let Some(second) = it.next() {
                         self.calculate_layout_recursive(second, r2, screen, gaps, out);
                     }
                 }
@@ -472,24 +499,81 @@ impl BspLayoutSystem {
                     let gap = gaps.inner.vertical as f64;
                     let total = rect.size.height;
                     let available = (total - gap).max(0.0);
-                    let first_h_f = available * (*ratio as f64);
-                    let first_h = first_h_f.max(0.0);
-                    let second_h = (available - first_h).max(0.0);
-                    let r1 = CGRect::new(rect.origin, CGSize::new(rect.size.width, first_h));
-                    let r2 = CGRect::new(
-                        CGPoint::new(rect.origin.x, rect.origin.y + first_h + gap),
-                        CGSize::new(rect.size.width, second_h),
-                    );
                     let mut it = node.children(&self.tree.map);
-                    if let Some(first) = it.next() {
+                    if let (Some(first), Some(second)) = (it.next(), it.next()) {
+                        let mut first_h = (available * (*ratio as f64)).max(0.0);
+                        let mut first_capped = false;
+                        if let Some(first_cap) = self.max_len_for_node(first, gaps, false) {
+                            if first_cap < first_h {
+                                first_h = first_cap.max(0.0);
+                                first_capped = true;
+                            }
+                        }
+                        let mut second_h = (available - first_h).max(0.0);
+                        let mut second_capped = false;
+                        if let Some(second_cap) = self.max_len_for_node(second, gaps, false) {
+                            if second_cap < second_h {
+                                second_h = second_cap.max(0.0);
+                                second_capped = true;
+                            }
+                        }
+                        if second_capped && !first_capped {
+                            first_h = (available - second_h).max(0.0);
+                        }
+                        let r1 = CGRect::new(rect.origin, CGSize::new(rect.size.width, first_h));
+                        let r2 = CGRect::new(
+                            CGPoint::new(rect.origin.x, rect.origin.y + first_h + gap),
+                            CGSize::new(rect.size.width, second_h),
+                        );
                         self.calculate_layout_recursive(first, r1, screen, gaps, out);
-                    }
-                    if let Some(second) = it.next() {
                         self.calculate_layout_recursive(second, r2, screen, gaps, out);
                     }
                 }
             },
             None => {}
+        }
+    }
+
+    fn max_len_for_node(
+        &self,
+        node: NodeId,
+        gaps: &crate::common::config::GapSettings,
+        horizontal: bool,
+    ) -> Option<f64> {
+        match self.kind.get(node) {
+            Some(NodeKind::Leaf { window: Some(w), .. }) => {
+                self.constraints.get(w).and_then(|c| c.cap_for_axis(horizontal))
+            }
+            Some(NodeKind::Split { orientation, .. }) => {
+                let mut it = node.children(&self.tree.map);
+                let first = it.next()?;
+                let second = it.next()?;
+                let c1 = self.max_len_for_node(first, gaps, horizontal);
+                let c2 = self.max_len_for_node(second, gaps, horizontal);
+                if (horizontal && *orientation == Orientation::Horizontal)
+                    || (!horizontal && *orientation == Orientation::Vertical)
+                {
+                    match (c1, c2) {
+                        (Some(a), Some(b)) => {
+                            let gap = if *orientation == Orientation::Horizontal {
+                                gaps.inner.horizontal
+                            } else {
+                                gaps.inner.vertical
+                            };
+                            Some(a + b + gap)
+                        }
+                        _ => None,
+                    }
+                } else {
+                    match (c1, c2) {
+                        (None, None) => None,
+                        (Some(a), None) => Some(a),
+                        (None, Some(b)) => Some(b),
+                        (Some(a), Some(b)) => Some(a.min(b)),
+                    }
+                }
+            }
+            _ => None,
         }
     }
 
@@ -540,6 +624,8 @@ impl Components {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::config::{GapSettings, HorizontalPlacement, VerticalPlacement};
+    use crate::sys::geometry::IsWithin;
 
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
 
@@ -605,6 +691,34 @@ mod tests {
         let vertical_count = tree.matches("Vertical").count();
         assert_eq!(horizontal_count, 2, "Should have 2 horizontal splits");
         assert_eq!(vertical_count, 2, "Should have 2 vertical splits");
+    }
+
+    #[test]
+    fn constrained_window_frees_space_for_siblings() {
+        let mut system = BspLayoutSystem::default();
+        let layout = system.create_layout();
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+        system.set_window_constraint(w(1), WindowConstraint {
+            max_w: Some(300.0),
+            max_h: None,
+        });
+
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 600.0));
+        let gaps = GapSettings::default();
+        let frames = system.calculate_layout(
+            layout,
+            screen,
+            0.0,
+            &gaps,
+            0.0,
+            HorizontalPlacement::Top,
+            VerticalPlacement::Left,
+        );
+        let w1_width = frames.iter().find(|(wid, _)| *wid == w(1)).unwrap().1.size.width;
+        let w2_width = frames.iter().find(|(wid, _)| *wid == w(2)).unwrap().1.size.width;
+        assert!(w1_width.is_within(0.5, 300.0));
+        assert!(w2_width.is_within(0.5, 700.0));
     }
 }
 

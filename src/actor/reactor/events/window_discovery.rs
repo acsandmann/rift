@@ -344,11 +344,14 @@ impl WindowDiscoveryHandler {
                 continue;
             }
             let windows_for_space = app_windows.remove(&space).unwrap_or_default();
+            let mut deferred: HashSet<WindowId> = HashSet::default();
 
             if !windows_for_space.is_empty() {
                 for wid in &windows_for_space {
                     let title_opt =
                         reactor.window_manager.windows.get(wid).map(|w| w.info.title.clone());
+                    let was_floating =
+                        reactor.layout_manager.layout_engine.is_window_floating(*wid);
                     let assign_result = reactor
                         .layout_manager
                         .layout_engine
@@ -372,9 +375,14 @@ impl WindowDiscoveryHandler {
                         );
 
                     match assign_result {
-                        Ok(AppRuleResult::Managed(_)) => {
+                        Ok(AppRuleResult::Managed(decision)) => {
                             if let Some(window) = reactor.window_manager.windows.get_mut(wid) {
                                 window.ignore_app_rule = false;
+                            }
+                            let should_float =
+                                decision.floating || (!decision.prev_rule_decision && was_floating);
+                            if !should_float && reactor.maybe_start_constraint_probe(*wid, space) {
+                                deferred.insert(*wid);
                             }
                         }
                         Ok(AppRuleResult::Unmanaged) => {
@@ -408,6 +416,9 @@ impl WindowDiscoveryHandler {
                 .filter_map(|&wid| {
                     let window = reactor.window_manager.windows.get(&wid)?;
                     if !window.matches_filter(WindowFilter::EffectivelyManageable) {
+                        return None;
+                    }
+                    if deferred.contains(&wid) {
                         return None;
                     }
                     Some((

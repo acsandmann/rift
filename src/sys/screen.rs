@@ -719,7 +719,9 @@ mod test {
     use objc2_core_foundation::{CFRetained, CFString, CGPoint, CGRect, CGSize};
     use objc2_core_graphics::CGError;
 
-    use super::{CGScreenInfo, NSScreenInfo, ScreenCache, ScreenId, System};
+    use super::{
+        CGScreenInfo, NSScreenInfo, ScreenCache, ScreenId, System, constrain_display_bounds,
+    };
     use crate::sys::screen::{SpaceId, order_visible_spaces_by_position};
 
     struct Stub {
@@ -813,14 +815,30 @@ mod test {
         };
         let mut sc = ScreenCache::new_with(stub);
         let (screens, _) = sc.refresh().unwrap();
-        let frames: Vec<CGRect> = screens.iter().map(|d| d.frame).collect();
-        assert_eq!(
-            vec![
+        let mut frames: Vec<CGRect> = screens.iter().map(|d| d.frame).collect();
+        let mut expected = vec![
+            constrain_display_bounds(
+                1,
                 CGRect::new(CGPoint::new(3840.0, 1080.0), CGSize::new(1512.0, 982.0)),
+                0.0,
+            ),
+            constrain_display_bounds(
+                3,
                 CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(3840.0, 2160.0)),
-            ],
-            frames
-        );
+                0.0,
+            ),
+        ];
+        let order = |a: &CGRect, b: &CGRect| {
+            let x = a.origin.x.total_cmp(&b.origin.x);
+            if x == std::cmp::Ordering::Equal {
+                a.origin.y.total_cmp(&b.origin.y)
+            } else {
+                x
+            }
+        };
+        frames.sort_by(order);
+        expected.sort_by(order);
+        assert_eq!(expected, frames);
     }
 
     #[test]

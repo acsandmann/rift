@@ -94,7 +94,8 @@ impl DragManager {
                 continue;
             }
             let iou = inter_area / union_area;
-            if iou < stick_fraction {
+            let overlap_fraction = inter_area / dragged_area;
+            if overlap_fraction < stick_fraction {
                 continue;
             }
 
@@ -111,7 +112,7 @@ impl DragManager {
 
             scored.push(CandidateMetrics {
                 window: *other_wid,
-                overlap: iou,
+                overlap: overlap_fraction,
                 score,
             });
         }
