@@ -604,7 +604,16 @@ impl LayoutSystem for ScrollingLayoutSystem {
             match self.settings.alignment {
                 crate::common::config::ScrollingAlignment::Left => tiling.origin.x,
                 crate::common::config::ScrollingAlignment::Center => {
-                    tiling.origin.x + (tiling.size.width - selected_width) / 2.0
+                    let is_first = selected_col_idx == 0;
+                    let is_last = selected_col_idx == state.columns.len().saturating_sub(1);
+
+                    if is_first {
+                        tiling.origin.x
+                    } else if is_last {
+                        tiling.origin.x + tiling.size.width - selected_width
+                    } else {
+                        tiling.origin.x + (tiling.size.width - selected_width) / 2.0 // Center others
+                    }
                 }
                 crate::common::config::ScrollingAlignment::Right => {
                     tiling.origin.x + tiling.size.width - selected_width
