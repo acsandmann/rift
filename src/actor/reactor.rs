@@ -2021,8 +2021,8 @@ impl Reactor {
         {
             let skip_empty = self.config.settings.gestures.skip_empty;
             let cmd = match dir {
-                Direction::Left => Some(layout::LayoutCommand::PrevWorkspace(Some(skip_empty))),
-                Direction::Right => Some(layout::LayoutCommand::NextWorkspace(Some(skip_empty))),
+                Direction::Left => Some(layout::LayoutCommand::NextWorkspace(Some(skip_empty))),
+                Direction::Right => Some(layout::LayoutCommand::PrevWorkspace(Some(skip_empty))),
                 _ => None,
             };
             if let Some(cmd) = cmd {
