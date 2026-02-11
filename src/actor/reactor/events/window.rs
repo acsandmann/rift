@@ -221,7 +221,7 @@ impl WindowEventHandler {
             let mut triggered_by_rift =
                 has_pending_request && last_seen.is_some_and(|seen| seen == last_sent_txid);
 
-            if mouse_state == Some(MouseState::Down) && triggered_by_rift {
+            if effective_mouse_state == Some(MouseState::Down) && triggered_by_rift {
                 if let Some((wsid, _)) = pending_target {
                     reactor.transaction_manager.remove_for_window(wsid);
                 }
@@ -299,13 +299,13 @@ impl WindowEventHandler {
                 let Some(window) = reactor.window_manager.windows.get_mut(&wid) else {
                     return false;
                 };
-                if window.frame_monotonic == new_frame {
+                if window.frame_monotonic.same_as(new_frame) {
                     return false;
                 }
                 window.frame_monotonic = new_frame;
             }
 
-            let dragging = mouse_state == Some(MouseState::Down) || reactor.is_in_drag();
+            let dragging = effective_mouse_state == Some(MouseState::Down) || reactor.is_in_drag();
 
             if !dragging {
                 reactor.drag_manager.skip_layout_for_window = Some(wid);
@@ -314,7 +314,7 @@ impl WindowEventHandler {
             if dragging {
                 reactor.ensure_active_drag(wid, &old_frame);
                 reactor.update_active_drag(wid, &new_frame);
-                let is_resize = old_frame.size != new_frame.size;
+                let is_resize = !old_frame.size.same_as(new_frame.size);
                 if is_resize {
                     if active_space_for_window(reactor, &new_frame, server_id).is_some() {
                         let screens = reactor
@@ -360,7 +360,7 @@ impl WindowEventHandler {
                         }
                     }
                     let _ = reactor.update_layout_or_warn(false, false);
-                } else if old_frame.size != new_frame.size {
+                } else if !old_frame.size.same_as(new_frame.size) {
                     if let Some(space) = old_space {
                         if reactor.is_space_active(space) {
                             let screens = reactor
