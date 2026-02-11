@@ -469,23 +469,31 @@ impl FromStr for KeyCode {
             "insert" => KeyCode::Insert,
             "delete" | "del" => KeyCode::Delete,
 
-            "minus" | "hyphen" => KeyCode::Minus,
-            "equal" | "equals" => KeyCode::Equal,
-            "comma" => KeyCode::Comma,
-            "period" | "dot" => KeyCode::Period,
-            "slash" | "forwardslash" => KeyCode::Slash,
-            "semicolon" => KeyCode::Semicolon,
-            "quote" | "apostrophe" => KeyCode::Quote,
-            "backquote" | "grave" | "tilde" => KeyCode::Backquote,
-            "backslash" => KeyCode::Backslash,
-            "bracketleft" | "leftbracket" | "leftsquarebracket" => KeyCode::BracketLeft,
-            "bracketright" | "rightbracket" | "rightsquarebracket" => KeyCode::BracketRight,
+            "minus" | "hyphen" => layout_char_keycode("-", KeyCode::Minus),
+            "equal" | "equals" => layout_char_keycode("=", KeyCode::Equal),
+            "comma" => layout_char_keycode(",", KeyCode::Comma),
+            "period" | "dot" => layout_char_keycode(".", KeyCode::Period),
+            "slash" | "forwardslash" => layout_char_keycode("/", KeyCode::Slash),
+            "semicolon" => layout_char_keycode(";", KeyCode::Semicolon),
+            "quote" | "apostrophe" => layout_char_keycode("'", KeyCode::Quote),
+            "backquote" | "grave" | "tilde" => layout_char_keycode("`", KeyCode::Backquote),
+            "backslash" => layout_char_keycode("\\", KeyCode::Backslash),
+            "bracketleft" | "leftbracket" | "leftsquarebracket" => {
+                layout_char_keycode("[", KeyCode::BracketLeft)
+            }
+            "bracketright" | "rightbracket" | "rightsquarebracket" => {
+                layout_char_keycode("]", KeyCode::BracketRight)
+            }
 
             other => return Err(anyhow!("Unrecognized key token: {}", other)),
         };
 
         Ok(key)
     }
+}
+
+fn layout_char_keycode(ch: &str, fallback: KeyCode) -> KeyCode {
+    keycode_from_char(ch).unwrap_or(fallback)
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq, Eq, Hash)]
@@ -1040,5 +1048,21 @@ mod tests {
     fn test_from_str_uses_virtual_keymap() {
         let result = KeyCode::from_str("h");
         assert!(result.is_ok(), "Should parse single character 'h'");
+    }
+
+    #[test]
+    fn test_named_punctuation_uses_layout_map() {
+        assert_eq!(
+            KeyCode::from_str("comma").unwrap(),
+            keycode_from_char(",").unwrap_or(KeyCode::Comma)
+        );
+        assert_eq!(
+            KeyCode::from_str("period").unwrap(),
+            keycode_from_char(".").unwrap_or(KeyCode::Period)
+        );
+        assert_eq!(
+            KeyCode::from_str("slash").unwrap(),
+            keycode_from_char("/").unwrap_or(KeyCode::Slash)
+        );
     }
 }
