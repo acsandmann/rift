@@ -2021,10 +2021,22 @@ impl Reactor {
             && self.config.settings.layout.scrolling.gestures.propagate_to_workspace_swipe
         {
             let skip_empty = self.config.settings.gestures.skip_empty;
-            let cmd = match dir {
-                Direction::Left => Some(layout::LayoutCommand::NextWorkspace(Some(skip_empty))),
-                Direction::Right => Some(layout::LayoutCommand::PrevWorkspace(Some(skip_empty))),
-                _ => None,
+            let cmd = if self.config.settings.gestures.invert_horizontal_swipe {
+                match dir {
+                    Direction::Left => Some(layout::LayoutCommand::PrevWorkspace(Some(skip_empty))),
+                    Direction::Right => {
+                        Some(layout::LayoutCommand::NextWorkspace(Some(skip_empty)))
+                    }
+                    _ => None,
+                }
+            } else {
+                match dir {
+                    Direction::Left => Some(layout::LayoutCommand::NextWorkspace(Some(skip_empty))),
+                    Direction::Right => {
+                        Some(layout::LayoutCommand::PrevWorkspace(Some(skip_empty)))
+                    }
+                    _ => None,
+                }
             };
             if let Some(cmd) = cmd {
                 let space = workspace_switch_space.or_else(|| self.workspace_command_space());
