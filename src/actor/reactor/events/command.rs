@@ -104,6 +104,9 @@ impl CommandEventHandler {
         };
 
         reactor.handle_layout_response(response, workspace_space);
+        if requires_workspace_space {
+            reactor.update_event_tap_layout_mode();
+        }
     }
 
     pub fn handle_command_metrics(_reactor: &mut Reactor, cmd: MetricsCommand) {

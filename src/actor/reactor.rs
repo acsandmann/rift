@@ -1991,6 +1991,7 @@ impl Reactor {
                     &layout::LayoutCommand::SwitchToWorkspace(workspace_index),
                 );
                 self.handle_layout_response(response, Some(window_space));
+                self.update_event_tap_layout_mode();
             }
         }
     }
@@ -2041,6 +2042,7 @@ impl Reactor {
 
                     // Recurse to handle the new response (e.g. focus window on the new workspace)
                     self.handle_layout_response(resp, Some(space));
+                    self.update_event_tap_layout_mode();
                     return;
                 }
             }
@@ -2534,29 +2536,39 @@ impl Reactor {
     }
 
     fn update_event_tap_layout_mode(&mut self) {
-        if let Some(event_tap_tx) = self.communication_manager.event_tap_tx.as_ref() {
-            let mut modes = Vec::new();
-            let mut modes_by_space = HashMap::default();
-            for screen in &self.space_manager.screens {
-                if let Some(space) = screen.space {
-                    if modes_by_space.contains_key(&space) {
-                        continue;
-                    }
-                    let mode = self.layout_manager.layout_engine.active_layout_mode_at(space);
-                    modes_by_space.insert(space, mode);
-                    modes.push((space, mode));
-                }
+        let Some(event_tap_tx) = self.communication_manager.event_tap_tx.as_ref() else {
+            return;
+        };
+
+        let last_modes = &self.notification_manager.last_layout_modes_by_space;
+        let mut modes: Vec<(SpaceId, crate::common::config::LayoutMode)> =
+            Vec::with_capacity(self.space_manager.screens.len());
+        let mut changed = false;
+
+        for screen in &self.space_manager.screens {
+            let Some(space) = screen.space else {
+                continue;
+            };
+
+            // Keep first occurrence only if multiple screens briefly report the same space.
+            if modes.iter().any(|(existing, _)| *existing == space) {
+                continue;
             }
 
-            if modes_by_space.is_empty()
-                || self.notification_manager.last_layout_modes_by_space == modes_by_space
-            {
-                return;
+            let mode = self.layout_manager.layout_engine.active_layout_mode_at(space);
+            if last_modes.get(&space).copied() != Some(mode) {
+                changed = true;
             }
-
-            self.notification_manager.last_layout_modes_by_space = modes_by_space;
-            event_tap_tx.send(crate::actor::event_tap::Request::LayoutModesChanged(modes));
+            modes.push((space, mode));
         }
+
+        if modes.is_empty() || (!changed && modes.len() == last_modes.len()) {
+            return;
+        }
+
+        let modes_by_space = modes.iter().copied().collect();
+        self.notification_manager.last_layout_modes_by_space = modes_by_space;
+        event_tap_tx.send(crate::actor::event_tap::Request::LayoutModesChanged(modes));
     }
 
     fn set_mission_control_active(&mut self, active: bool) {
