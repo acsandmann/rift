@@ -351,7 +351,7 @@ comb1 = "Alt + Shift"
 
 # Commands
 # - toggle_space_activated
-# - next_window / prev_window
+# - next_workspace / prev_workspace
 # - next_workspace = true|false (optional skip-empty override)
 # - prev_workspace = true|false (optional skip-empty override)
 # - switch_to_workspace = N
@@ -360,7 +360,7 @@ comb1 = "Alt + Shift"
 # - switch_to_last_workspace
 # - set_workspace_layout = { mode = "traditional"|"bsp"|"master_stack"|"scrolling" } (active workspace)
 # - set_workspace_layout = { workspace = N, mode = "traditional"|"bsp"|"master_stack"|"scrolling" }
-# - next_window / prev_window
+# - next_window / prev_window (wraps when it reaches last window in current workspace)
 # - ascend / descend
 # - move_focus = "left"|"right"|"up"|"down"
 # - move_node = "left"|"right"|"up"|"down"
