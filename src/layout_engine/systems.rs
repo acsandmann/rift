@@ -97,6 +97,7 @@ pub use scrolling::ScrollingLayoutSystem;
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Debug)]
 #[enum_dispatch(LayoutSystem)]
 pub enum LayoutSystemKind {
     Traditional(TraditionalLayoutSystem),

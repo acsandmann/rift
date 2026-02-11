@@ -8,7 +8,7 @@ use crate::actor::menu_bar;
 use crate::actor::reactor::Reactor;
 use crate::common::collections::HashSet;
 use crate::model::server::{
-    ApplicationData, DisplayData, LayoutStateData, WindowData, WorkspaceData,
+    ApplicationData, DisplayData, LayoutStateData, WindowData, WorkspaceData, WorkspaceLayoutData,
 };
 use crate::model::virtual_workspace::VirtualWorkspaceId;
 use crate::sys::screen::{ScreenInfo, SpaceId, get_active_space_number, managed_display_space_ids};
@@ -39,6 +39,15 @@ impl ReactorQueryHandle {
     pub fn query_displays(&self) -> Vec<DisplayData> {
         let mut reactor = self.inner.write();
         reactor.query_displays()
+    }
+
+    pub fn query_workspace_layouts(
+        &self,
+        space_id: Option<SpaceId>,
+        workspace_id: Option<usize>,
+    ) -> Vec<WorkspaceLayoutData> {
+        let mut reactor = self.inner.write();
+        reactor.query_workspace_layouts(space_id, workspace_id)
     }
 
     pub fn query_window_info(&self, window_id: WindowId) -> Option<WindowData> {
@@ -85,6 +94,14 @@ impl Reactor {
     }
 
     pub fn query_displays(&mut self) -> Vec<DisplayData> { self.handle_displays_query() }
+
+    pub fn query_workspace_layouts(
+        &mut self,
+        space_id: Option<SpaceId>,
+        workspace_id: Option<usize>,
+    ) -> Vec<WorkspaceLayoutData> {
+        self.handle_workspace_layouts_query(space_id, workspace_id)
+    }
 
     pub fn query_window_info(&mut self, window_id: WindowId) -> Option<WindowData> {
         self.handle_window_info_query(window_id)
@@ -211,9 +228,20 @@ impl Reactor {
                 }
             }
 
+            let layout_mode = space_id
+                .and_then(|space| {
+                    self.layout_manager
+                        .layout_engine
+                        .virtual_workspace_manager()
+                        .workspace_info(space, *workspace_id)
+                        .map(|ws| ws.layout_mode().to_string())
+                })
+                .unwrap_or_else(|| "unknown".to_string());
+
             workspaces.push(WorkspaceData {
                 id: format!("{:?}", workspace_id),
                 name: workspace_name.to_string(),
+                layout_mode,
                 is_active,
                 window_count: windows.len(),
                 windows,
@@ -222,6 +250,45 @@ impl Reactor {
         }
 
         workspaces
+    }
+
+    fn handle_workspace_layouts_query(
+        &mut self,
+        space_id_param: Option<SpaceId>,
+        workspace_id: Option<usize>,
+    ) -> Vec<WorkspaceLayoutData> {
+        let Some(space) = space_id_param.or_else(|| self.default_query_space()) else {
+            return Vec::new();
+        };
+
+        let workspace_list = self
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager_mut()
+            .list_workspaces(space);
+        let active_workspace = self.layout_manager.layout_engine.active_workspace(space);
+
+        workspace_list
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| workspace_id.map(|target| target == *index).unwrap_or(true))
+            .filter_map(|(index, (id, name))| {
+                let layout_mode = self
+                    .layout_manager
+                    .layout_engine
+                    .virtual_workspace_manager()
+                    .workspace_info(space, *id)
+                    .map(|ws| ws.layout_mode().to_string())?;
+
+                Some(WorkspaceLayoutData {
+                    id: format!("{:?}", id),
+                    index,
+                    name: name.clone(),
+                    layout_mode,
+                    is_active: active_workspace == Some(*id),
+                })
+            })
+            .collect()
     }
 
     fn handle_active_workspace_query(
@@ -355,7 +422,7 @@ impl Reactor {
 
         Some(LayoutStateData {
             space_id: space_id_u64,
-            mode: self.layout_manager.layout_engine.layout_mode().to_string(),
+            mode: self.layout_manager.layout_engine.layout_mode_at(space_id).to_string(),
             floating_windows,
             tiled_windows,
             focused_window,

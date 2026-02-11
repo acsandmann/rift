@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use slotmap::SlotMap;
 
 /// N-ary tree.
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Tree<O> {
     pub map: NodeMap,
     pub data: O,
@@ -28,7 +28,7 @@ impl<O: Observer> Tree<O> {
 ///
 /// Multiple trees can be contained within a map. This also makes it easier
 /// to move branches between trees.
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct NodeMap {
     map: SlotMap<NodeId, Node>,
 }

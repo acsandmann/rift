@@ -264,7 +264,8 @@ impl WmController {
                 }
             }
             ScreenParametersChanged(screens, converter) => {
-                let frames: Vec<CGRect> = screens.iter().map(|s| s.frame).collect();
+                let frames_with_spaces: Vec<(CGRect, Option<SpaceId>)> =
+                    screens.iter().map(|s| (s.frame, s.space)).collect();
                 let spaces: Vec<Option<SpaceId>> = screens.iter().map(|s| s.space).collect();
 
                 self.events_tx.send(Event::ScreenParametersChanged(
@@ -272,9 +273,10 @@ impl WmController {
                     self.get_windows_for_spaces(&spaces),
                 ));
 
-                _ = self
-                    .event_tap_tx
-                    .send(event_tap::Request::ScreenParametersChanged(frames, converter));
+                _ = self.event_tap_tx.send(event_tap::Request::ScreenParametersChanged(
+                    frames_with_spaces,
+                    converter,
+                ));
                 if let Some(tx) = &self.stack_line_tx {
                     _ = tx.try_send(crate::actor::stack_line::Event::ScreenParametersChanged(
                         converter,
@@ -286,9 +288,11 @@ impl WmController {
                     spaces.clone(),
                     self.get_windows_for_spaces(&spaces),
                 ));
+                _ = self.event_tap_tx.send(event_tap::Request::SpaceChanged(spaces));
             }
             PowerStateChanged(is_low_power_mode) => {
                 info!("Power state changed: low power mode = {}", is_low_power_mode);
+                _ = self.event_tap_tx.send(event_tap::Request::SetLowPowerMode(is_low_power_mode));
             }
             Command(Wm(crate::actor::wm_controller::WmCmd::ToggleSpaceActivated)) => {
                 self.events_tx.send(reactor::Event::Command(reactor::Command::Reactor(

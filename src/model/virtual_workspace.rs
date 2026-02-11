@@ -6,9 +6,12 @@ use tracing::{error, warn};
 
 use crate::actor::app::WindowId;
 use crate::common::collections::{HashMap, HashSet};
-use crate::common::config::{AppWorkspaceRule, VirtualWorkspaceSettings, WorkspaceSelector};
+use crate::common::config::{
+    AppWorkspaceRule, LayoutMode, LayoutSettings, VirtualWorkspaceSettings, WorkspaceSelector,
+};
 use crate::common::log::trace_misc;
 use crate::layout_engine::Direction;
+use crate::layout_engine::systems::LayoutSystemKind;
 use crate::sys::app::pid_t;
 use crate::sys::geometry::CGRectDef;
 use crate::sys::screen::SpaceId;
@@ -53,21 +56,57 @@ pub enum AppRuleResult {
     Unmanaged,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct VirtualWorkspace {
     pub name: String,
     pub space: SpaceId,
     windows: HashSet<WindowId>,
     last_focused: Option<WindowId>,
+    #[serde(default = "default_layout_system_kind")]
+    pub layout_system: LayoutSystemKind,
+    #[serde(default)]
+    pub layout_mode: LayoutMode,
+}
+
+fn default_layout_system_kind() -> LayoutSystemKind {
+    VirtualWorkspace::create_layout_system(LayoutMode::default(), &LayoutSettings::default())
 }
 
 impl VirtualWorkspace {
-    fn new(name: String, space: SpaceId) -> Self {
+    fn new(name: String, space: SpaceId, mode: LayoutMode, settings: &LayoutSettings) -> Self {
+        let layout_system = Self::create_layout_system(mode, settings);
         Self {
             name,
             space,
             windows: HashSet::default(),
             last_focused: None,
+            layout_system,
+            layout_mode: mode,
+        }
+    }
+
+    pub fn tree(&self) -> &LayoutSystemKind { &self.layout_system }
+
+    pub fn tree_mut(&mut self) -> &mut LayoutSystemKind { &mut self.layout_system }
+
+    pub fn layout_mode(&self) -> LayoutMode { self.layout_mode }
+
+    pub fn create_layout_system(mode: LayoutMode, settings: &LayoutSettings) -> LayoutSystemKind {
+        match mode {
+            LayoutMode::Traditional => LayoutSystemKind::Traditional(
+                crate::layout_engine::systems::TraditionalLayoutSystem::default(),
+            ),
+            LayoutMode::Bsp => {
+                LayoutSystemKind::Bsp(crate::layout_engine::systems::BspLayoutSystem::default())
+            }
+            LayoutMode::MasterStack => LayoutSystemKind::MasterStack(
+                crate::layout_engine::systems::MasterStackLayoutSystem::new(
+                    settings.master_stack.clone(),
+                ),
+            ),
+            LayoutMode::Scrolling => LayoutSystemKind::Scrolling(
+                crate::layout_engine::systems::ScrollingLayoutSystem::new(&settings.scrolling),
+            ),
         }
     }
 
@@ -105,7 +144,7 @@ impl Default for HideCorner {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VirtualWorkspaceManager {
-    workspaces: SlotMap<VirtualWorkspaceId, VirtualWorkspace>,
+    pub(crate) workspaces: SlotMap<VirtualWorkspaceId, VirtualWorkspace>,
     workspaces_by_space: HashMap<SpaceId, Vec<VirtualWorkspaceId>>,
     pub active_workspace_per_space:
         HashMap<SpaceId, (Option<VirtualWorkspaceId>, VirtualWorkspaceId)>,
@@ -129,7 +168,13 @@ pub struct VirtualWorkspaceManager {
     #[serde(skip)]
     default_workspace: usize,
     #[serde(skip)]
-    workspace_auto_back_and_forth: bool,
+    pub workspace_auto_back_and_forth: bool,
+    #[serde(skip)]
+    pub workspace_rules: Vec<crate::common::config::WorkspaceLayoutRule>,
+    #[serde(skip)]
+    pub default_layout_mode: LayoutMode,
+    #[serde(skip)]
+    pub layout_settings: LayoutSettings,
 }
 
 impl Default for VirtualWorkspaceManager {
@@ -137,15 +182,23 @@ impl Default for VirtualWorkspaceManager {
 }
 
 impl VirtualWorkspaceManager {
-    pub fn new() -> Self { Self::new_with_config(&VirtualWorkspaceSettings::default()) }
-
-    pub fn new_with_rules(app_rules: Vec<AppWorkspaceRule>) -> Self {
-        let mut cfg = VirtualWorkspaceSettings::default();
-        cfg.app_rules = app_rules;
-        Self::new_with_config(&cfg)
+    pub fn new() -> Self {
+        Self::new_with_config(&VirtualWorkspaceSettings::default(), &LayoutSettings::default())
     }
 
-    pub fn new_with_config(config: &VirtualWorkspaceSettings) -> Self {
+    pub fn new_with_rules(
+        app_rules: Vec<AppWorkspaceRule>,
+        layout_settings: LayoutSettings,
+    ) -> Self {
+        let mut cfg = VirtualWorkspaceSettings::default();
+        cfg.app_rules = app_rules;
+        Self::new_with_config(&cfg, &layout_settings)
+    }
+
+    pub fn new_with_config(
+        config: &VirtualWorkspaceSettings,
+        layout_settings: &LayoutSettings,
+    ) -> Self {
         let max_workspaces = 32;
         let target_count = config.default_workspace_count.max(1).min(max_workspaces);
         let default_workspace = config.default_workspace.min(target_count - 1);
@@ -166,14 +219,24 @@ impl VirtualWorkspaceManager {
             default_workspace_names: config.workspace_names.clone(),
             default_workspace,
             workspace_auto_back_and_forth: config.workspace_auto_back_and_forth,
+            workspace_rules: config.workspace_rules.clone(),
+            default_layout_mode: layout_settings.mode,
+            layout_settings: layout_settings.clone(),
         };
 
         manager.rebuild_app_rule_regex_cache();
         manager
     }
 
-    pub fn update_settings(&mut self, config: &VirtualWorkspaceSettings) {
+    pub fn update_settings(
+        &mut self,
+        config: &VirtualWorkspaceSettings,
+        layout_settings: &LayoutSettings,
+    ) {
         self.app_rules = config.app_rules.clone();
+        self.workspace_rules = config.workspace_rules.clone();
+        self.default_layout_mode = layout_settings.mode;
+        self.layout_settings = layout_settings.clone();
         self.default_workspace_count = config.default_workspace_count;
         self.default_workspace_names = config.workspace_names.clone();
         self.workspace_auto_back_and_forth = config.workspace_auto_back_and_forth;
@@ -182,9 +245,10 @@ impl VirtualWorkspaceManager {
         let target_count = self.default_workspace_count.max(1).min(self.max_workspaces);
         self.default_workspace = config.default_workspace.min(target_count - 1);
 
-        for (space, ids) in self.workspaces_by_space.iter_mut() {
-            while ids.len() < target_count {
-                let idx = ids.len();
+        let spaces: Vec<SpaceId> = self.workspaces_by_space.keys().copied().collect();
+        for space in spaces {
+            while self.workspaces_by_space.get(&space).unwrap().len() < target_count {
+                let idx = self.workspaces_by_space.get(&space).unwrap().len();
                 let name = if let Some(n) = self.default_workspace_names.get(idx) {
                     n.clone()
                 } else {
@@ -192,9 +256,11 @@ impl VirtualWorkspaceManager {
                     self.workspace_counter += 1;
                     name
                 };
-                let ws = VirtualWorkspace::new(name, *space);
+
+                let mode = self.resolve_layout_mode_for_workspace(idx, &name);
+                let ws = VirtualWorkspace::new(name, space, mode, &self.layout_settings);
                 let id = self.workspaces.insert(ws);
-                ids.push(id);
+                self.workspaces_by_space.get_mut(&space).unwrap().push(id);
             }
         }
     }
@@ -233,7 +299,9 @@ impl VirtualWorkspaceManager {
                 .get(i)
                 .cloned()
                 .unwrap_or_else(|| format!("Workspace {}", i + 1));
-            let ws = VirtualWorkspace::new(name, space);
+
+            let mode = self.resolve_layout_mode_for_workspace(i, &name);
+            let ws = VirtualWorkspace::new(name, space, mode, &self.layout_settings);
             let id = self.workspaces.insert(ws);
             ids.push(id);
         }
@@ -243,6 +311,27 @@ impl VirtualWorkspaceManager {
         if let Some(&default_id) = ids.get(default_idx) {
             self.active_workspace_per_space.insert(space, (None, default_id));
         }
+    }
+
+    fn resolve_layout_mode_for_workspace(&self, index: usize, name: &str) -> LayoutMode {
+        // Check workspace_rules (last matching rule wins, like app_rules)
+        for rule in self.workspace_rules.iter().rev() {
+            match &rule.workspace {
+                WorkspaceSelector::Index(idx) if *idx == index => return rule.layout,
+                WorkspaceSelector::Name(n) if n == name => return rule.layout,
+                _ => continue,
+            }
+        }
+        // Fall back to global default
+        self.default_layout_mode
+    }
+
+    pub fn desired_layout_mode_for_workspace(&self, index: usize, name: &str) -> LayoutMode {
+        self.resolve_layout_mode_for_workspace(index, name)
+    }
+
+    pub fn initialized_spaces(&self) -> Vec<SpaceId> {
+        self.workspaces_by_space.keys().copied().collect()
     }
 
     pub fn remap_space(&mut self, old_space: SpaceId, new_space: SpaceId) {
@@ -326,7 +415,11 @@ impl VirtualWorkspaceManager {
         name: Option<String>,
     ) -> Result<VirtualWorkspaceId, WorkspaceError> {
         self.ensure_space_initialized(space);
-        let count = self.workspaces_by_space.get(&space).map(|v| v.len()).unwrap_or(0);
+        let count = self
+            .workspaces_by_space
+            .get(&space)
+            .map(|v: &Vec<VirtualWorkspaceId>| v.len())
+            .unwrap_or(0);
         if count >= self.max_workspaces {
             return Err(WorkspaceError::InconsistentState(format!(
                 "Maximum workspace limit ({}) reached for space {:?}",
@@ -340,7 +433,14 @@ impl VirtualWorkspaceManager {
             name
         });
 
-        let workspace = VirtualWorkspace::new(name, space);
+        let idx = self
+            .workspaces_by_space
+            .get(&space)
+            .map(|v: &Vec<VirtualWorkspaceId>| v.len())
+            .unwrap_or(0);
+        let mode = self.resolve_layout_mode_for_workspace(idx, &name);
+
+        let workspace = VirtualWorkspace::new(name, space, mode, &self.layout_settings);
         let workspace_id = self.workspaces.insert(workspace);
         self.workspaces_by_space.entry(space).or_default().push(workspace_id);
 
@@ -540,6 +640,26 @@ impl VirtualWorkspaceManager {
         window_id: WindowId,
     ) -> Option<VirtualWorkspaceId> {
         self.window_to_workspace.get(&(space, window_id)).copied()
+    }
+
+    pub fn workspace_for_window_any(&self, window_id: WindowId) -> Option<VirtualWorkspaceId> {
+        self.window_to_workspace.iter().find_map(|((_, wid), ws_id)| {
+            if *wid == window_id {
+                Some(*ws_id)
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn workspaces_for_window(&self, window_id: WindowId) -> Vec<VirtualWorkspaceId> {
+        let mut ids = HashSet::default();
+        for ((_, wid), ws_id) in self.window_to_workspace.iter() {
+            if *wid == window_id {
+                ids.insert(*ws_id);
+            }
+        }
+        ids.into_iter().collect()
     }
 
     pub fn set_last_rule_decision(&mut self, space: SpaceId, window_id: WindowId, value: bool) {
@@ -906,7 +1026,12 @@ impl VirtualWorkspaceManager {
             self.last_rule_decision.get(&(space, window_id)).copied().unwrap_or(false);
 
         self.ensure_space_initialized(space);
-        if self.workspaces_by_space.get(&space).map(|v| v.is_empty()).unwrap_or(true) {
+        if self
+            .workspaces_by_space
+            .get(&space)
+            .map(|v: &Vec<VirtualWorkspaceId>| v.is_empty())
+            .unwrap_or(true)
+        {
             return Err(WorkspaceError::NoWorkspacesAvailable);
         }
 
@@ -942,7 +1067,11 @@ impl VirtualWorkspaceManager {
                 };
 
                 if let Some(workspace_idx) = maybe_idx {
-                    let len = self.workspaces_by_space.get(&space).map(|v| v.len()).unwrap_or(0);
+                    let len = self
+                        .workspaces_by_space
+                        .get(&space)
+                        .map(|v: &Vec<VirtualWorkspaceId>| v.len())
+                        .unwrap_or(0);
                     if workspace_idx >= len {
                         tracing::warn!(
                             "App rule references non-existent workspace index {}, falling back to active workspace",
@@ -1043,7 +1172,7 @@ impl VirtualWorkspaceManager {
         let first_id = self
             .workspaces_by_space
             .get(&space)
-            .and_then(|v| v.first().copied())
+            .and_then(|v: &Vec<VirtualWorkspaceId>| v.first().copied())
             .ok_or_else(|| {
                 WorkspaceError::InconsistentState("No workspaces for space".to_string())
             })?;
@@ -1420,7 +1549,8 @@ mod tests {
         settings.default_workspace_count = 5;
         settings.default_workspace = 3;
 
-        let mut manager = VirtualWorkspaceManager::new_with_config(&settings);
+        let mut manager =
+            VirtualWorkspaceManager::new_with_config(&settings, &LayoutSettings::default());
 
         let space = SpaceId::new(42);
         let workspaces = manager.list_workspaces(space);
@@ -1604,7 +1734,8 @@ mod tests {
             },
         ];
 
-        let mut manager = VirtualWorkspaceManager::new_with_config(&settings);
+        let mut manager =
+            VirtualWorkspaceManager::new_with_config(&settings, &LayoutSettings::default());
 
         // 1. Floating persistence via app_id (case-insensitive)
         let w_float = WindowId::new(10, 1);

@@ -161,12 +161,45 @@ impl WorkspaceLayouts {
             .collect()
     }
 
-    pub(crate) fn for_each_active(&self, mut f: impl FnMut(LayoutId)) {
-        for info in self.map.values() {
-            if let Some(l) = info.active() {
-                f(l);
-            }
-        }
+    pub(crate) fn active_layouts_with_workspace(
+        &self,
+    ) -> Vec<(crate::model::VirtualWorkspaceId, LayoutId)> {
+        self.map
+            .iter()
+            .filter_map(|(&(_, ws_id), info)| info.active().map(|l| (ws_id, l)))
+            .collect()
+    }
+
+    pub(crate) fn ensure_active_for_workspace(
+        &mut self,
+        space: SpaceId,
+        size: CGSize,
+        workspace_id: crate::model::VirtualWorkspaceId,
+        tree: &mut impl LayoutSystem,
+    ) {
+        self.ensure_active_for_space(space, size, std::iter::once(workspace_id), tree);
+    }
+
+    pub(crate) fn replace_layouts_for_workspace(
+        &mut self,
+        space: SpaceId,
+        workspace_id: crate::model::VirtualWorkspaceId,
+        new_layout: LayoutId,
+    ) {
+        let active_size = self
+            .map
+            .get(&(space, workspace_id))
+            .map(|info| info.active_size)
+            .unwrap_or_else(|| Size::from(CGSize::new(1000.0, 1000.0)));
+
+        let mut configurations = crate::common::collections::HashMap::default();
+        configurations.insert(active_size, new_layout);
+
+        self.map.insert((space, workspace_id), SpaceLayoutInfo {
+            configurations,
+            active_size,
+            last_saved: Some(new_layout),
+        });
     }
 
     pub(crate) fn spaces(&self) -> crate::common::collections::BTreeSet<SpaceId> {

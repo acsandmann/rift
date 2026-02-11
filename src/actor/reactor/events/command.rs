@@ -35,8 +35,17 @@ impl CommandEventHandler {
                 | LayoutCommand::SwitchToWorkspace(_)
                 | LayoutCommand::SwitchToLastWorkspace
         );
+        let requires_workspace_space = matches!(
+            cmd,
+            LayoutCommand::NextWorkspace(_)
+                | LayoutCommand::PrevWorkspace(_)
+                | LayoutCommand::SwitchToWorkspace(_)
+                | LayoutCommand::SetWorkspaceLayout { .. }
+                | LayoutCommand::CreateWorkspace
+                | LayoutCommand::SwitchToLastWorkspace
+        );
         let command_space = reactor.workspace_command_space();
-        let workspace_space = if is_workspace_switch {
+        let workspace_space = if requires_workspace_space {
             if let Some(space) = command_space {
                 reactor.store_current_floating_positions(space);
             }
@@ -56,6 +65,7 @@ impl CommandEventHandler {
             LayoutCommand::NextWorkspace(_)
             | LayoutCommand::PrevWorkspace(_)
             | LayoutCommand::SwitchToWorkspace(_)
+            | LayoutCommand::SetWorkspaceLayout { .. }
             | LayoutCommand::CreateWorkspace
             | LayoutCommand::SwitchToLastWorkspace => {
                 if let Some(space) = workspace_space {
@@ -94,6 +104,9 @@ impl CommandEventHandler {
         };
 
         reactor.handle_layout_response(response, workspace_space);
+        if requires_workspace_space {
+            reactor.update_event_tap_layout_mode();
+        }
     }
 
     pub fn handle_command_metrics(_reactor: &mut Reactor, cmd: MetricsCommand) {

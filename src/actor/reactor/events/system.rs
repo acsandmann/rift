@@ -13,7 +13,10 @@ impl SystemEventHandler {
         reactor.menu_manager.menu_state = match reactor.menu_manager.menu_state {
             MenuState::Closed => MenuState::Open(1),
             MenuState::Open(depth) => {
-                debug!(depth, "menu already open; ignoring duplicate menu-open notification");
+                debug!(
+                    depth,
+                    "menu already open; ignoring duplicate menu-open notification"
+                );
                 MenuState::Open(depth)
             }
         };

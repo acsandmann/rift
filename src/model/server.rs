@@ -14,9 +14,19 @@ pub struct WorkspaceData {
     pub id: String,
     pub index: usize,
     pub name: String,
+    pub layout_mode: String,
     pub is_active: bool,
     pub window_count: usize,
     pub windows: Vec<WindowData>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceLayoutData {
+    pub id: String,
+    pub index: usize,
+    pub name: String,
+    pub layout_mode: String,
+    pub is_active: bool,
 }
 
 #[derive(Debug, Clone)]

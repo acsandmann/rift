@@ -80,6 +80,10 @@ hot_reload = true
 #	- "bsp" (binary space partitioning),
 #   - "master_stack" (master area + stack area)
 # defaults to "traditional" if omitted
+#
+# This is the default layout mode if there is nothing else configured
+# in the `workspace_rules` section below.
+# You can set different layouts per workspace using `workspace_rules`.
 mode = "traditional"
 
 # these settings only apply when layout mode == "master_stack"
@@ -107,6 +111,9 @@ alignment = "center"
 # 			(disrespects alignment setting above)
 # - "anchored": always align focused column according to `alignment`
 focus_navigation_style = "niri"
+# the scrolling layout tends to function better without animations,
+# so you can disable them if you like
+# animate = false
 
 [settings.layout.scrolling.gestures]
 # Enable horizontal scroll gestures to switch columns
@@ -115,6 +122,8 @@ enabled = false
 invert_horizontal = false
 # Number of fingers required for gesture
 fingers = 3
+# If true, scrolling past the end of the strip will trigger a workspace switch
+propagate_to_workspace_swipe = false
 
 [settings.layout.stack]
 # How much of each stacked window sticks out (in pixels)
@@ -237,6 +246,15 @@ preserve_focus_per_workspace = true
 workspace_auto_back_and_forth = false
 reapply_app_rules_on_title_change = false
 
+# Workspace-specific rules
+# - workspace: target workspace by index (integer) or name (string)
+# - layout: layout mode to use ("traditional", "bsp", "master_stack", "scrolling")
+# workspace_rules = [
+#   { workspace = 1, layout = "bsp" },
+#   { workspace = "second", layout = "scrolling" }
+# ]
+workspace_rules = []
+
 
 # Default workspace to activate on startup (0-based index).
 # If omitted, defaults to 0 (first workspace). Must be less than default_workspace_count.
@@ -340,6 +358,10 @@ comb1 = "Alt + Shift"
 # - move_window_to_workspace = N / move_window_to_workspace = { workspace = N, window_id = 123 } (optional window id)
 # - create_workspace
 # - switch_to_last_workspace
+# - set_workspace_layout = { mode = "traditional"|"bsp"|"master_stack"|"scrolling" } (active workspace)
+# - set_workspace_layout = { workspace = N, mode = "traditional"|"bsp"|"master_stack"|"scrolling" }
+# - next_window / prev_window
+# - ascend / descend
 # - move_focus = "left"|"right"|"up"|"down"
 # - move_node = "left"|"right"|"up"|"down"
 # - join_window = "left"|"right"|"up"|"down"
@@ -353,9 +375,14 @@ comb1 = "Alt + Shift"
 # - close_window = { window_server_id = 123 }
 # - focus_window = { window_id = 123, window_server_id = 456 }
 # - show_mission_control_all / show_mission_control_current / dismiss_mission_control (this is rift's own mission control, not macOS's)
+
 # the following commands *only* work when the master stack layout is active
 # - adjust_master_ratio = 0.05 / adjust_master_count = 1
 # - promote_to_master / swap_master_stack
+
+# the following commands *only* work when the scrolling layout is active
+# - scroll_strip = { delta = 0.5 }
+# - snap_strip / center_selection
 
 "Alt + Z" = "toggle_space_activated"
 
@@ -380,6 +407,12 @@ comb1 = "Alt + Shift"
 "comb1 + 3" = { move_window_to_workspace = 3 }
 
 "Alt + Tab" = "switch_to_last_workspace"
+
+# commands to change the layout engine of the active workspace
+# "Alt + Ctrl + 1" = { set_workspace_layout = { mode = "traditional" } }
+# "Alt + Ctrl + 2" = { set_workspace_layout = { mode = "bsp" } }
+# "Alt + Ctrl + 3" = { set_workspace_layout = { mode = "master_stack" } }
+# "Alt + Ctrl + 4" = { set_workspace_layout = { mode = "scrolling" } }
 
 "Alt + Shift + Left" = { join_window = "left" }
 "Alt + Shift + Right" = { join_window = "right" }
