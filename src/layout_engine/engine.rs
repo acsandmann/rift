@@ -1180,21 +1180,33 @@ impl LayoutEngine {
 
                 EventResponse::default()
             }
-
-            LayoutCommand::NextWindow => self.move_focus_internal(
-                space,
-                visible_spaces,
-                visible_space_centers,
-                Direction::Right,
-                is_floating,
-            ),
-            LayoutCommand::PrevWindow => self.move_focus_internal(
-                space,
-                visible_spaces,
-                visible_space_centers,
-                Direction::Left,
-                is_floating,
-            ),
+            LayoutCommand::NextWindow | LayoutCommand::PrevWindow => {
+                let forward = matches!(command, LayoutCommand::NextWindow);
+                let windows = if is_floating {
+                    self.active_floating_windows_in_workspace(space)
+                } else {
+                    self.filter_active_workspace_windows(
+                        space,
+                        self.workspace_tree(workspace_id).visible_windows_in_layout(layout),
+                    )
+                };
+                if let Some(idx) = windows.iter().position(|&w| Some(w) == self.focused_window) {
+                    let next = if forward {
+                        (idx + 1) % windows.len()
+                    } else {
+                        (idx + windows.len() - 1) % windows.len()
+                    };
+                    let response = EventResponse {
+                        focus_window: Some(windows[next]),
+                        raise_windows: vec![windows[next]],
+                        boundary_hit: None,
+                    };
+                    self.apply_focus_response(space, workspace_id, layout, &response);
+                    return response;
+                } else {
+                    EventResponse::default()
+                }
+            }
             LayoutCommand::MoveFocus(direction) => {
                 debug!(
                     "MoveFocus command received, direction: {:?}, is_floating: {}",
