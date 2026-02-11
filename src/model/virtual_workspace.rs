@@ -652,6 +652,16 @@ impl VirtualWorkspaceManager {
         })
     }
 
+    pub fn workspaces_for_window(&self, window_id: WindowId) -> Vec<VirtualWorkspaceId> {
+        let mut ids = HashSet::default();
+        for ((_, wid), ws_id) in self.window_to_workspace.iter() {
+            if *wid == window_id {
+                ids.insert(*ws_id);
+            }
+        }
+        ids.into_iter().collect()
+    }
+
     pub fn set_last_rule_decision(&mut self, space: SpaceId, window_id: WindowId, value: bool) {
         self.last_rule_decision.insert((space, window_id), value);
     }

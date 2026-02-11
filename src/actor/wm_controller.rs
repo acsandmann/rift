@@ -288,6 +288,9 @@ impl WmController {
                     spaces.clone(),
                     self.get_windows_for_spaces(&spaces),
                 ));
+                _ = self
+                    .event_tap_tx
+                    .send(event_tap::Request::SpaceChanged(spaces));
             }
             PowerStateChanged(is_low_power_mode) => {
                 info!("Power state changed: low power mode = {}", is_low_power_mode);

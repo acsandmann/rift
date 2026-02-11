@@ -44,6 +44,7 @@ pub enum Request {
     Warp(CGPoint),
     EnforceHidden,
     ScreenParametersChanged(Vec<(CGRect, Option<SpaceId>)>, CoordinateConverter),
+    SpaceChanged(Vec<Option<SpaceId>>),
     SetEventProcessing(bool),
     SetFocusFollowsMouseEnabled(bool),
     SetHotkeys(Vec<(Hotkey, WmCommand)>),
@@ -381,6 +382,15 @@ impl EventTap {
                     .collect();
                 state.converter = converter;
                 state.window_level_cache.clear();
+            }
+            Request::SpaceChanged(spaces) => {
+                state.screen_spaces = state
+                    .screens
+                    .iter()
+                    .copied()
+                    .zip(spaces.into_iter())
+                    .filter_map(|(frame, maybe_space)| maybe_space.map(|space| (frame, space)))
+                    .collect();
             }
             Request::SetEventProcessing(enabled) => {
                 state.event_processing_enabled = enabled;

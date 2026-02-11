@@ -667,8 +667,11 @@ impl LayoutEngine {
     fn remove_window_internal(&mut self, wid: WindowId, preserve_floating: bool) {
         let affected_space: Option<SpaceId> = self.space_with_window(wid);
 
-        if let Some(ws_id) = self.virtual_workspace_manager.workspace_for_window_any(wid) {
-            self.workspace_tree_mut(ws_id).remove_window(wid);
+        let ws_ids = self.virtual_workspace_manager.workspaces_for_window(wid);
+        if !ws_ids.is_empty() {
+            for ws_id in ws_ids {
+                self.workspace_tree_mut(ws_id).remove_window(wid);
+            }
         } else {
             // Fallback: search all workspaces
             let ws_ids: Vec<_> = self.virtual_workspace_manager.workspaces.keys().collect();
