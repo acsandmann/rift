@@ -1019,7 +1019,20 @@ impl LayoutEngine {
                 if self.floating.is_floating(wid) {
                     self.floating.set_last_focus(Some(wid));
                 } else {
-                    let (ws_id, layout) = self.workspace_and_layout(space);
+                    let Some(ws_id) = self.active_workspace_id(space) else {
+                        warn!(
+                            "No active workspace for space {:?}; skipping focus for {:?}",
+                            space, wid
+                        );
+                        return EventResponse::default();
+                    };
+                    let Some(layout) = self.workspace_layouts.active(space, ws_id) else {
+                        warn!(
+                            "No active layout for workspace {:?} on space {:?}; skipping focus for {:?}",
+                            ws_id, space, wid
+                        );
+                        return EventResponse::default();
+                    };
                     let _ = self.workspace_tree_mut(ws_id).select_window(layout, wid);
                     self.virtual_workspace_manager.set_last_focused_window(space, ws_id, Some(wid));
                 }
@@ -1031,7 +1044,20 @@ impl LayoutEngine {
                 screens,
             } => {
                 for (space, screen_frame, display_uuid) in screens {
-                    let (ws_id, layout) = self.workspace_and_layout(space);
+                    let Some(ws_id) = self.active_workspace_id(space) else {
+                        warn!(
+                            "No active workspace for space {:?}; skipping resize for {:?}",
+                            space, wid
+                        );
+                        continue;
+                    };
+                    let Some(layout) = self.workspace_layouts.active(space, ws_id) else {
+                        warn!(
+                            "No active layout for workspace {:?} on space {:?}; skipping resize for {:?}",
+                            ws_id, space, wid
+                        );
+                        continue;
+                    };
                     let gaps =
                         self.layout_settings.gaps.effective_for_display(display_uuid.as_deref());
                     self.workspace_tree_mut(ws_id).on_window_resized(
@@ -2407,6 +2433,44 @@ mod tests {
         assert!(
             result.is_ok(),
             "handle_command should not panic before SpaceExposed"
+        );
+    }
+
+    #[test]
+    fn window_focus_does_not_panic_before_layout_initialization() {
+        let mut engine = test_engine();
+        let space = SpaceId::new(43);
+        let wid = WindowId::new(1000, 1);
+
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            engine.handle_event(LayoutEvent::WindowFocused(space, wid))
+        }));
+
+        assert!(
+            result.is_ok(),
+            "WindowFocused should not panic before SpaceExposed"
+        );
+    }
+
+    #[test]
+    fn window_resize_does_not_panic_before_layout_initialization() {
+        let mut engine = test_engine();
+        let space = SpaceId::new(44);
+        let wid = WindowId::new(1001, 1);
+        let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(100.0, 100.0));
+
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            engine.handle_event(LayoutEvent::WindowResized {
+                wid,
+                old_frame: frame,
+                new_frame: frame,
+                screens: vec![(space, frame, None)],
+            })
+        }));
+
+        assert!(
+            result.is_ok(),
+            "WindowResized should not panic before SpaceExposed"
         );
     }
 

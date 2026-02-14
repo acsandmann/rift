@@ -1,4 +1,4 @@
-use objc2_core_foundation::{CGPoint, CGSize};
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use test_log::test;
 
 use super::testing::*;
@@ -6,7 +6,17 @@ use super::*;
 use crate::actor::app::Request;
 use crate::layout_engine::{Direction, LayoutCommand, LayoutEngine};
 use crate::sys::app::WindowInfo;
-use crate::sys::window_server::WindowServerId;
+use crate::sys::window_server::{WindowServerId, WindowServerInfo};
+
+fn is_layout_write_request(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::BeginWindowAnimation(_)
+            | Request::SetWindowPos(..)
+            | Request::SetWindowFrame(..)
+            | Request::SetBatchWindowFrame(..)
+    )
+}
 
 #[test]
 fn it_ignores_stale_resize_events() {
@@ -37,6 +47,496 @@ fn it_ignores_stale_resize_events() {
     assert!(
         requests.is_empty(),
         "got requests when there should have been none: {requests:?}"
+    );
+}
+
+#[test]
+fn window_server_id_changed_rebinds_window_mappings() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    reactor.handle_event(screen_params_event(
+        vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
+        vec![Some(SpaceId::new(1))],
+        vec![],
+    ));
+
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    let wid = WindowId::new(1, 1);
+    let old_wsid = WindowServerId::new(1);
+    let new_wsid = WindowServerId::new(1001);
+
+    reactor.window_manager.visible_windows.insert(old_wsid);
+    reactor.window_manager.observed_window_server_ids.insert(new_wsid);
+    reactor
+        .window_server_info_manager
+        .window_server_info
+        .insert(old_wsid, WindowServerInfo {
+            id: old_wsid,
+            pid: 1,
+            layer: 0,
+            frame: CGRect::new(CGPoint::new(10., 10.), CGSize::new(400., 400.)),
+        });
+    reactor.transaction_manager.store_txid(
+        old_wsid,
+        TransactionId::default(),
+        CGRect::new(CGPoint::new(0., 0.), CGSize::new(100., 100.)),
+    );
+    assert!(reactor.transaction_manager.get_target_frame(old_wsid).is_some());
+
+    let new_info = WindowServerInfo {
+        id: new_wsid,
+        pid: 1,
+        layer: 0,
+        frame: CGRect::new(CGPoint::new(50., 50.), CGSize::new(500., 500.)),
+    };
+    reactor.handle_event(Event::WindowServerIdChanged(wid, Some(new_wsid), Some(new_info)));
+
+    assert_eq!(
+        reactor.window_manager.windows.get(&wid).and_then(|w| w.info.sys_id),
+        Some(new_wsid),
+    );
+    assert_eq!(reactor.window_manager.window_ids.get(&new_wsid), Some(&wid));
+    assert!(!reactor.window_manager.window_ids.contains_key(&old_wsid));
+    assert!(reactor.window_manager.visible_windows.contains(&new_wsid));
+    assert!(!reactor.window_manager.visible_windows.contains(&old_wsid));
+    assert!(!reactor.window_manager.observed_window_server_ids.contains(&new_wsid));
+    assert!(!reactor.window_server_info_manager.window_server_info.contains_key(&old_wsid));
+    assert_eq!(
+        reactor
+            .window_server_info_manager
+            .window_server_info
+            .get(&new_wsid)
+            .map(|w| w.id),
+        Some(new_wsid),
+    );
+    assert!(reactor.transaction_manager.get_target_frame(old_wsid).is_none());
+    assert!(reactor.transaction_manager.get_target_frame(new_wsid).is_some());
+}
+
+#[test]
+fn window_server_destroyed_ignores_old_wsid_after_rebind() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let space = SpaceId::new(1);
+    reactor.handle_event(screen_params_event(
+        vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
+        vec![Some(space)],
+        vec![],
+    ));
+
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    let wid = WindowId::new(1, 1);
+    let old_wsid = WindowServerId::new(1);
+    let new_wsid = WindowServerId::new(1001);
+    reactor.handle_event(Event::WindowServerIdChanged(
+        wid,
+        Some(new_wsid),
+        Some(WindowServerInfo {
+            id: new_wsid,
+            pid: 1,
+            layer: 0,
+            frame: CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.)),
+        }),
+    ));
+
+    super::events::space::SpaceEventHandler::handle_window_server_destroyed(
+        &mut reactor,
+        old_wsid,
+        space,
+    );
+
+    assert!(reactor.window_manager.windows.contains_key(&wid));
+    assert_eq!(reactor.window_manager.window_ids.get(&new_wsid), Some(&wid));
+    assert!(!reactor.window_manager.window_ids.contains_key(&old_wsid));
+}
+
+#[test]
+fn window_server_destroyed_skips_probe_when_window_still_exists() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let space = SpaceId::new(1);
+    let frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    reactor.handle_event(screen_params_event(vec![frame], vec![Some(space)], vec![]));
+
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    let wid = WindowId::new(1, 1);
+    let wsid = WindowServerId::new(4_000_002);
+    reactor.handle_event(Event::WindowServerIdChanged(
+        wid,
+        Some(wsid),
+        Some(WindowServerInfo {
+            id: wsid,
+            pid: 1,
+            layer: 0,
+            frame,
+        }),
+    ));
+    let _ = apps.requests();
+
+    super::events::space::SpaceEventHandler::handle_window_server_destroyed(
+        &mut reactor,
+        wsid,
+        space,
+    );
+
+    assert!(
+        !apps
+            .requests()
+            .into_iter()
+            .any(|request| matches!(request, Request::WindowMaybeDestroyed(id) if id == wid))
+    );
+}
+
+#[test]
+fn window_server_destroyed_on_non_current_space_is_ignored() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let left_space = SpaceId::new(1);
+    let right_space = SpaceId::new(97);
+    reactor.handle_event(screen_params_event(
+        vec![
+            CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.)),
+            CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.)),
+        ],
+        vec![Some(left_space), Some(right_space)],
+        vec![],
+    ));
+
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    let wsid = WindowServerId::new(1);
+    let _ = apps.requests();
+
+    super::events::space::SpaceEventHandler::handle_window_server_destroyed(
+        &mut reactor,
+        wsid,
+        right_space,
+    );
+
+    assert!(
+        !apps
+            .requests()
+            .into_iter()
+            .any(|request| matches!(request, Request::WindowMaybeDestroyed(_)))
+    );
+}
+
+#[test]
+fn space_changed_does_not_relayout_while_mouse_is_down() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let space = SpaceId::new(1);
+    reactor.handle_event(screen_params_event(
+        vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
+        vec![Some(space)],
+        vec![],
+    ));
+
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let wid = WindowId::new(1, 1);
+    let wsid = reactor
+        .window_manager
+        .windows
+        .get(&wid)
+        .and_then(|window| window.info.sys_id)
+        .expect("window should have a server id");
+    let mut shifted = reactor
+        .window_manager
+        .windows
+        .get(&wid)
+        .map(|window| window.frame_monotonic)
+        .expect("window should exist");
+    shifted.origin.x += 120.0;
+    reactor.window_manager.windows.get_mut(&wid).unwrap().frame_monotonic = shifted;
+
+    let ws_info = vec![WindowServerInfo {
+        id: wsid,
+        pid: wid.pid,
+        layer: 0,
+        frame: shifted,
+    }];
+
+    let _ = apps.requests();
+    crate::sys::event::set_mouse_state(MouseState::Down);
+    reactor.handle_event(Event::SpaceChanged(vec![Some(space)], ws_info.clone()));
+    assert!(
+        apps.requests().is_empty(),
+        "space-changed should not relayout while mouse is down"
+    );
+
+    crate::sys::event::set_mouse_state(MouseState::Up);
+    reactor.handle_event(Event::SpaceChanged(vec![Some(space)], ws_info));
+    assert!(
+        apps.requests().into_iter().any(|request| is_layout_write_request(&request)),
+        "space-changed should relayout after mouse is released"
+    );
+}
+
+#[test]
+fn space_changed_ignores_duplicate_signature_with_frame_jitter() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let space = SpaceId::new(1);
+    reactor.handle_event(screen_params_event(
+        vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
+        vec![Some(space)],
+        vec![],
+    ));
+
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let wid = WindowId::new(1, 1);
+    let wsid = reactor
+        .window_manager
+        .windows
+        .get(&wid)
+        .and_then(|window| window.info.sys_id)
+        .expect("window should have a server id");
+    let mut shifted = reactor
+        .window_manager
+        .windows
+        .get(&wid)
+        .map(|window| window.frame_monotonic)
+        .expect("window should exist");
+    shifted.origin.x += 120.0;
+    reactor.window_manager.windows.get_mut(&wid).unwrap().frame_monotonic = shifted;
+
+    let ws_info = vec![WindowServerInfo {
+        id: wsid,
+        pid: wid.pid,
+        layer: 0,
+        frame: shifted,
+    }];
+
+    let mut jittered = shifted;
+    jittered.origin.x += 24.0;
+    let jittered_ws_info = vec![WindowServerInfo {
+        id: wsid,
+        pid: wid.pid,
+        layer: 0,
+        frame: jittered,
+    }];
+
+    let _ = apps.requests();
+    reactor.handle_event(Event::SpaceChanged(vec![Some(space)], ws_info));
+    assert!(
+        apps.requests().into_iter().any(|request| is_layout_write_request(&request)),
+        "first snapshot should trigger relayout"
+    );
+
+    reactor.handle_event(Event::SpaceChanged(vec![Some(space)], jittered_ws_info));
+    assert!(
+        apps.requests().is_empty(),
+        "duplicate snapshot signature should be ignored"
+    );
+}
+
+#[test]
+fn raised_window_outside_active_workspace_does_not_steal_focus() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let space = SpaceId::new(1);
+    reactor.handle_event(screen_params_event(
+        vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
+        vec![Some(space)],
+        vec![],
+    ));
+
+    let off_workspace_wid = WindowId::new(1, 1);
+    let active_workspace_wid = WindowId::new(1, 2);
+    reactor.handle_events(apps.make_app_with_opts(
+        1,
+        make_windows(2),
+        Some(off_workspace_wid),
+        true,
+        true,
+    ));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let active_ws = reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager()
+        .active_workspace(space)
+        .expect("Active workspace should exist");
+    let second_ws = reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .create_workspace(space, Some("Other".into()))
+        .expect("Creating second workspace should succeed");
+    assert_ne!(active_ws, second_ws);
+    assert!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager_mut()
+            .assign_window_to_workspace(space, off_workspace_wid, second_ws)
+    );
+    assert!(
+        !reactor
+            .layout_manager
+            .layout_engine
+            .is_window_in_active_workspace(space, off_workspace_wid)
+    );
+
+    reactor.send_layout_event(layout::LayoutEvent::WindowFocused(space, active_workspace_wid));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.selected_window(space),
+        Some(active_workspace_wid)
+    );
+
+    reactor.handle_event(Event::ApplicationActivated(1, Quiet::Yes));
+    reactor.handle_event(Event::ApplicationGloballyActivated(1));
+    reactor.handle_event(Event::ApplicationMainWindowChanged(
+        1,
+        Some(off_workspace_wid),
+        Quiet::No,
+    ));
+
+    assert_eq!(
+        reactor.layout_manager.layout_engine.selected_window(space),
+        Some(active_workspace_wid)
+    );
+}
+
+#[test]
+fn drag_finalize_still_runs_after_wsid_rebind() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    reactor.handle_event(screen_params_event(
+        vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
+        vec![Some(SpaceId::new(1))],
+        vec![],
+    ));
+
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let wid = WindowId::new(1, 1);
+    let new_wsid = WindowServerId::new(1001);
+    reactor.handle_event(Event::WindowServerIdChanged(
+        wid,
+        Some(new_wsid),
+        Some(WindowServerInfo {
+            id: new_wsid,
+            pid: 1,
+            layer: 0,
+            frame: CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.)),
+        }),
+    ));
+
+    let dragged_frame = CGRect::new(CGPoint::new(100.0, 100.0), CGSize::new(900.0, 900.0));
+    reactor.handle_event(Event::WindowFrameChanged(
+        wid,
+        dragged_frame,
+        None,
+        Requested(false),
+        Some(MouseState::Down),
+    ));
+
+    assert!(matches!(
+        reactor.drag_manager.drag_state,
+        DragState::Active { .. }
+    ));
+    assert_eq!(reactor.drag_manager.skip_layout_for_window, Some(wid));
+
+    reactor.handle_event(Event::WindowFrameChanged(
+        wid,
+        dragged_frame,
+        None,
+        Requested(false),
+        Some(MouseState::Up),
+    ));
+
+    assert!(matches!(reactor.drag_manager.drag_state, DragState::Inactive));
+    assert!(reactor.drag_manager.skip_layout_for_window.is_none());
+}
+
+#[test]
+fn user_drag_with_stale_pending_txid_still_snaps_back() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    reactor.handle_event(screen_params_event(
+        vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
+        vec![Some(SpaceId::new(1))],
+        vec![],
+    ));
+
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    let wid = WindowId::new(1, 1);
+    apps.simulate_until_quiet(&mut reactor);
+    let wsid = reactor
+        .window_manager
+        .windows
+        .get(&wid)
+        .and_then(|window| window.info.sys_id)
+        .expect("window should have a server id");
+    reactor.transaction_manager.store_txid(
+        wsid,
+        TransactionId::default(),
+        CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(500.0, 500.0)),
+    );
+    let dragged_frame = CGRect::new(CGPoint::new(100.0, 100.0), CGSize::new(500.0, 500.0));
+    let _ = apps.requests();
+
+    reactor.handle_event(Event::WindowFrameChanged(
+        wid,
+        dragged_frame,
+        Some(TransactionId::default().next()),
+        Requested(false),
+        Some(MouseState::Down),
+    ));
+
+    reactor.handle_event(Event::WindowFrameChanged(
+        wid,
+        dragged_frame,
+        Some(TransactionId::default().next()),
+        Requested(false),
+        Some(MouseState::Up),
+    ));
+
+    assert!(
+        apps.requests().into_iter().any(|request| is_layout_write_request(&request)),
+        "user drag should still produce snapback requests after stale tx mismatch"
     );
 }
 
@@ -132,6 +632,28 @@ fn it_clears_screen_state_when_no_displays_are_reported() {
         vec![],
     ));
     assert_eq!(1, reactor.space_manager.screens.len());
+}
+
+#[test]
+fn mouse_over_main_window_does_not_autoraise() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let space = SpaceId::new(1);
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    reactor.handle_event(screen_params_event(vec![screen], vec![Some(space)], vec![]));
+
+    let main_wid = WindowId::new(1, 1);
+    let other_wid = WindowId::new(1, 2);
+    reactor.handle_event(Event::ApplicationGloballyActivated(1));
+    reactor.handle_events(apps.make_app_with_opts(1, make_windows(2), Some(main_wid), true, true));
+
+    assert_eq!(reactor.main_window(), Some(main_wid));
+    assert!(reactor.should_raise_on_mouse_over(other_wid));
+    assert!(!reactor.should_raise_on_mouse_over(main_wid));
 }
 
 #[test]

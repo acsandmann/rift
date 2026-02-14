@@ -25,7 +25,7 @@ use tracing::{Instrument, Span, debug, error, info, instrument, trace, warn};
 use crate::actor;
 use crate::actor::reactor::transaction_manager::TransactionId;
 use crate::actor::reactor::{self, Event, Requested};
-use crate::common::collections::{HashMap, HashSet};
+use crate::common::collections::{HashMap, HashSet, hash_map};
 use crate::model::tx_store::WindowTxStore;
 use crate::sys::app::NSRunningApplicationExt;
 pub use crate::sys::app::{AppInfo, WindowInfo, pid_t};
@@ -244,6 +244,9 @@ struct State {
     observer: Observer,
     events_tx: reactor::Sender,
     windows: HashMap<WindowId, AppWindowState>,
+    tab_groups: HashMap<TabGroupKey, WindowId>,
+    tab_group_by_wid: HashMap<WindowId, TabGroupKey>,
+    tab_group_by_wsid: HashMap<WindowServerId, TabGroupKey>,
     last_window_idx: u32,
     main_window: Option<WindowId>,
     last_activated: Option<(Instant, Quiet, Option<WindowId>, r#continue::Sender<()>)>,
@@ -259,6 +262,23 @@ struct AppWindowState {
     hidden_by_app: bool,
     window_server_id: Option<WindowServerId>,
     is_animating: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum TabGroupKey {
+    Ax(AXUIElement),
+}
+
+enum RegisterWindowResult {
+    New {
+        info: WindowInfo,
+        wid: WindowId,
+        window_server_info: Option<WindowServerInfo>,
+    },
+    ExistingTabGroup {
+        wid: WindowId,
+        info: WindowInfo,
+    },
 }
 
 const APP_NOTIFICATIONS: &[&str] = &[
@@ -400,6 +420,7 @@ impl State {
         let window_count = initial_window_elements.len() as usize;
         self.windows.reserve(window_count);
         let mut windows = Vec::with_capacity(window_count);
+        let mut seen_wids: HashSet<WindowId> = HashSet::default();
 
         let mut elements_with_ids = Vec::with_capacity(window_count);
         let mut wsids = Vec::with_capacity(window_count);
@@ -419,10 +440,17 @@ impl State {
 
         for (elem, wsid) in elements_with_ids {
             let hint = wsid.and_then(|id| server_info_by_id.get(&id).copied());
-            let Some((info, wid, _)) = self.register_window(elem, hint) else {
+            let Some(result) = self.register_window(elem, hint) else {
                 continue;
             };
-            windows.push((wid, info));
+            match result {
+                RegisterWindowResult::New { info, wid, .. }
+                | RegisterWindowResult::ExistingTabGroup { wid, info } => {
+                    if seen_wids.insert(wid) {
+                        windows.push((wid, info));
+                    }
+                }
+            }
         }
 
         self.main_window = self.app.main_window().ok().and_then(|w| self.id(&w).ok());
@@ -460,6 +488,20 @@ impl State {
                     return Ok(false);
                 }
 
+                let is_tab_group_window = self.tab_group_by_wid.contains_key(&wid);
+                let missing_window_server_window = self
+                    .windows
+                    .get(&wid)
+                    .and_then(|window| window.window_server_id)
+                    .is_some_and(|wsid| window_server::get_window(wsid).is_none());
+
+                // Do not eagerly destroy native-tab windows since tab switches can
+                // transiently replace window-server ids.
+                if missing_window_server_window && !is_tab_group_window {
+                    self.remove_tracked_window(wid, "Removed stale window (WindowMaybeDestroyed)");
+                    return Ok(false);
+                }
+
                 // Trigger a visible windows refresh. If the window is gone, the reactor
                 // will detect it via missing membership and tear down state.
                 *request = Request::GetVisibleWindows;
@@ -484,30 +526,79 @@ impl State {
                         return Err(e);
                     }
                 };
+                let main_elem = self.app.main_window().ok();
                 let mut new = Vec::with_capacity(window_elems.len() as usize);
+                let mut new_index_by_wid: HashMap<WindowId, usize> = HashMap::default();
                 let mut known_visible = Vec::with_capacity(window_elems.len() as usize);
+                let mut known_visible_set: HashSet<WindowId> = HashSet::default();
                 for elem in window_elems.iter() {
                     let elem = elem.clone();
-                    if let Ok(id) = self.id(&elem) {
-                        known_visible.push(id);
-                        match WindowInfo::from_ax_element(&elem, None) {
-                            Ok((info, _)) => {
-                                new.push((id, info));
+                    let wid = if let Ok(id) = self.id(&elem) {
+                        Some(id)
+                    } else {
+                        if main_elem.as_ref().is_some_and(|main| main == &elem) {
+                            if let Some(wid) = self.maybe_rebind_unknown_main_window(&elem) {
+                                Some(wid)
+                            } else {
+                                match self.register_window(elem.clone(), None) {
+                                    Some(RegisterWindowResult::New { info, wid, .. })
+                                    | Some(RegisterWindowResult::ExistingTabGroup { wid, info }) => {
+                                        if let hash_map::Entry::Vacant(entry) =
+                                            new_index_by_wid.entry(wid)
+                                        {
+                                            entry.insert(new.len());
+                                            new.push((wid, info));
+                                        }
+                                        Some(wid)
+                                    }
+                                    None => None,
+                                }
                             }
-                            Err(err) => {
-                                trace!(
-                                    ?id,
-                                    ?err,
-                                    "Failed to refresh window info; will retry later"
-                                );
+                        } else {
+                            match self.register_window(elem.clone(), None) {
+                                Some(RegisterWindowResult::New { info, wid, .. })
+                                | Some(RegisterWindowResult::ExistingTabGroup { wid, info }) => {
+                                    if let hash_map::Entry::Vacant(entry) =
+                                        new_index_by_wid.entry(wid)
+                                    {
+                                        entry.insert(new.len());
+                                        new.push((wid, info));
+                                    }
+                                    Some(wid)
+                                }
+                                None => None,
                             }
                         }
-                        continue;
-                    }
-                    let Some((info, wid, _)) = self.register_window(elem, None) else {
+                    };
+                    let Some(wid) = wid else {
                         continue;
                     };
-                    new.push((wid, info));
+                    if known_visible_set.insert(wid) {
+                        known_visible.push(wid);
+                    }
+
+                    self.maybe_activate_tab_group_window(wid, &elem);
+
+                    let Ok((info, _)) = WindowInfo::from_ax_element(&elem, None) else {
+                        continue;
+                    };
+                    let preferred_sys = self.windows.get(&wid).and_then(|w| w.window_server_id);
+                    let existing = new_index_by_wid.get(&wid).map(|idx| &new[*idx].1);
+                    let should_replace = match (preferred_sys, existing) {
+                        (Some(preferred), Some(existing)) => {
+                            existing.sys_id != Some(preferred) && info.sys_id == Some(preferred)
+                        }
+                        (Some(preferred), None) => info.sys_id == Some(preferred),
+                        _ => false,
+                    };
+                    if let Some(&idx) = new_index_by_wid.get(&wid) {
+                        if should_replace {
+                            new[idx] = (wid, info);
+                        }
+                    } else {
+                        new_index_by_wid.insert(wid, new.len());
+                        new.push((wid, info));
+                    }
                 }
                 self.send_event(Event::WindowsDiscovered {
                     pid: self.pid,
@@ -695,27 +786,50 @@ impl State {
             }
             kAXMainWindowChangedNotification => {
                 // NOTE(acsandmann):
-                // because of apps like firefox that send delayed(or dont send at all) axuielementdestroyed/windowserverdisappeared
-                // this is a fallback to ensure we handle windows being closed
+                // because of apps like firefox that send delayed (or don't send at all)
+                // AXUIElementDestroyed/window-server disappeared events, this is a fallback
+                // to ensure we handle windows being closed.
+                self.on_main_window_changed(None, true);
                 self.remove_stale_windows();
-                self.on_main_window_changed(None, false);
             }
             kAXWindowCreatedNotification => {
-                if self.id(&elem).is_ok() {
+                if let Ok(wid) = self.id(&elem) {
+                    let main_elem = self.app.main_window().ok();
+                    if main_elem.as_ref().is_some_and(|main| main == &elem) {
+                        self.maybe_activate_tab_group_window(wid, &elem);
+                    }
                     return;
                 }
-                let Some((window, wid, window_server_info)) = self.register_window(elem, None)
-                else {
+
+                let main_elem = self.app.main_window().ok();
+                if main_elem.as_ref().is_some_and(|main| main == &elem)
+                    && self.maybe_rebind_unknown_main_window(&elem).is_some()
+                {
+                    return;
+                }
+
+                let created_elem = elem.clone();
+                let Some(result) = self.register_window(elem, None) else {
                     return;
                 };
-                let window_server_info = window_server_info
-                    .or_else(|| window.sys_id.and_then(window_server::get_window));
-                self.send_event(Event::WindowCreated(
-                    wid,
-                    window,
-                    window_server_info,
-                    event::get_mouse_state(),
-                ));
+                match result {
+                    RegisterWindowResult::New { info, wid, window_server_info } => {
+                        let window_server_info = window_server_info
+                            .or_else(|| info.sys_id.and_then(window_server::get_window));
+                        self.send_event(Event::WindowCreated(
+                            wid,
+                            info,
+                            window_server_info,
+                            event::get_mouse_state(),
+                        ));
+                    }
+                    RegisterWindowResult::ExistingTabGroup { wid, .. } => {
+                        let main_elem = self.app.main_window().ok();
+                        if main_elem.as_ref().is_some_and(|main| main == &created_elem) {
+                            self.maybe_activate_tab_group_window(wid, &created_elem);
+                        }
+                    }
+                }
             }
             kAXMenuOpenedNotification => self.send_event(Event::MenuOpened),
             kAXMenuClosedNotification => self.send_event(Event::MenuClosed),
@@ -723,7 +837,29 @@ impl State {
                 let Ok(wid) = self.id(&elem) else {
                     return;
                 };
+                let is_active_elem = self.window(wid).map(|w| w.elem == elem).unwrap_or(false);
+                let key = self.tab_group_by_wid.get(&wid).cloned();
+                if let Some(key) = key.as_ref()
+                    && let Ok(wsid) = WindowServerId::try_from(&elem)
+                    && self.tab_group_by_wsid.get(&wsid) == Some(key)
+                {
+                    self.tab_group_by_wsid.remove(&wsid);
+                }
+
+                if !is_active_elem {
+                    return;
+                }
+
+                if key.is_some()
+                    && let Some(replacement) = self.find_tab_group_replacement(wid, &elem)
+                {
+                    self.activate_tab_group_window(wid, &replacement);
+                    self.on_main_window_changed(Some(wid), false);
+                    return;
+                }
+
                 self.windows.remove(&wid);
+                self.remove_tab_group_for_window(wid);
                 self.send_event(Event::WindowDestroyed(wid));
 
                 self.on_main_window_changed(Some(wid), false);
@@ -732,6 +868,7 @@ impl State {
                 let Ok(wid) = self.id(&elem) else {
                     return;
                 };
+                self.maybe_activate_tab_group_window(wid, &elem);
 
                 if let Ok(window) = self.window(wid) {
                     if window.is_animating {
@@ -791,6 +928,7 @@ impl State {
                 let Ok(wid) = self.id(&elem) else {
                     return;
                 };
+                self.maybe_activate_tab_group_window(wid, &elem);
                 match WindowInfo::from_ax_element(&elem, None) {
                     Ok((info, _)) => {
                         self.send_event(Event::WindowTitleChanged(wid, info.title));
@@ -958,7 +1096,10 @@ impl State {
             Some(wid) => wid,
             None => {
                 if !allow_register {
-                    warn!(?self.pid, "Got MainWindowChanged on unknown window; clearing main window");
+                    warn!(
+                        ?self.pid,
+                        "Got MainWindowChanged on unknown window; clearing main window"
+                    );
                     if self.main_window.take().is_some() {
                         self.send_event(Event::ApplicationMainWindowChanged(
                             self.pid,
@@ -968,21 +1109,19 @@ impl State {
                     }
                     return None;
                 }
-                let Some((info, wid, window_server_info)) = self.register_window(elem, None) else {
-                    warn!(?self.pid, "Got MainWindowChanged on unknown window");
-                    return None;
-                };
-                let window_server_info =
-                    window_server_info.or_else(|| info.sys_id.and_then(window_server::get_window));
-                self.send_event(Event::WindowCreated(
-                    wid,
-                    info,
-                    window_server_info,
-                    event::get_mouse_state(),
-                ));
-                wid
+
+                if let Some(wid) = self.maybe_rebind_unknown_main_window(&elem) {
+                    wid
+                } else {
+                    let Some(wid) = self.register_main_window(elem.clone()) else {
+                        return None;
+                    };
+                    wid
+                }
             }
         };
+
+        self.maybe_activate_tab_group_window(wid, &elem);
 
         if self.main_window == Some(wid) {
             return Some(wid);
@@ -994,6 +1133,77 @@ impl State {
         };
         self.send_event(Event::ApplicationMainWindowChanged(self.pid, Some(wid), quiet));
         Some(wid)
+    }
+
+    fn maybe_rebind_unknown_main_window(&mut self, elem: &AXUIElement) -> Option<WindowId> {
+        let wid = self.main_window?;
+        let (old_elem, old_wsid) = self
+            .windows
+            .get(&wid)
+            .map(|window| (window.elem.clone(), window.window_server_id))?;
+        let new_wsid = WindowServerId::try_from(elem).ok()?;
+        if old_wsid == Some(new_wsid) {
+            return Some(wid);
+        }
+
+        let tracked_tab_group = self.tab_group_by_wid.contains_key(&wid);
+        let has_tabs = elem.tab_group().ok().flatten().is_some()
+            || elem.tabs().ok().is_some_and(|tabs| !tabs.is_empty());
+        let frame_matches =
+            old_elem
+                .frame()
+                .ok()
+                .zip(elem.frame().ok())
+                .is_some_and(|(old_frame, new_frame)| {
+                    // 24pt absorbs transient AX frame jitter during native-tab swaps (titlebar/chrome
+                    // timing, rounding) without requiring exact equality, while still small enough to
+                    // avoid remapping clearly different windows.
+                    (old_frame.origin.x - new_frame.origin.x).abs() <= 24.0
+                        && (old_frame.origin.y - new_frame.origin.y).abs() <= 24.0
+                        && (old_frame.size.width - new_frame.size.width).abs() <= 24.0
+                        && (old_frame.size.height - new_frame.size.height).abs() <= 24.0
+                });
+        // Rebinding unknown main windows for non-tabbed apps can remap unrelated windows and
+        // cause cross-display jitter; only allow this fallback for known tab groups.
+        if !has_tabs && !(tracked_tab_group && frame_matches) {
+            return None;
+        }
+
+        self.activate_tab_group_window(wid, elem);
+        (self.id(elem).ok() == Some(wid)).then_some(wid)
+    }
+
+    fn register_main_window(&mut self, elem: AXUIElement) -> Option<WindowId> {
+        let Some(result) = self.register_window(elem, None) else {
+            warn!(?self.pid, "Got MainWindowChanged on unknown window");
+            return None;
+        };
+        match result {
+            RegisterWindowResult::New { info, wid, window_server_info } => {
+                let window_server_info =
+                    window_server_info.or_else(|| info.sys_id.and_then(window_server::get_window));
+                self.send_event(Event::WindowCreated(
+                    wid,
+                    info,
+                    window_server_info,
+                    event::get_mouse_state(),
+                ));
+                Some(wid)
+            }
+            RegisterWindowResult::ExistingTabGroup { wid, .. } => Some(wid),
+        }
+    }
+
+    fn find_tab_group_replacement(
+        &self,
+        wid: WindowId,
+        dead_elem: &AXUIElement,
+    ) -> Option<AXUIElement> {
+        self.app.windows().ok().and_then(|windows| {
+            windows
+                .into_iter()
+                .find(|candidate| candidate != dead_elem && self.id(candidate).ok() == Some(wid))
+        })
     }
 
     fn on_activation_changed(&mut self) -> Result<(), AxError> {
@@ -1087,23 +1297,115 @@ impl State {
         }
     }
 
+    fn tab_group_key(
+        &mut self,
+        elem: &AXUIElement,
+        info: &WindowInfo,
+        wsid: Option<WindowServerId>,
+    ) -> Option<TabGroupKey> {
+        if !info.is_standard || !info.is_root {
+            return None;
+        }
+
+        if let Ok(Some(tab_group)) = elem.tab_group() {
+            return Some(TabGroupKey::Ax(tab_group));
+        }
+
+        wsid.and_then(|wsid| self.active_tab_group_key_for_wsid(wsid).cloned())
+    }
+
+    fn active_tab_group_key_for_wsid(&self, wsid: WindowServerId) -> Option<&TabGroupKey> {
+        let key = self.tab_group_by_wsid.get(&wsid)?;
+        let wid = self.tab_groups.get(key)?;
+        let window = self.windows.get(wid)?;
+        (window.window_server_id == Some(wsid)).then_some(key)
+    }
+
+    fn allocate_window_idx(&mut self) -> NonZeroU32 {
+        loop {
+            assert!(
+                self.last_window_idx < u32::MAX,
+                "Window index overflow for pid {}",
+                self.pid
+            );
+            self.last_window_idx += 1;
+            let idx = NonZeroU32::new(self.last_window_idx).unwrap();
+            let wid = WindowId { pid: self.pid, idx };
+            if !self.windows.contains_key(&wid) {
+                return idx;
+            }
+        }
+    }
+
+    fn register_tab_group(
+        &mut self,
+        key: TabGroupKey,
+        wid: WindowId,
+        wsid: Option<WindowServerId>,
+    ) {
+        self.tab_groups.insert(key.clone(), wid);
+        self.tab_group_by_wid.insert(wid, key.clone());
+        if let Some(wsid) = wsid {
+            self.tab_group_by_wsid.insert(wsid, key);
+        }
+    }
+
+    fn remove_tab_group_for_window(&mut self, wid: WindowId) {
+        let Some(key) = self.tab_group_by_wid.remove(&wid) else {
+            return;
+        };
+        self.tab_groups.remove(&key);
+        let wsids: Vec<WindowServerId> = self
+            .tab_group_by_wsid
+            .iter()
+            .filter_map(|(wsid, k)| (k == &key).then_some(*wsid))
+            .collect();
+        for wsid in wsids {
+            self.tab_group_by_wsid.remove(&wsid);
+        }
+    }
+
+    fn register_window_notifications(&self, elem: &AXUIElement) -> bool {
+        match elem.role() {
+            Ok(role) if role == AX_WINDOW_ROLE => {}
+            _ => return false,
+        }
+        for notif in WINDOW_NOTIFICATIONS {
+            let res = self.observer.add_notification(elem, notif);
+            if let Err(err) = res {
+                let is_already_registered = matches!(err, AxError::Ax(code) if code == AXError::NotificationAlreadyRegistered);
+                if !is_already_registered {
+                    trace!("Watching failed with error {err:?} on window {elem:#?}");
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn unregister_window_notifications(&self, elem: &AXUIElement) {
+        for notif in WINDOW_NOTIFICATIONS {
+            _ = self.observer.remove_notification(elem, notif);
+        }
+    }
+
     #[must_use]
     fn register_window(
         &mut self,
         elem: AXUIElement,
         server_info_hint: Option<WindowServerInfo>,
-    ) -> Option<(WindowInfo, WindowId, Option<WindowServerInfo>)> {
+    ) -> Option<RegisterWindowResult> {
         let Ok((mut info, server_info)) = WindowInfo::from_ax_element(&elem, server_info_hint)
         else {
             return None;
         };
 
-        let bundle_is_widget = info.bundle_id.as_deref().map_or(false, |id| {
+        let bundle_is_widget = info.bundle_id.as_deref().is_some_and(|id| {
             let id_lower = id.to_ascii_lowercase();
             id_lower.ends_with(".widget") || id_lower.contains(".widget.")
         });
 
-        let path_is_extension = info.path.as_ref().and_then(|p| p.to_str()).map_or(false, |path| {
+        let path_is_extension = info.path.as_ref().and_then(|p| p.to_str()).is_some_and(|path| {
             let lower = path.to_ascii_lowercase();
             lower.contains(".appex/") || lower.ends_with(".appex")
         });
@@ -1114,7 +1416,6 @@ impl State {
         }
 
         if info.ax_role.as_deref() == Some("AXPopover") || info.ax_role.as_deref() == Some("AXMenu")
-        //|| info.ax_subrole.as_deref() == Some("AXUnknown")
         {
             trace!(
                 role = ?info.ax_role,
@@ -1124,7 +1425,6 @@ impl State {
             return None;
         }
 
-        // TODO: improve this heuristic using ideas from AeroSpace(maybe implement a similar testing architecture based on ax dumps)
         if (self.bundle_id.as_deref() == Some("com.googlecode.iterm2")
             || self.bundle_id.as_deref() == Some("com.apple.TextInputUI.xpc.CursorUIViewService"))
             && elem.attribute("AXTitleUIElement").is_err()
@@ -1140,26 +1440,45 @@ impl State {
 
         let window_server_id = info.sys_id.or_else(|| {
             WindowServerId::try_from(&elem)
-                .or_else(|e| {
+                .map_err(|e| {
                     info!("Could not get window server id for {elem:?}: {e}");
-                    Err(e)
+                    e
                 })
                 .ok()
         });
 
-        let idx = window_server_id
-            .map(|sid| NonZeroU32::new(sid.as_u32()).expect("Window server id was 0"))
-            .unwrap_or_else(|| {
-                self.last_window_idx += 1;
-                NonZeroU32::new(self.last_window_idx).unwrap()
-            });
-        let wid = WindowId { pid: self.pid, idx };
-        if self.windows.contains_key(&wid) {
-            trace!(?wid, "Window already registered; skipping duplicate");
-            return None;
+        let tab_group_key = self.tab_group_key(&elem, &info, window_server_id);
+        if let Some(key) = tab_group_key.clone()
+            && let Some(&existing_wid) = self.tab_groups.get(&key)
+        {
+            self.activate_tab_group_window(existing_wid, &elem);
+            return Some(RegisterWindowResult::ExistingTabGroup { wid: existing_wid, info });
         }
 
-        if !register_notifs(&elem, self) {
+        let wid = if let Some(sid) = window_server_id {
+            let idx = NonZeroU32::new(sid.as_u32()).expect("Window server id was 0");
+            self.last_window_idx = self.last_window_idx.max(idx.get());
+            let sid_wid = WindowId { pid: self.pid, idx };
+            if let Some(existing) = self.windows.get(&sid_wid) {
+                if existing.window_server_id == Some(sid) {
+                    trace!(?sid_wid, ?sid, "Window already registered; skipping duplicate");
+                    return None;
+                }
+                WindowId {
+                    pid: self.pid,
+                    idx: self.allocate_window_idx(),
+                }
+            } else {
+                sid_wid
+            }
+        } else {
+            WindowId {
+                pid: self.pid,
+                idx: self.allocate_window_idx(),
+            }
+        };
+
+        if !self.register_window_notifications(&elem) {
             return None;
         }
         let hidden_by_app = self.is_hidden;
@@ -1173,36 +1492,115 @@ impl State {
             is_animating: false,
         });
         debug_assert!(old.is_none(), "Duplicate window id {wid:?}");
+        if let Some(key) = tab_group_key {
+            self.register_tab_group(key, wid, window_server_id);
+        }
         if hidden_by_app {
             self.send_event(Event::WindowMinimized(wid));
         }
-        return Some((info, wid, server_info));
+        Some(RegisterWindowResult::New {
+            info,
+            wid,
+            window_server_info: server_info,
+        })
+    }
 
-        fn register_notifs(win: &AXUIElement, state: &State) -> bool {
-            match win.role() {
-                Ok(role) if role == AX_WINDOW_ROLE => (),
-                _ => return false,
-            }
-            for notif in WINDOW_NOTIFICATIONS {
-                let res = state.observer.add_notification(win, notif);
-                if let Err(err) = res {
-                    let is_already_registered = matches!(
-                        err,
-                        AxError::Ax(code) if code == AXError::NotificationAlreadyRegistered
-                    );
-                    if !is_already_registered {
-                        trace!("Watching failed with error {err:?} on window {win:#?}");
-                        return false;
-                    }
-                }
-            }
-            true
+    fn maybe_activate_tab_group_window(&mut self, wid: WindowId, elem: &AXUIElement) {
+        if !self.tab_group_by_wid.contains_key(&wid) {
+            return;
         }
+        self.activate_tab_group_window(wid, elem);
+    }
+
+    fn activate_tab_group_window(&mut self, wid: WindowId, elem: &AXUIElement) {
+        let (old_elem, old_wsid) = match self.windows.get(&wid) {
+            Some(window) => (window.elem.clone(), window.window_server_id),
+            None => return,
+        };
+
+        let new_elem = elem.clone();
+        let new_wsid = WindowServerId::try_from(&new_elem).ok();
+        if let (Some(key), Some(new_wsid)) = (self.tab_group_by_wid.get(&wid).cloned(), new_wsid) {
+            self.tab_group_by_wsid.insert(new_wsid, key);
+        }
+
+        if old_wsid == new_wsid {
+            return;
+        }
+
+        if old_elem == new_elem {
+            let txid = self.txid_from_store(new_wsid).unwrap_or_default();
+            if let Some(window) = self.windows.get_mut(&wid) {
+                window.window_server_id = new_wsid;
+                window.last_seen_txid = txid;
+            }
+            self.send_event(Event::WindowServerIdChanged(
+                wid,
+                new_wsid,
+                new_wsid.and_then(window_server::get_window),
+            ));
+            return;
+        }
+
+        if !self.register_window_notifications(&new_elem) {
+            return;
+        }
+        self.unregister_window_notifications(&old_elem);
+
+        let txid = self.txid_from_store(new_wsid).unwrap_or_default();
+        if let Some(window) = self.windows.get_mut(&wid) {
+            window.elem = new_elem;
+            window.window_server_id = new_wsid;
+            window.last_seen_txid = txid;
+        }
+
+        if old_wsid != new_wsid {
+            self.send_event(Event::WindowServerIdChanged(
+                wid,
+                new_wsid,
+                new_wsid.and_then(window_server::get_window),
+            ));
+        }
+    }
+
+    fn try_recover_invalid_window(&mut self, wid: WindowId) -> bool {
+        let Some(window) = self.windows.get(&wid) else {
+            return false;
+        };
+        let dead_elem = window.elem.clone();
+
+        if self.tab_group_by_wid.contains_key(&wid)
+            && let Some(replacement) = self.find_tab_group_replacement(wid, &dead_elem)
+        {
+            self.activate_tab_group_window(wid, &replacement);
+            self.on_main_window_changed(Some(wid), false);
+            return true;
+        }
+
+        if self.main_window == Some(wid)
+            && let Ok(main_elem) = self.app.main_window()
+        {
+            if self.id(&main_elem).ok() == Some(wid) {
+                self.maybe_activate_tab_group_window(wid, &main_elem);
+                return true;
+            }
+
+            if self.maybe_rebind_unknown_main_window(&main_elem) == Some(wid) {
+                return true;
+            }
+        }
+
+        false
     }
 
     fn handle_ax_error(&mut self, wid: WindowId, err: &AXError) -> bool {
         if matches!(*err, AXError::InvalidUIElement) {
+            if self.try_recover_invalid_window(wid) {
+                return true;
+            }
+
             if self.windows.remove(&wid).is_some() {
+                self.remove_tab_group_for_window(wid);
                 self.send_event(Event::WindowDestroyed(wid));
                 self.on_main_window_changed(Some(wid), false);
             }
@@ -1238,36 +1636,74 @@ impl State {
     }
 
     fn remove_stale_windows(&mut self) {
-        let current_window_ids: HashSet<WindowId> = match self.app.windows() {
-            Ok(elems) => elems.iter().filter_map(|elem| self.id(&elem).ok()).collect(),
-            Err(e) => {
-                trace!(?e, "Failed to get windows; checking each tracked window");
-                let mut to_remove = Vec::new();
-                for (&wid, window) in self.windows.iter() {
-                    // InvalidUIElement means the window is gone
-                    if matches!(window.elem.role(), Err(AxError::Ax(AXError::InvalidUIElement))) {
-                        to_remove.push(wid);
-                    }
+        let Ok(elems) = self.app.windows() else {
+            trace!("Failed to get windows; checking each tracked window");
+            let mut to_remove = Vec::new();
+            for (&wid, window) in self.windows.iter() {
+                if matches!(window.elem.role(), Err(AxError::Ax(AXError::InvalidUIElement))) {
+                    to_remove.push(wid);
                 }
-                for wid in to_remove {
-                    self.remove_tracked_window(wid, "Removed stale window (individual check)");
-                }
-                return;
             }
+            for wid in to_remove {
+                self.remove_tracked_window(wid, "Removed stale window (individual check)");
+            }
+            return;
         };
+
+        let mut current_wsids: HashSet<WindowServerId> = HashSet::default();
+        let mut current_window_ids: HashSet<WindowId> = HashSet::default();
+        let mut had_unmapped = false;
+        for elem in elems.iter() {
+            if let Ok(wsid) = WindowServerId::try_from(elem) {
+                current_wsids.insert(wsid);
+            }
+            match self.id(elem) {
+                Ok(wid) => {
+                    current_window_ids.insert(wid);
+                }
+                Err(_) => had_unmapped = true,
+            }
+        }
+
+        if had_unmapped {
+            trace!("Window list contained unknown elements; skipping list-based stale cleanup");
+            let mut to_remove = Vec::new();
+            for (&wid, window) in self.windows.iter() {
+                if matches!(window.elem.role(), Err(AxError::Ax(AXError::InvalidUIElement))) {
+                    to_remove.push(wid);
+                }
+            }
+            for wid in to_remove {
+                self.remove_tracked_window(wid, "Removed stale window (individual check)");
+            }
+            return;
+        }
 
         let tracked_wids: Vec<WindowId> = self.windows.keys().copied().collect();
         for wid in tracked_wids {
             if !current_window_ids.contains(&wid) {
+                let in_tab_group = self.tab_group_by_wid.get(&wid).is_some_and(|key| {
+                    current_wsids
+                        .iter()
+                        .any(|wsid| self.active_tab_group_key_for_wsid(*wsid) == Some(key))
+                });
+                if in_tab_group {
+                    continue;
+                }
                 self.remove_tracked_window(wid, "Removed stale window (not in current list)");
             }
         }
     }
 
     fn remove_tracked_window(&mut self, wid: WindowId, reason: &'static str) {
+        let was_main_window = self.main_window == Some(wid);
         if self.windows.remove(&wid).is_some() {
+            self.remove_tab_group_for_window(wid);
             debug!(?wid, reason);
             self.send_event(Event::WindowDestroyed(wid));
+            if was_main_window {
+                self.on_main_window_changed(Some(wid), false);
+            }
         }
     }
 
@@ -1284,15 +1720,35 @@ impl State {
     }
 
     fn id(&self, elem: &AXUIElement) -> Result<WindowId, AxError> {
-        if let Ok(id) = WindowServerId::try_from(elem) {
-            let wid = WindowId {
-                pid: self.pid,
-                idx: NonZeroU32::new(id.as_u32()).expect("Window server id was 0"),
-            };
-            if self.windows.contains_key(&wid) {
+        if let Ok(Some(tab_group)) = elem.tab_group() {
+            let key = TabGroupKey::Ax(tab_group);
+            if let Some(&wid) = self.tab_groups.get(&key) {
                 return Ok(wid);
             }
-        } else if let Some((&wid, _)) = self.windows.iter().find(|(_, w)| &w.elem == elem) {
+        }
+
+        if let Ok(wsid) = WindowServerId::try_from(elem) {
+            if let Some(key) = self.active_tab_group_key_for_wsid(wsid)
+                && let Some(&wid) = self.tab_groups.get(key)
+            {
+                return Ok(wid);
+            }
+
+            let wid = WindowId {
+                pid: self.pid,
+                idx: NonZeroU32::new(wsid.as_u32()).expect("Window server id was 0"),
+            };
+            if self.windows.get(&wid).is_some_and(|state| state.window_server_id == Some(wsid)) {
+                return Ok(wid);
+            }
+            if let Some((&wid, _)) =
+                self.windows.iter().find(|(_, state)| state.window_server_id == Some(wsid))
+            {
+                return Ok(wid);
+            }
+        }
+
+        if let Some((&wid, _)) = self.windows.iter().find(|(_, w)| &w.elem == elem) {
             return Ok(wid);
         }
         Err(AxError::NotFound)
@@ -1369,6 +1825,9 @@ fn app_thread_main(
         observer,
         events_tx,
         windows: HashMap::default(),
+        tab_groups: HashMap::default(),
+        tab_group_by_wid: HashMap::default(),
+        tab_group_by_wsid: HashMap::default(),
         last_window_idx: 0,
         main_window: None,
         last_activated: None,
