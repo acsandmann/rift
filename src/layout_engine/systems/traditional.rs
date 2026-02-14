@@ -3,9 +3,10 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::actor::app::{WindowId, pid_t};
+use crate::common::collections::HashMap;
 use crate::layout_engine::systems::LayoutSystem;
 use crate::layout_engine::utils::compute_tiling_area;
-use crate::layout_engine::{Direction, LayoutId, LayoutKind, Orientation};
+use crate::layout_engine::{Direction, LayoutId, LayoutKind, Orientation, WindowConstraint};
 use crate::model::selection::*;
 use crate::model::tree::{self, NodeId, NodeMap, OwnedNode, Tree};
 use crate::sys::geometry::Round;
@@ -14,6 +15,8 @@ use crate::sys::geometry::Round;
 pub struct TraditionalLayoutSystem {
     pub(crate) tree: Tree<Components>,
     pub(crate) layout_roots: slotmap::SlotMap<LayoutId, OwnedNode>,
+    #[serde(skip)]
+    constraints: HashMap<WindowId, WindowConstraint>,
 }
 
 impl Default for TraditionalLayoutSystem {
@@ -21,6 +24,7 @@ impl Default for TraditionalLayoutSystem {
         Self {
             tree: Tree::with_observer(Components::default()),
             layout_roots: Default::default(),
+            constraints: HashMap::default(),
         }
     }
 }
@@ -136,6 +140,18 @@ impl TraditionalLayoutSystem {
         self.tree.data.layout.set_kind(node, kind);
     }
 
+    pub(crate) fn set_window_constraint(&mut self, wid: WindowId, constraint: WindowConstraint) {
+        self.constraints.insert(wid, constraint);
+    }
+
+    pub(crate) fn clear_window_constraint(&mut self, wid: WindowId) {
+        self.constraints.remove(&wid);
+    }
+
+    pub(crate) fn window_constraint(&self, wid: WindowId) -> Option<WindowConstraint> {
+        self.constraints.get(&wid).copied()
+    }
+
     pub(crate) fn calculate_layout_for_node(
         &self,
         node: NodeId,
@@ -160,6 +176,7 @@ impl TraditionalLayoutSystem {
             stack_line_thickness,
             stack_line_horiz,
             stack_line_vert,
+            &self.constraints,
         );
         sizes
     }
@@ -455,6 +472,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
             stack_line_thickness,
             stack_line_horiz,
             stack_line_vert,
+            &self.constraints,
         );
 
         sizes
@@ -1798,7 +1816,10 @@ impl TraditionalLayoutSystem {
                     first_direction = Some(direction);
                 }
                 if resize {
-                    self.resize_internal(node, f64::from(delta) / f64::from(whole), direction);
+                    let ratio = f64::from(delta) / f64::from(whole);
+                    if !self.resize_internal(node, ratio, direction) {
+                        let _ = self.resize_internal(node, ratio, direction.opposite());
+                    }
                 }
             }
             good
@@ -2294,6 +2315,7 @@ impl Layout {
         stack_line_thickness: f64,
         stack_line_horiz: crate::common::config::HorizontalPlacement,
         stack_line_vert: crate::common::config::VerticalPlacement,
+        constraints: &HashMap<WindowId, WindowConstraint>,
     ) {
         let info = &self.info[node];
         let rect = if info.is_fullscreen {
@@ -2355,6 +2377,7 @@ impl Layout {
                         stack_line_thickness,
                         stack_line_horiz,
                         stack_line_vert,
+                        constraints,
                     );
                 }
             }
@@ -2371,6 +2394,7 @@ impl Layout {
                 stack_line_thickness,
                 stack_line_horiz,
                 stack_line_vert,
+                constraints,
             ),
             Vertical => self.layout_axis(
                 map,
@@ -2385,7 +2409,53 @@ impl Layout {
                 stack_line_thickness,
                 stack_line_horiz,
                 stack_line_vert,
+                constraints,
             ),
+        }
+    }
+
+    fn max_len_for_node(
+        &self,
+        map: &NodeMap,
+        window: &WindowIndex,
+        node: NodeId,
+        gaps: &crate::common::config::GapSettings,
+        horizontal: bool,
+        constraints: &HashMap<WindowId, WindowConstraint>,
+    ) -> Option<f64> {
+        if let Some(wid) = window.at(node) {
+            return constraints.get(&wid).and_then(|c| c.cap_for_axis(horizontal));
+        }
+
+        let kind = self.kind(node);
+        if kind.is_group() {
+            return None;
+        }
+
+        let children: Vec<_> = node.children(map).collect();
+        if children.is_empty() {
+            return None;
+        }
+
+        let mut caps = Vec::with_capacity(children.len());
+        for child in children {
+            let cap = self.max_len_for_node(map, window, child, gaps, horizontal, constraints)?;
+            caps.push(cap);
+        }
+
+        let orientation = kind.orientation();
+        if (horizontal && orientation == Orientation::Horizontal)
+            || (!horizontal && orientation == Orientation::Vertical)
+        {
+            let gap = if orientation == Orientation::Horizontal {
+                gaps.inner.horizontal
+            } else {
+                gaps.inner.vertical
+            };
+            let total_gap = (caps.len().saturating_sub(1) as f64) * gap;
+            Some(caps.into_iter().sum::<f64>() + total_gap)
+        } else {
+            Some(caps.into_iter().fold(0.0, f64::max))
         }
     }
 
@@ -2403,6 +2473,7 @@ impl Layout {
         stack_line_thickness: f64,
         stack_line_horiz: crate::common::config::HorizontalPlacement,
         stack_line_vert: crate::common::config::VerticalPlacement,
+        constraints: &HashMap<WindowId, WindowConstraint>,
     ) {
         use objc2_core_foundation::{CGPoint, CGSize};
         let children: Vec<_> = node.children(map).collect();
@@ -2452,14 +2523,78 @@ impl Layout {
         } else {
             (axis_len - total_gap).max(0.0)
         };
+        let weights: Vec<f64> =
+            children.iter().map(|child| f64::from(self.info[*child].size)).collect();
+        let caps: Vec<Option<f64>> = children
+            .iter()
+            .map(|child| self.max_len_for_node(map, window, *child, gaps, horizontal, constraints))
+            .collect();
+        let has_caps = caps.iter().any(|cap| cap.is_some());
+        let mut seg_lens = Vec::with_capacity(children.len());
+        if has_caps {
+            let mut fixed: Vec<Option<f64>> = vec![None; children.len()];
+            let mut remaining = usable_axis;
+            let mut remaining_weight = weights.iter().sum::<f64>();
+            loop {
+                if remaining_weight <= 0.0 {
+                    break;
+                }
+                let mut changed = false;
+                for (i, w) in weights.iter().enumerate() {
+                    if fixed[i].is_some() {
+                        continue;
+                    }
+                    if let Some(cap) = caps[i] {
+                        let desired = remaining * (*w) / remaining_weight;
+                        if desired > cap + 0.1 {
+                            fixed[i] = Some(cap.max(0.0));
+                            changed = true;
+                        }
+                    }
+                }
+                if !changed {
+                    break;
+                }
+                let fixed_sum: f64 = fixed.iter().filter_map(|v| *v).sum();
+                remaining = (usable_axis - fixed_sum).max(0.0);
+                remaining_weight = weights
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| fixed[*i].is_none())
+                    .map(|(_, w)| *w)
+                    .sum::<f64>();
+            }
+            let fixed_sum: f64 = fixed.iter().filter_map(|v| *v).sum();
+            remaining = (usable_axis - fixed_sum).max(0.0);
+            remaining_weight = weights
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| fixed[*i].is_none())
+                .map(|(_, w)| *w)
+                .sum::<f64>();
+            for (i, w) in weights.iter().enumerate() {
+                let len = if let Some(fixed_len) = fixed[i] {
+                    fixed_len
+                } else if remaining_weight > 0.0 {
+                    remaining * (*w) / remaining_weight
+                } else {
+                    0.0
+                };
+                seg_lens.push(len);
+            }
+        } else {
+            for &child in &children {
+                let ratio = f64::from(self.info[child].size) / f64::from(total);
+                seg_lens.push(usable_axis * ratio);
+            }
+        }
         let mut offset = if horizontal {
             rect.origin.x
         } else {
             rect.origin.y
         };
         for (i, &child) in children.iter().enumerate() {
-            let ratio = f64::from(self.info[child].size) / f64::from(total);
-            let seg_len = usable_axis * ratio;
+            let seg_len = seg_lens[i];
             let child_rect = if horizontal {
                 CGRect {
                     origin: CGPoint { x: offset, y: rect.origin.y },
@@ -2490,6 +2625,7 @@ impl Layout {
                 stack_line_thickness,
                 stack_line_horiz,
                 stack_line_vert,
+                constraints,
             );
             offset += seg_len;
             if i < children.len() - 1 {
@@ -2538,7 +2674,9 @@ mod tests {
     use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 
     use super::*;
-    use crate::layout_engine::{Direction, LayoutKind};
+    use crate::common::config::{GapSettings, HorizontalPlacement, VerticalPlacement};
+    use crate::layout_engine::{Direction, LayoutKind, WindowConstraint};
+    use crate::sys::geometry::IsWithin;
 
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
 
@@ -2567,6 +2705,36 @@ mod tests {
 
         assert_eq!(system.window_in_direction(layout, Direction::Down), Some(w(1)));
         assert_eq!(system.window_in_direction(layout, Direction::Up), Some(w(2)));
+    }
+
+    #[test]
+    fn constrained_window_frees_space_for_siblings() {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+        system.set_window_constraint(w(1), WindowConstraint {
+            max_w: Some(300.0),
+            max_h: None,
+        });
+
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 600.0));
+        let gaps = GapSettings::default();
+        let frames = system.calculate_layout(
+            layout,
+            screen,
+            0.0,
+            &gaps,
+            0.0,
+            HorizontalPlacement::Top,
+            VerticalPlacement::Left,
+        );
+        let w1_width = frames.iter().find(|(wid, _)| *wid == w(1)).unwrap().1.size.width;
+        let w2_width = frames.iter().find(|(wid, _)| *wid == w(2)).unwrap().1.size.width;
+        assert!(w1_width.is_within(0.5, 300.0));
+        assert!(w2_width.is_within(0.5, 700.0));
     }
 
     struct TestTraditionalLayoutSystem {

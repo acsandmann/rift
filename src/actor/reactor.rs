@@ -47,6 +47,7 @@ use crate::actor::reactor::events::window_discovery::WindowDiscoveryHandler;
 use crate::actor::{self, menu_bar, stack_line};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
 use crate::common::config::Config;
+use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{self as layout, Direction, LayoutEngine, LayoutEvent};
 use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy};
 use crate::model::tx_store::WindowTxStore;
@@ -71,9 +72,9 @@ pub(crate) use crate::model::reactor::{
     WindowState,
 };
 pub use crate::model::reactor::{
-    Command, DisplaySelector, DragSession, DragState, MenuState, MissionControlState,
-    ReactorCommand, RefocusState, Requested, StaleCleanupState, WorkspaceSwitchOrigin,
-    WorkspaceSwitchState,
+    Command, DisplaySelector, DragSession, DragState, FrameChangeKind, MenuState,
+    MissionControlState, ReactorCommand, RefocusState, Requested, StaleCleanupState,
+    WorkspaceSwitchOrigin, WorkspaceSwitchState,
 };
 
 #[derive(Clone)]
@@ -101,6 +102,12 @@ impl std::ops::Deref for ReactorHandle {
     type Target = ReactorQueryHandle;
 
     fn deref(&self) -> &Self::Target { &self.queries }
+}
+
+#[derive(Clone, Copy)]
+struct ConstraintProbe {
+    txid: TransactionId,
+    target: CGRect,
 }
 
 use crate::model::server::WindowData;
@@ -180,6 +187,7 @@ pub enum Event {
         #[serde(with = "CGRectDef")] CGRect,
         Option<TransactionId>,
         Requested,
+        #[serde(default)] FrameChangeKind,
         Option<MouseState>,
     ),
     WindowTitleChanged(WindowId, String),
@@ -254,6 +262,8 @@ pub struct Reactor {
     mission_control_manager: managers::MissionControlManager,
     refocus_manager: managers::RefocusManager,
     pending_space_change_manager: managers::PendingSpaceChangeManager,
+    constraint_probes: HashMap<WindowId, ConstraintProbe>,
+    constraint_probing_enabled: bool,
     active_spaces: HashSet<SpaceId>,
     display_churn_active: bool,
     display_churn_pending_full_refresh: bool,
@@ -380,6 +390,8 @@ impl Reactor {
                 pending_space_change: None,
                 topology_relayout_pending: false,
             },
+            constraint_probes: HashMap::default(),
+            constraint_probing_enabled: true,
             active_spaces: HashSet::default(),
             display_churn_active: false,
             display_churn_pending_full_refresh: false,
@@ -412,6 +424,51 @@ impl Reactor {
             return false;
         };
         self.is_space_active(space)
+    }
+
+    fn maybe_start_constraint_probe(&mut self, wid: WindowId, space: SpaceId) -> bool {
+        if !self.constraint_probing_enabled {
+            return false;
+        }
+        if self.constraint_probes.contains_key(&wid) {
+            return true;
+        }
+        if self.layout_manager.layout_engine.window_constraint(wid).is_some() {
+            return false;
+        }
+        if self.layout_manager.layout_engine.is_window_floating(wid) {
+            return false;
+        }
+        let Some(window) = self.window_manager.windows.get(&wid) else {
+            return false;
+        };
+        if !window.matches_filter(WindowFilter::EffectivelyManageable) {
+            return false;
+        }
+        let Some(app_state) = self.app_manager.apps.get(&wid.pid) else {
+            return false;
+        };
+        let Some(wsid) = window.info.sys_id else {
+            return false;
+        };
+        let Some(screen) = self.space_manager.screen_by_space(space) else {
+            return false;
+        };
+        let gaps = self
+            .config
+            .settings
+            .layout
+            .gaps
+            .effective_for_display(screen.display_uuid_opt());
+        let target = compute_tiling_area(screen.frame, &gaps);
+        let txid = self.transaction_manager.generate_next_txid(wsid);
+        self.transaction_manager.store_txid(wsid, txid, target);
+        if app_state.handle.send(Request::SetWindowFrame(wid, target, txid, true)).is_err() {
+            self.transaction_manager.remove_for_window(wsid);
+            return false;
+        }
+        self.constraint_probes.insert(wid, ConstraintProbe { txid, target });
+        true
     }
 
     fn activation_cfg(&self) -> SpaceActivationConfig {
@@ -775,6 +832,10 @@ impl Reactor {
         }
 
         let should_update_notifications = Self::should_update_notifications(&event);
+        let skip_layout_update = matches!(
+            &event,
+            Event::WindowFrameChanged(_, _, _, Requested(true), _, _)
+        );
 
         let raised_window = self.main_window_tracker.handle_event(&event);
         let mut is_resize = false;
@@ -863,13 +924,21 @@ impl Reactor {
             Event::WindowDeminiaturized(wid) => {
                 WindowEventHandler::handle_window_deminiaturized(self, wid);
             }
-            Event::WindowFrameChanged(wid, new_frame, last_seen, requested, mouse_state) => {
+            Event::WindowFrameChanged(
+                wid,
+                new_frame,
+                last_seen,
+                requested,
+                change_kind,
+                mouse_state,
+            ) => {
                 is_resize = WindowEventHandler::handle_window_frame_changed(
                     self,
                     wid,
                     new_frame,
                     last_seen,
                     requested,
+                    change_kind,
                     mouse_state,
                 );
             }
@@ -917,6 +986,7 @@ impl Reactor {
             is_resize,
             window_was_destroyed,
             should_update_notifications,
+            skip_layout_update,
         );
     }
 
@@ -926,6 +996,7 @@ impl Reactor {
         is_resize: bool,
         window_was_destroyed: bool,
         should_update_notifications: bool,
+        skip_layout_update: bool,
     ) {
         if self.display_churn_active || self.display_churn_pending_full_refresh {
             return;
@@ -943,7 +1014,7 @@ impl Reactor {
         }
 
         let mut layout_changed = false;
-        if !self.is_in_drag() || window_was_destroyed {
+        if !skip_layout_update && (!self.is_in_drag() || window_was_destroyed) {
             layout_changed = self.update_layout_or_warn(
                 is_resize,
                 matches!(
@@ -1771,9 +1842,12 @@ impl Reactor {
                 };
 
                 match assign_result {
-                    Ok(AppRuleResult::Managed(_)) => {
+                    Ok(AppRuleResult::Managed(decision)) => {
                         if let Some(window) = self.window_manager.windows.get_mut(wid) {
                             window.ignore_app_rule = false;
+                        }
+                        if !decision.floating && self.maybe_start_constraint_probe(*wid, space) {
+                            continue;
                         }
                         manageable_windows.push(*wid);
                     }
@@ -1798,6 +1872,9 @@ impl Reactor {
                         warn!("Failed to assign window {:?} to workspace: {:?}", wid, e);
                         if let Some(window) = self.window_manager.windows.get_mut(wid) {
                             window.ignore_app_rule = false;
+                        }
+                        if self.maybe_start_constraint_probe(*wid, space) {
+                            continue;
                         }
                         manageable_windows.push(*wid);
                     }

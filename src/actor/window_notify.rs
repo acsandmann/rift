@@ -5,7 +5,7 @@ use tracing::{debug, trace};
 
 use super::reactor::{self, Event};
 use crate::actor::app::WindowId;
-use crate::actor::reactor::Requested;
+use crate::actor::reactor::{FrameChangeKind, Requested};
 use crate::common::collections::{HashMap, HashSet};
 use crate::model::tx_store::WindowTxStore;
 use crate::sys::screen::SpaceId;
@@ -216,6 +216,12 @@ impl WindowNotify {
                     }
                     CGSEventType::Known(KnownCGSEvent::WindowMoved)
                     | CGSEventType::Known(KnownCGSEvent::WindowResized) => {
+                        let change_kind = match event {
+                            CGSEventType::Known(KnownCGSEvent::WindowResized) => {
+                                FrameChangeKind::Resize
+                            }
+                            _ => FrameChangeKind::Move,
+                        };
                         // TODO: suppress move/resize while Mission Control is active
                         let mouse_state = event::get_mouse_state();
                         let window_id = evt.window_id.unwrap();
@@ -236,6 +242,7 @@ impl WindowNotify {
                                     bounds,
                                     last_seen,
                                     Requested(false),
+                                    change_kind,
                                     mouse_state,
                                 ));
                             }

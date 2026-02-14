@@ -9,6 +9,7 @@ use crate::common::config::{MasterStackNewWindowPlacement, MasterStackSettings, 
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{
     Direction, LayoutId, LayoutKind, LayoutSystem, Orientation, TraditionalLayoutSystem,
+    WindowConstraint,
 };
 use crate::model::tree::NodeId;
 
@@ -46,6 +47,18 @@ impl MasterStackLayoutSystem {
             }
             self.rebuild_layout(layout);
         }
+    }
+
+    pub fn set_window_constraint(&mut self, wid: WindowId, constraint: WindowConstraint) {
+        self.inner.set_window_constraint(wid, constraint);
+    }
+
+    pub fn clear_window_constraint(&mut self, wid: WindowId) {
+        self.inner.clear_window_constraint(wid);
+    }
+
+    pub fn window_constraint(&self, wid: WindowId) -> Option<WindowConstraint> {
+        self.inner.window_constraint(wid)
     }
 
     fn root_orientation(&self) -> Orientation {

@@ -11,6 +11,17 @@ use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Requested(pub bool);
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FrameChangeKind {
+    Move,
+    Resize,
+}
+
+impl Default for FrameChangeKind {
+    fn default() -> Self { FrameChangeKind::Move }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(untagged)]
 pub enum Command {
