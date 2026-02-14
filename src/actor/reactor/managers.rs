@@ -336,4 +336,5 @@ pub struct WindowServerInfoManager {
 pub struct PendingSpaceChangeManager {
     pub pending_space_change: Option<PendingSpaceChange>,
     pub topology_relayout_pending: bool,
+    pub last_space_change_signature: Option<(Vec<Option<SpaceId>>, Vec<WindowServerId>)>,
 }

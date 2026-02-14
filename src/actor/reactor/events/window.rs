@@ -74,6 +74,60 @@ impl WindowEventHandler {
         // }
     }
 
+    pub fn handle_window_server_id_changed(
+        reactor: &mut Reactor,
+        wid: WindowId,
+        wsid: Option<WindowServerId>,
+        ws_info: Option<WindowServerInfo>,
+    ) {
+        let Some(window_state) = reactor.window_manager.windows.get_mut(&wid) else {
+            return;
+        };
+
+        let old_wsid = window_state.info.sys_id;
+        if old_wsid == wsid {
+            if let Some(info) = ws_info {
+                reactor.window_manager.observed_window_server_ids.remove(&info.id);
+                reactor.window_server_info_manager.window_server_info.insert(info.id, info);
+            }
+            return;
+        }
+
+        if let Some(old) = old_wsid {
+            if reactor.window_manager.window_ids.get(&old) == Some(&wid) {
+                reactor.window_manager.window_ids.remove(&old);
+            }
+            reactor.transaction_manager.remove_for_window(old);
+            reactor.window_server_info_manager.window_server_info.remove(&old);
+            reactor.window_manager.visible_windows.remove(&old);
+        }
+
+        window_state.info.sys_id = wsid;
+        window_state.is_manageable = utils::compute_window_manageability(
+            window_state.info.sys_id,
+            window_state.info.is_minimized,
+            window_state.info.is_standard,
+            window_state.info.is_root,
+            &reactor.window_server_info_manager.window_server_info,
+        );
+
+        if let Some(new_wsid) = wsid {
+            reactor.window_manager.window_ids.insert(new_wsid, wid);
+            reactor.window_manager.visible_windows.insert(new_wsid);
+            reactor.window_manager.observed_window_server_ids.remove(&new_wsid);
+            reactor.transaction_manager.store_txid(
+                new_wsid,
+                reactor.transaction_manager.get_last_sent_txid(new_wsid),
+                window_state.frame_monotonic,
+            );
+        }
+
+        if let Some(info) = ws_info {
+            reactor.window_manager.observed_window_server_ids.remove(&info.id);
+            reactor.window_server_info_manager.window_server_info.insert(info.id, info);
+        }
+    }
+
     pub fn handle_window_destroyed(reactor: &mut Reactor, wid: WindowId) -> bool {
         let window_server_id = match reactor.window_manager.windows.get(&wid) {
             Some(window) => window.info.sys_id,
@@ -222,7 +276,16 @@ impl WindowEventHandler {
             let mut triggered_by_rift =
                 has_pending_request && last_seen.is_some_and(|seen| seen == last_sent_txid);
 
-            if effective_mouse_state == Some(MouseState::Down) && triggered_by_rift {
+            let user_frame_event = !requested.0
+                && matches!(effective_mouse_state, Some(MouseState::Down | MouseState::Up));
+
+            if user_frame_event && has_pending_request {
+                if let Some((wsid, _)) = pending_target {
+                    reactor.transaction_manager.remove_for_window(wsid);
+                }
+                triggered_by_rift = false;
+                has_pending_request = false;
+            } else if effective_mouse_state == Some(MouseState::Down) && triggered_by_rift {
                 if let Some((wsid, _)) = pending_target {
                     reactor.transaction_manager.remove_for_window(wsid);
                 }

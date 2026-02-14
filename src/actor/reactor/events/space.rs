@@ -12,6 +12,7 @@ use crate::actor::reactor::{
 use crate::actor::wm_controller::WmEvent;
 use crate::common::collections::{HashMap, HashSet};
 use crate::sys::app::AppInfo;
+use crate::sys::event::{MouseState, get_mouse_state};
 use crate::sys::screen::{ScreenId, SpaceId};
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 
@@ -52,15 +53,47 @@ impl SpaceEventHandler {
             return;
         } else if crate::sys::window_server::space_is_user(sid.get()) {
             if let Some(&wid) = reactor.window_manager.window_ids.get(&wsid) {
-                reactor.window_manager.window_ids.remove(&wsid);
-                reactor.window_server_info_manager.window_server_info.remove(&wsid);
-                reactor.window_manager.visible_windows.remove(&wsid);
+                if crate::sys::window_server::get_window(wsid).is_some() {
+                    trace!(
+                        ?wid,
+                        ?wsid,
+                        ?sid,
+                        "Ignoring WindowServerDestroyed because window still exists"
+                    );
+                    return;
+                }
+
+                if let Some(current_space) = reactor.best_space_for_window_id(wid)
+                    && crate::sys::window_server::space_is_user(current_space.get())
+                    && current_space != sid
+                {
+                    trace!(
+                        ?wid,
+                        ?wsid,
+                        ?sid,
+                        ?current_space,
+                        "Ignoring WindowServerDestroyed for non-current user space"
+                    );
+                    return;
+                }
+
+                let drag_in_progress =
+                    reactor.is_in_drag() || get_mouse_state() == Some(MouseState::Down);
+                if drag_in_progress {
+                    trace!(
+                        ?wid,
+                        ?wsid,
+                        drag_in_progress,
+                        "Ignoring transient WindowServerDestroyed during drag/display transition"
+                    );
+                    return;
+                }
+
                 if let Some(app_state) = reactor.app_manager.apps.get(&wid.pid) {
                     if let Err(e) = app_state.handle.send(Request::WindowMaybeDestroyed(wid)) {
                         warn!("Failed to send WindowMaybeDestroyed: {}", e);
                     }
-                }
-                if let Some(tx) = reactor.communication_manager.events_tx.as_ref() {
+                } else if let Some(tx) = reactor.communication_manager.events_tx.as_ref() {
                     tx.send(Event::WindowDestroyed(wid));
                 }
             } else {
@@ -167,6 +200,8 @@ impl SpaceEventHandler {
         screens: Vec<ScreenInfo>,
         ws_info: Vec<WindowServerInfo>,
     ) {
+        reactor.pending_space_change_manager.last_space_change_signature = None;
+
         let previous_displays: HashSet<String> =
             reactor.space_manager.screens.iter().map(|s| s.display_uuid.clone()).collect();
         let new_displays: HashSet<String> =
@@ -317,6 +352,27 @@ impl SpaceEventHandler {
                 Some(PendingSpaceChange { spaces, ws_info });
             return;
         }
+
+        let signature = space_change_signature(&spaces, &ws_info);
+        if !reactor.pending_space_change_manager.topology_relayout_pending
+            && reactor.pending_space_change_manager.last_space_change_signature.as_ref()
+                == Some(&signature)
+        {
+            trace!(?spaces, "Ignoring duplicate SpaceChanged signature");
+            return;
+        }
+        reactor.pending_space_change_manager.last_space_change_signature = Some(signature);
+
+        let mouse_down = get_mouse_state() == Some(MouseState::Down);
+        if spaces == reactor.raw_spaces_for_current_screens()
+            && (reactor.is_in_drag() || mouse_down)
+        {
+            trace!(
+                ?spaces,
+                mouse_down, "Ignoring duplicate SpaceChanged while drag/mouse-down"
+            );
+            return;
+        }
         let spaces_all_none = spaces.iter().all(|space| space.is_none());
         if spaces_all_none {
             update_stale_cleanup_state(reactor, true);
@@ -415,6 +471,15 @@ fn request_visible_windows(reactor: &Reactor, pid: i32, context: &str) {
             warn!("Failed to {}: {}", context, e);
         }
     }
+}
+
+fn space_change_signature(
+    spaces: &[Option<SpaceId>],
+    ws_info: &[WindowServerInfo],
+) -> (Vec<Option<SpaceId>>, Vec<WindowServerId>) {
+    let mut wsids: Vec<WindowServerId> = ws_info.iter().map(|info| info.id).collect();
+    wsids.sort_unstable_by_key(|id| id.as_u32());
+    (spaces.to_vec(), wsids)
 }
 
 fn update_stale_cleanup_state(reactor: &mut Reactor, spaces_all_none: bool) {

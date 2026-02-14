@@ -226,14 +226,7 @@ impl AXUIElement {
         let Some(value) = self.copy_attribute("AXWindows")? else {
             return Ok(Vec::new());
         };
-        let array = self.downcast::<CFArray>(value)?;
-        let array = unsafe { CFRetained::cast_unchecked::<CFArray<CFType>>(array) };
-        let mut out = Vec::with_capacity(array.len());
-        for entry in array.iter() {
-            let elem = self.downcast::<RawAXUIElement>(entry)?;
-            out.push(AXUIElement::new(elem));
-        }
-        Ok(out)
+        self.elements_from_cf_array(value)
     }
 
     pub fn parent(&self) -> Result<Option<AXUIElement>> {
@@ -243,6 +236,25 @@ impl AXUIElement {
         let element = self.downcast::<RawAXUIElement>(value)?;
         Ok(Some(AXUIElement::new(element)))
     }
+
+    pub fn element_attribute(&self, name: &'static str) -> Result<Option<AXUIElement>> {
+        let Some(value) = self.copy_attribute(name)? else {
+            return Ok(None);
+        };
+        let element = self.downcast::<RawAXUIElement>(value)?;
+        Ok(Some(AXUIElement::new(element)))
+    }
+
+    pub fn elements_attribute(&self, name: &'static str) -> Result<Vec<AXUIElement>> {
+        let Some(value) = self.copy_attribute(name)? else {
+            return Ok(Vec::new());
+        };
+        self.elements_from_cf_array(value)
+    }
+
+    pub fn tab_group(&self) -> Result<Option<AXUIElement>> { self.element_attribute("AXTabGroup") }
+
+    pub fn tabs(&self) -> Result<Vec<AXUIElement>> { self.elements_attribute("AXTabs") }
 
     pub fn attribute(&self, name: &'static str) -> Result<Option<CFRetained<CFType>>> {
         self.copy_attribute(name)
@@ -303,6 +315,17 @@ impl AXUIElement {
     pub fn can_move(&self) -> Result<bool> { self.bool_attribute("AXPosition") }
 
     pub fn can_resize(&self) -> Result<bool> { self.bool_attribute("AXSize") }
+
+    fn elements_from_cf_array(&self, value: CFRetained<CFType>) -> Result<Vec<AXUIElement>> {
+        let array = self.downcast::<CFArray>(value)?;
+        let array = unsafe { CFRetained::cast_unchecked::<CFArray<CFType>>(array) };
+        let mut out = Vec::with_capacity(array.len());
+        for entry in array.iter() {
+            let elem = self.downcast::<RawAXUIElement>(entry)?;
+            out.push(AXUIElement::new(elem));
+        }
+        Ok(out)
+    }
 }
 
 impl Deref for AXUIElement {

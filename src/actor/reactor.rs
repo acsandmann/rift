@@ -51,7 +51,7 @@ use crate::layout_engine::{self as layout, Direction, LayoutEngine, LayoutEvent}
 use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy};
 use crate::model::tx_store::WindowTxStore;
 use crate::model::virtual_workspace::AppRuleResult;
-use crate::sys::event::MouseState;
+use crate::sys::event::{MouseState, get_mouse_state};
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt};
 pub use crate::sys::screen::ScreenInfo;
@@ -164,6 +164,7 @@ pub enum Event {
         Option<WindowServerInfo>,
         Option<MouseState>,
     ),
+    WindowServerIdChanged(WindowId, Option<WindowServerId>, Option<WindowServerInfo>),
     WindowDestroyed(WindowId),
     #[serde(skip)]
     WindowServerDestroyed(crate::sys::window_server::WindowServerId, SpaceId),
@@ -379,6 +380,7 @@ impl Reactor {
             pending_space_change_manager: managers::PendingSpaceChangeManager {
                 pending_space_change: None,
                 topology_relayout_pending: false,
+                last_space_change_signature: None,
             },
             active_spaces: HashSet::default(),
             display_churn_active: false,
@@ -705,6 +707,7 @@ impl Reactor {
         let wsid = match event {
             Event::WindowFrameChanged(wid, ..) => Some(wid.idx.get()),
             Event::WindowCreated(wid, ..) => Some(wid.idx.get()),
+            Event::WindowServerIdChanged(_, wsid, _) => wsid.map(|id| id.as_u32()),
             Event::WindowDestroyed(wid) => Some(wid.idx.get()),
             Event::WindowMinimized(wid) => Some(wid.idx.get()),
             Event::WindowDeminiaturized(wid) => Some(wid.idx.get()),
@@ -730,6 +733,7 @@ impl Reactor {
         matches!(
             event,
             Event::WindowCreated(..)
+                | Event::WindowServerIdChanged(..)
                 | Event::WindowDestroyed(..)
                 | Event::WindowServerDestroyed(..)
                 | Event::WindowServerAppeared(..)
@@ -842,6 +846,9 @@ impl Reactor {
             Event::WindowCreated(wid, window, ws_info, mouse_state) => {
                 WindowEventHandler::handle_window_created(self, wid, window, ws_info, mouse_state);
             }
+            Event::WindowServerIdChanged(wid, wsid, ws_info) => {
+                WindowEventHandler::handle_window_server_id_changed(self, wid, wsid, ws_info);
+            }
             Event::WindowDestroyed(wid) => {
                 window_was_destroyed = WindowEventHandler::handle_window_destroyed(self, wid);
             }
@@ -938,12 +945,19 @@ impl Reactor {
                 .get(&raised_window)
                 .and_then(|w| self.best_space_for_window(&w.frame_monotonic, w.info.sys_id))
             {
-                self.send_layout_event(LayoutEvent::WindowFocused(space, raised_window));
+                if self
+                    .layout_manager
+                    .layout_engine
+                    .is_window_in_active_workspace(space, raised_window)
+                {
+                    self.send_layout_event(LayoutEvent::WindowFocused(space, raised_window));
+                }
             }
         }
 
+        let mouse_down = get_mouse_state() == Some(MouseState::Down);
         let mut layout_changed = false;
-        if !self.is_in_drag() || window_was_destroyed {
+        if (!self.is_in_drag() && !mouse_down) || window_was_destroyed {
             layout_changed = self.update_layout_or_warn(
                 is_resize,
                 matches!(
@@ -1632,6 +1646,10 @@ impl Reactor {
     // Returns true if the window should be raised on mouse over considering
     // active workspace membership and potential occlusion of other windows above it.
     fn should_raise_on_mouse_over(&self, wid: WindowId) -> bool {
+        if self.main_window() == Some(wid) {
+            return false;
+        }
+
         let Some(window) = self.window_manager.windows.get(&wid) else {
             return false;
         };
