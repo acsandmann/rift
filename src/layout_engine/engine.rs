@@ -7,7 +7,9 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-use super::{Direction, FloatingManager, LayoutId, LayoutSystemKind, WorkspaceLayouts};
+use super::{
+    Direction, FloatingManager, LayoutId, LayoutSystemKind, WindowConstraint, WorkspaceLayouts,
+};
 use crate::actor::app::{AppInfo, WindowId, pid_t};
 use crate::actor::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::common::collections::{HashMap, HashSet};
@@ -248,6 +250,70 @@ impl LayoutEngine {
                 _ => {}
             }
         }
+    }
+
+    pub fn set_window_constraint(&mut self, wid: WindowId, constraint: WindowConstraint) {
+        let ws_ids = self.virtual_workspace_manager.workspaces_for_window(wid);
+        let ws_ids = if ws_ids.is_empty() {
+            self.virtual_workspace_manager.workspaces.keys().collect()
+        } else {
+            ws_ids
+        };
+
+        for ws_id in ws_ids {
+            match self.workspace_tree_mut(ws_id) {
+                LayoutSystemKind::Traditional(system) => {
+                    system.set_window_constraint(wid, constraint);
+                }
+                LayoutSystemKind::Bsp(system) => {
+                    system.set_window_constraint(wid, constraint);
+                }
+                LayoutSystemKind::MasterStack(system) => {
+                    system.set_window_constraint(wid, constraint);
+                }
+                LayoutSystemKind::Scrolling(_) => {}
+            }
+        }
+    }
+
+    pub fn clear_window_constraint(&mut self, wid: WindowId) {
+        let ws_ids = self.virtual_workspace_manager.workspaces_for_window(wid);
+        let ws_ids = if ws_ids.is_empty() {
+            self.virtual_workspace_manager.workspaces.keys().collect()
+        } else {
+            ws_ids
+        };
+
+        for ws_id in ws_ids {
+            match self.workspace_tree_mut(ws_id) {
+                LayoutSystemKind::Traditional(system) => system.clear_window_constraint(wid),
+                LayoutSystemKind::Bsp(system) => system.clear_window_constraint(wid),
+                LayoutSystemKind::MasterStack(system) => system.clear_window_constraint(wid),
+                LayoutSystemKind::Scrolling(_) => {}
+            }
+        }
+    }
+
+    pub fn window_constraint(&self, wid: WindowId) -> Option<WindowConstraint> {
+        let ws_ids = self.virtual_workspace_manager.workspaces_for_window(wid);
+        let ws_ids = if ws_ids.is_empty() {
+            self.virtual_workspace_manager.workspaces.keys().collect()
+        } else {
+            ws_ids
+        };
+
+        for ws_id in ws_ids {
+            let constraint = match self.workspace_tree(ws_id) {
+                LayoutSystemKind::Traditional(system) => system.window_constraint(wid),
+                LayoutSystemKind::Bsp(system) => system.window_constraint(wid),
+                LayoutSystemKind::MasterStack(system) => system.window_constraint(wid),
+                LayoutSystemKind::Scrolling(_) => None,
+            };
+            if constraint.is_some() {
+                return constraint;
+            }
+        }
+        None
     }
 
     pub fn update_virtual_workspace_settings(
@@ -679,6 +745,7 @@ impl LayoutEngine {
                 self.workspace_tree_mut(ws_id).remove_window(wid);
             }
         }
+        self.clear_window_constraint(wid);
 
         if preserve_floating {
             self.floating.remove_active_for_window(wid);

@@ -24,7 +24,7 @@ use tracing::{Instrument, Span, debug, error, info, instrument, trace, warn};
 
 use crate::actor;
 use crate::actor::reactor::transaction_manager::TransactionId;
-use crate::actor::reactor::{self, Event, Requested};
+use crate::actor::reactor::{self, Event, FrameChangeKind, Requested};
 use crate::common::collections::{HashMap, HashSet};
 use crate::model::tx_store::WindowTxStore;
 use crate::sys::app::NSRunningApplicationExt;
@@ -552,6 +552,7 @@ impl State {
                     frame,
                     Some(txid),
                     Requested(true),
+                    FrameChangeKind::Move,
                     None,
                 ));
             }
@@ -595,6 +596,7 @@ impl State {
                     frame,
                     Some(txid),
                     Requested(true),
+                    FrameChangeKind::Resize,
                     None,
                 ));
             }
@@ -632,6 +634,7 @@ impl State {
                             frame,
                             Some(txid),
                             Requested(true),
+                            FrameChangeKind::Resize,
                             None,
                         ));
                     }
@@ -686,6 +689,7 @@ impl State {
                     frame,
                     txid,
                     Requested(true),
+                    FrameChangeKind::Resize,
                     None,
                 ));
                 SLSReenableUpdate(*G_CONNECTION);
@@ -748,6 +752,11 @@ impl State {
                     return;
                 };
 
+                let change_kind = match notif {
+                    kAXWindowResizedNotification => FrameChangeKind::Resize,
+                    _ => FrameChangeKind::Move,
+                };
+
                 if let Ok(window) = self.window(wid) {
                     if window.is_animating {
                         trace!(?wid, ?notif, "Ignoring notification during animation");
@@ -781,6 +790,7 @@ impl State {
                     frame,
                     txid,
                     Requested(false),
+                    change_kind,
                     event::get_mouse_state(),
                 ));
             }

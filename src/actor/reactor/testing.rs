@@ -1,7 +1,7 @@
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use tracing::debug;
 
-use super::{Event, Reactor, Record, Requested, ScreenInfo, TransactionId};
+use super::{Event, FrameChangeKind, Reactor, Record, Requested, ScreenInfo, TransactionId};
 use crate::actor;
 use crate::actor::app::{AppThreadHandle, Request, WindowId};
 use crate::common::collections::BTreeMap;
@@ -19,7 +19,9 @@ impl Reactor {
         config.settings.animate = false;
         let record = Record::new_for_test(tempfile::NamedTempFile::new().unwrap());
         let (broadcast_tx, _) = actor::channel();
-        Reactor::new(config, layout, record, broadcast_tx, None, false)
+        let mut reactor = Reactor::new(config, layout, record, broadcast_tx, None, false);
+        reactor.constraint_probing_enabled = false;
+        reactor
     }
 
     pub fn handle_events(&mut self, events: Vec<Event>) {
@@ -225,6 +227,7 @@ impl Apps {
                             frame,
                             Some(txid),
                             Requested(true),
+                            FrameChangeKind::Resize,
                             None,
                         ));
                     }
@@ -241,6 +244,7 @@ impl Apps {
                                 frame,
                                 Some(txid),
                                 Requested(true),
+                                FrameChangeKind::Resize,
                                 None,
                             ));
                         }
@@ -257,6 +261,7 @@ impl Apps {
                             window.frame,
                             Some(txid),
                             Requested(true),
+                            FrameChangeKind::Move,
                             None,
                         ));
                     }
@@ -272,6 +277,7 @@ impl Apps {
                         window.frame,
                         Some(window.last_seen_txid),
                         Requested(true),
+                        FrameChangeKind::Resize,
                         None,
                     ));
                 }
