@@ -832,10 +832,8 @@ impl Reactor {
         }
 
         let should_update_notifications = Self::should_update_notifications(&event);
-        let skip_layout_update = matches!(
-            &event,
-            Event::WindowFrameChanged(_, _, _, Requested(true), _, _)
-        );
+        let skip_layout_update =
+            matches!(&event, Event::WindowFrameChanged(_, _, _, Requested(true), _, _));
 
         let raised_window = self.main_window_tracker.handle_event(&event);
         let mut is_resize = false;

@@ -225,10 +225,7 @@ impl WindowEventHandler {
                     let inferred = infer_constraint_from_target(new_frame, probe.target);
                     let existing = reactor.layout_manager.layout_engine.window_constraint(wid);
                     let constraint = merge_constraints(existing, inferred);
-                    reactor
-                        .layout_manager
-                        .layout_engine
-                        .set_window_constraint(wid, constraint);
+                    reactor.layout_manager.layout_engine.set_window_constraint(wid, constraint);
                     reactor.constraint_probes.remove(&wid);
                     if let Some(app_info) =
                         reactor.app_manager.apps.get(&wid.pid).map(|app| app.info.clone())
@@ -303,10 +300,7 @@ impl WindowEventHandler {
                         let existing_constraint =
                             reactor.layout_manager.layout_engine.window_constraint(wid);
                         let constraint = merge_constraints(existing_constraint, inferred);
-                        reactor
-                            .layout_manager
-                            .layout_engine
-                            .set_window_constraint(wid, constraint);
+                        reactor.layout_manager.layout_engine.set_window_constraint(wid, constraint);
                         if existing_constraint == Some(constraint) {
                             trace!(
                                 ?wid,

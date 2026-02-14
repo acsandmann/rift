@@ -88,10 +88,7 @@ mod tests {
         let wsid = WindowServerId(42);
         let frame = CGRect {
             origin: CGPoint { x: 0.0, y: 0.0 },
-            size: CGSize {
-                width: 100.0,
-                height: 100.0,
-            },
+            size: CGSize { width: 100.0, height: 100.0 },
         };
 
         let tx1 = store.next_txid(wsid);
