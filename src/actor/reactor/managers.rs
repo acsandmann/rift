@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use objc2_core_foundation::CGRect;
+use objc2_core_foundation::{CGPoint, CGRect};
 use tracing::trace;
 
 use super::replay::Record;
@@ -16,7 +16,7 @@ use crate::actor::reactor::Reactor;
 use crate::actor::reactor::animation::AnimationManager;
 use crate::actor::{event_tap, menu_bar, raise_manager, stack_line, window_notify, wm_controller};
 use crate::common::collections::{HashMap, HashSet};
-use crate::common::config::WindowSnappingSettings;
+use crate::common::config::{LayoutMode, WindowSnappingSettings};
 use crate::layout_engine::LayoutEngine;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
@@ -192,6 +192,44 @@ pub struct LayoutManager {
 
 pub type LayoutResult = Vec<(SpaceId, Vec<(WindowId, CGRect)>)>;
 
+fn bound_frame_to_screen(frame: CGRect, screen: CGRect) -> CGRect {
+    const WINDOW_HIDDEN_THRESHOLD: f64 = 10.0;
+
+    let screen_left = screen.origin.x;
+    let screen_top = screen.origin.y;
+    let screen_right = screen.max().x;
+    let screen_bottom = screen.max().y;
+    let max_y = (screen_bottom - frame.size.height).max(screen_top);
+    let x = if frame.max().x <= screen_left {
+        screen_left - frame.size.width + WINDOW_HIDDEN_THRESHOLD
+    } else if frame.origin.x >= screen_right {
+        screen_right - WINDOW_HIDDEN_THRESHOLD
+    } else {
+        frame.origin.x
+    };
+
+    CGRect::new(
+        CGPoint::new(x, frame.origin.y.clamp(screen_top, max_y)),
+        frame.size,
+    )
+}
+
+fn bound_scrolling_tiled_frames_to_screen(
+    reactor: &Reactor,
+    layout: &mut Vec<(WindowId, CGRect)>,
+    screen: CGRect,
+    active_workspace_windows: &HashSet<WindowId>,
+) {
+    for (wid, frame) in layout.iter_mut() {
+        if !active_workspace_windows.contains(wid)
+            || reactor.layout_manager.layout_engine.is_window_floating(*wid)
+        {
+            continue;
+        }
+        *frame = bound_frame_to_screen(*frame, screen);
+    }
+}
+
 impl LayoutManager {
     pub fn update_layout(
         reactor: &mut Reactor,
@@ -207,6 +245,11 @@ impl LayoutManager {
             return LayoutResult::new();
         }
         let screens = reactor.space_manager.screens.clone();
+        let active_space_count = screens
+            .iter()
+            .filter_map(|screen| screen.space)
+            .filter(|space| reactor.is_space_active(*space))
+            .count();
         let mut layout_result = LayoutResult::new();
 
         for screen in screens {
@@ -227,7 +270,7 @@ impl LayoutManager {
                 .layout_manager
                 .layout_engine
                 .update_space_display(space, display_uuid_opt.clone());
-            let layout =
+            let mut layout =
                 reactor.layout_manager.layout_engine.calculate_layout_with_virtual_workspaces(
                     space,
                     screen.frame.clone(),
@@ -237,6 +280,23 @@ impl LayoutManager {
                     reactor.config.settings.ui.stack_line.vert_placement,
                     |wid| reactor.window_manager.windows.get(&wid).map(|w| w.frame_monotonic),
                 );
+            if active_space_count > 1
+                && reactor.layout_manager.layout_engine.active_layout_mode_at(space)
+                    == LayoutMode::Scrolling
+            {
+                let active_workspace_windows: HashSet<WindowId> = reactor
+                    .layout_manager
+                    .layout_engine
+                    .windows_in_active_workspace(space)
+                    .into_iter()
+                    .collect();
+                bound_scrolling_tiled_frames_to_screen(
+                    reactor,
+                    &mut layout,
+                    screen.frame,
+                    &active_workspace_windows,
+                );
+            }
             layout_result.push((space, layout));
         }
 
@@ -336,4 +396,51 @@ pub struct WindowServerInfoManager {
 pub struct PendingSpaceChangeManager {
     pub pending_space_change: Option<PendingSpaceChange>,
     pub topology_relayout_pending: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+
+    use super::bound_frame_to_screen;
+
+    fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
+        CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))
+    }
+
+    #[test]
+    fn bound_frame_to_screen_keeps_partial_overlap_for_strip_behavior() {
+        let screen = rect(2000.0, 0.0, 1000.0, 800.0);
+        let frame = rect(1500.0, 50.0, 700.0, 400.0);
+        let bounded = bound_frame_to_screen(frame, screen);
+        assert_eq!(bounded.origin.x, 1500.0);
+        assert_eq!(bounded.size.width, 700.0);
+    }
+
+    #[test]
+    fn bound_frame_to_screen_parks_fully_offscreen_windows_to_hidden_sliver() {
+        let screen = rect(2000.0, 0.0, 1000.0, 800.0);
+        let frame = rect(1200.0, 80.0, 600.0, 300.0);
+        let bounded = bound_frame_to_screen(frame, screen);
+        assert_eq!(bounded.origin.x, 1410.0);
+        assert_eq!(bounded.size.width, 600.0);
+    }
+
+    #[test]
+    fn bound_frame_to_screen_parks_right_offscreen_windows_to_hidden_sliver() {
+        let screen = rect(2000.0, 0.0, 1000.0, 800.0);
+        let frame = rect(3200.0, 80.0, 600.0, 300.0);
+        let bounded = bound_frame_to_screen(frame, screen);
+        assert_eq!(bounded.origin.x, 2990.0);
+        assert_eq!(bounded.size.width, 600.0);
+    }
+
+    #[test]
+    fn bound_frame_to_screen_does_not_park_partially_visible_right_windows() {
+        let screen = rect(2000.0, 0.0, 1000.0, 800.0);
+        let frame = rect(2998.0, 80.0, 600.0, 300.0);
+        let bounded = bound_frame_to_screen(frame, screen);
+        assert_eq!(bounded.origin.x, 2998.0);
+        assert_eq!(bounded.size.width, 600.0);
+    }
 }

@@ -37,6 +37,7 @@ use crate::sys::event;
 use crate::sys::executor::Executor;
 use crate::sys::observer::Observer;
 use crate::sys::process::ProcessInfo;
+use crate::sys::skylight::{G_CONNECTION, SLSDisableUpdate, SLSReenableUpdate};
 use crate::sys::window_server::{self, WindowServerId, WindowServerInfo};
 
 const kAXApplicationActivatedNotification: &str = "AXApplicationActivated";
@@ -651,6 +652,8 @@ impl State {
                     let _ = self.app.set_bool_attribute("AXEnhancedUserInterface", false);
                 }
                 self.stop_notifications_for_animation(&elem);
+
+                SLSDisableUpdate(*G_CONNECTION);
             }
             &mut Request::EndWindowAnimation(wid) => {
                 let (elem, txid) = match self.window(wid) {
@@ -685,6 +688,7 @@ impl State {
                     Requested(true),
                     None,
                 ));
+                SLSReenableUpdate(*G_CONNECTION);
             }
             &mut Request::Raise(ref wids, ref token, sequence_id, quiet) => {
                 self.raises_tx

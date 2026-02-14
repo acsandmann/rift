@@ -51,6 +51,18 @@ impl SpaceEventHandler {
 
             return;
         } else if crate::sys::window_server::space_is_user(sid.get()) {
+            if let Some(current_space) = crate::sys::window_server::window_space(wsid)
+                && current_space != sid
+            {
+                trace!(
+                    ?wsid,
+                    from_space = ?sid,
+                    to_space = ?current_space,
+                    "Ignoring stale WindowServerDestroyed for window that moved spaces"
+                );
+                return;
+            }
+
             if let Some(&wid) = reactor.window_manager.window_ids.get(&wsid) {
                 reactor.window_manager.window_ids.remove(&wsid);
                 reactor.window_server_info_manager.window_server_info.remove(&wsid);

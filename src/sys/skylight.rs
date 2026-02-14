@@ -222,8 +222,8 @@ unsafe extern "C" {
     pub safe fn CGEnableEventStateCombining(enable: bool);
 
     pub fn SLSMainConnectionID() -> cid_t;
-    pub fn SLSDisableUpdate(cid: cid_t) -> i32;
-    pub fn SLSReenableUpdate(cid: cid_t) -> i32;
+    pub safe fn SLSDisableUpdate(cid: cid_t) -> i32;
+    pub safe fn SLSReenableUpdate(cid: cid_t) -> i32;
     pub fn _SLPSSetFrontProcessWithOptions(
         psn: *const ProcessSerialNumber,
         wid: u32,

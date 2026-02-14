@@ -18,6 +18,17 @@ use crate::sys::window_server::{self as window_server, WindowServerId};
 pub struct CommandEventHandler;
 
 impl CommandEventHandler {
+    fn assigned_space_for_window(
+        reactor: &Reactor,
+        window_id: WindowId,
+    ) -> Option<crate::sys::screen::SpaceId> {
+        let vwm = reactor.layout_manager.layout_engine.virtual_workspace_manager();
+        reactor
+            .space_manager
+            .iter_known_spaces()
+            .find(|space| vwm.workspace_for_window(*space, window_id).is_some())
+    }
+
     pub fn handle_command(reactor: &mut Reactor, cmd: Command) {
         match cmd {
             Command::Layout(cmd) => Self::handle_command_layout(reactor, cmd),
@@ -395,7 +406,8 @@ impl CommandEventHandler {
             }
         };
 
-        let Some(source_space) = reactor.best_space_for_window(&window_frame, window_server_id)
+        let Some(source_space) = Self::assigned_space_for_window(reactor, window_id)
+            .or_else(|| reactor.best_space_for_window(&window_frame, window_server_id))
         else {
             warn!(
                 ?window_id,
