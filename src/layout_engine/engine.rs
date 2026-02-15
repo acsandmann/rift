@@ -702,6 +702,13 @@ impl LayoutEngine {
         self.rebalance_all_layouts();
     }
 
+    fn remove_window_from_all_tiling_trees(&mut self, wid: WindowId) {
+        let ws_ids: Vec<_> = self.virtual_workspace_manager.workspaces.keys().collect();
+        for ws_id in ws_ids {
+            self.workspace_tree_mut(ws_id).remove_window(wid);
+        }
+    }
+
     fn space_with_window(&self, wid: WindowId) -> Option<SpaceId> {
         for space in self.workspace_layouts.spaces() {
             if let Some(ws_id) = self.virtual_workspace_manager.active_workspace(space) {
@@ -1941,11 +1948,9 @@ impl LayoutEngine {
                 let is_floating = self.floating.is_floating(focused_window);
 
                 if is_floating {
-                    self.floating.remove_active(op_space, focused_window.pid, focused_window);
-                } else if let Some(_layout) =
-                    self.workspace_layouts.active(op_space, current_workspace_id)
-                {
-                    self.workspace_tree_mut(current_workspace_id).remove_window(focused_window);
+                    self.floating.remove_active_for_window(focused_window);
+                } else {
+                    self.remove_window_from_all_tiling_trees(focused_window);
                 }
 
                 let assigned = self.virtual_workspace_manager.assign_window_to_workspace(
@@ -2107,9 +2112,7 @@ impl LayoutEngine {
         let source_workspace = self
             .virtual_workspace_manager
             .workspace_for_window(source_space, window_id)
-            .or_else(|| {
-                self.virtual_workspace_manager.workspace_for_window(target_space, window_id)
-            });
+            .or_else(|| self.virtual_workspace_manager.workspace_for_window_any(window_id));
 
         let Some(source_workspace_id) = source_workspace else {
             return EventResponse::default();
@@ -2132,9 +2135,9 @@ impl LayoutEngine {
         let was_floating = self.floating.is_floating(window_id);
 
         if was_floating {
-            self.floating.remove_active(source_space, window_id.pid, window_id);
+            self.floating.remove_active_for_window(window_id);
         } else {
-            self.workspace_tree_mut(source_workspace_id).remove_window(window_id);
+            self.remove_window_from_all_tiling_trees(window_id);
         }
 
         let assigned = self.virtual_workspace_manager.assign_window_to_workspace(
@@ -2345,7 +2348,7 @@ impl LayoutEngine {
 mod tests {
     use std::panic::AssertUnwindSafe;
 
-    use objc2_core_foundation::CGPoint;
+    use objc2_core_foundation::{CGPoint, CGSize};
 
     use super::*;
     use crate::common::collections::HashMap;
@@ -2470,5 +2473,86 @@ mod tests {
 
         assert!(response.raise_windows.is_empty());
         assert_eq!(response.focus_window, None);
+    }
+
+    #[test]
+    fn move_window_to_space_detaches_window_when_source_mapping_is_stale() {
+        let mut engine = test_engine();
+        let source = SpaceId::new(70);
+        let target = SpaceId::new(71);
+        let screen_size = CGSize::new(1920.0, 1080.0);
+        let window_id = WindowId::new(4242, 1);
+
+        let _ = engine.handle_event(LayoutEvent::SpaceExposed(source, screen_size));
+        let _ = engine.handle_event(LayoutEvent::SpaceExposed(target, screen_size));
+
+        let source_workspace = engine
+            .virtual_workspace_manager()
+            .active_workspace(source)
+            .expect("source active workspace");
+        let target_workspace = engine
+            .virtual_workspace_manager()
+            .active_workspace(target)
+            .expect("target active workspace");
+        let source_layout = engine
+            .workspace_layouts
+            .active(source, source_workspace)
+            .expect("source active layout");
+        let target_layout = engine
+            .workspace_layouts
+            .active(target, target_workspace)
+            .expect("target active layout");
+
+        assert!(
+            engine.virtual_workspace_manager_mut().assign_window_to_workspace(
+                source,
+                window_id,
+                source_workspace
+            )
+        );
+        engine
+            .workspace_tree_mut(source_workspace)
+            .add_window_after_selection(source_layout, window_id);
+        assert!(
+            engine
+                .workspace_tree(source_workspace)
+                .contains_window(source_layout, window_id)
+        );
+
+        // Create an inconsistent state: workspace mapping points to target, but source tree
+        // still contains the window. Cross-space move must still detach from source tree.
+        assert!(
+            engine.virtual_workspace_manager_mut().assign_window_to_workspace(
+                target,
+                window_id,
+                target_workspace
+            )
+        );
+        assert_eq!(
+            engine.virtual_workspace_manager().workspace_for_window(source, window_id),
+            None
+        );
+        assert!(
+            engine
+                .workspace_tree(source_workspace)
+                .contains_window(source_layout, window_id)
+        );
+
+        let _ = engine.move_window_to_space(source, target, screen_size, window_id);
+
+        assert!(
+            !engine
+                .workspace_tree(source_workspace)
+                .contains_window(source_layout, window_id)
+        );
+        assert!(
+            engine
+                .workspace_tree(target_workspace)
+                .contains_window(target_layout, window_id)
+        );
+        assert_eq!(
+            engine.virtual_workspace_manager().workspace_for_window(target, window_id),
+            Some(target_workspace)
+        );
     }
 }

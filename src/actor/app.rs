@@ -37,6 +37,7 @@ use crate::sys::event;
 use crate::sys::executor::Executor;
 use crate::sys::observer::Observer;
 use crate::sys::process::ProcessInfo;
+use crate::sys::skylight::{G_CONNECTION, SLSDisableUpdate, SLSReenableUpdate};
 use crate::sys::window_server::{self, WindowServerId, WindowServerInfo};
 
 const kAXApplicationActivatedNotification: &str = "AXApplicationActivated";
@@ -516,10 +517,10 @@ impl State {
                 });
             }
             &mut Request::SetWindowPos(wid, pos, txid, eui) => {
-                let elem = match self.window_mut(wid) {
+                let (elem, is_animating) = match self.window_mut(wid) {
                     Ok(window) => {
                         window.last_seen_txid = txid;
-                        window.elem.clone()
+                        (window.elem.clone(), window.is_animating)
                     }
                     Err(err) => match err {
                         AxError::Ax(code) => {
@@ -534,7 +535,7 @@ impl State {
                     },
                 };
 
-                if eui {
+                if eui && !is_animating {
                     let _ = with_enhanced_ui_disabled(&self.app, || elem.set_position(pos));
                 } else {
                     let _ = elem.set_position(pos);
@@ -555,10 +556,10 @@ impl State {
                 ));
             }
             &mut Request::SetWindowFrame(wid, desired, txid, eui) => {
-                let elem = match self.window_mut(wid) {
+                let (elem, is_animating) = match self.window_mut(wid) {
                     Ok(window) => {
                         window.last_seen_txid = txid;
-                        window.elem.clone()
+                        (window.elem.clone(), window.is_animating)
                     }
                     Err(err) => match err {
                         AxError::Ax(code) => {
@@ -571,7 +572,7 @@ impl State {
                     },
                 };
 
-                if eui {
+                if eui && !is_animating {
                     with_enhanced_ui_disabled(&self.app, || {
                         let _ = elem.set_size(desired.size);
                         let _ = elem.set_position(desired.origin);
@@ -641,9 +642,18 @@ impl State {
                 }
             }
             &mut Request::BeginWindowAnimation(wid) => {
-                let window = self.window_mut(wid)?;
-                window.is_animating = true;
-                self.stop_notifications_for_animation(&self.window(wid)?.elem);
+                let had_animations = self.has_active_window_animations();
+                let (elem, started_animation) = {
+                    let window = self.window_mut(wid)?;
+                    let started_animation = !std::mem::replace(&mut window.is_animating, true);
+                    (window.elem.clone(), started_animation)
+                };
+                if started_animation && !had_animations {
+                    let _ = self.app.set_bool_attribute("AXEnhancedUserInterface", false);
+                }
+                self.stop_notifications_for_animation(&elem);
+
+                SLSDisableUpdate(*G_CONNECTION);
             }
             &mut Request::EndWindowAnimation(wid) => {
                 let (elem, txid) = match self.window(wid) {
@@ -658,8 +668,12 @@ impl State {
                         AxError::NotFound => return Ok(false),
                     },
                 };
-                if let Ok(window) = self.window_mut(wid) {
-                    window.is_animating = false;
+                let ended_animation = self
+                    .window_mut(wid)
+                    .map(|window| std::mem::replace(&mut window.is_animating, false))
+                    .unwrap_or(false);
+                if ended_animation && !self.has_active_window_animations() {
+                    let _ = self.app.set_bool_attribute("AXEnhancedUserInterface", true);
                 }
                 self.restart_notifications_after_animation(&elem);
                 let frame =
@@ -674,6 +688,7 @@ impl State {
                     Requested(true),
                     None,
                 ));
+                SLSReenableUpdate(*G_CONNECTION);
             }
             &mut Request::Raise(ref wids, ref token, sequence_id, quiet) => {
                 self.raises_tx
@@ -723,7 +738,7 @@ impl State {
                 let Ok(wid) = self.id(&elem) else {
                     return;
                 };
-                self.windows.remove(&wid);
+                self.remove_window(wid);
                 self.send_event(Event::WindowDestroyed(wid));
 
                 self.on_main_window_changed(Some(wid), false);
@@ -1202,7 +1217,7 @@ impl State {
 
     fn handle_ax_error(&mut self, wid: WindowId, err: &AXError) -> bool {
         if matches!(*err, AXError::InvalidUIElement) {
-            if self.windows.remove(&wid).is_some() {
+            if self.remove_window(wid).is_some() {
                 self.send_event(Event::WindowDestroyed(wid));
                 self.on_main_window_changed(Some(wid), false);
             }
@@ -1265,7 +1280,7 @@ impl State {
     }
 
     fn remove_tracked_window(&mut self, wid: WindowId, reason: &'static str) {
-        if self.windows.remove(&wid).is_some() {
+        if self.remove_window(wid).is_some() {
             debug!(?wid, reason);
             self.send_event(Event::WindowDestroyed(wid));
         }
@@ -1314,6 +1329,16 @@ impl State {
                 debug!(?notif, ?elem, "Adding notification failed with error {err}");
             }
         }
+    }
+
+    fn has_active_window_animations(&self) -> bool { self.windows.values().any(|w| w.is_animating) }
+
+    fn remove_window(&mut self, wid: WindowId) -> Option<AppWindowState> {
+        let window = self.windows.remove(&wid)?;
+        if window.is_animating && !self.has_active_window_animations() {
+            let _ = self.app.set_bool_attribute("AXEnhancedUserInterface", true);
+        }
+        Some(window)
     }
 }
 
