@@ -813,13 +813,25 @@ mod test {
         };
         let mut sc = ScreenCache::new_with(stub);
         let (screens, _) = sc.refresh().unwrap();
-        let frames: Vec<CGRect> = screens.iter().map(|d| d.frame).collect();
+
+        let secondary = screens.iter().find(|screen| screen.id == ScreenId(1)).unwrap();
         assert_eq!(
-            vec![
+            secondary.frame,
+            super::constrain_display_bounds(
+                1,
                 CGRect::new(CGPoint::new(3840.0, 1080.0), CGSize::new(1512.0, 982.0)),
+                0.0,
+            )
+        );
+
+        let primary = screens.iter().find(|screen| screen.id == ScreenId(3)).unwrap();
+        assert_eq!(
+            primary.frame,
+            super::constrain_display_bounds(
+                3,
                 CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(3840.0, 2160.0)),
-            ],
-            frames
+                0.0,
+            )
         );
     }
 
