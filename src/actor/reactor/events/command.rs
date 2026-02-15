@@ -196,7 +196,7 @@ impl CommandEventHandler {
             ReactorCommand::DismissMissionControl => {
                 if !send_wm_cmd(
                     reactor,
-                    crate::actor::wm_controller::WmCmd::ShowMissionControlAll,
+                    crate::actor::wm_controller::WmCmd::DismissMissionControl,
                 ) {
                     reactor.set_mission_control_active(false);
                 }

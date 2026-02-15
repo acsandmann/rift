@@ -73,6 +73,7 @@ pub enum WmCmd {
 
     ShowMissionControlAll,
     ShowMissionControlCurrent,
+    DismissMissionControl,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -376,6 +377,11 @@ impl WmController {
             Command(Wm(ShowMissionControlCurrent)) => {
                 if let Some(tx) = &self.mission_control_tx {
                     let _ = tx.try_send(mission_control::Event::ShowCurrent);
+                }
+            }
+            Command(Wm(DismissMissionControl)) => {
+                if let Some(tx) = &self.mission_control_tx {
+                    let _ = tx.try_send(mission_control::Event::Dismiss);
                 }
             }
             Command(Wm(Exec(cmd))) => {
