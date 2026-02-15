@@ -155,13 +155,10 @@ impl LayoutEngine {
     }
 
     /// Get the active workspace and layout for a space.
-    fn workspace_and_layout(&self, space: SpaceId) -> (VirtualWorkspaceId, LayoutId) {
-        let ws_id = self.active_workspace_id(space).expect("No active workspace for space");
-        let layout = self
-            .workspace_layouts
-            .active(space, ws_id)
-            .expect("No active layout for workspace");
-        (ws_id, layout)
+    fn workspace_and_layout(&self, space: SpaceId) -> Option<(VirtualWorkspaceId, LayoutId)> {
+        let ws_id = self.active_workspace_id(space)?;
+        let layout = self.workspace_layouts.active(space, ws_id)?;
+        Some((ws_id, layout))
     }
 
     fn workspace_id_for_index(
@@ -435,7 +432,10 @@ impl LayoutEngine {
         direction: Direction,
         is_floating: bool,
     ) -> EventResponse {
-        let (ws_id, layout) = self.workspace_and_layout(space);
+        let Some((ws_id, layout)) = self.workspace_and_layout(space) else {
+            warn!("No active workspace/layout for space {:?}; move_focus ignored", space);
+            return EventResponse::default();
+        };
 
         if is_floating {
             let floating_windows = self.active_floating_windows_in_workspace(space);
@@ -538,7 +538,13 @@ impl LayoutEngine {
                 visible_spaces,
                 visible_space_centers,
             ) {
-                let (new_ws_id, new_layout) = self.workspace_and_layout(new_space);
+                let Some((new_ws_id, new_layout)) = self.workspace_and_layout(new_space) else {
+                    debug!(
+                        "No active workspace/layout for adjacent space {:?}; skipping cross-space focus",
+                        new_space
+                    );
+                    return EventResponse::default();
+                };
                 let windows_in_new_space = self.filter_active_workspace_windows(
                     new_space,
                     self.workspace_tree(new_ws_id).visible_windows_in_layout(new_layout),
@@ -1026,7 +1032,13 @@ impl LayoutEngine {
                 if self.floating.is_floating(wid) {
                     self.floating.set_last_focus(Some(wid));
                 } else {
-                    let (ws_id, layout) = self.workspace_and_layout(space);
+                    let Some((ws_id, layout)) = self.workspace_and_layout(space) else {
+                        warn!(
+                            "No active workspace/layout for focused window {:?} on space {:?}",
+                            wid, space
+                        );
+                        return EventResponse::default();
+                    };
                     let _ = self.workspace_tree_mut(ws_id).select_window(layout, wid);
                     self.virtual_workspace_manager.set_last_focused_window(space, ws_id, Some(wid));
                 }
@@ -1038,7 +1050,13 @@ impl LayoutEngine {
                 screens,
             } => {
                 for (space, screen_frame, display_uuid) in screens {
-                    let (ws_id, layout) = self.workspace_and_layout(space);
+                    let Some((ws_id, layout)) = self.workspace_and_layout(space) else {
+                        debug!(
+                            "No active workspace/layout for resized window {:?} on space {:?}; skipping",
+                            wid, space
+                        );
+                        continue;
+                    };
                     let gaps =
                         self.layout_settings.gaps.effective_for_display(display_uuid.as_deref());
                     self.workspace_tree_mut(ws_id).on_window_resized(
@@ -1114,8 +1132,14 @@ impl LayoutEngine {
             } else {
                 if let Some(space) = space {
                     self.floating.add_active(space, wid.pid, wid);
-                    let (ws_id, _) = self.workspace_and_layout(space);
-                    self.workspace_tree_mut(ws_id).remove_window(wid);
+                    if let Some((ws_id, _)) = self.workspace_and_layout(space) {
+                        self.workspace_tree_mut(ws_id).remove_window(wid);
+                    } else {
+                        debug!(
+                            "No active workspace/layout for space {:?}; leaving window {:?} out of tiling removal",
+                            space, wid
+                        );
+                    }
                 }
                 self.floating.add_floating(wid);
                 self.floating.set_last_focus(Some(wid));
@@ -1182,8 +1206,7 @@ impl LayoutEngine {
             LayoutCommand::ToggleFocusFloating => unreachable!(),
 
             LayoutCommand::SwapWindows(a, b) => {
-                let (ws_id, layout) = self.workspace_and_layout(space);
-                let _ = self.workspace_tree_mut(ws_id).swap_windows(layout, a, b);
+                let _ = self.workspace_tree_mut(workspace_id).swap_windows(layout, a, b);
 
                 EventResponse::default()
             }
@@ -1235,7 +1258,14 @@ impl LayoutEngine {
                         visible_spaces,
                         visible_space_centers,
                     ) {
-                        let (new_ws_id, new_layout) = self.workspace_and_layout(new_space);
+                        let Some((new_ws_id, new_layout)) = self.workspace_and_layout(new_space)
+                        else {
+                            debug!(
+                                "No active workspace/layout for adjacent space {:?}; skipping cross-space move",
+                                new_space
+                            );
+                            return EventResponse::default();
+                        };
                         let windows = self
                             .workspace_tree(workspace_id)
                             .visible_windows_under_selection(layout);
@@ -1477,7 +1507,9 @@ impl LayoutEngine {
         stack_line_horiz: crate::common::config::HorizontalPlacement,
         stack_line_vert: crate::common::config::VerticalPlacement,
     ) -> Vec<(WindowId, CGRect)> {
-        let (ws_id, layout) = self.workspace_and_layout(space);
+        let Some((ws_id, layout)) = self.workspace_and_layout(space) else {
+            return Vec::new();
+        };
         self.workspace_tree(ws_id).calculate_layout(
             layout,
             screen,
@@ -1657,7 +1689,9 @@ impl LayoutEngine {
         stack_line_horiz: crate::common::config::HorizontalPlacement,
         stack_line_vert: crate::common::config::VerticalPlacement,
     ) -> Vec<GroupContainerInfo> {
-        let (ws_id, layout_id) = self.workspace_and_layout(space);
+        let Some((ws_id, layout_id)) = self.workspace_and_layout(space) else {
+            return Vec::new();
+        };
         match self.workspace_tree(ws_id) {
             LayoutSystemKind::Traditional(s) => s.collect_group_containers_in_selection_path(
                 layout_id,
@@ -1682,7 +1716,9 @@ impl LayoutEngine {
     }
 
     pub fn active_workspace_for_space_has_fullscreen(&mut self, space: SpaceId) -> bool {
-        let (ws_id, layout_id) = self.workspace_and_layout(space);
+        let Some((ws_id, layout_id)) = self.workspace_and_layout(space) else {
+            return false;
+        };
         self.workspace_tree(ws_id).has_any_fullscreen_node(layout_id)
     }
 
@@ -1695,7 +1731,9 @@ impl LayoutEngine {
         stack_line_horiz: crate::common::config::HorizontalPlacement,
         stack_line_vert: crate::common::config::VerticalPlacement,
     ) -> Vec<GroupContainerInfo> {
-        let (ws_id, layout_id) = self.workspace_and_layout(space);
+        let Some((ws_id, layout_id)) = self.workspace_and_layout(space) else {
+            return Vec::new();
+        };
         match self.workspace_tree(ws_id) {
             LayoutSystemKind::Traditional(s) => s.collect_group_containers(
                 layout_id,
@@ -1809,7 +1847,7 @@ impl LayoutEngine {
 
     #[cfg(test)]
     pub(crate) fn selected_window(&mut self, space: SpaceId) -> Option<WindowId> {
-        let (ws_id, layout) = self.workspace_and_layout(space);
+        let (ws_id, layout) = self.workspace_and_layout(space)?;
         self.workspace_tree(ws_id).selected_window(layout)
     }
 
@@ -2410,6 +2448,34 @@ mod tests {
         assert!(
             result.is_ok(),
             "handle_command should not panic before SpaceExposed"
+        );
+    }
+
+    #[test]
+    fn move_focus_to_uninitialized_adjacent_space_does_not_panic() {
+        let mut engine = test_engine();
+        let current_space = SpaceId::new(50);
+        let adjacent_space = SpaceId::new(51);
+        let screen_size = CGSize::new(1920.0, 1080.0);
+        let visible_spaces = vec![current_space, adjacent_space];
+        let mut visible_space_centers = HashMap::default();
+        visible_space_centers.insert(current_space, CGPoint::new(0.0, 0.0));
+        visible_space_centers.insert(adjacent_space, CGPoint::new(1920.0, 0.0));
+
+        let _ = engine.handle_event(LayoutEvent::SpaceExposed(current_space, screen_size));
+
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            engine.handle_command(
+                Some(current_space),
+                &visible_spaces,
+                &visible_space_centers,
+                LayoutCommand::MoveFocus(Direction::Right),
+            )
+        }));
+
+        assert!(
+            result.is_ok(),
+            "cross-space move focus should not panic when adjacent space is not initialized"
         );
     }
 
