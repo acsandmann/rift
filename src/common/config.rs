@@ -491,7 +491,7 @@ pub struct MenuBarSettings {
 pub struct StackLineSettings {
     #[serde(default = "no")]
     pub enabled: bool,
-    #[serde(default)]
+    #[serde(default = "default_stack_line_thickness")]
     pub thickness: f64,
     #[serde(default)]
     pub horiz_placement: HorizontalPlacement,
@@ -1101,7 +1101,8 @@ fn default_swipe_fingers() -> usize { 3 }
 fn default_distance_pct() -> f64 { 0.08 }
 fn default_overscroll_threshold() -> f64 { 0.625 }
 
-fn default_stack_line_spacing() -> f64 { 0.0 }
+fn default_stack_line_spacing() -> f64 { 1.0 }
+fn default_stack_line_thickness() -> f64 { 20.0 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
 #[serde(rename_all = "snake_case")]
