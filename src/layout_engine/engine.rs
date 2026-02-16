@@ -763,10 +763,44 @@ impl LayoutEngine {
         }
 
         if let Some(space) = affected_space {
+            self.clear_singleton_constraints_in_active_workspace(space);
             self.broadcast_windows_changed(space);
         }
 
         self.rebalance_all_layouts();
+    }
+
+    fn clear_singleton_constraints_in_active_workspace(&mut self, space: SpaceId) {
+        let Some(active_workspace_id) = self.virtual_workspace_manager.active_workspace(space)
+        else {
+            return;
+        };
+        let singleton = if let Some(layout) =
+            self.workspace_layouts.active(space, active_workspace_id)
+        {
+            let tiled = self.workspace_tree(active_workspace_id).visible_windows_in_layout(layout);
+            if tiled.len() == 1 {
+                tiled.first().copied()
+            } else {
+                None
+            }
+        } else {
+            let windows = self.virtual_workspace_manager.windows_in_active_workspace(space);
+            if windows.len() == 1 {
+                windows.first().copied()
+            } else {
+                None
+            }
+        };
+
+        if let Some(wid) = singleton {
+            debug!(
+                ?space,
+                ?wid,
+                "Clearing singleton window constraint to allow full expansion"
+            );
+            self.clear_window_constraint(wid);
+        }
     }
 
     fn space_with_window(&self, wid: WindowId) -> Option<SpaceId> {
@@ -2030,6 +2064,7 @@ impl LayoutEngine {
                 }
 
                 let active_workspace = self.virtual_workspace_manager.active_workspace(op_space);
+                self.clear_singleton_constraints_in_active_workspace(op_space);
 
                 if Some(target_workspace_id) == active_workspace {
                     if is_floating {
@@ -2400,7 +2435,7 @@ impl LayoutEngine {
 mod tests {
     use std::panic::AssertUnwindSafe;
 
-    use objc2_core_foundation::CGPoint;
+    use objc2_core_foundation::{CGPoint, CGSize};
 
     use super::*;
     use crate::common::collections::HashMap;
@@ -2525,5 +2560,53 @@ mod tests {
 
         assert!(response.raise_windows.is_empty());
         assert_eq!(response.focus_window, None);
+    }
+
+    #[test]
+    fn window_removed_clears_singleton_constraint() {
+        let mut engine = test_engine();
+        let space = SpaceId::new(11);
+        let _ = engine.virtual_workspace_manager_mut().list_workspaces(space);
+        let _ = engine.handle_event(LayoutEvent::SpaceExposed(space, CGSize::new(1000.0, 1000.0)));
+
+        let w1 = WindowId::new(111, 1);
+        let w2 = WindowId::new(111, 2);
+        let _ = engine.handle_event(LayoutEvent::WindowAdded(space, w1));
+        let _ = engine.handle_event(LayoutEvent::WindowAdded(space, w2));
+
+        engine.set_window_constraint(w1, WindowConstraint {
+            max_w: Some(420.0),
+            max_h: None,
+        });
+        assert!(engine.window_constraint(w1).is_some());
+
+        let _ = engine.handle_event(LayoutEvent::WindowRemoved(w2));
+        assert_eq!(engine.window_constraint(w1), None);
+    }
+
+    #[test]
+    fn move_window_to_workspace_clears_singleton_constraint_in_active_workspace() {
+        let mut engine = test_engine();
+        let space = SpaceId::new(12);
+        let _ = engine.virtual_workspace_manager_mut().list_workspaces(space);
+        let _ = engine.handle_event(LayoutEvent::SpaceExposed(space, CGSize::new(1000.0, 1000.0)));
+
+        let w1 = WindowId::new(222, 1);
+        let w2 = WindowId::new(222, 2);
+        let _ = engine.handle_event(LayoutEvent::WindowAdded(space, w1));
+        let _ = engine.handle_event(LayoutEvent::WindowAdded(space, w2));
+
+        engine.set_window_constraint(w1, WindowConstraint {
+            max_w: Some(420.0),
+            max_h: None,
+        });
+        assert!(engine.window_constraint(w1).is_some());
+
+        let _ =
+            engine.handle_virtual_workspace_command(space, &LayoutCommand::MoveWindowToWorkspace {
+                workspace: 1,
+                window_id: Some(w2.idx.get()),
+            });
+        assert_eq!(engine.window_constraint(w1), None);
     }
 }

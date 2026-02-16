@@ -424,7 +424,6 @@ impl WmController {
                 return;
             }
         }
-
         actor::app::spawn_app_thread(
             pid,
             info,

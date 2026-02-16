@@ -252,7 +252,8 @@ impl WindowEventHandler {
             let mut triggered_by_rift =
                 has_pending_request && last_seen.is_some_and(|seen| seen == last_sent_txid);
 
-            if effective_mouse_state == Some(MouseState::Down) && triggered_by_rift {
+            if effective_mouse_state == Some(MouseState::Down) && triggered_by_rift && !requested.0
+            {
                 if let Some((wsid, _)) = pending_target {
                     reactor.transaction_manager.remove_for_window(wsid);
                 }
@@ -277,12 +278,9 @@ impl WindowEventHandler {
                             window.frame_monotonic = new_frame;
                         }
                         reactor.transaction_manager.remove_for_window(wsid);
-                    } else if change_kind == FrameChangeKind::Resize
-                        && !new_frame.size.same_as(target.size)
-                    {
+                    } else if !new_frame.size.same_as(target.size) {
                         debug!(?wid, ?new_frame, ?target, "Resize constrained by window");
                         window.frame_monotonic = new_frame;
-                        reactor.transaction_manager.remove_for_window(wsid);
                         let origin_matches_target = new_frame.origin.same_as(target.origin);
                         let _ = window;
 
@@ -296,6 +294,17 @@ impl WindowEventHandler {
                             return false;
                         }
 
+                        if requested.0 && matches!(change_kind, FrameChangeKind::Move) {
+                            trace!(
+                                ?wid,
+                                ?new_frame,
+                                ?target,
+                                "Skipping constrained resize inference for requested move; waiting for resize confirmation"
+                            );
+                            return false;
+                        }
+
+                        reactor.transaction_manager.remove_for_window(wsid);
                         let inferred = infer_constraint_from_target(new_frame, target);
                         let existing_constraint =
                             reactor.layout_manager.layout_engine.window_constraint(wid);

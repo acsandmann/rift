@@ -4,6 +4,7 @@ use test_log::test;
 use super::testing::*;
 use super::*;
 use crate::actor::app::Request;
+use crate::actor::reactor::events::window::WindowEventHandler;
 use crate::layout_engine::{Direction, LayoutCommand, LayoutEngine};
 use crate::sys::app::WindowInfo;
 use crate::sys::window_server::WindowServerId;
@@ -38,6 +39,140 @@ fn it_ignores_stale_resize_events() {
         requests.is_empty(),
         "got requests when there should have been none: {requests:?}"
     );
+}
+
+#[test]
+fn intermediate_constrained_resize_keeps_pending_target_until_move_settles() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    reactor.handle_event(screen_params_event(
+        vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
+        vec![Some(SpaceId::new(1))],
+        vec![],
+    ));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let wid = WindowId::new(1, 1);
+    let wsid = WindowServerId::new(1);
+    let txid = reactor.transaction_manager.generate_next_txid(wsid);
+    let target = CGRect::new(CGPoint::new(500., 0.), CGSize::new(500., 1000.));
+    reactor.transaction_manager.store_txid(wsid, txid, target);
+
+    let intermediate = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let changed = WindowEventHandler::handle_window_frame_changed(
+        &mut reactor,
+        wid,
+        intermediate,
+        Some(txid),
+        Requested(false),
+        FrameChangeKind::Resize,
+        None,
+    );
+    assert!(!changed);
+    assert_eq!(
+        reactor.transaction_manager.get_target_frame(wsid),
+        Some(target),
+        "pending target must remain until move settles at requested origin"
+    );
+}
+
+#[test]
+fn constrained_resize_clears_pending_target_on_resize_settle() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    reactor.handle_event(screen_params_event(
+        vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
+        vec![Some(SpaceId::new(1))],
+        vec![],
+    ));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let wid = WindowId::new(1, 1);
+    let wsid = WindowServerId::new(1);
+    let txid = reactor.transaction_manager.generate_next_txid(wsid);
+    let target = CGRect::new(CGPoint::new(500., 0.), CGSize::new(500., 1000.));
+    reactor.transaction_manager.store_txid(wsid, txid, target);
+
+    let constrained_resize = CGRect::new(CGPoint::new(500., 0.), CGSize::new(420., 1000.));
+    let changed = WindowEventHandler::handle_window_frame_changed(
+        &mut reactor,
+        wid,
+        constrained_resize,
+        Some(txid),
+        Requested(true),
+        FrameChangeKind::Resize,
+        None,
+    );
+    assert!(changed);
+    assert_eq!(reactor.transaction_manager.get_target_frame(wsid), None);
+    assert_eq!(
+        reactor.layout_manager.layout_engine.window_constraint(wid),
+        Some(crate::layout_engine::WindowConstraint { max_w: Some(420.), max_h: None })
+    );
+}
+
+#[test]
+fn requested_move_with_stale_size_does_not_infer_constraint_before_resize() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    reactor.handle_event(screen_params_event(
+        vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
+        vec![Some(SpaceId::new(1))],
+        vec![],
+    ));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let wid = WindowId::new(1, 1);
+    let wsid = WindowServerId::new(1);
+    let txid = reactor.transaction_manager.generate_next_txid(wsid);
+    let target = CGRect::new(CGPoint::new(500., 0.), CGSize::new(500., 1000.));
+    reactor.transaction_manager.store_txid(wsid, txid, target);
+
+    let stale_move = CGRect::new(CGPoint::new(500., 0.), CGSize::new(1000., 1000.));
+    let changed = WindowEventHandler::handle_window_frame_changed(
+        &mut reactor,
+        wid,
+        stale_move,
+        Some(txid),
+        Requested(true),
+        FrameChangeKind::Move,
+        None,
+    );
+    assert!(!changed);
+    assert_eq!(
+        reactor.transaction_manager.get_target_frame(wsid),
+        Some(target),
+        "move events can arrive before resize settles; keep pending target"
+    );
+    assert_eq!(reactor.layout_manager.layout_engine.window_constraint(wid), None);
+
+    let changed = WindowEventHandler::handle_window_frame_changed(
+        &mut reactor,
+        wid,
+        target,
+        Some(txid),
+        Requested(true),
+        FrameChangeKind::Resize,
+        None,
+    );
+    assert!(!changed);
+    assert_eq!(reactor.transaction_manager.get_target_frame(wsid), None);
+    assert_eq!(reactor.layout_manager.layout_engine.window_constraint(wid), None);
 }
 
 #[test]
