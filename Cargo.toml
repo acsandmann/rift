@@ -40,7 +40,7 @@ dirs = "6.0.0"
 dispatchr = { git = "https://github.com/drewcrawford/dispatchr" }
 nix = { version = "0.30.1", features = ["process", "user"] }
 objc2 = { version = "0.6.2", default-features = false }
-objc2-app-kit = { version = "0.3.1", default-features = false, features = [
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
 	"NSAppearance",
 	"NSApplication",
 	"NSAttributedString",
@@ -88,7 +88,7 @@ objc2-core-text = { version = "0.3.2", default-features = false, features = [
 	"CTLine",
 	"objc2-core-graphics"
 ]}
-objc2-core-graphics = { version = "0.3.1", default-features = false, features = [
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
 	"CGColor",
 	"CGDirectDisplay",
 	"CGError",
@@ -97,7 +97,7 @@ objc2-core-graphics = { version = "0.3.1", default-features = false, features = 
 	"CGWindow",
 	"objc2"
 ]}
-objc2-foundation = { version = "0.3.1", default-features = false, features = [
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
 	"NSArray",
 	"NSEnumerator",
 	"NSAttributedString",
@@ -107,7 +107,7 @@ objc2-foundation = { version = "0.3.1", default-features = false, features = [
 	"NSProcessInfo",
 	"NSValue"
 ]}
-objc2-quartz-core = { version = "0.3.0", default-features = false, features = [
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
 	"CAAnimation",
 	"CABase",
 	"CAEAGLLayer",
