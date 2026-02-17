@@ -356,6 +356,7 @@ comb1 = "Alt + Shift"
 # - prev_workspace = true|false (optional skip-empty override)
 # - switch_to_workspace = N
 # - move_window_to_workspace = N / move_window_to_workspace = { workspace = N, window_id = 123 } (optional window id)
+# - bring_window_to_workspace = N (moves window and switches workspace at the same time)
 # - create_workspace
 # - switch_to_last_workspace
 # - set_workspace_layout = { mode = "traditional"|"bsp"|"master_stack"|"scrolling" } (active workspace)

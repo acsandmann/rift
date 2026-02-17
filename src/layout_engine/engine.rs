@@ -71,6 +71,10 @@ pub enum LayoutCommand {
         workspace: usize,
         window_id: Option<u32>,
     },
+    BringWindowToWorkspace {
+        workspace: usize,
+        window_id: Option<u32>,
+    },
     SetWorkspaceLayout {
         workspace: Option<usize>,
         mode: LayoutMode,
@@ -1327,6 +1331,7 @@ impl LayoutEngine {
             | LayoutCommand::PrevWorkspace(_)
             | LayoutCommand::SwitchToWorkspace(_)
             | LayoutCommand::MoveWindowToWorkspace { .. }
+            | LayoutCommand::BringWindowToWorkspace { .. }
             | LayoutCommand::SetWorkspaceLayout { .. }
             | LayoutCommand::CreateWorkspace
             | LayoutCommand::SwitchToLastWorkspace => EventResponse::default(),
@@ -2058,6 +2063,104 @@ impl LayoutEngine {
 
                 self.broadcast_windows_changed(op_space);
                 EventResponse::default()
+            }
+            LayoutCommand::BringWindowToWorkspace {
+                workspace: workspace_index,
+                window_id: maybe_id,
+            } => {
+                let focused_window = if let Some(spec_u32) = maybe_id {
+                    match self.virtual_workspace_manager.find_window_by_idx(space, *spec_u32) {
+                        Some(w) => w,
+                        None => return EventResponse::default(),
+                    }
+                } else {
+                    match self.focused_window {
+                        Some(wid) => wid,
+                        None => return EventResponse::default(),
+                    }
+                };
+
+                let inferred_space = self.space_with_window(focused_window);
+                let op_space = if inferred_space == Some(space) {
+                    space
+                } else {
+                    inferred_space.unwrap_or(space)
+                };
+
+                let workspaces = self.virtual_workspace_manager_mut().list_workspaces(op_space);
+                let Some((target_workspace_id, _)) = workspaces.get(*workspace_index) else {
+                    return EventResponse::default();
+                };
+                let target_workspace_id = *target_workspace_id;
+
+                let Some(current_workspace_id) =
+                    self.virtual_workspace_manager.workspace_for_window(op_space, focused_window)
+                else {
+                    return EventResponse::default();
+                };
+
+                if current_workspace_id == target_workspace_id {
+                    return EventResponse::default();
+                }
+
+                let is_floating = self.floating.is_floating(focused_window);
+
+                if is_floating {
+                    self.floating.remove_active_for_window(focused_window);
+                } else {
+                    self.remove_window_from_all_tiling_trees(focused_window);
+                }
+
+                let assigned = self.virtual_workspace_manager.assign_window_to_workspace(
+                    op_space,
+                    focused_window,
+                    target_workspace_id,
+                );
+                if !assigned {
+                    if is_floating {
+                        self.floating.add_active(op_space, focused_window.pid, focused_window);
+                    } else if let Some(prev_layout) =
+                        self.workspace_layouts.active(op_space, current_workspace_id)
+                    {
+                        self.workspace_tree_mut(current_workspace_id)
+                            .add_window_after_selection(prev_layout, focused_window);
+                    }
+                    return EventResponse::default();
+                }
+
+                if !is_floating {
+                    if let Some(target_layout) =
+                        self.workspace_layouts.active(op_space, target_workspace_id)
+                    {
+                        self.workspace_tree_mut(target_workspace_id)
+                            .add_window_after_selection(target_layout, focused_window);
+                    }
+                }
+
+                let active_workspace = self.virtual_workspace_manager.active_workspace(op_space);
+
+                if Some(target_workspace_id) == active_workspace {
+                    if is_floating {
+                        self.floating.add_active(op_space, focused_window.pid, focused_window);
+                    }
+                    return EventResponse {
+                        focus_window: Some(focused_window),
+                        raise_windows: vec![],
+                        boundary_hit: None,
+                    };
+                }
+
+                self.virtual_workspace_manager.set_last_focused_window(
+                    op_space,
+                    target_workspace_id,
+                    Some(focused_window),
+                );
+                self.virtual_workspace_manager
+                    .set_active_workspace(op_space, target_workspace_id);
+
+                self.broadcast_windows_changed(op_space);
+                self.broadcast_workspace_changed(op_space);
+                return self.refocus_workspace(op_space, target_workspace_id);
             }
             LayoutCommand::CreateWorkspace => {
                 match self.virtual_workspace_manager.create_workspace(space, None) {
