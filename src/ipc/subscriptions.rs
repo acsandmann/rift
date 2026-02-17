@@ -148,6 +148,7 @@ impl ServerState {
             BroadcastEvent::WorkspaceChanged { .. } => "workspace_changed",
             BroadcastEvent::WindowsChanged { .. } => "windows_changed",
             BroadcastEvent::WindowTitleChanged { .. } => "window_title_changed",
+            BroadcastEvent::StacksChanged { .. } => "stacks_changed",
         };
 
         let mut targets: HashSet<ClientPort> = HashSet::default();
@@ -180,6 +181,7 @@ impl ServerState {
             BroadcastEvent::WorkspaceChanged { .. } => "workspace_changed",
             BroadcastEvent::WindowsChanged { .. } => "windows_changed",
             BroadcastEvent::WindowTitleChanged { .. } => "window_title_changed",
+            BroadcastEvent::StacksChanged { .. } => "stacks_changed",
         };
 
         // Collect relevant subscriptions without full HashMap clone

@@ -10,7 +10,7 @@ use super::{
 };
 use crate::actor;
 use crate::actor::app::{WindowId, pid_t};
-use crate::actor::broadcast::BroadcastSender;
+use crate::actor::broadcast::{BroadcastEvent, BroadcastSender, StackInfo};
 use crate::actor::drag_swap::DragManager as DragSwapManager;
 use crate::actor::reactor::Reactor;
 use crate::actor::reactor::animation::AnimationManager;
@@ -320,55 +320,89 @@ impl LayoutManager {
 
         let active_space = reactor.main_window_space();
         for (space, layout) in layout_result {
-            // Handle stack_line
-            if reactor.config.settings.ui.stack_line.enabled {
-                if let Some(tx) = &reactor.communication_manager.stack_line_tx {
-                    let screen = reactor.space_manager.screen_by_space(space);
-                    if let Some(screen) = screen {
-                        let display_uuid = screen.display_uuid_opt();
-                        let gaps =
-                            reactor.config.settings.layout.gaps.effective_for_display(display_uuid);
-                        let active_workspace_for_space_has_fullscreen = active_space == Some(space)
-                            && reactor
-                                .layout_manager
-                                .layout_engine
-                                .active_workspace_for_space_has_fullscreen(space);
-                        let group_infos =
-                            reactor.layout_manager.layout_engine.collect_group_containers(
-                                space,
-                                screen.frame,
-                                &gaps,
-                                reactor.config.settings.ui.stack_line.thickness(),
-                                reactor.config.settings.ui.stack_line.horiz_placement,
-                                reactor.config.settings.ui.stack_line.vert_placement,
-                            );
+            if let Some(screen) = reactor.space_manager.screen_by_space(space) {
+                let screen_frame = screen.frame;
+                let display_uuid = screen.display_uuid_owned();
+                let gaps = reactor
+                    .config
+                    .settings
+                    .layout
+                    .gaps
+                    .effective_for_display(display_uuid.as_deref());
+                let active_workspace_for_space_has_fullscreen = active_space == Some(space)
+                    && reactor
+                        .layout_manager
+                        .layout_engine
+                        .active_workspace_for_space_has_fullscreen(space);
+                let group_infos = reactor.layout_manager.layout_engine.collect_group_containers(
+                    space,
+                    screen_frame,
+                    &gaps,
+                    reactor.config.settings.ui.stack_line.thickness(),
+                    reactor.config.settings.ui.stack_line.horiz_placement,
+                    reactor.config.settings.ui.stack_line.vert_placement,
+                );
 
-                        let groups: Vec<crate::actor::stack_line::GroupInfo> = group_infos
-                            .into_iter()
-                            .map(|g| crate::actor::stack_line::GroupInfo {
-                                node_id: g.node_id,
-                                space_id: space,
-                                container_kind: g.container_kind,
-                                frame: g.frame,
-                                total_count: g.total_count,
-                                selected_index: g.selected_index,
-                                window_ids: g.window_ids,
-                            })
-                            .collect();
-                        let active_space_ids: Vec<crate::sys::screen::SpaceId> =
-                            reactor.iter_active_spaces().collect();
+                // Keep internal stack-line UI actor fed from the same group snapshot.
+                if reactor.config.settings.ui.stack_line.enabled
+                    && let Some(tx) = &reactor.communication_manager.stack_line_tx
+                {
+                    let groups: Vec<crate::actor::stack_line::GroupInfo> = group_infos
+                        .iter()
+                        .map(|g| crate::actor::stack_line::GroupInfo {
+                            node_id: g.node_id,
+                            space_id: space,
+                            container_kind: g.container_kind,
+                            frame: g.frame,
+                            total_count: g.total_count,
+                            selected_index: g.selected_index,
+                            window_ids: g.window_ids.clone(),
+                        })
+                        .collect();
+                    let active_space_ids: Vec<crate::sys::screen::SpaceId> =
+                        reactor.iter_active_spaces().collect();
 
-                        if let Err(e) =
-                            tx.try_send(crate::actor::stack_line::Event::GroupsUpdated {
-                                active_space_ids,
-                                space_id: space,
-                                groups,
-                                active_workspace_for_space_has_fullscreen,
-                            })
-                        {
-                            tracing::warn!("Failed to send groups update to stack_line: {}", e);
-                        }
+                    if let Err(e) = tx.try_send(crate::actor::stack_line::Event::GroupsUpdated {
+                        active_space_ids,
+                        space_id: space,
+                        groups,
+                        active_workspace_for_space_has_fullscreen,
+                    }) {
+                        tracing::warn!("Failed to send groups update to stack_line: {}", e);
                     }
+                }
+
+                if let Some(workspace_id) =
+                    reactor.layout_manager.layout_engine.active_workspace(space)
+                {
+                    let workspace_index =
+                        reactor.layout_manager.layout_engine.active_workspace_idx(space);
+                    let workspace_name = reactor
+                        .layout_manager
+                        .layout_engine
+                        .workspace_name(space, workspace_id)
+                        .unwrap_or_else(|| format!("Workspace {:?}", workspace_id));
+
+                    let stacks: Vec<StackInfo> = group_infos
+                        .iter()
+                        .map(|g| StackInfo {
+                            container_kind: g.container_kind,
+                            total_count: g.total_count,
+                            selected_index: g.selected_index,
+                            windows: g.window_ids.iter().map(WindowId::to_debug_string).collect(),
+                        })
+                        .collect();
+
+                    let event = BroadcastEvent::StacksChanged {
+                        workspace_id,
+                        workspace_index,
+                        workspace_name,
+                        stacks,
+                        active_workspace_has_fullscreen: active_workspace_for_space_has_fullscreen,
+                        space_id: space,
+                        display_uuid,
+                    };
+                    let _ = reactor.communication_manager.event_broadcaster.send(event);
                 }
             }
 

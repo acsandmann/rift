@@ -92,6 +92,31 @@ impl CliExecutor for DefaultCliExecutor {
                     env_vars.insert("RIFT_DISPLAY_UUID".into(), display_uuid.clone());
                 }
             }
+            BroadcastEvent::StacksChanged {
+                workspace_id,
+                workspace_index,
+                workspace_name,
+                stacks,
+                active_workspace_has_fullscreen,
+                space_id,
+                display_uuid,
+            } => {
+                env_vars.insert("RIFT_EVENT_TYPE".into(), "stacks_changed".into());
+                env_vars.insert("RIFT_WORKSPACE_ID".into(), workspace_id.to_string());
+                env_vars.insert("RIFT_WORKSPACE_NAME".into(), workspace_name.clone());
+                if let Some(workspace_index) = workspace_index {
+                    env_vars.insert("RIFT_WORKSPACE_INDEX".into(), workspace_index.to_string());
+                }
+                env_vars.insert("RIFT_STACK_COUNT".into(), stacks.len().to_string());
+                env_vars.insert(
+                    "RIFT_ACTIVE_WORKSPACE_HAS_FULLSCREEN".into(),
+                    active_workspace_has_fullscreen.to_string(),
+                );
+                env_vars.insert("RIFT_SPACE_ID".into(), space_id.to_string());
+                if let Some(display_uuid) = display_uuid.as_ref() {
+                    env_vars.insert("RIFT_DISPLAY_UUID".into(), display_uuid.clone());
+                }
+            }
         }
 
         let event_json = match serde_json::to_string(event) {

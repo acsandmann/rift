@@ -1,8 +1,17 @@
 use serde::{Deserialize, Serialize};
 
 use crate::actor::app::WindowId;
-use crate::layout_engine::VirtualWorkspaceId;
+use crate::layout_engine::{LayoutKind, VirtualWorkspaceId};
 use crate::sys::screen::SpaceId;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "snake_case")]
+pub struct StackInfo {
+    pub container_kind: LayoutKind,
+    pub total_count: usize,
+    pub selected_index: usize,
+    pub windows: Vec<String>,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
@@ -28,6 +37,15 @@ pub enum BroadcastEvent {
         workspace_name: String,
         previous_title: String,
         new_title: String,
+        space_id: SpaceId,
+        display_uuid: Option<String>,
+    },
+    StacksChanged {
+        workspace_id: VirtualWorkspaceId,
+        workspace_index: Option<u64>,
+        workspace_name: String,
+        stacks: Vec<StackInfo>,
+        active_workspace_has_fullscreen: bool,
         space_id: SpaceId,
         display_uuid: Option<String>,
     },
