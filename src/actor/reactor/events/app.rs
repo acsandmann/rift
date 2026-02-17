@@ -1,6 +1,6 @@
 use tracing::{debug, warn};
 
-use crate::actor::app::{AppInfo, AppThreadHandle, Quiet, WindowId};
+use crate::actor::app::{AppInfo, AppThreadHandle, Quiet, Request, WindowId};
 use crate::actor::reactor::{AppState, Reactor};
 use crate::layout_engine::LayoutEvent;
 use crate::sys::app::WindowInfo;
@@ -19,7 +19,37 @@ impl AppEventHandler {
         _is_frontmost: bool,
         _main_window: Option<WindowId>,
     ) {
-        reactor.app_manager.apps.insert(pid, AppState { info: info.clone(), handle });
+        if let Some(existing) = reactor.app_manager.apps.get_mut(&pid) {
+            if existing.handle.send(Request::GetVisibleWindows).is_ok() {
+                debug!(
+                    pid,
+                    bundle = ?info.bundle_id,
+                    "Ignoring duplicate ApplicationLaunched for already managed app"
+                );
+                if let Err(e) = handle.send(Request::Terminate) {
+                    warn!("Failed to terminate duplicate app thread for app {}: {}", pid, e);
+                }
+                reactor.update_partial_window_server_info(window_server_info);
+                reactor.on_windows_discovered_with_app_info(
+                    pid,
+                    visible_windows,
+                    vec![],
+                    Some(info),
+                );
+                return;
+            }
+
+            warn!(
+                pid,
+                bundle = ?info.bundle_id,
+                "Replacing stale app thread after duplicate launch event"
+            );
+            existing.info = info.clone();
+            existing.handle = handle;
+        } else {
+            reactor.app_manager.apps.insert(pid, AppState { info: info.clone(), handle });
+        }
+
         reactor.update_partial_window_server_info(window_server_info);
         reactor.on_windows_discovered_with_app_info(pid, visible_windows, vec![], Some(info));
     }
