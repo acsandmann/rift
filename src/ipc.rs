@@ -15,8 +15,9 @@ use crate::actor::reactor::{self, Event};
 use crate::ipc::subscriptions::SharedServerState;
 use crate::sys::dispatch::block_on;
 use crate::sys::mach::{
-    is_mach_server_registered, mach_msg_header_t, mach_send_request, mach_server_run,
-    send_mach_reply,
+    is_mach_server_registered, mach_allocate_reply_port, mach_deallocate_reply_port,
+    mach_msg_header_t, mach_receive_message_on_port, mach_send_request,
+    mach_send_request_with_reply_port, mach_server_run, send_mach_reply,
 };
 
 type ClientPort = u32;
@@ -51,8 +52,45 @@ pub struct RiftMachClient {
     connected: bool,
 }
 
+pub struct RiftMachSubscription {
+    reply_port: u32,
+}
+
+impl RiftMachSubscription {
+    pub fn recv_event(&self) -> Result<serde_json::Value, String> {
+        let mut event_buf = Vec::with_capacity(256);
+        let ok = unsafe { mach_receive_message_on_port(self.reply_port, &mut event_buf) };
+        if !ok || event_buf.is_empty() {
+            return Err("Failed to receive Mach event".to_string());
+        }
+
+        let json_bytes = CStr::from_bytes_until_nul(&event_buf)
+            .map_err(|_| "event payload missing NUL terminator")?
+            .to_bytes();
+
+        serde_json::from_slice(json_bytes).map_err(|e| format!("Failed to parse event JSON: {e}"))
+    }
+}
+
+impl Drop for RiftMachSubscription {
+    fn drop(&mut self) {
+        unsafe {
+            mach_deallocate_reply_port(self.reply_port);
+        }
+    }
+}
+
 impl RiftMachClient {
     pub fn connect() -> Result<Self, String> { Ok(RiftMachClient { connected: true }) }
+
+    fn parse_response_buffer(response_buf: &[u8]) -> Result<RiftResponse, String> {
+        let json_bytes = CStr::from_bytes_until_nul(response_buf)
+            .map_err(|_| "response missing NUL terminator")?
+            .to_bytes();
+
+        serde_json::from_slice(json_bytes)
+            .map_err(|e| format!("Failed to parse response JSON: {}", e))
+    }
 
     pub fn send_request(&self, request: &RiftRequest) -> Result<RiftResponse, String> {
         if !self.connected {
@@ -75,22 +113,57 @@ impl RiftMachClient {
             return Err("Failed to send Mach request or no response received".to_string());
         }
 
-        let json_bytes = CStr::from_bytes_until_nul(&response_buf)
-            .map_err(|_| {
-                "response missing NUL
-          terminator"
-            })?
-            .to_bytes();
+        Self::parse_response_buffer(&response_buf)
+    }
 
-        let response: RiftResponse = serde_json::from_slice(json_bytes).map_err(|e| {
-            format!(
-                "Failed to parse
-          response JSON: {}",
-                e
+    pub fn subscribe(&self, event: String) -> Result<RiftMachSubscription, String> {
+        if !self.connected {
+            return Err("Not connected".to_string());
+        }
+
+        let reply_port = unsafe {
+            mach_allocate_reply_port().ok_or_else(|| "Failed to allocate reply port".to_string())?
+        };
+
+        let request = RiftRequest::Subscribe { event: event.clone() };
+        let request_json = serde_json::to_vec(&request)
+            .map_err(|e| format!("Failed to serialize request: {}", e))?;
+
+        let mut response_buf = Vec::with_capacity(256);
+        let ok = unsafe {
+            mach_send_request_with_reply_port(
+                request_json.as_ptr() as *const i8,
+                request_json.len() as u32,
+                reply_port,
+                &mut response_buf,
             )
-        })?;
+        };
+        if !ok || response_buf.is_empty() {
+            unsafe {
+                mach_deallocate_reply_port(reply_port);
+            }
+            return Err("Failed to send subscribe request or no response received".to_string());
+        }
 
-        Ok(response)
+        let response = match Self::parse_response_buffer(&response_buf) {
+            Ok(resp) => resp,
+            Err(err) => {
+                unsafe {
+                    mach_deallocate_reply_port(reply_port);
+                }
+                return Err(err);
+            }
+        };
+
+        match response {
+            RiftResponse::Success { .. } => Ok(RiftMachSubscription { reply_port }),
+            RiftResponse::Error { error } => {
+                unsafe {
+                    mach_deallocate_reply_port(reply_port);
+                }
+                Err(format!("Subscribe request failed: {error}"))
+            }
+        }
     }
 }
 

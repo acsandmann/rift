@@ -993,16 +993,18 @@ impl Reactor {
         }
         let app = self.app_manager.apps.get(&window_id.pid)?;
 
-        let preferred_name = app.info.localized_name.clone().or_else(|| app.info.bundle_id.clone());
+        let app_name = app.info.localized_name.clone();
+        let bundle_id = app.info.bundle_id.clone();
 
         Some(WindowData {
             id: window_id,
             is_floating: self.layout_manager.layout_engine.is_window_floating(window_id),
             is_focused: self.main_window() == Some(window_id),
+            app_name,
             info: WindowInfo {
                 title: window_state.info.title.clone(),
                 frame: window_state.frame_monotonic,
-                bundle_id: preferred_name,
+                bundle_id,
                 ..window_state.info.clone()
             },
         })

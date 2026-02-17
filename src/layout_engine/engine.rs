@@ -433,7 +433,10 @@ impl LayoutEngine {
         is_floating: bool,
     ) -> EventResponse {
         let Some((ws_id, layout)) = self.workspace_and_layout(space) else {
-            warn!("No active workspace/layout for space {:?}; move_focus ignored", space);
+            warn!(
+                "No active workspace/layout for space {:?}; move_focus ignored",
+                space
+            );
             return EventResponse::default();
         };
 

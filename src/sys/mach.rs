@@ -288,6 +288,96 @@ unsafe fn mach_get_bs_port(bs_name: &CStr) -> mach_port_t {
     service_port
 }
 
+pub unsafe fn mach_allocate_reply_port() -> Option<mach_port_t> {
+    let task = mach_task_self();
+    let mut reply_port: mach_port_t = 0;
+    if mach_port_allocate(task, MACH_PORT_RIGHT_RECEIVE, &mut reply_port) != KERN_SUCCESS {
+        error!("mach_allocate_reply_port: mach_port_allocate failed");
+        return None;
+    }
+
+    let limits = mach_port_limits {
+        mpl_qlimit: MACH_PORT_QLIMIT_LARGE,
+    };
+    let _ = mach_port_set_attributes(
+        task,
+        reply_port,
+        MACH_PORT_LIMITS_INFO,
+        &limits as *const _ as *const c_void,
+        MACH_PORT_LIMITS_INFO_COUNT,
+    );
+
+    let ir = mach_port_insert_right(task, reply_port, reply_port, MACH_MSG_TYPE_MAKE_SEND as c_int);
+    if ir != KERN_SUCCESS {
+        error!(
+            "mach_allocate_reply_port: mach_port_insert_right failed for reply port (kr={})",
+            ir
+        );
+        let _ = mach_port_mod_refs(task, reply_port, MACH_PORT_RIGHT_RECEIVE, -1);
+        let _ = mach_port_deallocate(task, reply_port);
+        return None;
+    }
+
+    Some(reply_port)
+}
+
+pub unsafe fn mach_deallocate_reply_port(reply_port: mach_port_t) {
+    if reply_port == 0 {
+        return;
+    }
+    let task = mach_task_self();
+    let _ = mach_port_mod_refs(task, reply_port, MACH_PORT_RIGHT_RECEIVE, -1);
+    let _ = mach_port_deallocate(task, reply_port);
+}
+
+unsafe fn receive_message_on_port(
+    reply_port: mach_port_t,
+    response_buf: &mut Vec<u8>,
+    log_ctx: &str,
+) -> bool {
+    let mut buffer: mach_buffer = zeroed();
+    let recv_result = mach_msg(
+        &mut buffer.message.header,
+        MACH_RCV_MSG,
+        0,
+        size_of::<mach_buffer>() as u32,
+        reply_port,
+        MACH_MSG_TIMEOUT_NONE,
+        0,
+    );
+
+    if recv_result != MACH_MSG_SUCCESS {
+        error!(
+            "{}: failed to receive response (recv_result={} reply_port={})",
+            log_ctx, recv_result, reply_port
+        );
+        return false;
+    }
+
+    let mut rsp_ptr: *mut c_char = null_mut();
+    let mut rsp_len: usize = 0;
+
+    let inline_len = buffer
+        .message
+        .header
+        .msgh_size
+        .saturating_sub(size_of::<mach_msg_header_t>() as u32) as usize;
+    if inline_len > 0 {
+        let sm_ptr = (&mut buffer.message.header) as *mut mach_msg_header_t as *mut simple_message;
+        rsp_len = inline_len;
+        rsp_ptr = (*sm_ptr).data.as_mut_ptr() as *mut c_char;
+    }
+
+    response_buf.clear();
+    if rsp_len > 0 && !rsp_ptr.is_null() {
+        let slice = core::slice::from_raw_parts(rsp_ptr as *const u8, rsp_len);
+        response_buf.extend_from_slice(slice);
+    }
+
+    mach_msg_destroy(&mut buffer.message.header);
+    true
+}
+
 pub unsafe fn mach_send_message(
     port: mach_port_t,
     message: *const c_char,
@@ -383,57 +473,72 @@ pub unsafe fn mach_send_message(
     }
 
     if await_response {
-        let mut buffer: mach_buffer = zeroed();
-        let recv_result = mach_msg(
-            &mut buffer.message.header,
-            MACH_RCV_MSG,
-            0,
-            size_of::<mach_buffer>() as u32,
-            reply_port,
-            MACH_MSG_TIMEOUT_NONE,
-            0,
-        );
-
+        let received = if let Some(buf) = response_buf {
+            receive_message_on_port(reply_port, buf, "mach_send_message")
+        } else {
+            false
+        };
         let _ = mach_port_mod_refs(task, reply_port, MACH_PORT_RIGHT_RECEIVE, -1);
         let _ = mach_port_deallocate(task, reply_port);
-
-        if recv_result != MACH_MSG_SUCCESS {
-            error!(
-                "mach_send_message: failed to receive response (recv_result={} reply_port={})",
-                recv_result, reply_port
-            );
+        if !received {
             return false;
         }
-
-        let mut rsp_ptr: *mut c_char = null_mut();
-        let mut rsp_len: usize = 0;
-
-        let inline_len = buffer
-            .message
-            .header
-            .msgh_size
-            .saturating_sub(size_of::<mach_msg_header_t>() as u32)
-            as usize;
-        if inline_len > 0 {
-            let sm_ptr =
-                (&mut buffer.message.header) as *mut mach_msg_header_t as *mut simple_message;
-            rsp_len = inline_len;
-            rsp_ptr = unsafe { (*sm_ptr).data.as_mut_ptr() as *mut c_char };
-        }
-
-        if let Some(buf) = response_buf {
-            buf.clear();
-            if rsp_len > 0 && !rsp_ptr.is_null() {
-                let slice = core::slice::from_raw_parts(rsp_ptr as *const u8, rsp_len);
-                buf.extend_from_slice(slice);
-            }
-        }
-
-        mach_msg_destroy(&mut buffer.message.header);
         return true;
     }
 
     true
+}
+
+pub unsafe fn mach_send_message_with_reply_port(
+    port: mach_port_t,
+    message: *const c_char,
+    len: u32,
+    reply_port: mach_port_t,
+    response_buf: &mut Vec<u8>,
+) -> bool {
+    if message.is_null() || port == 0 || reply_port == 0 || len > MAX_MESSAGE_SIZE {
+        error!(
+            "mach_send_message_with_reply_port: invalid input args message={:?} port={} len={} reply_port={}",
+            message, port, len, reply_port
+        );
+        return false;
+    }
+
+    let aligned_len = (len + 3) & !3;
+
+    let mut sm: simple_message = zeroed();
+    sm.header.msgh_remote_port = port;
+    sm.header.msgh_local_port = reply_port;
+    sm.header.msgh_voucher_port = 0;
+    sm.header.msgh_id = reply_port as i32;
+    sm.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_COPY_SEND);
+    sm.header.msgh_size = (size_of::<mach_msg_header_t>() as u32) + aligned_len;
+
+    copy_nonoverlapping(message as *const u8, sm.data.as_mut_ptr(), len as usize);
+    if aligned_len > len {
+        let pad = (aligned_len - len) as usize;
+        core::ptr::write_bytes(sm.data.as_mut_ptr().add(len as usize), 0, pad);
+    }
+
+    let send_result = mach_msg(
+        &mut sm.header,
+        MACH_SEND_MSG,
+        sm.header.msgh_size,
+        0,
+        0,
+        MACH_MSG_TIMEOUT_NONE,
+        0,
+    );
+
+    if send_result != MACH_MSG_SUCCESS {
+        error!(
+            "mach_send_message_with_reply_port: mach_msg send failed (result={} remote_port={} reply_port={})",
+            send_result, port, reply_port
+        );
+        return false;
+    }
+
+    receive_message_on_port(reply_port, response_buf, "mach_send_message_with_reply_port")
 }
 
 pub unsafe fn mach_send_request(
@@ -473,6 +578,57 @@ pub unsafe fn mach_send_request(
     }
 
     mach_send_message(service_port, message, len, true, Some(response_buf))
+}
+
+pub unsafe fn mach_send_request_with_reply_port(
+    message: *const c_char,
+    len: u32,
+    reply_port: mach_port_t,
+    response_buf: &mut Vec<u8>,
+) -> bool {
+    if message.is_null() || len > MAX_MESSAGE_SIZE || reply_port == 0 {
+        error!(
+            "mach_send_request_with_reply_port: invalid args message={:?} len={} reply_port={}",
+            message, len, reply_port
+        );
+        return false;
+    }
+
+    let service_name = bs_name();
+
+    let mut service_port: mach_port_t = 0;
+    let mut attempt = 0;
+    while attempt < 5 {
+        service_port = mach_get_bs_port(&service_name);
+        if service_port != 0 {
+            break;
+        }
+        let backoff_ms = 50u64.saturating_mul(1u64 << attempt);
+        std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+        attempt += 1;
+    }
+
+    if service_port == 0 {
+        error!(
+            "mach_send_request_with_reply_port: mach_get_bs_port returned 0 for {} after {} attempts",
+            service_name.to_string_lossy(),
+            attempt
+        );
+        return false;
+    }
+
+    mach_send_message_with_reply_port(service_port, message, len, reply_port, response_buf)
+}
+
+pub unsafe fn mach_receive_message_on_port(
+    reply_port: mach_port_t,
+    response_buf: &mut Vec<u8>,
+) -> bool {
+    if reply_port == 0 {
+        error!("mach_receive_message_on_port: invalid reply_port=0");
+        return false;
+    }
+    receive_message_on_port(reply_port, response_buf, "mach_receive_message_on_port")
 }
 
 pub type mach_handler = unsafe extern "C" fn(

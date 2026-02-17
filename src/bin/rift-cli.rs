@@ -390,19 +390,30 @@ fn main() {
     sigpipe::reset();
     let cli = Cli::parse();
 
-    if let Commands::Service { .. } = &cli.command {
-        println!(
-            "service commands have been moved to the `rift` binary. (ie `rift service install`)"
-        );
-        process::exit(0);
-    }
-
-    let request = match build_request(cli.command) {
-        Ok(req) => req,
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            process::exit(1);
+    let request = match cli.command {
+        Commands::Service { .. } => {
+            println!(
+                "service commands have been moved to the `rift` binary. (ie `rift service install`)"
+            );
+            process::exit(0);
         }
+        Commands::Subscribe {
+            subscribe: SubscribeCommands::Mach { event },
+        } => {
+            if let Err(e) = run_mach_subscription(event) {
+                eprintln!("Communication error: {}", e);
+                eprintln!("Hint: ensure the rift service is running (try `rift service start`).");
+                process::exit(1);
+            }
+            process::exit(0);
+        }
+        command => match build_request(command) {
+            Ok(req) => req,
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                process::exit(1);
+            }
+        },
     };
 
     let client = match RiftMachClient::connect() {
@@ -876,4 +887,21 @@ fn write_json(value: &Value, pretty: bool) -> Result<(), String> {
     }
     writer.write_all(b"\n").map_err(|e| e.to_string())?;
     writer.flush().map_err(|e| e.to_string())
+}
+
+fn run_mach_subscription(event: String) -> Result<(), String> {
+    let pretty = std::env::var("RIFT_CLI_PRETTY").map(|v| v != "0").unwrap_or(false);
+    let client = RiftMachClient::connect()?;
+    let subscription = client.subscribe(event)?;
+
+    loop {
+        let event_payload = subscription.recv_event()?;
+        // Exit cleanly when output is closed by the consumer.
+        if let Err(e) = write_json(&event_payload, pretty) {
+            if e.contains("Broken pipe") {
+                return Ok(());
+            }
+            return Err(format!("Failed to write event output: {e}"));
+        }
+    }
 }
