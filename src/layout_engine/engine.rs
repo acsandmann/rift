@@ -228,6 +228,123 @@ impl LayoutEngine {
 
         true
     }
+
+    fn response_for_raised_windows(raise_windows: Vec<WindowId>) -> EventResponse {
+        if raise_windows.is_empty() {
+            EventResponse::default()
+        } else {
+            EventResponse {
+                raise_windows,
+                focus_window: None,
+                boundary_hit: None,
+            }
+        }
+    }
+
+    fn toggle_orientation_for_system<S: LayoutSystem>(
+        system: &mut S,
+        layout: LayoutId,
+        default_orientation: crate::common::config::StackDefaultOrientation,
+    ) -> EventResponse {
+        if system.parent_of_selection_is_stacked(layout) {
+            let toggled_windows =
+                system.apply_stacking_to_parent_of_selection(layout, default_orientation);
+            return Self::response_for_raised_windows(toggled_windows);
+        }
+        system.toggle_tile_orientation(layout);
+        EventResponse::default()
+    }
+
+    fn toggle_stack_for_workspace(
+        &mut self,
+        workspace_id: VirtualWorkspaceId,
+        layout: LayoutId,
+        default_orientation: crate::common::config::StackDefaultOrientation,
+    ) -> EventResponse {
+        let unstacked_windows = {
+            self.workspace_tree_mut(workspace_id)
+                .unstack_parent_of_selection(layout, default_orientation)
+        };
+        if !unstacked_windows.is_empty() {
+            return Self::response_for_raised_windows(unstacked_windows);
+        }
+
+        let stacked_windows = {
+            self.workspace_tree_mut(workspace_id)
+                .apply_stacking_to_parent_of_selection(layout, default_orientation)
+        };
+        if !stacked_windows.is_empty() {
+            return Self::response_for_raised_windows(stacked_windows);
+        }
+
+        let visible_windows = self.workspace_tree(workspace_id).visible_windows_in_layout(layout);
+        Self::response_for_raised_windows(visible_windows)
+    }
+
+    fn collect_group_containers_for_space(
+        &self,
+        space: SpaceId,
+        screen: CGRect,
+        gaps: &crate::common::config::GapSettings,
+        stack_line_thickness: f64,
+        stack_line_horiz: crate::common::config::HorizontalPlacement,
+        stack_line_vert: crate::common::config::VerticalPlacement,
+        selection_path_only: bool,
+    ) -> Vec<GroupContainerInfo> {
+        let Some((ws_id, layout_id)) = self.workspace_and_layout(space) else {
+            return Vec::new();
+        };
+        let stack_offset = self.layout_settings.stack.stack_offset;
+        match self.workspace_tree(ws_id) {
+            LayoutSystemKind::Traditional(s) => {
+                if selection_path_only {
+                    s.collect_group_containers_in_selection_path(
+                        layout_id,
+                        screen,
+                        stack_offset,
+                        gaps,
+                        stack_line_thickness,
+                        stack_line_horiz,
+                        stack_line_vert,
+                    )
+                } else {
+                    s.collect_group_containers(
+                        layout_id,
+                        screen,
+                        stack_offset,
+                        gaps,
+                        stack_line_thickness,
+                        stack_line_horiz,
+                        stack_line_vert,
+                    )
+                }
+            }
+            LayoutSystemKind::MasterStack(s) => {
+                if selection_path_only {
+                    s.collect_group_containers_in_selection_path(
+                        layout_id,
+                        screen,
+                        stack_offset,
+                        gaps,
+                        stack_line_thickness,
+                        stack_line_horiz,
+                        stack_line_vert,
+                    )
+                } else {
+                    s.collect_group_containers(
+                        layout_id,
+                        screen,
+                        stack_offset,
+                        gaps,
+                        stack_line_thickness,
+                        stack_line_horiz,
+                        stack_line_vert,
+                    )
+                }
+            }
+            _ => Vec::new(),
+        }
+    }
 }
 
 impl LayoutEngine {
@@ -1340,40 +1457,7 @@ impl LayoutEngine {
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
                 let default_orientation: crate::common::config::StackDefaultOrientation =
                     self.layout_settings.stack.default_orientation;
-                let unstacked_windows = self
-                    .workspace_tree_mut(workspace_id)
-                    .unstack_parent_of_selection(layout, default_orientation);
-
-                if !unstacked_windows.is_empty() {
-                    return EventResponse {
-                        raise_windows: unstacked_windows,
-                        focus_window: None,
-                        boundary_hit: None,
-                    };
-                }
-
-                let stacked_windows = self
-                    .workspace_tree_mut(workspace_id)
-                    .apply_stacking_to_parent_of_selection(layout, default_orientation);
-                if !stacked_windows.is_empty() {
-                    return EventResponse {
-                        raise_windows: stacked_windows,
-                        focus_window: None,
-                        boundary_hit: None,
-                    };
-                }
-
-                let visible_windows =
-                    self.workspace_tree(workspace_id).visible_windows_in_layout(layout);
-                if !visible_windows.is_empty() {
-                    EventResponse {
-                        raise_windows: visible_windows,
-                        focus_window: None,
-                        boundary_hit: None,
-                    }
-                } else {
-                    EventResponse::default()
-                }
+                self.toggle_stack_for_workspace(workspace_id, layout, default_orientation)
             }
             LayoutCommand::UnjoinWindows => {
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
@@ -1385,54 +1469,20 @@ impl LayoutEngine {
 
                 let default_orientation = self.layout_settings.stack.default_orientation;
                 let tree = self.workspace_tree_mut(workspace_id);
-                let resp = match tree {
+                match tree {
                     LayoutSystemKind::Traditional(s) => {
-                        if s.parent_of_selection_is_stacked(layout) {
-                            let toggled_windows = s
-                                .apply_stacking_to_parent_of_selection(layout, default_orientation);
-                            if !toggled_windows.is_empty() {
-                                EventResponse {
-                                    raise_windows: toggled_windows,
-                                    focus_window: None,
-                                    boundary_hit: None,
-                                }
-                            } else {
-                                EventResponse::default()
-                            }
-                        } else {
-                            s.toggle_tile_orientation(layout);
-                            EventResponse::default()
-                        }
+                        Self::toggle_orientation_for_system(s, layout, default_orientation)
                     }
                     LayoutSystemKind::Bsp(s) => {
-                        s.toggle_tile_orientation(layout);
-                        EventResponse::default()
+                        Self::toggle_orientation_for_system(s, layout, default_orientation)
                     }
                     LayoutSystemKind::MasterStack(s) => {
-                        if s.parent_of_selection_is_stacked(layout) {
-                            let toggled_windows = s
-                                .apply_stacking_to_parent_of_selection(layout, default_orientation);
-                            if !toggled_windows.is_empty() {
-                                EventResponse {
-                                    raise_windows: toggled_windows,
-                                    focus_window: None,
-                                    boundary_hit: None,
-                                }
-                            } else {
-                                EventResponse::default()
-                            }
-                        } else {
-                            s.toggle_tile_orientation(layout);
-                            EventResponse::default()
-                        }
+                        Self::toggle_orientation_for_system(s, layout, default_orientation)
                     }
                     LayoutSystemKind::Scrolling(s) => {
-                        s.toggle_tile_orientation(layout);
-                        EventResponse::default()
+                        Self::toggle_orientation_for_system(s, layout, default_orientation)
                     }
-                };
-
-                resp
+                }
             }
             LayoutCommand::ResizeWindowGrow => {
                 if is_floating {
@@ -1704,30 +1754,15 @@ impl LayoutEngine {
         stack_line_horiz: crate::common::config::HorizontalPlacement,
         stack_line_vert: crate::common::config::VerticalPlacement,
     ) -> Vec<GroupContainerInfo> {
-        let Some((ws_id, layout_id)) = self.workspace_and_layout(space) else {
-            return Vec::new();
-        };
-        match self.workspace_tree(ws_id) {
-            LayoutSystemKind::Traditional(s) => s.collect_group_containers_in_selection_path(
-                layout_id,
-                screen,
-                self.layout_settings.stack.stack_offset,
-                gaps,
-                stack_line_thickness,
-                stack_line_horiz,
-                stack_line_vert,
-            ),
-            LayoutSystemKind::MasterStack(s) => s.collect_group_containers_in_selection_path(
-                layout_id,
-                screen,
-                self.layout_settings.stack.stack_offset,
-                gaps,
-                stack_line_thickness,
-                stack_line_horiz,
-                stack_line_vert,
-            ),
-            _ => Vec::new(),
-        }
+        self.collect_group_containers_for_space(
+            space,
+            screen,
+            gaps,
+            stack_line_thickness,
+            stack_line_horiz,
+            stack_line_vert,
+            true,
+        )
     }
 
     pub fn active_workspace_for_space_has_fullscreen(&mut self, space: SpaceId) -> bool {
@@ -1746,30 +1781,15 @@ impl LayoutEngine {
         stack_line_horiz: crate::common::config::HorizontalPlacement,
         stack_line_vert: crate::common::config::VerticalPlacement,
     ) -> Vec<GroupContainerInfo> {
-        let Some((ws_id, layout_id)) = self.workspace_and_layout(space) else {
-            return Vec::new();
-        };
-        match self.workspace_tree(ws_id) {
-            LayoutSystemKind::Traditional(s) => s.collect_group_containers(
-                layout_id,
-                screen,
-                self.layout_settings.stack.stack_offset,
-                gaps,
-                stack_line_thickness,
-                stack_line_horiz,
-                stack_line_vert,
-            ),
-            LayoutSystemKind::MasterStack(s) => s.collect_group_containers(
-                layout_id,
-                screen,
-                self.layout_settings.stack.stack_offset,
-                gaps,
-                stack_line_thickness,
-                stack_line_horiz,
-                stack_line_vert,
-            ),
-            _ => Vec::new(),
-        }
+        self.collect_group_containers_for_space(
+            space,
+            screen,
+            gaps,
+            stack_line_thickness,
+            stack_line_horiz,
+            stack_line_vert,
+            false,
+        )
     }
 
     pub fn calculate_layout_for_workspace(

@@ -1061,6 +1061,36 @@ impl LayoutSystem for TraditionalLayoutSystem {
 }
 
 impl TraditionalLayoutSystem {
+    fn stack_group_container_info(
+        &self,
+        node: NodeId,
+        kind: crate::layout_engine::LayoutKind,
+        rect: CGRect,
+        children: &[NodeId],
+        selected_index: usize,
+    ) -> crate::layout_engine::engine::GroupContainerInfo {
+        let ui_selected_index = if matches!(kind, crate::layout_engine::LayoutKind::VerticalStack) {
+            children.len().saturating_sub(1).saturating_sub(selected_index)
+        } else {
+            selected_index
+        };
+
+        let mut window_ids =
+            children.iter().filter_map(|&child| self.window_at(child)).collect::<Vec<_>>();
+        if matches!(kind, crate::layout_engine::LayoutKind::VerticalStack) {
+            window_ids.reverse();
+        }
+
+        crate::layout_engine::engine::GroupContainerInfo {
+            node_id: node,
+            container_kind: kind,
+            frame: rect,
+            total_count: children.len(),
+            selected_index: ui_selected_index,
+            window_ids,
+        }
+    }
+
     pub(crate) fn collect_group_containers_in_selection_path(
         &self,
         layout: LayoutId,
@@ -1071,7 +1101,6 @@ impl TraditionalLayoutSystem {
         stack_line_horiz: crate::common::config::HorizontalPlacement,
         stack_line_vert: crate::common::config::VerticalPlacement,
     ) -> Vec<crate::layout_engine::engine::GroupContainerInfo> {
-        use self::StackLayoutResult;
         use crate::layout_engine::LayoutKind::*;
 
         let mut out = Vec::new();
@@ -1105,46 +1134,23 @@ impl TraditionalLayoutSystem {
                     break;
                 }
 
-                let ui_selected_index = if matches!(kind, VerticalStack) {
-                    children.len().saturating_sub(1).saturating_sub(selected_index)
-                } else {
-                    selected_index
-                };
-
-                out.push(crate::layout_engine::engine::GroupContainerInfo {
-                    node_id: node,
-                    container_kind: kind,
-                    frame: rect,
-                    total_count: children.len(),
-                    selected_index: ui_selected_index,
-                    window_ids: {
-                        let mut ids = children
-                            .iter()
-                            .filter_map(|&child| self.window_at(child))
-                            .collect::<Vec<_>>();
-                        if matches!(kind, VerticalStack) {
-                            ids.reverse();
-                        }
-                        ids
-                    },
-                });
-
-                let mut container_rect = rect;
-                let reserve = stack_line_thickness.max(0.0);
                 let is_horizontal = matches!(kind, HorizontalStack);
-                container_rect = adjust_stack_container_rect(
-                    container_rect,
-                    is_horizontal,
-                    reserve,
-                    stack_line_horiz,
-                    stack_line_vert,
-                );
+                out.push(self.stack_group_container_info(
+                    node,
+                    kind,
+                    rect,
+                    &children,
+                    selected_index,
+                ));
 
-                let layout_res = StackLayoutResult::new(
-                    container_rect,
+                let layout_res = stack_layout_result(
+                    rect,
                     children.len(),
                     stack_offset,
                     is_horizontal,
+                    stack_line_thickness,
+                    stack_line_horiz,
+                    stack_line_vert,
                 );
                 rect = layout_res.get_focused_frame_for_index(selected_index, selected_index);
 
@@ -1179,7 +1185,6 @@ impl TraditionalLayoutSystem {
         stack_line_horiz: crate::common::config::HorizontalPlacement,
         stack_line_vert: crate::common::config::VerticalPlacement,
     ) -> Vec<crate::layout_engine::engine::GroupContainerInfo> {
-        use self::StackLayoutResult;
         use crate::layout_engine::LayoutKind::*;
 
         let mut out = Vec::new();
@@ -1206,46 +1211,23 @@ impl TraditionalLayoutSystem {
                     self.tree.data.selection.local_selection(map, node).unwrap_or(children[0]);
                 let selected_index = children.iter().position(|&c| c == local_sel).unwrap_or(0);
 
-                let ui_selected_index = if matches!(kind, VerticalStack) {
-                    children.len().saturating_sub(1).saturating_sub(selected_index)
-                } else {
-                    selected_index
-                };
-
-                out.push(crate::layout_engine::engine::GroupContainerInfo {
-                    node_id: node,
-                    container_kind: kind,
-                    frame: rect,
-                    total_count: children.len(),
-                    selected_index: ui_selected_index,
-                    window_ids: {
-                        let mut ids = children
-                            .iter()
-                            .filter_map(|&child| self.window_at(child))
-                            .collect::<Vec<_>>();
-                        if matches!(kind, VerticalStack) {
-                            ids.reverse();
-                        }
-                        ids
-                    },
-                });
-
-                let mut container_rect = rect;
-                let reserve = stack_line_thickness.max(0.0);
                 let is_horizontal = matches!(kind, HorizontalStack);
-                container_rect = adjust_stack_container_rect(
-                    container_rect,
-                    is_horizontal,
-                    reserve,
-                    stack_line_horiz,
-                    stack_line_vert,
-                );
+                out.push(self.stack_group_container_info(
+                    node,
+                    kind,
+                    rect,
+                    &children,
+                    selected_index,
+                ));
 
-                let layout_res = StackLayoutResult::new(
-                    container_rect,
+                let layout_res = stack_layout_result(
+                    rect,
                     children.len(),
                     stack_offset,
                     is_horizontal,
+                    stack_line_thickness,
+                    stack_line_horiz,
+                    stack_line_vert,
                 );
 
                 for (i, &child) in children.iter().enumerate().rev() {
@@ -2319,19 +2301,14 @@ impl Layout {
                     return;
                 }
                 let is_horizontal = matches!(info.kind, HorizontalStack);
-                let reserve = stack_line_thickness.max(0.0);
-                let container_rect = adjust_stack_container_rect(
+                let layout = stack_layout_result(
                     rect,
-                    is_horizontal,
-                    reserve,
-                    stack_line_horiz,
-                    stack_line_vert,
-                );
-                let layout = StackLayoutResult::new(
-                    container_rect,
                     children.len(),
                     stack_offset,
                     is_horizontal,
+                    stack_line_thickness,
+                    stack_line_horiz,
+                    stack_line_vert,
                 );
                 let focused_idx = children
                     .iter()
@@ -2505,6 +2482,26 @@ impl Components {
         self.layout.handle_event(map, event);
         self.window.handle_event(map, event);
     }
+}
+
+fn stack_layout_result(
+    rect: CGRect,
+    child_count: usize,
+    stack_offset: f64,
+    is_horizontal: bool,
+    stack_line_thickness: f64,
+    stack_line_horiz: crate::common::config::HorizontalPlacement,
+    stack_line_vert: crate::common::config::VerticalPlacement,
+) -> StackLayoutResult {
+    let reserve = stack_line_thickness.max(0.0);
+    let container_rect = adjust_stack_container_rect(
+        rect,
+        is_horizontal,
+        reserve,
+        stack_line_horiz,
+        stack_line_vert,
+    );
+    StackLayoutResult::new(container_rect, child_count, stack_offset, is_horizontal)
 }
 
 fn adjust_stack_container_rect(
