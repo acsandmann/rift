@@ -224,7 +224,7 @@ impl WindowEventHandler {
                     }
                     let inferred = infer_constraint_from_target(new_frame, probe.target);
                     let existing = reactor.layout_manager.layout_engine.window_constraint(wid);
-                    let constraint = merge_constraints(existing, inferred);
+                    let constraint = merge_constraints(existing, inferred, new_frame, probe.target);
                     reactor.layout_manager.layout_engine.set_window_constraint(wid, constraint);
                     reactor.constraint_probes.remove(&wid);
                     if let Some(app_info) =
@@ -308,7 +308,8 @@ impl WindowEventHandler {
                         let inferred = infer_constraint_from_target(new_frame, target);
                         let existing_constraint =
                             reactor.layout_manager.layout_engine.window_constraint(wid);
-                        let constraint = merge_constraints(existing_constraint, inferred);
+                        let constraint =
+                            merge_constraints(existing_constraint, inferred, new_frame, target);
                         reactor.layout_manager.layout_engine.set_window_constraint(wid, constraint);
                         if existing_constraint == Some(constraint) {
                             trace!(
@@ -604,6 +605,8 @@ fn infer_constraint_from_target(new_frame: CGRect, target: CGRect) -> WindowCons
 fn merge_constraints(
     existing: Option<WindowConstraint>,
     inferred: WindowConstraint,
+    new_frame: CGRect,
+    target: CGRect,
 ) -> WindowConstraint {
     fn merge_axis(existing: Option<f64>, inferred: Option<f64>) -> Option<f64> {
         match (existing, inferred) {
@@ -614,12 +617,34 @@ fn merge_constraints(
         }
     }
 
-    if let Some(existing) = existing {
+    let mut merged = if let Some(existing_constraint) = existing {
         WindowConstraint {
-            max_w: merge_axis(existing.max_w, inferred.max_w),
-            max_h: merge_axis(existing.max_h, inferred.max_h),
+            max_w: merge_axis(existing_constraint.max_w, inferred.max_w),
+            max_h: merge_axis(existing_constraint.max_h, inferred.max_h),
         }
     } else {
         inferred
+    };
+
+    if let Some(existing_constraint) = existing {
+        const CAP_EPS: f64 = 0.5;
+        if inferred.max_w.is_none()
+            && new_frame.size.width > target.size.width + 0.1
+            && existing_constraint
+                .max_w
+                .is_some_and(|cap| new_frame.size.width > cap + CAP_EPS)
+        {
+            merged.max_w = None;
+        }
+        if inferred.max_h.is_none()
+            && new_frame.size.height > target.size.height + 0.1
+            && existing_constraint
+                .max_h
+                .is_some_and(|cap| new_frame.size.height > cap + CAP_EPS)
+        {
+            merged.max_h = None;
+        }
     }
+
+    merged
 }

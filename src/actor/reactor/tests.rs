@@ -5,7 +5,7 @@ use super::testing::*;
 use super::*;
 use crate::actor::app::Request;
 use crate::actor::reactor::events::window::WindowEventHandler;
-use crate::layout_engine::{Direction, LayoutCommand, LayoutEngine};
+use crate::layout_engine::{Direction, LayoutCommand, LayoutEngine, WindowConstraint};
 use crate::sys::app::WindowInfo;
 use crate::sys::window_server::WindowServerId;
 
@@ -173,6 +173,50 @@ fn requested_move_with_stale_size_does_not_infer_constraint_before_resize() {
     assert!(!changed);
     assert_eq!(reactor.transaction_manager.get_target_frame(wsid), None);
     assert_eq!(reactor.layout_manager.layout_engine.window_constraint(wid), None);
+}
+
+#[test]
+fn stale_max_constraint_is_cleared_when_window_cannot_shrink_to_cap() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    reactor.handle_event(screen_params_event(
+        vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
+        vec![Some(SpaceId::new(1))],
+        vec![],
+    ));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let wid = WindowId::new(1, 1);
+    reactor
+        .layout_manager
+        .layout_engine
+        .set_window_constraint(wid, WindowConstraint { max_w: Some(162.), max_h: None });
+
+    let wsid = WindowServerId::new(1);
+    let txid = reactor.transaction_manager.generate_next_txid(wsid);
+    let target = CGRect::new(CGPoint::new(0., 0.), CGSize::new(162., 1000.));
+    reactor.transaction_manager.store_txid(wsid, txid, target);
+
+    let actual = CGRect::new(CGPoint::new(0., 0.), CGSize::new(400., 1000.));
+    let changed = WindowEventHandler::handle_window_frame_changed(
+        &mut reactor,
+        wid,
+        actual,
+        Some(txid),
+        Requested(true),
+        FrameChangeKind::Resize,
+        None,
+    );
+    assert!(changed);
+    assert_eq!(
+        reactor.layout_manager.layout_engine.window_constraint(wid),
+        Some(WindowConstraint { max_w: None, max_h: None })
+    );
 }
 
 #[test]
