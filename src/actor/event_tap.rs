@@ -288,8 +288,23 @@ impl EventTap {
         self.swipe.borrow().is_some() || self.scroll.borrow().is_some()
     }
 
+    fn keyboard_handlers_enabled(&self) -> bool {
+        self.disable_hotkey.borrow().is_some() || !self.hotkeys.borrow().is_empty()
+    }
+
+    fn mouse_move_handlers_enabled(&self) -> bool {
+        let state = self.state.borrow();
+        state.event_processing_enabled
+            && (self.stack_line_tx.is_some()
+                || (state.focus_follows_mouse_config_enabled && state.focus_follows_mouse_enabled))
+    }
+
     fn desired_event_mask(&self) -> CGEventMask {
-        build_event_mask(self.gesture_handlers_enabled())
+        build_event_mask(
+            self.gesture_handlers_enabled(),
+            self.keyboard_handlers_enabled(),
+            self.mouse_move_handlers_enabled(),
+        )
     }
 
     fn create_tap_with_mask(
@@ -346,11 +361,22 @@ impl EventTap {
             .clone()
             .and_then(|spec| spec.to_hotkey());
         let (swipe, scroll) = Self::build_gesture_handlers(&config, wm_sender.is_some());
-        let event_mask = build_event_mask(swipe.is_some() || scroll.is_some());
         let mut state = State::default();
         state.mouse_hides_on_focus = config.settings.mouse_hides_on_focus;
         state.focus_follows_mouse_config_enabled = config.settings.focus_follows_mouse;
         state.default_layout_mode = config.settings.layout.mode;
+        state.disable_hotkey_active = disable_hotkey
+            .as_ref()
+            .map(|target| state.compute_disable_hotkey_active(target))
+            .unwrap_or(false);
+        let event_mask = build_event_mask(
+            swipe.is_some() || scroll.is_some(),
+            disable_hotkey.is_some(),
+            state.event_processing_enabled
+                && (stack_line_tx.is_some()
+                    || (state.focus_follows_mouse_config_enabled
+                        && state.focus_follows_mouse_enabled)),
+        );
         EventTap {
             config: RefCell::new(config),
             events_tx,
@@ -397,6 +423,8 @@ impl EventTap {
     }
 
     fn on_request(self: &Rc<Self>, request: Request) {
+        let mut should_rebuild_mask = false;
+        let mut should_update_gesture_handlers = false;
         let mut state = self.state.borrow_mut();
         match request {
             Request::Warp(point) => {
@@ -441,6 +469,7 @@ impl EventTap {
             Request::SetEventProcessing(enabled) => {
                 state.event_processing_enabled = enabled;
                 state.reset(enabled);
+                should_rebuild_mask = true;
             }
             Request::SetFocusFollowsMouseEnabled(enabled) => {
                 debug!(
@@ -449,6 +478,7 @@ impl EventTap {
                 );
                 state.focus_follows_mouse_enabled = enabled;
                 state.reset(enabled);
+                should_rebuild_mask = true;
             }
             Request::SetHotkeys(bindings) => {
                 let mut map = self.hotkeys.borrow_mut();
@@ -470,6 +500,7 @@ impl EventTap {
                     }
                 }
                 debug!("Updated hotkey bindings: {}", map.len());
+                should_rebuild_mask = true;
             }
             Request::ConfigUpdated(new_config) => {
                 let mouse_hides_on_focus = new_config.settings.mouse_hides_on_focus;
@@ -497,10 +528,8 @@ impl EventTap {
                         state.reset(true);
                     }
                 }
-                drop(state);
-                self.update_gesture_handlers();
-                self.rebuild_event_tap_mask_if_needed();
-                return;
+                should_update_gesture_handlers = true;
+                should_rebuild_mask = true;
             }
             Request::LayoutModesChanged(modes) => {
                 state.layout_mode_by_space.clear();
@@ -520,6 +549,14 @@ impl EventTap {
                     state.last_mouse_move_timestamp = 0;
                 }
             }
+        }
+        drop(state);
+
+        if should_update_gesture_handlers {
+            self.update_gesture_handlers();
+        }
+        if should_rebuild_mask {
+            self.rebuild_event_tap_mask_if_needed();
         }
     }
 
@@ -1147,7 +1184,11 @@ fn mouse_move_sampling_profile(low_power_mode: bool) -> (u64, f64) {
     }
 }
 
-fn build_event_mask(gestures_enabled: bool) -> CGEventMask {
+fn build_event_mask(
+    gestures_enabled: bool,
+    keyboard_enabled: bool,
+    mouse_move_enabled: bool,
+) -> CGEventMask {
     let mut m: u64 = 0;
     let add = |m: &mut u64, ty: CGEventType| *m |= 1u64 << (ty.0 as u64);
 
@@ -1156,18 +1197,22 @@ fn build_event_mask(gestures_enabled: bool) -> CGEventMask {
         CGEventType::LeftMouseUp,
         CGEventType::RightMouseDown,
         CGEventType::RightMouseUp,
-        CGEventType::MouseMoved,
         CGEventType::LeftMouseDragged,
         CGEventType::RightMouseDragged,
     ] {
         add(&mut m, ty);
     }
-    for ty in [
-        CGEventType::KeyDown,
-        CGEventType::KeyUp,
-        CGEventType::FlagsChanged,
-    ] {
-        add(&mut m, ty);
+    if mouse_move_enabled {
+        add(&mut m, CGEventType::MouseMoved);
+    }
+    if keyboard_enabled {
+        for ty in [
+            CGEventType::KeyDown,
+            CGEventType::KeyUp,
+            CGEventType::FlagsChanged,
+        ] {
+            add(&mut m, ty);
+        }
     }
     if gestures_enabled {
         // NSEventType::Gesture is an NSEventType — it maps via .0
