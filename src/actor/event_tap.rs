@@ -18,7 +18,7 @@ use super::stack_line;
 use crate::actor;
 use crate::actor::wm_controller::{self, WmCommand, WmEvent};
 use crate::common::collections::{HashMap, HashSet};
-use crate::common::config::{Config, HapticPattern};
+use crate::common::config::{Config, HapticPattern, LayoutMode};
 use crate::common::log::trace_misc;
 use crate::layout_engine::LayoutCommand as LC;
 use crate::sys::event::{self, Hotkey, KeyCode, MouseState, set_mouse_state};
@@ -71,6 +71,9 @@ struct State {
     hidden: bool,
     above_window: Option<WindowServerId>,
     above_window_level: NSWindowLevel,
+    mouse_hides_on_focus: bool,
+    focus_follows_mouse_config_enabled: bool,
+    default_layout_mode: LayoutMode,
     converter: CoordinateConverter,
     screens: Vec<CGRect>,
     event_processing_enabled: bool,
@@ -98,6 +101,9 @@ impl Default for State {
             hidden: false,
             above_window: None,
             above_window_level: NSWindowLevel::MIN,
+            mouse_hides_on_focus: false,
+            focus_follows_mouse_config_enabled: false,
+            default_layout_mode: LayoutMode::Traditional,
             converter: CoordinateConverter::default(),
             screens: Vec::new(),
             event_processing_enabled: false,
@@ -292,11 +298,15 @@ impl EventTap {
             .clone()
             .and_then(|spec| spec.to_hotkey());
         let (swipe, scroll) = Self::build_gesture_handlers(&config, wm_sender.is_some());
+        let mut state = State::default();
+        state.mouse_hides_on_focus = config.settings.mouse_hides_on_focus;
+        state.focus_follows_mouse_config_enabled = config.settings.focus_follows_mouse;
+        state.default_layout_mode = config.settings.layout.mode;
         EventTap {
             config: RefCell::new(config),
             events_tx,
             requests_rx: Some(requests_rx),
-            state: RefCell::new(State::default()),
+            state: RefCell::new(state),
             tap: RefCell::new(None),
             disable_hotkey: RefCell::new(disable_hotkey),
             swipe: RefCell::new(swipe),
@@ -334,7 +344,7 @@ impl EventTap {
             return;
         }
 
-        if this.config.borrow().settings.mouse_hides_on_focus {
+        if this.state.borrow().mouse_hides_on_focus {
             if let Err(e) = window_server::allow_hide_mouse() {
                 error!(
                     "Could not enable mouse hiding: {e:?}. \
@@ -359,7 +369,7 @@ impl EventTap {
                     state.above_window = None;
                     state.above_window_level = NSWindowLevel::MIN;
                 }
-                if self.config.borrow().settings.mouse_hides_on_focus && !state.hidden {
+                if state.mouse_hides_on_focus && !state.hidden {
                     debug!("Hiding mouse");
                     if let Err(e) = event::hide_mouse() {
                         warn!("Failed to hide mouse: {e:?}");
@@ -426,23 +436,26 @@ impl EventTap {
                 debug!("Updated hotkey bindings: {}", map.len());
             }
             Request::ConfigUpdated(new_config) => {
-                *self.config.borrow_mut() = new_config;
-                let disable_hotkey = self
-                    .config
-                    .borrow()
+                let mouse_hides_on_focus = new_config.settings.mouse_hides_on_focus;
+                let focus_follows_mouse_config_enabled = new_config.settings.focus_follows_mouse;
+                let default_layout_mode = new_config.settings.layout.mode;
+                let disable_hotkey = new_config
                     .settings
                     .focus_follows_mouse_disable_hotkey
                     .clone()
                     .and_then(|spec| spec.to_hotkey());
+                *self.config.borrow_mut() = new_config;
                 *self.disable_hotkey.borrow_mut() = disable_hotkey;
                 {
-                    let mut state = self.state.borrow_mut();
+                    state.mouse_hides_on_focus = mouse_hides_on_focus;
+                    state.focus_follows_mouse_config_enabled = focus_follows_mouse_config_enabled;
+                    state.default_layout_mode = default_layout_mode;
                     let prev_active = state.disable_hotkey_active;
                     state.disable_hotkey_active = self
                         .disable_hotkey
                         .borrow()
                         .as_ref()
-                        .map(|target| state.compute_disable_hotkey_active(target.clone()))
+                        .map(|target| state.compute_disable_hotkey_active(target))
                         .unwrap_or(false);
                     if prev_active && !state.disable_hotkey_active {
                         state.reset(true);
@@ -472,26 +485,30 @@ impl EventTap {
     }
 
     fn on_event(self: &Rc<Self>, event_type: CGEventType, event: &CGEvent) -> bool {
-        let mut state = self.state.borrow_mut();
-
         if event_type.0 == NSEventType::Gesture.0 as u32 {
+            let scroll_handler = self.scroll.borrow();
+            let swipe_handler = self.swipe.borrow();
+            if scroll_handler.is_none() && swipe_handler.is_none() {
+                return true;
+            }
+
+            let state = self.state.borrow_mut();
             if let Some(nsevent) = NSEvent::eventWithCGEvent(event)
                 && nsevent.r#type() == NSEventType::Gesture
             {
                 let cursor = CGEvent::location(Some(event));
-                let default_mode = self.config.borrow().settings.layout.mode;
-                let mode = state.layout_mode_at_point(cursor).unwrap_or(default_mode);
-                let is_scrolling_mode =
-                    matches!(mode, crate::common::config::LayoutMode::Scrolling);
-                let scroll_handler = self.scroll.borrow();
+                let mode = state.layout_mode_at_point(cursor).unwrap_or(state.default_layout_mode);
+                let is_scrolling_mode = matches!(mode, LayoutMode::Scrolling);
                 if is_scrolling_mode && let Some(handler) = scroll_handler.as_ref() {
                     self.handle_scroll_gesture_event(handler, &nsevent);
-                } else if let Some(handler) = self.swipe.borrow().as_ref() {
+                } else if let Some(handler) = swipe_handler.as_ref() {
                     self.handle_gesture_event(handler, &nsevent);
                 }
             }
             return true;
         }
+
+        let mut state = self.state.borrow_mut();
 
         match event_type {
             CGEventType::LeftMouseDown | CGEventType::RightMouseDown => {
@@ -546,7 +563,7 @@ impl EventTap {
                 }
 
                 // ffm
-                if self.config.borrow().settings.focus_follows_mouse
+                if state.focus_follows_mouse_config_enabled
                     && state.focus_follows_mouse_enabled
                     && !state.disable_hotkey_active
                 {
@@ -574,13 +591,10 @@ impl EventTap {
         let mut st = state.borrow_mut();
 
         let phase = nsevent.phase();
-        if [
-            NSEventPhase::Ended,
-            NSEventPhase::Cancelled,
-            NSEventPhase::Began,
-        ]
-        .contains(&phase)
-        {
+        if matches!(
+            phase,
+            NSEventPhase::Ended | NSEventPhase::Cancelled | NSEventPhase::Began
+        ) {
             st.reset();
             return;
         }
@@ -678,13 +692,10 @@ impl EventTap {
         let mut st = state.borrow_mut();
 
         let phase = nsevent.phase();
-        if [
-            NSEventPhase::Ended,
-            NSEventPhase::Cancelled,
-            NSEventPhase::Began,
-        ]
-        .contains(&phase)
-        {
+        if matches!(
+            phase,
+            NSEventPhase::Ended | NSEventPhase::Cancelled | NSEventPhase::Began
+        ) {
             st.reset();
             return;
         }
@@ -779,7 +790,7 @@ impl EventTap {
                 }
 
                 st.accum_dx += dx;
-                let step = cfg.distance_pct.max(0.01);
+                let step = cfg.distance_pct;
                 if st.accum_dx.abs() >= step {
                     let delta = if cfg.invert_horizontal {
                         -st.accum_dx
@@ -810,7 +821,7 @@ impl EventTap {
                         return;
                     }
                     st.accum_dx += dx;
-                    let step = cfg.distance_pct.max(0.01);
+                    let step = cfg.distance_pct;
                     if st.accum_dx.abs() >= step {
                         let delta = if cfg.invert_horizontal {
                             -st.accum_dx
@@ -852,7 +863,7 @@ impl EventTap {
 
         if let Some(target) = self.disable_hotkey.borrow().as_ref() {
             let prev_active = state.disable_hotkey_active;
-            state.disable_hotkey_active = state.compute_disable_hotkey_active(target.clone());
+            state.disable_hotkey_active = state.compute_disable_hotkey_active(target);
             if state.disable_hotkey_active != prev_active {
                 if state.disable_hotkey_active {
                     debug!(?target, "focus_follows_mouse disabled while hotkey held");
@@ -869,19 +880,16 @@ impl EventTap {
                     modifiers_from_flags_with_keys(state.current_flags, &state.pressed_keys),
                     key_code,
                 );
-                let commands = {
-                    let bindings = self.hotkeys.borrow();
-                    bindings.get(&hotkey).cloned()
+                let Some(wm_sender) = &self.wm_sender else {
+                    debug!(?hotkey, "Hotkey triggered but no WM sender available");
+                    return true;
                 };
-                if let Some(commands) = commands {
-                    if let Some(wm_sender) = &self.wm_sender {
-                        for cmd in commands {
-                            wm_sender.send(WmEvent::Command(cmd));
-                        }
-                        return false;
-                    } else {
-                        debug!(?hotkey, "Hotkey triggered but no WM sender available");
+                let bindings = self.hotkeys.borrow();
+                if let Some(commands) = bindings.get(&hotkey) {
+                    for cmd in commands {
+                        wm_sender.send(WmEvent::Command(cmd.clone()));
                     }
+                    return false;
                 }
             }
         }
@@ -951,7 +959,7 @@ impl State {
         }
     }
 
-    fn compute_disable_hotkey_active(&self, target: Hotkey) -> bool {
+    fn compute_disable_hotkey_active(&self, target: &Hotkey) -> bool {
         let active_mods = modifiers_from_flags_with_keys(self.current_flags, &self.pressed_keys);
 
         let check_modifier = |left: Modifiers, right: Modifiers| -> bool {
