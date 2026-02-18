@@ -1004,7 +1004,11 @@ impl State {
             return None;
         }
 
-        debug!("Mouse is now above window {new_window:?} at {loc:?}");
+        let new_window_level = new_window
+            .map(|id| self.cached_window_level(id, event_timestamp))
+            .unwrap_or(NSWindowLevel::MIN);
+
+        debug!("Mouse is now above window {new_window:?} (level {new_window_level:?}) at {loc:?}");
 
         // There is a gap between the menu bar and the actual menu pop-ups when
         // a menu is opened. When the mouse goes over this gap, the system
@@ -1019,20 +1023,23 @@ impl State {
                 if screen.contains(CGPoint::new(loc.x, loc.y + WITHIN))
                     && loc.y < screen.min().y + WITHIN
                 {
+                    self.above_window = new_window;
+                    self.above_window_level = new_window_level;
                     return None;
                 }
             }
         }
 
         let old_window = replace(&mut self.above_window, new_window);
-
-        let new_window_level = new_window
-            .map(|id| self.cached_window_level(id, event_timestamp))
-            .unwrap_or(NSWindowLevel::MIN);
         let old_window_level = replace(&mut self.above_window_level, new_window_level);
         debug!(?old_window, ?old_window_level, ?new_window, ?new_window_level);
 
         if old_window_level >= NSPopUpMenuWindowLevel {
+            // Ignore one transition out of pop-up/menu-like windows to avoid
+            // stealing focus while transient UI is closing, but clear the
+            // latch so the next move over the same window can recover.
+            self.above_window = None;
+            self.above_window_level = NSWindowLevel::MIN;
             return None;
         }
 
