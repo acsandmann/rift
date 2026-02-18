@@ -38,6 +38,9 @@ impl TransactionManager {
     /// Removes the transaction ID entry for a window.
     pub fn remove_for_window(&self, wsid: WindowServerId) { self.store.remove(&wsid); }
 
+    /// Clears the pending target for a window while preserving its last txid.
+    pub fn clear_target_for_window(&self, wsid: WindowServerId) { self.store.clear_target(&wsid); }
+
     /// Generates the next transaction ID for a window.
     pub fn generate_next_txid(&self, wsid: WindowServerId) -> TransactionId {
         self.store.next_txid(wsid)

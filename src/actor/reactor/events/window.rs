@@ -224,7 +224,7 @@ impl WindowEventHandler {
 
             if effective_mouse_state == Some(MouseState::Down) && triggered_by_rift {
                 if let Some((wsid, _)) = pending_target {
-                    reactor.transaction_manager.remove_for_window(wsid);
+                    reactor.transaction_manager.clear_target_for_window(wsid);
                 }
                 triggered_by_rift = false;
                 has_pending_request = false;
@@ -246,7 +246,7 @@ impl WindowEventHandler {
                             debug!(?wid, ?new_frame, "Final frame matches Rift request");
                             window.frame_monotonic = new_frame;
                         }
-                        reactor.transaction_manager.remove_for_window(wsid);
+                        reactor.transaction_manager.clear_target_for_window(wsid);
                     } else {
                         trace!(
                             ?wid,
@@ -263,7 +263,7 @@ impl WindowEventHandler {
                     );
                     window.frame_monotonic = new_frame;
                     if let Some(wsid) = window.info.sys_id {
-                        reactor.transaction_manager.remove_for_window(wsid);
+                        reactor.transaction_manager.clear_target_for_window(wsid);
                     }
                 }
 
@@ -282,7 +282,7 @@ impl WindowEventHandler {
                     }
                 }
                 if let Some(wsid) = server_id {
-                    reactor.transaction_manager.remove_for_window(wsid);
+                    reactor.transaction_manager.clear_target_for_window(wsid);
                 }
                 return false;
             }
