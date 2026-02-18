@@ -58,6 +58,7 @@ pub struct EventTap {
     events_tx: reactor::Sender,
     requests_rx: Option<Receiver>,
     state: RefCell<State>,
+    event_mask: RefCell<CGEventMask>,
     tap: RefCell<Option<crate::sys::event_tap::EventTap>>,
     disable_hotkey: RefCell<Option<Hotkey>>,
     swipe: RefCell<Option<SwipeHandler>>,
@@ -69,8 +70,7 @@ pub struct EventTap {
 
 struct State {
     hidden: bool,
-    above_window: Option<WindowServerId>,
-    above_window_level: NSWindowLevel,
+    above_window: (Option<WindowServerId>, NSWindowLevel),
     mouse_hides_on_focus: bool,
     focus_follows_mouse_config_enabled: bool,
     default_layout_mode: LayoutMode,
@@ -99,8 +99,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             hidden: false,
-            above_window: None,
-            above_window_level: NSWindowLevel::MIN,
+            above_window: (None, NSWindowLevel::MIN),
             mouse_hides_on_focus: false,
             focus_follows_mouse_config_enabled: false,
             default_layout_mode: LayoutMode::Traditional,
@@ -285,6 +284,55 @@ impl EventTap {
         *self.scroll.borrow_mut() = scroll;
     }
 
+    fn gesture_handlers_enabled(&self) -> bool {
+        self.swipe.borrow().is_some() || self.scroll.borrow().is_some()
+    }
+
+    fn desired_event_mask(&self) -> CGEventMask {
+        build_event_mask(self.gesture_handlers_enabled())
+    }
+
+    fn create_tap_with_mask(
+        self: &Rc<Self>,
+        mask: CGEventMask,
+    ) -> Option<crate::sys::event_tap::EventTap> {
+        let ctx = Box::new(CallbackCtx { this: Rc::clone(self) });
+        let ctx_ptr = Box::into_raw(ctx) as *mut std::ffi::c_void;
+
+        let tap = unsafe {
+            crate::sys::event_tap::EventTap::new_with_options(
+                CGTapOpt::Default,
+                mask,
+                Some(mouse_callback),
+                ctx_ptr,
+                Some(drop_mouse_ctx),
+            )
+        };
+
+        if tap.is_none() {
+            unsafe { drop(Box::from_raw(ctx_ptr as *mut CallbackCtx)) };
+        }
+
+        tap
+    }
+
+    fn rebuild_event_tap_mask_if_needed(self: &Rc<Self>) {
+        let next_mask = self.desired_event_mask();
+        let current_mask = *self.event_mask.borrow();
+        if next_mask == current_mask {
+            return;
+        }
+
+        let Some(new_tap) = self.create_tap_with_mask(next_mask) else {
+            warn!("Failed to rebuild event tap with updated mask");
+            return;
+        };
+
+        let old_tap = self.tap.borrow_mut().replace(new_tap);
+        drop(old_tap);
+        *self.event_mask.borrow_mut() = next_mask;
+    }
+
     pub fn new(
         config: Config,
         events_tx: reactor::Sender,
@@ -298,6 +346,7 @@ impl EventTap {
             .clone()
             .and_then(|spec| spec.to_hotkey());
         let (swipe, scroll) = Self::build_gesture_handlers(&config, wm_sender.is_some());
+        let event_mask = build_event_mask(swipe.is_some() || scroll.is_some());
         let mut state = State::default();
         state.mouse_hides_on_focus = config.settings.mouse_hides_on_focus;
         state.focus_follows_mouse_config_enabled = config.settings.focus_follows_mouse;
@@ -307,6 +356,7 @@ impl EventTap {
             events_tx,
             requests_rx: Some(requests_rx),
             state: RefCell::new(state),
+            event_mask: RefCell::new(event_mask),
             tap: RefCell::new(None),
             disable_hotkey: RefCell::new(disable_hotkey),
             swipe: RefCell::new(swipe),
@@ -322,25 +372,12 @@ impl EventTap {
 
         let this = Rc::new(self);
 
-        let mask = build_event_mask(true);
-
-        let ctx = Box::new(CallbackCtx { this: Rc::clone(&this) });
-        let ctx_ptr = Box::into_raw(ctx) as *mut std::ffi::c_void;
-
-        let tap = unsafe {
-            crate::sys::event_tap::EventTap::new_with_options(
-                CGTapOpt::Default,
-                mask,
-                Some(mouse_callback),
-                ctx_ptr,
-                Some(drop_mouse_ctx),
-            )
-        };
+        let mask = *this.event_mask.borrow();
+        let tap = this.create_tap_with_mask(mask);
 
         if let Some(tap) = tap {
             *this.tap.borrow_mut() = Some(tap);
         } else {
-            unsafe { drop(Box::from_raw(ctx_ptr as *mut CallbackCtx)) };
             return;
         }
 
@@ -366,8 +403,7 @@ impl EventTap {
                 if let Err(e) = event::warp_mouse(point) {
                     warn!("Failed to warp mouse: {e:?}");
                 } else {
-                    state.above_window = None;
-                    state.above_window_level = NSWindowLevel::MIN;
+                    state.above_window = (None, NSWindowLevel::MIN);
                 }
                 if state.mouse_hides_on_focus && !state.hidden {
                     debug!("Hiding mouse");
@@ -461,7 +497,10 @@ impl EventTap {
                         state.reset(true);
                     }
                 }
+                drop(state);
                 self.update_gesture_handlers();
+                self.rebuild_event_tap_mask_if_needed();
+                return;
             }
             Request::LayoutModesChanged(modes) => {
                 state.layout_mode_by_space.clear();
@@ -1008,7 +1047,7 @@ impl State {
         event_timestamp: u64,
     ) -> Option<WindowServerId> {
         let new_window = hinted_window.or_else(|| window_server::get_window_at_point(loc));
-        if self.above_window == new_window {
+        if self.above_window.0 == new_window {
             return None;
         }
 
@@ -1025,29 +1064,27 @@ impl State {
         // dismiss the pop-up. Strangely, it only seems to happen when the mouse
         // travels down from the menu bar and not when it travels back up.
         // First observed on 13.5.2.
-        if self.above_window_level == NSMainMenuWindowLevel {
+        if self.above_window.1 == NSMainMenuWindowLevel {
             const WITHIN: f64 = 1.0;
             for screen in &self.screens {
                 if screen.contains(CGPoint::new(loc.x, loc.y + WITHIN))
                     && loc.y < screen.min().y + WITHIN
                 {
-                    self.above_window = new_window;
-                    self.above_window_level = new_window_level;
+                    self.above_window = (new_window, new_window_level);
                     return None;
                 }
             }
         }
 
-        let old_window = replace(&mut self.above_window, new_window);
-        let old_window_level = replace(&mut self.above_window_level, new_window_level);
+        let (old_window, old_window_level) =
+            replace(&mut self.above_window, (new_window, new_window_level));
         debug!(?old_window, ?old_window_level, ?new_window, ?new_window_level);
 
         if old_window_level >= NSPopUpMenuWindowLevel {
             // Ignore one transition out of pop-up/menu-like windows to avoid
             // stealing focus while transient UI is closing, but clear the
             // latch so the next move over the same window can recover.
-            self.above_window = None;
-            self.above_window_level = NSWindowLevel::MIN;
+            self.above_window = (None, NSWindowLevel::MIN);
             return None;
         }
 
@@ -1062,8 +1099,7 @@ impl State {
 
     fn reset(&mut self, enabled: bool) {
         if enabled {
-            self.above_window = None;
-            self.above_window_level = NSWindowLevel::MIN;
+            self.above_window = (None, NSWindowLevel::MIN);
             self.last_mouse_move_loc = None;
             self.last_mouse_move_timestamp = 0;
             self.window_level_cache.clear();
@@ -1111,7 +1147,7 @@ fn mouse_move_sampling_profile(low_power_mode: bool) -> (u64, f64) {
     }
 }
 
-fn build_event_mask(swipe_enabled: bool) -> CGEventMask {
+fn build_event_mask(gestures_enabled: bool) -> CGEventMask {
     let mut m: u64 = 0;
     let add = |m: &mut u64, ty: CGEventType| *m |= 1u64 << (ty.0 as u64);
 
@@ -1133,7 +1169,7 @@ fn build_event_mask(swipe_enabled: bool) -> CGEventMask {
     ] {
         add(&mut m, ty);
     }
-    if swipe_enabled {
+    if gestures_enabled {
         // NSEventType::Gesture is an NSEventType — it maps via .0
         *&mut m |= 1u64 << (NSEventType::Gesture.0 as u64);
     }
