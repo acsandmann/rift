@@ -806,17 +806,13 @@ impl State {
                 let Ok(wid) = self.id(&elem) else {
                     return;
                 };
-                match WindowInfo::from_ax_element(&elem, None) {
-                    Ok((info, _)) => {
-                        self.send_event(Event::WindowTitleChanged(wid, info.title));
-                    }
-                    Err(err) => {
-                        trace!(
-                            ?wid,
-                            ?err,
-                            "Failed to refresh window info for WindowTitleChanged notification"
-                        );
-                    }
+                match elem.title() {
+                    Ok(title) => self.send_event(Event::WindowTitleChanged(wid, title)),
+                    Err(err) => debug!(
+                        ?wid,
+                        ?err,
+                        "Failed to read title for WindowTitleChanged notification"
+                    ),
                 }
             }
             _ => error!("Unhandled notification {notif:?} on {elem:#?}"),
