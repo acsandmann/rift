@@ -4,13 +4,13 @@ use tracing::{debug, trace, warn};
 use crate::actor::app::WindowId;
 use crate::actor::reactor::events::drag::DragEventHandler;
 use crate::actor::reactor::{
-    DragState, Quiet, Reactor, Requested, TransactionId, WindowFilter, WindowState, utils,
+    utils, DragState, Quiet, Reactor, Requested, TransactionId, WindowFilter, WindowState,
 };
 use crate::common::config::LayoutMode;
 use crate::layout_engine::LayoutEvent;
 use crate::sys::app::WindowInfo as Window;
-use crate::sys::event::{MouseState, get_mouse_state};
-use crate::sys::geometry::SameAs;
+use crate::sys::event::{get_mouse_state, MouseState};
+use crate::sys::geometry::{IsWithin, SameAs};
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 
@@ -241,9 +241,19 @@ impl WindowEventHandler {
                 };
 
                 if let Some((wsid, target)) = pending_target {
-                    if new_frame.same_as(target) {
+                    // Use a wider tolerance (2px) to account for apps that
+                    // round or snap window positions to integer boundaries.
+                    // The default same_as threshold (0.1px) is too tight and
+                    // causes the target to never be cleared for such apps,
+                    // which eventually leads to stale events falling through
+                    // to the user-initiated path and triggering re-tile loops.
+                    if new_frame.is_within(2.0, target) {
                         if !window.frame_monotonic.same_as(new_frame) {
-                            debug!(?wid, ?new_frame, "Final frame matches Rift request");
+                            debug!(
+                                ?wid,
+                                ?new_frame,
+                                "Final frame matches Rift request (within tolerance)"
+                            );
                             window.frame_monotonic = new_frame;
                         }
                         reactor.transaction_manager.clear_target_for_window(wsid);
@@ -285,6 +295,29 @@ impl WindowEventHandler {
                     reactor.transaction_manager.clear_target_for_window(wsid);
                 }
                 return false;
+            }
+
+            // ── Settling cooldown ──────────────────────────────────────
+            // After RIFT finishes positioning a window, late SLS/AX events
+            // can arrive with no pending transaction.  Without this guard
+            // they would be treated as user-initiated moves and trigger a
+            // re-tile, creating a feedback loop (jitter).  We suppress them
+            // for a short window after the last RIFT-initiated target was
+            // cleared.
+            if let Some(wsid) = server_id {
+                if reactor.transaction_manager.is_settling(wsid) {
+                    if let Some(window) = reactor.window_manager.windows.get_mut(&wid) {
+                        if !window.frame_monotonic.same_as(new_frame) {
+                            trace!(
+                                ?wid,
+                                ?new_frame,
+                                "Updating frame during settling cooldown (no re-tile)"
+                            );
+                            window.frame_monotonic = new_frame;
+                        }
+                    }
+                    return false;
+                }
             }
 
             let old_space = reactor.best_space_for_window(&old_frame, server_id);
@@ -338,6 +371,21 @@ impl WindowEventHandler {
                     reactor.maybe_swap_on_drag(wid, new_frame);
                 }
             } else {
+                // Ignore tiny position-only changes when not dragging.
+                // These are almost always caused by OS/app rounding of
+                // sub-pixel coordinates rather than actual user moves.
+                if old_frame.size.same_as(new_frame.size)
+                    && old_frame.origin.is_within(3.0, new_frame.origin)
+                {
+                    trace!(
+                        ?wid,
+                        ?old_frame,
+                        ?new_frame,
+                        "Ignoring sub-pixel position drift (no drag)"
+                    );
+                    return false;
+                }
+
                 if old_space != new_space {
                     let keep_assigned_for_scrolling = old_space.is_some_and(|space| {
                         reactor.layout_manager.layout_engine.active_layout_mode_at(space)
