@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use r#continue::continuation;
 use objc2::rc::Retained;
-use objc2_app_kit::NSRunningApplication;
+use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
 use objc2_application_services::AXError;
 use objc2_core_foundation::{CFRunLoop, CGPoint, CGRect};
 use serde::{Deserialize, Serialize};
@@ -67,7 +67,9 @@ pub struct WindowId {
 
 impl serde::ser::Serialize for WindowId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where S: serde::ser::Serializer {
+    where
+        S: serde::ser::Serializer,
+    {
         use serde::ser::SerializeStruct;
         let mut s = serializer.serialize_struct("WindowId", 2)?;
         s.serialize_field("pid", &self.pid)?;
@@ -78,7 +80,9 @@ impl serde::ser::Serialize for WindowId {
 
 impl<'de> serde::de::Deserialize<'de> for WindowId {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where D: serde::de::Deserializer<'de> {
+    where
+        D: serde::de::Deserializer<'de>,
+    {
         struct WindowIdVisitor;
         impl<'de> serde::de::Visitor<'de> for WindowIdVisitor {
             type Value = WindowId;
@@ -90,13 +94,17 @@ impl<'de> serde::de::Deserialize<'de> for WindowId {
             }
 
             fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
-            where E: serde::de::Error {
+            where
+                E: serde::de::Error,
+            {
                 WindowId::from_debug_string(v)
                     .ok_or_else(|| E::custom("invalid WindowId debug string"))
             }
 
             fn visit_seq<A>(self, mut seq: A) -> Result<WindowId, A::Error>
-            where A: serde::de::SeqAccess<'de> {
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
                 let pid: pid_t = seq
                     .next_element()?
                     .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
@@ -111,7 +119,9 @@ impl<'de> serde::de::Deserialize<'de> for WindowId {
             }
 
             fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
-            where M: serde::de::MapAccess<'de> {
+            where
+                M: serde::de::MapAccess<'de>,
+            {
                 let mut pid: Option<pid_t> = None;
                 let mut idx: Option<u32> = None;
 
@@ -170,7 +180,9 @@ impl WindowId {
         })
     }
 
-    pub fn to_debug_string(&self) -> String { format!("{:?}", self) }
+    pub fn to_debug_string(&self) -> String {
+        format!("{:?}", self)
+    }
 }
 
 #[derive(Clone)]
@@ -184,7 +196,9 @@ impl AppThreadHandle {
         this
     }
 
-    pub fn send(&self, req: Request) -> anyhow::Result<()> { Ok(self.requests_tx.send(req)) }
+    pub fn send(&self, req: Request) -> anyhow::Result<()> {
+        Ok(self.requests_tx.send(req))
+    }
 }
 
 impl Debug for AppThreadHandle {
@@ -214,6 +228,7 @@ pub enum Request {
     /// parameter for the last window only. Events for other windows will be
     /// marked `Quiet::Yes` automatically.
     Raise(Vec<WindowId>, CancellationToken, u64, Quiet),
+    Activate(Quiet),
 }
 
 struct RaiseRequest(Vec<WindowId>, CancellationToken, u64, Quiet);
@@ -694,6 +709,11 @@ impl State {
                 self.raises_tx
                     .send(RaiseRequest(wids.clone(), token.clone(), sequence_id, quiet));
             }
+            &mut Request::Activate(_quiet) => {
+                #[allow(deprecated)]
+                let opts = NSApplicationActivationOptions::ActivateIgnoringOtherApps;
+                let _ = self.running_app.activateWithOptions(opts);
+            }
         }
         Ok(false)
     }
@@ -828,7 +848,9 @@ enum RaiseError {
 }
 
 impl From<AxError> for RaiseError {
-    fn from(value: AxError) -> Self { Self::AXError(value) }
+    fn from(value: AxError) -> Self {
+        Self::AXError(value)
+    }
 }
 
 impl State {
@@ -1183,6 +1205,7 @@ impl State {
             window_server_id,
             is_animating: false,
         });
+
         debug_assert!(old.is_none(), "Duplicate window id {wid:?}");
         if hidden_by_app {
             self.send_event(Event::WindowMinimized(wid));
@@ -1282,7 +1305,9 @@ impl State {
         }
     }
 
-    fn send_event(&self, event: Event) { self.events_tx.send(event); }
+    fn send_event(&self, event: Event) {
+        self.events_tx.send(event);
+    }
 
     fn window(&self, wid: WindowId) -> Result<&AppWindowState, AxError> {
         assert_eq!(wid.pid, self.pid);

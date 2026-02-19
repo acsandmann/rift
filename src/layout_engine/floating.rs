@@ -13,10 +13,20 @@ pub(crate) struct FloatingManager {
 }
 
 impl FloatingManager {
-    pub(crate) fn new() -> Self { Self::default() }
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
 
     pub(crate) fn is_floating(&self, window_id: WindowId) -> bool {
         self.floating_windows.contains(&window_id)
+    }
+
+    pub(crate) fn is_active(&self, space: SpaceId, window_id: WindowId) -> bool {
+        self.active_floating_windows
+            .get(&space)
+            .and_then(|m| m.get(&window_id.pid))
+            .map(|s| s.contains(&window_id))
+            .unwrap_or(false)
     }
 
     pub(crate) fn add_floating(&mut self, window_id: WindowId) {
@@ -72,7 +82,9 @@ impl FloatingManager {
         self.last_floating_focus = wid;
     }
 
-    pub(crate) fn last_focus(&self) -> Option<WindowId> { self.last_floating_focus }
+    pub(crate) fn last_focus(&self) -> Option<WindowId> {
+        self.last_floating_focus
+    }
 
     pub(crate) fn remove_all_for_pid(&mut self, pid: pid_t) {
         let _ = self.floating_windows.remove_all_for_pid(pid);
