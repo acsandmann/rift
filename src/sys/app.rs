@@ -1,5 +1,5 @@
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::Entry;
 use std::ffi::c_void;
 use std::path::PathBuf;
@@ -103,7 +103,7 @@ impl ActivationPolicyObserver {
         remove_activation_policy_observer(pid);
         remove_finished_launching_observer(pid);
 
-        callback(pid, info);
+        notify_ready_once(&callback, pid, info);
     }
 }
 
@@ -196,7 +196,7 @@ impl FinishedLaunchingObserver {
         remove_finished_launching_observer(pid);
         remove_activation_policy_observer(pid);
 
-        callback(pid, info);
+        notify_ready_once(&callback, pid, info);
     }
 }
 
@@ -225,6 +225,16 @@ static FINISHED_LAUNCHING_CALLBACK: Lazy<Mutex<Option<ActivationPolicyCallback>>
 static FINISHED_LAUNCHING_OBSERVERS: Lazy<Mutex<HashMap<pid_t, usize>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+static READY_CALLBACK_NOTIFIED: Lazy<Mutex<HashSet<pid_t>>> =
+    Lazy::new(|| Mutex::new(HashSet::new()));
+
+fn notify_ready_once(callback: &ActivationPolicyCallback, pid: pid_t, info: AppInfo) {
+    if !READY_CALLBACK_NOTIFIED.lock().insert(pid) {
+        return;
+    }
+    callback(pid, info);
+}
+
 pub fn set_activation_policy_callback<F>(callback: F)
 where F: Fn(pid_t, AppInfo) + Send + Sync + 'static {
     *ACTIVATION_POLICY_CALLBACK.lock() = Some(Arc::new(callback));
@@ -251,7 +261,7 @@ pub fn ensure_activation_policy_observer(pid: pid_t, info: AppInfo) {
     let Some(app) = NSRunningApplication::with_process_id(pid) else {
         drop(observers);
         remove_activation_policy_observer(pid);
-        callback(pid, info);
+        notify_ready_once(&callback, pid, info);
         return;
     };
     let observer = ActivationPolicyObserver::new(app, info, callback);
@@ -274,7 +284,7 @@ pub fn ensure_finished_launching_observer(pid: pid_t, info: AppInfo) {
     if app.isFinishedLaunching() {
         drop(observers);
         remove_finished_launching_observer(pid);
-        callback(pid, info);
+        notify_ready_once(&callback, pid, info);
         return;
     };
     let observer = FinishedLaunchingObserver::new(app, info, callback);
@@ -298,6 +308,10 @@ pub fn remove_finished_launching_observer(pid: pid_t) {
             let _ = Retained::from_raw(ptr);
         }
     }
+}
+
+pub fn clear_ready_callback_notified(pid: pid_t) {
+    READY_CALLBACK_NOTIFIED.lock().remove(&pid);
 }
 
 pub fn running_apps(bundle: Option<String>) -> impl Iterator<Item = (pid_t, AppInfo)> {

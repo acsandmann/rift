@@ -232,6 +232,8 @@ impl WmController {
             }
             AppTerminated(pid) => {
                 sys::app::remove_activation_policy_observer(pid);
+                sys::app::remove_finished_launching_observer(pid);
+                sys::app::clear_ready_callback_notified(pid);
                 self.events_tx.send(Event::ApplicationTerminated(pid));
             }
             ConfigUpdated(new_cfg) => {
