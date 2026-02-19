@@ -106,6 +106,19 @@ pub enum WorkspaceSelector {
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[serde(untagged)]
+pub enum ScratchpadConfig {
+    Boolean(bool),
+    Named(String),
+}
+
+impl Default for ScratchpadConfig {
+    fn default() -> Self {
+        ScratchpadConfig::Boolean(false)
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct AppWorkspaceRule {
     /// Application bundle identifier (e.g., "com.apple.Terminal")
@@ -115,6 +128,10 @@ pub struct AppWorkspaceRule {
     /// Whether windows should be floating in this workspace
     #[serde(default)]
     pub floating: bool,
+    /// Whether windows should be treated as scratchpad windows.
+    /// Can be `true` (generic scratchpad) or a string name (named scratchpad).
+    #[serde(default)]
+    pub scratchpad: ScratchpadConfig,
     /// Whether Rift should manage matching windows (defaults to true). `false` makes the
     /// window invisible to Rift (no tiling, floating, or assignments).
     #[serde(default = "yes")]
