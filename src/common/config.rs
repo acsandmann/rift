@@ -310,7 +310,7 @@ unsafe impl Sync for Config {}
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
-    #[serde(default = "yes")]
+    #[serde(default = "no")]
     pub animate: bool,
     #[serde(default = "default_animation_duration")]
     pub animation_duration: f64,
