@@ -53,9 +53,9 @@ use crate::model::virtual_workspace::{AppRuleResult, HideCorner};
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt};
+use crate::sys::screen::ScreenId;
 pub use crate::sys::screen::ScreenInfo;
 use crate::sys::screen::{SpaceId, get_active_space_number, order_visible_spaces_by_position};
-use crate::sys::screen::ScreenId;
 use crate::sys::window_server::{
     self, WindowServerId, WindowServerInfo, current_cursor_location, space_is_fullscreen,
     wait_for_native_fullscreen_transition, window_level, window_sub_level,
@@ -2831,7 +2831,9 @@ impl Reactor {
         self.maybe_send_menu_update();
     }
 
-    fn force_refresh_all_windows(&mut self) { self.request_visible_windows_for_apps(true); }
+    fn force_refresh_all_windows(&mut self) {
+        self.request_visible_windows_for_apps(true);
+    }
 
     fn request_close_window(&mut self, wid: WindowId) {
         if let Some(app) = self.app_manager.apps.get(&wid.pid) {
