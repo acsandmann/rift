@@ -1,6 +1,6 @@
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -310,9 +310,7 @@ pub fn remove_finished_launching_observer(pid: pid_t) {
     }
 }
 
-pub fn clear_ready_callback_notified(pid: pid_t) {
-    READY_CALLBACK_NOTIFIED.lock().remove(&pid);
-}
+pub fn clear_ready_callback_notified(pid: pid_t) { READY_CALLBACK_NOTIFIED.lock().remove(&pid); }
 
 pub fn running_apps(bundle: Option<String>) -> impl Iterator<Item = (pid_t, AppInfo)> {
     let callback = ACTIVATION_POLICY_CALLBACK.lock().clone();
