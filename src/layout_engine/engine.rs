@@ -742,7 +742,7 @@ impl LayoutEngine {
                         focus_window: Some(target_window),
                         raise_windows: windows_in_new_space,
                         boundary_hit: None,
-                    ..Default::default()
+                        ..Default::default()
                     };
                     self.apply_focus_response(new_space, new_ws_id, new_layout, &response);
                     return response;
@@ -1173,7 +1173,6 @@ impl LayoutEngine {
                     None => (None, None),
                 };
 
-
                 for (
                     wid,
                     title_opt,
@@ -1183,7 +1182,8 @@ impl LayoutEngine {
                     size_hint,
                     min_size,
                     max_size,
-                ) in windows_with_titles {
+                ) in windows_with_titles
+                {
                     if self.scratchpad.is_scratchpad(wid) {
                         self.virtual_workspace_manager.remove_window(wid);
                         if !self.floating.is_floating(wid) {
@@ -1303,10 +1303,8 @@ impl LayoutEngine {
                     let mut fallback_focus = None;
                     if self.focused_window.map_or(false, |fw| windows_to_hide.contains(&fw)) {
                         if let Some((ws_id, layout)) = self.workspace_and_layout(space) {
-                            fallback_focus = self
-                                .workspace_tree(ws_id)
-                                .selected_window(layout)
-                                .or_else(|| {
+                            fallback_focus =
+                                self.workspace_tree(ws_id).selected_window(layout).or_else(|| {
                                     self.workspace_tree(ws_id)
                                         .visible_windows_in_layout(layout)
                                         .first()
@@ -1723,9 +1721,9 @@ impl LayoutEngine {
                 let default_orientation: crate::common::config::StackDefaultOrientation =
                     self.layout_settings.stack.default_orientation;
                 let _ = self.toggle_stack_for_workspace(workspace_id, layout, default_orientation);
-                let unstacked_windows =
-                    self.workspace_tree_mut(workspace_id)
-                        .unstack_parent_of_selection(layout, default_orientation);
+                let unstacked_windows = self
+                    .workspace_tree_mut(workspace_id)
+                    .unstack_parent_of_selection(layout, default_orientation);
 
                 if !unstacked_windows.is_empty() {
                     return EventResponse {
@@ -1735,9 +1733,9 @@ impl LayoutEngine {
                     };
                 }
 
-                let stacked_windows =
-                    self.workspace_tree_mut(workspace_id)
-                        .apply_stacking_to_parent_of_selection(layout, default_orientation);
+                let stacked_windows = self
+                    .workspace_tree_mut(workspace_id)
+                    .apply_stacking_to_parent_of_selection(layout, default_orientation);
                 if !stacked_windows.is_empty() {
                     return EventResponse {
                         raise_windows: stacked_windows,
@@ -1746,7 +1744,8 @@ impl LayoutEngine {
                     };
                 }
 
-                let visible_windows = self.workspace_tree(workspace_id).visible_windows_in_layout(layout);
+                let visible_windows =
+                    self.workspace_tree(workspace_id).visible_windows_in_layout(layout);
                 if !visible_windows.is_empty() {
                     EventResponse {
                         raise_windows: visible_windows,
@@ -1771,8 +1770,10 @@ impl LayoutEngine {
                         let tree = self.workspace_tree_mut(workspace_id);
                         if let LayoutSystemKind::Traditional(s) = tree {
                             if s.parent_of_selection_is_stacked(layout) {
-                                let toggled_windows = s
-                                    .apply_stacking_to_parent_of_selection(layout, default_orientation);
+                                let toggled_windows = s.apply_stacking_to_parent_of_selection(
+                                    layout,
+                                    default_orientation,
+                                );
                                 if !toggled_windows.is_empty() {
                                     return EventResponse {
                                         raise_windows: toggled_windows,
@@ -1789,28 +1790,44 @@ impl LayoutEngine {
                     LayoutSystemKind::Bsp(_) => {
                         let tree = self.workspace_tree_mut(workspace_id);
                         if let LayoutSystemKind::Bsp(s) = tree {
-                            return Self::toggle_orientation_for_system(s, layout, default_orientation);
+                            return Self::toggle_orientation_for_system(
+                                s,
+                                layout,
+                                default_orientation,
+                            );
                         }
                         EventResponse::default()
                     }
                     LayoutSystemKind::Stack(_) => {
                         let tree = self.workspace_tree_mut(workspace_id);
                         if let LayoutSystemKind::Stack(s) = tree {
-                            return Self::toggle_orientation_for_system(s, layout, default_orientation);
+                            return Self::toggle_orientation_for_system(
+                                s,
+                                layout,
+                                default_orientation,
+                            );
                         }
                         EventResponse::default()
                     }
                     LayoutSystemKind::MasterStack(_) => {
                         let tree = self.workspace_tree_mut(workspace_id);
                         if let LayoutSystemKind::MasterStack(s) = tree {
-                            return Self::toggle_orientation_for_system(s, layout, default_orientation);
+                            return Self::toggle_orientation_for_system(
+                                s,
+                                layout,
+                                default_orientation,
+                            );
                         }
                         EventResponse::default()
                     }
                     LayoutSystemKind::Scrolling(_) => {
                         let tree = self.workspace_tree_mut(workspace_id);
                         if let LayoutSystemKind::Scrolling(s) = tree {
-                            return Self::toggle_orientation_for_system(s, layout, default_orientation);
+                            return Self::toggle_orientation_for_system(
+                                s,
+                                layout,
+                                default_orientation,
+                            );
                         }
                         EventResponse::default()
                     }
@@ -1903,16 +1920,15 @@ impl LayoutEngine {
                     }
                     self.floating.remove_active(space, wid.pid, wid);
 
-                    let fallback_focus = self
-                        .workspace_and_layout(space)
-                        .and_then(|(workspace_id, layout)| {
-                            self.workspace_tree(workspace_id)
-                                .selected_window(layout)
-                                .or_else(|| {
+                    let fallback_focus =
+                        self.workspace_and_layout(space).and_then(|(workspace_id, layout)| {
+                            self.workspace_tree(workspace_id).selected_window(layout).or_else(
+                                || {
                                     self.workspace_tree(workspace_id)
                                         .visible_windows_in_layout(layout)
                                         .pop()
-                                })
+                                },
+                            )
                         });
 
                     return EventResponse {
@@ -1955,16 +1971,11 @@ impl LayoutEngine {
                         self.focused_window = None;
                     }
 
-                    let fallback_focus = self
-                        .workspace_and_layout(space)
-                        .and_then(|(ws_id, layout)| {
-                            self.workspace_tree(ws_id)
-                                .selected_window(layout)
-                                .or_else(|| {
-                                    self.workspace_tree(ws_id)
-                                        .visible_windows_in_layout(layout)
-                                        .pop()
-                                })
+                    let fallback_focus =
+                        self.workspace_and_layout(space).and_then(|(ws_id, layout)| {
+                            self.workspace_tree(ws_id).selected_window(layout).or_else(|| {
+                                self.workspace_tree(ws_id).visible_windows_in_layout(layout).pop()
+                            })
                         });
 
                     return EventResponse {
@@ -2350,7 +2361,9 @@ impl LayoutEngine {
         ))
     }
 
-    pub fn save(&self, _path: PathBuf) -> std::io::Result<()> { Ok(()) }
+    pub fn save(&self, _path: PathBuf) -> std::io::Result<()> {
+        Ok(())
+    }
 
     pub fn serialize_to_string(&self) -> String {
         ron::ser::to_string(&self).unwrap()
@@ -3076,11 +3089,13 @@ mod tests {
         let _ = engine.virtual_workspace_manager_mut().list_workspaces(space);
         let _ = engine.virtual_workspace_manager_mut().auto_assign_window(window_id, space);
 
-        let response =
-            engine.handle_virtual_workspace_command(space, &LayoutCommand::SetWorkspaceLayout {
+        let response = engine.handle_virtual_workspace_command(
+            space,
+            &LayoutCommand::SetWorkspaceLayout {
                 workspace: Some(1),
                 mode: LayoutMode::Bsp,
-            });
+            },
+        );
 
         assert!(response.raise_windows.is_empty());
         assert_eq!(response.focus_window, None);
