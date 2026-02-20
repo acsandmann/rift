@@ -119,3 +119,84 @@ jobs:
           git -C tap add "${TAP_FILE_PATH}"
           git -C tap commit -m "chore(formula): rift ${{ steps.pkg.outputs.version }} (universal) - sha256 ${{ steps.pkg.outputs.sha256 }}"
           git -C tap push origin HEAD
+
+  update-nix:
+    runs-on: ubuntu-latest
+    needs: build-and-publish
+    permissions:
+      contents: write
+    outputs:
+      commit_sha: ${{ steps.commit.outputs.sha }}
+      no_commit_sha: ${{ steps.no_commit.outputs.sha }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install Nix
+        uses: nixbuild/nix-quick-install-action@v34
+
+      - name: Find universal binary release asset
+        id: find_asset
+        run: |
+          ASSETS=$(gh api repos/${{ github.repository }}/releases/tags/${{ github.ref_name }} --jq '.assets[].name')
+          BINARY=$(echo "$ASSETS" | grep -i "universal" | head -1)
+          if [ -z "$BINARY" ]; then
+            echo "No universal binary found in release assets"
+            exit 1
+          fi
+          echo "binary=${BINARY}" >> "$GITHUB_OUTPUT"
+          echo "Found binary: ${BINARY}"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Download and calculate hash
+        id: hash
+        run: |
+          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ steps.find_asset.outputs.binary }}"
+          echo "Downloading from: ${DOWNLOAD_URL}"
+
+          HASH=$(nix-prefetch-url --type sha256 --unpack "${DOWNLOAD_URL}")
+          echo "hash=${HASH}" >> "$GITHUB_OUTPUT"
+          echo "Calculated hash: ${HASH}"
+
+      - name: Update package.nix
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          BINARY="${{ steps.find_asset.outputs.binary }}"
+          HASH="${{ steps.hash.outputs.hash }}"
+
+          sed -i "s|version = \"[^\"]*\"|version = \"${VERSION}\"|g" nix/package.nix
+          sed -i "s|url = \"https://github.com/acsandmann/rift/releases/download/v[^/]*/[^\"]*\"|url = \"https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${BINARY}\"|g" nix/package.nix
+          sed -i "s|sha256 = \"[^\"]*\"|sha256 = \"${HASH}\"|g" nix/package.nix
+
+      - name: Check for changes
+        id: check_changes
+        run: |
+          if git diff --quiet nix/package.nix; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            nix flake update
+          fi
+
+      - name: Commit package updates
+        if: steps.check_changes.outputs.has_changes == 'true'
+        id: commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add nix/package.nix flake.lock
+          git commit -m "chore(nix): update rift-bin package after release ${{ github.ref_name }}"
+          COMMIT_SHA=$(git rev-parse HEAD)
+          echo "sha=${COMMIT_SHA}" >> "$GITHUB_OUTPUT"
+          git push origin HEAD:main
+
+      - name: Output commit SHA (no changes case)
+        if: steps.check_changes.outputs.has_changes == 'false'
+        id: no_commit
+        run: |
+          COMMIT_SHA=$(git rev-parse HEAD)
+          echo "sha=${COMMIT_SHA}" >> "$GITHUB_OUTPUT"
