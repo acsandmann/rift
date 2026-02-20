@@ -34,6 +34,8 @@ use crate::sys::{haptics, power};
 // Window levels can change for transient UI windows; cache briefly to reduce
 // query overhead without pinning stale values for long.
 const WINDOW_LEVEL_CACHE_TTL_NS: u64 = 300_000_000; // 300ms
+const WINDOW_LEVEL_CACHE_PRUNE_INTERVAL_NS: u64 = 1_000_000_000; // 1s
+const WINDOW_LEVEL_CACHE_MAX_ENTRIES: usize = 512;
 const MOUSE_MOVE_MIN_INTERVAL_NS_NORMAL: u64 = 8_000_000; // 8ms ~= 125 Hz
 const MOUSE_MOVE_MIN_DISTANCE_PX_SQ_NORMAL: f64 = 4.0; // 2px^2
 const MOUSE_MOVE_MIN_INTERVAL_NS_LOW_POWER: u64 = 16_000_000; // 16ms ~= 62 Hz
@@ -88,6 +90,7 @@ struct State {
     last_mouse_move_loc: Option<CGPoint>,
     last_mouse_move_timestamp: u64,
     window_level_cache: HashMap<WindowServerId, CachedWindowLevel>,
+    window_level_cache_last_prune_at: u64,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -118,6 +121,7 @@ impl Default for State {
             last_mouse_move_loc: None,
             last_mouse_move_timestamp: 0,
             window_level_cache: HashMap::default(),
+            window_level_cache_last_prune_at: 0,
         }
     }
 }
@@ -468,6 +472,7 @@ impl EventTap {
                     .collect();
                 state.converter = converter;
                 state.window_level_cache.clear();
+                state.window_level_cache_last_prune_at = 0;
             }
             Request::SpaceChanged(spaces) => {
                 state.screen_spaces = state
@@ -1156,11 +1161,35 @@ impl State {
             self.last_mouse_move_loc = None;
             self.last_mouse_move_timestamp = 0;
             self.window_level_cache.clear();
+            self.window_level_cache_last_prune_at = 0;
         }
     }
 
     #[inline]
     fn cached_window_level(&mut self, id: WindowServerId, event_timestamp: u64) -> NSWindowLevel {
+        if event_timestamp.saturating_sub(self.window_level_cache_last_prune_at)
+            >= WINDOW_LEVEL_CACHE_PRUNE_INTERVAL_NS
+        {
+            let cutoff = event_timestamp.saturating_sub(WINDOW_LEVEL_CACHE_TTL_NS);
+            self.window_level_cache
+                .retain(|_, cached| cached.observed_at >= cutoff);
+            self.window_level_cache_last_prune_at = event_timestamp;
+
+            // Defensive bound for long sessions with heavy transient-window churn.
+            if self.window_level_cache.len() > WINDOW_LEVEL_CACHE_MAX_ENTRIES {
+                let mut items: Vec<(WindowServerId, u64)> = self
+                    .window_level_cache
+                    .iter()
+                    .map(|(wid, cached)| (*wid, cached.observed_at))
+                    .collect();
+                items.sort_unstable_by_key(|(_, observed_at)| *observed_at);
+                let drop_count = items.len() - WINDOW_LEVEL_CACHE_MAX_ENTRIES;
+                for (wid, _) in items.into_iter().take(drop_count) {
+                    self.window_level_cache.remove(&wid);
+                }
+            }
+        }
+
         if let Some(cached) = self.window_level_cache.get(&id) {
             if event_timestamp.saturating_sub(cached.observed_at) <= WINDOW_LEVEL_CACHE_TTL_NS {
                 return cached.level;
