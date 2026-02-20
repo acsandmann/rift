@@ -393,16 +393,19 @@ impl LayoutManager {
                         })
                         .collect();
 
-                    let event = BroadcastEvent::StacksChanged {
-                        workspace_id,
-                        workspace_index,
-                        workspace_name,
-                        stacks,
-                        active_workspace_has_fullscreen: active_workspace_for_space_has_fullscreen,
-                        space_id: space,
-                        display_uuid,
-                    };
-                    let _ = reactor.communication_manager.event_broadcaster.send(event);
+                    if stacks.len() > 0 {
+                        let event = BroadcastEvent::StacksChanged {
+                            workspace_id,
+                            workspace_index,
+                            workspace_name,
+                            stacks,
+                            active_workspace_has_fullscreen:
+                                active_workspace_for_space_has_fullscreen,
+                            space_id: space,
+                            display_uuid,
+                        };
+                        let _ = reactor.communication_manager.event_broadcaster.send(event);
+                    }
                 }
             }
 
