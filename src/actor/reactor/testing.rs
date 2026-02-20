@@ -94,7 +94,9 @@ pub fn make_window(idx: usize) -> WindowInfo {
     }
 }
 
-pub fn make_windows(count: usize) -> Vec<WindowInfo> { (1..=count).map(make_window).collect() }
+pub fn make_windows(count: usize) -> Vec<WindowInfo> {
+    (1..=count).map(make_window).collect()
+}
 
 pub struct Apps {
     tx: actor::Sender<Request>,
@@ -275,6 +277,7 @@ impl Apps {
                         None,
                     ));
                 }
+                Request::Activate(..) => todo!(),
                 Request::Raise(..) => todo!(),
                 Request::CloseWindow(..) => todo!(),
             }

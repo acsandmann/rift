@@ -396,6 +396,10 @@ comb1 = "Alt + Shift"
 "comb1 + 2" = { move_window_to_workspace = 2 }
 "comb1 + 3" = { move_window_to_workspace = 3 }
 
+# scratchpad
+"Alt + Shift + S" = "add_scratchpad"
+#"Alt + S" = "toggle_scratchpad"
+
 "Alt + Tab" = "switch_to_last_workspace"
 
 # commands to change the layout engine of the active workspace

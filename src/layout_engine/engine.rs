@@ -88,6 +88,9 @@ pub enum LayoutCommand {
     },
     PromoteToMaster,
     SwapMasterStack,
+    AddScratchpad,
+    ToggleScratchpad,
+    ToggleScratchpadNamed(String),
 }
 
 #[non_exhaustive]
@@ -119,15 +122,17 @@ pub struct EventResponse {
     pub raise_windows: Vec<WindowId>,
     pub focus_window: Option<WindowId>,
     pub boundary_hit: Option<Direction>,
+    pub hide_windows: Vec<WindowId>,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct LayoutEngine {
     workspace_layouts: WorkspaceLayouts,
     floating: FloatingManager,
+    scratchpad: super::ScratchpadManager,
     #[serde(skip)]
     focused_window: Option<WindowId>,
-    virtual_workspace_manager: VirtualWorkspaceManager,
+    pub virtual_workspace_manager: VirtualWorkspaceManager,
     #[serde(skip)]
     layout_settings: LayoutSettings,
     #[serde(skip)]
@@ -237,6 +242,7 @@ impl LayoutEngine {
                 raise_windows,
                 focus_window: None,
                 boundary_hit: None,
+                ..Default::default()
             }
         }
     }
@@ -492,6 +498,7 @@ impl LayoutEngine {
             focus_window,
             raise_windows: vec![],
             boundary_hit: None,
+            ..Default::default()
         }
     }
 
@@ -597,6 +604,7 @@ impl LayoutEngine {
                                 focus_window,
                                 raise_windows: vec![],
                                 boundary_hit: None,
+                                ..Default::default()
                             };
                             self.apply_focus_response(space, ws_id, layout, &response);
                             return response;
@@ -625,6 +633,7 @@ impl LayoutEngine {
                     focus_window: tiled_windows.first().copied(),
                     raise_windows: tiled_windows,
                     boundary_hit: None,
+                    ..Default::default()
                 };
                 self.apply_focus_response(space, ws_id, layout, &response);
                 return response;
@@ -645,6 +654,7 @@ impl LayoutEngine {
                 focus_window,
                 raise_windows,
                 boundary_hit: None,
+                ..Default::default()
             };
             self.apply_focus_response(space, ws_id, layout, &response);
             response
@@ -682,6 +692,7 @@ impl LayoutEngine {
                         focus_window: Some(target_window),
                         raise_windows: windows_in_new_space,
                         boundary_hit: None,
+                    ..Default::default()
                     };
                     self.apply_focus_response(new_space, new_ws_id, new_layout, &response);
                     return response;
@@ -696,6 +707,7 @@ impl LayoutEngine {
                     focus_window,
                     raise_windows: vec![],
                     boundary_hit: None,
+                    ..Default::default()
                 };
                 self.apply_focus_response(space, ws_id, layout, &response);
                 return response;
@@ -714,6 +726,7 @@ impl LayoutEngine {
                     focus_window: Some(fallback_focus),
                     raise_windows: visible_windows,
                     boundary_hit: None,
+                    ..Default::default()
                 };
                 self.apply_focus_response(space, ws_id, layout, &response);
                 return response;
@@ -810,6 +823,7 @@ impl LayoutEngine {
             self.floating.remove_active_for_window(wid);
         } else {
             self.floating.remove_floating(wid);
+            self.scratchpad.remove(wid);
         }
 
         self.virtual_workspace_manager.remove_window(wid);
@@ -938,6 +952,7 @@ impl LayoutEngine {
         LayoutEngine {
             workspace_layouts: WorkspaceLayouts::default(),
             floating: FloatingManager::new(),
+            scratchpad: super::ScratchpadManager::new(),
             focused_window: None,
             virtual_workspace_manager,
             layout_settings: layout_settings.clone(),
@@ -947,7 +962,9 @@ impl LayoutEngine {
         }
     }
 
-    pub fn debug_tree(&self, space: SpaceId) { self.debug_tree_desc(space, "", false); }
+    pub fn debug_tree(&self, space: SpaceId) {
+        self.debug_tree_desc(space, "", false);
+    }
 
     pub fn debug_tree_desc(&self, space: SpaceId, desc: &'static str, print: bool) {
         if let Some(workspace_id) = self.virtual_workspace_manager.active_workspace(space) {
@@ -992,6 +1009,7 @@ impl LayoutEngine {
                     crate::model::VirtualWorkspaceId,
                     Vec<WindowId>,
                 > = HashMap::default();
+                let mut windows_to_hide = Vec::new();
 
                 let (app_bundle_id, app_name) = match app_info.as_ref() {
                     Some(info) => (info.bundle_id.as_deref(), info.localized_name.as_deref()),
@@ -999,6 +1017,21 @@ impl LayoutEngine {
                 };
 
                 for (wid, title_opt, ax_role_opt, ax_subrole_opt) in windows_with_titles {
+                    if self.scratchpad.is_scratchpad(wid) {
+                        self.virtual_workspace_manager.remove_window(wid);
+                        if !self.floating.is_floating(wid) {
+                            self.floating.add_floating(wid);
+                        }
+                        if self.scratchpad.is_active(wid) {
+                            self.floating.add_active(space, pid, wid);
+                        } else {
+                            // Ensure it's not active if it shouldn't be
+                            self.floating.remove_active(space, pid, wid);
+                            windows_to_hide.push(wid);
+                        }
+                        continue;
+                    }
+
                     let title_ref = title_opt.as_deref();
                     let ax_role_ref = ax_role_opt.as_deref();
                     let ax_subrole_ref = ax_subrole_opt.as_deref();
@@ -1022,6 +1055,7 @@ impl LayoutEngine {
                                 Ok(ws) => Some(AppRuleAssignment {
                                     workspace_id: ws,
                                     floating: was_floating,
+                                    scratchpad: None,
                                     prev_rule_decision: false,
                                 }),
                                 Err(_) => {
@@ -1038,19 +1072,28 @@ impl LayoutEngine {
                     let AppRuleAssignment {
                         workspace_id: assigned_workspace,
                         floating: rule_says_float,
+                        scratchpad: rule_says_scratchpad,
                         prev_rule_decision,
                     } = match assignment {
                         Some(assign) => assign,
                         None => continue,
                     };
 
-                    let should_float = rule_says_float || (!prev_rule_decision && was_floating);
+                    let should_float = rule_says_float
+                        || rule_says_scratchpad.is_some()
+                        || (!prev_rule_decision && was_floating);
 
                     if should_float {
                         self.floating.add_floating(wid);
                         self.floating.add_active(space, pid, wid);
                     } else if was_floating {
                         self.floating.remove_floating(wid);
+                    }
+
+                    if let Some(ref name) = rule_says_scratchpad {
+                        self.scratchpad.add(wid, Some(name.clone()));
+                        self.virtual_workspace_manager.remove_window(wid);
+                        self.floating.remove_active(space, pid, wid);
                     }
 
                     if !self.floating.is_floating(wid) {
@@ -1093,18 +1136,62 @@ impl LayoutEngine {
                 self.broadcast_windows_changed(space);
 
                 self.rebalance_all_layouts();
+
+                if !windows_to_hide.is_empty() {
+                    let mut fallback_focus = None;
+                    if self.focused_window.map_or(false, |fw| windows_to_hide.contains(&fw)) {
+                        if let Some((ws_id, layout)) = self.workspace_and_layout(space) {
+                            fallback_focus = self
+                                .workspace_tree(ws_id)
+                                .selected_window(layout)
+                                .or_else(|| {
+                                    self.workspace_tree(ws_id)
+                                        .visible_windows_in_layout(layout)
+                                        .first()
+                                        .cloned()
+                                });
+                        }
+
+                        // if still none, try focusing finder/dock
+                    }
+
+                    return EventResponse {
+                        hide_windows: windows_to_hide,
+                        focus_window: fallback_focus,
+                        raise_windows: vec![],
+                        boundary_hit: None,
+                    };
+                }
             }
             LayoutEvent::AppClosed(pid) => {
                 for (_, ws) in self.virtual_workspace_manager.workspaces.iter_mut() {
                     ws.layout_system.remove_windows_for_app(pid);
                 }
                 self.floating.remove_all_for_pid(pid);
+                self.scratchpad.remove_for_app(pid);
 
                 self.virtual_workspace_manager.remove_windows_for_app(pid);
                 self.virtual_workspace_manager.remove_app_floating_positions(pid);
             }
             LayoutEvent::WindowAdded(space, wid) => {
                 self.debug_tree(space);
+
+                if self.scratchpad.is_scratchpad(wid) {
+                    self.virtual_workspace_manager.remove_window(wid);
+                    if !self.floating.is_floating(wid) {
+                        self.floating.add_floating(wid);
+                    }
+                    if !self.scratchpad.is_active(wid) {
+                        // If the window is not active, hide it immediately.
+                        // Also re-assert focus on the currently focused window to prevent OS from focusing the hidden window.
+                        return EventResponse {
+                            hide_windows: vec![wid],
+                            focus_window: self.focused_window,
+                            ..Default::default()
+                        };
+                    }
+                    return EventResponse::default();
+                }
 
                 let assigned_workspace =
                     match self.virtual_workspace_manager.workspace_for_window(space, wid) {
@@ -1124,7 +1211,9 @@ impl LayoutEngine {
                 let should_be_floating = self.floating.is_floating(wid);
 
                 if should_be_floating {
-                    self.floating.add_active(space, wid.pid, wid);
+                    if !self.scratchpad.is_scratchpad(wid) {
+                        self.floating.add_active(space, wid.pid, wid);
+                    }
                 } else if let Some(layout) =
                     self.workspace_layouts.active(space, assigned_workspace)
                 {
@@ -1149,6 +1238,13 @@ impl LayoutEngine {
             }
             LayoutEvent::WindowFocused(space, wid) => {
                 self.focused_window = Some(wid);
+
+                // If user manually focuses an inactive scratchpad (e.g. via Dock/Cmd-Tab), make it active
+                if self.scratchpad.is_scratchpad(wid) && !self.scratchpad.is_active(wid) {
+                    self.scratchpad.set_active(wid, true);
+                    self.floating.add_active(space, wid.pid, wid);
+                }
+
                 if self.floating.is_floating(wid) {
                     self.floating.set_last_focus(Some(wid));
                 } else {
@@ -1299,6 +1395,7 @@ impl LayoutEngine {
                     raise_windows,
                     focus_window,
                     boundary_hit: None,
+                    ..Default::default()
                 };
                 self.apply_focus_response(space, workspace_id, layout, &response);
                 return response;
@@ -1315,6 +1412,7 @@ impl LayoutEngine {
                     raise_windows,
                     focus_window,
                     boundary_hit: None,
+                    ..Default::default()
                 };
                 self.apply_focus_response(space, workspace_id, layout, &response);
                 return response;
@@ -1350,6 +1448,7 @@ impl LayoutEngine {
                         focus_window: Some(windows[next]),
                         raise_windows: vec![windows[next]],
                         boundary_hit: None,
+                        ..Default::default()
                     };
                     self.apply_focus_response(space, workspace_id, layout, &response);
                     return response;
@@ -1422,6 +1521,7 @@ impl LayoutEngine {
                         raise_windows,
                         focus_window: None,
                         boundary_hit: None,
+                        ..Default::default()
                     }
                 }
             }
@@ -1436,6 +1536,7 @@ impl LayoutEngine {
                         raise_windows,
                         focus_window: None,
                         boundary_hit: None,
+                        ..Default::default()
                     }
                 }
             }
@@ -1457,7 +1558,40 @@ impl LayoutEngine {
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
                 let default_orientation: crate::common::config::StackDefaultOrientation =
                     self.layout_settings.stack.default_orientation;
-                self.toggle_stack_for_workspace(workspace_id, layout, default_orientation)
+                self.toggle_stack_for_workspace(workspace_id, layout, default_orientation);
+                let unstacked_windows =
+                    self.workspace_tree_mut(workspace_id)
+                        .unstack_parent_of_selection(layout, default_orientation);
+
+                if !unstacked_windows.is_empty() {
+                    return EventResponse {
+                        raise_windows: unstacked_windows,
+                        focus_window: None,
+                        ..Default::default()
+                    };
+                }
+
+                let stacked_windows =
+                    self.workspace_tree_mut(workspace_id)
+                        .apply_stacking_to_parent_of_selection(layout, default_orientation);
+                if !stacked_windows.is_empty() {
+                    return EventResponse {
+                        raise_windows: stacked_windows,
+                        focus_window: None,
+                        ..Default::default()
+                    };
+                }
+
+                let visible_windows = self.workspace_tree(workspace_id).visible_windows_in_layout(layout);
+                if !visible_windows.is_empty() {
+                    EventResponse {
+                        raise_windows: visible_windows,
+                        focus_window: None,
+                        ..Default::default()
+                    }
+                } else {
+                    EventResponse::default()
+                }
             }
             LayoutCommand::UnjoinWindows => {
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
@@ -1468,19 +1602,47 @@ impl LayoutEngine {
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
 
                 let default_orientation = self.layout_settings.stack.default_orientation;
-                let tree = self.workspace_tree_mut(workspace_id);
-                match tree {
-                    LayoutSystemKind::Traditional(s) => {
-                        Self::toggle_orientation_for_system(s, layout, default_orientation)
+                match self.workspace_tree(workspace_id) {
+                    LayoutSystemKind::Traditional(_) => {
+                        let tree = self.workspace_tree_mut(workspace_id);
+                        if let LayoutSystemKind::Traditional(s) = tree {
+                            Self::toggle_orientation_for_system(s, layout, default_orientation);
+                            if s.parent_of_selection_is_stacked(layout) {
+                                let toggled_windows = s
+                                    .apply_stacking_to_parent_of_selection(layout, default_orientation);
+                                if !toggled_windows.is_empty() {
+                                    return EventResponse {
+                                        raise_windows: toggled_windows,
+                                        focus_window: None,
+                                        ..Default::default()
+                                    };
+                                }
+                            } else {
+                                s.toggle_tile_orientation(layout);
+                            }
+                        }
+                        EventResponse::default()
                     }
-                    LayoutSystemKind::Bsp(s) => {
-                        Self::toggle_orientation_for_system(s, layout, default_orientation)
+                    LayoutSystemKind::Bsp(_) => {
+                        let tree = self.workspace_tree_mut(workspace_id);
+                        if let LayoutSystemKind::Bsp(s) = tree {
+                            return Self::toggle_orientation_for_system(s, layout, default_orientation);
+                        }
+                        EventResponse::default()
                     }
-                    LayoutSystemKind::MasterStack(s) => {
-                        Self::toggle_orientation_for_system(s, layout, default_orientation)
+                    LayoutSystemKind::MasterStack(_) => {
+                        let tree = self.workspace_tree_mut(workspace_id);
+                        if let LayoutSystemKind::MasterStack(s) = tree {
+                            return Self::toggle_orientation_for_system(s, layout, default_orientation);
+                        }
+                        EventResponse::default()
                     }
-                    LayoutSystemKind::Scrolling(s) => {
-                        Self::toggle_orientation_for_system(s, layout, default_orientation)
+                    LayoutSystemKind::Scrolling(_) => {
+                        let tree = self.workspace_tree_mut(workspace_id);
+                        if let LayoutSystemKind::Scrolling(s) = tree {
+                            return Self::toggle_orientation_for_system(s, layout, default_orientation);
+                        }
+                        EventResponse::default()
                     }
                 }
             }
@@ -1558,6 +1720,127 @@ impl LayoutEngine {
                 if let LayoutSystemKind::Scrolling(system) = self.workspace_tree_mut(workspace_id) {
                     system.center_selected_column(layout);
                 }
+                EventResponse::default()
+            }
+            LayoutCommand::AddScratchpad => {
+                if let Some(wid) = self.focused_window {
+                    self.virtual_workspace_manager.remove_window(wid);
+                    self.scratchpad.add(wid, None);
+                    self.scratchpad.set_active(wid, false);
+                    if !self.floating.is_floating(wid) {
+                        self.workspace_tree_mut(workspace_id).remove_window(wid);
+                        self.floating.add_floating(wid);
+                    }
+                    self.floating.remove_active(space, wid.pid, wid);
+
+                    let fallback_focus = self
+                        .workspace_and_layout(space)
+                        .and_then(|(workspace_id, layout)| {
+                            self.workspace_tree(workspace_id)
+                                .selected_window(layout)
+                                .or_else(|| {
+                                    self.workspace_tree(workspace_id)
+                                        .visible_windows_in_layout(layout)
+                                        .pop()
+                                })
+                        });
+
+                    return EventResponse {
+                        hide_windows: vec![wid],
+                        focus_window: fallback_focus,
+                        ..Default::default()
+                    };
+                }
+                EventResponse::default()
+            }
+            LayoutCommand::ToggleScratchpad => self.handle_toggle_scratchpad(space, None),
+            LayoutCommand::ToggleScratchpadNamed(name) => {
+                println!("ToggleScratchpadNamed: {}", name);
+                self.handle_toggle_scratchpad(space, Some(name))
+            }
+        }
+    }
+
+    fn handle_toggle_scratchpad(
+        &mut self,
+        space: SpaceId,
+        name_filter: Option<String>,
+    ) -> EventResponse {
+        tracing::info!(
+            "handle_toggle_scratchpad: space={:?}, filter={:?}",
+            space,
+            name_filter
+        );
+        if let Some(wid) = self.focused_window {
+            if self.scratchpad.is_scratchpad(wid) {
+                let matches_filter = match &name_filter {
+                    Some(n) => self.scratchpad.get_name(wid).map(|s| s == n).unwrap_or(false),
+                    None => true,
+                };
+                if matches_filter {
+                    tracing::info!("Hiding scratchpad window {:?}", wid);
+                    self.floating.remove_active(space, wid.pid, wid);
+                    self.scratchpad.set_active(wid, false);
+                    if self.focused_window == Some(wid) {
+                        self.focused_window = None;
+                    }
+
+                    let fallback_focus = self
+                        .workspace_and_layout(space)
+                        .and_then(|(ws_id, layout)| {
+                            self.workspace_tree(ws_id)
+                                .selected_window(layout)
+                                .or_else(|| {
+                                    self.workspace_tree(ws_id)
+                                        .visible_windows_in_layout(layout)
+                                        .pop()
+                                })
+                        });
+
+                    return EventResponse {
+                        hide_windows: vec![wid],
+                        focus_window: fallback_focus,
+                        ..Default::default()
+                    };
+                }
+            }
+        }
+
+        let active_floats = self.floating.active_flat(space);
+        let visible_scratchpad = active_floats.iter().find(|&&w| {
+            self.scratchpad.is_scratchpad(w)
+                && (name_filter.as_ref().is_none()
+                    || self.scratchpad.get_name(w) == name_filter.as_ref())
+        });
+        tracing::info!("Visible scratchpad found: {:?}", visible_scratchpad);
+
+        if let Some(&wid) = visible_scratchpad {
+            self.floating.remove_active(space, wid.pid, wid);
+            self.scratchpad.set_active(wid, false);
+            EventResponse {
+                hide_windows: vec![wid],
+                ..Default::default()
+            }
+        } else {
+            let next = if let Some(name) = &name_filter {
+                self.scratchpad.get_by_name(name)
+            } else {
+                self.scratchpad.next()
+            };
+            tracing::info!("Next scratchpad window to show: {:?}", next);
+
+            if let Some(wid) = next {
+                self.floating.add_active(space, wid.pid, wid);
+                self.scratchpad.set_active(wid, true);
+                if name_filter.is_none() {
+                    self.scratchpad.cycle();
+                }
+                EventResponse {
+                    raise_windows: vec![wid],
+                    focus_window: Some(wid),
+                    ..Default::default()
+                }
+            } else {
                 EventResponse::default()
             }
         }
@@ -1673,7 +1956,7 @@ impl LayoutEngine {
                 .virtual_workspace_manager
                 .get_workspace_floating_positions(space, active_workspace_id);
             for (window_id, stored_position) in floating_positions {
-                if self.floating.is_floating(window_id) {
+                if self.floating.is_active(space, window_id) {
                     ensure_visible_floating(
                         self,
                         &mut positions,
@@ -1740,6 +2023,22 @@ impl LayoutEngine {
                 app_bundle_id.as_deref(),
             );
             positions.insert(wid, hidden_rect);
+        }
+
+        let scratchpad_windows: Vec<WindowId> = self.scratchpad.iter().copied().collect();
+        for wid in scratchpad_windows {
+            if !positions.contains_key(&wid) {
+                let size = window_size(wid);
+                let app_bundle_id = self.get_app_bundle_id_for_window(wid);
+                let hidden_rect = self.virtual_workspace_manager.calculate_hidden_position(
+                    screen,
+                    999,
+                    size,
+                    HideCorner::BottomRight,
+                    app_bundle_id.as_deref(),
+                );
+                positions.insert(wid, hidden_rect);
+            }
         }
 
         positions.into_iter().collect()
@@ -1878,7 +2177,9 @@ impl LayoutEngine {
         Ok(())
     }
 
-    pub fn serialize_to_string(&self) -> String { ron::ser::to_string(&self).unwrap() }
+    pub fn serialize_to_string(&self) -> String {
+        ron::ser::to_string(&self).unwrap()
+    }
 
     #[cfg(test)]
     pub(crate) fn selected_window(&mut self, space: SpaceId) -> Option<WindowId> {
@@ -2050,6 +2351,7 @@ impl LayoutEngine {
                         focus_window: Some(focused_window),
                         raise_windows: vec![],
                         boundary_hit: None,
+                        ..Default::default()
                     };
                 } else if Some(current_workspace_id) == active_workspace {
                     self.focused_window = None;
@@ -2066,6 +2368,7 @@ impl LayoutEngine {
                             focus_window: Some(new_focus),
                             raise_windows: vec![],
                             boundary_hit: None,
+                            ..Default::default()
                         };
                     }
                 }
@@ -2130,6 +2433,7 @@ impl LayoutEngine {
                         None
                     },
                     boundary_hit: None,
+                    ..Default::default()
                 }
             }
             _ => EventResponse::default(),
@@ -2190,6 +2494,7 @@ impl LayoutEngine {
                 raise_windows: vec![window_id],
                 focus_window: Some(window_id),
                 boundary_hit: None,
+                ..Default::default()
             };
         }
 
@@ -2298,6 +2603,7 @@ impl LayoutEngine {
             raise_windows: vec![window_id],
             focus_window: Some(window_id),
             boundary_hit: None,
+            ..Default::default()
         }
     }
 
@@ -2324,8 +2630,21 @@ impl LayoutEngine {
     }
 
     fn update_active_floating_windows(&mut self, space: SpaceId) {
-        let windows_in_workspace =
+        let mut windows_in_workspace =
             self.virtual_workspace_manager.windows_in_active_workspace(space);
+
+        // Keep currently active scratchpads visible
+        let active_scratchpads: Vec<_> = self
+            .scratchpad
+            .iter()
+            .filter(|&&w| self.scratchpad.is_active(w))
+            .copied()
+            .collect();
+
+        for wid in active_scratchpads {
+            windows_in_workspace.push(wid);
+        }
+
         self.floating.rebuild_active_for_workspace(space, windows_in_workspace);
     }
 

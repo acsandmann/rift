@@ -51,12 +51,15 @@ use crate::common::config::Config;
 use crate::layout_engine::{self as layout, Direction, LayoutEngine, LayoutEvent};
 use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy};
 use crate::model::tx_store::WindowTxStore;
-use crate::model::virtual_workspace::AppRuleResult;
+use crate::model::virtual_workspace::{AppRuleResult, HideCorner};
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt};
 pub use crate::sys::screen::ScreenInfo;
-use crate::sys::screen::{SpaceId, get_active_space_number, order_visible_spaces_by_position};
+
+use crate::sys::screen::{
+    ScreenId, SpaceId, get_active_space_number, order_visible_spaces_by_position,
+};
 use crate::sys::timer::Timer;
 use crate::sys::window_server::{
     self, WindowServerId, WindowServerInfo, current_cursor_location, space_is_fullscreen,
@@ -84,11 +87,17 @@ pub struct ReactorHandle {
 }
 
 impl ReactorHandle {
-    pub fn new(sender: Sender, queries: ReactorQueryHandle) -> Self { Self { sender, queries } }
+    pub fn new(sender: Sender, queries: ReactorQueryHandle) -> Self {
+        Self { sender, queries }
+    }
 
-    pub fn sender(&self) -> Sender { self.sender.clone() }
+    pub fn sender(&self) -> Sender {
+        self.sender.clone()
+    }
 
-    pub fn send(&self, event: Event) { self.sender.send(event) }
+    pub fn send(&self, event: Event) {
+        self.sender.send(event)
+    }
 
     pub fn try_send(
         &self,
@@ -101,7 +110,9 @@ impl ReactorHandle {
 impl std::ops::Deref for ReactorHandle {
     type Target = ReactorQueryHandle;
 
-    fn deref(&self) -> &Self::Target { &self.queries }
+    fn deref(&self) -> &Self::Target {
+        &self.queries
+    }
 }
 
 use display_topology::{DisplaySnapshot, DisplayTopologyManager, WindowSnapshot};
@@ -256,6 +267,29 @@ pub struct Reactor {
     display_topology_manager: DisplayTopologyManager,
 }
 
+#[derive(Clone, Debug)]
+struct Screen {
+    frame: CGRect,
+    space: Option<SpaceId>,
+    display_uuid: String,
+    name: Option<String>,
+    screen_id: ScreenId,
+}
+
+impl Screen {
+    fn display_uuid_opt(&self) -> Option<&str> {
+        if self.display_uuid.is_empty() {
+            None
+        } else {
+            Some(self.display_uuid.as_str())
+        }
+    }
+
+    fn display_uuid_owned(&self) -> Option<String> {
+        self.display_uuid_opt().map(|uuid| uuid.to_string())
+    }
+}
+
 impl Reactor {
     pub fn spawn(
         config: Config,
@@ -388,7 +422,9 @@ impl Reactor {
         }
     }
 
-    fn is_space_active(&self, space: SpaceId) -> bool { self.active_spaces.contains(&space) }
+    fn is_space_active(&self, space: SpaceId) -> bool {
+        self.active_spaces.contains(&space)
+    }
 
     fn iter_active_spaces(&self) -> impl Iterator<Item = SpaceId> + '_ {
         self.active_spaces.iter().copied()
@@ -416,7 +452,9 @@ impl Reactor {
         }
     }
 
-    fn screens_for_current_spaces(&self) -> Vec<ScreenInfo> { self.space_manager.screens.clone() }
+    fn screens_for_current_spaces(&self) -> Vec<ScreenInfo> {
+        self.space_manager.screens.clone()
+    }
 
     fn screens_for_spaces(&self, spaces: &[Option<SpaceId>]) -> Vec<ScreenInfo> {
         self.space_manager
@@ -2157,6 +2195,7 @@ impl Reactor {
             raise_windows,
             mut focus_window,
             boundary_hit,
+            hide_windows,
         } = response;
 
         if let Some(dir) = boundary_hit
@@ -2198,6 +2237,63 @@ impl Reactor {
                     self.handle_layout_response(resp, Some(space));
                     self.update_event_tap_layout_mode();
                     return;
+                }
+            }
+        }
+
+        for wid in hide_windows {
+            if let Some(app) = self.app_manager.apps.get(&wid.pid) {
+                let wsid = self
+                    .window_manager
+                    .windows
+                    .get(&wid)
+                    .and_then(|w| w.info.sys_id)
+                    .unwrap_or(crate::sys::window_server::WindowServerId(0));
+                let txid = self.transaction_manager.generate_next_txid(wsid);
+
+                // Calculate hidden position using virtual workspace logic
+                let mut offscreen = CGPoint { x: 20000.0, y: 20000.0 };
+
+                if let Some(w) = self.window_manager.windows.get(&wid) {
+                    if let Some(space) = self.best_space_for_window_id(wid) {
+                        if let Some(screen) = self.space_manager.screen_by_space(space) {
+                            let bundle_id = app.info.bundle_id.as_deref();
+                            let hidden_rect = self
+                                .layout_manager
+                                .layout_engine
+                                .virtual_workspace_manager
+                                .calculate_hidden_position(
+                                    screen.frame,
+                                    0,
+                                    w.frame_monotonic.size,
+                                    HideCorner::BottomRight,
+                                    bundle_id,
+                                );
+                            offscreen = hidden_rect.origin;
+                        }
+                    }
+                }
+
+                tracing::info!("Hiding window {:?} by moving it to {:?}", wid, offscreen);
+                // eui=true to ensure consistent behavior with other moves
+                let _ = app.handle.send(Request::SetWindowPos(wid, offscreen, txid, true));
+
+                // Update local cache to reflect it's hidden/moved
+                if let Some(w) = self.window_manager.windows.get_mut(&wid) {
+                    w.frame_monotonic.origin = offscreen;
+                }
+
+                // If we're hiding the currently focused window and no replacement focus is provided,
+                // try to focus Finder/Desktop to ensure the hidden window loses focus.
+                if focus_window.is_none() && self.main_window() == Some(wid) {
+                    tracing::info!("Focusing Finder/Desktop after hiding focused window {:?}", wid);
+                    if let Some((_, finder_app)) =
+                        self.app_manager.apps.iter().find(|(_, app)| {
+                            app.info.bundle_id.as_deref() == Some("com.apple.finder")
+                        })
+                    {
+                        let _ = finder_app.handle.send(Request::Activate(Quiet::No));
+                    }
                 }
             }
         }
@@ -2750,7 +2846,9 @@ impl Reactor {
         }
     }
 
-    fn main_window(&self) -> Option<WindowId> { self.main_window_tracker.main_window() }
+    fn main_window(&self) -> Option<WindowId> {
+        self.main_window_tracker.main_window()
+    }
 
     fn main_window_space(&self) -> Option<SpaceId> {
         // TODO: Optimize this with a cache or something.

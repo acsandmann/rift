@@ -292,6 +292,7 @@ fn handle_layout_response_groups_windows_by_app_and_screen() {
             ],
             focus_window: None,
             boundary_hit: None,
+            ..Default::default()
         },
         None,
     );
@@ -336,6 +337,7 @@ fn handle_layout_response_includes_handles_for_raise_and_focus_windows() {
             raise_windows: vec![WindowId::new(1, 1)],
             focus_window: Some(WindowId::new(2, 1)),
             boundary_hit: None,
+            ..Default::default()
         },
         None,
     );
