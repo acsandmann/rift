@@ -2148,6 +2148,32 @@ impl LayoutEngine {
         self.virtual_workspace_manager.active_workspace(space)
     }
 
+    pub fn ensure_active_workspace_info(
+        &mut self,
+        space: SpaceId,
+    ) -> Option<(crate::model::VirtualWorkspaceId, String)> {
+        if let Some(workspace_id) = self.virtual_workspace_manager.active_workspace(space) {
+            let workspace_name = self
+                .workspace_name(space, workspace_id)
+                .unwrap_or_else(|| format!("Workspace {:?}", workspace_id));
+            return Some((workspace_id, workspace_name));
+        }
+
+        let first_workspace = self
+            .virtual_workspace_manager
+            .list_workspaces(space)
+            .first()
+            .map(|(workspace_id, _)| *workspace_id)?;
+
+        self.virtual_workspace_manager.set_active_workspace(space, first_workspace);
+
+        let workspace_name = self
+            .workspace_name(space, first_workspace)
+            .unwrap_or_else(|| format!("Workspace {:?}", first_workspace));
+
+        Some((first_workspace, workspace_name))
+    }
+
     pub fn active_workspace_idx(&self, space: SpaceId) -> Option<u64> {
         self.virtual_workspace_manager.active_workspace_idx(space)
     }

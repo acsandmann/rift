@@ -43,6 +43,7 @@ const KERN_SUCCESS: kern_return_t = 0;
 const MACH_MSG_SUCCESS: kern_return_t = 0;
 
 const MACH_SEND_MSG: mach_msg_option_t = 0x0000_0001;
+const MACH_SEND_TIMEOUT: mach_msg_option_t = 0x0000_0010;
 const MACH_RCV_MSG: mach_msg_option_t = 0x0000_0002;
 const MACH_RCV_TIMEOUT: mach_msg_option_t = 0x0000_0100;
 
@@ -55,6 +56,7 @@ const MACH_MSGH_BITS_COMPLEX: u32 = 0x8000_0000;
 const MACH_MSG_TYPE_MAKE_SEND: u32 = 20;
 
 const MACH_PORT_RIGHT_RECEIVE: c_int = 1;
+const MACH_PORT_RIGHT_SEND: c_int = 0;
 const MACH_PORT_LIMITS_INFO: c_int = 1;
 const MACH_PORT_LIMITS_INFO_COUNT: u32 = 1;
 const MACH_PORT_QLIMIT_LARGE: u32 = 1024;
@@ -330,6 +332,20 @@ pub unsafe fn mach_deallocate_reply_port(reply_port: mach_port_t) {
     let _ = mach_port_deallocate(task, reply_port);
 }
 
+pub unsafe fn mach_retain_send_right(port: mach_port_t) -> bool {
+    if port == 0 {
+        return false;
+    }
+    mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_SEND, 1) == KERN_SUCCESS
+}
+
+pub unsafe fn mach_release_send_right(port: mach_port_t) -> bool {
+    if port == 0 {
+        return false;
+    }
+    mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_SEND, -1) == KERN_SUCCESS
+}
+
 unsafe fn receive_message_on_port(
     reply_port: mach_port_t,
     response_buf: &mut Vec<u8>,
@@ -484,6 +500,52 @@ pub unsafe fn mach_send_message(
             return false;
         }
         return true;
+    }
+
+    true
+}
+
+pub unsafe fn mach_try_send_message(port: mach_port_t, message: *const c_char, len: u32) -> bool {
+    if message.is_null() || port == 0 || len > MAX_MESSAGE_SIZE {
+        error!(
+            "mach_try_send_message: invalid input args message={:?} port={} len={}",
+            message, port, len
+        );
+        return false;
+    }
+
+    let aligned_len = (len + 3) & !3;
+
+    let mut sm: simple_message = zeroed();
+    sm.header.msgh_remote_port = port;
+    sm.header.msgh_local_port = 0;
+    sm.header.msgh_voucher_port = 0;
+    sm.header.msgh_id = 0;
+    sm.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+    sm.header.msgh_size = (size_of::<mach_msg_header_t>() as u32) + aligned_len;
+
+    copy_nonoverlapping(message as *const u8, sm.data.as_mut_ptr(), len as usize);
+    if aligned_len > len {
+        let pad = (aligned_len - len) as usize;
+        core::ptr::write_bytes(sm.data.as_mut_ptr().add(len as usize), 0, pad);
+    }
+
+    let send_result = mach_msg(
+        &mut sm.header,
+        MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+        sm.header.msgh_size,
+        0,
+        0,
+        0,
+        0,
+    );
+
+    if send_result != MACH_MSG_SUCCESS {
+        debug!(
+            "mach_try_send_message: timed/nonblocking send failed (result={} remote_port={})",
+            send_result, port
+        );
+        return false;
     }
 
     true

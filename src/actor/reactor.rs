@@ -1208,12 +1208,9 @@ impl Reactor {
         if let Some(space) =
             spaces.iter().copied().flatten().find(|space| self.is_space_active(*space))
         {
-            if let Some(workspace_id) = self.layout_manager.layout_engine.active_workspace(space) {
-                let workspace_name = self
-                    .layout_manager
-                    .layout_engine
-                    .workspace_name(space, workspace_id)
-                    .unwrap_or_else(|| format!("Workspace {:?}", workspace_id));
+            if let Some((workspace_id, workspace_name)) =
+                self.layout_manager.layout_engine.ensure_active_workspace_info(space)
+            {
                 let display_uuid = self
                     .space_manager
                     .screen_by_space(space)
