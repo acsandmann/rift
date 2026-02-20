@@ -80,7 +80,6 @@ impl AppManager {
 pub struct SpaceManager {
     pub screens: Vec<ScreenInfo>,
     pub fullscreen_by_space: HashMap<u64, FullscreenSpaceTrack>,
-    pub changing_screens: HashSet<WindowServerId>,
     pub has_seen_display_set: bool,
 }
 

@@ -48,9 +48,9 @@ pub fn make_screen_snapshots(frames: Vec<CGRect>, spaces: Vec<Option<SpaceId>>) 
 pub fn screen_params_event(
     frames: Vec<CGRect>,
     spaces: Vec<Option<SpaceId>>,
-    ws_info: Vec<WindowServerInfo>,
+    _ws_info: Vec<WindowServerInfo>,
 ) -> Event {
-    Event::ScreenParametersChanged(make_screen_snapshots(frames, spaces), ws_info)
+    Event::ScreenParametersChanged(make_screen_snapshots(frames, spaces))
 }
 
 /*impl Drop for Reactor {

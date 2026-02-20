@@ -21,7 +21,7 @@ use crate::sys::dispatch::DispatchExt;
 use crate::sys::power::{init_power_state, set_low_power_mode_state};
 use crate::sys::screen::{CoordinateConverter, ScreenCache, ScreenInfo, SpaceId};
 use crate::sys::skylight::{CGDisplayRegisterReconfigurationCallback, DisplayReconfigFlags};
-use crate::sys::window_server;
+use crate::sys::{display_churn, window_server};
 
 const REFRESH_DEFAULT_DELAY_NS: i64 = 150_000_000;
 const REFRESH_RETRY_DELAY_NS: i64 = 150_000_000;
@@ -52,6 +52,7 @@ struct Instance {
     display_churn_flags: Cell<DisplayReconfigFlags>,
     display_topology_state: RefCell<Option<DisplayTopologyState>>,
     refresh_deferred_until_stable: Cell<bool>,
+    last_sent_spaces: RefCell<Option<Vec<Option<SpaceId>>>>,
 }
 
 unsafe impl Encode for Instance {
@@ -136,6 +137,7 @@ impl NotificationCenterInner {
             display_churn_flags: Cell::new(DisplayReconfigFlags::empty()),
             display_topology_state: RefCell::new(None),
             refresh_deferred_until_stable: Cell::new(false),
+            last_sent_spaces: RefCell::new(None),
         };
         let handler: Retained<Self> = unsafe { msg_send![Self::alloc(), initWith: instance] };
         unsafe {
@@ -254,6 +256,14 @@ impl NotificationCenterInner {
         if let Some((screens, _)) = self.collect_state() {
             let spaces: Vec<Option<SpaceId>> = screens.iter().map(|s| s.space).collect();
             if !spaces.is_empty() {
+                {
+                    let mut last_sent = ivars.last_sent_spaces.borrow_mut();
+                    if last_sent.as_ref() == Some(&spaces) {
+                        trace!(?spaces, "Skipping duplicate current space snapshot");
+                        return;
+                    }
+                    *last_sent = Some(spaces.clone());
+                }
                 self.send_event(WmEvent::SpaceChanged(spaces));
             }
         }
@@ -301,8 +311,13 @@ impl NotificationCenterInner {
         ivars.display_churn_flags.set(ivars.display_churn_flags.get() | flags);
         ivars.display_churn_epoch.set(ivars.display_churn_epoch.get().wrapping_add(1));
         ivars.display_topology_state.borrow_mut().take();
+        ivars.last_sent_spaces.borrow_mut().take();
         if !was_active {
+            let epoch = display_churn::begin(flags);
+            trace!(epoch, "Global display churn activated");
             self.send_event(WmEvent::DisplayChurnBegin);
+        } else {
+            let _ = display_churn::begin(flags);
         }
 
         {
@@ -448,6 +463,8 @@ impl NotificationCenterInner {
         ivars.display_churn_epoch.set(ivars.display_churn_epoch.get().wrapping_add(1));
         ivars.display_churn_flags.set(DisplayReconfigFlags::empty());
         ivars.display_topology_state.borrow_mut().take();
+        let epoch = display_churn::end();
+        trace!(epoch, "Global display churn cleared");
         self.send_event(WmEvent::DisplayChurnEnd);
 
         if ivars.refresh_deferred_until_stable.replace(false) {

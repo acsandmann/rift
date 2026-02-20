@@ -11,7 +11,7 @@ use crate::model::tx_store::WindowTxStore;
 use crate::sys::screen::SpaceId;
 use crate::sys::skylight::{CGSEventType, KnownCGSEvent, SLSMainConnectionID, SLSSpaceGetType};
 use crate::sys::window_server::{WindowQuery, WindowServerId};
-use crate::sys::{event, window_notify};
+use crate::sys::{display_churn, event, window_notify};
 
 #[derive(Default)]
 pub struct Ignored {
@@ -191,15 +191,29 @@ impl WindowNotify {
                         }
                     }
                     CGSEventType::Known(KnownCGSEvent::SpaceWindowDestroyed) => {
+                        if display_churn::is_active() {
+                            continue;
+                        }
+                        let (Some(window_id), Some(space_id)) = (evt.window_id, evt.space_id)
+                        else {
+                            continue;
+                        };
                         events_tx.send(Event::WindowServerDestroyed(
-                            WindowServerId::new(evt.window_id.unwrap()),
-                            SpaceId::new(evt.space_id.unwrap()),
+                            WindowServerId::new(window_id),
+                            SpaceId::new(space_id),
                         ))
                     }
                     CGSEventType::Known(KnownCGSEvent::SpaceWindowCreated) => {
+                        if display_churn::is_active() {
+                            continue;
+                        }
+                        let (Some(window_id), Some(space_id)) = (evt.window_id, evt.space_id)
+                        else {
+                            continue;
+                        };
                         events_tx.send(Event::WindowServerAppeared(
-                            WindowServerId::new(evt.window_id.unwrap()),
-                            SpaceId::new(evt.space_id.unwrap()),
+                            WindowServerId::new(window_id),
+                            SpaceId::new(space_id),
                         ))
                     }
                     CGSEventType::Known(KnownCGSEvent::WorkspaceWindowIsViewable)
@@ -210,15 +224,21 @@ impl WindowNotify {
                     | CGSEventType::Known(
                         KnownCGSEvent::WorkspacesWindowDidOrderOutOnNonCurrentManagedSpaces,
                     ) => {
-                        events_tx.send(Event::ResyncAppForWindow(WindowServerId::new(
-                            evt.window_id.unwrap(),
-                        )));
+                        if display_churn::is_active() {
+                            continue;
+                        }
+                        let Some(window_id) = evt.window_id else {
+                            continue;
+                        };
+                        events_tx.send(Event::ResyncAppForWindow(WindowServerId::new(window_id)));
                     }
                     CGSEventType::Known(KnownCGSEvent::WindowMoved)
                     | CGSEventType::Known(KnownCGSEvent::WindowResized) => {
                         // TODO: suppress move/resize while Mission Control is active
                         let mouse_state = event::get_mouse_state();
-                        let window_id = evt.window_id.unwrap();
+                        let Some(window_id) = evt.window_id else {
+                            continue;
+                        };
                         let wsid = WindowServerId::new(window_id);
                         if let Some(query) = WindowQuery::new(&[wsid]) {
                             if query.advance().is_none() {

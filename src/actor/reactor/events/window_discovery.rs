@@ -64,7 +64,6 @@ impl WindowDiscoveryHandler {
         ) || pending_refresh
             || reactor.is_mission_control_active()
             || reactor.is_in_drag()
-            || reactor.pid_has_changing_screens(pid)
             || (known_visible_set.is_empty()
                 && !reactor.has_visible_window_server_ids_for_pid(pid))
             || has_window_server_visibles_without_ax;

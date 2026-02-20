@@ -6,7 +6,7 @@ use crate::common::log::MetricsCommand;
 use crate::layout_engine::{Direction, LayoutCommand};
 use crate::sys::app::WindowInfo;
 use crate::sys::screen::SpaceId;
-use crate::sys::window_server::{WindowServerId, WindowServerInfo};
+use crate::sys::window_server::WindowServerId;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Requested(pub bool);
@@ -138,7 +138,6 @@ pub(crate) struct AppState {
 #[derive(Debug, Clone)]
 pub(crate) struct PendingSpaceChange {
     pub(crate) spaces: Vec<Option<SpaceId>>,
-    pub(crate) ws_info: Vec<WindowServerInfo>,
 }
 
 #[derive(Debug)]

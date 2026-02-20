@@ -13,7 +13,7 @@ use crate::actor::wm_controller::WmEvent;
 use crate::common::collections::{HashMap, HashSet};
 use crate::sys::app::AppInfo;
 use crate::sys::screen::{ScreenId, SpaceId};
-use crate::sys::window_server::{WindowServerId, WindowServerInfo};
+use crate::sys::window_server::WindowServerId;
 
 pub struct SpaceEventHandler;
 
@@ -174,11 +174,7 @@ impl SpaceEventHandler {
         }
     }
 
-    pub fn handle_screen_parameters_changed(
-        reactor: &mut Reactor,
-        screens: Vec<ScreenInfo>,
-        ws_info: Vec<WindowServerInfo>,
-    ) {
+    pub fn handle_screen_parameters_changed(reactor: &mut Reactor, screens: Vec<ScreenInfo>) {
         let previous_displays: HashSet<String> =
             reactor.space_manager.screens.iter().map(|s| s.display_uuid.clone()).collect();
         let new_displays: HashSet<String> =
@@ -212,7 +208,7 @@ impl SpaceEventHandler {
             }
 
             reactor.recompute_and_set_active_spaces(&[]);
-            reactor.update_complete_window_server_info(ws_info);
+            reactor.update_complete_window_server_info(Vec::new());
         } else {
             let spaces: Vec<Option<SpaceId>> = screens.iter().map(|s| s.space).collect();
             let previous_sizes: HashMap<ScreenId, CGSize> = reactor
@@ -281,9 +277,11 @@ impl SpaceEventHandler {
                     reactor.send_layout_event(LayoutEvent::SpaceExposed(space, size));
                 }
             }
+            let ws_info = reactor.authoritative_window_snapshot_for_active_spaces();
             reactor.finalize_space_change(&spaces, ws_info);
         }
         reactor.try_apply_pending_space_change();
+        reactor.maybe_commit_display_topology_snapshot();
 
         // Mark that we should perform a one-shot relayout after spaces are applied,
         // so windows return to their prior displays post-topology change.
@@ -292,11 +290,7 @@ impl SpaceEventHandler {
         }
     }
 
-    pub fn handle_space_changed(
-        reactor: &mut Reactor,
-        mut spaces: Vec<Option<SpaceId>>,
-        ws_info: Vec<WindowServerInfo>,
-    ) {
+    pub fn handle_space_changed(reactor: &mut Reactor, mut spaces: Vec<Option<SpaceId>>) {
         // Also drop any space update that reports more spaces than screens; these are
         // transient and can reorder active workspaces across displays.
         if spaces.len() > reactor.space_manager.screens.len() {
@@ -307,6 +301,18 @@ impl SpaceEventHandler {
             );
             return;
         }
+
+        // NSWorkspace can emit repeated ActiveDisplay notifications with an unchanged
+        // space vector. Treat exact duplicates as no-ops to avoid relayout thrash,
+        // especially while cross-display window moves are in flight.
+        if spaces == reactor.raw_spaces_for_current_screens()
+            && !reactor.pending_space_change_manager.topology_relayout_pending
+            && !reactor.display_topology_manager.is_churning_or_awaiting_commit()
+        {
+            trace!(?spaces, "Ignoring duplicate space change snapshot");
+            return;
+        }
+
         // If a topology change is in-flight, ignore space updates that don't match the
         // current screen count; wait for the matching vector before applying changes.
         if reactor.pending_space_change_manager.topology_relayout_pending
@@ -326,7 +332,7 @@ impl SpaceEventHandler {
         if reactor.is_mission_control_active() {
             // dont process whilst mc is active
             reactor.pending_space_change_manager.pending_space_change =
-                Some(PendingSpaceChange { spaces, ws_info });
+                Some(PendingSpaceChange { spaces });
             return;
         }
         let spaces_all_none = spaces.iter().all(|space| space.is_none());
@@ -358,6 +364,7 @@ impl SpaceEventHandler {
         reactor.reconcile_spaces_with_display_history(&spaces, false);
         info!("space changed");
         reactor.set_screen_spaces(&spaces);
+        let ws_info = reactor.authoritative_window_snapshot_for_active_spaces();
         reactor.finalize_space_change(&spaces, ws_info);
 
         // If a topology change was detected earlier, perform a one-shot refresh/layout
@@ -371,6 +378,7 @@ impl SpaceEventHandler {
                 "Layout update failed after topology change",
             );
         }
+        reactor.maybe_commit_display_topology_snapshot();
     }
 
     pub fn handle_mission_control_native_entered(reactor: &mut Reactor) {

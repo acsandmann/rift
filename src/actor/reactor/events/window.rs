@@ -198,12 +198,7 @@ impl WindowEventHandler {
                     return false;
                 };
 
-                if reactor.is_mission_control_active()
-                    || window
-                        .info
-                        .sys_id
-                        .is_some_and(|wsid| reactor.space_manager.changing_screens.contains(&wsid))
-                {
+                if reactor.is_mission_control_active() {
                     return false;
                 }
 

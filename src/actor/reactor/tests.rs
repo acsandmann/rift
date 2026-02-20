@@ -1,6 +1,7 @@
 use objc2_core_foundation::{CGPoint, CGSize};
 use test_log::test;
 
+use super::display_topology::TopologyState;
 use super::testing::*;
 use super::*;
 use crate::actor::app::Request;
@@ -123,7 +124,7 @@ fn it_clears_screen_state_when_no_displays_are_reported() {
     reactor.handle_event(screen_params_event(vec![], vec![], vec![]));
     assert!(reactor.space_manager.screens.is_empty());
 
-    reactor.handle_event(Event::SpaceChanged(vec![], vec![]));
+    reactor.handle_event(Event::SpaceChanged(vec![]));
     assert!(reactor.space_manager.screens.is_empty());
 
     reactor.handle_event(screen_params_event(
@@ -132,6 +133,30 @@ fn it_clears_screen_state_when_no_displays_are_reported() {
         vec![],
     ));
     assert_eq!(1, reactor.space_manager.screens.len());
+}
+
+#[test]
+fn duplicate_space_changed_snapshot_is_ignored() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+
+    reactor.handle_event(screen_params_event(vec![frame], vec![Some(space)], vec![]));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+    let _ = apps.requests();
+
+    reactor.handle_event(Event::SpaceChanged(vec![Some(space)]));
+    let requests = apps.requests();
+    assert!(
+        requests.is_empty(),
+        "duplicate SpaceChanged should not trigger refresh requests: {requests:?}"
+    );
 }
 
 #[test]
@@ -453,14 +478,14 @@ fn it_retains_windows_without_server_ids_after_login_visibility_failure() {
     ));
     apps.simulate_until_quiet(&mut reactor);
 
-    reactor.handle_event(Event::SpaceChanged(vec![None], vec![]));
+    reactor.handle_event(Event::SpaceChanged(vec![None]));
 
     // Simulate a native fullscreen transition: space temporarily becomes a fullscreen
     // space id (reactor suppresses it to None), then returns to the original space.
     let fullscreen_space = SpaceId::new(0x400000000 + space.get());
-    reactor.handle_event(Event::SpaceChanged(vec![Some(fullscreen_space)], vec![]));
+    reactor.handle_event(Event::SpaceChanged(vec![Some(fullscreen_space)]));
 
-    reactor.handle_event(Event::SpaceChanged(vec![Some(space)], vec![]));
+    reactor.handle_event(Event::SpaceChanged(vec![Some(space)]));
 
     loop {
         let requests = apps.requests();
@@ -511,4 +536,80 @@ fn display_index_selector_uses_physical_left_to_right_order() {
         .expect("expected display index 0 to resolve");
 
     assert_eq!(selected.frame, left);
+}
+
+#[test]
+fn display_churn_quarantine_counters_increment() {
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    reactor.display_topology_manager.quarantine_appeared();
+    reactor.display_topology_manager.quarantine_destroyed();
+    reactor.display_topology_manager.quarantine_resync();
+
+    let stats = reactor.display_topology_manager.quarantine_stats.clone();
+    assert_eq!(stats.appeared_dropped, 1);
+    assert_eq!(stats.destroyed_dropped, 1);
+    assert_eq!(stats.resync_dropped, 1);
+}
+
+#[test]
+fn display_churn_transitions_to_awaiting_commit_then_stable() {
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    reactor.handle_event(screen_params_event(vec![frame], vec![Some(space)], vec![]));
+
+    reactor.display_topology_manager.begin_churn(
+        2,
+        crate::sys::skylight::DisplayReconfigFlags::ADD,
+        crate::common::collections::HashSet::default(),
+    );
+    reactor
+        .display_topology_manager
+        .end_churn_to_awaiting(2, crate::sys::skylight::DisplayReconfigFlags::ADD);
+
+    assert!(matches!(
+        reactor.display_topology_manager.state(),
+        TopologyState::AwaitingCommitSnapshot { .. }
+    ));
+
+    reactor.handle_event(screen_params_event(vec![frame], vec![Some(space)], vec![]));
+
+    assert!(matches!(
+        reactor.display_topology_manager.state(),
+        TopologyState::Stable
+    ));
+}
+
+#[test]
+fn display_churn_quarantines_window_frame_changed_events() {
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    reactor.display_topology_manager.begin_churn(
+        3,
+        crate::sys::skylight::DisplayReconfigFlags::ADD,
+        crate::common::collections::HashSet::default(),
+    );
+
+    let quarantined = reactor.maybe_quarantine_during_churn(&Event::WindowFrameChanged(
+        WindowId::new(99, 1),
+        CGRect::new(CGPoint::new(10., 10.), CGSize::new(500., 400.)),
+        None,
+        Requested(false),
+        Some(MouseState::Up),
+    ));
+    assert!(
+        quarantined,
+        "WindowFrameChanged should be quarantined during churn"
+    );
 }

@@ -25,12 +25,10 @@ type Receiver = actor::Receiver<WmEvent>;
 use self::WmCmd::*;
 use crate::actor::app::AppInfo;
 use crate::actor::{self, event_tap, mission_control, reactor};
-use crate::common::collections::HashSet;
 use crate::model::tx_store::WindowTxStore;
 use crate::sys::dispatch::DispatchExt;
 use crate::sys::event::Hotkey;
 use crate::sys::screen::{CoordinateConverter, ScreenInfo, SpaceId};
-use crate::sys::window_server::WindowServerInfo;
 use crate::{layout_engine as layout, sys};
 
 #[derive(Debug)]
@@ -269,12 +267,8 @@ impl WmController {
             ScreenParametersChanged(screens, converter) => {
                 let frames_with_spaces: Vec<(CGRect, Option<SpaceId>)> =
                     screens.iter().map(|s| (s.frame, s.space)).collect();
-                let spaces: Vec<Option<SpaceId>> = screens.iter().map(|s| s.space).collect();
 
-                self.events_tx.send(Event::ScreenParametersChanged(
-                    screens,
-                    self.get_windows_for_spaces(&spaces),
-                ));
+                self.events_tx.send(Event::ScreenParametersChanged(screens));
 
                 _ = self.event_tap_tx.send(event_tap::Request::ScreenParametersChanged(
                     frames_with_spaces,
@@ -287,10 +281,7 @@ impl WmController {
                 }
             }
             SpaceChanged(spaces) => {
-                self.events_tx.send(reactor::Event::SpaceChanged(
-                    spaces.clone(),
-                    self.get_windows_for_spaces(&spaces),
-                ));
+                self.events_tx.send(reactor::Event::SpaceChanged(spaces.clone()));
                 _ = self.event_tap_tx.send(event_tap::Request::SpaceChanged(spaces));
             }
             PowerStateChanged(is_low_power_mode) => {
@@ -445,47 +436,6 @@ impl WmController {
         debug!("register_hotkeys");
         let bindings: Vec<(Hotkey, WmCommand)> = self.config.config.keys.iter().cloned().collect();
         _ = self.event_tap_tx.send(event_tap::Request::SetHotkeys(bindings));
-    }
-
-    fn get_windows_for_spaces(&self, spaces: &[Option<SpaceId>]) -> Vec<WindowServerInfo> {
-        // IMPORTANT: `spaces` is a raw snapshot from system events (one per screen).
-        // It does *not* encode whether a space is currently "active"/"activated" per our
-        // activation policy (default_disable, ToggleSpaceActivated, login-window suppression).
-        //
-        // The reactor owns the activation policy and should decide which spaces are active.
-        // At the WM→reactor boundary, we must only send windows for spaces that are actually
-        // active in the current configuration.
-        //
-        // We can't safely reconstruct that policy here without duplicating reactor behavior,
-        // so treat a missing/unknown space id as inactive and filter it out.
-        let all_windows = sys::window_server::get_visible_windows_with_layer(None);
-
-        let space_id_values: Vec<u64> = spaces.iter().copied().flatten().map(|s| s.get()).collect();
-
-        // If we don't know any current spaces yet, avoid leaking windows across spaces.
-        if space_id_values.is_empty() {
-            return Vec::new();
-        }
-
-        let allowed_window_ids: HashSet<u32> =
-            sys::window_server::space_window_list_for_connection(&space_id_values, 0, false)
-                .into_iter()
-                .collect();
-
-        if allowed_window_ids.is_empty() {
-            if !all_windows.is_empty() {
-                tracing::trace!(
-                    ?space_id_values,
-                    "space window list empty during screen update; skipping update"
-                );
-            }
-            return Vec::new();
-        }
-
-        all_windows
-            .into_iter()
-            .filter(|info| allowed_window_ids.contains(&info.id.as_u32()))
-            .collect()
     }
 
     fn exec_cmd(&self, cmd_args: ExecCmd) {

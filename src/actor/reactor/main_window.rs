@@ -281,7 +281,7 @@ mod tests {
             true,
         ));
 
-        reactor.handle_event(SpaceChanged(vec![None], vec![]));
+        reactor.handle_event(SpaceChanged(vec![None]));
         reactor.handle_event(ApplicationActivated(3, Quiet::No));
         reactor.handle_event(ApplicationGloballyActivated(3));
         reactor.handle_event(WindowsDiscovered {
@@ -291,7 +291,7 @@ mod tests {
         });
         assert_eq!(Some(WindowId::new(3, 1)), reactor.main_window());
 
-        reactor.handle_event(SpaceChanged(vec![Some(space)], vec![]));
+        reactor.handle_event(SpaceChanged(vec![Some(space)]));
         assert_eq!(
             reactor.layout_manager.layout_engine.selected_window(space),
             Some(WindowId::new(3, 1))
