@@ -1171,8 +1171,7 @@ impl State {
             >= WINDOW_LEVEL_CACHE_PRUNE_INTERVAL_NS
         {
             let cutoff = event_timestamp.saturating_sub(WINDOW_LEVEL_CACHE_TTL_NS);
-            self.window_level_cache
-                .retain(|_, cached| cached.observed_at >= cutoff);
+            self.window_level_cache.retain(|_, cached| cached.observed_at >= cutoff);
             self.window_level_cache_last_prune_at = event_timestamp;
 
             // Defensive bound for long sessions with heavy transient-window churn.
