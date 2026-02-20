@@ -78,6 +78,7 @@ struct State {
     screens: Vec<CGRect>,
     event_processing_enabled: bool,
     focus_follows_mouse_enabled: bool,
+    stack_line_enabled: bool,
     disable_hotkey_active: bool,
     low_power_mode: bool,
     pressed_keys: HashSet<KeyCode>,
@@ -107,6 +108,7 @@ impl Default for State {
             screens: Vec::new(),
             event_processing_enabled: false,
             focus_follows_mouse_enabled: true,
+            stack_line_enabled: false,
             disable_hotkey_active: false,
             low_power_mode: power::is_low_power_mode_enabled(),
             pressed_keys: HashSet::default(),
@@ -250,6 +252,16 @@ unsafe fn drop_mouse_ctx(ptr: *mut std::ffi::c_void) {
 }
 
 impl EventTap {
+    #[inline]
+    fn stack_line_hover_enabled(&self, state: &State) -> bool {
+        state.stack_line_enabled && self.stack_line_tx.is_some()
+    }
+
+    #[inline]
+    fn focus_follows_mouse_handler_enabled(state: &State) -> bool {
+        state.focus_follows_mouse_config_enabled && state.focus_follows_mouse_enabled
+    }
+
     fn build_gesture_handlers(
         config: &Config,
         has_wm: bool,
@@ -295,8 +307,8 @@ impl EventTap {
     fn mouse_move_handlers_enabled(&self) -> bool {
         let state = self.state.borrow();
         state.event_processing_enabled
-            && (self.stack_line_tx.is_some()
-                || (state.focus_follows_mouse_config_enabled && state.focus_follows_mouse_enabled))
+            && (self.stack_line_hover_enabled(&state)
+                || Self::focus_follows_mouse_handler_enabled(&state))
     }
 
     fn desired_event_mask(&self) -> CGEventMask {
@@ -364,6 +376,7 @@ impl EventTap {
         let mut state = State::default();
         state.mouse_hides_on_focus = config.settings.mouse_hides_on_focus;
         state.focus_follows_mouse_config_enabled = config.settings.focus_follows_mouse;
+        state.stack_line_enabled = config.settings.ui.stack_line.enabled;
         state.default_layout_mode = config.settings.layout.mode;
         state.disable_hotkey_active = disable_hotkey
             .as_ref()
@@ -373,9 +386,8 @@ impl EventTap {
             swipe.is_some() || scroll.is_some(),
             disable_hotkey.is_some(),
             state.event_processing_enabled
-                && (stack_line_tx.is_some()
-                    || (state.focus_follows_mouse_config_enabled
-                        && state.focus_follows_mouse_enabled)),
+                && ((state.stack_line_enabled && stack_line_tx.is_some())
+                    || Self::focus_follows_mouse_handler_enabled(&state)),
         );
         EventTap {
             config: RefCell::new(config),
@@ -505,6 +517,7 @@ impl EventTap {
             Request::ConfigUpdated(new_config) => {
                 let mouse_hides_on_focus = new_config.settings.mouse_hides_on_focus;
                 let focus_follows_mouse_config_enabled = new_config.settings.focus_follows_mouse;
+                let stack_line_enabled = new_config.settings.ui.stack_line.enabled;
                 let default_layout_mode = new_config.settings.layout.mode;
                 let disable_hotkey = new_config
                     .settings
@@ -516,6 +529,7 @@ impl EventTap {
                 {
                     state.mouse_hides_on_focus = mouse_hides_on_focus;
                     state.focus_follows_mouse_config_enabled = focus_follows_mouse_config_enabled;
+                    state.stack_line_enabled = stack_line_enabled;
                     state.default_layout_mode = default_layout_mode;
                     let prev_active = state.disable_hotkey_active;
                     state.disable_hotkey_active = self
@@ -634,7 +648,9 @@ impl EventTap {
                 }
 
                 // stack line hover feedback
-                if let Some(tx) = &self.stack_line_tx {
+                if state.stack_line_enabled
+                    && let Some(tx) = &self.stack_line_tx
+                {
                     let _ = tx.try_send(stack_line::Event::MouseMoved(loc));
                 }
 

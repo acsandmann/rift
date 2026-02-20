@@ -1,4 +1,6 @@
-use nix::libc;
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::time::Duration;
+
 use objc2::MainThreadMarker;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -21,6 +23,11 @@ pub struct Update {
 pub enum Event {
     Update(Update),
     ConfigUpdated(Config),
+}
+
+enum DebounceCommand {
+    Arm,
+    Shutdown,
 }
 
 pub struct Menu {
@@ -48,13 +55,11 @@ impl Menu {
     }
 
     pub async fn run(mut self) {
-        const DEBOUNCE_MS: u64 = 150;
+        const DEBOUNCE: Duration = Duration::from_millis(150);
 
         let mut pending: Option<Event> = None;
-
         let (tick_tx, mut tick_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-
-        Self::spawn_kqueue_timer(DEBOUNCE_MS as i64, tick_tx);
+        let debounce_tx = Self::spawn_debouncer(DEBOUNCE, tick_tx);
 
         loop {
             tokio::select! {
@@ -76,11 +81,15 @@ impl Menu {
                         Some((span, event)) => {
                             let _enter = span.enter();
                             match event {
-                                Event::Update(_) => pending = Some(event),
+                                Event::Update(_) => {
+                                    pending = Some(event);
+                                    let _ = debounce_tx.send(DebounceCommand::Arm);
+                                }
                                 Event::ConfigUpdated(cfg) => self.handle_config_updated(cfg),
                             }
                         }
                         None => {
+                            let _ = debounce_tx.send(DebounceCommand::Shutdown);
                             if let Some(ev) = pending.take() {
                                 self.handle_event(ev);
                             }
@@ -144,57 +153,35 @@ impl Menu {
         }
     }
 
-    fn spawn_kqueue_timer(period_ms: i64, tx: UnboundedSender<()>) {
-        std::thread::spawn(move || unsafe {
-            let kq = libc::kqueue();
-            if kq < 0 {
-                return;
-            }
+    fn spawn_debouncer(
+        period: Duration,
+        tick_tx: UnboundedSender<()>,
+    ) -> mpsc::Sender<DebounceCommand> {
+        let (cmd_tx, cmd_rx) = mpsc::channel::<DebounceCommand>();
 
-            let mut change: libc::kevent = std::mem::zeroed();
-            change.ident = 1 as libc::uintptr_t;
-            change.filter = libc::EVFILT_TIMER as i16;
-            change.flags = (libc::EV_ADD | libc::EV_ENABLE) as u16;
-            change.fflags = 0;
-            change.data = period_ms as libc::intptr_t;
-            change.udata = std::ptr::null_mut();
-
-            let reg = libc::kevent(
-                kq,
-                &change as *const libc::kevent,
-                1,
-                std::ptr::null_mut(),
-                0,
-                std::ptr::null(),
-            );
-            if reg < 0 {
-                let _ = libc::close(kq);
-                return;
-            }
-
-            let mut event: libc::kevent = std::mem::zeroed();
-
+        std::thread::spawn(move || {
             loop {
-                let n = libc::kevent(
-                    kq,
-                    std::ptr::null(),
-                    0,
-                    &mut event as *mut libc::kevent,
-                    1,
-                    std::ptr::null(),
-                );
-
-                if n <= 0 {
-                    break;
-                }
-
-                if tx.send(()).is_err() {
-                    break;
+                match cmd_rx.recv() {
+                    Ok(DebounceCommand::Arm) => loop {
+                        match cmd_rx.recv_timeout(period) {
+                            Ok(DebounceCommand::Arm) => continue,
+                            Ok(DebounceCommand::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
+                                return;
+                            }
+                            Err(RecvTimeoutError::Timeout) => {
+                                if tick_tx.send(()).is_err() {
+                                    return;
+                                }
+                                break;
+                            }
+                        }
+                    },
+                    Ok(DebounceCommand::Shutdown) | Err(_) => return,
                 }
             }
-
-            let _ = libc::close(kq);
         });
+
+        cmd_tx
     }
 }
 
