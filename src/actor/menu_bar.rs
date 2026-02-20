@@ -129,9 +129,9 @@ impl Menu {
         let menu_bar_settings = &self.config.settings.ui.menu_bar;
         icon.update(
             update.active_space,
-            update.workspaces.clone(),
+            &update.workspaces,
             update.active_workspace,
-            update.windows.clone(),
+            &update.windows,
             menu_bar_settings,
         );
     }

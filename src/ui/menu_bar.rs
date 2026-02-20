@@ -64,9 +64,9 @@ impl MenuIcon {
     pub fn update(
         &mut self,
         _active_space: SpaceId,
-        workspaces: Vec<WorkspaceData>,
+        workspaces: &[WorkspaceData],
         _active_workspace: Option<VirtualWorkspaceId>,
-        _windows: Vec<WindowData>,
+        _windows: &[WindowData],
         settings: &MenuBarSettings,
     ) {
         let mode = settings.mode;
@@ -85,10 +85,11 @@ impl MenuIcon {
         let render_inputs = match (mode, style) {
             (MenuBarDisplayMode::All, WorkspaceDisplayStyle::Layout) => {
                 let filtered = if settings.show_empty {
-                    workspaces
+                    workspaces.to_vec()
                 } else {
                     workspaces
-                        .into_iter()
+                        .iter()
+                        .cloned()
                         .filter(|w| w.window_count > 0 || w.is_active)
                         .collect::<Vec<_>>()
                 };
@@ -102,7 +103,8 @@ impl MenuIcon {
                     .collect()
             }
             (MenuBarDisplayMode::All, WorkspaceDisplayStyle::Label) => workspaces
-                .into_iter()
+                .iter()
+                .cloned()
                 .filter(|w| settings.show_empty || w.window_count > 0 || w.is_active)
                 .map(|ws| {
                     let mut clone = ws.clone();
@@ -116,7 +118,8 @@ impl MenuIcon {
                 })
                 .collect(),
             (MenuBarDisplayMode::Active, WorkspaceDisplayStyle::Layout) => workspaces
-                .into_iter()
+                .iter()
+                .cloned()
                 .find(|w| w.is_active)
                 .map(|ws| {
                     vec![WorkspaceRenderInput {
@@ -127,7 +130,8 @@ impl MenuIcon {
                 })
                 .unwrap_or_default(),
             (MenuBarDisplayMode::Active, WorkspaceDisplayStyle::Label) => workspaces
-                .into_iter()
+                .iter()
+                .cloned()
                 .find(|w| w.is_active)
                 .map(|ws| {
                     let mut clone = ws.clone();
