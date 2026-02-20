@@ -80,6 +80,8 @@ pub fn make_window(idx: usize) -> WindowInfo {
         is_standard: true,
         is_root: true,
         is_minimized: false,
+        ax_can_move: true,
+        ax_can_resize: true,
         title: format!("Window{idx}"),
         frame: CGRect::new(
             CGPoint::new(100.0 * f64::from(idx as u32), 100.0),

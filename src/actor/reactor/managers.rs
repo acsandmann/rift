@@ -278,6 +278,13 @@ impl LayoutManager {
                     reactor.config.settings.ui.stack_line.horiz_placement,
                     reactor.config.settings.ui.stack_line.vert_placement,
                     |wid| reactor.window_manager.windows.get(&wid).map(|w| w.frame_monotonic),
+                    |wid| {
+                        reactor
+                            .window_manager
+                            .windows
+                            .get(&wid)
+                            .and_then(|w| (!w.info.ax_can_resize).then_some(w.frame_monotonic.size))
+                    },
                 );
             if active_space_count > 1
                 && reactor.layout_manager.layout_engine.active_layout_mode_at(space)

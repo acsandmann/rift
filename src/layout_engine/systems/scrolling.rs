@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicBool, AtomicI8, AtomicU64, Ordering};
 
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 use crate::actor::app::{WindowId, pid_t};
@@ -40,6 +41,8 @@ struct LayoutState {
     last_center_offset_delta_px: AtomicU64,
     #[serde(skip, default = "default_atomic")]
     overscroll_accumulation: AtomicU64,
+    #[serde(skip, default = "default_width_cache")]
+    last_constrained_column_widths: RwLock<Vec<f64>>,
     fullscreen: HashSet<WindowId>,
     fullscreen_within_gaps: HashSet<WindowId>,
 }
@@ -60,6 +63,7 @@ impl LayoutState {
             last_step_px: AtomicU64::new(0.0f64.to_bits()),
             last_center_offset_delta_px: AtomicU64::new(0.0f64.to_bits()),
             overscroll_accumulation: AtomicU64::new(0.0f64.to_bits()),
+            last_constrained_column_widths: RwLock::new(Vec::new()),
             fullscreen: HashSet::default(),
             fullscreen_within_gaps: HashSet::default(),
         }
@@ -264,6 +268,9 @@ impl Clone for LayoutState {
             overscroll_accumulation: AtomicU64::new(
                 self.overscroll_accumulation.load(Ordering::Relaxed),
             ),
+            last_constrained_column_widths: RwLock::new(
+                self.last_constrained_column_widths.read().clone(),
+            ),
             fullscreen: self.fullscreen.clone(),
             fullscreen_within_gaps: self.fullscreen_within_gaps.clone(),
         }
@@ -273,6 +280,7 @@ impl Clone for LayoutState {
 fn default_atomic_bool() -> AtomicBool { AtomicBool::new(false) }
 fn default_atomic_i8() -> AtomicI8 { AtomicI8::new(0) }
 fn default_atomic() -> AtomicU64 { AtomicU64::new(0.0f64.to_bits()) }
+fn default_width_cache() -> RwLock<Vec<f64>> { RwLock::new(Vec::new()) }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ScrollingLayoutSystem {
@@ -318,6 +326,220 @@ impl ScrollingLayoutSystem {
         ratio.clamp(min_ratio, max_ratio).max(0.05).min(0.98)
     }
 
+    pub(crate) fn calculate_layout_constrained(
+        &self,
+        layout: LayoutId,
+        inputs: crate::layout_engine::systems::LayoutCalcInputs<'_>,
+        constraints: crate::layout_engine::systems::LayoutConstraints<'_>,
+    ) -> Vec<(WindowId, CGRect)> {
+        let screen = inputs.screen;
+        let gaps = inputs.gaps;
+        let fixed_sizes = constraints.fixed_sizes;
+
+        let Some(state) = self.layouts.get(layout) else {
+            return Vec::new();
+        };
+        let tiling = compute_tiling_area(screen, gaps);
+        let gap_x = gaps.inner.horizontal;
+        let gap_y = gaps.inner.vertical;
+        let base_ratio = self.clamp_ratio(state.column_width_ratio);
+
+        let mut column_widths = Vec::with_capacity(state.columns.len());
+        for col in state.columns.iter() {
+            let ratio = self.clamp_ratio(base_ratio + col.width_offset);
+            let mut width = (tiling.size.width * ratio).max(1.0);
+            if !fixed_sizes.is_empty() {
+                let fixed_w = col
+                    .windows
+                    .iter()
+                    .filter_map(|wid| fixed_sizes.get(wid).map(|s| s.width))
+                    .fold(0.0, f64::max);
+                if fixed_w > 0.0 {
+                    width = width.min(fixed_w.max(1.0));
+                }
+            }
+            column_widths.push(width);
+        }
+        *state.last_constrained_column_widths.write() = column_widths.clone();
+
+        let mut column_starts = Vec::with_capacity(state.columns.len());
+        let mut strip_cursor = 0.0;
+        for width in &column_widths {
+            column_starts.push(strip_cursor);
+            strip_cursor += *width + gap_x;
+        }
+        let strip_max_offset = column_starts.last().copied().unwrap_or(0.0);
+        let selected_col_idx = state.selected_location().map(|(idx, _)| idx).unwrap_or(0);
+        let selected_width = column_widths
+            .get(selected_col_idx)
+            .copied()
+            .unwrap_or((tiling.size.width * base_ratio).max(1.0));
+        let step = selected_width + gap_x;
+        state.last_screen_width.store(tiling.size.width.to_bits(), Ordering::Relaxed);
+        state.last_gap_x.store(gap_x.to_bits(), Ordering::Relaxed);
+        state.last_step_px.store(step.to_bits(), Ordering::Relaxed);
+
+        let niri_navigation = matches!(
+            self.settings.focus_navigation_style,
+            ScrollingFocusNavigationStyle::Niri
+        );
+        let anchor_x = if niri_navigation && state.center_override_window.is_none() {
+            tiling.origin.x
+        } else {
+            match self.settings.alignment {
+                crate::common::config::ScrollingAlignment::Left => tiling.origin.x,
+                crate::common::config::ScrollingAlignment::Center => {
+                    tiling.origin.x + (tiling.size.width - selected_width) / 2.0
+                }
+                crate::common::config::ScrollingAlignment::Right => {
+                    tiling.origin.x + tiling.size.width - selected_width
+                }
+            }
+        };
+        let center_anchor_x = tiling.origin.x + (tiling.size.width - selected_width) / 2.0;
+        let center_offset_delta = anchor_x - center_anchor_x;
+        state
+            .last_center_offset_delta_px
+            .store(center_offset_delta.to_bits(), Ordering::Relaxed);
+
+        if state.pending_center_align.load(Ordering::Relaxed) {
+            let offset = state
+                .selected_location()
+                .map(|(col_idx, _)| {
+                    center_offset_delta + column_starts.get(col_idx).copied().unwrap_or(0.0)
+                })
+                .unwrap_or(0.0);
+            state.scroll_offset_px.store(offset.to_bits(), Ordering::Relaxed);
+            state.pending_center_align.store(false, Ordering::Relaxed);
+            state.pending_align.store(false, Ordering::Relaxed);
+        } else if state.pending_align.load(Ordering::Relaxed) {
+            let offset = state
+                .selected_location()
+                .map(|(col_idx, _)| column_starts.get(col_idx).copied().unwrap_or(0.0))
+                .unwrap_or(0.0);
+            state.scroll_offset_px.store(offset.to_bits(), Ordering::Relaxed);
+            state.pending_align.store(false, Ordering::Relaxed);
+        }
+        let reveal_direction = state.pending_reveal_direction.swap(0, Ordering::Relaxed);
+        if reveal_direction != 0 {
+            if let Some((selected_col_idx, _)) = state.selected_location() {
+                let selected_width = column_widths
+                    .get(selected_col_idx)
+                    .copied()
+                    .unwrap_or((tiling.size.width * base_ratio).max(1.0));
+                let mut offset = f64::from_bits(state.scroll_offset_px.load(Ordering::Relaxed));
+                let selected_start = column_starts.get(selected_col_idx).copied().unwrap_or(0.0);
+                let selected_x = anchor_x + selected_start - offset;
+                let visible_left = tiling.origin.x;
+                let visible_right = tiling.origin.x + tiling.size.width;
+
+                match reveal_direction {
+                    -1 => {
+                        if selected_x < visible_left {
+                            offset = anchor_x + selected_start - visible_left;
+                        } else if selected_x + selected_width > visible_right {
+                            offset = anchor_x + selected_start + selected_width - visible_right;
+                        }
+                    }
+                    1 => {
+                        if selected_x + selected_width > visible_right {
+                            offset = anchor_x + selected_start + selected_width - visible_right;
+                        } else if selected_x < visible_left {
+                            offset = anchor_x + selected_start - visible_left;
+                        }
+                    }
+                    2 => {
+                        if selected_x < visible_left {
+                            offset = anchor_x + selected_start - visible_left;
+                        } else if selected_x + selected_width > visible_right {
+                            offset = anchor_x + selected_start + selected_width - visible_right;
+                        }
+                    }
+                    _ => {}
+                }
+                state.scroll_offset_px.store(offset.to_bits(), Ordering::Relaxed);
+            }
+        }
+        let current = f64::from_bits(state.scroll_offset_px.load(Ordering::Relaxed));
+        let base_max_offset = strip_max_offset;
+        let (min_offset, max_offset) = if state.center_override_window.is_some() {
+            (center_offset_delta, base_max_offset + center_offset_delta)
+        } else {
+            (0.0, base_max_offset)
+        };
+        let clamped = current.clamp(min_offset, max_offset);
+        state.scroll_offset_px.store(clamped.to_bits(), Ordering::Relaxed);
+
+        let mut out = Vec::new();
+        for (col_idx, col) in state.columns.iter().enumerate() {
+            let offset = f64::from_bits(state.scroll_offset_px.load(Ordering::Relaxed));
+            let column_width = column_widths
+                .get(col_idx)
+                .copied()
+                .unwrap_or((tiling.size.width * base_ratio).max(1.0));
+            let start = column_starts.get(col_idx).copied().unwrap_or(0.0);
+            let x = anchor_x + start - offset;
+            if col.windows.is_empty() {
+                continue;
+            }
+            let total_gap = gap_y * (col.windows.len().saturating_sub(1) as f64);
+            let available_height = (tiling.size.height - total_gap).max(0.0);
+
+            let mut rigid_total = 0.0;
+            let mut rigid_heights = Vec::with_capacity(col.windows.len());
+            let mut rigid_flags = Vec::with_capacity(col.windows.len());
+            for wid in &col.windows {
+                let rigid_h = fixed_sizes.get(wid).map(|s| s.height.max(0.0));
+                if let Some(h) = rigid_h {
+                    rigid_total += h;
+                    rigid_heights.push(h);
+                    rigid_flags.push(true);
+                } else {
+                    rigid_heights.push(0.0);
+                    rigid_flags.push(false);
+                }
+            }
+
+            let (scaled_rigid_total, rigid_scale) =
+                if rigid_total > available_height && rigid_total > 0.0 {
+                    (available_height, available_height / rigid_total)
+                } else {
+                    (rigid_total, 1.0)
+                };
+            let flex_count = rigid_flags.iter().filter(|&&b| !b).count();
+            let flex_height = if flex_count > 0 {
+                ((available_height - scaled_rigid_total).max(0.0) / flex_count as f64).max(1.0)
+            } else {
+                0.0
+            };
+
+            let mut y_cursor = tiling.origin.y;
+            for (row_idx, wid) in col.windows.iter().enumerate() {
+                let row_height = if rigid_flags[row_idx] {
+                    (rigid_heights[row_idx] * rigid_scale).max(1.0)
+                } else {
+                    flex_height
+                };
+                let mut frame = CGRect::new(
+                    CGPoint::new(x.round(), y_cursor.round()),
+                    CGSize::new(column_width.round(), row_height.round()),
+                );
+                if state.fullscreen.contains(wid) {
+                    frame = screen;
+                } else if state.fullscreen_within_gaps.contains(wid) {
+                    frame = tiling;
+                }
+                out.push((*wid, frame));
+
+                y_cursor += row_height;
+                if row_idx < col.windows.len() - 1 {
+                    y_cursor += gap_y;
+                }
+            }
+        }
+        out
+    }
+
     fn column_widths_and_starts(
         state: &LayoutState,
         screen_width: f64,
@@ -341,6 +563,32 @@ impl ScrollingLayoutSystem {
         (widths, starts)
     }
 
+    fn starts_for_widths(widths: &[f64], gap_x: f64) -> Vec<f64> {
+        let mut starts = Vec::with_capacity(widths.len());
+        let mut cursor = 0.0;
+        for width in widths {
+            starts.push(cursor);
+            cursor += *width + gap_x;
+        }
+        starts
+    }
+
+    fn effective_column_widths_and_starts(
+        state: &LayoutState,
+        screen_width: f64,
+        gap_x: f64,
+        min_ratio: f64,
+        max_ratio: f64,
+    ) -> (Vec<f64>, Vec<f64>) {
+        let cached_widths = state.last_constrained_column_widths.read();
+        if cached_widths.len() == state.columns.len() && !cached_widths.is_empty() {
+            let widths = cached_widths.clone();
+            let starts = Self::starts_for_widths(&widths, gap_x);
+            return (widths, starts);
+        }
+        Self::column_widths_and_starts(state, screen_width, gap_x, min_ratio, max_ratio)
+    }
+
     pub fn scroll_by_delta(&mut self, layout: LayoutId, delta: f64) -> Option<Direction> {
         let min_ratio = self.settings.min_column_width_ratio;
         let max_ratio = self.settings.max_column_width_ratio;
@@ -353,8 +601,13 @@ impl ScrollingLayoutSystem {
         if screen_width <= 0.0 {
             return None;
         }
-        let (widths, starts) =
-            Self::column_widths_and_starts(state, screen_width, gap_x, min_ratio, max_ratio);
+        let (widths, starts) = Self::effective_column_widths_and_starts(
+            state,
+            screen_width,
+            gap_x,
+            min_ratio,
+            max_ratio,
+        );
         if starts.is_empty() {
             return None;
         }
@@ -415,8 +668,13 @@ impl ScrollingLayoutSystem {
         if screen_width <= 0.0 {
             return;
         }
-        let (_widths, starts) =
-            Self::column_widths_and_starts(state, screen_width, gap_x, min_ratio, max_ratio);
+        let (_widths, starts) = Self::effective_column_widths_and_starts(
+            state,
+            screen_width,
+            gap_x,
+            min_ratio,
+            max_ratio,
+        );
         if starts.is_empty() {
             return;
         }
@@ -588,172 +846,24 @@ impl LayoutSystem for ScrollingLayoutSystem {
         &self,
         layout: LayoutId,
         screen: CGRect,
-        _stack_offset: f64,
+        stack_offset: f64,
         gaps: &crate::common::config::GapSettings,
-        _stack_line_thickness: f64,
-        _stack_line_horiz: crate::common::config::HorizontalPlacement,
-        _stack_line_vert: crate::common::config::VerticalPlacement,
+        stack_line_thickness: f64,
+        stack_line_horiz: crate::common::config::HorizontalPlacement,
+        stack_line_vert: crate::common::config::VerticalPlacement,
     ) -> Vec<(WindowId, CGRect)> {
-        let Some(state) = self.layouts.get(layout) else {
-            return Vec::new();
-        };
-        let tiling = compute_tiling_area(screen, gaps);
-        let gap_x = gaps.inner.horizontal;
-        let gap_y = gaps.inner.vertical;
-        let base_ratio = self.clamp_ratio(state.column_width_ratio);
-
-        let mut column_ratios = Vec::with_capacity(state.columns.len());
-        let mut column_widths = Vec::with_capacity(state.columns.len());
-        for col in state.columns.iter() {
-            let ratio = self.clamp_ratio(base_ratio + col.width_offset);
-            column_ratios.push(ratio);
-            column_widths.push((tiling.size.width * ratio).max(1.0));
-        }
-
-        let mut column_starts = Vec::with_capacity(state.columns.len());
-        let mut strip_cursor = 0.0;
-        for width in &column_widths {
-            column_starts.push(strip_cursor);
-            strip_cursor += *width + gap_x;
-        }
-        let strip_max_offset = column_starts.last().copied().unwrap_or(0.0);
-        let selected_col_idx = state.selected_location().map(|(idx, _)| idx).unwrap_or(0);
-        let selected_width = column_widths
-            .get(selected_col_idx)
-            .copied()
-            .unwrap_or((tiling.size.width * base_ratio).max(1.0));
-        let step = selected_width + gap_x;
-        state.last_screen_width.store(tiling.size.width.to_bits(), Ordering::Relaxed);
-        state.last_gap_x.store(gap_x.to_bits(), Ordering::Relaxed);
-        state.last_step_px.store(step.to_bits(), Ordering::Relaxed);
-
-        let niri_navigation = matches!(
-            self.settings.focus_navigation_style,
-            ScrollingFocusNavigationStyle::Niri
-        );
-        let anchor_x = if niri_navigation && state.center_override_window.is_none() {
-            // Keep strip anchoring stable in niri mode so focus changes do not
-            // shift unrelated columns when selected widths differ.
-            tiling.origin.x
-        } else {
-            match self.settings.alignment {
-                crate::common::config::ScrollingAlignment::Left => tiling.origin.x,
-                crate::common::config::ScrollingAlignment::Center => {
-                    tiling.origin.x + (tiling.size.width - selected_width) / 2.0
-                }
-                crate::common::config::ScrollingAlignment::Right => {
-                    tiling.origin.x + tiling.size.width - selected_width
-                }
-            }
-        };
-        let center_anchor_x = tiling.origin.x + (tiling.size.width - selected_width) / 2.0;
-        let center_offset_delta = anchor_x - center_anchor_x;
-        state
-            .last_center_offset_delta_px
-            .store(center_offset_delta.to_bits(), Ordering::Relaxed);
-
-        if state.pending_center_align.load(Ordering::Relaxed) {
-            let offset = state
-                .selected_location()
-                .map(|(col_idx, _)| {
-                    center_offset_delta + column_starts.get(col_idx).copied().unwrap_or(0.0)
-                })
-                .unwrap_or(0.0);
-            state.scroll_offset_px.store(offset.to_bits(), Ordering::Relaxed);
-            state.pending_center_align.store(false, Ordering::Relaxed);
-            state.pending_align.store(false, Ordering::Relaxed);
-        } else if state.pending_align.load(Ordering::Relaxed) {
-            let offset = state
-                .selected_location()
-                .map(|(col_idx, _)| column_starts.get(col_idx).copied().unwrap_or(0.0))
-                .unwrap_or(0.0);
-            state.scroll_offset_px.store(offset.to_bits(), Ordering::Relaxed);
-            state.pending_align.store(false, Ordering::Relaxed);
-        }
-        let reveal_direction = state.pending_reveal_direction.swap(0, Ordering::Relaxed);
-        if reveal_direction != 0 {
-            if let Some((selected_col_idx, _)) = state.selected_location() {
-                let selected_width = column_widths
-                    .get(selected_col_idx)
-                    .copied()
-                    .unwrap_or((tiling.size.width * base_ratio).max(1.0));
-                let mut offset = f64::from_bits(state.scroll_offset_px.load(Ordering::Relaxed));
-                let selected_start = column_starts.get(selected_col_idx).copied().unwrap_or(0.0);
-                let selected_x = anchor_x + selected_start - offset;
-                let visible_left = tiling.origin.x;
-                let visible_right = tiling.origin.x + tiling.size.width;
-
-                match reveal_direction {
-                    -1 => {
-                        if selected_x < visible_left {
-                            offset = anchor_x + selected_start - visible_left;
-                        } else if selected_x + selected_width > visible_right {
-                            offset = anchor_x + selected_start + selected_width - visible_right;
-                        }
-                    }
-                    1 => {
-                        if selected_x + selected_width > visible_right {
-                            offset = anchor_x + selected_start + selected_width - visible_right;
-                        } else if selected_x < visible_left {
-                            offset = anchor_x + selected_start - visible_left;
-                        }
-                    }
-                    2 => {
-                        if selected_x < visible_left {
-                            offset = anchor_x + selected_start - visible_left;
-                        } else if selected_x + selected_width > visible_right {
-                            offset = anchor_x + selected_start + selected_width - visible_right;
-                        }
-                    }
-                    _ => {}
-                }
-                state.scroll_offset_px.store(offset.to_bits(), Ordering::Relaxed);
-            }
-        }
-        let current = f64::from_bits(state.scroll_offset_px.load(Ordering::Relaxed));
-        let base_max_offset = strip_max_offset;
-        let (min_offset, max_offset) = if state.center_override_window.is_some() {
-            (center_offset_delta, base_max_offset + center_offset_delta)
-        } else {
-            (0.0, base_max_offset)
-        };
-        let clamped = current.clamp(min_offset, max_offset);
-        state.scroll_offset_px.store(clamped.to_bits(), Ordering::Relaxed);
-
-        let mut out = Vec::new();
-        for (col_idx, col) in state.columns.iter().enumerate() {
-            let offset = f64::from_bits(state.scroll_offset_px.load(Ordering::Relaxed));
-            let ratio = column_ratios.get(col_idx).copied().unwrap_or(base_ratio);
-            let column_width = (tiling.size.width * ratio).max(1.0);
-            let start = column_starts.get(col_idx).copied().unwrap_or(0.0);
-            let x = anchor_x + start - offset;
-            if col.windows.is_empty() {
-                continue;
-            }
-            let total_gap = gap_y * (col.windows.len().saturating_sub(1) as f64);
-            let available_height = (tiling.size.height - total_gap).max(0.0);
-            let row_height = if col.windows.is_empty() {
-                0.0
-            } else {
-                (available_height / col.windows.len() as f64).max(1.0)
-            };
-
-            for (row_idx, wid) in col.windows.iter().enumerate() {
-                let y = tiling.origin.y + (row_idx as f64) * (row_height + gap_y);
-                // round position and size independently to avoid size jitter from min/max rounding.
-                let mut frame = CGRect::new(
-                    CGPoint::new(x.round(), y.round()),
-                    CGSize::new(column_width.round(), row_height.round()),
-                );
-                if state.fullscreen.contains(wid) {
-                    frame = screen;
-                } else if state.fullscreen_within_gaps.contains(wid) {
-                    frame = tiling;
-                }
-                out.push((*wid, frame));
-            }
-        }
-        out
+        self.calculate_layout_constrained(
+            layout,
+            crate::layout_engine::systems::LayoutCalcInputs::new(
+                screen,
+                stack_offset,
+                gaps,
+                stack_line_thickness,
+                stack_line_horiz,
+                stack_line_vert,
+            ),
+            crate::layout_engine::systems::LayoutConstraints::unconstrained(),
+        )
     }
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
@@ -1256,6 +1366,7 @@ mod tests {
 
     use super::ScrollingLayoutSystem;
     use crate::actor::app::{WindowId, pid_t};
+    use crate::common::collections::HashMap;
     use crate::common::config::{GapSettings, ScrollingLayoutSettings};
     use crate::layout_engine::systems::LayoutSystem;
     use crate::layout_engine::utils::compute_tiling_area;
@@ -1287,6 +1398,130 @@ mod tests {
             Default::default(),
             Default::default(),
         )
+    }
+
+    #[test]
+    fn fixed_size_window_shrinks_scrolling_column_width() {
+        let mut system = ScrollingLayoutSystem::new(&ScrollingLayoutSettings::default());
+        let layout = system.create_layout();
+        let w1 = wid(1, 1);
+        let w2 = wid(1, 2);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+
+        let gaps = GapSettings::default();
+        let mut fixed = HashMap::default();
+        fixed.insert(w1, CGSize::new(200.0, 100.0));
+
+        let frames = system.calculate_layout_constrained(
+            layout,
+            crate::layout_engine::systems::LayoutCalcInputs::new(
+                screen(1000.0, 800.0),
+                0.0,
+                &gaps,
+                0.0,
+                Default::default(),
+                Default::default(),
+            ),
+            crate::layout_engine::systems::LayoutConstraints::with_fixed_sizes(&fixed),
+        );
+        let w1_frame = frames.iter().find(|(id, _)| *id == w1).unwrap().1;
+        assert!((w1_frame.size.width - 200.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn scroll_by_delta_uses_constrained_column_widths() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.alignment = crate::common::config::ScrollingAlignment::Left;
+        let mut system = ScrollingLayoutSystem::new(&settings);
+        let layout = system.create_layout();
+        let w1 = wid(1, 1);
+        let w2 = wid(1, 2);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2); // selected column
+
+        let gaps = GapSettings::default();
+        let mut fixed = HashMap::default();
+        fixed.insert(w2, CGSize::new(200.0, 120.0));
+        let frames = system.calculate_layout_constrained(
+            layout,
+            crate::layout_engine::systems::LayoutCalcInputs::new(
+                screen(1000.0, 800.0),
+                0.0,
+                &gaps,
+                0.0,
+                Default::default(),
+                Default::default(),
+            ),
+            crate::layout_engine::systems::LayoutConstraints::with_fixed_sizes(&fixed),
+        );
+        let selected_width = frame_for(&frames, w2).size.width;
+        let expected_step = selected_width + gaps.inner.horizontal;
+        let before = scroll_offset(&system, layout);
+
+        let boundary = system.scroll_by_delta(layout, -0.5);
+        let after = scroll_offset(&system, layout);
+
+        assert_eq!(boundary, None);
+        let expected = before - 0.5 * expected_step;
+        assert!(
+            (after - expected).abs() < 2.0,
+            "expected constrained step {}, got offset {} -> {}",
+            expected_step,
+            before,
+            after
+        );
+    }
+
+    #[test]
+    fn snap_to_nearest_column_uses_constrained_starts() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.alignment = crate::common::config::ScrollingAlignment::Left;
+        let mut system = ScrollingLayoutSystem::new(&settings);
+        let layout = system.create_layout();
+        let w1 = wid(1, 1);
+        let w2 = wid(1, 2);
+        let w3 = wid(1, 3);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+        system.add_window_after_selection(layout, w3);
+
+        let gaps = GapSettings::default();
+        let mut fixed = HashMap::default();
+        fixed.insert(w2, CGSize::new(150.0, 120.0));
+        let frames = system.calculate_layout_constrained(
+            layout,
+            crate::layout_engine::systems::LayoutCalcInputs::new(
+                screen(1000.0, 800.0),
+                0.0,
+                &gaps,
+                0.0,
+                Default::default(),
+                Default::default(),
+            ),
+            crate::layout_engine::systems::LayoutConstraints::with_fixed_sizes(&fixed),
+        );
+        let w1_width = frame_for(&frames, w1).size.width;
+        let w2_width = frame_for(&frames, w2).size.width;
+        let second_start = w1_width + gaps.inner.horizontal;
+        let third_start = second_start + w2_width + gaps.inner.horizontal;
+        let near_third = third_start - (w2_width + gaps.inner.horizontal) * 0.25;
+        system
+            .layouts
+            .get(layout)
+            .expect("layout state missing")
+            .scroll_offset_px
+            .store(near_third.to_bits(), Ordering::Relaxed);
+
+        system.snap_to_nearest_column(layout);
+        let snapped = scroll_offset(&system, layout);
+
+        assert!(
+            (snapped - third_start).abs() < 2.0,
+            "expected snap to constrained third start {}, got {}",
+            third_start,
+            snapped
+        );
     }
 
     fn frame_for(frames: &[(WindowId, CGRect)], wid: WindowId) -> CGRect {

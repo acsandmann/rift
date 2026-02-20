@@ -1,8 +1,9 @@
-use objc2_core_foundation::CGRect;
+use objc2_core_foundation::{CGRect, CGSize};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::actor::app::{WindowId, pid_t};
+use crate::common::collections::HashMap;
 use crate::layout_engine::systems::LayoutSystem;
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{Direction, LayoutId, LayoutKind, Orientation};
@@ -26,6 +27,31 @@ impl Default for TraditionalLayoutSystem {
 }
 
 impl TraditionalLayoutSystem {
+    pub(crate) fn calculate_layout_constrained(
+        &self,
+        layout: LayoutId,
+        inputs: crate::layout_engine::systems::LayoutCalcInputs<'_>,
+        constraints: crate::layout_engine::systems::LayoutConstraints<'_>,
+    ) -> Vec<(WindowId, CGRect)> {
+        let mut sizes = vec![];
+        let tiling_area = compute_tiling_area(inputs.screen, inputs.gaps);
+        self.tree.data.layout.apply_with_gaps(
+            &self.tree.map,
+            &self.tree.data.window,
+            self.root(layout),
+            tiling_area,
+            inputs.screen,
+            &mut sizes,
+            inputs.stack_offset,
+            inputs.gaps,
+            inputs.stack_line_thickness,
+            inputs.stack_line_horiz,
+            inputs.stack_line_vert,
+            constraints.fixed_sizes,
+        );
+        sizes
+    }
+
     fn find_best_focus_target(&self, node: NodeId) -> Option<(NodeId, WindowId)> {
         if let Some(wid) = self.tree.data.window.at(node) {
             return Some((node, wid));
@@ -136,7 +162,7 @@ impl TraditionalLayoutSystem {
         self.tree.data.layout.set_kind(node, kind);
     }
 
-    pub(crate) fn calculate_layout_for_node(
+    pub(crate) fn calculate_layout_for_node_constrained(
         &self,
         node: NodeId,
         screen: CGRect,
@@ -146,6 +172,7 @@ impl TraditionalLayoutSystem {
         stack_line_thickness: f64,
         stack_line_horiz: crate::common::config::HorizontalPlacement,
         stack_line_vert: crate::common::config::VerticalPlacement,
+        fixed_sizes: &HashMap<WindowId, CGSize>,
     ) -> Vec<(WindowId, CGRect)> {
         let mut sizes = vec![];
         self.tree.data.layout.apply_with_gaps(
@@ -160,6 +187,7 @@ impl TraditionalLayoutSystem {
             stack_line_thickness,
             stack_line_horiz,
             stack_line_vert,
+            fixed_sizes,
         );
         sizes
     }
@@ -440,24 +468,18 @@ impl LayoutSystem for TraditionalLayoutSystem {
         stack_line_horiz: crate::common::config::HorizontalPlacement,
         stack_line_vert: crate::common::config::VerticalPlacement,
     ) -> Vec<(WindowId, CGRect)> {
-        let mut sizes = vec![];
-        let tiling_area = compute_tiling_area(screen, gaps);
-
-        self.tree.data.layout.apply_with_gaps(
-            &self.tree.map,
-            &self.tree.data.window,
-            self.root(layout),
-            tiling_area,
-            screen,
-            &mut sizes,
-            stack_offset,
-            gaps,
-            stack_line_thickness,
-            stack_line_horiz,
-            stack_line_vert,
-        );
-
-        sizes
+        self.calculate_layout_constrained(
+            layout,
+            crate::layout_engine::systems::LayoutCalcInputs::new(
+                screen,
+                stack_offset,
+                gaps,
+                stack_line_thickness,
+                stack_line_horiz,
+                stack_line_vert,
+            ),
+            crate::layout_engine::systems::LayoutConstraints::unconstrained(),
+        )
     }
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
@@ -2276,6 +2298,7 @@ impl Layout {
         stack_line_thickness: f64,
         stack_line_horiz: crate::common::config::HorizontalPlacement,
         stack_line_vert: crate::common::config::VerticalPlacement,
+        fixed_sizes: &HashMap<WindowId, CGSize>,
     ) {
         let info = &self.info[node];
         let rect = if info.is_fullscreen {
@@ -2332,6 +2355,7 @@ impl Layout {
                         stack_line_thickness,
                         stack_line_horiz,
                         stack_line_vert,
+                        fixed_sizes,
                     );
                 }
             }
@@ -2348,6 +2372,7 @@ impl Layout {
                 stack_line_thickness,
                 stack_line_horiz,
                 stack_line_vert,
+                fixed_sizes,
             ),
             Vertical => self.layout_axis(
                 map,
@@ -2362,6 +2387,7 @@ impl Layout {
                 stack_line_thickness,
                 stack_line_horiz,
                 stack_line_vert,
+                fixed_sizes,
             ),
         }
     }
@@ -2380,6 +2406,7 @@ impl Layout {
         stack_line_thickness: f64,
         stack_line_horiz: crate::common::config::HorizontalPlacement,
         stack_line_vert: crate::common::config::VerticalPlacement,
+        fixed_sizes: &HashMap<WindowId, CGSize>,
     ) {
         use objc2_core_foundation::{CGPoint, CGSize};
         let children: Vec<_> = node.children(map).collect();
@@ -2412,7 +2439,6 @@ impl Layout {
             let sum_children: f32 = children.iter().map(|c| self.info[*c].size).sum();
             (sum_children - self.info[node].total).abs() < 0.01
         });
-        let total = self.info[node].total;
         let inner_gap = if horizontal {
             gaps.inner.horizontal
         } else {
@@ -2429,14 +2455,48 @@ impl Layout {
         } else {
             (axis_len - total_gap).max(0.0)
         };
+        let mut min_lens: Vec<f64> = Vec::with_capacity(children.len());
+        let mut rigid: Vec<bool> = Vec::with_capacity(children.len());
+        let mut flex_weight_sum = 0.0;
+        let mut flex_count = 0usize;
+        for &child in &children {
+            let min_len = self.min_axis_len(map, window, child, horizontal, gaps, fixed_sizes);
+            let is_rigid = !self.subtree_has_flexible_leaf(map, window, child, fixed_sizes);
+            min_lens.push(min_len.max(0.0));
+            rigid.push(is_rigid);
+            if !is_rigid {
+                flex_weight_sum += f64::from(self.info[child].size.max(0.0));
+                flex_count += 1;
+            }
+        }
+
+        let min_total: f64 = min_lens.iter().sum();
+        let scale = if min_total > usable_axis && min_total > 0.0 {
+            usable_axis / min_total
+        } else {
+            1.0
+        };
+        let scaled_total = min_total * scale;
+        let remaining = (usable_axis - scaled_total).max(0.0);
+
         let mut offset = if horizontal {
             rect.origin.x
         } else {
             rect.origin.y
         };
         for (i, &child) in children.iter().enumerate() {
-            let ratio = f64::from(self.info[child].size) / f64::from(total);
-            let seg_len = usable_axis * ratio;
+            let base = min_lens[i] * scale;
+            let seg_len = if rigid[i] {
+                base
+            } else if flex_weight_sum > 0.0 {
+                let weight = f64::from(self.info[child].size.max(0.0));
+                base + remaining * (weight / flex_weight_sum)
+            } else if flex_count > 0 {
+                base + remaining / flex_count as f64
+            } else {
+                base
+            };
+
             let child_rect = if horizontal {
                 CGRect {
                     origin: CGPoint { x: offset, y: rect.origin.y },
@@ -2467,12 +2527,95 @@ impl Layout {
                 stack_line_thickness,
                 stack_line_horiz,
                 stack_line_vert,
+                fixed_sizes,
             );
             offset += seg_len;
             if i < children.len() - 1 {
                 offset += inner_gap;
             }
         }
+    }
+
+    fn min_axis_len(
+        &self,
+        map: &NodeMap,
+        window: &WindowIndex,
+        node: NodeId,
+        horizontal: bool,
+        gaps: &crate::common::config::GapSettings,
+        fixed_sizes: &HashMap<WindowId, CGSize>,
+    ) -> f64 {
+        if let Some(wid) = window.at(node) {
+            return fixed_sizes
+                .get(&wid)
+                .map_or(0.0, |size| if horizontal { size.width } else { size.height });
+        }
+
+        let children: Vec<_> = node.children(map).collect();
+        if children.is_empty() {
+            return 0.0;
+        }
+
+        let kind = self.kind(node);
+        let inner_gap = if horizontal {
+            gaps.inner.horizontal
+        } else {
+            gaps.inner.vertical
+        };
+
+        match kind {
+            LayoutKind::Horizontal => {
+                if horizontal {
+                    let sum: f64 = children
+                        .iter()
+                        .map(|&c| self.min_axis_len(map, window, c, horizontal, gaps, fixed_sizes))
+                        .sum();
+                    sum + (children.len().saturating_sub(1)) as f64 * inner_gap
+                } else {
+                    children
+                        .iter()
+                        .map(|&c| self.min_axis_len(map, window, c, horizontal, gaps, fixed_sizes))
+                        .fold(0.0, f64::max)
+                }
+            }
+            LayoutKind::Vertical => {
+                if horizontal {
+                    children
+                        .iter()
+                        .map(|&c| self.min_axis_len(map, window, c, horizontal, gaps, fixed_sizes))
+                        .fold(0.0, f64::max)
+                } else {
+                    let sum: f64 = children
+                        .iter()
+                        .map(|&c| self.min_axis_len(map, window, c, horizontal, gaps, fixed_sizes))
+                        .sum();
+                    sum + (children.len().saturating_sub(1)) as f64 * inner_gap
+                }
+            }
+            LayoutKind::HorizontalStack | LayoutKind::VerticalStack => children
+                .iter()
+                .map(|&c| self.min_axis_len(map, window, c, horizontal, gaps, fixed_sizes))
+                .fold(0.0, f64::max),
+        }
+    }
+
+    fn subtree_has_flexible_leaf(
+        &self,
+        map: &NodeMap,
+        window: &WindowIndex,
+        node: NodeId,
+        fixed_sizes: &HashMap<WindowId, CGSize>,
+    ) -> bool {
+        if let Some(wid) = window.at(node) {
+            return !fixed_sizes.contains_key(&wid);
+        }
+
+        for child in node.children(map) {
+            if self.subtree_has_flexible_leaf(map, window, child, fixed_sizes) {
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -2535,6 +2678,8 @@ mod tests {
     use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 
     use super::*;
+    use crate::common::collections::HashMap;
+    use crate::common::config::{GapSettings, HorizontalPlacement, VerticalPlacement};
     use crate::layout_engine::{Direction, LayoutKind};
 
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
@@ -2564,6 +2709,37 @@ mod tests {
 
         assert_eq!(system.window_in_direction(layout, Direction::Down), Some(w(1)));
         assert_eq!(system.window_in_direction(layout, Direction::Up), Some(w(2)));
+    }
+
+    #[test]
+    fn fixed_size_window_does_not_expand_split_axis() {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+
+        let gaps = GapSettings::default();
+        let mut fixed = HashMap::default();
+        fixed.insert(w(1), CGSize::new(200.0, 100.0));
+
+        let frames = system.calculate_layout_constrained(
+            layout,
+            crate::layout_engine::systems::LayoutCalcInputs::new(
+                CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0)),
+                0.0,
+                &gaps,
+                0.0,
+                HorizontalPlacement::Top,
+                VerticalPlacement::Left,
+            ),
+            crate::layout_engine::systems::LayoutConstraints::with_fixed_sizes(&fixed),
+        );
+        let w1_frame = frames.iter().find(|(id, _)| *id == w(1)).unwrap().1;
+        let w2_frame = frames.iter().find(|(id, _)| *id == w(2)).unwrap().1;
+        assert!((w1_frame.size.width - 200.0).abs() < 1.0);
+        assert!((w2_frame.size.width - 800.0).abs() < 1.0);
     }
 
     struct TestTraditionalLayoutSystem {

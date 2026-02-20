@@ -460,6 +460,8 @@ fn it_retains_windows_without_server_ids_after_login_visibility_failure() {
         is_standard: true,
         is_root: true,
         is_minimized: false,
+        ax_can_move: true,
+        ax_can_resize: true,
         title: "NoServerId".to_string(),
         frame: CGRect::new(CGPoint::new(50., 50.), CGSize::new(400., 400.)),
         sys_id: None,

@@ -300,9 +300,9 @@ impl AXUIElement {
         self.set_attribute_value(attr.as_ref(), cf_bool.as_ref())
     }
 
-    pub fn can_move(&self) -> Result<bool> { self.bool_attribute("AXPosition") }
+    pub fn can_move(&self) -> Result<bool> { self.is_settable("AXPosition") }
 
-    pub fn can_resize(&self) -> Result<bool> { self.bool_attribute("AXSize") }
+    pub fn can_resize(&self) -> Result<bool> { self.is_settable("AXSize") }
 }
 
 impl Deref for AXUIElement {

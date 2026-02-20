@@ -394,6 +394,10 @@ pub struct WindowInfo {
     pub is_root: bool,
     #[serde(default)]
     pub is_minimized: bool,
+    #[serde(default = "default_true")]
+    pub ax_can_move: bool,
+    #[serde(default = "default_true")]
+    pub ax_can_resize: bool,
     pub title: String,
     #[serde(with = "CGRectDef")]
     pub frame: CGRect,
@@ -404,12 +408,16 @@ pub struct WindowInfo {
     pub ax_subrole: Option<String>,
 }
 
+fn default_true() -> bool { true }
+
 impl WindowInfo {
     pub fn from_ax_element(
         element: &AXUIElement,
         server_info_hint: Option<WindowServerInfo>,
     ) -> Result<(Self, Option<WindowServerInfo>), AxError> {
         let frame = element.frame()?;
+        let ax_can_move = element.can_move().unwrap_or(true);
+        let ax_can_resize = element.can_resize().unwrap_or(true);
         let role = element.role()?;
         let subrole = element.subrole()?;
         let is_standard = role == AX_WINDOW_ROLE && subrole == AX_STANDARD_WINDOW_SUBROLE;
@@ -438,6 +446,8 @@ impl WindowInfo {
             is_standard,
             is_root: true,
             is_minimized,
+            ax_can_move,
+            ax_can_resize,
             title: element.title().unwrap_or_default(),
             frame,
             sys_id: id,
