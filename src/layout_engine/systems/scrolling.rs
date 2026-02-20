@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicBool, AtomicI8, AtomicU64, Ordering};
 
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
 use crate::actor::app::{WindowId, pid_t};
@@ -40,6 +41,8 @@ struct LayoutState {
     last_center_offset_delta_px: AtomicU64,
     #[serde(skip, default = "default_atomic")]
     overscroll_accumulation: AtomicU64,
+    #[serde(skip, default = "default_width_cache")]
+    last_constrained_column_widths: RwLock<Vec<f64>>,
     fullscreen: HashSet<WindowId>,
     fullscreen_within_gaps: HashSet<WindowId>,
 }
@@ -60,6 +63,7 @@ impl LayoutState {
             last_step_px: AtomicU64::new(0.0f64.to_bits()),
             last_center_offset_delta_px: AtomicU64::new(0.0f64.to_bits()),
             overscroll_accumulation: AtomicU64::new(0.0f64.to_bits()),
+            last_constrained_column_widths: RwLock::new(Vec::new()),
             fullscreen: HashSet::default(),
             fullscreen_within_gaps: HashSet::default(),
         }
@@ -264,6 +268,9 @@ impl Clone for LayoutState {
             overscroll_accumulation: AtomicU64::new(
                 self.overscroll_accumulation.load(Ordering::Relaxed),
             ),
+            last_constrained_column_widths: RwLock::new(
+                self.last_constrained_column_widths.read().clone(),
+            ),
             fullscreen: self.fullscreen.clone(),
             fullscreen_within_gaps: self.fullscreen_within_gaps.clone(),
         }
@@ -273,6 +280,7 @@ impl Clone for LayoutState {
 fn default_atomic_bool() -> AtomicBool { AtomicBool::new(false) }
 fn default_atomic_i8() -> AtomicI8 { AtomicI8::new(0) }
 fn default_atomic() -> AtomicU64 { AtomicU64::new(0.0f64.to_bits()) }
+fn default_width_cache() -> RwLock<Vec<f64>> { RwLock::new(Vec::new()) }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ScrollingLayoutSystem {
@@ -352,6 +360,7 @@ impl ScrollingLayoutSystem {
             }
             column_widths.push(width);
         }
+        *state.last_constrained_column_widths.write() = column_widths.clone();
 
         let mut column_starts = Vec::with_capacity(state.columns.len());
         let mut strip_cursor = 0.0;
@@ -554,6 +563,32 @@ impl ScrollingLayoutSystem {
         (widths, starts)
     }
 
+    fn starts_for_widths(widths: &[f64], gap_x: f64) -> Vec<f64> {
+        let mut starts = Vec::with_capacity(widths.len());
+        let mut cursor = 0.0;
+        for width in widths {
+            starts.push(cursor);
+            cursor += *width + gap_x;
+        }
+        starts
+    }
+
+    fn effective_column_widths_and_starts(
+        state: &LayoutState,
+        screen_width: f64,
+        gap_x: f64,
+        min_ratio: f64,
+        max_ratio: f64,
+    ) -> (Vec<f64>, Vec<f64>) {
+        let cached_widths = state.last_constrained_column_widths.read();
+        if cached_widths.len() == state.columns.len() && !cached_widths.is_empty() {
+            let widths = cached_widths.clone();
+            let starts = Self::starts_for_widths(&widths, gap_x);
+            return (widths, starts);
+        }
+        Self::column_widths_and_starts(state, screen_width, gap_x, min_ratio, max_ratio)
+    }
+
     pub fn scroll_by_delta(&mut self, layout: LayoutId, delta: f64) -> Option<Direction> {
         let min_ratio = self.settings.min_column_width_ratio;
         let max_ratio = self.settings.max_column_width_ratio;
@@ -566,8 +601,13 @@ impl ScrollingLayoutSystem {
         if screen_width <= 0.0 {
             return None;
         }
-        let (widths, starts) =
-            Self::column_widths_and_starts(state, screen_width, gap_x, min_ratio, max_ratio);
+        let (widths, starts) = Self::effective_column_widths_and_starts(
+            state,
+            screen_width,
+            gap_x,
+            min_ratio,
+            max_ratio,
+        );
         if starts.is_empty() {
             return None;
         }
@@ -628,8 +668,13 @@ impl ScrollingLayoutSystem {
         if screen_width <= 0.0 {
             return;
         }
-        let (_widths, starts) =
-            Self::column_widths_and_starts(state, screen_width, gap_x, min_ratio, max_ratio);
+        let (_widths, starts) = Self::effective_column_widths_and_starts(
+            state,
+            screen_width,
+            gap_x,
+            min_ratio,
+            max_ratio,
+        );
         if starts.is_empty() {
             return;
         }
@@ -1382,6 +1427,101 @@ mod tests {
         );
         let w1_frame = frames.iter().find(|(id, _)| *id == w1).unwrap().1;
         assert!((w1_frame.size.width - 200.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn scroll_by_delta_uses_constrained_column_widths() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.alignment = crate::common::config::ScrollingAlignment::Left;
+        let mut system = ScrollingLayoutSystem::new(&settings);
+        let layout = system.create_layout();
+        let w1 = wid(1, 1);
+        let w2 = wid(1, 2);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2); // selected column
+
+        let gaps = GapSettings::default();
+        let mut fixed = HashMap::default();
+        fixed.insert(w2, CGSize::new(200.0, 120.0));
+        let frames = system.calculate_layout_constrained(
+            layout,
+            crate::layout_engine::systems::LayoutCalcInputs::new(
+                screen(1000.0, 800.0),
+                0.0,
+                &gaps,
+                0.0,
+                Default::default(),
+                Default::default(),
+            ),
+            crate::layout_engine::systems::LayoutConstraints::with_fixed_sizes(&fixed),
+        );
+        let selected_width = frame_for(&frames, w2).size.width;
+        let expected_step = selected_width + gaps.inner.horizontal;
+        let before = scroll_offset(&system, layout);
+
+        let boundary = system.scroll_by_delta(layout, -0.5);
+        let after = scroll_offset(&system, layout);
+
+        assert_eq!(boundary, None);
+        let expected = before - 0.5 * expected_step;
+        assert!(
+            (after - expected).abs() < 2.0,
+            "expected constrained step {}, got offset {} -> {}",
+            expected_step,
+            before,
+            after
+        );
+    }
+
+    #[test]
+    fn snap_to_nearest_column_uses_constrained_starts() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.alignment = crate::common::config::ScrollingAlignment::Left;
+        let mut system = ScrollingLayoutSystem::new(&settings);
+        let layout = system.create_layout();
+        let w1 = wid(1, 1);
+        let w2 = wid(1, 2);
+        let w3 = wid(1, 3);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+        system.add_window_after_selection(layout, w3);
+
+        let gaps = GapSettings::default();
+        let mut fixed = HashMap::default();
+        fixed.insert(w2, CGSize::new(150.0, 120.0));
+        let frames = system.calculate_layout_constrained(
+            layout,
+            crate::layout_engine::systems::LayoutCalcInputs::new(
+                screen(1000.0, 800.0),
+                0.0,
+                &gaps,
+                0.0,
+                Default::default(),
+                Default::default(),
+            ),
+            crate::layout_engine::systems::LayoutConstraints::with_fixed_sizes(&fixed),
+        );
+        let w1_width = frame_for(&frames, w1).size.width;
+        let w2_width = frame_for(&frames, w2).size.width;
+        let second_start = w1_width + gaps.inner.horizontal;
+        let third_start = second_start + w2_width + gaps.inner.horizontal;
+        let near_third = third_start - (w2_width + gaps.inner.horizontal) * 0.25;
+        system
+            .layouts
+            .get(layout)
+            .expect("layout state missing")
+            .scroll_offset_px
+            .store(near_third.to_bits(), Ordering::Relaxed);
+
+        system.snap_to_nearest_column(layout);
+        let snapped = scroll_offset(&system, layout);
+
+        assert!(
+            (snapped - third_start).abs() < 2.0,
+            "expected snap to constrained third start {}, got {}",
+            third_start,
+            snapped
+        );
     }
 
     fn frame_for(frames: &[(WindowId, CGRect)], wid: WindowId) -> CGRect {
