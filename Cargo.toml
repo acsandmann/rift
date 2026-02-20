@@ -27,6 +27,14 @@ incremental = false
 lto = "thin"
 strip = true
 
+[profile.release-fast]
+inherits = "release"
+opt-level = 2
+codegen-units = 16
+incremental = true
+lto = "off"
+strip = false
+
 [lib]
 doctest = false
 
