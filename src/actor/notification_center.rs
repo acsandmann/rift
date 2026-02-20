@@ -27,7 +27,7 @@ const REFRESH_DEFAULT_DELAY_NS: i64 = 150_000_000;
 const REFRESH_RETRY_DELAY_NS: i64 = 150_000_000;
 const REFRESH_MAX_RETRIES: u8 = 10;
 
-const DISPLAY_CHURN_QUIET_NS: i64 = 300_000_000;
+const DISPLAY_CHURN_QUIET_NS: i64 = 3_000_000_000;
 const DISPLAY_STABILIZE_RETRY_NS: i64 = 200_000_000;
 const DISPLAY_STABILIZE_MAX_ATTEMPTS: u8 = 25;
 const DISPLAY_STABLE_REQUIRED_HITS: u8 = 2;
@@ -93,8 +93,11 @@ define_class! {
             {
                 let mut cache = self.ivars().screen_cache.borrow_mut();
                 cache.mark_sleeping(false);
-                cache.mark_dirty();
             }
+            // After sleep/wake, macOS can change display modes/desktop shape without emitting
+            // an ActiveDisplay/ActiveSpace notification. Ensure we always refresh screen
+            // parameters so the reactor/layout engine sees updated bounds.
+            self.schedule_screen_refresh();
             self.send_event(WmEvent::SystemWoke);
         }
 
