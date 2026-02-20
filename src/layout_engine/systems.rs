@@ -1,11 +1,62 @@
+use std::sync::OnceLock;
+
 use enum_dispatch::enum_dispatch;
-use objc2_core_foundation::CGRect;
+use objc2_core_foundation::{CGRect, CGSize};
 use serde::{Deserialize, Serialize};
 
 use crate::actor::app::{WindowId, pid_t};
+use crate::common::collections::HashMap;
 use crate::layout_engine::{Direction, LayoutKind};
 
 slotmap::new_key_type! { pub struct LayoutId; }
+
+#[derive(Clone, Copy)]
+pub(crate) struct LayoutCalcInputs<'a> {
+    pub(crate) screen: CGRect,
+    pub(crate) stack_offset: f64,
+    pub(crate) gaps: &'a crate::common::config::GapSettings,
+    pub(crate) stack_line_thickness: f64,
+    pub(crate) stack_line_horiz: crate::common::config::HorizontalPlacement,
+    pub(crate) stack_line_vert: crate::common::config::VerticalPlacement,
+}
+
+impl<'a> LayoutCalcInputs<'a> {
+    pub(crate) fn new(
+        screen: CGRect,
+        stack_offset: f64,
+        gaps: &'a crate::common::config::GapSettings,
+        stack_line_thickness: f64,
+        stack_line_horiz: crate::common::config::HorizontalPlacement,
+        stack_line_vert: crate::common::config::VerticalPlacement,
+    ) -> Self {
+        Self {
+            screen,
+            stack_offset,
+            gaps,
+            stack_line_thickness,
+            stack_line_horiz,
+            stack_line_vert,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct LayoutConstraints<'a> {
+    pub(crate) fixed_sizes: &'a HashMap<WindowId, CGSize>,
+}
+
+impl<'a> LayoutConstraints<'a> {
+    pub(crate) fn with_fixed_sizes(fixed_sizes: &'a HashMap<WindowId, CGSize>) -> Self {
+        Self { fixed_sizes }
+    }
+}
+
+impl LayoutConstraints<'static> {
+    pub(crate) fn unconstrained() -> Self {
+        static EMPTY_FIXED_SIZES: OnceLock<HashMap<WindowId, CGSize>> = OnceLock::new();
+        Self::with_fixed_sizes(EMPTY_FIXED_SIZES.get_or_init(HashMap::default))
+    }
+}
 
 #[enum_dispatch]
 pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
@@ -104,4 +155,28 @@ pub enum LayoutSystemKind {
     Bsp(BspLayoutSystem),
     MasterStack(MasterStackLayoutSystem),
     Scrolling(ScrollingLayoutSystem),
+}
+
+impl LayoutSystemKind {
+    pub(crate) fn calculate_layout_constrained(
+        &self,
+        layout: LayoutId,
+        inputs: LayoutCalcInputs<'_>,
+        constraints: LayoutConstraints<'_>,
+    ) -> Vec<(WindowId, CGRect)> {
+        match self {
+            LayoutSystemKind::Traditional(system) => {
+                system.calculate_layout_constrained(layout, inputs, constraints)
+            }
+            LayoutSystemKind::Bsp(system) => {
+                system.calculate_layout_constrained(layout, inputs, constraints)
+            }
+            LayoutSystemKind::MasterStack(system) => {
+                system.calculate_layout_constrained(layout, inputs, constraints)
+            }
+            LayoutSystemKind::Scrolling(system) => {
+                system.calculate_layout_constrained(layout, inputs, constraints)
+            }
+        }
+    }
 }

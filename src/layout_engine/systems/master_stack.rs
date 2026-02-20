@@ -23,6 +23,41 @@ impl Default for MasterStackLayoutSystem {
 }
 
 impl MasterStackLayoutSystem {
+    pub(crate) fn calculate_layout_constrained(
+        &self,
+        layout: LayoutId,
+        inputs: crate::layout_engine::systems::LayoutCalcInputs<'_>,
+        constraints: crate::layout_engine::systems::LayoutConstraints<'_>,
+    ) -> Vec<(WindowId, CGRect)> {
+        let screen = inputs.screen;
+        let gaps = inputs.gaps;
+
+        let root = self.inner.root(layout);
+        let children: Vec<_> = root.children(self.inner.map()).collect();
+        if children.len() == 2 && children.iter().all(|&c| self.inner.window_at(c).is_none()) {
+            let (master, stack) = if self.master_first() {
+                (children[0], children[1])
+            } else {
+                (children[1], children[0])
+            };
+            if self.inner.visible_windows_in_subtree(stack).is_empty() {
+                let rect = compute_tiling_area(screen, gaps);
+                return self.inner.calculate_layout_for_node_constrained(
+                    master,
+                    screen,
+                    rect,
+                    inputs.stack_offset,
+                    gaps,
+                    inputs.stack_line_thickness,
+                    inputs.stack_line_horiz,
+                    inputs.stack_line_vert,
+                    constraints.fixed_sizes,
+                );
+            }
+        }
+        self.inner.calculate_layout_constrained(layout, inputs, constraints)
+    }
+
     pub fn new(settings: MasterStackSettings) -> Self {
         Self {
             inner: TraditionalLayoutSystem::default(),
@@ -477,36 +512,17 @@ impl LayoutSystem for MasterStackLayoutSystem {
         stack_line_horiz: crate::common::config::HorizontalPlacement,
         stack_line_vert: crate::common::config::VerticalPlacement,
     ) -> Vec<(WindowId, CGRect)> {
-        let root = self.inner.root(layout);
-        let children: Vec<_> = root.children(self.inner.map()).collect();
-        if children.len() == 2 && children.iter().all(|&c| self.inner.window_at(c).is_none()) {
-            let (master, stack) = if self.master_first() {
-                (children[0], children[1])
-            } else {
-                (children[1], children[0])
-            };
-            if self.inner.visible_windows_in_subtree(stack).is_empty() {
-                let rect = compute_tiling_area(screen, gaps);
-                return self.inner.calculate_layout_for_node(
-                    master,
-                    screen,
-                    rect,
-                    stack_offset,
-                    gaps,
-                    stack_line_thickness,
-                    stack_line_horiz,
-                    stack_line_vert,
-                );
-            }
-        }
-        self.inner.calculate_layout(
+        self.calculate_layout_constrained(
             layout,
-            screen,
-            stack_offset,
-            gaps,
-            stack_line_thickness,
-            stack_line_horiz,
-            stack_line_vert,
+            crate::layout_engine::systems::LayoutCalcInputs::new(
+                screen,
+                stack_offset,
+                gaps,
+                stack_line_thickness,
+                stack_line_horiz,
+                stack_line_vert,
+            ),
+            crate::layout_engine::systems::LayoutConstraints::unconstrained(),
         )
     }
 

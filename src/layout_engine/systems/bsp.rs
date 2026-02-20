@@ -187,6 +187,27 @@ impl Default for BspLayoutSystem {
 }
 
 impl BspLayoutSystem {
+    pub(crate) fn calculate_layout_constrained(
+        &self,
+        layout: LayoutId,
+        inputs: crate::layout_engine::systems::LayoutCalcInputs<'_>,
+        constraints: crate::layout_engine::systems::LayoutConstraints<'_>,
+    ) -> Vec<(WindowId, CGRect)> {
+        let mut out = Vec::new();
+        if let Some(state) = self.layouts.get(layout).copied() {
+            let rect = Self::apply_outer_gaps(inputs.screen, inputs.gaps);
+            self.calculate_layout_recursive(
+                state.root,
+                rect,
+                inputs.screen,
+                inputs.gaps,
+                constraints.fixed_sizes,
+                &mut out,
+            );
+        }
+        out
+    }
+
     fn index_window(&mut self, wid: WindowId, node: NodeId) {
         debug_assert!(
             matches!(self.kind.get(node), Some(NodeKind::Leaf { .. })),
@@ -451,6 +472,7 @@ impl BspLayoutSystem {
         rect: CGRect,
         screen: CGRect,
         gaps: &crate::common::config::GapSettings,
+        fixed_sizes: &HashMap<WindowId, CGSize>,
         out: &mut Vec<(WindowId, CGRect)>,
     ) {
         match self.kind.get(node) {
@@ -476,44 +498,131 @@ impl BspLayoutSystem {
                     let gap = gaps.inner.horizontal as f64;
                     let total = rect.size.width;
                     let available = (total - gap).max(0.0);
-                    let first_w_f = available * (*ratio as f64);
-                    let first_w = first_w_f.max(0.0);
-                    let second_w = (available - first_w).max(0.0);
+                    let mut it = node.children(&self.tree.map);
+                    let Some(first) = it.next() else { return };
+                    let Some(second) = it.next() else { return };
+
+                    let req_first = self.subtree_constraints(first, gaps, fixed_sizes);
+                    let req_second = self.subtree_constraints(second, gaps, fixed_sizes);
+
+                    let mut min_first = req_first.min_width;
+                    let mut min_second = req_second.min_width;
+                    let min_total = min_first + min_second;
+                    let scale = if min_total > available && min_total > 0.0 {
+                        available / min_total
+                    } else {
+                        1.0
+                    };
+                    min_first *= scale;
+                    min_second *= scale;
+                    let leftover = (available - (min_first + min_second)).max(0.0);
+
+                    let (first_w, second_w) = match (req_first.flex, req_second.flex) {
+                        (false, true) => (min_first, (available - min_first).max(0.0)),
+                        (true, false) => ((available - min_second).max(0.0), min_second),
+                        (true, true) => {
+                            let r = (*ratio as f64).clamp(0.0, 1.0);
+                            let fw = min_first + leftover * r;
+                            (fw.max(0.0), (available - fw).max(0.0))
+                        }
+                        (false, false) => (min_first.max(0.0), min_second.max(0.0)),
+                    };
                     let r1 = CGRect::new(rect.origin, CGSize::new(first_w, rect.size.height));
                     let r2 = CGRect::new(
                         CGPoint::new(rect.origin.x + first_w + gap, rect.origin.y),
                         CGSize::new(second_w, rect.size.height),
                     );
-                    let mut it = node.children(&self.tree.map);
-                    if let Some(first) = it.next() {
-                        self.calculate_layout_recursive(first, r1, screen, gaps, out);
-                    }
-                    if let Some(second) = it.next() {
-                        self.calculate_layout_recursive(second, r2, screen, gaps, out);
-                    }
+                    self.calculate_layout_recursive(first, r1, screen, gaps, fixed_sizes, out);
+                    self.calculate_layout_recursive(second, r2, screen, gaps, fixed_sizes, out);
                 }
                 Orientation::Vertical => {
                     let gap = gaps.inner.vertical as f64;
                     let total = rect.size.height;
                     let available = (total - gap).max(0.0);
-                    let first_h_f = available * (*ratio as f64);
-                    let first_h = first_h_f.max(0.0);
-                    let second_h = (available - first_h).max(0.0);
+                    let mut it = node.children(&self.tree.map);
+                    let Some(first) = it.next() else { return };
+                    let Some(second) = it.next() else { return };
+
+                    let req_first = self.subtree_constraints(first, gaps, fixed_sizes);
+                    let req_second = self.subtree_constraints(second, gaps, fixed_sizes);
+
+                    let mut min_first = req_first.min_height;
+                    let mut min_second = req_second.min_height;
+                    let min_total = min_first + min_second;
+                    let scale = if min_total > available && min_total > 0.0 {
+                        available / min_total
+                    } else {
+                        1.0
+                    };
+                    min_first *= scale;
+                    min_second *= scale;
+                    let leftover = (available - (min_first + min_second)).max(0.0);
+
+                    let (first_h, second_h) = match (req_first.flex, req_second.flex) {
+                        (false, true) => (min_first, (available - min_first).max(0.0)),
+                        (true, false) => ((available - min_second).max(0.0), min_second),
+                        (true, true) => {
+                            let r = (*ratio as f64).clamp(0.0, 1.0);
+                            let fh = min_first + leftover * r;
+                            (fh.max(0.0), (available - fh).max(0.0))
+                        }
+                        (false, false) => (min_first.max(0.0), min_second.max(0.0)),
+                    };
                     let r1 = CGRect::new(rect.origin, CGSize::new(rect.size.width, first_h));
                     let r2 = CGRect::new(
                         CGPoint::new(rect.origin.x, rect.origin.y + first_h + gap),
                         CGSize::new(rect.size.width, second_h),
                     );
-                    let mut it = node.children(&self.tree.map);
-                    if let Some(first) = it.next() {
-                        self.calculate_layout_recursive(first, r1, screen, gaps, out);
-                    }
-                    if let Some(second) = it.next() {
-                        self.calculate_layout_recursive(second, r2, screen, gaps, out);
-                    }
+                    self.calculate_layout_recursive(first, r1, screen, gaps, fixed_sizes, out);
+                    self.calculate_layout_recursive(second, r2, screen, gaps, fixed_sizes, out);
                 }
             },
             None => {}
+        }
+    }
+
+    fn subtree_constraints(
+        &self,
+        node: NodeId,
+        gaps: &crate::common::config::GapSettings,
+        fixed_sizes: &HashMap<WindowId, CGSize>,
+    ) -> SubtreeConstraints {
+        match self.kind.get(node) {
+            Some(NodeKind::Leaf { window, .. }) => match window {
+                Some(wid) => fixed_sizes.get(wid).map_or(SubtreeConstraints::flex(), |size| {
+                    SubtreeConstraints {
+                        min_width: size.width.max(0.0),
+                        min_height: size.height.max(0.0),
+                        flex: false,
+                    }
+                }),
+                None => SubtreeConstraints::flex(),
+            },
+            Some(NodeKind::Split { orientation, .. }) => {
+                let mut it = node.children(&self.tree.map);
+                let Some(first) = it.next() else {
+                    return SubtreeConstraints::flex();
+                };
+                let Some(second) = it.next() else {
+                    return SubtreeConstraints::flex();
+                };
+                let a = self.subtree_constraints(first, gaps, fixed_sizes);
+                let b = self.subtree_constraints(second, gaps, fixed_sizes);
+                let flex = a.flex || b.flex;
+                match orientation {
+                    Orientation::Horizontal => SubtreeConstraints {
+                        min_width: a.min_width + b.min_width + gaps.inner.horizontal.max(0.0),
+                        min_height: a.min_height.max(b.min_height),
+                        flex,
+                    },
+                    Orientation::Vertical => SubtreeConstraints {
+                        min_width: a.min_width.max(b.min_width),
+                        min_height: a.min_height + b.min_height + gaps.inner.vertical.max(0.0),
+                        flex,
+                    },
+                }
+            }
+            None => SubtreeConstraints::flex(),
         }
     }
 
@@ -526,6 +635,23 @@ impl BspLayoutSystem {
         match self.kind.get(sel) {
             Some(NodeKind::Leaf { window, .. }) => *window,
             _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SubtreeConstraints {
+    min_width: f64,
+    min_height: f64,
+    flex: bool,
+}
+
+impl SubtreeConstraints {
+    fn flex() -> Self {
+        Self {
+            min_width: 0.0,
+            min_height: 0.0,
+            flex: true,
         }
     }
 }
@@ -563,7 +689,11 @@ impl Components {
 
 #[cfg(test)]
 mod tests {
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+
     use super::*;
+    use crate::common::collections::HashMap;
+    use crate::common::config::{GapSettings, HorizontalPlacement, VerticalPlacement};
 
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
 
@@ -588,6 +718,33 @@ mod tests {
 
         assert_eq!(system.window_in_direction(layout, Direction::Down), Some(w(1)));
         assert_eq!(system.window_in_direction(layout, Direction::Up), Some(w(2)));
+    }
+
+    #[test]
+    fn fixed_size_window_does_not_expand_split_axis() {
+        let mut system = BspLayoutSystem::default();
+        let layout = system.create_layout();
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+
+        let gaps = GapSettings::default();
+        let mut fixed = HashMap::default();
+        fixed.insert(w(1), CGSize::new(200.0, 100.0));
+
+        let frames = system.calculate_layout_constrained(
+            layout,
+            crate::layout_engine::systems::LayoutCalcInputs::new(
+                CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0)),
+                0.0,
+                &gaps,
+                0.0,
+                HorizontalPlacement::Top,
+                VerticalPlacement::Left,
+            ),
+            crate::layout_engine::systems::LayoutConstraints::with_fixed_sizes(&fixed),
+        );
+        let w1_frame = frames.iter().find(|(id, _)| *id == w(1)).unwrap().1;
+        assert!((w1_frame.size.width - 200.0).abs() < 1.0);
     }
 
     #[test]
@@ -702,18 +859,24 @@ impl LayoutSystem for BspLayoutSystem {
         &self,
         layout: LayoutId,
         screen: CGRect,
-        _stack_offset: f64,
+        stack_offset: f64,
         gaps: &crate::common::config::GapSettings,
-        _stack_line_thickness: f64,
-        _stack_line_horiz: crate::common::config::HorizontalPlacement,
-        _stack_line_vert: crate::common::config::VerticalPlacement,
+        stack_line_thickness: f64,
+        stack_line_horiz: crate::common::config::HorizontalPlacement,
+        stack_line_vert: crate::common::config::VerticalPlacement,
     ) -> Vec<(WindowId, CGRect)> {
-        let mut out = Vec::new();
-        if let Some(state) = self.layouts.get(layout).copied() {
-            let rect = Self::apply_outer_gaps(screen, gaps);
-            self.calculate_layout_recursive(state.root, rect, screen, gaps, &mut out);
-        }
-        out
+        self.calculate_layout_constrained(
+            layout,
+            crate::layout_engine::systems::LayoutCalcInputs::new(
+                screen,
+                stack_offset,
+                gaps,
+                stack_line_thickness,
+                stack_line_horiz,
+                stack_line_vert,
+            ),
+            crate::layout_engine::systems::LayoutConstraints::unconstrained(),
+        )
     }
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {

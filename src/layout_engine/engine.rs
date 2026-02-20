@@ -1586,7 +1586,7 @@ impl LayoutEngine {
         )
     }
 
-    pub fn calculate_layout_with_virtual_workspaces<F>(
+    pub fn calculate_layout_with_virtual_workspaces<F, G>(
         &mut self,
         space: SpaceId,
         screen: CGRect,
@@ -1595,9 +1595,11 @@ impl LayoutEngine {
         stack_line_horiz: crate::common::config::HorizontalPlacement,
         stack_line_vert: crate::common::config::VerticalPlacement,
         get_window_frame: F,
+        get_window_fixed_size: G,
     ) -> Vec<(WindowId, CGRect)>
     where
         F: Fn(WindowId) -> Option<CGRect>,
+        G: Fn(WindowId) -> Option<CGSize>,
     {
         use crate::model::HideCorner;
 
@@ -1655,15 +1657,32 @@ impl LayoutEngine {
 
         if let Some(active_workspace_id) = self.virtual_workspace_manager.active_workspace(space) {
             if let Some(layout) = self.workspace_layouts.active(space, active_workspace_id) {
-                let tiled_positions = self.workspace_tree(active_workspace_id).calculate_layout(
-                    layout,
-                    screen,
-                    self.layout_settings.stack.stack_offset,
-                    gaps,
-                    stack_line_thickness,
-                    stack_line_horiz,
-                    stack_line_vert,
-                );
+                let mut fixed_sizes = HashMap::default();
+                for wid in self.windows_in_active_workspace(space) {
+                    if self.floating.is_floating(wid) {
+                        continue;
+                    }
+                    if let Some(size) = get_window_fixed_size(wid) {
+                        fixed_sizes.insert(wid, size);
+                    }
+                }
+
+                let stack_offset = self.layout_settings.stack.stack_offset;
+                let tiled_positions =
+                    self.workspace_tree(active_workspace_id).calculate_layout_constrained(
+                        layout,
+                        crate::layout_engine::systems::LayoutCalcInputs::new(
+                            screen,
+                            stack_offset,
+                            gaps,
+                            stack_line_thickness,
+                            stack_line_horiz,
+                            stack_line_vert,
+                        ),
+                        crate::layout_engine::systems::LayoutConstraints::with_fixed_sizes(
+                            &fixed_sizes,
+                        ),
+                    );
                 for (wid, rect) in tiled_positions {
                     positions.insert(wid, rect);
                 }

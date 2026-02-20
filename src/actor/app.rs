@@ -260,6 +260,8 @@ struct AppWindowState {
     hidden_by_app: bool,
     window_server_id: Option<WindowServerId>,
     is_animating: bool,
+    ax_can_move: bool,
+    ax_can_resize: bool,
 }
 
 const APP_NOTIFICATIONS: &[&str] = &[
@@ -302,6 +304,77 @@ impl State {
             None
         } else {
             Some(txid)
+        }
+    }
+
+    fn move_position_for_frame(
+        elem: &AXUIElement,
+        desired: CGRect,
+        ax_can_move: bool,
+        ax_can_resize: bool,
+    ) -> CGPoint {
+        if ax_can_move && !ax_can_resize {
+            // If a window can't be resized, treat `desired` as a container and center the
+            // current frame within it (best-effort). This avoids "stuck in corner" holes when
+            // layouts try to tile a fixed-size window.
+            elem.frame()
+                .ok()
+                .map(|current| {
+                    let dx = ((desired.size.width - current.size.width) / 2.0).max(0.0);
+                    let dy = ((desired.size.height - current.size.height) / 2.0).max(0.0);
+                    CGPoint::new(desired.origin.x + dx, desired.origin.y + dy)
+                })
+                .unwrap_or(desired.origin)
+        } else {
+            desired.origin
+        }
+    }
+
+    fn apply_frame_to_element(
+        elem: &AXUIElement,
+        desired: CGRect,
+        ax_can_move: bool,
+        ax_can_resize: bool,
+    ) {
+        let move_pos = Self::move_position_for_frame(elem, desired, ax_can_move, ax_can_resize);
+        if ax_can_resize {
+            let _ = elem.set_size(desired.size);
+        }
+        if ax_can_move {
+            let _ = elem.set_position(move_pos);
+        }
+        if ax_can_resize {
+            let _ = elem.set_size(desired.size);
+        }
+    }
+
+    fn set_position_with_optional_eui(
+        &self,
+        elem: &AXUIElement,
+        position: CGPoint,
+        disable_eui: bool,
+    ) {
+        if disable_eui {
+            let _ = with_enhanced_ui_disabled(&self.app, || elem.set_position(position));
+        } else {
+            let _ = elem.set_position(position);
+        }
+    }
+
+    fn apply_frame_with_optional_eui(
+        &self,
+        elem: &AXUIElement,
+        desired: CGRect,
+        ax_can_move: bool,
+        ax_can_resize: bool,
+        disable_eui: bool,
+    ) {
+        if disable_eui {
+            with_enhanced_ui_disabled(&self.app, || {
+                Self::apply_frame_to_element(elem, desired, ax_can_move, ax_can_resize);
+            });
+        } else {
+            Self::apply_frame_to_element(elem, desired, ax_can_move, ax_can_resize);
         }
     }
 
@@ -517,10 +590,10 @@ impl State {
                 });
             }
             &mut Request::SetWindowPos(wid, pos, txid, eui) => {
-                let (elem, is_animating) = match self.window_mut(wid) {
+                let (elem, is_animating, ax_can_move) = match self.window_mut(wid) {
                     Ok(window) => {
                         window.last_seen_txid = txid;
-                        (window.elem.clone(), window.is_animating)
+                        (window.elem.clone(), window.is_animating, window.ax_can_move)
                     }
                     Err(err) => match err {
                         AxError::Ax(code) => {
@@ -535,11 +608,9 @@ impl State {
                     },
                 };
 
-                if eui && !is_animating {
-                    let _ = with_enhanced_ui_disabled(&self.app, || elem.set_position(pos));
-                } else {
-                    let _ = elem.set_position(pos);
-                };
+                if ax_can_move {
+                    self.set_position_with_optional_eui(&elem, pos, eui && !is_animating);
+                }
 
                 let frame =
                     match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
@@ -556,10 +627,15 @@ impl State {
                 ));
             }
             &mut Request::SetWindowFrame(wid, desired, txid, eui) => {
-                let (elem, is_animating) = match self.window_mut(wid) {
+                let (elem, is_animating, ax_can_move, ax_can_resize) = match self.window_mut(wid) {
                     Ok(window) => {
                         window.last_seen_txid = txid;
-                        (window.elem.clone(), window.is_animating)
+                        (
+                            window.elem.clone(),
+                            window.is_animating,
+                            window.ax_can_move,
+                            window.ax_can_resize,
+                        )
                     }
                     Err(err) => match err {
                         AxError::Ax(code) => {
@@ -572,17 +648,13 @@ impl State {
                     },
                 };
 
-                if eui && !is_animating {
-                    with_enhanced_ui_disabled(&self.app, || {
-                        let _ = elem.set_size(desired.size);
-                        let _ = elem.set_position(desired.origin);
-                        let _ = elem.set_size(desired.size);
-                    });
-                } else {
-                    let _ = elem.set_size(desired.size);
-                    let _ = elem.set_position(desired.origin);
-                    let _ = elem.set_size(desired.size);
-                }
+                self.apply_frame_with_optional_eui(
+                    &elem,
+                    desired,
+                    ax_can_move,
+                    ax_can_resize,
+                    eui && !is_animating,
+                );
 
                 let frame =
                     match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
@@ -602,10 +674,10 @@ impl State {
                 let app = self.app.clone();
                 let result = with_enhanced_ui_disabled(&app, || -> Result<(), AxError> {
                     for (wid, desired) in frames.iter() {
-                        let elem = match self.window_mut(*wid) {
+                        let (elem, ax_can_move, ax_can_resize) = match self.window_mut(*wid) {
                             Ok(window) => {
                                 window.last_seen_txid = txid;
-                                window.elem.clone()
+                                (window.elem.clone(), window.ax_can_move, window.ax_can_resize)
                             }
                             Err(err) => match err {
                                 AxError::Ax(code) => {
@@ -617,10 +689,7 @@ impl State {
                                 AxError::NotFound => continue,
                             },
                         };
-
-                        let _ = elem.set_size(desired.size);
-                        let _ = elem.set_position(desired.origin);
-                        let _ = elem.set_size(desired.size);
+                        Self::apply_frame_to_element(&elem, *desired, ax_can_move, ax_can_resize);
 
                         let frame = match self.handle_ax_result(*wid, elem.frame())? {
                             Some(frame) => frame,
@@ -1182,6 +1251,8 @@ impl State {
             hidden_by_app,
             window_server_id,
             is_animating: false,
+            ax_can_move: info.ax_can_move,
+            ax_can_resize: info.ax_can_resize,
         });
         debug_assert!(old.is_none(), "Duplicate window id {wid:?}");
         if hidden_by_app {
