@@ -5,6 +5,7 @@ use std::thread;
 
 use crossbeam_channel::{Sender, TrySendError, bounded};
 use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
 use parking_lot::{Mutex, RwLock};
 use serde_json::Value;
 use tracing::{debug, error, info, warn};
@@ -64,23 +65,26 @@ impl ServerState {
 
     pub fn subscribe_client(&self, client_port: ClientPort, event: String) {
         info!("Client {} subscribing to event: {}", client_port, event);
-        let was_known_client = self.subscriptions_by_client.contains_key(&client_port);
         let mut added = false;
-        self.subscriptions_by_client
-            .entry(client_port)
-            .and_modify(|subs| {
+        let mut should_retain_send_right = false;
+
+        match self.subscriptions_by_client.entry(client_port) {
+            Entry::Occupied(mut entry) => {
+                let subs = entry.get_mut();
                 if !subs.contains(&event) {
                     subs.push(event.clone());
                     added = true;
                 }
-            })
-            .or_insert_with(|| {
+            }
+            Entry::Vacant(entry) => {
                 added = true;
-                vec![event.clone()]
-            });
+                should_retain_send_right = true;
+                entry.insert(vec![event.clone()]);
+            }
+        }
 
         if added {
-            if !was_known_client {
+            if should_retain_send_right {
                 let _ = unsafe { mach_retain_send_right(client_port) };
             }
             self.subscriptions_by_event
@@ -101,8 +105,9 @@ impl ServerState {
         let mut removed_client_entry = false;
 
         if let Some(mut entry) = self.subscriptions_by_client.get_mut(&client_port) {
+            let old_len = entry.len();
             entry.retain(|e| e != &event);
-            removed = true;
+            removed = entry.len() != old_len;
             if entry.is_empty() {
                 drop(entry);
                 self.subscriptions_by_client.remove(&client_port);
@@ -254,7 +259,7 @@ impl ServerState {
         unsafe {
             let result = mach_try_send_message(
                 client_port,
-                c_message.as_ptr() as *mut c_char,
+                c_message.as_ptr() as *const c_char,
                 bytes.len() as u32,
             );
             if !result {
