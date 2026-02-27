@@ -311,11 +311,10 @@ impl ScrollingLayoutSystem {
                 self.settings.max_column_width_ratio,
             )
             .max(0.05)
-            .min(1.0)
     }
 
     fn clamp_ratio_with_bounds(ratio: f64, min_ratio: f64, max_ratio: f64) -> f64 {
-        ratio.clamp(min_ratio, max_ratio).max(0.05).min(1.0)
+        ratio.clamp(min_ratio, max_ratio).max(0.05)
     }
 
     fn column_widths_and_starts(
@@ -979,7 +978,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
             return;
         }
         let ratio = new_frame.size.width / tiling.size.width;
-        let clamped = ratio.clamp(min_ratio, max_ratio).max(0.05).min(0.98);
+        let clamped = ratio.clamp(min_ratio, max_ratio).max(0.05);
 
         let base_ratio = state.column_width_ratio;
         if let Some((col_idx, _)) = state.selected_location() {
@@ -1228,13 +1227,13 @@ impl LayoutSystem for ScrollingLayoutSystem {
 
         let Some((col_idx, _)) = state.selected_location() else {
             let ratio = base_ratio + amount;
-            state.column_width_ratio = ratio.clamp(min_ratio, max_ratio).max(0.05).min(0.98);
+            state.column_width_ratio = ratio.clamp(min_ratio, max_ratio).max(0.05);
             return;
         };
 
         let current = base_ratio + state.columns[col_idx].width_offset;
         let next = current + amount;
-        let clamped = next.clamp(min_ratio, max_ratio).max(0.05).min(0.98);
+        let clamped = next.clamp(min_ratio, max_ratio).max(0.05);
         state.columns[col_idx].width_offset = clamped - base_ratio;
         if niri_navigation {
             state.reveal_selected_without_direction();
