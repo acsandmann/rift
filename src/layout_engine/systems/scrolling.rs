@@ -311,11 +311,11 @@ impl ScrollingLayoutSystem {
                 self.settings.max_column_width_ratio,
             )
             .max(0.05)
-            .min(0.98)
+            .min(1.0)
     }
 
     fn clamp_ratio_with_bounds(ratio: f64, min_ratio: f64, max_ratio: f64) -> f64 {
-        ratio.clamp(min_ratio, max_ratio).max(0.05).min(0.98)
+        ratio.clamp(min_ratio, max_ratio).max(0.05).min(1.0)
     }
 
     fn column_widths_and_starts(
