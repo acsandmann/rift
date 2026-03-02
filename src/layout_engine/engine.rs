@@ -1740,6 +1740,7 @@ impl LayoutEngine {
         use crate::model::HideCorner;
 
         let mut positions = HashMap::default();
+        let mut active_tiled_windows = HashSet::default();
         let window_size = |wid| {
             get_window_frame(wid)
                 .map(|f| f.size)
@@ -1815,6 +1816,7 @@ impl LayoutEngine {
                 );
 
                 for (wid, rect) in tiled_positions {
+                    active_tiled_windows.insert(wid);
                     positions.insert(wid, rect);
                 }
             }
@@ -1897,6 +1899,9 @@ impl LayoutEngine {
 
         for (wid, rect) in positions.iter_mut() {
             if !self.is_window_resize_locked(*wid) {
+                continue;
+            }
+            if active_tiled_windows.contains(wid) {
                 continue;
             }
 
@@ -2834,5 +2839,77 @@ mod tests {
             engine.virtual_workspace_manager().workspace_for_window(target, window_id),
             Some(target_workspace)
         );
+    }
+
+    #[test]
+    fn locked_tiled_windows_stay_within_screen_bounds() {
+        let mut engine = test_engine();
+        let space = SpaceId::new(90);
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1200.0, 800.0));
+        let pid: pid_t = 4242;
+
+        let locked = WindowId::new(pid, 100);
+        let other_a = WindowId::new(pid, 101);
+        let other_b = WindowId::new(pid, 102);
+
+        let _ = engine.handle_event(LayoutEvent::SpaceExposed(space, screen.size));
+        let _ = engine.handle_event(LayoutEvent::WindowsOnScreenUpdated(
+            space,
+            pid,
+            vec![
+                (
+                    locked,
+                    None,
+                    None,
+                    None,
+                    false,
+                    // Intentionally impossible size for this screen; layout should still keep
+                    // tiled results bounded instead of force-applying this at the end.
+                    CGSize::new(1600.0, 900.0),
+                ),
+                (
+                    other_a,
+                    None,
+                    None,
+                    None,
+                    true,
+                    CGSize::new(600.0, 600.0),
+                ),
+                (
+                    other_b,
+                    None,
+                    None,
+                    None,
+                    true,
+                    CGSize::new(600.0, 600.0),
+                ),
+            ],
+            None,
+        ));
+
+        let gaps = engine.layout_settings.gaps.effective_for_display(None);
+        let positions = engine.calculate_layout_with_virtual_workspaces(
+            space,
+            screen,
+            &gaps,
+            0.0,
+            Default::default(),
+            Default::default(),
+            |_| None,
+            &[screen],
+        );
+        let frames: HashMap<WindowId, CGRect> = positions.into_iter().collect();
+        let locked_frame = frames
+            .get(&locked)
+            .copied()
+            .expect("locked tiled window should have a calculated frame");
+
+        let epsilon = 0.5;
+        let max_x = screen.origin.x + screen.size.width + epsilon;
+        let max_y = screen.origin.y + screen.size.height + epsilon;
+        assert!(locked_frame.origin.x >= screen.origin.x - epsilon);
+        assert!(locked_frame.origin.y >= screen.origin.y - epsilon);
+        assert!(locked_frame.origin.x + locked_frame.size.width <= max_x);
+        assert!(locked_frame.origin.y + locked_frame.size.height <= max_y);
     }
 }
