@@ -2867,22 +2867,8 @@ mod tests {
                     // tiled results bounded instead of force-applying this at the end.
                     CGSize::new(1600.0, 900.0),
                 ),
-                (
-                    other_a,
-                    None,
-                    None,
-                    None,
-                    true,
-                    CGSize::new(600.0, 600.0),
-                ),
-                (
-                    other_b,
-                    None,
-                    None,
-                    None,
-                    true,
-                    CGSize::new(600.0, 600.0),
-                ),
+                (other_a, None, None, None, true, CGSize::new(600.0, 600.0)),
+                (other_b, None, None, None, true, CGSize::new(600.0, 600.0)),
             ],
             None,
         ));

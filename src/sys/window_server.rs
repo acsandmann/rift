@@ -26,6 +26,7 @@ use crate::sys::app::pid_t;
 use crate::sys::axuielement::{AXUIElement, Error as AxError};
 use crate::sys::cg_ok;
 use crate::sys::dispatch::DispatchExt;
+use crate::sys::mach::mach_get_window_sub_level;
 use crate::sys::process::ProcessSerialNumber;
 use crate::sys::skylight::*;
 
@@ -409,6 +410,8 @@ pub fn window_level(wid: u32) -> Option<NSWindowLevel> {
     )?;
     Some(query.advance()?.level() as NSWindowLevel)
 }
+
+pub fn window_sub_level(wid: u32) -> c_int { unsafe { mach_get_window_sub_level(wid) } }
 
 fn iterator_window_suitable(iterator: *mut CFType) -> bool {
     let tags = unsafe { SLSWindowIteratorGetTags(iterator) };

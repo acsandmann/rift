@@ -25,6 +25,7 @@ use rift_wm::layout_engine::LayoutEngine;
 use rift_wm::model::tx_store::WindowTxStore;
 use rift_wm::sys::accessibility::ensure_accessibility_permission;
 use rift_wm::sys::executor::Executor;
+use rift_wm::sys::mach::init_window_sub_level_server_port;
 use rift_wm::sys::screen::{CoordinateConverter, displays_have_separate_spaces};
 use rift_wm::sys::service::{ServiceCommands, handle_service_command};
 use rift_wm::sys::skylight::{
@@ -124,6 +125,7 @@ fn main() {
     }
 
     ensure_accessibility_permission();
+    init_window_sub_level_server_port();
 
     if !displays_have_separate_spaces() {
         eprintln!(

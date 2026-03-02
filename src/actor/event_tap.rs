@@ -1,7 +1,9 @@
 use std::cell::RefCell;
 use std::mem::replace;
+use std::panic::AssertUnwindSafe;
 use std::rc::Rc;
 
+use objc2::exception;
 use objc2_app_kit::{
     NSEvent, NSEventPhase, NSEventType, NSMainMenuWindowLevel, NSPopUpMenuWindowLevel,
     NSTouchPhase, NSTouchType, NSWindowLevel,
@@ -747,10 +749,9 @@ impl EventTap {
                 break;
             }
 
-            if !ended && t.r#type() == NSTouchType::Indirect {
-                let pos = t.normalizedPosition();
-                sum_x += pos.x as f64;
-                sum_y += pos.y as f64;
+            if !ended && let Some((x, y)) = touch_normalized_position(&t) {
+                sum_x += x;
+                sum_y += y;
                 active_count += 1;
             }
         }
@@ -867,10 +868,9 @@ impl EventTap {
                 break;
             }
 
-            if !ended && t.r#type() == NSTouchType::Indirect {
-                let pos = t.normalizedPosition();
-                sum_x += pos.x as f64;
-                sum_y += pos.y as f64;
+            if !ended && let Some((x, y)) = touch_normalized_position(&t) {
+                sum_x += x;
+                sum_y += y;
                 active_count += 1;
             }
         }
@@ -1243,6 +1243,18 @@ fn mouse_move_sampling_profile(low_power_mode: bool) -> (u64, f64) {
             MOUSE_MOVE_MIN_DISTANCE_PX_SQ_NORMAL,
         )
     }
+}
+
+#[inline]
+fn touch_normalized_position(touch: &objc2_app_kit::NSTouch) -> Option<(f64, f64)> {
+    if touch.r#type() != NSTouchType::Indirect || touch.isResting() {
+        return None;
+    }
+
+    let position = exception::catch(AssertUnwindSafe(|| touch.normalizedPosition())).ok()?;
+    let x = position.x.clamp(0.0, 1.0) as f64;
+    let y = position.y.clamp(0.0, 1.0) as f64;
+    Some((x, y))
 }
 
 fn build_event_mask(
