@@ -68,6 +68,7 @@ hot_reload = true
 # Layout Types:
 # 	- "traditional" (i3/sway-like containers)
 #	- "bsp" (binary space partitioning),
+#   - "stack" (single stacked container)
 #   - "master_stack" (master area + stack area)
 # defaults to "traditional" if omitted
 #
@@ -238,7 +239,7 @@ reapply_app_rules_on_title_change = false
 
 # Workspace-specific rules
 # - workspace: target workspace by index (integer) or name (string)
-# - layout: layout mode to use ("traditional", "bsp", "master_stack", "scrolling")
+# - layout: layout mode to use ("traditional", "bsp", "stack", "master_stack", "scrolling")
 # workspace_rules = [
 #   { workspace = 1, layout = "bsp" },
 #   { workspace = "second", layout = "scrolling" }
@@ -348,8 +349,8 @@ comb1 = "Alt + Shift"
 # - move_window_to_workspace = N / move_window_to_workspace = { workspace = N, window_id = 123 } (optional window id)
 # - create_workspace
 # - switch_to_last_workspace
-# - set_workspace_layout = { mode = "traditional"|"bsp"|"master_stack"|"scrolling" } (active workspace)
-# - set_workspace_layout = { workspace = N, mode = "traditional"|"bsp"|"master_stack"|"scrolling" }
+# - set_workspace_layout = { mode = "traditional"|"bsp"|"stack"|"master_stack"|"scrolling" } (active workspace)
+# - set_workspace_layout = { workspace = N, mode = "traditional"|"bsp"|"stack"|"master_stack"|"scrolling" }
 # - next_window / prev_window (focus wraps when it reaches last window in current workspace)
 # - ascend / descend
 # - move_focus = "left"|"right"|"up"|"down"

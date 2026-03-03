@@ -330,6 +330,29 @@ impl LayoutEngine {
                     )
                 }
             }
+            LayoutSystemKind::Stack(s) => {
+                if selection_path_only {
+                    s.collect_group_containers_in_selection_path(
+                        layout_id,
+                        screen,
+                        stack_offset,
+                        gaps,
+                        stack_line_thickness,
+                        stack_line_horiz,
+                        stack_line_vert,
+                    )
+                } else {
+                    s.collect_group_containers(
+                        layout_id,
+                        screen,
+                        stack_offset,
+                        gaps,
+                        stack_line_thickness,
+                        stack_line_horiz,
+                        stack_line_vert,
+                    )
+                }
+            }
             LayoutSystemKind::MasterStack(s) => {
                 if selection_path_only {
                     s.collect_group_containers_in_selection_path(
@@ -364,6 +387,9 @@ impl LayoutEngine {
 
         for (_, ws) in self.virtual_workspace_manager.workspaces.iter_mut() {
             match &mut ws.layout_system {
+                LayoutSystemKind::Stack(system) => {
+                    system.update_settings(settings.stack.default_orientation);
+                }
                 LayoutSystemKind::MasterStack(system) => {
                     system.update_settings(settings.master_stack.clone());
                 }
@@ -405,6 +431,7 @@ impl LayoutEngine {
             match self.workspace_tree(ws_id) {
                 LayoutSystemKind::Traditional(_) => "traditional",
                 LayoutSystemKind::Bsp(_) => "bsp",
+                LayoutSystemKind::Stack(_) => "stack",
                 LayoutSystemKind::MasterStack(_) => "master_stack",
                 LayoutSystemKind::Scrolling(_) => "scrolling",
             }
@@ -418,6 +445,7 @@ impl LayoutEngine {
             match self.workspace_tree(ws_id) {
                 LayoutSystemKind::Traditional(_) => crate::common::config::LayoutMode::Traditional,
                 LayoutSystemKind::Bsp(_) => crate::common::config::LayoutMode::Bsp,
+                LayoutSystemKind::Stack(_) => crate::common::config::LayoutMode::Stack,
                 LayoutSystemKind::MasterStack(_) => crate::common::config::LayoutMode::MasterStack,
                 LayoutSystemKind::Scrolling(_) => crate::common::config::LayoutMode::Scrolling,
             }
@@ -1587,6 +1615,9 @@ impl LayoutEngine {
                         Self::toggle_orientation_for_system(s, layout, default_orientation)
                     }
                     LayoutSystemKind::Bsp(s) => {
+                        Self::toggle_orientation_for_system(s, layout, default_orientation)
+                    }
+                    LayoutSystemKind::Stack(s) => {
                         Self::toggle_orientation_for_system(s, layout, default_orientation)
                     }
                     LayoutSystemKind::MasterStack(s) => {

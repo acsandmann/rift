@@ -11,7 +11,7 @@ pub use graph::{Direction, LayoutKind, Orientation};
 pub(crate) use systems::LayoutId;
 pub use systems::{
     BspLayoutSystem, LayoutSystem, LayoutSystemKind, MasterStackLayoutSystem,
-    ScrollingLayoutSystem, TraditionalLayoutSystem,
+    ScrollingLayoutSystem, StackLayoutSystem, TraditionalLayoutSystem,
 };
 pub(crate) use workspaces::WorkspaceLayouts;
 
