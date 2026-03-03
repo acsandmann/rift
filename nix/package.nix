@@ -105,7 +105,7 @@ EOF
 
       packages.rift = build;
       packages.rift-bin = rift-bin;
-      packages.default = rift-bin;
+      packages.default = build;
 
       devshells.default = {
         packages = [
