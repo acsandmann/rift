@@ -294,6 +294,7 @@ fn parse_layout_mode(layout_mode: &str) -> Option<LayoutMode> {
     match layout_mode {
         "traditional" => Some(LayoutMode::Traditional),
         "bsp" => Some(LayoutMode::Bsp),
+        "stack" => Some(LayoutMode::Stack),
         "master_stack" => Some(LayoutMode::MasterStack),
         "scrolling" => Some(LayoutMode::Scrolling),
         _ => None,
@@ -304,6 +305,7 @@ fn layout_title(mode: LayoutMode) -> &'static str {
     match mode {
         LayoutMode::Traditional => "Traditional",
         LayoutMode::Bsp => "BSP",
+        LayoutMode::Stack => "Stack",
         LayoutMode::MasterStack => "Master Stack",
         LayoutMode::Scrolling => "Scrolling",
     }
@@ -373,12 +375,14 @@ fn build_status_menu(
     for mode in [
         LayoutMode::Traditional,
         LayoutMode::Bsp,
+        LayoutMode::Stack,
         LayoutMode::MasterStack,
         LayoutMode::Scrolling,
     ] {
         let action = match mode {
             LayoutMode::Traditional => sel!(onSetLayoutTraditional:),
             LayoutMode::Bsp => sel!(onSetLayoutBsp:),
+            LayoutMode::Stack => sel!(onSetLayoutStack:),
             LayoutMode::MasterStack => sel!(onSetLayoutMasterStack:),
             LayoutMode::Scrolling => sel!(onSetLayoutScrolling:),
         };
@@ -682,6 +686,11 @@ define_class!(
         #[unsafe(method(onSetLayoutBsp:))]
         fn on_set_layout_bsp(&self, _sender: Option<&AnyObject>) {
             self.emit(MenuAction::SetLayout(LayoutMode::Bsp));
+        }
+
+        #[unsafe(method(onSetLayoutStack:))]
+        fn on_set_layout_stack(&self, _sender: Option<&AnyObject>) {
+            self.emit(MenuAction::SetLayout(LayoutMode::Stack));
         }
 
         #[unsafe(method(onSetLayoutMasterStack:))]

@@ -551,7 +551,7 @@ impl StackLineSettings {
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct LayoutSettings {
-    /// Layout mode: "traditional" (i3/sway style containers)
+    /// Layout mode: "traditional", "bsp", "stack", "master_stack", or "scrolling"
     #[serde(default)]
     pub mode: LayoutMode,
     /// Stack system configuration
@@ -577,6 +577,8 @@ pub enum LayoutMode {
     Traditional,
     /// Binary space partitioning tiling
     Bsp,
+    /// Dedicated stacked layout (single stack container)
+    Stack,
     /// Master/stack layout (master area + stack area)
     MasterStack,
     /// Scrolling column layout (niri-style)
@@ -588,6 +590,7 @@ impl ToString for LayoutMode {
         match self {
             LayoutMode::Traditional => "traditional".to_string(),
             LayoutMode::Bsp => "bsp".to_string(),
+            LayoutMode::Stack => "stack".to_string(),
             LayoutMode::MasterStack => "master_stack".to_string(),
             LayoutMode::Scrolling => "scrolling".to_string(),
         }
@@ -1070,7 +1073,9 @@ fn yes() -> bool { true }
 
 fn default_stack_offset() -> f64 { 40.0 }
 
-fn default_stack_orientation() -> StackDefaultOrientation { StackDefaultOrientation::Perpendicular }
+pub fn default_stack_orientation() -> StackDefaultOrientation {
+    StackDefaultOrientation::Perpendicular
+}
 
 fn default_master_stack_new_window_placement() -> MasterStackNewWindowPlacement {
     MasterStackNewWindowPlacement::Master

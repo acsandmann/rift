@@ -57,7 +57,7 @@ pub use crate::sys::screen::ScreenInfo;
 use crate::sys::screen::{SpaceId, get_active_space_number, order_visible_spaces_by_position};
 use crate::sys::window_server::{
     self, WindowServerId, WindowServerInfo, current_cursor_location, space_is_fullscreen,
-    wait_for_native_fullscreen_transition, window_level,
+    wait_for_native_fullscreen_transition, window_level, window_sub_level,
 };
 
 pub type Sender = actor::Sender<Event>;
@@ -1777,11 +1777,15 @@ impl Reactor {
     }
 
     // Returns true if the window should be raised on mouse over considering
-    // active workspace membership and potential occlusion of other windows above it.
+    // active workspace membership and potential occlusion of floating windows above it.
     fn should_raise_on_mouse_over(&self, wid: WindowId) -> bool {
         let Some(window) = self.window_manager.windows.get(&wid) else {
             return false;
         };
+
+        if self.main_window() == Some(wid) {
+            return false;
+        }
 
         if !window.matches_filter(WindowFilter::EffectivelyManageable)
             && !self.layout_manager.layout_engine.is_window_floating(wid)
@@ -1812,28 +1816,13 @@ impl Reactor {
             return true;
         };
 
-        for child_wsid in window_server::associated_windows(candidate_wsid) {
-            if let Some(&child_wid) = self.window_manager.window_ids.get(&child_wsid)
-                && let Some(child_state) = self.window_manager.windows.get(&child_wid)
-                && matches!(
-                    child_state.info.ax_role.as_deref(),
-                    Some("AXSheet") | Some("AXDrawer")
-                )
-            {
-                trace!(
-                    ?candidate_wsid,
-                    "Skipping autoraise while child sheet/drawer exists"
-                );
-                return false;
-            }
-        }
-
         let order = {
             let space_id = space.get();
             crate::sys::window_server::space_window_list_for_connection(&[space_id], 0, false)
         };
         let candidate_u32 = candidate_wsid.as_u32();
         let candidate_level = window_level(candidate_u32);
+        let candidate_sub_level = window_sub_level(candidate_u32);
 
         for above_u32 in order {
             if above_u32 == candidate_u32 {
@@ -1858,9 +1847,11 @@ impl Reactor {
             }
 
             let above_level = window_level(above_u32);
+            let above_sub_level = window_sub_level(above_u32);
             if candidate_level
                 .zip(above_level)
                 .is_some_and(|(candidate, above)| candidate == above)
+                && candidate_sub_level == above_sub_level
             {
                 return false;
             }

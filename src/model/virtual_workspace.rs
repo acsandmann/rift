@@ -99,6 +99,11 @@ impl VirtualWorkspace {
             LayoutMode::Bsp => {
                 LayoutSystemKind::Bsp(crate::layout_engine::systems::BspLayoutSystem::default())
             }
+            LayoutMode::Stack => {
+                LayoutSystemKind::Stack(crate::layout_engine::systems::StackLayoutSystem::new(
+                    settings.stack.default_orientation,
+                ))
+            }
             LayoutMode::MasterStack => LayoutSystemKind::MasterStack(
                 crate::layout_engine::systems::MasterStackLayoutSystem::new(
                     settings.master_stack.clone(),
