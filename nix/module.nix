@@ -32,14 +32,11 @@
         };
 
         config = lib.mkOption {
-          type =
-            with lib.types;
-            oneOf [
-              str
-              path
-              toml.type
-              null
-            ];
+          type = with lib.types; nullOr (oneOf [
+            str
+            path
+            toml.type
+          ]);
           description = "Configuration settings for rift. Also accepts paths (string or path type) to a config file. If null, rift uses internal defaults.";
           default = null;
         };
