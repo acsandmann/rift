@@ -40,12 +40,16 @@
               toml.type
               null
             ];
-          description = "Configuration settings for rift. Also accepts paths (string or path type) to a config file.";
-          default = ../rift.default.toml;
+          description = "Configuration settings for rift. Also accepts paths (string or path type) to a config file. If null, rift uses internal defaults.";
+          default = null;
         };
       };
 
       config = lib.mkIf cfg.enable {
+        # Add rift to systemPackages for stable /Applications/Nix Apps/ installation
+        # This creates a stable directory (not symlink) that preserves TCC permissions across rebuilds
+        environment.systemPackages = [ cfg.package ];
+
         launchd.user.agents.rift = {
           command = "${cfg.package}/bin/rift${
             if configFile == null then "" else " --config " + lib.escapeShellArg configFile
@@ -70,7 +74,6 @@
             LimitLoadToSessionType = "Aqua";
             Nice = -20;
           };
-        };
       };
     };
 }
