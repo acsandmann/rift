@@ -993,19 +993,6 @@ impl LayoutSystem for BspLayoutSystem {
         }
     }
 
-    fn apply_window_size_constraint(
-        &mut self,
-        layout: LayoutId,
-        wid: WindowId,
-        current_frame: CGRect,
-        target_size: objc2_core_foundation::CGSize,
-        screen: CGRect,
-        gaps: &crate::common::config::GapSettings,
-    ) {
-        let target_frame = CGRect::new(current_frame.origin, target_size);
-        self.on_window_resized(layout, wid, current_frame, target_frame, screen, gaps);
-    }
-
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool {
         let sel_snapshot = self.selection_of_layout(layout);
         let Some(sel) = sel_snapshot else {

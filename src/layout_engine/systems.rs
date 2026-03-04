@@ -1,5 +1,5 @@
 use enum_dispatch::enum_dispatch;
-use objc2_core_foundation::{CGRect, CGSize};
+use objc2_core_foundation::CGRect;
 use serde::{Deserialize, Serialize};
 
 use crate::actor::app::{WindowId, pid_t};
@@ -50,16 +50,6 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
         wid: WindowId,
         old_frame: CGRect,
         new_frame: CGRect,
-        screen: CGRect,
-        gaps: &crate::common::config::GapSettings,
-    );
-
-    fn apply_window_size_constraint(
-        &mut self,
-        layout: LayoutId,
-        wid: WindowId,
-        current_frame: CGRect,
-        target_size: CGSize,
         screen: CGRect,
         gaps: &crate::common::config::GapSettings,
     );

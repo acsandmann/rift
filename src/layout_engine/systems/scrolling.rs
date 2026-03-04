@@ -992,44 +992,6 @@ impl LayoutSystem for ScrollingLayoutSystem {
         }
     }
 
-    fn apply_window_size_constraint(
-        &mut self,
-        layout: LayoutId,
-        wid: WindowId,
-        _current_frame: CGRect,
-        target_size: objc2_core_foundation::CGSize,
-        screen: CGRect,
-        gaps: &crate::common::config::GapSettings,
-    ) {
-        let min_ratio = self.settings.min_column_width_ratio;
-        let max_ratio = self.settings.max_column_width_ratio;
-        let niri_navigation = matches!(
-            self.settings.focus_navigation_style,
-            ScrollingFocusNavigationStyle::Niri
-        );
-
-        let Some(state) = self.layout_state_mut(layout) else {
-            return;
-        };
-        let tiling = compute_tiling_area(screen, gaps);
-        if tiling.size.width <= 0.0 {
-            return;
-        }
-
-        let ratio = target_size.width / tiling.size.width;
-        let clamped = ratio.clamp(min_ratio, max_ratio).max(0.05).min(0.98);
-        let base_ratio = state.column_width_ratio;
-
-        if let Some((col_idx, _)) = state.locate(wid) {
-            state.columns[col_idx].width_offset = clamped - base_ratio;
-            if niri_navigation && state.selected == Some(wid) {
-                state.reveal_selected_without_direction();
-            } else if state.selected == Some(wid) {
-                state.align_scroll_to_selected();
-            }
-        }
-    }
-
     fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
         let Some(state) = self.layout_state_mut(layout) else {
             return false;

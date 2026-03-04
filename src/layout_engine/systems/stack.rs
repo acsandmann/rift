@@ -1,5 +1,5 @@
 use nix::libc::pid_t;
-use objc2_core_foundation::{CGRect, CGSize};
+use objc2_core_foundation::CGRect;
 use serde::{Deserialize, Serialize};
 
 use crate::actor::app::WindowId;
@@ -265,25 +265,6 @@ impl LayoutSystem for StackLayoutSystem {
         gaps: &crate::common::config::GapSettings,
     ) {
         self.inner.on_window_resized(layout, wid, old_frame, new_frame, screen, gaps);
-    }
-
-    fn apply_window_size_constraint(
-        &mut self,
-        layout: LayoutId,
-        wid: WindowId,
-        current_frame: CGRect,
-        target_size: CGSize,
-        screen: CGRect,
-        gaps: &crate::common::config::GapSettings,
-    ) {
-        self.inner.apply_window_size_constraint(
-            layout,
-            wid,
-            current_frame,
-            target_size,
-            screen,
-            gaps,
-        );
     }
 
     fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {

@@ -640,22 +640,6 @@ impl LayoutSystem for TraditionalLayoutSystem {
         }
     }
 
-    fn apply_window_size_constraint(
-        &mut self,
-        layout: LayoutId,
-        wid: WindowId,
-        current_frame: CGRect,
-        target_size: objc2_core_foundation::CGSize,
-        screen: CGRect,
-        _gaps: &crate::common::config::GapSettings,
-    ) {
-        let Some(node) = self.tree.data.window.node_for(layout, wid) else {
-            return;
-        };
-        let target_frame = CGRect::new(current_frame.origin, target_size);
-        self.set_frame_from_resize(node, current_frame, target_frame, screen);
-    }
-
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool {
         let selection = self.selection(layout);
         self.move_node(layout, selection, direction)

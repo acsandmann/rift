@@ -648,25 +648,6 @@ impl LayoutSystem for MasterStackLayoutSystem {
         self.inner.on_window_resized(layout, wid, old_frame, new_frame, screen, gaps);
     }
 
-    fn apply_window_size_constraint(
-        &mut self,
-        layout: LayoutId,
-        wid: WindowId,
-        current_frame: CGRect,
-        target_size: objc2_core_foundation::CGSize,
-        screen: CGRect,
-        gaps: &crate::common::config::GapSettings,
-    ) {
-        self.inner.apply_window_size_constraint(
-            layout,
-            wid,
-            current_frame,
-            target_size,
-            screen,
-            gaps,
-        );
-    }
-
     fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
         self.inner.swap_windows(layout, a, b)
     }
