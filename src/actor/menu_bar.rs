@@ -212,6 +212,9 @@ impl Menu {
             MenuAction::OpenDocumentation => {
                 Self::open_path_or_url("https://github.com/acsandmann/rift#readme");
             }
+            MenuAction::OpenMatrix => {
+                Self::open_path_or_url("https://matrix.to/#/#rift:matrix.org");
+            }
             MenuAction::OpenConfig => {
                 Self::open_path_or_url(common::config::config_file());
             }

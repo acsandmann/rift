@@ -52,6 +52,7 @@ pub enum MenuAction {
     SwitchToWorkspace(usize),
     OpenGitHub,
     OpenDocumentation,
+    OpenMatrix,
     OpenConfig,
     ReloadConfig,
     QuitRift,
@@ -505,6 +506,15 @@ fn build_status_menu(
         None,
         None,
     ));
+    help_submenu.addItem(&make_menu_item(
+        mtm,
+        "Matrix",
+        Some(sel!(onOpenMatrix:)),
+        Some(handler),
+        None,
+        None,
+        None,
+    ));
     help_item.setSubmenu(Some(&help_submenu));
     menu.addItem(&help_item);
 
@@ -741,6 +751,11 @@ define_class!(
         #[unsafe(method(onOpenGitHub:))]
         fn on_open_github(&self, _sender: Option<&AnyObject>) {
             self.emit(MenuAction::OpenGitHub);
+        }
+
+        #[unsafe(method(onOpenMatrix:))]
+        fn on_open_matrix(&self, _sender: Option<&AnyObject>) {
+            self.emit(MenuAction::OpenMatrix);
         }
 
         #[unsafe(method(onReloadConfig:))]
