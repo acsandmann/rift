@@ -733,8 +733,8 @@ impl State {
                     event::get_mouse_state(),
                 ));
             }
-            kAXMenuOpenedNotification => self.send_event(Event::MenuOpened),
-            kAXMenuClosedNotification => self.send_event(Event::MenuClosed),
+            kAXMenuOpenedNotification => self.send_event(Event::MenuOpened(self.pid)),
+            kAXMenuClosedNotification => self.send_event(Event::MenuClosed(self.pid)),
             kAXUIElementDestroyedNotification => {
                 let Ok(wid) = self.id(&elem) else {
                     return;

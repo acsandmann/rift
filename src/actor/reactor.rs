@@ -179,8 +179,8 @@ pub enum Event {
     ),
     WindowTitleChanged(WindowId, String),
     ResyncAppForWindow(WindowServerId),
-    MenuOpened,
-    MenuClosed,
+    MenuOpened(pid_t),
+    MenuClosed(pid_t),
 
     /// Left mouse button was released.
     ///
@@ -852,8 +852,8 @@ impl Reactor {
                 | Event::Command(..)
                 | Event::RaiseCompleted { .. }
                 | Event::RaiseTimeout { .. }
-                | Event::MenuOpened
-                | Event::MenuClosed
+                | Event::MenuOpened(..)
+                | Event::MenuClosed(..)
         )
     }
 
@@ -956,12 +956,18 @@ impl Reactor {
                 AppEventHandler::handle_application_terminated(self, pid);
             }
             Event::ApplicationThreadTerminated(pid) => {
+                self.clear_menu_state_for_pid(pid);
                 AppEventHandler::handle_application_thread_terminated(self, pid);
             }
             Event::ApplicationActivated(pid, quiet) => {
+                self.clear_menu_state_for_non_owner(pid);
                 AppEventHandler::handle_application_activated(self, pid, quiet);
             }
+            Event::ApplicationDeactivated(pid) => {
+                self.clear_menu_state_for_pid(pid);
+            }
             Event::ApplicationGloballyDeactivated(pid) => {
+                self.clear_menu_state_for_pid(pid);
                 if self.is_login_window_pid(pid) {
                     self.set_login_window_active(false);
                 }
@@ -970,6 +976,7 @@ impl Reactor {
                 AppEventHandler::handle_resync_app_for_window(self, wsid);
             }
             Event::ApplicationGloballyActivated(pid) => {
+                self.clear_menu_state_for_non_owner(pid);
                 if self.is_login_window_pid(pid) {
                     self.set_login_window_active(true);
 
@@ -1036,8 +1043,8 @@ impl Reactor {
             Event::MouseUp => {
                 DragEventHandler::handle_mouse_up(self);
             }
-            Event::MenuOpened => SystemEventHandler::handle_menu_opened(self),
-            Event::MenuClosed => SystemEventHandler::handle_menu_closed(self),
+            Event::MenuOpened(pid) => SystemEventHandler::handle_menu_opened(self, pid),
+            Event::MenuClosed(pid) => SystemEventHandler::handle_menu_closed(self, pid),
             Event::MouseMovedOverWindow(wsid) => {
                 WindowEventHandler::handle_mouse_moved_over_window(self, wsid);
             }
@@ -2592,6 +2599,22 @@ impl Reactor {
                 app_handles,
                 focus_quiet: quiet,
             }));
+    }
+
+    fn clear_menu_state_for_pid(&mut self, pid: pid_t) {
+        if matches!(self.menu_manager.menu_state, MenuState::Open(owner) if owner == pid) {
+            debug!(pid, "Clearing menu-open state for deactivated app");
+            self.menu_manager.menu_state = MenuState::Closed;
+            self.update_focus_follows_mouse_state();
+        }
+    }
+
+    fn clear_menu_state_for_non_owner(&mut self, pid: pid_t) {
+        if matches!(self.menu_manager.menu_state, MenuState::Open(owner) if owner != pid) {
+            debug!(pid, "Clearing stale menu-open state after app focus changed");
+            self.menu_manager.menu_state = MenuState::Closed;
+            self.update_focus_follows_mouse_state();
+        }
     }
 
     fn set_focus_follows_mouse_enabled(&self, enabled: bool) {

@@ -445,6 +445,62 @@ fn it_preserves_layout_after_login_screen() {
 }
 
 #[test]
+fn menu_open_state_is_cleared_when_owner_deactivates() {
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let (event_tap_tx, mut event_tap_rx) = actor::channel();
+    reactor.communication_manager.event_tap_tx = Some(event_tap_tx);
+
+    reactor.handle_event(Event::MenuOpened(1));
+    let disable = event_tap_rx.try_recv().expect("menu-open should update event tap").1;
+    assert!(matches!(
+        disable,
+        crate::actor::event_tap::Request::SetFocusFollowsMouseEnabled(false)
+    ));
+    assert_eq!(reactor.menu_manager.menu_state, MenuState::Open(1));
+
+    reactor.handle_event(Event::ApplicationDeactivated(1));
+    let enable = event_tap_rx
+        .try_recv()
+        .expect("app deactivation should re-enable focus-follows-mouse")
+        .1;
+    assert!(matches!(
+        enable,
+        crate::actor::event_tap::Request::SetFocusFollowsMouseEnabled(true)
+    ));
+    assert_eq!(reactor.menu_manager.menu_state, MenuState::Closed);
+}
+
+#[test]
+fn stale_menu_open_state_is_cleared_when_other_app_activates() {
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let (event_tap_tx, mut event_tap_rx) = actor::channel();
+    reactor.communication_manager.event_tap_tx = Some(event_tap_tx);
+
+    reactor.handle_event(Event::MenuOpened(1));
+    let _ = event_tap_rx.try_recv().expect("menu-open should update event tap");
+    assert_eq!(reactor.menu_manager.menu_state, MenuState::Open(1));
+
+    reactor.handle_event(Event::ApplicationGloballyActivated(2));
+    let enable = event_tap_rx
+        .try_recv()
+        .expect("activation of another app should clear stale menu state")
+        .1;
+    assert!(matches!(
+        enable,
+        crate::actor::event_tap::Request::SetFocusFollowsMouseEnabled(true)
+    ));
+    assert_eq!(reactor.menu_manager.menu_state, MenuState::Closed);
+}
+
+#[test]
 fn it_retains_windows_without_server_ids_after_login_visibility_failure() {
     let mut apps = Apps::new();
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(

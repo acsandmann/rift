@@ -101,7 +101,7 @@ pub enum MissionControlState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MenuState {
     Closed,
-    Open(usize),
+    Open(pid_t),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
