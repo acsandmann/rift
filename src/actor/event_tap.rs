@@ -289,7 +289,11 @@ impl EventTap {
     fn build_gesture_handlers(
         config: &Config,
         has_wm: bool,
-    ) -> (Option<SwipeHandler>, Option<ScrollHandler>, Vec<MouseWheelHandler>) {
+    ) -> (
+        Option<SwipeHandler>,
+        Option<ScrollHandler>,
+        Vec<MouseWheelHandler>,
+    ) {
         let swipe_cfg = SwipeConfig::from_config(config);
         let swipe = if swipe_cfg.enabled && has_wm {
             Some(SwipeHandler {
@@ -797,9 +801,8 @@ impl EventTap {
                     // ScrollStrip only activates in scrolling layout.
                     if h.action == MouseWheelAction::ScrollStrip {
                         let cursor = CGEvent::location(Some(event));
-                        let mode = state
-                            .layout_mode_at_point(cursor)
-                            .unwrap_or(state.default_layout_mode);
+                        let mode =
+                            state.layout_mode_at_point(cursor).unwrap_or(state.default_layout_mode);
                         if !matches!(mode, LayoutMode::Scrolling) {
                             continue;
                         }
@@ -1091,8 +1094,13 @@ impl EventTap {
         let handler = &handlers[handler_idx];
 
         // Prefer horizontal axis, fall back to vertical.
-        let axis2 = CGEvent::integer_value_field(Some(event), CGEventField::ScrollWheelEventPointDeltaAxis2);
-        let raw = if axis2 != 0 { axis2 } else {
+        let axis2 = CGEvent::integer_value_field(
+            Some(event),
+            CGEventField::ScrollWheelEventPointDeltaAxis2,
+        );
+        let raw = if axis2 != 0 {
+            axis2
+        } else {
             CGEvent::integer_value_field(Some(event), CGEventField::ScrollWheelEventPointDeltaAxis1)
         };
         if raw == 0 {
@@ -1111,13 +1119,17 @@ impl EventTap {
             MouseWheelAction::ScrollStrip => {
                 let mut delta = *accum;
                 *accum = 0.0;
-                if handler.invert { delta = -delta; }
+                if handler.invert {
+                    delta = -delta;
+                }
                 LC::ScrollStrip { delta: delta * 0.05 }
             }
             MouseWheelAction::Resize => {
                 let mut amount = *accum;
                 *accum = 0.0;
-                if handler.invert { amount = -amount; }
+                if handler.invert {
+                    amount = -amount;
+                }
                 LC::ResizeWindowBy { amount: amount * 0.01 }
             }
             MouseWheelAction::MoveColumn => {
