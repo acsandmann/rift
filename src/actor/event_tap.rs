@@ -1018,13 +1018,16 @@ unsafe extern "C-unwind" fn mouse_callback(
     event_ref: core::ptr::NonNull<CGEvent>,
     user_info: *mut std::ffi::c_void,
 ) -> *mut CGEvent {
-    let ctx = unsafe { &*(user_info as *const CallbackCtx) };
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let ctx = unsafe { &*(user_info as *const CallbackCtx) };
+        let event = unsafe { event_ref.as_ref() };
+        ctx.this.on_event(event_type, event)
+    }));
 
-    let event = unsafe { event_ref.as_ref() };
-    if ctx.this.on_event(event_type, event) {
-        event_ref.as_ptr()
-    } else {
-        core::ptr::null_mut()
+    match result {
+        Ok(true) => event_ref.as_ptr(),
+        Ok(false) => core::ptr::null_mut(),
+        Err(_) => event_ref.as_ptr(),
     }
 }
 
@@ -1251,7 +1254,11 @@ fn touch_normalized_position(touch: &objc2_app_kit::NSTouch) -> Option<(f64, f64
         return None;
     }
 
-    let position = exception::catch(AssertUnwindSafe(|| touch.normalizedPosition())).ok()?;
+    let position = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        exception::catch(AssertUnwindSafe(|| touch.normalizedPosition())).ok()
+    }))
+    .ok()
+    .flatten()?;
     let x = position.x.clamp(0.0, 1.0) as f64;
     let y = position.y.clamp(0.0, 1.0) as f64;
     Some((x, y))
