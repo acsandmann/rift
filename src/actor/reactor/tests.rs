@@ -235,6 +235,8 @@ fn it_ignores_windows_on_nonzero_layers() {
             pid: 1,
             layer: 10,
             frame: CGRect::ZERO,
+            min_frame: CGSize::ZERO,
+            max_frame: CGSize::ZERO,
         }],
     ));
 
@@ -405,6 +407,8 @@ fn it_preserves_layout_after_login_screen() {
                 id: WindowServerId::new(n),
                 layer: 0,
                 frame: CGRect::ZERO,
+                min_frame: CGSize::ZERO,
+                max_frame: CGSize::ZERO,
             })
             .collect(),
     ));
@@ -517,6 +521,8 @@ fn it_retains_windows_without_server_ids_after_login_visibility_failure() {
         is_root: true,
         is_minimized: false,
         is_resizable: true,
+        min_size: None,
+        max_size: None,
         title: "NoServerId".to_string(),
         frame: CGRect::new(CGPoint::new(50., 50.), CGSize::new(400., 400.)),
         sys_id: None,

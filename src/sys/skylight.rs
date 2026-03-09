@@ -10,7 +10,7 @@ use bitflags::bitflags;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use objc2_application_services::{AXError, AXUIElement};
 use objc2_core_foundation::{
-    CFArray, CFData, CFDictionary, CFNumber, CFString, CFType, CGPoint, CGRect,
+    CFArray, CFData, CFDictionary, CFNumber, CFString, CFType, CGPoint, CGRect, CGSize,
 };
 use objc2_core_graphics::{CGContext, CGError, CGImage, CGWindowID};
 use objc2_foundation::NSArray;
@@ -298,6 +298,19 @@ unsafe extern "C" {
     pub fn SLSWindowIteratorGetAttachedWindowCount(iterator: *mut CFType) -> c_int;
     pub fn SLSWindowIteratorGetPID(iterator: *mut CFType) -> c_int;
     pub fn SLSWindowIteratorGetBounds(iterator: *mut CFType) -> CGRect;
+    pub fn SLSWindowIteratorGetConstraints(
+        iterator: *mut CFType,
+        min: *mut CGSize,
+        max: *mut CGSize,
+        cur: *mut CGSize,
+    ) -> CGError;
+    pub fn SLSPackagesGetWindowConstraints(
+        cid: cid_t,
+        wid: u32,
+        min: *mut CGSize,
+        max: *mut CGSize,
+        cur: *mut CGSize,
+    ) -> CGError;
 
     pub fn SLSCopySpacesForWindows(
         cid: cid_t,

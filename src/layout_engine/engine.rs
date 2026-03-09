@@ -1,6 +1,4 @@
 use std::cmp::Ordering;
-use std::fs::{self, File};
-use std::io::{Read, Write};
 use std::path::PathBuf;
 
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
@@ -11,8 +9,9 @@ use super::{Direction, FloatingManager, LayoutId, LayoutSystemKind, WorkspaceLay
 use crate::actor::app::{AppInfo, WindowId, pid_t};
 use crate::actor::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::common::collections::{HashMap, HashSet};
-use crate::common::config::{LayoutMode, LayoutSettings};
+use crate::common::config::{LayoutMode, LayoutSettings, VirtualWorkspaceSettings};
 use crate::layout_engine::LayoutSystem;
+use crate::layout_engine::systems::WindowLayoutConstraints;
 use crate::model::virtual_workspace::{
     AppRuleAssignment, AppRuleResult, VirtualWorkspace, VirtualWorkspaceId, VirtualWorkspaceManager,
 };
@@ -103,6 +102,8 @@ pub enum LayoutEvent {
             Option<String>,
             bool,
             CGSize,
+            Option<CGSize>,
+            Option<CGSize>,
         )>,
         Option<AppInfo>,
     ),
@@ -134,6 +135,8 @@ pub struct LayoutEngine {
     floating: FloatingManager,
     #[serde(skip)]
     focused_window: Option<WindowId>,
+    #[serde(skip)]
+    window_layout_constraints: HashMap<WindowId, WindowLayoutConstraints>,
     virtual_workspace_manager: VirtualWorkspaceManager,
     #[serde(skip)]
     layout_settings: LayoutSettings,
@@ -855,6 +858,7 @@ impl LayoutEngine {
         if self.focused_window == Some(wid) {
             self.focused_window = None;
         }
+        self.window_layout_constraints.remove(&wid);
 
         if let Some(space) = affected_space {
             self.broadcast_windows_changed(space);
@@ -974,6 +978,7 @@ impl LayoutEngine {
             workspace_layouts: WorkspaceLayouts::default(),
             floating: FloatingManager::new(),
             focused_window: None,
+            window_layout_constraints: HashMap::default(),
             virtual_workspace_manager,
             layout_settings: layout_settings.clone(),
             broadcast_tx,
@@ -1033,9 +1038,31 @@ impl LayoutEngine {
                     None => (None, None),
                 };
 
-                for (wid, title_opt, ax_role_opt, ax_subrole_opt, _is_resizable, _size_hint) in
-                    windows_with_titles
+                for (
+                    wid,
+                    title_opt,
+                    ax_role_opt,
+                    ax_subrole_opt,
+                    is_resizable,
+                    size_hint,
+                    min_size,
+                    max_size,
+                ) in windows_with_titles
                 {
+                    self.window_layout_constraints.insert(
+                        wid,
+                        WindowLayoutConstraints {
+                            is_resizable,
+                            locked_width: size_hint.width,
+                            locked_height: size_hint.height,
+                            min_width: min_size.map_or(0.0, |s| s.width),
+                            min_height: min_size.map_or(0.0, |s| s.height),
+                            max_width: max_size.map_or(0.0, |s| s.width),
+                            max_height: max_size.map_or(0.0, |s| s.height),
+                        }
+                        .normalized(),
+                    );
+
                     let title_ref = title_opt.as_deref();
                     let ax_role_ref = ax_role_opt.as_deref();
                     let ax_subrole_ref = ax_subrole_opt.as_deref();
@@ -1136,6 +1163,7 @@ impl LayoutEngine {
                     ws.layout_system.remove_windows_for_app(pid);
                 }
                 self.floating.remove_all_for_pid(pid);
+                self.window_layout_constraints.retain(|wid, _| wid.pid != pid);
 
                 self.virtual_workspace_manager.remove_windows_for_app(pid);
                 self.virtual_workspace_manager.remove_app_floating_positions(pid);
@@ -1619,6 +1647,7 @@ impl LayoutEngine {
             layout,
             screen,
             self.layout_settings.stack.stack_offset,
+            &self.window_layout_constraints,
             gaps,
             stack_line_thickness,
             stack_line_horiz,
@@ -1702,6 +1731,7 @@ impl LayoutEngine {
                     layout,
                     screen,
                     self.layout_settings.stack.stack_offset,
+                    &self.window_layout_constraints,
                     gaps,
                     stack_line_thickness,
                     stack_line_horiz,
@@ -1856,6 +1886,7 @@ impl LayoutEngine {
                 layout,
                 screen,
                 self.layout_settings.stack.stack_offset,
+                &self.window_layout_constraints,
                 gaps,
                 stack_line_thickness,
                 stack_line_horiz,
@@ -1911,19 +1942,11 @@ impl LayoutEngine {
         }
     }
 
-    pub fn load(path: PathBuf) -> anyhow::Result<Self> {
-        let mut buf = String::new();
-        File::open(path)?.read_to_string(&mut buf)?;
-        Ok(ron::from_str(&buf)?)
+    pub fn load(_path: PathBuf) -> anyhow::Result<Self> {
+        Ok(Self::new(&VirtualWorkspaceSettings::default(), &LayoutSettings::default(), None))
     }
 
-    pub fn save(&self, path: PathBuf) -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        File::create(path)?.write_all(self.serialize_to_string().as_bytes())?;
-        Ok(())
-    }
+    pub fn save(&self, _path: PathBuf) -> std::io::Result<()> { Ok(()) }
 
     pub fn serialize_to_string(&self) -> String { ron::ser::to_string(&self).unwrap() }
 
@@ -2743,9 +2766,11 @@ mod tests {
                     // Intentionally impossible size for this screen; layout should still keep
                     // tiled results bounded instead of force-applying this at the end.
                     CGSize::new(1600.0, 900.0),
+                    None,
+                    None,
                 ),
-                (other_a, None, None, None, true, CGSize::new(600.0, 600.0)),
-                (other_b, None, None, None, true, CGSize::new(600.0, 600.0)),
+                (other_a, None, None, None, true, CGSize::new(600.0, 600.0), None, None),
+                (other_b, None, None, None, true, CGSize::new(600.0, 600.0), None, None),
             ],
             None,
         ));

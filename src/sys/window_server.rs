@@ -19,7 +19,7 @@ use objc2_core_graphics::{
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 
-use super::geometry::CGRectDef;
+use super::geometry::{CGRectDef, CGSizeDef};
 use crate::actor::app::WindowId;
 use crate::layout_engine::Direction;
 use crate::sys::app::pid_t;
@@ -159,6 +159,28 @@ impl WindowQuery {
     #[inline]
     #[allow(dead_code)]
     pub fn attributes(&self) -> u64 { unsafe { SLSWindowIteratorGetAttributes(self.iter) } }
+
+    #[inline]
+    pub fn constraints(&self) -> (CGSize, CGSize) {
+        let mut min = CGSize::ZERO;
+        let mut max = CGSize::ZERO;
+        let mut cur = CGSize::ZERO;
+        unsafe { SLSWindowIteratorGetConstraints(self.iter, &mut min, &mut max, &mut cur) };
+
+        if min.width == 0.0 && min.height == 0.0 && max.width == 0.0 && max.height == 0.0 {
+            unsafe {
+                SLSPackagesGetWindowConstraints(
+                    *G_CONNECTION,
+                    self.window_id(),
+                    &mut min,
+                    &mut max,
+                    &mut cur,
+                )
+            };
+        }
+
+        (min, max)
+    }
 }
 
 impl Drop for WindowQuery {
@@ -178,6 +200,10 @@ pub struct WindowServerInfo {
     pub layer: i32,
     #[serde(with = "CGRectDef")]
     pub frame: CGRect,
+    #[serde(with = "CGSizeDef")]
+    pub min_frame: CGSize,
+    #[serde(with = "CGSizeDef")]
+    pub max_frame: CGSize,
 }
 
 pub fn get_visible_windows_with_layer(layer: Option<i32>) -> Vec<WindowServerInfo> {
@@ -303,6 +329,8 @@ fn make_info(
             pid: pid.try_into().ok()?,
             layer,
             frame: cg_frame,
+            min_frame: CGSize::ZERO,
+            max_frame: CGSize::ZERO,
         });
     }
 
@@ -317,6 +345,8 @@ pub fn get_windows(ids: &[WindowServerId]) -> Vec<WindowServerInfo> {
             pid: 1234,
             layer: 0,
             frame: CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(800.0, 600.0)),
+            min_frame: CGSize::ZERO,
+            max_frame: CGSize::ZERO,
         })
         .collect()
 }
@@ -336,11 +366,14 @@ pub fn get_windows(ids: &[WindowServerId]) -> Vec<WindowServerInfo> {
 
     let mut out = Vec::with_capacity(ids.len());
     while query.advance().is_some() {
+        let (min_frame, max_frame) = query.constraints();
         out.push(WindowServerInfo {
             id: WindowServerId::new(query.window_id()),
             pid: query.pid() as i32,
             layer: query.level(),
             frame: query.bounds(),
+            min_frame,
+            max_frame,
         });
     }
     out

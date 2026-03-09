@@ -3,8 +3,9 @@ use objc2_core_foundation::CGRect;
 use serde::{Deserialize, Serialize};
 
 use crate::actor::app::WindowId;
+use crate::common::collections::HashMap;
 use crate::common::config::{StackDefaultOrientation, default_stack_orientation};
-use crate::layout_engine::systems::LayoutSystem;
+use crate::layout_engine::systems::{LayoutSystem, WindowLayoutConstraints};
 use crate::layout_engine::{Direction, LayoutId, LayoutKind, TraditionalLayoutSystem};
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -161,6 +162,7 @@ impl LayoutSystem for StackLayoutSystem {
         layout: LayoutId,
         screen: CGRect,
         stack_offset: f64,
+        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &crate::common::config::GapSettings,
         stack_line_thickness: f64,
         stack_line_horiz: crate::common::config::HorizontalPlacement,
@@ -170,6 +172,7 @@ impl LayoutSystem for StackLayoutSystem {
             layout,
             screen,
             stack_offset,
+            constraints,
             gaps,
             stack_line_thickness,
             stack_line_horiz,

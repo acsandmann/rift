@@ -81,6 +81,8 @@ pub fn make_window(idx: usize) -> WindowInfo {
         is_root: true,
         is_minimized: false,
         is_resizable: true,
+        min_size: None,
+        max_size: None,
         title: format!("Window{idx}"),
         frame: CGRect::new(
             CGPoint::new(100.0 * f64::from(idx as u32), 100.0),
@@ -158,6 +160,8 @@ impl Apps {
                         id: info.sys_id.unwrap(),
                         layer: 0,
                         frame: info.frame,
+                        min_frame: CGSize::ZERO,
+                        max_frame: CGSize::ZERO,
                     })
                     .collect()
             } else {

@@ -1959,6 +1959,8 @@ impl Reactor {
                 Option<String>,
                 bool,
                 CGSize,
+                Option<CGSize>,
+                Option<CGSize>,
             )> = manageable_windows
                 .iter()
                 .map(|&wid| {
@@ -1969,7 +1971,18 @@ impl Reactor {
                     let is_resizable = window.map_or(true, |w| w.info.is_resizable);
                     let size_hint =
                         window.map_or(CGSize::new(0.0, 0.0), |w| w.frame_monotonic.size);
-                    (wid, title_opt, ax_role, ax_subrole, is_resizable, size_hint)
+                    let min_size = window.and_then(|w| w.info.min_size);
+                    let max_size = window.and_then(|w| w.info.max_size);
+                    (
+                        wid,
+                        title_opt,
+                        ax_role,
+                        ax_subrole,
+                        is_resizable,
+                        size_hint,
+                        min_size,
+                        max_size,
+                    )
                 })
                 .collect();
 
@@ -2575,7 +2588,9 @@ impl Reactor {
             LayoutEvent::WindowsOnScreenUpdated(space, _, windows, _) => {
                 let hidden_exists = windows
                     .iter()
-                    .any(|(wid, _, _, _, _, _)| self.window_in_non_active_workspace(*space, *wid));
+                    .any(|(wid, _, _, _, _, _, _, _)| {
+                        self.window_in_non_active_workspace(*space, *wid)
+                    });
                 if hidden_exists {
                     self.refocus_manager.refocus_state = RefocusState::Pending(*space);
                 }
