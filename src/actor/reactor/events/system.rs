@@ -49,8 +49,7 @@ impl SystemEventHandler {
             MenuState::Open(owner) => {
                 debug!(
                     pid,
-                    owner,
-                    "ignoring menu-closed notification for non-owning app"
+                    owner, "ignoring menu-closed notification for non-owning app"
                 );
             }
         }

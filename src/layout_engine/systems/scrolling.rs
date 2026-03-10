@@ -817,8 +817,10 @@ impl LayoutSystem for ScrollingLayoutSystem {
                     frame = tiling;
                 } else if let Some(c) = constraints.get(wid).copied() {
                     let c = c.normalized();
-                    let desired_w =
-                        c.fixed_for_axis(true).unwrap_or(frame.size.width).max(c.min_for_axis(true));
+                    let desired_w = c
+                        .fixed_for_axis(true)
+                        .unwrap_or(frame.size.width)
+                        .max(c.min_for_axis(true));
                     let desired_h = c
                         .fixed_for_axis(false)
                         .unwrap_or(frame.size.height)

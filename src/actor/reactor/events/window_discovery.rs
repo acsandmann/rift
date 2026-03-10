@@ -222,9 +222,11 @@ impl WindowDiscoveryHandler {
             // without reapplying app rules.
             for (wid, info) in &new {
                 if reactor.window_manager.windows.contains_key(wid) {
-                    let old_sys_id = reactor.window_manager.windows.get(wid).and_then(|window| {
-                        window.info.sys_id
-                    });
+                    let old_sys_id = reactor
+                        .window_manager
+                        .windows
+                        .get(wid)
+                        .and_then(|window| window.info.sys_id);
                     Self::sync_window_server_id_mapping(reactor, *wid, old_sys_id, info.sys_id);
                     let manageable = utils::compute_window_manageability(
                         info.sys_id,
@@ -271,11 +273,8 @@ impl WindowDiscoveryHandler {
         // Process all new windows
         for (wid, info) in new {
             if reactor.window_manager.windows.contains_key(&wid) {
-                let old_sys_id = reactor
-                    .window_manager
-                    .windows
-                    .get(&wid)
-                    .and_then(|window| window.info.sys_id);
+                let old_sys_id =
+                    reactor.window_manager.windows.get(&wid).and_then(|window| window.info.sys_id);
                 Self::sync_window_server_id_mapping(reactor, wid, old_sys_id, info.sys_id);
                 let manageable = utils::compute_window_manageability(
                     info.sys_id,

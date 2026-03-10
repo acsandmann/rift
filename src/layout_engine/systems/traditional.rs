@@ -542,9 +542,8 @@ impl LayoutSystem for TraditionalLayoutSystem {
         let node = if selection.parent(self.map()).is_none() {
             // If the root is selected but it already has children, split relative to the
             // root's active child instead of appending a fresh full-weight sibling.
-            if let Some(anchor) = self
-                .local_selection(selection)
-                .or_else(|| selection.last_child(self.map()))
+            if let Some(anchor) =
+                self.local_selection(selection).or_else(|| selection.last_child(self.map()))
             {
                 self.smart_window_insertion(layout, anchor, wid)
             } else {
@@ -987,10 +986,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
                 crate::layout_engine::Direction::Left,
                 crate::layout_engine::Direction::Up,
             ] {
-                if candidates
-                    .iter()
-                    .any(|&node| self.resize_internal(node, amount, direction))
-                {
+                if candidates.iter().any(|&node| self.resize_internal(node, amount, direction)) {
                     break;
                 }
             }
@@ -1825,9 +1821,7 @@ impl TraditionalLayoutSystem {
                     };
                 let chosen = if primary_delta != 0.0 && self.can_resize_towards(node, primary_dir) {
                     Some((primary_dir, primary_delta))
-                } else if secondary_delta != 0.0
-                    && self.can_resize_towards(node, secondary_dir)
-                {
+                } else if secondary_delta != 0.0 && self.can_resize_towards(node, secondary_dir) {
                     Some((secondary_dir, secondary_delta))
                 } else {
                     None
@@ -1846,9 +1840,7 @@ impl TraditionalLayoutSystem {
                     };
                 let chosen = if primary_delta != 0.0 && self.can_resize_towards(node, primary_dir) {
                     Some((primary_dir, primary_delta))
-                } else if secondary_delta != 0.0
-                    && self.can_resize_towards(node, secondary_dir)
-                {
+                } else if secondary_delta != 0.0 && self.can_resize_towards(node, secondary_dir) {
                     Some((secondary_dir, secondary_delta))
                 } else {
                     None
@@ -2438,29 +2430,26 @@ impl Layout {
         }
 
         let stack_span = stack_offset.max(0.0) * (children.len().saturating_sub(1) as f64);
-        let min_max = mins
-            .iter()
-            .copied()
-            .fold(0.0_f64, |acc, value| acc.max(value));
+        let min_max = mins.iter().copied().fold(0.0_f64, |acc, value| acc.max(value));
 
         if matches!(kind, LayoutKind::HorizontalStack | LayoutKind::VerticalStack) {
-            let selected_child = selection.local_selection(map, node).unwrap_or(children[0]);
-            let selected_idx = children.iter().position(|&c| c == selected_child).unwrap_or(0);
-            let selected_min = mins.get(selected_idx).copied().unwrap_or(0.0);
-            let selected_fixed = fixed_parts.get(selected_idx).copied().unwrap_or(None);
-            let selected_max = max_parts.get(selected_idx).copied().unwrap_or(None);
-            let selected_can_grow = grows.get(selected_idx).copied().unwrap_or(true);
             let stacked_on_axis = matches!(
                 (kind, horizontal),
                 (LayoutKind::HorizontalStack, true) | (LayoutKind::VerticalStack, false)
             );
             if stacked_on_axis {
-                let min_total = selected_min + stack_span;
-                let fixed_total = selected_fixed.map(|v| v + stack_span);
-                let max_total = selected_max.map(|v| v + stack_span);
-                return (min_total, fixed_total, max_total, selected_can_grow);
+                let required_focus = mins
+                    .iter()
+                    .copied()
+                    .zip(fixed_parts.iter().copied())
+                    .fold(0.0_f64, |acc, (min, fixed)| acc.max(fixed.unwrap_or(min)));
+                return (required_focus + stack_span, None, None, any_grow);
             }
-            return (selected_min, selected_fixed, selected_max, selected_can_grow);
+            let fixed_max = fixed_parts.iter().copied().try_fold(0.0, |acc, part| match part {
+                Some(value) => Some(if value > acc { value } else { acc }),
+                None => None,
+            });
+            return (min_max, fixed_max, None, any_grow);
         }
 
         if axis_aligned {
@@ -2477,19 +2466,11 @@ impl Layout {
                 any_grow,
             )
         } else {
-            let max_min = max_parts
-                .into_iter()
-                .fold(None::<f64>, |acc, part| match (acc, part) {
-                (Some(current), Some(value)) => Some(current.min(value)),
-                (Some(current), None) => Some(current),
-                (None, Some(value)) => Some(value),
-                (None, None) => None,
-            });
             let fixed_max = fixed_parts.into_iter().try_fold(0.0, |acc, part| match part {
                 Some(value) => Some(if value > acc { value } else { acc }),
                 None => None,
             });
-            (min_max, fixed_max, max_min, any_grow)
+            (min_max, fixed_max, None, any_grow)
         }
     }
 
@@ -2560,7 +2541,11 @@ impl Layout {
                         gaps,
                         is_horizontal,
                     );
-                    let axis_len = if is_horizontal { rect.size.width } else { rect.size.height };
+                    let axis_len = if is_horizontal {
+                        rect.size.width
+                    } else {
+                        rect.size.height
+                    };
                     // Stack offset capping exists to preserve required focused size.
                     // A max-only cap is not a required reservation and should not shrink
                     // the stack slot or reduce offset budget.
@@ -2710,17 +2695,16 @@ impl Layout {
         let axis_constraints: Vec<AxisConstraints> = children
             .iter()
             .map(|&child| {
-                let (min, fixed, max, can_grow) =
-                    self.node_axis_constraints(
-                        map,
-                        window,
-                        selection,
-                        child,
-                        constraints,
-                        stack_offset,
-                        gaps,
-                        horizontal,
-                    );
+                let (min, fixed, max, can_grow) = self.node_axis_constraints(
+                    map,
+                    window,
+                    selection,
+                    child,
+                    constraints,
+                    stack_offset,
+                    gaps,
+                    horizontal,
+                );
                 AxisConstraints {
                     min,
                     fixed,
@@ -3265,7 +3249,6 @@ mod tests {
         system.select_window(layout, settings);
         system.join_selection_with_direction(layout, Direction::Right);
         let _ = system.apply_stacking_to_parent_of_selection(layout, StackDefaultOrientation::Same);
-        system.select_window(layout, settings);
 
         let mut constraints = HashMap::default();
         constraints.insert(
@@ -3283,27 +3266,112 @@ mod tests {
         );
 
         let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1200.0, 800.0));
-        let positions = system.calculate_layout(
-            layout,
-            screen,
-            40.0,
-            &constraints,
-            &Default::default(),
-            0.0,
-            Default::default(),
-            Default::default(),
-        );
-        let frames: HashMap<WindowId, CGRect> = positions.into_iter().collect();
+        assert!(system.select_window(layout, settings));
+        let frames: HashMap<WindowId, CGRect> = system
+            .calculate_layout(
+                layout,
+                screen,
+                40.0,
+                &constraints,
+                &Default::default(),
+                0.0,
+                Default::default(),
+                Default::default(),
+            )
+            .into_iter()
+            .collect();
+
         let settings_frame = frames.get(&settings).copied().expect("settings frame missing");
         let sibling_frame = frames.get(&sibling).copied().expect("sibling frame missing");
-
         assert!(
             settings_frame.size.width <= 321.0,
             "focused fixed-size settings window should not keep an oversized stack slot"
         );
         assert!(
-            sibling_frame.size.width >= 600.0,
-            "sibling outside mixed stack should receive released width"
+            sibling_frame.size.width >= 399.0,
+            "sibling outside mixed stack should keep its normal split share"
+        );
+    }
+
+    #[test]
+    fn focused_locked_child_does_not_shrink_parent_stack_container() {
+        use crate::common::config::StackDefaultOrientation;
+
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
+
+        let constrained = w(14);
+        let normal = w(15);
+        let sibling = w(16);
+        system.add_window_after_selection(layout, constrained);
+        system.add_window_after_selection(layout, normal);
+        system.add_window_after_selection(layout, sibling);
+
+        system.select_window(layout, constrained);
+        system.join_selection_with_direction(layout, Direction::Right);
+        let _ = system.apply_stacking_to_parent_of_selection(layout, StackDefaultOrientation::Same);
+
+        let mut constraints = HashMap::default();
+        constraints.insert(
+            constrained,
+            WindowLayoutConstraints {
+                is_resizable: false,
+                locked_width: 320.0,
+                locked_height: 200.0,
+                min_width: 320.0,
+                min_height: 200.0,
+                max_width: 320.0,
+                max_height: 200.0,
+            }
+            .normalized(),
+        );
+
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1200.0, 800.0));
+
+        assert!(system.select_window(layout, normal));
+        let normal_frames: HashMap<WindowId, CGRect> = system
+            .calculate_layout(
+                layout,
+                screen,
+                40.0,
+                &constraints,
+                &Default::default(),
+                0.0,
+                Default::default(),
+                Default::default(),
+            )
+            .into_iter()
+            .collect();
+
+        assert!(system.select_window(layout, constrained));
+        let constrained_frames: HashMap<WindowId, CGRect> = system
+            .calculate_layout(
+                layout,
+                screen,
+                40.0,
+                &constraints,
+                &Default::default(),
+                0.0,
+                Default::default(),
+                Default::default(),
+            )
+            .into_iter()
+            .collect();
+
+        let normal_sibling = normal_frames
+            .get(&sibling)
+            .copied()
+            .expect("sibling frame with unconstrained focus");
+        let constrained_sibling = constrained_frames
+            .get(&sibling)
+            .copied()
+            .expect("sibling frame with constrained focus");
+
+        assert!(
+            (normal_sibling.size.width - constrained_sibling.size.width).abs() < 1.0,
+            "switching focus to a constrained stack child should not shrink the parent split"
         );
     }
 
@@ -3473,6 +3541,287 @@ mod tests {
         // With offset 250 and 3 children in a 420px container, focused width stays near 100px.
         assert!(focused.size.width <= 360.0);
         assert!(focused.size.width <= 200.0);
+    }
+
+    #[test]
+    fn focused_max_only_child_does_not_shrink_mixed_stack_container() {
+        use crate::common::config::StackDefaultOrientation;
+
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
+
+        let constrained = w(46);
+        let normal = w(47);
+        let sibling = w(48);
+        system.add_window_after_selection(layout, constrained);
+        system.add_window_after_selection(layout, normal);
+        system.add_window_after_selection(layout, sibling);
+
+        system.select_window(layout, constrained);
+        system.join_selection_with_direction(layout, Direction::Right);
+        let _ = system.apply_stacking_to_parent_of_selection(layout, StackDefaultOrientation::Same);
+        assert!(system.select_window(layout, constrained));
+
+        let mut constraints = HashMap::default();
+        constraints.insert(
+            constrained,
+            WindowLayoutConstraints {
+                is_resizable: true,
+                locked_width: 0.0,
+                locked_height: 0.0,
+                min_width: 0.0,
+                min_height: 0.0,
+                max_width: 320.0,
+                max_height: 0.0,
+            }
+            .normalized(),
+        );
+
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1200.0, 800.0));
+        let frames: HashMap<WindowId, CGRect> = system
+            .calculate_layout(
+                layout,
+                screen,
+                40.0,
+                &constraints,
+                &Default::default(),
+                0.0,
+                Default::default(),
+                Default::default(),
+            )
+            .into_iter()
+            .collect();
+
+        let constrained_frame = frames.get(&constrained).copied().expect("constrained frame");
+        let sibling_frame = frames.get(&sibling).copied().expect("sibling frame");
+
+        assert!(
+            constrained_frame.size.width <= 321.0,
+            "focused max-only child should still be clamped at the leaf"
+        );
+        assert!(
+            sibling_frame.size.width <= 601.0,
+            "max-only focused child should not reclaim parent split space"
+        );
+    }
+
+    #[test]
+    fn max_only_height_does_not_cap_plain_row_cross_axis() {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::Vertical);
+
+        let top_row = system.tree.mk_node().push_back(root);
+        system.tree.data.layout.set_kind(top_row, LayoutKind::Horizontal);
+
+        let constrained = w(37);
+        let unconstrained = w(38);
+        let sibling = w(39);
+        let constrained_node = system.add_window_under(layout, top_row, constrained);
+        let _ = system.add_window_under(layout, top_row, unconstrained);
+        let _ = system.add_window_under(layout, root, sibling);
+        system.select(constrained_node);
+
+        let mut constraints = HashMap::default();
+        constraints.insert(
+            constrained,
+            WindowLayoutConstraints {
+                is_resizable: true,
+                locked_width: 0.0,
+                locked_height: 0.0,
+                min_width: 0.0,
+                min_height: 0.0,
+                max_width: 0.0,
+                max_height: 200.0,
+            }
+            .normalized(),
+        );
+
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1200.0, 800.0));
+        let frames: HashMap<WindowId, CGRect> = system
+            .calculate_layout(
+                layout,
+                screen,
+                0.0,
+                &constraints,
+                &Default::default(),
+                0.0,
+                Default::default(),
+                Default::default(),
+            )
+            .into_iter()
+            .collect();
+
+        let constrained_frame = frames.get(&constrained).copied().expect("constrained frame");
+        let unconstrained_frame = frames.get(&unconstrained).copied().expect("unconstrained frame");
+        let sibling_frame = frames.get(&sibling).copied().expect("sibling frame");
+
+        assert!(
+            constrained_frame.size.height <= 201.0,
+            "constrained leaf should still honor its own max height"
+        );
+        assert!(
+            unconstrained_frame.size.height >= 399.0,
+            "unconstrained sibling in the row should keep the row's full height"
+        );
+        assert!(
+            (sibling_frame.size.height - 400.0).abs() < 1.0,
+            "cross-axis max-only constraint should not change the parent split allocation"
+        );
+    }
+
+    #[test]
+    fn max_only_height_does_not_cap_stack_cross_axis() {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::Vertical);
+
+        let top_stack = system.tree.mk_node().push_back(root);
+        system.tree.data.layout.set_kind(top_stack, LayoutKind::HorizontalStack);
+
+        let constrained = w(40);
+        let unconstrained = w(41);
+        let sibling = w(42);
+        let constrained_node = system.add_window_under(layout, top_stack, constrained);
+        let _ = system.add_window_under(layout, top_stack, unconstrained);
+        let _ = system.add_window_under(layout, root, sibling);
+        system.select(constrained_node);
+
+        let mut constraints = HashMap::default();
+        constraints.insert(
+            constrained,
+            WindowLayoutConstraints {
+                is_resizable: true,
+                locked_width: 0.0,
+                locked_height: 0.0,
+                min_width: 0.0,
+                min_height: 0.0,
+                max_width: 0.0,
+                max_height: 200.0,
+            }
+            .normalized(),
+        );
+
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1200.0, 800.0));
+        let frames: HashMap<WindowId, CGRect> = system
+            .calculate_layout(
+                layout,
+                screen,
+                40.0,
+                &constraints,
+                &Default::default(),
+                0.0,
+                Default::default(),
+                Default::default(),
+            )
+            .into_iter()
+            .collect();
+
+        let constrained_frame = frames.get(&constrained).copied().expect("constrained frame");
+        let unconstrained_frame = frames.get(&unconstrained).copied().expect("unconstrained frame");
+        let sibling_frame = frames.get(&sibling).copied().expect("sibling frame");
+
+        assert!(
+            constrained_frame.size.height <= 201.0,
+            "focused constrained stack child should still honor its own max height"
+        );
+        assert!(
+            unconstrained_frame.size.height >= 399.0,
+            "other stacked windows should not inherit the focused window's cross-axis max"
+        );
+        assert!(
+            (sibling_frame.size.height - 400.0).abs() < 1.0,
+            "stack container should not shrink just because the selected child has a max-only cap"
+        );
+    }
+
+    #[test]
+    fn stack_cross_axis_size_does_not_change_with_focus() {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::Vertical);
+
+        let top_stack = system.tree.mk_node().push_back(root);
+        system.tree.data.layout.set_kind(top_stack, LayoutKind::HorizontalStack);
+
+        let constrained = w(43);
+        let unconstrained = w(44);
+        let sibling = w(45);
+        let constrained_node = system.add_window_under(layout, top_stack, constrained);
+        let _unconstrained_node = system.add_window_under(layout, top_stack, unconstrained);
+        let _ = system.add_window_under(layout, root, sibling);
+
+        let mut constraints = HashMap::default();
+        constraints.insert(
+            constrained,
+            WindowLayoutConstraints {
+                is_resizable: false,
+                locked_width: 280.0,
+                locked_height: 200.0,
+                min_width: 280.0,
+                min_height: 200.0,
+                max_width: 280.0,
+                max_height: 200.0,
+            }
+            .normalized(),
+        );
+
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1200.0, 800.0));
+
+        system.select(constrained_node);
+        let constrained_frames: HashMap<WindowId, CGRect> = system
+            .calculate_layout(
+                layout,
+                screen,
+                40.0,
+                &constraints,
+                &Default::default(),
+                0.0,
+                Default::default(),
+                Default::default(),
+            )
+            .into_iter()
+            .collect();
+
+        assert!(system.select_window(layout, unconstrained));
+        let unconstrained_frames: HashMap<WindowId, CGRect> = system
+            .calculate_layout(
+                layout,
+                screen,
+                40.0,
+                &constraints,
+                &Default::default(),
+                0.0,
+                Default::default(),
+                Default::default(),
+            )
+            .into_iter()
+            .collect();
+
+        let constrained_sibling = constrained_frames
+            .get(&sibling)
+            .copied()
+            .expect("sibling frame when constrained child focused");
+        let unconstrained_sibling = unconstrained_frames
+            .get(&sibling)
+            .copied()
+            .expect("sibling frame when unconstrained child focused");
+        let unconstrained_frame =
+            unconstrained_frames.get(&unconstrained).copied().expect("unconstrained frame");
+
+        assert!(
+            (constrained_sibling.size.height - unconstrained_sibling.size.height).abs() < 1.0,
+            "switching focus inside a stack should not resize sibling containers"
+        );
+        assert!(
+            unconstrained_frame.size.height >= 399.0,
+            "an unconstrained focused child should still be allowed to use the stack's full height"
+        );
     }
 
     // Tests for StackLayoutResult::get_focused_frame_for_index
@@ -3736,8 +4085,14 @@ mod tests {
         let total = system.tree.data.layout.info[root].total;
 
         assert!((s1 - s2).abs() < 0.0001, "second insert should split 50/50");
-        assert!((total - (s1 + s2)).abs() < 0.0001, "parent total should be recomputed");
-        assert!((s1 / total - 0.5).abs() < 0.0001, "resulting proportion should be 50%");
+        assert!(
+            (total - (s1 + s2)).abs() < 0.0001,
+            "parent total should be recomputed"
+        );
+        assert!(
+            (s1 / total - 0.5).abs() < 0.0001,
+            "resulting proportion should be 50%"
+        );
     }
 
     #[test]
@@ -3797,8 +4152,14 @@ mod tests {
 
         let f1 = frames.get(&w1).copied().expect("w1 frame missing");
         let f2 = frames.get(&w2).copied().expect("w2 frame missing");
-        assert!(f1.size.width >= 999.0, "non-resizable w1 should keep locked width");
-        assert!(f2.size.width >= 499.0, "non-resizable w2 should keep locked width");
+        assert!(
+            f1.size.width >= 999.0,
+            "non-resizable w1 should keep locked width"
+        );
+        assert!(
+            f2.size.width >= 499.0,
+            "non-resizable w2 should keep locked width"
+        );
     }
 
     #[test]
@@ -3858,7 +4219,10 @@ mod tests {
 
         let f1 = frames.get(&w1).copied().expect("w1 frame missing");
         let f2 = frames.get(&w2).copied().expect("w2 frame missing");
-        assert!((f1.size.width - f2.size.width).abs() < 1.0, "new split should remain even");
+        assert!(
+            (f1.size.width - f2.size.width).abs() < 1.0,
+            "new split should remain even"
+        );
     }
 
     #[test]
@@ -3919,7 +4283,10 @@ mod tests {
         let f1 = frames.get(&w1).copied().expect("w1 frame missing");
         let f2 = frames.get(&w2).copied().expect("w2 frame missing");
         assert!(f1.size.width >= 999.0, "axis-locked width should be preserved");
-        assert!(f2.size.width >= 499.0, "remaining sibling should get leftover width");
+        assert!(
+            f2.size.width >= 499.0,
+            "remaining sibling should get leftover width"
+        );
     }
 
     #[test]
@@ -4127,5 +4494,4 @@ mod tests {
             .expect("right node proportion missing");
         assert_eq!(before, after);
     }
-
 }

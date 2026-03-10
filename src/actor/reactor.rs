@@ -2586,11 +2586,9 @@ impl Reactor {
                 self.request_refocus_if_hidden(*space, *wid);
             }
             LayoutEvent::WindowsOnScreenUpdated(space, _, windows, _) => {
-                let hidden_exists = windows
-                    .iter()
-                    .any(|(wid, _, _, _, _, _, _, _)| {
-                        self.window_in_non_active_workspace(*space, *wid)
-                    });
+                let hidden_exists = windows.iter().any(|(wid, _, _, _, _, _, _, _)| {
+                    self.window_in_non_active_workspace(*space, *wid)
+                });
                 if hidden_exists {
                     self.refocus_manager.refocus_state = RefocusState::Pending(*space);
                 }

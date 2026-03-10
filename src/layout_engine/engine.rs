@@ -1943,7 +1943,11 @@ impl LayoutEngine {
     }
 
     pub fn load(_path: PathBuf) -> anyhow::Result<Self> {
-        Ok(Self::new(&VirtualWorkspaceSettings::default(), &LayoutSettings::default(), None))
+        Ok(Self::new(
+            &VirtualWorkspaceSettings::default(),
+            &LayoutSettings::default(),
+            None,
+        ))
     }
 
     pub fn save(&self, _path: PathBuf) -> std::io::Result<()> { Ok(()) }
@@ -2769,8 +2773,26 @@ mod tests {
                     None,
                     None,
                 ),
-                (other_a, None, None, None, true, CGSize::new(600.0, 600.0), None, None),
-                (other_b, None, None, None, true, CGSize::new(600.0, 600.0), None, None),
+                (
+                    other_a,
+                    None,
+                    None,
+                    None,
+                    true,
+                    CGSize::new(600.0, 600.0),
+                    None,
+                    None,
+                ),
+                (
+                    other_b,
+                    None,
+                    None,
+                    None,
+                    true,
+                    CGSize::new(600.0, 600.0),
+                    None,
+                    None,
+                ),
             ],
             None,
         ));

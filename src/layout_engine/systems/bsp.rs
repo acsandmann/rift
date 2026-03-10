@@ -470,7 +470,8 @@ impl BspLayoutSystem {
                     } else {
                         rect
                     };
-                    if !*fullscreen && !*fullscreen_within_gaps
+                    if !*fullscreen
+                        && !*fullscreen_within_gaps
                         && let Some(c) = constraints.get(w).copied()
                     {
                         let c = c.normalized();
@@ -629,8 +630,7 @@ impl BspLayoutSystem {
                         return (
                             c.min_for_axis(horizontal),
                             c.fixed_for_axis(horizontal),
-                            (c.max_for_axis(horizontal) > 0.0)
-                                .then(|| c.max_for_axis(horizontal)),
+                            (c.max_for_axis(horizontal) > 0.0).then(|| c.max_for_axis(horizontal)),
                             c.resizable_for_axis(horizontal),
                         );
                     }
@@ -672,10 +672,8 @@ impl BspLayoutSystem {
                         .iter()
                         .copied()
                         .try_fold(0.0, |acc, part| part.map(|p| acc + p));
-                    let max_total = max_parts
-                        .iter()
-                        .copied()
-                        .try_fold(0.0, |acc, part| part.map(|p| acc + p));
+                    let max_total =
+                        max_parts.iter().copied().try_fold(0.0, |acc, part| part.map(|p| acc + p));
                     (
                         min_total,
                         fixed_total.map(|v| v + gap_total),
@@ -686,20 +684,11 @@ impl BspLayoutSystem {
                     let min_max = mins
                         .into_iter()
                         .fold(0.0, |acc, value| if value > acc { value } else { acc });
-                    let max_max =
-                        max_parts
-                            .into_iter()
-                            .fold(None::<f64>, |acc, part| match (acc, part) {
-                                (Some(current), Some(value)) => Some(current.min(value)),
-                                (Some(current), None) => Some(current),
-                                (None, Some(value)) => Some(value),
-                                (None, None) => None,
-                            });
                     let fixed_max = fixed_parts.into_iter().try_fold(0.0, |acc, part| match part {
                         Some(value) => Some(if value > acc { value } else { acc }),
                         None => None,
                     });
-                    (min_max, fixed_max, max_max, any_grow)
+                    (min_max, fixed_max, None, any_grow)
                 }
             }
             None => (0.0, None, None, true),
@@ -865,6 +854,69 @@ mod tests {
         assert!((f1.size.width - 600.0).abs() < 1.0);
         assert!((f2.size.width - 1000.0).abs() < 1.0);
         assert!((f2.origin.x - 600.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn max_only_height_does_not_cap_cross_axis_subtree() {
+        let mut system = BspLayoutSystem::default();
+        let layout = system.create_layout();
+
+        let constrained = w(103);
+        let unconstrained = w(104);
+        let sibling = w(105);
+        system.add_window_after_selection(layout, constrained);
+        system.split_selection(layout, LayoutKind::Vertical);
+        system.add_window_after_selection(layout, sibling);
+        assert!(system.select_window(layout, constrained));
+        system.split_selection(layout, LayoutKind::Horizontal);
+        system.add_window_after_selection(layout, unconstrained);
+
+        let mut constraints = HashMap::default();
+        constraints.insert(
+            constrained,
+            WindowLayoutConstraints {
+                is_resizable: true,
+                locked_width: 0.0,
+                locked_height: 0.0,
+                min_width: 0.0,
+                min_height: 0.0,
+                max_width: 0.0,
+                max_height: 200.0,
+            }
+            .normalized(),
+        );
+
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1200.0, 800.0));
+        let frames: HashMap<WindowId, CGRect> = system
+            .calculate_layout(
+                layout,
+                screen,
+                0.0,
+                &constraints,
+                &Default::default(),
+                0.0,
+                Default::default(),
+                Default::default(),
+            )
+            .into_iter()
+            .collect();
+
+        let constrained_frame = frames.get(&constrained).copied().expect("constrained frame");
+        let unconstrained_frame = frames.get(&unconstrained).copied().expect("unconstrained frame");
+        let sibling_frame = frames.get(&sibling).copied().expect("sibling frame");
+
+        assert!(
+            constrained_frame.size.height <= 201.0,
+            "constrained leaf should still honor its own max height"
+        );
+        assert!(
+            unconstrained_frame.size.height >= 399.0,
+            "unconstrained child in the orthogonal subtree should keep the subtree's full height"
+        );
+        assert!(
+            (sibling_frame.size.height - 400.0).abs() < 1.0,
+            "orthogonal max-only constraint should not change the parent split allocation"
+        );
     }
 }
 
