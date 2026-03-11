@@ -629,9 +629,10 @@ impl LayoutSystem for ScrollingLayoutSystem {
                     }
                 }
             }
-            let mut width = fixed_w.unwrap_or(base_width.max(min_w)).max(min_w);
+            let required_w = fixed_w.unwrap_or(min_w).max(min_w);
+            let mut width = base_width.max(required_w);
             if let Some(max_w) = max_w {
-                width = width.min(max_w);
+                width = width.min(max_w).max(required_w);
             }
             // Keep scrolling columns bounded to the tiling viewport. This layout
             // scrolls between column starts; it does not pan within a single
@@ -1531,6 +1532,67 @@ mod tests {
         );
         let frame = frame_for(&frames, window);
         assert!(frame.size.width <= 600.0);
+    }
+
+    #[test]
+    fn locked_window_width_wins_over_smaller_sibling_max_width_in_same_column() {
+        let mut system = ScrollingLayoutSystem::new(&ScrollingLayoutSettings::default());
+        let layout = system.create_layout();
+        let locked = wid(31, 1);
+        let capped = wid(31, 2);
+        system.add_window_after_selection(layout, locked);
+        system.add_window_after_selection(layout, capped);
+
+        let state = system.layouts.get_mut(layout).expect("layout state missing");
+        state.columns = vec![Column {
+            windows: vec![locked, capped],
+            width_offset: 0.0,
+        }];
+        state.selected = Some(locked);
+
+        let mut constraints = HashMap::default();
+        constraints.insert(
+            locked,
+            WindowLayoutConstraints {
+                is_resizable: false,
+                locked_width: 700.0,
+                locked_height: 400.0,
+                min_width: 700.0,
+                min_height: 0.0,
+                max_width: 700.0,
+                max_height: 0.0,
+            }
+            .normalized(),
+        );
+        constraints.insert(
+            capped,
+            WindowLayoutConstraints {
+                is_resizable: true,
+                locked_width: 0.0,
+                locked_height: 0.0,
+                min_width: 0.0,
+                min_height: 0.0,
+                max_width: 500.0,
+                max_height: 0.0,
+            }
+            .normalized(),
+        );
+
+        let frames = system.calculate_layout(
+            layout,
+            screen(1200.0, 700.0),
+            0.0,
+            &constraints,
+            &GapSettings::default(),
+            0.0,
+            Default::default(),
+            Default::default(),
+        );
+        let locked_frame = frame_for(&frames, locked);
+        let capped_frame = frame_for(&frames, capped);
+
+        assert!(locked_frame.size.width >= 699.0);
+        assert!(capped_frame.size.width <= 501.0);
     }
 
     #[test]
