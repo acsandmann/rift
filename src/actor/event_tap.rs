@@ -460,7 +460,7 @@ impl EventTap {
                 }
             }
             Request::EnforceHidden => {
-                if state.hidden {
+                if state.mouse_hides_on_focus && state.hidden {
                     if let Err(e) = event::hide_mouse() {
                         warn!("Failed to hide mouse: {e:?}");
                     }
@@ -534,6 +534,7 @@ impl EventTap {
                 *self.config.borrow_mut() = new_config;
                 *self.disable_hotkey.borrow_mut() = disable_hotkey;
                 {
+                    let prev_mouse_hides_on_focus = state.mouse_hides_on_focus;
                     state.mouse_hides_on_focus = mouse_hides_on_focus;
                     state.focus_follows_mouse_config_enabled = focus_follows_mouse_config_enabled;
                     state.stack_line_enabled = stack_line_enabled;
@@ -547,6 +548,13 @@ impl EventTap {
                         .unwrap_or(false);
                     if prev_active && !state.disable_hotkey_active {
                         state.reset(true);
+                    }
+                    if prev_mouse_hides_on_focus && !state.mouse_hides_on_focus && state.hidden {
+                        debug!("Showing mouse after disabling mouse_hides_on_focus");
+                        if let Err(e) = event::show_mouse() {
+                            warn!("Failed to show mouse: {e:?}");
+                        }
+                        state.hidden = false;
                     }
                 }
                 should_update_gesture_handlers = true;
