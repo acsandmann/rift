@@ -27,7 +27,10 @@ type Sid = u64;
 pub struct EventData {
     pub event_type: CGSEventType,
     pub window_id: Option<Wid>,
+    pub window_ids: Option<Vec<Wid>>,
     pub space_id: Option<Sid>,
+    pub connection_id: Option<u32>,
+    pub count: Option<u32>,
     pub payload: Option<Vec<u8>>,
     pub len: usize,
 }
@@ -111,6 +114,19 @@ fn read<T: Copy + Sized + 'static>(bytes: &[u8], off: usize) -> Option<T> {
     Some(unsafe { std::ptr::read_unaligned(buf.as_ptr() as *const T) })
 }
 
+fn read_u32s(bytes: &[u8], off: usize, count: usize) -> Option<Vec<u32>> {
+    let byte_count = count.checked_mul(std::mem::size_of::<u32>())?;
+    if bytes.len() < off + byte_count {
+        return None;
+    }
+
+    let mut out = Vec::with_capacity(count);
+    for idx in 0..count {
+        out.push(read::<u32>(bytes, off + idx * std::mem::size_of::<u32>())?);
+    }
+    Some(out)
+}
+
 extern "C" fn connection_callback(
     event_raw: u32,
     data: *mut c_void,
@@ -135,7 +151,10 @@ extern "C" fn connection_callback(
     };
 
     let mut window_id = None;
+    let mut window_ids = None;
     let mut space_id = None;
+    let mut connection_id = None;
+    let mut count = None;
 
     match kind {
         CGSEventType::Known(KnownCGSEvent::SpaceWindowDestroyed)
@@ -153,11 +172,75 @@ extern "C" fn connection_callback(
         }
 
         CGSEventType::Known(KnownCGSEvent::SpaceCreated)
-        | CGSEventType::Known(KnownCGSEvent::SpaceDestroyed) => {
+        | CGSEventType::Known(KnownCGSEvent::SpaceDestroyed)
+        | CGSEventType::Known(KnownCGSEvent::SpaceCurrentChanged)
+        | CGSEventType::Known(KnownCGSEvent::PackagesStatusBarSpaceChanged) => {
             if let Some(sid) = read::<u64>(bytes, 0) {
                 space_id = Some(sid)
             } else {
                 warn!("no space_id on {kind}");
+            }
+        }
+
+        CGSEventType::Known(KnownCGSEvent::SpaceWindowBatchReassociated) => {
+            if let Some(sid) = read::<u64>(bytes, 0) {
+                space_id = Some(sid);
+            } else {
+                warn!("Skylight event {kind} payload too short for space id (len={len})");
+            }
+
+            match read::<u32>(bytes, std::mem::size_of::<u64>()) {
+                Some(n) => {
+                    count = Some(n);
+                    let expected = n as usize;
+                    let off = std::mem::size_of::<u64>() + std::mem::size_of::<u32>();
+                    match read_u32s(bytes, off, expected) {
+                        Some(ids) => {
+                            if let Some(first) = ids.first().copied() {
+                                window_id = Some(first);
+                            }
+                            window_ids = Some(ids);
+                        }
+                        None if expected == 0 => {
+                            window_ids = Some(Vec::new());
+                        }
+                        None => {
+                            warn!(
+                                "Skylight event {kind} payload too short for {expected} window ids (len={len})"
+                            );
+                        }
+                    }
+                }
+                None => {
+                    warn!("Skylight event {kind} payload too short for count (len={len})");
+                }
+            }
+        }
+
+        CGSEventType::Known(KnownCGSEvent::ManagedSpaceMembershipUpdated)
+        | CGSEventType::Known(KnownCGSEvent::SpaceWindowManagementCapabilitiesChanged) => {
+            // These appear to be space-management notifications. Observed call
+            // sites suggest a leading space identifier and sometimes a window id.
+            if let Some(sid) = read::<u64>(bytes, 0) {
+                space_id = Some(sid);
+                if let Some(wid) = read::<u32>(bytes, std::mem::size_of::<u64>()) {
+                    window_id = Some(wid);
+                }
+            } else if let Some(wid) = read::<u32>(bytes, 0) {
+                window_id = Some(wid);
+            } else if len != 0 {
+                warn!(
+                    "Skylight event {kind} payload did not match expected space/window layout (len={len})"
+                );
+            }
+        }
+
+        CGSEventType::Known(KnownCGSEvent::WindowManagerSpaceFrontConnectionChanged)
+        | CGSEventType::Known(KnownCGSEvent::WindowManagerGlobalFrontConnectionChanged) => {
+            if let Some(cid) = read::<u32>(bytes, 0) {
+                connection_id = Some(cid);
+            } else {
+                warn!("Skylight event {kind} payload too short for connection id (len={len})");
             }
         }
 
@@ -167,7 +250,10 @@ extern "C" fn connection_callback(
         | CGSEventType::Known(KnownCGSEvent::WindowReordered)
         | CGSEventType::Known(KnownCGSEvent::WindowLevelChanged)
         | CGSEventType::Known(KnownCGSEvent::WindowUnhidden)
-        | CGSEventType::Known(KnownCGSEvent::WindowHidden) => {
+        | CGSEventType::Known(KnownCGSEvent::WindowHidden)
+        | CGSEventType::Known(KnownCGSEvent::WindowManagerActivatingClickOrdering)
+        | CGSEventType::Known(KnownCGSEvent::WindowOrderingGroupChanged)
+        | CGSEventType::Known(KnownCGSEvent::WindowParentChanged) => {
             if let Some(wid) = read::<u32>(bytes, 0) {
                 window_id = Some(wid);
             } else {
@@ -187,7 +273,10 @@ extern "C" fn connection_callback(
     let event_data = EventData {
         event_type: kind,
         window_id,
+        window_ids,
         space_id,
+        connection_id,
+        count,
         payload,
         len,
     };
