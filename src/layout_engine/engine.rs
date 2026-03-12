@@ -895,19 +895,19 @@ impl LayoutEngine {
     fn add_window_to_layout(&mut self, space: SpaceId, wid: WindowId) -> bool {
         let active_space_before = self.space_with_window(wid);
 
-        let assigned_workspace = match self.virtual_workspace_manager.workspace_for_window(space, wid)
-        {
-            Some(workspace_id) => workspace_id,
-            None => match self.virtual_workspace_manager.auto_assign_window(wid, space) {
-                Ok(workspace_id) => workspace_id,
-                Err(e) => {
-                    warn!("Failed to auto-assign window to workspace: {:?}", e);
-                    self.virtual_workspace_manager
-                        .active_workspace(space)
-                        .expect("No active workspace available")
-                }
-            },
-        };
+        let assigned_workspace =
+            match self.virtual_workspace_manager.workspace_for_window(space, wid) {
+                Some(workspace_id) => workspace_id,
+                None => match self.virtual_workspace_manager.auto_assign_window(wid, space) {
+                    Ok(workspace_id) => workspace_id,
+                    Err(e) => {
+                        warn!("Failed to auto-assign window to workspace: {:?}", e);
+                        self.virtual_workspace_manager
+                            .active_workspace(space)
+                            .expect("No active workspace available")
+                    }
+                },
+            };
 
         let should_be_floating = self.floating.is_floating(wid);
 
@@ -2999,12 +2999,7 @@ mod tests {
         ];
 
         let _ = engine.handle_event(LayoutEvent::SpaceExposed(space, screen.size));
-        let _ = engine.handle_event(LayoutEvent::WindowsOnScreenUpdated(
-            space,
-            pid,
-            windows,
-            None,
-        ));
+        let _ = engine.handle_event(LayoutEvent::WindowsOnScreenUpdated(space, pid, windows, None));
         let _ = engine.handle_event(LayoutEvent::WindowFocused(space, WindowId::new(pid, 1)));
         let gaps = engine.layout_settings.gaps.clone();
 
