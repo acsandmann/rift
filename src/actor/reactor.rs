@@ -1935,8 +1935,10 @@ impl Reactor {
                             window.ignore_app_rule = false;
                         }
 
+                        let effective_floating = assignment.floating
+                            || (!assignment.prev_rule_decision && was_floating);
                         let needs_layout_refresh =
-                            !was_assigned || was_floating != assignment.floating || was_ignored;
+                            !was_assigned || was_floating != effective_floating || was_ignored;
                         if needs_layout_refresh {
                             windows_needing_layout_refresh.push(*wid);
                         }

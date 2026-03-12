@@ -237,6 +237,10 @@ impl LayoutSystem for StackLayoutSystem {
         }
     }
 
+    fn windows_for_app(&self, layout: LayoutId, pid: pid_t) -> Vec<WindowId> {
+        self.inner.windows_for_app(layout, pid)
+    }
+
     fn set_windows_for_app(&mut self, layout: LayoutId, pid: pid_t, desired: Vec<WindowId>) {
         let before = self.windows_in_layout_preorder(layout);
         self.inner.set_windows_for_app(layout, pid, desired);

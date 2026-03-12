@@ -587,6 +587,10 @@ impl LayoutSystem for MasterStackLayoutSystem {
         }
     }
 
+    fn windows_for_app(&self, layout: LayoutId, pid: pid_t) -> Vec<WindowId> {
+        self.inner.windows_for_app(layout, pid)
+    }
+
     fn set_windows_for_app(&mut self, layout: LayoutId, pid: pid_t, mut desired: Vec<WindowId>) {
         let (_root, master, stack) = self.ensure_structure(layout);
         let root = self.inner.root(layout);

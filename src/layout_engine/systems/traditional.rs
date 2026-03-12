@@ -598,6 +598,14 @@ impl LayoutSystem for TraditionalLayoutSystem {
         }
     }
 
+    fn windows_for_app(&self, layout: LayoutId, pid: pid_t) -> Vec<WindowId> {
+        self.root(layout)
+            .traverse_postorder(self.map())
+            .filter_map(|node| self.window_at(node))
+            .filter(|wid| wid.pid == pid)
+            .collect()
+    }
+
     fn set_windows_for_app(&mut self, layout: LayoutId, pid: pid_t, mut desired: Vec<WindowId>) {
         let root = self.root(layout);
         let mut current = root

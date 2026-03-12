@@ -1117,6 +1117,16 @@ impl LayoutSystem for BspLayoutSystem {
         }
     }
 
+    fn windows_for_app(&self, layout: LayoutId, pid: pid_t) -> Vec<WindowId> {
+        if let Some(state) = self.layouts.get(layout).copied() {
+            let mut under = Vec::new();
+            self.collect_windows_under(state.root, &mut under);
+            under.into_iter().filter(|w| w.pid == pid).collect()
+        } else {
+            Vec::new()
+        }
+    }
+
     fn set_windows_for_app(&mut self, layout: LayoutId, pid: pid_t, desired: Vec<WindowId>) {
         let desired_set: HashSet<WindowId> = desired.iter().copied().collect();
         let mut current_set: HashSet<WindowId> = HashSet::default();

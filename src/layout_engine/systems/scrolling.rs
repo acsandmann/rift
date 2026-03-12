@@ -969,6 +969,19 @@ impl LayoutSystem for ScrollingLayoutSystem {
         }
     }
 
+    fn windows_for_app(&self, layout: LayoutId, pid: pid_t) -> Vec<WindowId> {
+        self.layout_state(layout)
+            .map(|state| {
+                state
+                    .columns
+                    .iter()
+                    .flat_map(|c| c.windows.iter().copied())
+                    .filter(|w| w.pid == pid)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn set_windows_for_app(&mut self, layout: LayoutId, pid: pid_t, desired: Vec<WindowId>) {
         let Some(state) = self.layout_state_mut(layout) else {
             return;
