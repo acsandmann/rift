@@ -1895,9 +1895,24 @@ impl Reactor {
             if !self.is_space_active(space) {
                 continue;
             }
-            let mut manageable_windows: Vec<WindowId> = Vec::new();
+            let mut windows_needing_layout_refresh: Vec<WindowId> = Vec::new();
 
             for wid in &wids {
+                let (was_assigned, was_floating, was_ignored) = {
+                    let engine = &self.layout_manager.layout_engine;
+                    (
+                        engine
+                            .virtual_workspace_manager()
+                            .workspace_for_window(space, *wid)
+                            .is_some(),
+                        engine.is_window_floating(*wid),
+                        self.window_manager
+                            .windows
+                            .get(wid)
+                            .map(|window| window.ignore_app_rule)
+                            .unwrap_or(false),
+                    )
+                };
                 let assign_result = {
                     let window = self.window_manager.windows.get(wid);
                     self.layout_manager
@@ -1915,11 +1930,16 @@ impl Reactor {
                 };
 
                 match assign_result {
-                    Ok(AppRuleResult::Managed(_)) => {
+                    Ok(AppRuleResult::Managed(assignment)) => {
                         if let Some(window) = self.window_manager.windows.get_mut(wid) {
                             window.ignore_app_rule = false;
                         }
-                        manageable_windows.push(*wid);
+
+                        let needs_layout_refresh =
+                            !was_assigned || was_floating != assignment.floating || was_ignored;
+                        if needs_layout_refresh {
+                            windows_needing_layout_refresh.push(*wid);
+                        }
                     }
                     Ok(AppRuleResult::Unmanaged) => {
                         if let Some(window) = self.window_manager.windows.get_mut(wid) {
@@ -1943,12 +1963,15 @@ impl Reactor {
                         if let Some(window) = self.window_manager.windows.get_mut(wid) {
                             window.ignore_app_rule = false;
                         }
-                        manageable_windows.push(*wid);
+
+                        if !was_assigned || was_ignored {
+                            windows_needing_layout_refresh.push(*wid);
+                        }
                     }
                 }
             }
 
-            if manageable_windows.is_empty() {
+            if windows_needing_layout_refresh.is_empty() {
                 continue;
             }
 
@@ -1961,7 +1984,7 @@ impl Reactor {
                 CGSize,
                 Option<CGSize>,
                 Option<CGSize>,
-            )> = manageable_windows
+            )> = windows_needing_layout_refresh
                 .iter()
                 .map(|&wid| {
                     let window = self.window_manager.windows.get(&wid);

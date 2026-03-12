@@ -449,6 +449,63 @@ fn it_preserves_layout_after_login_screen() {
 }
 
 #[test]
+fn title_change_reapply_does_not_rebalance_unchanged_layout() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    reactor.config.virtual_workspaces.reapply_app_rules_on_title_change = true;
+
+    let space = SpaceId::new(1);
+    let full_screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    reactor.handle_event(screen_params_event(vec![full_screen], vec![Some(space)], vec![]));
+
+    reactor.handle_events(apps.make_app_with_opts(
+        1,
+        make_windows(3),
+        Some(WindowId::new(1, 1)),
+        true,
+        true,
+    ));
+    reactor.handle_event(Event::ApplicationGloballyActivated(1));
+    apps.simulate_until_quiet(&mut reactor);
+
+    assert!(reactor.layout_manager.layout_engine.selected_window(space).is_some());
+    reactor.handle_event(Event::Command(Command::Layout(LayoutCommand::MoveNode(
+        Direction::Up,
+    ))));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let modified = reactor.layout_manager.layout_engine.calculate_layout(
+        space,
+        full_screen,
+        &reactor.config.settings.layout.gaps,
+        0.0,
+        crate::common::config::HorizontalPlacement::Top,
+        crate::common::config::VerticalPlacement::Right,
+    );
+
+    reactor.handle_event(Event::WindowTitleChanged(
+        WindowId::new(1, 1),
+        "Renamed window".to_string(),
+    ));
+
+    assert_eq!(
+        reactor.layout_manager.layout_engine.calculate_layout(
+            space,
+            full_screen,
+            &reactor.config.settings.layout.gaps,
+            0.0,
+            crate::common::config::HorizontalPlacement::Top,
+            crate::common::config::VerticalPlacement::Right,
+        ),
+        modified
+    );
+}
+
+#[test]
 fn menu_open_state_is_cleared_when_owner_deactivates() {
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(
         &crate::common::config::VirtualWorkspaceSettings::default(),
