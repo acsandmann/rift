@@ -192,6 +192,33 @@ impl LayoutState {
         self.selected
     }
 
+    fn rekey_window(&mut self, old: WindowId, new: WindowId) -> bool {
+        if old == new {
+            return self.locate(old).is_some();
+        }
+        let Some((col_idx, row_idx)) = self.locate(old) else {
+            return false;
+        };
+        if self.locate(new).is_some() {
+            return false;
+        }
+
+        self.columns[col_idx].windows[row_idx] = new;
+        if self.selected == Some(old) {
+            self.selected = Some(new);
+        }
+        if self.center_override_window == Some(old) {
+            self.center_override_window = Some(new);
+        }
+        if self.fullscreen.remove(&old) {
+            self.fullscreen.insert(new);
+        }
+        if self.fullscreen_within_gaps.remove(&old) {
+            self.fullscreen_within_gaps.insert(new);
+        }
+        true
+    }
+
     fn insert_column_after(&mut self, index: usize, wid: WindowId) {
         let column = Column {
             windows: vec![wid],
@@ -1056,6 +1083,12 @@ impl LayoutSystem for ScrollingLayoutSystem {
         } else {
             false
         }
+    }
+
+    fn rekey_window(&mut self, layout: LayoutId, old: WindowId, new: WindowId) -> bool {
+        self.layout_state_mut(layout)
+            .map(|state| state.rekey_window(old, new))
+            .unwrap_or(false)
     }
 
     fn on_window_resized(
@@ -2012,5 +2045,38 @@ mod tests {
             before.origin.x,
             after.origin.x
         );
+    }
+
+    #[test]
+    fn rekey_window_preserves_column_slot_and_window_state() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.focus_navigation_style =
+            crate::common::config::ScrollingFocusNavigationStyle::Niri;
+        let (mut system, layout, w1, old) = setup_two_windows(settings);
+        let new = WindowId::new(old.pid, 9);
+
+        system.center_selected_column(layout);
+        let _ = system.toggle_fullscreen_of_selection(layout);
+
+        let before = system.visible_windows_in_layout(layout);
+        assert!(system.rekey_window(layout, old, new));
+
+        let state = system.layouts.get(layout).expect("layout state missing");
+        let replaced = before
+            .iter()
+            .map(|wid| if *wid == old { new } else { *wid })
+            .collect::<Vec<_>>();
+        let after = state
+            .columns
+            .iter()
+            .flat_map(|column| column.windows.iter().copied())
+            .collect::<Vec<_>>();
+
+        assert_eq!(after, replaced);
+        assert_eq!(state.selected, Some(new));
+        assert_eq!(state.center_override_window, Some(new));
+        assert!(state.fullscreen.contains(&new));
+        assert!(!state.fullscreen.contains(&old));
+        assert!(after.contains(&w1));
     }
 }

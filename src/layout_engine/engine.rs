@@ -2441,6 +2441,53 @@ impl LayoutEngine {
         self.floating.is_floating(window_id)
     }
 
+    pub fn has_window_membership(&self, window_id: WindowId) -> bool {
+        if self.floating.is_floating(window_id) {
+            return true;
+        }
+        if self.window_layout_constraints.contains_key(&window_id) {
+            return true;
+        }
+        if self.virtual_workspace_manager.workspace_for_window_any(window_id).is_some() {
+            return true;
+        }
+
+        self.workspace_layouts.active_layouts_with_workspace().into_iter().any(
+            |(workspace_id, layout)| {
+                self.workspace_tree(workspace_id).contains_window(layout, window_id)
+            },
+        )
+    }
+
+    pub fn rekey_window(&mut self, old: WindowId, new: WindowId) -> bool {
+        if old == new {
+            return self.has_window_membership(old);
+        }
+
+        let had_membership = self.has_window_membership(old) || self.focused_window == Some(old);
+        if !had_membership {
+            return false;
+        }
+
+        self.workspace_layouts.active_layouts_with_workspace().into_iter().for_each(
+            |(workspace_id, layout)| {
+                self.workspace_tree_mut(workspace_id).rekey_window(layout, old, new);
+            },
+        );
+
+        self.floating.rekey_window(old, new);
+        self.virtual_workspace_manager.rekey_window(old, new);
+
+        if self.focused_window == Some(old) {
+            self.focused_window = Some(new);
+        }
+        if let Some(constraints) = self.window_layout_constraints.remove(&old) {
+            self.window_layout_constraints.insert(new, constraints);
+        }
+
+        true
+    }
+
     fn update_active_floating_windows(&mut self, space: SpaceId) {
         let windows_in_workspace =
             self.virtual_workspace_manager.windows_in_active_workspace(space);
@@ -3080,5 +3127,45 @@ mod tests {
             ),
             before
         );
+    }
+
+    #[test]
+    fn rekey_window_preserves_single_slot_focus_and_constraints() {
+        let mut engine = test_engine();
+        let space = SpaceId::new(94);
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 1000.0));
+        let pid: pid_t = 5153;
+        let old = WindowId::new(pid, 1);
+        let new = WindowId::new(pid, 2);
+
+        let _ = engine.handle_event(LayoutEvent::SpaceExposed(space, screen.size));
+        let _ = engine.handle_event(LayoutEvent::WindowsOnScreenUpdated(
+            space,
+            pid,
+            vec![(
+                old,
+                None,
+                None,
+                None,
+                true,
+                CGSize::new(500.0, 500.0),
+                None,
+                None,
+            )],
+            None,
+        ));
+        let _ = engine.handle_event(LayoutEvent::WindowFocused(space, old));
+
+        assert!(engine.rekey_window(old, new));
+        assert_eq!(engine.selected_window(space), Some(new));
+        assert_eq!(engine.windows_in_active_workspace(space), vec![new]);
+
+        let gaps = engine.layout_settings.gaps.clone();
+        let laid_out: HashMap<WindowId, CGRect> = engine
+            .calculate_layout(space, screen, &gaps, 0.0, Default::default(), Default::default())
+            .into_iter()
+            .collect();
+        assert!(laid_out.contains_key(&new));
+        assert!(!laid_out.contains_key(&old));
     }
 }

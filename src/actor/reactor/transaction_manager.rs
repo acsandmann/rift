@@ -60,4 +60,17 @@ impl TransactionManager {
     pub fn get_target_frame(&self, wsid: WindowServerId) -> Option<CGRect> {
         self.store.get(&wsid)?.target
     }
+
+    pub fn rekey_window(&self, old_wsid: WindowServerId, new_wsid: WindowServerId) {
+        if old_wsid == new_wsid {
+            return;
+        }
+        if let Some(record) = self.store.get(&old_wsid) {
+            self.store.insert(new_wsid, record.txid, record.target.unwrap_or(CGRect::ZERO));
+            if record.target.is_none() {
+                self.store.clear_target(&new_wsid);
+            }
+        }
+        self.store.remove(&old_wsid);
+    }
 }

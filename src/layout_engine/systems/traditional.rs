@@ -665,6 +665,10 @@ impl LayoutSystem for TraditionalLayoutSystem {
         }
     }
 
+    fn rekey_window(&mut self, layout: LayoutId, old: WindowId, new: WindowId) -> bool {
+        self.tree.data.window.rekey_window(layout, old, new)
+    }
+
     fn on_window_resized(
         &mut self,
         layout: LayoutId,
@@ -2116,6 +2120,43 @@ impl WindowIndex {
             .or_default()
             .0
             .push(WindowNodeInfo { layout, node });
+    }
+
+    pub(crate) fn rekey_window(&mut self, layout: LayoutId, old: WindowId, new: WindowId) -> bool {
+        if old == new {
+            return self.node_for(layout, old).is_some();
+        }
+
+        let Some(node) = self.node_for(layout, old) else {
+            return false;
+        };
+
+        if let Some(existing) = self.node_for(layout, new) {
+            return existing == node;
+        }
+
+        let moved = {
+            let Some(window_nodes) = self.window_nodes.get_mut(&old) else {
+                return false;
+            };
+            let Some(index) = window_nodes
+                .0
+                .iter()
+                .position(|info| info.layout == layout && info.node == node)
+            else {
+                return false;
+            };
+            window_nodes.0.remove(index)
+        };
+
+        if self.window_nodes.get(&old).is_some_and(|info| info.0.is_empty()) {
+            self.window_nodes.remove(&old);
+        }
+
+        let previous = self.windows.insert(node, new);
+        debug_assert_eq!(previous, Some(old));
+        self.window_nodes.entry(new).or_default().0.push(moved);
+        true
     }
 
     fn take_nodes_for(&mut self, wid: WindowId) -> impl Iterator<Item = (LayoutId, NodeId)> {
@@ -4991,5 +5032,35 @@ mod tests {
             .proportion(&system.tree.map, right_node)
             .expect("right node proportion missing");
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn rekey_window_preserves_node_and_selection() {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let w3 = w(3);
+        let old = w(1);
+        let w2 = w(2);
+        let new = w(9);
+
+        system.add_window_after_selection(layout, w3);
+        system.add_window_after_selection(layout, old);
+        system.add_window_after_selection(layout, w2);
+        assert!(system.select_window(layout, old));
+
+        let old_node = system.tree.data.window.node_for(layout, old).expect("old node missing");
+        let before = system.visible_windows_in_layout(layout);
+
+        assert!(system.rekey_window(layout, old, new));
+
+        let after = system.visible_windows_in_layout(layout);
+        let replaced = before
+            .iter()
+            .map(|wid| if *wid == old { new } else { *wid })
+            .collect::<Vec<_>>();
+        assert_eq!(after, replaced);
+        assert_eq!(system.selected_window(layout), Some(new));
+        assert_eq!(system.tree.data.window.node_for(layout, old), None);
+        assert_eq!(system.tree.data.window.node_for(layout, new), Some(old_node));
     }
 }
