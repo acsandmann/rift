@@ -33,6 +33,7 @@ impl AppEventHandler {
     }
 
     pub fn handle_application_thread_terminated(reactor: &mut Reactor, pid: i32) {
+        reactor.handle_native_tab_app_terminated(pid);
         reactor.app_manager.apps.remove(&pid);
         reactor.send_layout_event(LayoutEvent::AppClosed(pid));
     }

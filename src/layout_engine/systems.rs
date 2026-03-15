@@ -126,6 +126,37 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     fn has_windows_for_app(&self, layout: LayoutId, pid: pid_t) -> bool;
     fn contains_window(&self, layout: LayoutId, wid: WindowId) -> bool;
     fn select_window(&mut self, layout: LayoutId, wid: WindowId) -> bool;
+    fn rekey_window(&mut self, layout: LayoutId, old: WindowId, new: WindowId) -> bool {
+        if old == new {
+            return self.contains_window(layout, old);
+        }
+        if old.pid != new.pid {
+            return false;
+        }
+        if !self.contains_window(layout, old) {
+            return false;
+        }
+
+        let mut desired = self.windows_for_app(layout, old.pid);
+        let mut changed = false;
+        for wid in &mut desired {
+            if *wid == old {
+                *wid = new;
+                changed = true;
+            }
+        }
+        desired.retain(|wid| *wid != old);
+        let mut seen = std::collections::HashSet::new();
+        desired.retain(|wid| seen.insert(*wid));
+
+        if changed {
+            self.set_windows_for_app(layout, old.pid, desired);
+        }
+        if self.selected_window(layout) == Some(old) {
+            let _ = self.select_window(layout, new);
+        }
+        true
+    }
     fn on_window_resized(
         &mut self,
         layout: LayoutId,

@@ -82,6 +82,14 @@ impl MainWindowTracker {
             _ => None,
         }
     }
+
+    pub fn rekey_window(&mut self, old: WindowId, new: WindowId) {
+        if let Some(app) = self.apps.get_mut(&old.pid)
+            && app.main_window == Some(old)
+        {
+            app.main_window = Some(new);
+        }
+    }
 }
 
 #[cfg(test)]

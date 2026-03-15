@@ -163,6 +163,7 @@ impl AnimationManager {
         let mut animated_count = 0;
         let mut animated_wids_wsids: Vec<u32> = Vec::new();
         let mut any_frame_changed = false;
+        let mut synced_native_tab_wids = Vec::new();
 
         for &(wid, target_frame) in layout {
             // Skip applying layout frames and animations for the window currently being dragged.
@@ -182,8 +183,16 @@ impl AnimationManager {
                         if target_frame.same_as(current_frame) {
                             continue;
                         }
+                        let Some(wsid) = window.info.sys_id else {
+                            trace!(
+                                ?wid,
+                                ?current_frame,
+                                ?target_frame,
+                                "Skipping animation for window without window server id"
+                            );
+                            continue;
+                        };
                         any_frame_changed = true;
-                        let wsid = window.info.sys_id.unwrap();
                         let txid = reactor.transaction_manager.generate_next_txid(wsid);
                         (current_frame, Some(wsid), txid)
                     }
@@ -193,7 +202,7 @@ impl AnimationManager {
                     }
                 };
 
-            let Some(app_state) = &reactor.app_manager.apps.get(&wid.pid) else {
+            let Some(app_state) = reactor.app_manager.apps.get(&wid.pid) else {
                 debug!(?wid, "Skipping for window - app no longer exists");
                 continue;
             };
@@ -234,6 +243,7 @@ impl AnimationManager {
             if let Some(window) = reactor.window_manager.windows.get_mut(&wid) {
                 window.frame_monotonic = target_frame;
             }
+            synced_native_tab_wids.push(wid);
         }
 
         if animated_count > 0 {
@@ -249,6 +259,9 @@ impl AnimationManager {
             } else {
                 anim.run();
             }
+        }
+        for wid in synced_native_tab_wids {
+            reactor.handle_native_tab_frame_changed(wid, true);
         }
 
         any_frame_changed
@@ -276,6 +289,15 @@ impl AnimationManager {
             let target_frame = target_frame.round();
             let current_frame = window.frame_monotonic;
             if target_frame.same_as(current_frame) {
+                continue;
+            }
+            if window.info.sys_id.is_none() {
+                trace!(
+                    ?wid,
+                    ?current_frame,
+                    ?target_frame,
+                    "Skipping instant layout for window without window server id"
+                );
                 continue;
             }
             any_frame_changed = true;
@@ -339,9 +361,59 @@ impl AnimationManager {
                 if let Some(window) = reactor.window_manager.windows.get_mut(wid) {
                     window.frame_monotonic = *target_frame;
                 }
+                reactor.handle_native_tab_frame_changed(*wid, true);
             }
         }
 
         any_frame_changed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+
+    use super::AnimationManager;
+    use crate::actor::reactor::testing::{Apps, make_window, screen_params_event};
+    use crate::actor::reactor::{Reactor, WindowId};
+    use crate::layout_engine::LayoutEngine;
+    use crate::sys::screen::SpaceId;
+
+    #[test]
+    fn layout_application_skips_windows_without_window_server_ids() {
+        let mut apps = Apps::new();
+        let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+            &crate::common::config::VirtualWorkspaceSettings::default(),
+            &crate::common::config::LayoutSettings::default(),
+            None,
+        ));
+        let space = SpaceId::new(90);
+        reactor.handle_event(screen_params_event(
+            vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
+            vec![Some(space)],
+            vec![],
+        ));
+
+        reactor.handle_events(apps.make_app(1, vec![make_window(1)]));
+        apps.simulate_until_quiet(&mut reactor);
+        let _ = apps.requests();
+
+        let wid = WindowId::new(1, 1);
+        let target = CGRect::new(CGPoint::new(300., 50.), CGSize::new(400., 700.));
+        reactor.window_manager.windows.get_mut(&wid).unwrap().info.sys_id = None;
+
+        assert!(!AnimationManager::animate_layout(
+            &mut reactor,
+            space,
+            &[(wid, target)],
+            false,
+            None,
+        ));
+        assert!(!AnimationManager::instant_layout(
+            &mut reactor,
+            &[(wid, target)],
+            None,
+        ));
+        assert!(apps.requests().is_empty());
     }
 }

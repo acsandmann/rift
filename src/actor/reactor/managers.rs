@@ -5,8 +5,8 @@ use tracing::trace;
 
 use super::replay::Record;
 use super::{
-    AppState, Event, FullscreenSpaceTrack, PendingSpaceChange, ScreenInfo, WindowState,
-    WorkspaceSwitchOrigin, WorkspaceSwitchState,
+    AppState, Event, FullscreenSpaceTrack, NativeTabMembership, NativeTabRole, PendingSpaceChange,
+    ScreenInfo, WindowState, WorkspaceSwitchOrigin, WorkspaceSwitchState,
 };
 use crate::actor;
 use crate::actor::app::{WindowId, pid_t};
@@ -27,6 +27,281 @@ pub struct WindowManager {
     pub window_ids: HashMap<WindowServerId, WindowId>,
     pub visible_windows: HashSet<WindowServerId>,
     pub observed_window_server_ids: HashSet<WindowServerId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NativeTabGroup {
+    pub pid: pid_t,
+    pub members: HashSet<WindowId>,
+    pub active: Option<WindowId>,
+    pub canonical_frame: CGRect,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PendingNativeTabDestroy {
+    pub window_id: WindowId,
+    pub window_server_id: WindowServerId,
+    pub space_id: SpaceId,
+    pub frame: CGRect,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PendingNativeTabAppearance {
+    pub wsid: WindowServerId,
+    pub space: SpaceId,
+    pub frame: CGRect,
+}
+
+pub struct NativeTabManager {
+    pub groups: HashMap<u32, NativeTabGroup>,
+    pub by_window: HashMap<WindowId, u32>,
+    pub pending_destroys: HashMap<pid_t, Vec<PendingNativeTabDestroy>>,
+    pub pending_appearances: HashMap<pid_t, Vec<PendingNativeTabAppearance>>,
+    pub pending_frame_targets: HashMap<WindowId, CGRect>,
+    pub transient_empty_visibility_grace: HashMap<pid_t, u8>,
+    pub next_group_id: u32,
+}
+
+impl Default for NativeTabManager {
+    fn default() -> Self {
+        Self {
+            groups: HashMap::default(),
+            by_window: HashMap::default(),
+            pending_destroys: HashMap::default(),
+            pending_appearances: HashMap::default(),
+            pending_frame_targets: HashMap::default(),
+            transient_empty_visibility_grace: HashMap::default(),
+            next_group_id: 1,
+        }
+    }
+}
+
+impl NativeTabManager {
+    pub fn new() -> Self { Self::default() }
+
+    pub fn group_for_window(&self, wid: WindowId) -> Option<u32> {
+        self.by_window.get(&wid).copied()
+    }
+
+    pub fn is_suppressed(&self, wid: WindowId) -> bool {
+        self.group_for_window(wid)
+            .and_then(|group_id| self.groups.get(&group_id))
+            .is_some_and(|group| group.active != Some(wid))
+    }
+
+    pub fn stage_destroy(
+        &mut self,
+        window_id: WindowId,
+        window_server_id: WindowServerId,
+        space_id: SpaceId,
+        frame: CGRect,
+    ) {
+        let entry = self.pending_destroys.entry(window_id.pid).or_default();
+        if !entry.iter().any(|pending| pending.window_id == window_id) {
+            entry.push(PendingNativeTabDestroy {
+                window_id,
+                window_server_id,
+                space_id,
+                frame,
+            });
+        }
+    }
+
+    pub fn stage_appearance(
+        &mut self,
+        wsid: WindowServerId,
+        pid: pid_t,
+        space: SpaceId,
+        frame: CGRect,
+    ) {
+        let entry = self.pending_appearances.entry(pid).or_default();
+        if !entry.iter().any(|pending| pending.wsid == wsid) {
+            entry.push(PendingNativeTabAppearance { wsid, space, frame });
+        }
+    }
+
+    pub fn pending_destroys_for_pid(&self, pid: pid_t) -> Vec<PendingNativeTabDestroy> {
+        self.pending_destroys.get(&pid).cloned().unwrap_or_default()
+    }
+
+    pub fn pending_appearances_for_pid(&self, pid: pid_t) -> Vec<PendingNativeTabAppearance> {
+        self.pending_appearances.get(&pid).cloned().unwrap_or_default()
+    }
+
+    pub fn clear_pending_destroy(&mut self, window_id: WindowId) {
+        if let Some(pending) = self.pending_destroys.get_mut(&window_id.pid) {
+            pending.retain(|candidate| candidate.window_id != window_id);
+            if pending.is_empty() {
+                self.pending_destroys.remove(&window_id.pid);
+            }
+        }
+    }
+
+    pub fn clear_pending_appearance(&mut self, pid: pid_t, wsid: WindowServerId) {
+        if let Some(pending) = self.pending_appearances.get_mut(&pid) {
+            pending.retain(|candidate| candidate.wsid != wsid);
+            if pending.is_empty() {
+                self.pending_appearances.remove(&pid);
+            }
+        }
+    }
+
+    fn next_group_id(&mut self) -> u32 {
+        let group_id = self.next_group_id;
+        self.next_group_id += 1;
+        group_id
+    }
+
+    fn ensure_group(&mut self, active_window: WindowId, frame: CGRect) -> u32 {
+        if let Some(group_id) = self.by_window.get(&active_window).copied() {
+            return group_id;
+        }
+
+        let group_id = self.next_group_id();
+        let mut members = HashSet::default();
+        members.insert(active_window);
+        self.groups.insert(group_id, NativeTabGroup {
+            pid: active_window.pid,
+            active: Some(active_window),
+            members,
+            canonical_frame: frame,
+        });
+        self.by_window.insert(active_window, group_id);
+        group_id
+    }
+
+    fn clear_window_membership(windows: &mut HashMap<WindowId, WindowState>, wid: WindowId) {
+        if let Some(window) = windows.get_mut(&wid) {
+            window.native_tab = None;
+        }
+    }
+
+    fn dissolve_group(&mut self, group_id: u32, windows: &mut HashMap<WindowId, WindowState>) {
+        if let Some(group) = self.groups.remove(&group_id) {
+            for member in group.members {
+                self.by_window.remove(&member);
+                self.pending_frame_targets.remove(&member);
+                Self::clear_window_membership(windows, member);
+            }
+        }
+    }
+
+    pub fn replace_active_member(&mut self, old: WindowId, new: WindowId, frame: CGRect) -> u32 {
+        let group_id = self.ensure_group(old, frame);
+        if let Some(group) = self.groups.get_mut(&group_id) {
+            group.members.insert(new);
+            group.active = Some(new);
+            group.canonical_frame = frame;
+        }
+        self.by_window.insert(new, group_id);
+        group_id
+    }
+
+    pub fn add_background_member(
+        &mut self,
+        active_window: WindowId,
+        candidate: WindowId,
+        frame: CGRect,
+    ) -> u32 {
+        let group_id = self.ensure_group(active_window, frame);
+        if let Some(group) = self.groups.get_mut(&group_id) {
+            group.members.insert(candidate);
+            group.canonical_frame = frame;
+        }
+        self.by_window.insert(candidate, group_id);
+        group_id
+    }
+
+    pub fn set_active_member(&mut self, wid: WindowId, frame: CGRect) -> Option<u32> {
+        let Some(group_id) = self.by_window.get(&wid).copied() else {
+            return None;
+        };
+        if let Some(group) = self.groups.get_mut(&group_id) {
+            group.active = Some(wid);
+            group.canonical_frame = frame;
+        }
+        Some(group_id)
+    }
+
+    pub fn remove_window(&mut self, wid: WindowId, windows: &mut HashMap<WindowId, WindowState>) {
+        let Some(group_id) = self.by_window.remove(&wid) else {
+            return;
+        };
+        self.pending_frame_targets.remove(&wid);
+        Self::clear_window_membership(windows, wid);
+        if let Some(group) = self.groups.get_mut(&group_id) {
+            group.members.remove(&wid);
+            if group.active == Some(wid) {
+                group.active = group.members.iter().copied().next();
+            }
+            if group.members.len() >= 2 {
+                return;
+            }
+        }
+        self.dissolve_group(group_id, windows);
+    }
+
+    pub fn update_frame(
+        &mut self,
+        _wid: WindowId,
+        frame: CGRect,
+        membership: Option<NativeTabMembership>,
+    ) {
+        let Some(membership) = membership else {
+            return;
+        };
+        if membership.role == NativeTabRole::Active
+            && let Some(group) = self.groups.get_mut(&membership.group_id)
+        {
+            group.canonical_frame = frame;
+        }
+    }
+
+    pub fn remove_app(&mut self, pid: pid_t, windows: &mut HashMap<WindowId, WindowState>) {
+        self.pending_destroys.remove(&pid);
+        self.pending_appearances.remove(&pid);
+        self.pending_frame_targets.retain(|wid, _| wid.pid != pid);
+        let group_ids: Vec<u32> = self
+            .groups
+            .iter()
+            .filter_map(|(&group_id, group)| (group.pid == pid).then_some(group_id))
+            .collect();
+        for group_id in group_ids {
+            self.dissolve_group(group_id, windows);
+        }
+    }
+
+    pub fn set_pending_frame_target(&mut self, wid: WindowId, frame: CGRect) {
+        self.pending_frame_targets.insert(wid, frame);
+    }
+
+    pub fn pending_frame_target(&self, wid: WindowId) -> Option<CGRect> {
+        self.pending_frame_targets.get(&wid).copied()
+    }
+
+    pub fn clear_pending_frame_target(&mut self, wid: WindowId) {
+        self.pending_frame_targets.remove(&wid);
+    }
+
+    pub fn note_transient_empty_visibility(&mut self, pid: pid_t) {
+        self.transient_empty_visibility_grace.insert(pid, 1);
+    }
+
+    pub fn clear_transient_empty_visibility(&mut self, pid: pid_t) {
+        self.transient_empty_visibility_grace.remove(&pid);
+    }
+
+    pub fn consume_transient_empty_visibility(&mut self, pid: pid_t) -> bool {
+        let Some(remaining) = self.transient_empty_visibility_grace.get_mut(&pid) else {
+            return false;
+        };
+        if *remaining > 1 {
+            *remaining -= 1;
+        } else {
+            self.transient_empty_visibility_grace.remove(&pid);
+        }
+        true
+    }
 }
 
 /// Manages application state and rules

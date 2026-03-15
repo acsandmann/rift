@@ -262,6 +262,10 @@ impl LayoutSystem for StackLayoutSystem {
         self.inner.select_window(layout, wid)
     }
 
+    fn rekey_window(&mut self, layout: LayoutId, old: WindowId, new: WindowId) -> bool {
+        self.inner.rekey_window(layout, old, new)
+    }
+
     fn on_window_resized(
         &mut self,
         layout: LayoutId,
@@ -447,5 +451,31 @@ mod tests {
         let (mut system, layout) = setup_fullscreen_stack_system();
         system.unjoin_selection(layout);
         assert!(system.has_any_fullscreen_node(layout));
+    }
+
+    #[test]
+    fn rekey_window_preserves_stack_order_and_selection() {
+        let mut system = StackLayoutSystem::new(StackDefaultOrientation::Perpendicular);
+        let layout = system.create_layout();
+        let w3 = w(3);
+        let old = w(1);
+        let w2 = w(2);
+        let new = w(9);
+
+        system.add_window_after_selection(layout, w3);
+        system.add_window_after_selection(layout, old);
+        system.add_window_after_selection(layout, w2);
+        assert!(system.select_window(layout, old));
+
+        let before = system.visible_windows_in_layout(layout);
+        assert!(system.rekey_window(layout, old, new));
+
+        let after = system.visible_windows_in_layout(layout);
+        let replaced = before
+            .iter()
+            .map(|wid| if *wid == old { new } else { *wid })
+            .collect::<Vec<_>>();
+        assert_eq!(after, replaced);
+        assert_eq!(system.selected_window(layout), Some(new));
     }
 }

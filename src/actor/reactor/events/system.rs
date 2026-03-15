@@ -1,9 +1,10 @@
-use tracing::debug;
+use tracing::{debug, warn};
 
-use crate::actor::app::WindowId;
+use crate::actor::app::{Request, WindowId};
 use crate::actor::raise_manager;
 use crate::actor::reactor::{MenuState, Reactor};
 use crate::actor::wm_controller::Sender as WmSender;
+use crate::common::collections::HashMap;
 
 pub struct SystemEventHandler;
 
@@ -60,6 +61,36 @@ impl SystemEventHandler {
             reactor.window_manager.window_ids.keys().map(|wsid| wsid.as_u32()).collect();
         crate::sys::window_notify::update_window_notifications(&ids);
         reactor.notification_manager.last_sls_notification_ids = ids;
+
+        // Sleep/wake can interrupt both deferred native-tab destroys and ordinary
+        // close/removal cleanup, leaving stale tracked slots in layout for still-running
+        // apps like Finder. Re-probe one tracked window per pid so the app actor emits a
+        // current visible-window snapshot even when the app itself remains alive.
+        let mut probe_windows_by_pid: HashMap<i32, WindowId> = reactor
+            .window_manager
+            .windows
+            .keys()
+            .copied()
+            .map(|wid| (wid.pid, wid))
+            .collect();
+        for pending in reactor.pending_native_tab_destroys() {
+            probe_windows_by_pid.entry(pending.window_id.pid).or_insert(pending.window_id);
+        }
+
+        for window_id in probe_windows_by_pid.into_values() {
+            let Some(app) = reactor.app_manager.apps.get(&window_id.pid) else {
+                continue;
+            };
+            if let Err(err) = app.handle.send(Request::WindowMaybeDestroyed(window_id)) {
+                warn!(
+                    pid = window_id.pid,
+                    wid = ?window_id,
+                    ?err,
+                    "Failed to verify tracked windows after wake"
+                );
+            }
+        }
+        reactor.refresh_all_windows_without_pending_refresh();
     }
 
     pub fn handle_raise_completed(reactor: &mut Reactor, window_id: WindowId, sequence_id: u64) {

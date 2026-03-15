@@ -201,7 +201,19 @@ impl Apps {
             debug!(?request);
             match request {
                 Request::Terminate => break,
-                Request::WindowMaybeDestroyed(_) => {}
+                Request::WindowMaybeDestroyed(wid) => {
+                    if got_visible_windows {
+                        continue;
+                    }
+                    got_visible_windows = true;
+                    let windows =
+                        self.windows.keys().copied().filter(|known| known.pid == wid.pid).collect();
+                    events.push(Event::WindowsDiscovered {
+                        pid: wid.pid,
+                        new: vec![],
+                        known_visible: windows,
+                    });
+                }
                 Request::GetVisibleWindows => {
                     if got_visible_windows {
                         continue;
