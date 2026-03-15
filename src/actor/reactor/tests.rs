@@ -832,3 +832,55 @@ fn topology_relayout_pending_when_space_ids_change_for_same_displays() {
         "Space-id churn on unchanged displays should trigger topology relayout"
     );
 }
+
+#[test]
+fn fullscreen_space_in_screen_params_does_not_trigger_topology_relayout() {
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+
+    let frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1280., 800.));
+    let user_space = SpaceId::new(11);
+    let fullscreen_space = SpaceId::new(0x400000000 + user_space.get());
+    let display_uuid = "11111111-1111-1111-1111-111111111111".to_string();
+    let screens_for = |space: SpaceId| -> Vec<ScreenInfo> {
+        vec![ScreenInfo {
+            id: crate::sys::screen::ScreenId::new(0),
+            frame,
+            space: Some(space),
+            display_uuid: display_uuid.clone(),
+            name: None,
+        }]
+    };
+
+    reactor.handle_event(Event::ScreenParametersChanged(screens_for(user_space)));
+    assert!(!reactor.pending_space_change_manager.topology_relayout_pending);
+    assert_eq!(
+        reactor.layout_manager.layout_engine.last_space_for_display_uuid(&display_uuid),
+        Some(user_space)
+    );
+
+    reactor
+        .space_manager
+        .fullscreen_by_space
+        .insert(fullscreen_space.get(), FullscreenSpaceTrack::default());
+    reactor.handle_event(Event::ScreenParametersChanged(screens_for(fullscreen_space)));
+    assert!(
+        !reactor.pending_space_change_manager.topology_relayout_pending,
+        "fullscreen space transitions should not arm topology relayout"
+    );
+    assert_eq!(
+        reactor.layout_manager.layout_engine.last_space_for_display_uuid(&display_uuid),
+        Some(user_space),
+        "fullscreen spaces should not replace display->user-space history"
+    );
+
+    reactor.handle_event(Event::ScreenParametersChanged(screens_for(user_space)));
+    assert!(!reactor.pending_space_change_manager.topology_relayout_pending);
+    assert_eq!(
+        reactor.layout_manager.layout_engine.last_space_for_display_uuid(&display_uuid),
+        Some(user_space)
+    );
+}

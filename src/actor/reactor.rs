@@ -1315,6 +1315,11 @@ impl Reactor {
             let Some(space) = space_opt else {
                 continue;
             };
+            let is_fullscreen_space = window_server::space_is_fullscreen(space.get())
+                || self.space_manager.fullscreen_by_space.contains_key(&space.get());
+            if is_fullscreen_space {
+                continue;
+            }
             let Some(display_uuid) = screen.display_uuid_opt() else {
                 continue;
             };
