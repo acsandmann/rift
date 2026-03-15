@@ -39,6 +39,8 @@ impl Modifiers {
 
     pub fn remove(&mut self, other: Modifiers) { self.0 &= !other.0; }
 
+    pub fn bit_count(&self) -> u32 { self.0.count_ones() }
+
     pub fn has_generic_modifiers(&self) -> bool {
         MOD_FAMILIES.iter().any(|m| self.contains(m.generic))
     }
@@ -516,7 +518,7 @@ impl fmt::Display for Hotkey {
     }
 }
 
-fn parse_mods_and_optional_key(s: &str) -> Result<(Modifiers, Option<KeyCode>), anyhow::Error> {
+pub fn parse_mods_and_optional_key(s: &str) -> Result<(Modifiers, Option<KeyCode>), anyhow::Error> {
     let parts: Vec<&str> = s.split('+').map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
 
     let mut mods = Modifiers::empty();

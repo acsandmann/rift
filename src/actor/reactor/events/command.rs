@@ -126,6 +126,9 @@ impl CommandEventHandler {
 
     pub fn handle_config_updated(reactor: &mut Reactor, new_cfg: Config) {
         let old_keys = reactor.config.keys.clone();
+        let old_mouse_scroll = reactor.config.settings.layout.scrolling.mouse_scroll.clone();
+        let old_mouse_resize = reactor.config.settings.layout.mouse_resize.clone();
+        let old_mouse_move_column = reactor.config.settings.layout.mouse_move_column.clone();
 
         reactor.config = new_cfg;
         reactor
@@ -154,7 +157,11 @@ impl CommandEventHandler {
 
         let _ = reactor.update_layout_or_warn(false, true);
 
-        if old_keys != reactor.config.keys {
+        if old_keys != reactor.config.keys
+            || old_mouse_scroll != reactor.config.settings.layout.scrolling.mouse_scroll
+            || old_mouse_resize != reactor.config.settings.layout.mouse_resize
+            || old_mouse_move_column != reactor.config.settings.layout.mouse_move_column
+        {
             if let Some(wm) = &reactor.communication_manager.wm_sender {
                 wm.send(WmEvent::ConfigUpdated(reactor.config.clone()));
             }

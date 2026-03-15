@@ -116,6 +116,28 @@ fingers = 3
 # If true, scrolling past the end of the strip will trigger a workspace switch
 propagate_to_workspace_swipe = false
 
+# Use mouse scroll wheel to scroll the column strip (scrolling layout only)
+# Requires a modifier to avoid hijacking normal scrolling.
+# modifier accepts modifiers ("Alt"), combos ("Ctrl+Alt"), or modifier+key ("Ctrl+Alt+Z")
+[settings.layout.scrolling.mouse_scroll]
+enabled = false
+modifier = "Alt"
+invert = false
+sensitivity = 1.0
+
+# Mouse scroll wheel to resize the focused column width
+[settings.layout.mouse_resize]
+enabled = false
+modifier = "Ctrl+Alt"
+invert = false
+sensitivity = 1.0
+
+# Mouse scroll wheel to move the focused column left/right
+[settings.layout.mouse_move_column]
+enabled = false
+modifier = "Ctrl+Shift"
+invert = false
+
 [settings.layout.stack]
 # How much of each stacked window sticks out (in pixels)
 # Set to 0.0 to have them directly on top of each other.
