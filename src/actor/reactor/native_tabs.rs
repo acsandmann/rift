@@ -570,22 +570,29 @@ impl Reactor {
             }
 
             if !known_visible.contains(&pending.window_id) {
-                if let Some(new_active) = self
-                    .grouped_native_tab_replacement_for(pending.window_id, &known_visible)
-                    .filter(|candidate| {
-                        self.candidate_has_pending_native_tab_appearance(*candidate)
-                    })
-                    && self.try_activate_native_tab_replacement(pending.window_id, new_active)
+                if let Some(new_active) =
+                    self.grouped_native_tab_replacement_for(pending.window_id, &known_visible)
                 {
-                    if let Some(wsid) = self
-                        .window_manager
-                        .windows
-                        .get(&new_active)
-                        .and_then(|window| window.info.sys_id)
-                    {
-                        self.native_tab_manager.clear_pending_appearance(pid, wsid);
+                    let replacement_has_pending_appearance =
+                        self.candidate_has_pending_native_tab_appearance(new_active);
+                    if self.try_activate_native_tab_replacement(pending.window_id, new_active) {
+                        if replacement_has_pending_appearance {
+                            if let Some(wsid) = self
+                                .window_manager
+                                .windows
+                                .get(&new_active)
+                                .and_then(|window| window.info.sys_id)
+                            {
+                                self.native_tab_manager.clear_pending_appearance(pid, wsid);
+                            }
+                        } else {
+                            let _ = crate::actor::reactor::events::window::WindowEventHandler::handle_window_destroyed(
+                                self,
+                                pending.window_id,
+                            );
+                        }
+                        continue;
                     }
-                    continue;
                 }
                 self.native_tab_manager.clear_pending_destroy(pending.window_id);
                 let _ = crate::actor::reactor::events::window::WindowEventHandler::handle_window_destroyed(

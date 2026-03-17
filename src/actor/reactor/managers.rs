@@ -234,6 +234,20 @@ impl NativeTabManager {
             if group.active == Some(wid) {
                 group.active = group.members.iter().copied().next();
             }
+            let active = group.active;
+            let members: Vec<WindowId> = group.members.iter().copied().collect();
+            for member in members {
+                if let Some(window) = windows.get_mut(&member)
+                    && let Some(membership) = window.native_tab.as_mut()
+                    && membership.group_id == group_id
+                {
+                    membership.role = if Some(member) == active {
+                        NativeTabRole::Active
+                    } else {
+                        NativeTabRole::Suppressed
+                    };
+                }
+            }
             if group.members.len() >= 2 {
                 return;
             }

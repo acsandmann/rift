@@ -73,6 +73,31 @@ fn create_native_tab_replacement(
     reactor.note_native_tab_appearance(replacement_ws_info.id, space, replacement_ws_info)
 }
 
+fn create_three_tab_group(reactor: &mut Reactor, space: SpaceId) -> (WindowId, WindowId, WindowId) {
+    let first = WindowId::new(1, 1);
+    let (second, second_info, second_ws_info) = replacement_tab(reactor, first, 2);
+    assert!(create_native_tab_replacement(
+        reactor,
+        space,
+        WindowServerId::new(1),
+        second,
+        second_info,
+        second_ws_info,
+    ));
+
+    let (third, third_info, third_ws_info) = replacement_tab(reactor, second, 3);
+    assert!(create_native_tab_replacement(
+        reactor,
+        space,
+        WindowServerId::new(2),
+        third,
+        third_info,
+        third_ws_info,
+    ));
+
+    (first, second, third)
+}
+
 fn assert_native_tab_switch_state(
     reactor: &mut Reactor,
     space: SpaceId,
@@ -849,6 +874,52 @@ fn reconcile_native_tabs_reactivates_visible_group_member_instead_of_dissolving_
 }
 
 #[test]
+fn removing_active_native_tab_member_promotes_a_survivor_role() {
+    let (_apps, mut reactor, space) = native_tab_test_setup(339);
+    let (_first, _second, third) = create_three_tab_group(&mut reactor, space);
+
+    reactor.finalize_native_tab_window_destroy(third);
+
+    let active_count = [WindowId::new(1, 1), WindowId::new(1, 2)]
+        .into_iter()
+        .filter_map(|wid| {
+            reactor
+                .window_manager
+                .windows
+                .get(&wid)
+                .and_then(|window| window.native_tab)
+        })
+        .filter(|membership| membership.role == NativeTabRole::Active)
+        .count();
+    assert_eq!(active_count, 1);
+}
+
+#[test]
+fn closing_active_native_tab_rekeys_to_existing_group_member_without_pending_appearance() {
+    let (_apps, mut reactor, space) = native_tab_test_setup(340);
+    let (_first, second, third) = create_three_tab_group(&mut reactor, space);
+
+    assert!(reactor.stage_native_tab_destroy(WindowServerId::new(3), space));
+    assert!(!WindowEventHandler::handle_window_destroyed(&mut reactor, third));
+    assert!(reactor.window_manager.windows.contains_key(&third));
+
+    reactor.reconcile_native_tabs_for_pid(1, &[second]);
+
+    assert!(!reactor.window_manager.windows.contains_key(&third));
+    assert_eq!(
+        reactor.window_manager.windows[&second]
+            .native_tab
+            .expect("existing grouped member should become active")
+            .role,
+        NativeTabRole::Active
+    );
+    assert_eq!(
+        reactor.layout_manager.layout_engine.windows_in_active_workspace(space),
+        vec![second]
+    );
+}
+
+#[test]
 fn dragging_tabbed_window_still_detects_swap_targets() {
     let mut apps = Apps::new();
     let mut reactor = test_reactor();
@@ -980,6 +1051,27 @@ fn transient_empty_visibility_grace_is_one_shot_for_real_native_tab_close() {
         new: vec![],
         known_visible: vec![],
     });
+    assert_window_removed_from_layout(&reactor, space, wid);
+}
+
+#[test]
+fn transient_empty_visibility_requests_follow_up_refresh_to_finalize_last_tab_close() {
+    let (mut apps, mut reactor, space) = native_tab_test_setup(351);
+
+    let wid = WindowId::new(1, 1);
+    assert!(reactor.stage_native_tab_destroy(WindowServerId::new(1), space));
+    apps.windows.remove(&wid);
+    assert!(!WindowEventHandler::handle_window_destroyed(&mut reactor, wid));
+
+    reactor.handle_event(Event::ApplicationMainWindowChanged(1, None, Quiet::No));
+    reactor.handle_event(Event::WindowsDiscovered {
+        pid: 1,
+        new: vec![],
+        known_visible: vec![],
+    });
+    assert!(reactor.window_manager.windows.contains_key(&wid));
+
+    apps.simulate_until_quiet(&mut reactor);
     assert_window_removed_from_layout(&reactor, space, wid);
 }
 
