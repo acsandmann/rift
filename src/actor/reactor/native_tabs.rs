@@ -346,7 +346,10 @@ impl Reactor {
         }
 
         let Some(group_id) = self.native_tab_manager.group_for_window(wid) else {
-            self.native_tab_manager.stage_appearance(wsid, info.pid, sid, info.frame);
+            // don't treat ordinary already-managed same-size windows as tab-switch signals.
+            if !self.layout_manager.layout_engine.has_window_membership(wid) {
+                self.native_tab_manager.stage_appearance(wsid, info.pid, sid, info.frame);
+            }
             return false;
         };
         if !self.is_native_tab_suppressed(wid) {

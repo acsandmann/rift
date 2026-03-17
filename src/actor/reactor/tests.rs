@@ -1136,6 +1136,49 @@ fn pending_destroy_does_not_rekey_to_existing_same_frame_sibling_without_appeara
 }
 
 #[test]
+fn known_same_size_window_appearance_does_not_stage_tab_signal_or_rekey() {
+    let (_apps, mut reactor, space) = native_tab_window_and_space_setup(42, 2);
+
+    let old_wid = WindowId::new(1, 1);
+    let sibling_wid = WindowId::new(1, 2);
+    let old_frame = reactor.window_manager.windows[&old_wid].frame_monotonic;
+    if let Some(window) = reactor.window_manager.windows.get_mut(&sibling_wid) {
+        window.frame_monotonic = old_frame;
+    }
+
+    assert!(!reactor.note_native_tab_appearance(
+        WindowServerId::new(2),
+        space,
+        WindowServerInfo {
+            id: WindowServerId::new(2),
+            pid: 1,
+            layer: 0,
+            frame: old_frame,
+            min_frame: CGSize::ZERO,
+            max_frame: CGSize::ZERO,
+        },
+    ));
+    assert!(
+        reactor.native_tab_manager.pending_appearances_for_pid(1).is_empty(),
+        "known managed window appearance should not be retained as a native-tab signal"
+    );
+
+    assert!(reactor.stage_native_tab_destroy(WindowServerId::new(1), space));
+    assert!(!WindowEventHandler::handle_window_destroyed(
+        &mut reactor,
+        old_wid
+    ));
+    reactor.reconcile_native_tabs_for_pid(1, &[sibling_wid]);
+
+    assert!(!reactor.window_manager.windows.contains_key(&old_wid));
+    assert!(reactor.window_manager.windows[&sibling_wid].native_tab.is_none());
+    assert_eq!(
+        reactor.layout_manager.layout_engine.windows_in_active_workspace(space),
+        vec![sibling_wid]
+    );
+}
+
+#[test]
 fn native_tab_discovery_before_destroy_does_not_append_new_tab_to_layout() {
     let (_apps, mut reactor, space) = native_tab_test_setup(39);
 
