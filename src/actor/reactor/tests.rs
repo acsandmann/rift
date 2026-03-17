@@ -1072,6 +1072,65 @@ fn transient_empty_visibility_requests_follow_up_refresh_to_finalize_last_tab_cl
 }
 
 #[test]
+fn closing_last_tab_clears_stale_pending_native_tab_appearance_state() {
+    let (mut apps, mut reactor, space) = native_tab_test_setup(352);
+
+    let wid = WindowId::new(1, 1);
+    let frame = reactor.window_manager.windows[&wid].frame_monotonic;
+    let phantom_wsid = WindowServerId::new(2);
+    assert!(!reactor.note_native_tab_appearance(
+        phantom_wsid,
+        space,
+        WindowServerInfo {
+            id: phantom_wsid,
+            pid: 1,
+            layer: 0,
+            frame,
+            min_frame: CGSize::ZERO,
+            max_frame: CGSize::ZERO,
+        },
+    ));
+
+    assert_eq!(reactor.native_tab_manager.pending_appearances_for_pid(1).len(), 1);
+    assert!(reactor.window_manager.visible_windows.contains(&phantom_wsid));
+    assert!(
+        reactor
+            .window_server_info_manager
+            .window_server_info
+            .contains_key(&phantom_wsid)
+    );
+
+    assert!(reactor.stage_native_tab_destroy(WindowServerId::new(1), space));
+    apps.windows.remove(&wid);
+    assert!(!WindowEventHandler::handle_window_destroyed(&mut reactor, wid));
+
+    reactor.handle_event(Event::ApplicationMainWindowChanged(1, None, Quiet::No));
+    reactor.handle_event(Event::WindowsDiscovered {
+        pid: 1,
+        new: vec![],
+        known_visible: vec![],
+    });
+    apps.simulate_until_quiet(&mut reactor);
+
+    assert_window_removed_from_layout(&reactor, space, wid);
+    assert!(
+        reactor.native_tab_manager.pending_appearances_for_pid(1).is_empty(),
+        "stale pending native-tab appearances should be cleared after true last-tab close"
+    );
+    assert!(
+        !reactor.window_manager.visible_windows.contains(&phantom_wsid),
+        "phantom appeared wsid should be removed from visible window cache"
+    );
+    assert!(
+        !reactor
+            .window_server_info_manager
+            .window_server_info
+            .contains_key(&phantom_wsid),
+        "phantom appeared wsid should be removed from window-server info cache"
+    );
+}
+
+#[test]
 fn pending_native_tab_appearance_does_not_defer_regular_window_close() {
     let (_apps, mut reactor, space) = native_tab_test_setup(36);
 

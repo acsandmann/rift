@@ -307,6 +307,18 @@ impl Reactor {
             .any(|pending| pending.wsid == wsid)
     }
 
+    fn clear_stale_pending_native_tab_appearances_for_pid(&mut self, pid: pid_t) {
+        for pending in self.native_tab_manager.pending_appearances_for_pid(pid) {
+            let has_window_mapping = self.window_manager.window_ids.contains_key(&pending.wsid);
+            if !has_window_mapping {
+                self.window_manager.visible_windows.remove(&pending.wsid);
+                self.window_server_info_manager.window_server_info.remove(&pending.wsid);
+                self.window_manager.observed_window_server_ids.remove(&pending.wsid);
+            }
+            self.native_tab_manager.clear_pending_appearance(pid, pending.wsid);
+        }
+    }
+
     pub(super) fn stage_native_tab_destroy(&mut self, wsid: WindowServerId, sid: SpaceId) -> bool {
         let Some(&wid) = self.window_manager.window_ids.get(&wsid) else {
             return false;
@@ -608,6 +620,11 @@ impl Reactor {
             if self.window_manager.visible_windows.contains(&pending.window_server_id) {
                 self.native_tab_manager.clear_pending_destroy(pending.window_id);
             }
+        }
+
+        if known_visible.is_empty() && self.native_tab_manager.pending_destroys_for_pid(pid).is_empty()
+        {
+            self.clear_stale_pending_native_tab_appearances_for_pid(pid);
         }
 
         let active_windows: Vec<WindowId> = self
