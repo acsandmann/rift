@@ -883,11 +883,7 @@ fn removing_active_native_tab_member_promotes_a_survivor_role() {
     let active_count = [WindowId::new(1, 1), WindowId::new(1, 2)]
         .into_iter()
         .filter_map(|wid| {
-            reactor
-                .window_manager
-                .windows
-                .get(&wid)
-                .and_then(|window| window.native_tab)
+            reactor.window_manager.windows.get(&wid).and_then(|window| window.native_tab)
         })
         .filter(|membership| membership.role == NativeTabRole::Active)
         .count();
@@ -1146,18 +1142,16 @@ fn known_same_size_window_appearance_does_not_stage_tab_signal_or_rekey() {
         window.frame_monotonic = old_frame;
     }
 
-    assert!(!reactor.note_native_tab_appearance(
-        WindowServerId::new(2),
-        space,
-        WindowServerInfo {
+    assert!(
+        !reactor.note_native_tab_appearance(WindowServerId::new(2), space, WindowServerInfo {
             id: WindowServerId::new(2),
             pid: 1,
             layer: 0,
             frame: old_frame,
             min_frame: CGSize::ZERO,
             max_frame: CGSize::ZERO,
-        },
-    ));
+        },)
+    );
     assert!(
         reactor.native_tab_manager.pending_appearances_for_pid(1).is_empty(),
         "known managed window appearance should not be retained as a native-tab signal"
