@@ -249,9 +249,10 @@ impl WindowEventHandler {
             let mut triggered_by_rift =
                 has_pending_request && last_seen.is_some_and(|seen| seen == last_sent_txid);
 
-            if effective_mouse_state == Some(MouseState::Down) && triggered_by_rift {
+            if effective_mouse_state == Some(MouseState::Down) && has_pending_request {
                 if let Some((wsid, _)) = pending_target {
                     reactor.transaction_manager.clear_target_for_window(wsid);
+                    reactor.transaction_manager.set_last_sent_txid(wsid, last_sent_txid.next());
                 }
                 reactor.native_tab_manager.clear_pending_frame_target(wid);
                 triggered_by_rift = false;
@@ -260,6 +261,14 @@ impl WindowEventHandler {
 
             if has_pending_request && last_seen.is_some_and(|seen| seen != last_sent_txid) {
                 debug!(?last_seen, ?last_sent_txid, "Ignoring frame change");
+                return false;
+            }
+
+            if !has_pending_request
+                && requested.0
+                && last_seen.is_some_and(|seen| seen != last_sent_txid)
+            {
+                debug!(?last_seen, ?last_sent_txid, "Ignoring stale requested frame change");
                 return false;
             }
 

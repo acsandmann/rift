@@ -63,17 +63,19 @@ impl DragEventHandler {
             need_layout_refresh = true;
         }
 
+        if let Some(wid) = dragged_wid {
+            reactor.handle_native_tab_frame_changed(wid, true);
+        }
+
         if need_layout_refresh {
-            let skip_layout_occurred = reactor.drag_manager.skip_layout_for_window.is_some();
+            let skipped_wid = reactor.drag_manager.skip_layout_for_window;
             let _ = reactor.update_layout_or_warn(false, false);
-            if skip_layout_occurred {
+            if let Some(skipped_wid) = skipped_wid {
+                reactor.drag_manager.skip_layout_for_window = Some(skipped_wid);
                 let _ = reactor.update_layout_or_warn(false, false);
             }
         }
 
         reactor.drag_manager.skip_layout_for_window = None;
-        if let Some(wid) = dragged_wid {
-            reactor.handle_native_tab_frame_changed(wid, true);
-        }
     }
 }
