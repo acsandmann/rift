@@ -307,7 +307,6 @@ impl Reactor {
             .any(|pending| pending.wsid == wsid)
     }
 
-<<<<<<< HEAD
     fn clear_stale_pending_native_tab_appearances_for_pid(&mut self, pid: pid_t) {
         for pending in self.native_tab_manager.pending_appearances_for_pid(pid) {
             let has_window_mapping = self.window_manager.window_ids.contains_key(&pending.wsid);
@@ -320,8 +319,6 @@ impl Reactor {
         }
     }
 
-=======
->>>>>>> a226928 (x)
     pub(super) fn stage_native_tab_destroy(&mut self, wsid: WindowServerId, sid: SpaceId) -> bool {
         let Some(&wid) = self.window_manager.window_ids.get(&wsid) else {
             return false;
@@ -625,7 +622,8 @@ impl Reactor {
             }
         }
 
-        if known_visible.is_empty() && self.native_tab_manager.pending_destroys_for_pid(pid).is_empty()
+        if known_visible.is_empty()
+            && self.native_tab_manager.pending_destroys_for_pid(pid).is_empty()
         {
             self.clear_stale_pending_native_tab_appearances_for_pid(pid);
         }

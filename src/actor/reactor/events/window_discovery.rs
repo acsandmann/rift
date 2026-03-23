@@ -38,7 +38,6 @@ impl WindowDiscoveryHandler {
         let new_windows = Self::process_window_list(reactor, new, &app_info);
         Self::update_window_states(reactor, new_windows, &app_info);
         if transient_empty_known_visible {
-<<<<<<< HEAD
             if let Some(app_state) = reactor.app_manager.apps.get(&pid) {
                 let pending_destroys = reactor.native_tab_manager.pending_destroys_for_pid(pid);
                 if pending_destroys.is_empty() {
@@ -64,8 +63,6 @@ impl WindowDiscoveryHandler {
                     }
                 }
             }
-=======
->>>>>>> a226928 (x)
             return;
         }
         reactor.reconcile_native_tabs_for_pid(pid, &known_visible);
