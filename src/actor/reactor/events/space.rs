@@ -220,13 +220,11 @@ impl SpaceEventHandler {
         // Treat only user->user space-id changes as topology churn.
         let display_space_changed =
             previous_spaces_by_display.iter().any(|(display_uuid, old_space)| {
-                new_spaces_by_display
-                    .get(display_uuid)
-                    .is_some_and(|new_space| {
-                        new_space != old_space
-                            && !is_fullscreen_space(*old_space)
-                            && !is_fullscreen_space(*new_space)
-                    })
+                new_spaces_by_display.get(display_uuid).is_some_and(|new_space| {
+                    new_space != old_space
+                        && !is_fullscreen_space(*old_space)
+                        && !is_fullscreen_space(*new_space)
+                })
             });
 
         // IMPORTANT:
