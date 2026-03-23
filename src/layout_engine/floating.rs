@@ -74,6 +74,24 @@ impl FloatingManager {
 
     pub(crate) fn last_focus(&self) -> Option<WindowId> { self.last_floating_focus }
 
+    pub(crate) fn rekey_window(&mut self, old: WindowId, new: WindowId) {
+        if self.floating_windows.remove(&old) {
+            self.floating_windows.insert(new);
+        }
+
+        for space_map in self.active_floating_windows.values_mut() {
+            if let Some(app_set) = space_map.get_mut(&old.pid)
+                && app_set.remove(&old)
+            {
+                app_set.insert(new);
+            }
+        }
+
+        if self.last_floating_focus == Some(old) {
+            self.last_floating_focus = Some(new);
+        }
+    }
+
     pub(crate) fn remove_all_for_pid(&mut self, pid: pid_t) {
         let _ = self.floating_windows.remove_all_for_pid(pid);
 

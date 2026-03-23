@@ -1,6 +1,6 @@
 use tracing::{trace, warn};
 
-use crate::actor::app::{AppInfo, WindowId, WindowInfo, pid_t};
+use crate::actor::app::{AppInfo, Request, WindowId, WindowInfo, pid_t};
 use crate::actor::reactor::{Event, LayoutEvent, Reactor, WindowFilter, WindowState, utils};
 use crate::common::collections::{BTreeMap, HashSet};
 use crate::model::virtual_workspace::AppRuleResult;
@@ -26,11 +26,46 @@ impl WindowDiscoveryHandler {
         let app_info =
             app_info.or_else(|| reactor.app_manager.apps.get(&pid).map(|app| app.info.clone()));
 
-        let (stale_windows, pending_refresh) =
-            Self::identify_stale_windows(reactor, pid, &known_visible);
+        let transient_empty_known_visible = known_visible.is_empty()
+            && reactor.native_tab_manager.consume_transient_empty_visibility(pid);
+        let (stale_windows, pending_refresh) = Self::identify_stale_windows(
+            reactor,
+            pid,
+            &known_visible,
+            transient_empty_known_visible,
+        );
         Self::cleanup_stale_windows(reactor, pid, stale_windows, pending_refresh);
         let new_windows = Self::process_window_list(reactor, new, &app_info);
         Self::update_window_states(reactor, new_windows, &app_info);
+        if transient_empty_known_visible {
+            if let Some(app_state) = reactor.app_manager.apps.get(&pid) {
+                let pending_destroys = reactor.native_tab_manager.pending_destroys_for_pid(pid);
+                if pending_destroys.is_empty() {
+                    if let Err(err) = app_state.handle.send(Request::GetVisibleWindows) {
+                        warn!(
+                            pid,
+                            ?err,
+                            "Failed to request follow-up visible-window refresh after transient empty native-tab visibility"
+                        );
+                    }
+                } else {
+                    for pending in pending_destroys {
+                        if let Err(err) =
+                            app_state.handle.send(Request::WindowMaybeDestroyed(pending.window_id))
+                        {
+                            warn!(
+                                pid,
+                                wid = ?pending.window_id,
+                                ?err,
+                                "Failed to verify pending native-tab destroy after transient empty visibility"
+                            );
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        reactor.reconcile_native_tabs_for_pid(pid, &known_visible);
 
         Self::emit_layout_events(reactor, pid, &known_visible, &app_info);
     }
@@ -58,6 +93,7 @@ impl WindowDiscoveryHandler {
         reactor: &Reactor,
         pid: pid_t,
         known_visible: &[WindowId],
+        transient_empty_known_visible: bool,
     ) -> (Vec<WindowId>, bool) {
         const MIN_REAL_WINDOW_DIMENSION: f64 = 2.0;
 
@@ -82,12 +118,14 @@ impl WindowDiscoveryHandler {
         ) || pending_refresh
             || reactor.is_mission_control_active()
             || reactor.is_in_drag()
-            || (known_visible_set.is_empty()
-                && !reactor.has_visible_window_server_ids_for_pid(pid))
+            || transient_empty_known_visible
             || has_window_server_visibles_without_ax;
 
         if skip_stale_cleanup {
-            return (Vec::new(), false);
+            // `pending_refresh` is a one-shot stale-cleanup grace. If we keep it set after
+            // an empty wake / Mission Control discovery, later empty refreshes will continue
+            // to skip cleanup forever and leave ghost windows stranded in layout.
+            return (Vec::new(), pending_refresh);
         }
 
         let active_space_windows: Option<HashSet<WindowServerId>> = {
@@ -113,6 +151,10 @@ impl WindowDiscoveryHandler {
             .iter()
             .filter_map(|(&wid, state)| {
                 if wid.pid != pid || known_visible_set.contains(&wid) {
+                    return None;
+                }
+
+                if state.is_native_tab_suppressed() {
                     return None;
                 }
 
@@ -355,6 +397,11 @@ impl WindowDiscoveryHandler {
             .filter(|wid| wid.pid == pid)
             .filter(|wid| reactor.window_is_standard(*wid))
         {
+            if !reactor.layout_manager.layout_engine.has_window_membership(wid)
+                && reactor.maybe_hold_native_tab_window_created(wid)
+            {
+                continue;
+            }
             let Some(space) = reactor.best_space_for_window_id(wid) else {
                 continue;
             };
@@ -366,6 +413,11 @@ impl WindowDiscoveryHandler {
         // fall back to the app-reported known_visible list for this pid.
         for wid in known_visible.iter().copied().filter(|wid| wid.pid == pid) {
             if included.contains(&wid) || !reactor.window_is_standard(wid) {
+                continue;
+            }
+            if !reactor.layout_manager.layout_engine.has_window_membership(wid)
+                && reactor.maybe_hold_native_tab_window_created(wid)
+            {
                 continue;
             }
             let Some(state) = reactor.window_manager.windows.get(&wid) else {

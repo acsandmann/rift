@@ -150,6 +150,7 @@ pub(crate) struct WindowState {
     pub(crate) frame_monotonic: CGRect,
     pub(crate) is_manageable: bool,
     pub(crate) ignore_app_rule: bool,
+    pub(crate) native_tab: Option<NativeTabMembership>,
 }
 
 impl From<WindowInfo> for WindowState {
@@ -159,21 +160,44 @@ impl From<WindowInfo> for WindowState {
             info,
             is_manageable: false,
             ignore_app_rule: false,
+            native_tab: None,
         }
     }
 }
 
 impl WindowState {
+    pub(crate) fn is_native_tab_suppressed(&self) -> bool {
+        matches!(
+            self.native_tab,
+            Some(NativeTabMembership {
+                role: NativeTabRole::Suppressed,
+                ..
+            })
+        )
+    }
+
     pub(crate) fn is_effectively_manageable(&self) -> bool {
-        self.is_manageable && !self.ignore_app_rule
+        self.is_manageable && !self.ignore_app_rule && !self.is_native_tab_suppressed()
     }
 
     pub(crate) fn matches_filter(&self, filter: WindowFilter) -> bool {
         match filter {
-            WindowFilter::Manageable => self.is_manageable,
+            WindowFilter::Manageable => self.is_manageable && !self.is_native_tab_suppressed(),
             WindowFilter::EffectivelyManageable => self.is_effectively_manageable(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NativeTabMembership {
+    pub(crate) group_id: u32,
+    pub(crate) role: NativeTabRole,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeTabRole {
+    Active,
+    Suppressed,
 }
 
 #[derive(Clone, Copy, Debug)]

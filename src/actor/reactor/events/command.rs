@@ -493,6 +493,7 @@ impl CommandEventHandler {
         if let Some(state) = reactor.window_manager.windows.get_mut(&window_id) {
             state.frame_monotonic = target_frame;
         }
+        reactor.handle_native_tab_frame_changed(window_id, true);
 
         let response = reactor.layout_manager.layout_engine.move_window_to_space(
             source_space,

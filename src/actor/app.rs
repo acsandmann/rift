@@ -457,11 +457,6 @@ impl State {
                     return Ok(false);
                 }
 
-                // If we don't know this window, nothing to verify.
-                if !self.windows.contains_key(&wid) {
-                    return Ok(false);
-                }
-
                 // Trigger a visible windows refresh. If the window is gone, the reactor
                 // will detect it via missing membership and tear down state.
                 *request = Request::GetVisibleWindows;

@@ -128,6 +128,15 @@ impl VirtualWorkspace {
         self.windows.remove(&window_id)
     }
 
+    pub fn rekey_window(&mut self, old: WindowId, new: WindowId) {
+        if self.windows.remove(&old) {
+            self.windows.insert(new);
+        }
+        if self.last_focused == Some(old) {
+            self.last_focused = Some(new);
+        }
+    }
+
     pub fn set_last_focused(&mut self, window_id: Option<WindowId>) {
         self.last_focused = window_id;
     }
@@ -1085,6 +1094,35 @@ impl VirtualWorkspaceManager {
         }
     }
 
+    pub fn rekey_window(&mut self, old: WindowId, new: WindowId) {
+        let workspace_keys: Vec<(SpaceId, WindowId, VirtualWorkspaceId)> = self
+            .window_to_workspace
+            .iter()
+            .filter_map(|(&(space, wid), &workspace_id)| {
+                (wid == old).then_some((space, wid, workspace_id))
+            })
+            .collect();
+
+        for (space, wid, workspace_id) in workspace_keys {
+            self.window_to_workspace.remove(&(space, wid));
+            self.window_to_workspace.insert((space, new), workspace_id);
+            if let Some(workspace) = self.workspaces.get_mut(workspace_id) {
+                workspace.rekey_window(old, new);
+            }
+
+            if let Some(rule) = self.window_rule_floating.remove(&(space, old)) {
+                self.window_rule_floating.insert((space, new), rule);
+            }
+            if let Some(last_rule) = self.last_rule_decision.remove(&(space, old)) {
+                self.last_rule_decision.insert((space, new), last_rule);
+            }
+        }
+
+        for positions in self.floating_positions.values_mut() {
+            positions.rekey_window(old, new);
+        }
+    }
+
     pub fn list_workspaces(&mut self, space: SpaceId) -> Vec<(VirtualWorkspaceId, String)> {
         self.ensure_space_initialized(space);
         let ids = self.workspaces_by_space.get(&space).cloned().unwrap_or_default();
@@ -1531,6 +1569,12 @@ impl FloatingWindowPositions {
 
     fn remove_app_windows(&mut self, pid: pid_t) {
         self.positions.retain(|window_id, _| window_id.pid != pid);
+    }
+
+    fn rekey_window(&mut self, old: WindowId, new: WindowId) {
+        if let Some(position) = self.positions.remove(&old) {
+            self.positions.insert(new, position);
+        }
     }
 }
 

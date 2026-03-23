@@ -63,6 +63,16 @@ impl SpaceEventHandler {
                 return;
             }
 
+            if reactor.stage_native_tab_destroy(wsid, sid) {
+                if let Some(&wid) = reactor.window_manager.window_ids.get(&wsid)
+                    && let Some(app_state) = reactor.app_manager.apps.get(&wid.pid)
+                    && let Err(e) = app_state.handle.send(Request::WindowMaybeDestroyed(wid))
+                {
+                    warn!("Failed to send WindowMaybeDestroyed: {}", e);
+                }
+                return;
+            }
+
             if let Some(&wid) = reactor.window_manager.window_ids.get(&wsid) {
                 reactor.window_manager.window_ids.remove(&wsid);
                 reactor.window_server_info_manager.window_server_info.remove(&wsid);
@@ -90,9 +100,17 @@ impl SpaceEventHandler {
         wsid: WindowServerId,
         sid: SpaceId,
     ) {
-        if reactor.window_server_info_manager.window_server_info.contains_key(&wsid)
-            || reactor.window_manager.observed_window_server_ids.contains(&wsid)
+        let known_before =
+            reactor.window_server_info_manager.window_server_info.contains_key(&wsid)
+                || reactor.window_manager.observed_window_server_ids.contains(&wsid);
+        let appearance_info = crate::sys::window_server::get_window(wsid);
+        if let Some(window_server_info) = appearance_info
+            && reactor.note_native_tab_appearance(wsid, sid, window_server_info)
         {
+            return;
+        }
+
+        if known_before {
             debug!(
                 ?wsid,
                 "Received WindowServerAppeared for known window - ignoring"
@@ -103,7 +121,7 @@ impl SpaceEventHandler {
         reactor.window_manager.observed_window_server_ids.insert(wsid);
         // TODO: figure out why this is happening, we should really know about this app,
         // why dont we get notifications that its being launched?
-        if let Some(window_server_info) = crate::sys::window_server::get_window(wsid) {
+        if let Some(window_server_info) = appearance_info {
             if window_server_info.layer != 0 {
                 trace!(
                     ?wsid,

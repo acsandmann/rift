@@ -8,6 +8,7 @@ pub struct DragEventHandler;
 impl DragEventHandler {
     pub fn handle_mouse_up(reactor: &mut Reactor) {
         let mut need_layout_refresh = false;
+        let dragged_wid = reactor.drag_manager.dragged();
 
         let pending_swap = reactor.get_pending_drag_swap();
 
@@ -71,5 +72,8 @@ impl DragEventHandler {
         }
 
         reactor.drag_manager.skip_layout_for_window = None;
+        if let Some(wid) = dragged_wid {
+            reactor.handle_native_tab_frame_changed(wid, true);
+        }
     }
 }
