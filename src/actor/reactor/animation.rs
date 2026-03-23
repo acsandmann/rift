@@ -70,7 +70,7 @@ impl<'a> Animation<'a> {
                     origin: from.origin,
                     size: to.size,
                 };
-                _ = handle.send(Request::SetWindowFrame(wid, frame, txid, true));
+                _ = handle.send(Request::SetWindowFrame(wid, frame, txid, false));
             }
         }
 
@@ -97,9 +97,9 @@ impl<'a> Animation<'a> {
                 // clipped during the animation.
                 if frame * 2 == self.frames || frame == self.frames {
                     rect.size = to.size;
-                    _ = handle.send(Request::SetWindowFrame(wid, rect, txid, true));
+                    _ = handle.send(Request::SetWindowFrame(wid, rect, txid, false));
                 } else {
-                    _ = handle.send(Request::SetWindowPos(wid, rect.origin, txid, true));
+                    _ = handle.send(Request::SetWindowPos(wid, rect.origin, txid, false));
                 }
             }
         }

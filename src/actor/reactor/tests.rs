@@ -539,10 +539,7 @@ fn title_change_reapply_does_not_rebalance_when_window_stays_floating() {
         LayoutCommand::ToggleWindowFloating,
     )));
     apps.simulate_until_quiet(&mut reactor);
-    assert!(reactor
-        .layout_manager
-        .layout_engine
-        .is_window_floating(WindowId::new(1, 1)));
+    assert!(reactor.layout_manager.layout_engine.is_window_floating(WindowId::new(1, 1)));
 
     let modified = reactor.layout_manager.layout_engine.calculate_layout(
         space,
@@ -558,10 +555,7 @@ fn title_change_reapply_does_not_rebalance_when_window_stays_floating() {
         "Renamed floating window".to_string(),
     ));
 
-    assert!(reactor
-        .layout_manager
-        .layout_engine
-        .is_window_floating(WindowId::new(1, 1)));
+    assert!(reactor.layout_manager.layout_engine.is_window_floating(WindowId::new(1, 1)));
     assert_eq!(
         reactor.layout_manager.layout_engine.calculate_layout(
             space,
