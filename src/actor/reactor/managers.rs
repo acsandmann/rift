@@ -234,6 +234,7 @@ impl NativeTabManager {
             if group.active == Some(wid) {
                 group.active = group.members.iter().copied().next();
             }
+<<<<<<< HEAD
             let active = group.active;
             let members: Vec<WindowId> = group.members.iter().copied().collect();
             for member in members {
@@ -248,6 +249,8 @@ impl NativeTabManager {
                     };
                 }
             }
+=======
+>>>>>>> a226928 (x)
             if group.members.len() >= 2 {
                 return;
             }
