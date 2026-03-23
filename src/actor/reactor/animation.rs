@@ -183,15 +183,15 @@ impl AnimationManager {
                         if target_frame.same_as(current_frame) {
                             continue;
                         }
-                        let Some(wsid) = window.info.sys_id else {
-                            trace!(
-                                ?wid,
-                                ?current_frame,
-                                ?target_frame,
-                                "Skipping animation for window without window server id"
-                            );
+                        let wsid = window.info.sys_id.unwrap();
+                        if reactor
+                            .transaction_manager
+                            .get_target_frame(wsid)
+                            .is_some_and(|pending| pending.same_as(target_frame))
+                        {
+                            trace!(?wid, ?target_frame, "Skipping redundant layout request");
                             continue;
-                        };
+                        }
                         any_frame_changed = true;
                         let txid = reactor.transaction_manager.generate_next_txid(wsid);
                         (current_frame, Some(wsid), txid)
@@ -291,14 +291,15 @@ impl AnimationManager {
             if target_frame.same_as(current_frame) {
                 continue;
             }
-            if window.info.sys_id.is_none() {
-                trace!(
-                    ?wid,
-                    ?current_frame,
-                    ?target_frame,
-                    "Skipping instant layout for window without window server id"
-                );
-                continue;
+            if let Some(wsid) = window.info.sys_id {
+                if reactor
+                    .transaction_manager
+                    .get_target_frame(wsid)
+                    .is_some_and(|pending| pending.same_as(target_frame))
+                {
+                    trace!(?wid, ?target_frame, "Skipping redundant instant layout request");
+                    continue;
+                }
             }
             any_frame_changed = true;
             trace!(

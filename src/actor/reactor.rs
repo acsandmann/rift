@@ -1530,14 +1530,19 @@ impl Reactor {
         frame: &CGRect,
         window_server_id: Option<WindowServerId>,
     ) -> Option<SpaceId> {
-        if let Some(space) = window_server_id.and_then(crate::sys::window_server::window_space)
-            && (self.space_manager.screen_by_space(space).is_some()
-                || crate::sys::window_server::space_is_user(space.get()))
-        {
+        if let Some(space) = self.best_space_for_frame(frame) {
             return Some(space);
         }
 
-        self.best_space_for_frame(frame)
+        if let Some(space) = window_server_id.and_then(crate::sys::window_server::window_space) {
+            if self.space_manager.screen_by_space(space).is_some()
+                || crate::sys::window_server::space_is_user(space.get())
+            {
+                return Some(space);
+            }
+        }
+
+        None
     }
 
     fn best_space_for_frame(&self, frame: &CGRect) -> Option<SpaceId> {
