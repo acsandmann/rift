@@ -183,7 +183,10 @@ impl AnimationManager {
                         if target_frame.same_as(current_frame) {
                             continue;
                         }
-                        let wsid = window.info.sys_id.unwrap();
+                        let Some(wsid) = window.info.sys_id else {
+                            debug!(?wid, "Skipping animated layout - window has no server id");
+                            continue;
+                        };
                         if reactor
                             .transaction_manager
                             .get_target_frame(wsid)
@@ -291,15 +294,17 @@ impl AnimationManager {
             if target_frame.same_as(current_frame) {
                 continue;
             }
-            if let Some(wsid) = window.info.sys_id {
-                if reactor
-                    .transaction_manager
-                    .get_target_frame(wsid)
-                    .is_some_and(|pending| pending.same_as(target_frame))
-                {
-                    trace!(?wid, ?target_frame, "Skipping redundant instant layout request");
-                    continue;
-                }
+            let Some(wsid) = window.info.sys_id else {
+                debug!(?wid, "Skipping instant layout - window has no server id");
+                continue;
+            };
+            if reactor
+                .transaction_manager
+                .get_target_frame(wsid)
+                .is_some_and(|pending| pending.same_as(target_frame))
+            {
+                trace!(?wid, ?target_frame, "Skipping redundant instant layout request");
+                continue;
             }
             any_frame_changed = true;
             trace!(
