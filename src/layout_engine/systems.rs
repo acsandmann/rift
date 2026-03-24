@@ -1,11 +1,91 @@
 use enum_dispatch::enum_dispatch;
-use objc2_core_foundation::{CGRect, CGSize};
+use objc2_core_foundation::CGRect;
 use serde::{Deserialize, Serialize};
 
 use crate::actor::app::{WindowId, pid_t};
+use crate::common::collections::HashMap;
 use crate::layout_engine::{Direction, LayoutKind};
 
 slotmap::new_key_type! { pub struct LayoutId; }
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WindowLayoutConstraints {
+    pub is_resizable: bool,
+    pub locked_width: f64,
+    pub locked_height: f64,
+    pub min_width: f64,
+    pub min_height: f64,
+    pub max_width: f64,
+    pub max_height: f64,
+}
+
+impl WindowLayoutConstraints {
+    pub fn normalized(self) -> Self {
+        let clean = |v: f64| if v.is_finite() { v.max(0.0) } else { 0.0 };
+        let min_width = clean(self.min_width);
+        let min_height = clean(self.min_height);
+        let mut max_width = clean(self.max_width);
+        let mut max_height = clean(self.max_height);
+        if max_width > 0.0 && max_width < min_width {
+            max_width = min_width;
+        }
+        if max_height > 0.0 && max_height < min_height {
+            max_height = min_height;
+        }
+        Self {
+            is_resizable: self.is_resizable,
+            locked_width: clean(self.locked_width),
+            locked_height: clean(self.locked_height),
+            min_width,
+            min_height,
+            max_width,
+            max_height,
+        }
+    }
+
+    pub fn min_for_axis(self, horizontal: bool) -> f64 {
+        if horizontal {
+            self.min_width
+        } else {
+            self.min_height
+        }
+    }
+
+    pub fn max_for_axis(self, horizontal: bool) -> f64 {
+        if horizontal {
+            self.max_width
+        } else {
+            self.max_height
+        }
+    }
+
+    pub fn fixed_for_axis(self, horizontal: bool) -> Option<f64> {
+        let locked = if horizontal {
+            self.locked_width
+        } else {
+            self.locked_height
+        };
+        let min = self.min_for_axis(horizontal);
+        let max = self.max_for_axis(horizontal);
+        // Axis-specific lock: when min/max collapse to the same positive value,
+        // treat that axis as fixed even if the window is generally resizable.
+        if min > 0.0 && max > 0.0 && (min - max).abs() <= f64::EPSILON {
+            return Some(max);
+        }
+        if !self.is_resizable {
+            return (locked > 0.0).then_some(locked);
+        }
+        None
+    }
+
+    pub fn resizable_for_axis(self, horizontal: bool) -> bool {
+        self.fixed_for_axis(horizontal).is_none()
+    }
+
+    pub fn resizable_any_axis(self) -> bool {
+        self.resizable_for_axis(true) || self.resizable_for_axis(false)
+    }
+}
 
 #[enum_dispatch]
 pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
@@ -20,6 +100,7 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
         layout: LayoutId,
         screen: CGRect,
         stack_offset: f64,
+        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &crate::common::config::GapSettings,
         stack_line_thickness: f64,
         stack_line_horiz: crate::common::config::HorizontalPlacement,
@@ -40,6 +121,7 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId);
     fn remove_window(&mut self, wid: WindowId);
     fn remove_windows_for_app(&mut self, pid: pid_t);
+    fn windows_for_app(&self, layout: LayoutId, pid: pid_t) -> Vec<WindowId>;
     fn set_windows_for_app(&mut self, layout: LayoutId, pid: pid_t, desired: Vec<WindowId>);
     fn has_windows_for_app(&self, layout: LayoutId, pid: pid_t) -> bool;
     fn contains_window(&self, layout: LayoutId, wid: WindowId) -> bool;
@@ -50,16 +132,6 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
         wid: WindowId,
         old_frame: CGRect,
         new_frame: CGRect,
-        screen: CGRect,
-        gaps: &crate::common::config::GapSettings,
-    );
-
-    fn apply_window_size_constraint(
-        &mut self,
-        layout: LayoutId,
-        wid: WindowId,
-        current_frame: CGRect,
-        target_size: CGSize,
         screen: CGRect,
         gaps: &crate::common::config::GapSettings,
     );
@@ -99,11 +171,97 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
 mod traditional;
 pub use traditional::TraditionalLayoutSystem;
 mod bsp;
+pub(crate) mod constraints;
 pub use bsp::BspLayoutSystem;
 mod master_stack;
 pub use master_stack::MasterStackLayoutSystem;
 mod scrolling;
 pub use scrolling::ScrollingLayoutSystem;
+
+#[cfg(test)]
+mod tests {
+    use super::WindowLayoutConstraints;
+
+    #[test]
+    fn axis_specific_fixed_detection_supports_one_axis_locked_other_resizable() {
+        let c = WindowLayoutConstraints {
+            is_resizable: true,
+            locked_width: 700.0,
+            locked_height: 400.0,
+            min_width: 723.0,
+            min_height: 470.0,
+            max_width: 723.0,
+            max_height: 0.0,
+        }
+        .normalized();
+
+        assert_eq!(c.fixed_for_axis(true), Some(723.0));
+        assert_eq!(c.fixed_for_axis(false), None);
+        assert!(!c.resizable_for_axis(true));
+        assert!(c.resizable_for_axis(false));
+        assert!(c.resizable_any_axis());
+    }
+
+    #[test]
+    fn non_resizable_zero_locked_size_is_not_treated_as_fixed() {
+        let c = WindowLayoutConstraints {
+            is_resizable: false,
+            locked_width: 0.0,
+            locked_height: 0.0,
+            min_width: 0.0,
+            min_height: 0.0,
+            max_width: 0.0,
+            max_height: 0.0,
+        }
+        .normalized();
+
+        assert_eq!(c.fixed_for_axis(true), None);
+        assert_eq!(c.fixed_for_axis(false), None);
+        assert!(c.resizable_for_axis(true));
+        assert!(c.resizable_for_axis(false));
+    }
+
+    #[test]
+    fn non_resizable_positive_locked_size_remains_fixed() {
+        let c = WindowLayoutConstraints {
+            is_resizable: false,
+            locked_width: 640.0,
+            locked_height: 360.0,
+            min_width: 0.0,
+            min_height: 0.0,
+            max_width: 0.0,
+            max_height: 0.0,
+        }
+        .normalized();
+
+        assert_eq!(c.fixed_for_axis(true), Some(640.0));
+        assert_eq!(c.fixed_for_axis(false), Some(360.0));
+        assert!(!c.resizable_for_axis(true));
+        assert!(!c.resizable_for_axis(false));
+        assert!(!c.resizable_any_axis());
+    }
+
+    #[test]
+    fn positive_max_only_constraint_is_not_treated_as_fixed() {
+        let c = WindowLayoutConstraints {
+            is_resizable: true,
+            locked_width: 0.0,
+            locked_height: 0.0,
+            min_width: 0.0,
+            min_height: 0.0,
+            max_width: 600.0,
+            max_height: 480.0,
+        }
+        .normalized();
+
+        assert_eq!(c.fixed_for_axis(true), None);
+        assert_eq!(c.fixed_for_axis(false), None);
+        assert_eq!(c.max_for_axis(true), 600.0);
+        assert_eq!(c.max_for_axis(false), 480.0);
+        assert!(c.resizable_for_axis(true));
+        assert!(c.resizable_for_axis(false));
+    }
+}
 mod stack;
 pub use stack::StackLayoutSystem;
 

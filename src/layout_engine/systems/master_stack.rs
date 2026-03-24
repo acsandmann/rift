@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::HashMap as StdHashMap;
 
 use nix::libc::pid_t;
 use objc2_core_foundation::CGRect;
@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::actor::app::WindowId;
 use crate::common::config::{MasterStackNewWindowPlacement, MasterStackSettings, MasterStackSide};
+use crate::layout_engine::systems::WindowLayoutConstraints;
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{
     Direction, LayoutId, LayoutKind, LayoutSystem, Orientation, TraditionalLayoutSystem,
@@ -461,7 +462,7 @@ impl LayoutSystem for MasterStackLayoutSystem {
         } else {
             (children[1], children[0])
         };
-        let mut labels = HashMap::new();
+        let mut labels = StdHashMap::new();
         labels.insert(master, "master");
         labels.insert(stack, "stack");
         self.inner.draw_tree_with_labels(layout, &labels)
@@ -472,6 +473,7 @@ impl LayoutSystem for MasterStackLayoutSystem {
         layout: LayoutId,
         screen: CGRect,
         stack_offset: f64,
+        constraints: &crate::common::collections::HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &crate::common::config::GapSettings,
         stack_line_thickness: f64,
         stack_line_horiz: crate::common::config::HorizontalPlacement,
@@ -492,6 +494,7 @@ impl LayoutSystem for MasterStackLayoutSystem {
                     screen,
                     rect,
                     stack_offset,
+                    constraints,
                     gaps,
                     stack_line_thickness,
                     stack_line_horiz,
@@ -503,6 +506,7 @@ impl LayoutSystem for MasterStackLayoutSystem {
             layout,
             screen,
             stack_offset,
+            constraints,
             gaps,
             stack_line_thickness,
             stack_line_horiz,
@@ -583,6 +587,10 @@ impl LayoutSystem for MasterStackLayoutSystem {
         }
     }
 
+    fn windows_for_app(&self, layout: LayoutId, pid: pid_t) -> Vec<WindowId> {
+        self.inner.windows_for_app(layout, pid)
+    }
+
     fn set_windows_for_app(&mut self, layout: LayoutId, pid: pid_t, mut desired: Vec<WindowId>) {
         let (_root, master, stack) = self.ensure_structure(layout);
         let root = self.inner.root(layout);
@@ -646,25 +654,6 @@ impl LayoutSystem for MasterStackLayoutSystem {
         gaps: &crate::common::config::GapSettings,
     ) {
         self.inner.on_window_resized(layout, wid, old_frame, new_frame, screen, gaps);
-    }
-
-    fn apply_window_size_constraint(
-        &mut self,
-        layout: LayoutId,
-        wid: WindowId,
-        current_frame: CGRect,
-        target_size: objc2_core_foundation::CGSize,
-        screen: CGRect,
-        gaps: &crate::common::config::GapSettings,
-    ) {
-        self.inner.apply_window_size_constraint(
-            layout,
-            wid,
-            current_frame,
-            target_size,
-            screen,
-            gaps,
-        );
     }
 
     fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {

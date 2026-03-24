@@ -51,13 +51,11 @@ struct Cli {
     #[arg(long)]
     no_animate: bool,
 
-    /// Check whether the restore file can be loaded without actually starting
-    /// the window manager.
+    /// No-op compatibility check for the deprecated restore file path.
     #[arg(long)]
     validate: bool,
 
-    /// Restore the configuration saved with the save_and_exit command. This is
-    /// only useful within the same session.
+    /// Deprecated no-op flag retained for CLI compatibility.
     #[arg(long)]
     restore: bool,
 
@@ -146,7 +144,6 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
     config.settings.default_disable |= opt.default_disable;
 
     if opt.validate {
-        LayoutEngine::load(restore_file()).unwrap();
         return;
     }
 
@@ -154,15 +151,11 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
 
     let (broadcast_tx, broadcast_rx) = rift_wm::actor::channel();
 
-    let layout = if opt.restore {
-        LayoutEngine::load(restore_file()).unwrap()
-    } else {
-        LayoutEngine::new(
-            &config.virtual_workspaces,
-            &config.settings.layout,
-            Some(broadcast_tx.clone()),
-        )
-    };
+    let layout = LayoutEngine::new(
+        &config.virtual_workspaces,
+        &config.settings.layout,
+        Some(broadcast_tx.clone()),
+    );
     let (event_tap_tx, event_tap_rx) = rift_wm::actor::channel();
     let (menu_tx, menu_rx) = rift_wm::actor::channel();
     let (stack_line_tx, stack_line_rx) = rift_wm::actor::channel();

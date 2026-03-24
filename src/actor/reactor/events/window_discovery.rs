@@ -35,6 +35,24 @@ impl WindowDiscoveryHandler {
         Self::emit_layout_events(reactor, pid, &known_visible, &app_info);
     }
 
+    fn sync_window_server_id_mapping(
+        reactor: &mut Reactor,
+        wid: WindowId,
+        old_sys_id: Option<WindowServerId>,
+        new_sys_id: Option<WindowServerId>,
+    ) {
+        if old_sys_id != new_sys_id
+            && let Some(old_wsid) = old_sys_id
+            && reactor.window_manager.window_ids.get(&old_wsid) == Some(&wid)
+        {
+            reactor.window_manager.window_ids.remove(&old_wsid);
+        }
+
+        if let Some(new_wsid) = new_sys_id {
+            reactor.window_manager.window_ids.insert(new_wsid, wid);
+        }
+    }
+
     /// Identify windows that should be removed as stale.
     fn identify_stale_windows(
         reactor: &Reactor,
@@ -204,6 +222,12 @@ impl WindowDiscoveryHandler {
             // without reapplying app rules.
             for (wid, info) in &new {
                 if reactor.window_manager.windows.contains_key(wid) {
+                    let old_sys_id = reactor
+                        .window_manager
+                        .windows
+                        .get(wid)
+                        .and_then(|window| window.info.sys_id);
+                    Self::sync_window_server_id_mapping(reactor, *wid, old_sys_id, info.sys_id);
                     let manageable = utils::compute_window_manageability(
                         info.sys_id,
                         info.is_minimized,
@@ -219,6 +243,9 @@ impl WindowDiscoveryHandler {
                         existing.info.is_standard = info.is_standard;
                         existing.info.is_root = info.is_root;
                         existing.info.is_minimized = info.is_minimized;
+                        existing.info.is_resizable = info.is_resizable;
+                        existing.info.min_size = info.min_size;
+                        existing.info.max_size = info.max_size;
                         existing.info.sys_id = info.sys_id;
                         existing.info.bundle_id = info.bundle_id.clone();
                         existing.info.path = info.path.clone();
@@ -238,21 +265,44 @@ impl WindowDiscoveryHandler {
                     state.is_manageable = manageable;
                     reactor.window_manager.windows.insert(*wid, state);
                 }
-                if let Some(wsid) = info.sys_id {
-                    reactor.window_manager.window_ids.insert(wsid, *wid);
-                }
+                Self::sync_window_server_id_mapping(reactor, *wid, None, info.sys_id);
             }
             // fall through
         }
 
         // Process all new windows
         for (wid, info) in new {
-            if let Some(wsid) = info.sys_id {
-                reactor.window_manager.window_ids.insert(wsid, wid);
-            }
             if reactor.window_manager.windows.contains_key(&wid) {
-                // window state is already tracked; keep for layout sync only
+                let old_sys_id =
+                    reactor.window_manager.windows.get(&wid).and_then(|window| window.info.sys_id);
+                Self::sync_window_server_id_mapping(reactor, wid, old_sys_id, info.sys_id);
+                let manageable = utils::compute_window_manageability(
+                    info.sys_id,
+                    info.is_minimized,
+                    info.is_standard,
+                    info.is_root,
+                    &reactor.window_server_info_manager.window_server_info,
+                );
+                if let Some(existing) = reactor.window_manager.windows.get_mut(&wid) {
+                    existing.info.title = info.title.clone();
+                    if info.frame.size.width != 0.0 || info.frame.size.height != 0.0 {
+                        existing.frame_monotonic = info.frame;
+                    }
+                    existing.info.is_standard = info.is_standard;
+                    existing.info.is_root = info.is_root;
+                    existing.info.is_minimized = info.is_minimized;
+                    existing.info.is_resizable = info.is_resizable;
+                    existing.info.min_size = info.min_size;
+                    existing.info.max_size = info.max_size;
+                    existing.info.sys_id = info.sys_id;
+                    existing.info.bundle_id = info.bundle_id.clone();
+                    existing.info.path = info.path.clone();
+                    existing.info.ax_role = info.ax_role.clone();
+                    existing.info.ax_subrole = info.ax_subrole.clone();
+                    existing.is_manageable = manageable;
+                }
             } else {
+                Self::sync_window_server_id_mapping(reactor, wid, None, info.sys_id);
                 new_windows.push((wid, info));
             }
         }
@@ -404,6 +454,8 @@ impl WindowDiscoveryHandler {
                 Option<String>,
                 bool,
                 objc2_core_foundation::CGSize,
+                Option<objc2_core_foundation::CGSize>,
+                Option<objc2_core_foundation::CGSize>,
             )> = windows_for_space
                 .iter()
                 .filter_map(|&wid| {
@@ -418,6 +470,8 @@ impl WindowDiscoveryHandler {
                         window.info.ax_subrole.clone(),
                         window.info.is_resizable,
                         window.frame_monotonic.size,
+                        window.info.min_size,
+                        window.info.max_size,
                     ))
                 })
                 .collect();

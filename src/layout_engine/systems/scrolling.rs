@@ -4,9 +4,10 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use serde::{Deserialize, Serialize};
 
 use crate::actor::app::{WindowId, pid_t};
-use crate::common::collections::HashSet;
+use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{ScrollingFocusNavigationStyle, ScrollingLayoutSettings};
-use crate::layout_engine::systems::LayoutSystem;
+use crate::layout_engine::systems::constraints::{AxisConstraints, solve_axis_lengths};
+use crate::layout_engine::systems::{LayoutSystem, WindowLayoutConstraints};
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{Direction, LayoutId, LayoutKind};
 
@@ -588,6 +589,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
         layout: LayoutId,
         screen: CGRect,
         _stack_offset: f64,
+        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &crate::common::config::GapSettings,
         _stack_line_thickness: f64,
         _stack_line_horiz: crate::common::config::HorizontalPlacement,
@@ -601,12 +603,47 @@ impl LayoutSystem for ScrollingLayoutSystem {
         let gap_y = gaps.inner.vertical;
         let base_ratio = self.clamp_ratio(state.column_width_ratio);
 
-        let mut column_ratios = Vec::with_capacity(state.columns.len());
         let mut column_widths = Vec::with_capacity(state.columns.len());
+        let mut column_ratios = Vec::with_capacity(state.columns.len());
         for col in state.columns.iter() {
             let ratio = self.clamp_ratio(base_ratio + col.width_offset);
-            column_ratios.push(ratio);
-            column_widths.push((tiling.size.width * ratio).max(1.0));
+            let base_width = (tiling.size.width * ratio).max(1.0);
+            let mut min_w: f64 = 1.0;
+            let mut fixed_w: Option<f64> = None;
+            let mut max_w: Option<f64> = None;
+            for wid in &col.windows {
+                if let Some(c) = constraints.get(wid).copied() {
+                    let c = c.normalized();
+                    min_w = min_w.max(c.min_for_axis(true));
+                    if let Some(locked) = c.fixed_for_axis(true) {
+                        fixed_w = Some(match fixed_w {
+                            Some(current) => current.max(locked),
+                            None => locked,
+                        });
+                    }
+                    if c.max_for_axis(true) > 0.0 {
+                        max_w = Some(match max_w {
+                            Some(current) => current.min(c.max_for_axis(true)),
+                            None => c.max_for_axis(true),
+                        });
+                    }
+                }
+            }
+            let required_w = fixed_w.unwrap_or(min_w).max(min_w);
+            let mut width = base_width.max(required_w);
+            if let Some(max_w) = max_w {
+                width = width.min(max_w).max(required_w);
+            }
+            // Keep scrolling columns bounded to the tiling viewport. This layout
+            // scrolls between column starts; it does not pan within a single
+            // oversized column.
+            width = width.min(tiling.size.width.max(1.0));
+            column_widths.push(width);
+            column_ratios.push(if tiling.size.width > 0.0 {
+                (width / tiling.size.width).max(0.0)
+            } else {
+                0.0
+            });
         }
 
         let mut column_starts = Vec::with_capacity(state.columns.len());
@@ -723,7 +760,10 @@ impl LayoutSystem for ScrollingLayoutSystem {
         for (col_idx, col) in state.columns.iter().enumerate() {
             let offset = f64::from_bits(state.scroll_offset_px.load(Ordering::Relaxed));
             let ratio = column_ratios.get(col_idx).copied().unwrap_or(base_ratio);
-            let column_width = (tiling.size.width * ratio).max(1.0);
+            let column_width = column_widths
+                .get(col_idx)
+                .copied()
+                .unwrap_or((tiling.size.width * ratio).max(1.0));
             let start = column_starts.get(col_idx).copied().unwrap_or(0.0);
             let x = anchor_x + start - offset;
             if col.windows.is_empty() {
@@ -731,25 +771,79 @@ impl LayoutSystem for ScrollingLayoutSystem {
             }
             let total_gap = gap_y * (col.windows.len().saturating_sub(1) as f64);
             let available_height = (tiling.size.height - total_gap).max(0.0);
-            let row_height = if col.windows.is_empty() {
-                0.0
-            } else {
-                (available_height / col.windows.len() as f64).max(1.0)
-            };
+            let row_constraints: Vec<AxisConstraints> = col
+                .windows
+                .iter()
+                .map(|wid| {
+                    let (min, fixed, max, can_grow) = constraints
+                        .get(wid)
+                        .copied()
+                        .map(|c| {
+                            let c = c.normalized();
+                            (
+                                c.min_for_axis(false),
+                                c.fixed_for_axis(false),
+                                (c.max_for_axis(false) > 0.0).then(|| c.max_for_axis(false)),
+                                c.resizable_for_axis(false),
+                            )
+                        })
+                        .unwrap_or((0.0, None, None, true));
+                    AxisConstraints {
+                        min,
+                        fixed,
+                        max,
+                        weight: 1.0,
+                        can_grow,
+                    }
+                })
+                .collect();
+            let solved_row_heights = solve_axis_lengths(&row_constraints, available_height);
+            let fallback_row_height = (available_height / col.windows.len() as f64).max(1.0);
+            let mut y_cursor = tiling.origin.y;
 
             for (row_idx, wid) in col.windows.iter().enumerate() {
-                let y = tiling.origin.y + (row_idx as f64) * (row_height + gap_y);
+                let row_height = solved_row_heights
+                    .get(row_idx)
+                    .copied()
+                    .unwrap_or(fallback_row_height)
+                    .max(0.0);
                 // round position and size independently to avoid size jitter from min/max rounding.
                 let mut frame = CGRect::new(
-                    CGPoint::new(x.round(), y.round()),
+                    CGPoint::new(x.round(), y_cursor.round()),
                     CGSize::new(column_width.round(), row_height.round()),
                 );
                 if state.fullscreen.contains(wid) {
                     frame = screen;
                 } else if state.fullscreen_within_gaps.contains(wid) {
                     frame = tiling;
+                } else if let Some(c) = constraints.get(wid).copied() {
+                    let c = c.normalized();
+                    let desired_w = c
+                        .fixed_for_axis(true)
+                        .unwrap_or(frame.size.width)
+                        .max(c.min_for_axis(true));
+                    let desired_h = c
+                        .fixed_for_axis(false)
+                        .unwrap_or(frame.size.height)
+                        .max(c.min_for_axis(false));
+                    let desired_w = if c.max_for_axis(true) > 0.0 {
+                        desired_w.min(c.max_for_axis(true))
+                    } else {
+                        desired_w
+                    };
+                    let desired_h = if c.max_for_axis(false) > 0.0 {
+                        desired_h.min(c.max_for_axis(false))
+                    } else {
+                        desired_h
+                    };
+                    frame.size.width = desired_w.min(frame.size.width).max(0.0);
+                    frame.size.height = desired_h.min(frame.size.height).max(0.0);
                 }
                 out.push((*wid, frame));
+                y_cursor += row_height;
+                if row_idx < col.windows.len() - 1 {
+                    y_cursor += gap_y;
+                }
             }
         }
         out
@@ -875,6 +969,19 @@ impl LayoutSystem for ScrollingLayoutSystem {
         }
     }
 
+    fn windows_for_app(&self, layout: LayoutId, pid: pid_t) -> Vec<WindowId> {
+        self.layout_state(layout)
+            .map(|state| {
+                state
+                    .columns
+                    .iter()
+                    .flat_map(|c| c.windows.iter().copied())
+                    .filter(|w| w.pid == pid)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn set_windows_for_app(&mut self, layout: LayoutId, pid: pid_t, desired: Vec<WindowId>) {
         let Some(state) = self.layout_state_mut(layout) else {
             return;
@@ -989,44 +1096,6 @@ impl LayoutSystem for ScrollingLayoutSystem {
             state.reveal_selected_without_direction();
         } else if state.selected == Some(wid) {
             state.align_scroll_to_selected();
-        }
-    }
-
-    fn apply_window_size_constraint(
-        &mut self,
-        layout: LayoutId,
-        wid: WindowId,
-        _current_frame: CGRect,
-        target_size: objc2_core_foundation::CGSize,
-        screen: CGRect,
-        gaps: &crate::common::config::GapSettings,
-    ) {
-        let min_ratio = self.settings.min_column_width_ratio;
-        let max_ratio = self.settings.max_column_width_ratio;
-        let niri_navigation = matches!(
-            self.settings.focus_navigation_style,
-            ScrollingFocusNavigationStyle::Niri
-        );
-
-        let Some(state) = self.layout_state_mut(layout) else {
-            return;
-        };
-        let tiling = compute_tiling_area(screen, gaps);
-        if tiling.size.width <= 0.0 {
-            return;
-        }
-
-        let ratio = target_size.width / tiling.size.width;
-        let clamped = ratio.clamp(min_ratio, max_ratio).max(0.05).min(0.98);
-        let base_ratio = state.column_width_ratio;
-
-        if let Some((col_idx, _)) = state.locate(wid) {
-            state.columns[col_idx].width_offset = clamped - base_ratio;
-            if niri_navigation && state.selected == Some(wid) {
-                state.reveal_selected_without_direction();
-            } else if state.selected == Some(wid) {
-                state.align_scroll_to_selected();
-            }
         }
     }
 
@@ -1290,10 +1359,11 @@ mod tests {
 
     use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 
-    use super::ScrollingLayoutSystem;
+    use super::{Column, ScrollingLayoutSystem};
     use crate::actor::app::{WindowId, pid_t};
+    use crate::common::collections::HashMap;
     use crate::common::config::{GapSettings, ScrollingLayoutSettings};
-    use crate::layout_engine::systems::LayoutSystem;
+    use crate::layout_engine::systems::{LayoutSystem, WindowLayoutConstraints};
     use crate::layout_engine::utils::compute_tiling_area;
     use crate::layout_engine::{Direction, LayoutId};
 
@@ -1314,10 +1384,12 @@ mod tests {
         screen: CGRect,
         gaps: &GapSettings,
     ) -> Vec<(WindowId, CGRect)> {
+        let constraints = HashMap::default();
         system.calculate_layout(
             layout,
             screen,
             0.0,
+            &constraints,
             gaps,
             0.0,
             Default::default(),
@@ -1354,6 +1426,227 @@ mod tests {
         system.add_window_after_selection(layout, w1);
         system.add_window_after_selection(layout, w2);
         (system, layout, w1, w2)
+    }
+
+    #[test]
+    fn respects_min_width_and_min_height_independently() {
+        let mut system = ScrollingLayoutSystem::new(&ScrollingLayoutSettings::default());
+        let layout = system.create_layout();
+        let window = wid(10, 1);
+        system.add_window_after_selection(layout, window);
+
+        let mut constraints = HashMap::default();
+        constraints.insert(
+            window,
+            WindowLayoutConstraints {
+                is_resizable: true,
+                locked_width: 0.0,
+                locked_height: 0.0,
+                min_width: 700.0,
+                min_height: 500.0,
+                max_width: 0.0,
+                max_height: 0.0,
+            }
+            .normalized(),
+        );
+
+        let frames = system.calculate_layout(
+            layout,
+            screen(800.0, 600.0),
+            0.0,
+            &constraints,
+            &GapSettings::default(),
+            0.0,
+            Default::default(),
+            Default::default(),
+        );
+        let frame = frame_for(&frames, window);
+        assert!(frame.size.width >= 699.0);
+        assert!(frame.size.height >= 499.0);
+    }
+
+    #[test]
+    fn row_constraints_apply_vertical_min_independent_of_column_width() {
+        let mut system = ScrollingLayoutSystem::new(&ScrollingLayoutSettings::default());
+        let layout = system.create_layout();
+        let w1 = wid(20, 1);
+        let w2 = wid(20, 2);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+
+        let state = system.layouts.get_mut(layout).expect("layout state missing");
+        state.columns = vec![Column {
+            windows: vec![w1, w2],
+            width_offset: 0.0,
+        }];
+        state.selected = Some(w1);
+
+        let mut constraints = HashMap::default();
+        constraints.insert(
+            w1,
+            WindowLayoutConstraints {
+                is_resizable: true,
+                locked_width: 0.0,
+                locked_height: 0.0,
+                min_width: 500.0,
+                min_height: 350.0,
+                max_width: 0.0,
+                max_height: 0.0,
+            }
+            .normalized(),
+        );
+
+        let frames = system.calculate_layout(
+            layout,
+            screen(700.0, 600.0),
+            0.0,
+            &constraints,
+            &GapSettings::default(),
+            0.0,
+            Default::default(),
+            Default::default(),
+        );
+        let frame = frame_for(&frames, w1);
+        assert!(frame.size.width >= 499.0);
+        assert!(frame.size.height >= 349.0);
+    }
+
+    #[test]
+    fn respects_positive_max_width_for_resizable_window() {
+        let mut system = ScrollingLayoutSystem::new(&ScrollingLayoutSettings::default());
+        let layout = system.create_layout();
+        let window = wid(30, 1);
+        system.add_window_after_selection(layout, window);
+
+        let mut constraints = HashMap::default();
+        constraints.insert(
+            window,
+            WindowLayoutConstraints {
+                is_resizable: true,
+                locked_width: 0.0,
+                locked_height: 0.0,
+                min_width: 0.0,
+                min_height: 0.0,
+                max_width: 600.0,
+                max_height: 0.0,
+            }
+            .normalized(),
+        );
+
+        let frames = system.calculate_layout(
+            layout,
+            screen(1200.0, 700.0),
+            0.0,
+            &constraints,
+            &GapSettings::default(),
+            0.0,
+            Default::default(),
+            Default::default(),
+        );
+        let frame = frame_for(&frames, window);
+        assert!(frame.size.width <= 600.0);
+    }
+
+    #[test]
+    fn locked_window_width_wins_over_smaller_sibling_max_width_in_same_column() {
+        let mut system = ScrollingLayoutSystem::new(&ScrollingLayoutSettings::default());
+        let layout = system.create_layout();
+        let locked = wid(31, 1);
+        let capped = wid(31, 2);
+        system.add_window_after_selection(layout, locked);
+        system.add_window_after_selection(layout, capped);
+
+        let state = system.layouts.get_mut(layout).expect("layout state missing");
+        state.columns = vec![Column {
+            windows: vec![locked, capped],
+            width_offset: 0.0,
+        }];
+        state.selected = Some(locked);
+
+        let mut constraints = HashMap::default();
+        constraints.insert(
+            locked,
+            WindowLayoutConstraints {
+                is_resizable: false,
+                locked_width: 700.0,
+                locked_height: 400.0,
+                min_width: 700.0,
+                min_height: 0.0,
+                max_width: 700.0,
+                max_height: 0.0,
+            }
+            .normalized(),
+        );
+        constraints.insert(
+            capped,
+            WindowLayoutConstraints {
+                is_resizable: true,
+                locked_width: 0.0,
+                locked_height: 0.0,
+                min_width: 0.0,
+                min_height: 0.0,
+                max_width: 500.0,
+                max_height: 0.0,
+            }
+            .normalized(),
+        );
+
+        let frames = system.calculate_layout(
+            layout,
+            screen(1200.0, 700.0),
+            0.0,
+            &constraints,
+            &GapSettings::default(),
+            0.0,
+            Default::default(),
+            Default::default(),
+        );
+        let locked_frame = frame_for(&frames, locked);
+        let capped_frame = frame_for(&frames, capped);
+
+        assert!(locked_frame.size.width >= 699.0);
+        assert!(capped_frame.size.width <= 501.0);
+    }
+
+    #[test]
+    fn impossible_min_width_does_not_expand_column_beyond_tiling_width() {
+        let mut system = ScrollingLayoutSystem::new(&ScrollingLayoutSettings::default());
+        let layout = system.create_layout();
+        let window = wid(40, 1);
+        system.add_window_after_selection(layout, window);
+
+        let mut constraints = HashMap::default();
+        constraints.insert(
+            window,
+            WindowLayoutConstraints {
+                is_resizable: true,
+                locked_width: 0.0,
+                locked_height: 0.0,
+                min_width: 1600.0,
+                min_height: 0.0,
+                max_width: 0.0,
+                max_height: 0.0,
+            }
+            .normalized(),
+        );
+
+        let screen = screen(1200.0, 700.0);
+        let gaps = GapSettings::default();
+        let tiling = compute_tiling_area(screen, &gaps);
+        let frames = system.calculate_layout(
+            layout,
+            screen,
+            0.0,
+            &constraints,
+            &gaps,
+            0.0,
+            Default::default(),
+            Default::default(),
+        );
+        let frame = frame_for(&frames, window);
+        assert!(frame.size.width <= tiling.size.width);
+        assert!(frame.origin.x >= tiling.origin.x);
+        assert!(frame.origin.x + frame.size.width <= tiling.origin.x + tiling.size.width);
     }
 
     #[test]

@@ -1,10 +1,11 @@
 use nix::libc::pid_t;
-use objc2_core_foundation::{CGRect, CGSize};
+use objc2_core_foundation::CGRect;
 use serde::{Deserialize, Serialize};
 
 use crate::actor::app::WindowId;
+use crate::common::collections::HashMap;
 use crate::common::config::{StackDefaultOrientation, default_stack_orientation};
-use crate::layout_engine::systems::LayoutSystem;
+use crate::layout_engine::systems::{LayoutSystem, WindowLayoutConstraints};
 use crate::layout_engine::{Direction, LayoutId, LayoutKind, TraditionalLayoutSystem};
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -161,6 +162,7 @@ impl LayoutSystem for StackLayoutSystem {
         layout: LayoutId,
         screen: CGRect,
         stack_offset: f64,
+        constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &crate::common::config::GapSettings,
         stack_line_thickness: f64,
         stack_line_horiz: crate::common::config::HorizontalPlacement,
@@ -170,6 +172,7 @@ impl LayoutSystem for StackLayoutSystem {
             layout,
             screen,
             stack_offset,
+            constraints,
             gaps,
             stack_line_thickness,
             stack_line_horiz,
@@ -234,6 +237,10 @@ impl LayoutSystem for StackLayoutSystem {
         }
     }
 
+    fn windows_for_app(&self, layout: LayoutId, pid: pid_t) -> Vec<WindowId> {
+        self.inner.windows_for_app(layout, pid)
+    }
+
     fn set_windows_for_app(&mut self, layout: LayoutId, pid: pid_t, desired: Vec<WindowId>) {
         let before = self.windows_in_layout_preorder(layout);
         self.inner.set_windows_for_app(layout, pid, desired);
@@ -265,25 +272,6 @@ impl LayoutSystem for StackLayoutSystem {
         gaps: &crate::common::config::GapSettings,
     ) {
         self.inner.on_window_resized(layout, wid, old_frame, new_frame, screen, gaps);
-    }
-
-    fn apply_window_size_constraint(
-        &mut self,
-        layout: LayoutId,
-        wid: WindowId,
-        current_frame: CGRect,
-        target_size: CGSize,
-        screen: CGRect,
-        gaps: &crate::common::config::GapSettings,
-    ) {
-        self.inner.apply_window_size_constraint(
-            layout,
-            wid,
-            current_frame,
-            target_size,
-            screen,
-            gaps,
-        );
     }
 
     fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {

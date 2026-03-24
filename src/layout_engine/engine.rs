@@ -1,6 +1,4 @@
 use std::cmp::Ordering;
-use std::fs::{self, File};
-use std::io::{Read, Write};
 use std::path::PathBuf;
 
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
@@ -11,8 +9,9 @@ use super::{Direction, FloatingManager, LayoutId, LayoutSystemKind, WorkspaceLay
 use crate::actor::app::{AppInfo, WindowId, pid_t};
 use crate::actor::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::common::collections::{HashMap, HashSet};
-use crate::common::config::{LayoutMode, LayoutSettings};
+use crate::common::config::{LayoutMode, LayoutSettings, VirtualWorkspaceSettings};
 use crate::layout_engine::LayoutSystem;
+use crate::layout_engine::systems::WindowLayoutConstraints;
 use crate::model::virtual_workspace::{
     AppRuleAssignment, AppRuleResult, VirtualWorkspace, VirtualWorkspaceId, VirtualWorkspaceManager,
 };
@@ -26,6 +25,18 @@ pub struct GroupContainerInfo {
     pub total_count: usize,
     pub selected_index: usize,
     pub window_ids: Vec<crate::actor::app::WindowId>,
+}
+
+#[derive(Debug, Default)]
+struct WindowRemovalImpact {
+    active_space: Option<SpaceId>,
+    tiled_workspaces: Vec<VirtualWorkspaceId>,
+}
+
+impl WindowRemovalImpact {
+    fn changes_layout(&self) -> bool {
+        self.active_space.is_some() || !self.tiled_workspaces.is_empty()
+    }
 }
 
 #[non_exhaustive]
@@ -103,6 +114,8 @@ pub enum LayoutEvent {
             Option<String>,
             bool,
             CGSize,
+            Option<CGSize>,
+            Option<CGSize>,
         )>,
         Option<AppInfo>,
     ),
@@ -134,6 +147,8 @@ pub struct LayoutEngine {
     floating: FloatingManager,
     #[serde(skip)]
     focused_window: Option<WindowId>,
+    #[serde(skip)]
+    window_layout_constraints: HashMap<WindowId, WindowLayoutConstraints>,
     virtual_workspace_manager: VirtualWorkspaceManager,
     #[serde(skip)]
     layout_settings: LayoutSettings,
@@ -143,10 +158,6 @@ pub struct LayoutEngine {
     space_display_map: HashMap<SpaceId, Option<String>>,
     #[serde(skip)]
     display_last_space: HashMap<String, SpaceId>,
-    #[serde(skip)]
-    locked_resize_windows: HashSet<WindowId>,
-    #[serde(skip)]
-    locked_resize_target_sizes: HashMap<WindowId, CGSize>,
 }
 
 impl LayoutEngine {
@@ -830,22 +841,7 @@ impl LayoutEngine {
     }
 
     fn remove_window_internal(&mut self, wid: WindowId, preserve_floating: bool) {
-        let affected_space: Option<SpaceId> = self.space_with_window(wid);
-        self.locked_resize_windows.remove(&wid);
-        self.locked_resize_target_sizes.remove(&wid);
-
-        let ws_ids = self.virtual_workspace_manager.workspaces_for_window(wid);
-        if !ws_ids.is_empty() {
-            for ws_id in ws_ids {
-                self.workspace_tree_mut(ws_id).remove_window(wid);
-            }
-        } else {
-            // Fallback: search all workspaces
-            let ws_ids: Vec<_> = self.virtual_workspace_manager.workspaces.keys().collect();
-            for ws_id in ws_ids {
-                self.workspace_tree_mut(ws_id).remove_window(wid);
-            }
-        }
+        let removal = self.remove_window_layout_membership(wid);
 
         if preserve_floating {
             self.floating.remove_active_for_window(wid);
@@ -861,12 +857,75 @@ impl LayoutEngine {
         if self.focused_window == Some(wid) {
             self.focused_window = None;
         }
+        self.window_layout_constraints.remove(&wid);
 
-        if let Some(space) = affected_space {
+        if let Some(space) = removal.active_space {
             self.broadcast_windows_changed(space);
         }
 
-        self.rebalance_all_layouts();
+        if removal.changes_layout() {
+            self.rebalance_all_layouts();
+        }
+    }
+
+    fn remove_window_layout_membership(&mut self, wid: WindowId) -> WindowRemovalImpact {
+        let active_space = self.space_with_window(wid);
+        let tiled_workspaces = self.virtual_workspace_manager.workspaces_for_window(wid);
+
+        if !tiled_workspaces.is_empty() {
+            for ws_id in &tiled_workspaces {
+                self.workspace_tree_mut(*ws_id).remove_window(wid);
+            }
+            return WindowRemovalImpact { active_space, tiled_workspaces };
+        }
+
+        if active_space.is_some() {
+            // Fallback for stale mappings: the window is present in a live layout but its
+            // workspace mapping has already been lost, so scrub all trees once.
+            let ws_ids: Vec<_> = self.virtual_workspace_manager.workspaces.keys().collect();
+            for ws_id in ws_ids {
+                self.workspace_tree_mut(ws_id).remove_window(wid);
+            }
+            return WindowRemovalImpact { active_space, tiled_workspaces };
+        }
+
+        WindowRemovalImpact { active_space, tiled_workspaces }
+    }
+
+    fn add_window_to_layout(&mut self, space: SpaceId, wid: WindowId) -> bool {
+        let active_space_before = self.space_with_window(wid);
+
+        let assigned_workspace =
+            match self.virtual_workspace_manager.workspace_for_window(space, wid) {
+                Some(workspace_id) => workspace_id,
+                None => match self.virtual_workspace_manager.auto_assign_window(wid, space) {
+                    Ok(workspace_id) => workspace_id,
+                    Err(e) => {
+                        warn!("Failed to auto-assign window to workspace: {:?}", e);
+                        self.virtual_workspace_manager
+                            .active_workspace(space)
+                            .expect("No active workspace available")
+                    }
+                },
+            };
+
+        let should_be_floating = self.floating.is_floating(wid);
+
+        if should_be_floating {
+            self.floating.add_active(space, wid.pid, wid);
+        } else if let Some(layout) = self.workspace_layouts.active(space, assigned_workspace) {
+            if !self.workspace_tree(assigned_workspace).contains_window(layout, wid) {
+                self.workspace_tree_mut(assigned_workspace)
+                    .add_window_after_selection(layout, wid);
+            }
+        } else {
+            warn!(
+                "No active layout for workspace {:?} on space {:?}; window {:?} not added to tree",
+                assigned_workspace, space, wid
+            );
+        }
+
+        self.space_with_window(wid) != active_space_before
     }
 
     fn remove_window_from_all_tiling_trees(&mut self, wid: WindowId) {
@@ -904,6 +963,44 @@ impl LayoutEngine {
             .map(|ws| ws.name.clone())
             .unwrap_or_else(|| format!("Workspace {:?}", workspace_id));
         Some((workspace_id, workspace_name))
+    }
+
+    fn sync_tiled_windows_for_app(
+        &mut self,
+        space: SpaceId,
+        pid: pid_t,
+        tiled_by_workspace: &HashMap<crate::model::VirtualWorkspaceId, Vec<WindowId>>,
+    ) -> bool {
+        let total_tiled_count: usize = tiled_by_workspace.values().map(|v| v.len()).sum();
+        let mut tiled_membership_changed = false;
+
+        for (ws_id, layout) in self.workspace_layouts.active_layouts_for_space(space) {
+            let mut desired = tiled_by_workspace.get(&ws_id).cloned().unwrap_or_default();
+            for wid in self.virtual_workspace_manager.workspace_windows(space, ws_id) {
+                if wid.pid != pid || self.floating.is_floating(wid) || desired.contains(&wid) {
+                    continue;
+                }
+                desired.push(wid);
+            }
+
+            if desired.is_empty() && total_tiled_count == 0 {
+                if self.workspace_tree(ws_id).has_windows_for_app(layout, pid) {
+                    continue;
+                }
+            }
+
+            desired.sort_unstable();
+            let mut current = self.workspace_tree(ws_id).windows_for_app(layout, pid);
+            current.sort_unstable();
+            if desired == current {
+                continue;
+            }
+
+            self.workspace_tree_mut(ws_id).set_windows_for_app(layout, pid, desired);
+            tiled_membership_changed = true;
+        }
+
+        tiled_membership_changed
     }
 
     pub fn update_space_display(&mut self, space: SpaceId, display_uuid: Option<String>) {
@@ -980,93 +1077,13 @@ impl LayoutEngine {
             workspace_layouts: WorkspaceLayouts::default(),
             floating: FloatingManager::new(),
             focused_window: None,
+            window_layout_constraints: HashMap::default(),
             virtual_workspace_manager,
             layout_settings: layout_settings.clone(),
             broadcast_tx,
             space_display_map: HashMap::default(),
             display_last_space: HashMap::default(),
-            locked_resize_windows: HashSet::default(),
-            locked_resize_target_sizes: HashMap::default(),
         }
-    }
-
-    #[inline]
-    fn is_window_resize_locked(&self, wid: WindowId) -> bool {
-        self.locked_resize_windows.contains(&wid)
-    }
-
-    fn calibrate_locked_tiled_positions(
-        &mut self,
-        workspace_id: crate::model::VirtualWorkspaceId,
-        layout: LayoutId,
-        mut tiled_positions: Vec<(WindowId, CGRect)>,
-        screen: CGRect,
-        gaps: &crate::common::config::GapSettings,
-        stack_line_thickness: f64,
-        stack_line_horiz: crate::common::config::HorizontalPlacement,
-        stack_line_vert: crate::common::config::VerticalPlacement,
-    ) -> Vec<(WindowId, CGRect)> {
-        const SIZE_EPSILON: f64 = 0.5;
-
-        let constrained_targets: HashMap<WindowId, CGSize> = tiled_positions
-            .iter()
-            .filter_map(|(wid, _)| {
-                self.locked_resize_target_sizes
-                    .get(wid)
-                    .copied()
-                    .map(|target_size| (*wid, target_size))
-            })
-            .collect();
-
-        if constrained_targets.is_empty() {
-            return tiled_positions;
-        }
-
-        let max_passes = constrained_targets.len();
-        for _ in 0..max_passes {
-            let frames_by_window: HashMap<WindowId, CGRect> =
-                tiled_positions.iter().map(|(wid, frame)| (*wid, *frame)).collect();
-
-            let mut adjusted = false;
-
-            for (&wid, &target_size) in constrained_targets.iter() {
-                let Some(old_frame) = frames_by_window.get(&wid).copied() else {
-                    continue;
-                };
-
-                let width_diff = (old_frame.size.width - target_size.width).abs();
-                let height_diff = (old_frame.size.height - target_size.height).abs();
-                if width_diff <= SIZE_EPSILON && height_diff <= SIZE_EPSILON {
-                    continue;
-                }
-
-                self.workspace_tree_mut(workspace_id).apply_window_size_constraint(
-                    layout,
-                    wid,
-                    old_frame,
-                    target_size,
-                    screen,
-                    gaps,
-                );
-                adjusted = true;
-            }
-
-            if !adjusted {
-                break;
-            }
-
-            tiled_positions = self.workspace_tree(workspace_id).calculate_layout(
-                layout,
-                screen,
-                self.layout_settings.stack.stack_offset,
-                gaps,
-                stack_line_thickness,
-                stack_line_horiz,
-                stack_line_vert,
-            );
-        }
-
-        tiled_positions
     }
 
     pub fn debug_tree(&self, space: SpaceId) { self.debug_tree_desc(space, "", false); }
@@ -1120,22 +1137,34 @@ impl LayoutEngine {
                     None => (None, None),
                 };
 
-                for (wid, title_opt, ax_role_opt, ax_subrole_opt, is_resizable, size_hint) in
-                    windows_with_titles
+                for (
+                    wid,
+                    title_opt,
+                    ax_role_opt,
+                    ax_subrole_opt,
+                    is_resizable,
+                    size_hint,
+                    min_size,
+                    max_size,
+                ) in windows_with_titles
                 {
+                    self.window_layout_constraints.insert(
+                        wid,
+                        WindowLayoutConstraints {
+                            is_resizable,
+                            locked_width: size_hint.width,
+                            locked_height: size_hint.height,
+                            min_width: min_size.map_or(0.0, |s| s.width),
+                            min_height: min_size.map_or(0.0, |s| s.height),
+                            max_width: max_size.map_or(0.0, |s| s.width),
+                            max_height: max_size.map_or(0.0, |s| s.height),
+                        }
+                        .normalized(),
+                    );
+
                     let title_ref = title_opt.as_deref();
                     let ax_role_ref = ax_role_opt.as_deref();
                     let ax_subrole_ref = ax_subrole_opt.as_deref();
-
-                    if is_resizable {
-                        self.locked_resize_windows.remove(&wid);
-                        self.locked_resize_target_sizes.remove(&wid);
-                    } else {
-                        self.locked_resize_windows.insert(wid);
-                        if size_hint.width > 0.0 && size_hint.height > 0.0 {
-                            self.locked_resize_target_sizes.insert(wid, size_hint);
-                        }
-                    }
 
                     let was_floating = self.floating.is_floating(wid);
                     let assignment = match self
@@ -1200,82 +1229,26 @@ impl LayoutEngine {
 
                 // `windows_by_workspace` already excludes floating windows.
                 let tiled_by_workspace = windows_by_workspace;
-
-                let total_tiled_count: usize = tiled_by_workspace.values().map(|v| v.len()).sum();
-
-                for (ws_id, layout) in self.workspace_layouts.active_layouts_for_space(space) {
-                    let mut desired = tiled_by_workspace.get(&ws_id).cloned().unwrap_or_default();
-                    for wid in self.virtual_workspace_manager.workspace_windows(space, ws_id) {
-                        if wid.pid != pid
-                            || self.floating.is_floating(wid)
-                            || desired.contains(&wid)
-                        {
-                            continue;
-                        }
-                        desired.push(wid);
-                    }
-
-                    if desired.is_empty() && total_tiled_count == 0 {
-                        if self.workspace_tree(ws_id).has_windows_for_app(layout, pid) {
-                            continue;
-                        }
-                    }
-
-                    self.workspace_tree_mut(ws_id).set_windows_for_app(layout, pid, desired);
+                if self.sync_tiled_windows_for_app(space, pid, &tiled_by_workspace) {
+                    self.broadcast_windows_changed(space);
+                    self.rebalance_all_layouts();
                 }
-
-                self.broadcast_windows_changed(space);
-
-                self.rebalance_all_layouts();
             }
             LayoutEvent::AppClosed(pid) => {
                 for (_, ws) in self.virtual_workspace_manager.workspaces.iter_mut() {
                     ws.layout_system.remove_windows_for_app(pid);
                 }
                 self.floating.remove_all_for_pid(pid);
-                self.locked_resize_windows.retain(|wid| wid.pid != pid);
-                self.locked_resize_target_sizes.retain(|wid, _| wid.pid != pid);
+                self.window_layout_constraints.retain(|wid, _| wid.pid != pid);
 
                 self.virtual_workspace_manager.remove_windows_for_app(pid);
                 self.virtual_workspace_manager.remove_app_floating_positions(pid);
             }
             LayoutEvent::WindowAdded(space, wid) => {
                 self.debug_tree(space);
-
-                let assigned_workspace =
-                    match self.virtual_workspace_manager.workspace_for_window(space, wid) {
-                        Some(workspace_id) => workspace_id,
-                        None => match self.virtual_workspace_manager.auto_assign_window(wid, space)
-                        {
-                            Ok(workspace_id) => workspace_id,
-                            Err(e) => {
-                                warn!("Failed to auto-assign window to workspace: {:?}", e);
-                                self.virtual_workspace_manager
-                                    .active_workspace(space)
-                                    .expect("No active workspace available")
-                            }
-                        },
-                    };
-
-                let should_be_floating = self.floating.is_floating(wid);
-
-                if should_be_floating {
-                    self.floating.add_active(space, wid.pid, wid);
-                } else if let Some(layout) =
-                    self.workspace_layouts.active(space, assigned_workspace)
-                {
-                    if !self.workspace_tree(assigned_workspace).contains_window(layout, wid) {
-                        self.workspace_tree_mut(assigned_workspace)
-                            .add_window_after_selection(layout, wid);
-                    }
-                } else {
-                    warn!(
-                        "No active layout for workspace {:?} on space {:?}; window {:?} not added to tree",
-                        assigned_workspace, space, wid
-                    );
+                if self.add_window_to_layout(space, wid) {
+                    self.broadcast_windows_changed(space);
                 }
-
-                self.broadcast_windows_changed(space);
             }
             LayoutEvent::WindowRemoved(wid) => {
                 self.remove_window_internal(wid, false);
@@ -1305,11 +1278,6 @@ impl LayoutEngine {
                 new_frame,
                 screens,
             } => {
-                if self.is_window_resize_locked(wid) {
-                    self.locked_resize_target_sizes.insert(wid, new_frame.size);
-                    return EventResponse::default();
-                }
-
                 for (space, screen_frame, display_uuid) in screens {
                     let Some((ws_id, layout)) = self.workspace_and_layout(space) else {
                         debug!(
@@ -1633,14 +1601,6 @@ impl LayoutEngine {
                     return EventResponse::default();
                 }
 
-                if self
-                    .workspace_tree(workspace_id)
-                    .selected_window(layout)
-                    .is_some_and(|wid| self.is_window_resize_locked(wid))
-                {
-                    return EventResponse::default();
-                }
-
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
                 let resize_amount = 0.05;
                 self.workspace_tree_mut(workspace_id).resize_selection_by(layout, resize_amount);
@@ -1651,14 +1611,6 @@ impl LayoutEngine {
                     return EventResponse::default();
                 }
 
-                if self
-                    .workspace_tree(workspace_id)
-                    .selected_window(layout)
-                    .is_some_and(|wid| self.is_window_resize_locked(wid))
-                {
-                    return EventResponse::default();
-                }
-
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
                 let resize_amount = -0.05;
                 self.workspace_tree_mut(workspace_id).resize_selection_by(layout, resize_amount);
@@ -1666,14 +1618,6 @@ impl LayoutEngine {
             }
             LayoutCommand::ResizeWindowBy { amount } => {
                 if is_floating {
-                    return EventResponse::default();
-                }
-
-                if self
-                    .workspace_tree(workspace_id)
-                    .selected_window(layout)
-                    .is_some_and(|wid| self.is_window_resize_locked(wid))
-                {
                     return EventResponse::default();
                 }
 
@@ -1747,6 +1691,7 @@ impl LayoutEngine {
             layout,
             screen,
             self.layout_settings.stack.stack_offset,
+            &self.window_layout_constraints,
             gaps,
             stack_line_thickness,
             stack_line_horiz,
@@ -1771,7 +1716,6 @@ impl LayoutEngine {
         use crate::model::HideCorner;
 
         let mut positions = HashMap::default();
-        let mut active_tiled_windows = HashSet::default();
         let window_size = |wid| {
             get_window_frame(wid)
                 .map(|f| f.size)
@@ -1827,19 +1771,11 @@ impl LayoutEngine {
 
         if let Some(active_workspace_id) = self.virtual_workspace_manager.active_workspace(space) {
             if let Some(layout) = self.workspace_layouts.active(space, active_workspace_id) {
-                let tiled_positions = self.calibrate_locked_tiled_positions(
-                    active_workspace_id,
+                let tiled_positions = self.workspace_tree(active_workspace_id).calculate_layout(
                     layout,
-                    self.workspace_tree(active_workspace_id).calculate_layout(
-                        layout,
-                        screen,
-                        self.layout_settings.stack.stack_offset,
-                        gaps,
-                        stack_line_thickness,
-                        stack_line_horiz,
-                        stack_line_vert,
-                    ),
                     screen,
+                    self.layout_settings.stack.stack_offset,
+                    &self.window_layout_constraints,
                     gaps,
                     stack_line_thickness,
                     stack_line_horiz,
@@ -1847,7 +1783,6 @@ impl LayoutEngine {
                 );
 
                 for (wid, rect) in tiled_positions {
-                    active_tiled_windows.insert(wid);
                     positions.insert(wid, rect);
                 }
             }
@@ -1928,21 +1863,6 @@ impl LayoutEngine {
             positions.insert(wid, hidden_rect);
         }
 
-        for (wid, rect) in positions.iter_mut() {
-            if !self.is_window_resize_locked(*wid) {
-                continue;
-            }
-            if active_tiled_windows.contains(wid) {
-                continue;
-            }
-
-            let target_size = self.locked_resize_target_sizes.get(wid).copied();
-
-            if let Some(size) = target_size {
-                rect.size = size;
-            }
-        }
-
         positions.into_iter().collect()
     }
 
@@ -2010,6 +1930,7 @@ impl LayoutEngine {
                 layout,
                 screen,
                 self.layout_settings.stack.stack_offset,
+                &self.window_layout_constraints,
                 gaps,
                 stack_line_thickness,
                 stack_line_horiz,
@@ -2065,19 +1986,15 @@ impl LayoutEngine {
         }
     }
 
-    pub fn load(path: PathBuf) -> anyhow::Result<Self> {
-        let mut buf = String::new();
-        File::open(path)?.read_to_string(&mut buf)?;
-        Ok(ron::from_str(&buf)?)
+    pub fn load(_path: PathBuf) -> anyhow::Result<Self> {
+        Ok(Self::new(
+            &VirtualWorkspaceSettings::default(),
+            &LayoutSettings::default(),
+            None,
+        ))
     }
 
-    pub fn save(&self, path: PathBuf) -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        File::create(path)?.write_all(self.serialize_to_string().as_bytes())?;
-        Ok(())
-    }
+    pub fn save(&self, _path: PathBuf) -> std::io::Result<()> { Ok(()) }
 
     pub fn serialize_to_string(&self) -> String { ron::ser::to_string(&self).unwrap() }
 
@@ -2897,9 +2814,29 @@ mod tests {
                     // Intentionally impossible size for this screen; layout should still keep
                     // tiled results bounded instead of force-applying this at the end.
                     CGSize::new(1600.0, 900.0),
+                    None,
+                    None,
                 ),
-                (other_a, None, None, None, true, CGSize::new(600.0, 600.0)),
-                (other_b, None, None, None, true, CGSize::new(600.0, 600.0)),
+                (
+                    other_a,
+                    None,
+                    None,
+                    None,
+                    true,
+                    CGSize::new(600.0, 600.0),
+                    None,
+                    None,
+                ),
+                (
+                    other_b,
+                    None,
+                    None,
+                    None,
+                    true,
+                    CGSize::new(600.0, 600.0),
+                    None,
+                    None,
+                ),
             ],
             None,
         ));
@@ -2928,5 +2865,220 @@ mod tests {
         assert!(locked_frame.origin.y >= screen.origin.y - epsilon);
         assert!(locked_frame.origin.x + locked_frame.size.width <= max_x);
         assert!(locked_frame.origin.y + locked_frame.size.height <= max_y);
+    }
+
+    #[test]
+    fn repeated_windows_on_screen_update_does_not_rebalance_unchanged_tiled_layout() {
+        let mut engine = test_engine();
+        let space = SpaceId::new(91);
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 1000.0));
+        let pid: pid_t = 5150;
+
+        let windows = vec![
+            (
+                WindowId::new(pid, 1),
+                None,
+                None,
+                None,
+                true,
+                CGSize::new(500.0, 500.0),
+                None,
+                None,
+            ),
+            (
+                WindowId::new(pid, 2),
+                None,
+                None,
+                None,
+                true,
+                CGSize::new(500.0, 500.0),
+                None,
+                None,
+            ),
+            (
+                WindowId::new(pid, 3),
+                None,
+                None,
+                None,
+                true,
+                CGSize::new(500.0, 500.0),
+                None,
+                None,
+            ),
+        ];
+
+        let _ = engine.handle_event(LayoutEvent::SpaceExposed(space, screen.size));
+        let _ = engine.handle_event(LayoutEvent::WindowsOnScreenUpdated(
+            space,
+            pid,
+            windows.clone(),
+            None,
+        ));
+        let _ = engine.handle_event(LayoutEvent::WindowFocused(space, WindowId::new(pid, 1)));
+        let gaps = engine.layout_settings.gaps.clone();
+
+        let baseline = engine.calculate_layout(
+            space,
+            screen,
+            &gaps,
+            0.0,
+            Default::default(),
+            Default::default(),
+        );
+
+        let _ = engine.handle_command(
+            Some(space),
+            &[space],
+            &HashMap::default(),
+            LayoutCommand::MoveNode(Direction::Up),
+        );
+
+        let modified = engine.calculate_layout(
+            space,
+            screen,
+            &gaps,
+            0.0,
+            Default::default(),
+            Default::default(),
+        );
+        assert_ne!(baseline, modified);
+
+        let _ = engine.handle_event(LayoutEvent::WindowsOnScreenUpdated(space, pid, windows, None));
+
+        assert_eq!(
+            engine.calculate_layout(
+                space,
+                screen,
+                &gaps,
+                0.0,
+                Default::default(),
+                Default::default(),
+            ),
+            modified
+        );
+    }
+
+    #[test]
+    fn removing_unknown_window_does_not_rebalance_layout() {
+        let mut engine = test_engine();
+        let space = SpaceId::new(92);
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 1000.0));
+        let pid: pid_t = 5151;
+
+        let windows = vec![
+            (
+                WindowId::new(pid, 1),
+                None,
+                None,
+                None,
+                true,
+                CGSize::new(500.0, 500.0),
+                None,
+                None,
+            ),
+            (
+                WindowId::new(pid, 2),
+                None,
+                None,
+                None,
+                true,
+                CGSize::new(500.0, 500.0),
+                None,
+                None,
+            ),
+            (
+                WindowId::new(pid, 3),
+                None,
+                None,
+                None,
+                true,
+                CGSize::new(500.0, 500.0),
+                None,
+                None,
+            ),
+        ];
+
+        let _ = engine.handle_event(LayoutEvent::SpaceExposed(space, screen.size));
+        let _ = engine.handle_event(LayoutEvent::WindowsOnScreenUpdated(space, pid, windows, None));
+        let _ = engine.handle_event(LayoutEvent::WindowFocused(space, WindowId::new(pid, 1)));
+        let gaps = engine.layout_settings.gaps.clone();
+
+        let _ = engine.handle_command(
+            Some(space),
+            &[space],
+            &HashMap::default(),
+            LayoutCommand::MoveNode(Direction::Up),
+        );
+
+        let modified = engine.calculate_layout(
+            space,
+            screen,
+            &gaps,
+            0.0,
+            Default::default(),
+            Default::default(),
+        );
+
+        let _ = engine.handle_event(LayoutEvent::WindowRemoved(WindowId::new(9999, 1)));
+
+        assert_eq!(
+            engine.calculate_layout(
+                space,
+                screen,
+                &gaps,
+                0.0,
+                Default::default(),
+                Default::default(),
+            ),
+            modified
+        );
+    }
+
+    #[test]
+    fn duplicate_window_added_is_treated_as_noop_for_active_layout() {
+        let mut engine = test_engine();
+        let space = SpaceId::new(93);
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 1000.0));
+        let pid: pid_t = 5152;
+        let wid = WindowId::new(pid, 1);
+
+        let _ = engine.handle_event(LayoutEvent::SpaceExposed(space, screen.size));
+        let _ = engine.handle_event(LayoutEvent::WindowsOnScreenUpdated(
+            space,
+            pid,
+            vec![(
+                wid,
+                None,
+                None,
+                None,
+                true,
+                CGSize::new(500.0, 500.0),
+                None,
+                None,
+            )],
+            None,
+        ));
+        let gaps = engine.layout_settings.gaps.clone();
+        let before = engine.calculate_layout(
+            space,
+            screen,
+            &gaps,
+            0.0,
+            Default::default(),
+            Default::default(),
+        );
+
+        assert!(!engine.add_window_to_layout(space, wid));
+        assert_eq!(
+            engine.calculate_layout(
+                space,
+                screen,
+                &gaps,
+                0.0,
+                Default::default(),
+                Default::default(),
+            ),
+            before
+        );
     }
 }

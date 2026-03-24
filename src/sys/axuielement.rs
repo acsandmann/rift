@@ -317,8 +317,7 @@ impl AXUIElement {
                 &*RawAXUIElement::new_system_wide(),
                 point.x as f32,
                 point.y as f32,
-                std::ptr::NonNull::new((&mut out_ptr) as *mut *const RawAXUIElement)
-                    .expect("pointer to local is never null"),
+                std::ptr::NonNull::new_unchecked(&mut out_ptr),
             )
         };
         if status == AXError::Success && !out_ptr.is_null() {

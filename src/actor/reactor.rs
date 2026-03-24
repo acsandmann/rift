@@ -179,8 +179,8 @@ pub enum Event {
     ),
     WindowTitleChanged(WindowId, String),
     ResyncAppForWindow(WindowServerId),
-    MenuOpened,
-    MenuClosed,
+    MenuOpened(pid_t),
+    MenuClosed(pid_t),
 
     /// Left mouse button was released.
     ///
@@ -852,8 +852,8 @@ impl Reactor {
                 | Event::Command(..)
                 | Event::RaiseCompleted { .. }
                 | Event::RaiseTimeout { .. }
-                | Event::MenuOpened
-                | Event::MenuClosed
+                | Event::MenuOpened(..)
+                | Event::MenuClosed(..)
         )
     }
 
@@ -956,12 +956,18 @@ impl Reactor {
                 AppEventHandler::handle_application_terminated(self, pid);
             }
             Event::ApplicationThreadTerminated(pid) => {
+                self.clear_menu_state_for_pid(pid);
                 AppEventHandler::handle_application_thread_terminated(self, pid);
             }
             Event::ApplicationActivated(pid, quiet) => {
+                self.clear_menu_state_for_non_owner(pid);
                 AppEventHandler::handle_application_activated(self, pid, quiet);
             }
+            Event::ApplicationDeactivated(pid) => {
+                self.clear_menu_state_for_pid(pid);
+            }
             Event::ApplicationGloballyDeactivated(pid) => {
+                self.clear_menu_state_for_pid(pid);
                 if self.is_login_window_pid(pid) {
                     self.set_login_window_active(false);
                 }
@@ -970,6 +976,7 @@ impl Reactor {
                 AppEventHandler::handle_resync_app_for_window(self, wsid);
             }
             Event::ApplicationGloballyActivated(pid) => {
+                self.clear_menu_state_for_non_owner(pid);
                 if self.is_login_window_pid(pid) {
                     self.set_login_window_active(true);
 
@@ -1036,8 +1043,8 @@ impl Reactor {
             Event::MouseUp => {
                 DragEventHandler::handle_mouse_up(self);
             }
-            Event::MenuOpened => SystemEventHandler::handle_menu_opened(self),
-            Event::MenuClosed => SystemEventHandler::handle_menu_closed(self),
+            Event::MenuOpened(pid) => SystemEventHandler::handle_menu_opened(self, pid),
+            Event::MenuClosed(pid) => SystemEventHandler::handle_menu_closed(self, pid),
             Event::MouseMovedOverWindow(wsid) => {
                 WindowEventHandler::handle_mouse_moved_over_window(self, wsid);
             }
@@ -1308,6 +1315,11 @@ impl Reactor {
             let Some(space) = space_opt else {
                 continue;
             };
+            let is_fullscreen_space = window_server::space_is_fullscreen(space.get())
+                || self.space_manager.fullscreen_by_space.contains_key(&space.get());
+            if is_fullscreen_space {
+                continue;
+            }
             let Some(display_uuid) = screen.display_uuid_opt() else {
                 continue;
             };
@@ -1512,14 +1524,19 @@ impl Reactor {
         frame: &CGRect,
         window_server_id: Option<WindowServerId>,
     ) -> Option<SpaceId> {
-        if let Some(space) = window_server_id.and_then(crate::sys::window_server::window_space)
-            && (self.space_manager.screen_by_space(space).is_some()
-                || crate::sys::window_server::space_is_user(space.get()))
-        {
+        if let Some(space) = self.best_space_for_frame(frame) {
             return Some(space);
         }
 
-        self.best_space_for_frame(frame)
+        if let Some(space) = window_server_id.and_then(crate::sys::window_server::window_space) {
+            if self.space_manager.screen_by_space(space).is_some()
+                || crate::sys::window_server::space_is_user(space.get())
+            {
+                return Some(space);
+            }
+        }
+
+        None
     }
 
     fn best_space_for_frame(&self, frame: &CGRect) -> Option<SpaceId> {
@@ -1888,9 +1905,24 @@ impl Reactor {
             if !self.is_space_active(space) {
                 continue;
             }
-            let mut manageable_windows: Vec<WindowId> = Vec::new();
+            let mut windows_needing_layout_refresh: Vec<WindowId> = Vec::new();
 
             for wid in &wids {
+                let (was_assigned, was_floating, was_ignored) = {
+                    let engine = &self.layout_manager.layout_engine;
+                    (
+                        engine
+                            .virtual_workspace_manager()
+                            .workspace_for_window(space, *wid)
+                            .is_some(),
+                        engine.is_window_floating(*wid),
+                        self.window_manager
+                            .windows
+                            .get(wid)
+                            .map(|window| window.ignore_app_rule)
+                            .unwrap_or(false),
+                    )
+                };
                 let assign_result = {
                     let window = self.window_manager.windows.get(wid);
                     self.layout_manager
@@ -1908,11 +1940,18 @@ impl Reactor {
                 };
 
                 match assign_result {
-                    Ok(AppRuleResult::Managed(_)) => {
+                    Ok(AppRuleResult::Managed(assignment)) => {
                         if let Some(window) = self.window_manager.windows.get_mut(wid) {
                             window.ignore_app_rule = false;
                         }
-                        manageable_windows.push(*wid);
+
+                        let effective_floating =
+                            assignment.floating || (!assignment.prev_rule_decision && was_floating);
+                        let needs_layout_refresh =
+                            !was_assigned || was_floating != effective_floating || was_ignored;
+                        if needs_layout_refresh {
+                            windows_needing_layout_refresh.push(*wid);
+                        }
                     }
                     Ok(AppRuleResult::Unmanaged) => {
                         if let Some(window) = self.window_manager.windows.get_mut(wid) {
@@ -1936,12 +1975,15 @@ impl Reactor {
                         if let Some(window) = self.window_manager.windows.get_mut(wid) {
                             window.ignore_app_rule = false;
                         }
-                        manageable_windows.push(*wid);
+
+                        if !was_assigned || was_ignored {
+                            windows_needing_layout_refresh.push(*wid);
+                        }
                     }
                 }
             }
 
-            if manageable_windows.is_empty() {
+            if windows_needing_layout_refresh.is_empty() {
                 continue;
             }
 
@@ -1952,7 +1994,9 @@ impl Reactor {
                 Option<String>,
                 bool,
                 CGSize,
-            )> = manageable_windows
+                Option<CGSize>,
+                Option<CGSize>,
+            )> = windows_needing_layout_refresh
                 .iter()
                 .map(|&wid| {
                     let window = self.window_manager.windows.get(&wid);
@@ -1962,7 +2006,18 @@ impl Reactor {
                     let is_resizable = window.map_or(true, |w| w.info.is_resizable);
                     let size_hint =
                         window.map_or(CGSize::new(0.0, 0.0), |w| w.frame_monotonic.size);
-                    (wid, title_opt, ax_role, ax_subrole, is_resizable, size_hint)
+                    let min_size = window.and_then(|w| w.info.min_size);
+                    let max_size = window.and_then(|w| w.info.max_size);
+                    (
+                        wid,
+                        title_opt,
+                        ax_role,
+                        ax_subrole,
+                        is_resizable,
+                        size_hint,
+                        min_size,
+                        max_size,
+                    )
                 })
                 .collect();
 
@@ -2566,9 +2621,9 @@ impl Reactor {
                 self.request_refocus_if_hidden(*space, *wid);
             }
             LayoutEvent::WindowsOnScreenUpdated(space, _, windows, _) => {
-                let hidden_exists = windows
-                    .iter()
-                    .any(|(wid, _, _, _, _, _)| self.window_in_non_active_workspace(*space, *wid));
+                let hidden_exists = windows.iter().any(|(wid, _, _, _, _, _, _, _)| {
+                    self.window_in_non_active_workspace(*space, *wid)
+                });
                 if hidden_exists {
                     self.refocus_manager.refocus_state = RefocusState::Pending(*space);
                 }
@@ -2592,6 +2647,22 @@ impl Reactor {
                 app_handles,
                 focus_quiet: quiet,
             }));
+    }
+
+    fn clear_menu_state_for_pid(&mut self, pid: pid_t) {
+        if matches!(self.menu_manager.menu_state, MenuState::Open(owner) if owner == pid) {
+            debug!(pid, "Clearing menu-open state for deactivated app");
+            self.menu_manager.menu_state = MenuState::Closed;
+            self.update_focus_follows_mouse_state();
+        }
+    }
+
+    fn clear_menu_state_for_non_owner(&mut self, pid: pid_t) {
+        if matches!(self.menu_manager.menu_state, MenuState::Open(owner) if owner != pid) {
+            debug!(pid, "Clearing stale menu-open state after app focus changed");
+            self.menu_manager.menu_state = MenuState::Closed;
+            self.update_focus_follows_mouse_state();
+        }
     }
 
     fn set_focus_follows_mouse_enabled(&self, enabled: bool) {

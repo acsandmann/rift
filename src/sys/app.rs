@@ -10,7 +10,7 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{AnyThread, DefinedClass, define_class, msg_send};
 use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication, NSWorkspace};
-use objc2_core_foundation::CGRect;
+use objc2_core_foundation::{CGRect, CGSize};
 use objc2_foundation::{NSCopying, NSObject, NSObjectProtocol, NSString, ns_string};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
@@ -399,6 +399,10 @@ pub struct WindowInfo {
     pub title: String,
     #[serde(with = "CGRectDef")]
     pub frame: CGRect,
+    #[serde(skip)]
+    pub min_size: Option<CGSize>,
+    #[serde(skip)]
+    pub max_size: Option<CGSize>,
     pub sys_id: Option<WindowServerId>,
     pub bundle_id: Option<String>,
     pub path: Option<PathBuf>,
@@ -437,11 +441,15 @@ impl WindowInfo {
             (None, None)
         };
 
+        let min_size = server_info.map(|info| info.min_frame).or_else(|| None);
+        let max_size = server_info.map(|info| info.max_frame).or_else(|| None);
         let info = WindowInfo {
             is_standard,
             is_root: true,
             is_minimized,
             is_resizable,
+            min_size,
+            max_size,
             title: element.title().unwrap_or_default(),
             frame,
             sys_id: id,

@@ -194,11 +194,19 @@ impl SpaceEventHandler {
             .iter()
             .filter_map(|screen| screen.space.map(|space| (screen.display_uuid.clone(), space)))
             .collect();
+        let is_fullscreen_space = |space: SpaceId| {
+            crate::sys::window_server::space_is_fullscreen(space.get())
+                || reactor.space_manager.fullscreen_by_space.contains_key(&space.get())
+        };
+        // Fullscreen transitions create temporary non-user space IDs for the same display.
+        // Treat only user->user space-id changes as topology churn.
         let display_space_changed =
-            previous_spaces_by_display.iter().any(|(display_uuid, space)| {
-                new_spaces_by_display
-                    .get(display_uuid)
-                    .is_some_and(|new_space| new_space != space)
+            previous_spaces_by_display.iter().any(|(display_uuid, old_space)| {
+                new_spaces_by_display.get(display_uuid).is_some_and(|new_space| {
+                    new_space != old_space
+                        && !is_fullscreen_space(*old_space)
+                        && !is_fullscreen_space(*new_space)
+                })
             });
 
         // IMPORTANT:
