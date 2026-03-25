@@ -51,6 +51,9 @@ pub enum ReactorCommand {
         selector: DisplaySelector,
         window_id: Option<u32>,
     },
+    MoveEverythingToDisplay {
+        selector: DisplaySelector,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -67,7 +70,9 @@ pub(crate) struct FullscreenSpaceTrack {
 }
 
 impl Default for FullscreenSpaceTrack {
-    fn default() -> Self { FullscreenSpaceTrack { windows: Vec::new() } }
+    fn default() -> Self {
+        FullscreenSpaceTrack { windows: Vec::new() }
+    }
 }
 
 #[derive(Debug, Clone)]
