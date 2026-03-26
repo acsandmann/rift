@@ -47,6 +47,19 @@
         # This creates a stable directory (not symlink) that preserves TCC permissions across rebuilds
         environment.systemPackages = [ cfg.package ];
 
+        # Re-sign the app bundle with correct TCC identity after nix-darwin copies it
+        # The Nix build codesigns it, but nix-darwin re-signs during copy, losing our --identifier.
+        # This activation script runs after the copy and restores git.acsandmann.rift identity.
+        system.activationScripts.postActivation.text = lib.mkAfter ''
+          echo "Re-signing Rift.app with TCC identity..." >&2
+          /usr/bin/codesign --force --sign - \
+            --identifier git.acsandmann.rift \
+            "/Applications/Nix Apps/Rift.app/Contents/MacOS/rift" 2>/dev/null || true
+          /usr/bin/codesign --force --sign - \
+            --identifier git.acsandmann.rift \
+            "/Applications/Nix Apps/Rift.app" 2>/dev/null || true
+        '';
+
         launchd.user.agents.rift = {
           serviceConfig = {
             Label = "git.acsandmann.rift";
