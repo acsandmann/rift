@@ -48,19 +48,20 @@
         environment.systemPackages = [ cfg.package ];
 
         launchd.user.agents.rift = {
-          # Launch via the stable /Applications/Nix Apps/ path, NOT the Nix store path.
-          # macOS TCC (accessibility permissions) is tied to the app bundle path. nix-darwin
-          # copies app bundles from the Nix store to /Applications/Nix Apps/ as a stable
-          # non-symlink directory — that's the path the user grants accessibility to.
-          # Using the Nix store path directly (${cfg.package}/bin/rift) bypasses this, causing
-          # Rift to report "Accessibility permission is not granted" on every launch even
-          # after the user has granted it in System Settings.
-          command = "/Applications/Nix Apps/Rift.app/Contents/MacOS/rift${
-            if configFile == null then "" else " --config " + lib.escapeShellArg configFile
-          }";
-
           serviceConfig = {
             Label = "git.acsandmann.rift";
+
+            # Use ProgramArguments (direct exec array) instead of nix-darwin's `command` field.
+            # `command` wraps the value in `/bin/sh -c "..."`, which:
+            #   1. Breaks on the space in "/Applications/Nix Apps/" (shell splits it)
+            #   2. Makes macOS TCC see /bin/sh as the process instead of Rift, defeating
+            #      accessibility permissions even after the user grants them.
+            # ProgramArguments passes the path as an unquoted array element — no shell
+            # interpretation, no space splitting, and launchd exec()s Rift directly so
+            # TCC sees the correct /Applications/Nix Apps/Rift.app bundle identity.
+            ProgramArguments =
+              [ "/Applications/Nix Apps/Rift.app/Contents/MacOS/rift" ]
+              ++ lib.optionals (configFile != null) [ "--config" (toString configFile) ];
             EnvironmentVariables = {
               RUST_LOG = "error,warn,info";
               # todo improve
