@@ -39,7 +39,7 @@
       );
 
       # Wrap built binaries in proper macOS app bundle for TCC permissions
-      rift-app = pkgs.stdenv.mkDerivation {
+      rift-app = pkgs.clangStdenv.mkDerivation {
         pname = "rift";
         version = "0.1.0";
         
@@ -96,6 +96,12 @@ EOF
           # Also create symlinks in bin/ for CLI access
           mkdir -p $out/bin
           ln -s $out/Applications/Rift.app/Contents/MacOS/rift $out/bin/rift
+          
+          # Install rift-cli if it was built
+          if [ -f ${build}/bin/rift-cli ]; then
+            cp ${build}/bin/rift-cli $out/bin/rift-cli
+            chmod +x $out/bin/rift-cli
+          fi
         '';
         
         meta = {
