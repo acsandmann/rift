@@ -83,8 +83,15 @@
 </plist>
 EOF
           
-          # Ad-hoc codesign so TCC trust survives rebuilds on the same machine
-          /usr/bin/codesign --force --deep --sign - $out/Applications/Rift.app
+          # Ad-hoc codesign with explicit bundle identifier so TCC matches git.acsandmann.rift
+          # --identifier overrides the default (binary filename) and binds CFBundleIdentifier into
+          # the codesign identity, ensuring TCC lookups find the correct entry.
+          /usr/bin/codesign --force --sign - \
+            --identifier git.acsandmann.rift \
+            $out/Applications/Rift.app/Contents/MacOS/rift
+          /usr/bin/codesign --force --sign - \
+            --identifier git.acsandmann.rift \
+            $out/Applications/Rift.app
           
           # Also create symlinks in bin/ for CLI access
           mkdir -p $out/bin
