@@ -47,6 +47,9 @@
         
         dontUnpack = true;
         
+        # codesign needs to touch the Mach-O binary outside the sandbox
+        __noChroot = true;
+        
         installPhase = ''
           # Create proper macOS app bundle structure for accessibility permissions
           mkdir -p $out/Applications/Rift.app/Contents/MacOS
@@ -54,9 +57,7 @@
           
           # Install binaries from crane build into app bundle
           cp ${build}/bin/rift $out/Applications/Rift.app/Contents/MacOS/
-          cp ${build}/bin/rift-cli $out/Applications/Rift.app/Contents/MacOS/
           chmod +x $out/Applications/Rift.app/Contents/MacOS/rift
-          chmod +x $out/Applications/Rift.app/Contents/MacOS/rift-cli
           
           # Create Info.plist for proper app identification
           cat > $out/Applications/Rift.app/Contents/Info.plist << EOF
@@ -82,10 +83,12 @@
 </plist>
 EOF
           
+          # Ad-hoc codesign so TCC trust survives rebuilds on the same machine
+          /usr/bin/codesign --force --deep --sign - $out/Applications/Rift.app
+          
           # Also create symlinks in bin/ for CLI access
           mkdir -p $out/bin
           ln -s $out/Applications/Rift.app/Contents/MacOS/rift $out/bin/rift
-          ln -s $out/Applications/Rift.app/Contents/MacOS/rift-cli $out/bin/rift-cli
         '';
         
         meta = {

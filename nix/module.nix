@@ -48,7 +48,14 @@
         environment.systemPackages = [ cfg.package ];
 
         launchd.user.agents.rift = {
-          command = "${cfg.package}/bin/rift${
+          # Launch via the stable /Applications/Nix Apps/ path, NOT the Nix store path.
+          # macOS TCC (accessibility permissions) is tied to the app bundle path. nix-darwin
+          # copies app bundles from the Nix store to /Applications/Nix Apps/ as a stable
+          # non-symlink directory — that's the path the user grants accessibility to.
+          # Using the Nix store path directly (${cfg.package}/bin/rift) bypasses this, causing
+          # Rift to report "Accessibility permission is not granted" on every launch even
+          # after the user has granted it in System Settings.
+          command = "/Applications/Nix Apps/Rift.app/Contents/MacOS/rift${
             if configFile == null then "" else " --config " + lib.escapeShellArg configFile
           }";
 
