@@ -583,7 +583,7 @@ fn map_window_command(cmd: WindowCommands) -> Result<RiftCommand, String> {
             reactor::Command::Layout(LC::ToggleFullscreenWithinGaps),
         )),
         WindowCommands::ToggleColumnFullscreen => Ok(RiftCommand::Reactor(
-            reactor::Command::Layout(LC::ToggleColumnFullscreen),
+            reactor::Command::Layout(LC::ToggleColumnFullscreen { within_gaps: None }),
         )),
         WindowCommands::ToggleColumnFullscreenWithinGaps => Ok(RiftCommand::Reactor(
             reactor::Command::Layout(LC::ToggleColumnFullscreenWithinGaps),

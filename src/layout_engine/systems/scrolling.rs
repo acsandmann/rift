@@ -1286,7 +1286,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
             return affected;
         }
         state.clear_window_fullscreen_modes();
-        state.clear_fullscreen_modes();
+        state.columns[col_idx].fullscreen_within_gaps = false;
         state.columns[col_idx].fullscreen = true;
         affected
     }
@@ -1313,7 +1313,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
             return affected;
         }
         state.clear_window_fullscreen_modes();
-        state.clear_fullscreen_modes();
+        state.columns[col_idx].fullscreen = false;
         state.columns[col_idx].fullscreen_within_gaps = true;
         affected
     }
@@ -2172,6 +2172,29 @@ mod tests {
         assert_eq!(frame.origin.y, tiling.origin.y.round());
         assert_eq!(frame.size.width, tiling.size.width.round());
         assert_eq!(frame.size.height, tiling.size.height.round());
+    }
+
+    #[test]
+    fn multiple_columns_can_remain_column_fullscreen_in_scrolling() {
+        let mut system = ScrollingLayoutSystem::new(&ScrollingLayoutSettings::default());
+        let layout = system.create_layout();
+        let w1 = wid(52, 1);
+        let w2 = wid(52, 2);
+        let w3 = wid(52, 3);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+        system.add_window_after_selection(layout, w3);
+
+        assert_eq!(system.toggle_column_fullscreen_of_selection(layout), vec![w3]);
+        system.move_focus(layout, Direction::Left);
+        assert_eq!(system.toggle_column_fullscreen_of_selection(layout), vec![w2]);
+
+        let frames = render(&system, layout, screen(1000.0, 800.0), &GapSettings::default());
+        let frame2 = frame_for(&frames, w2);
+        let frame3 = frame_for(&frames, w3);
+
+        assert_eq!(frame2.size.width, 1000.0);
+        assert_eq!(frame3.size.width, 1000.0);
     }
 
     #[test]

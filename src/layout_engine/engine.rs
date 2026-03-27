@@ -58,7 +58,9 @@ pub enum LayoutCommand {
     ToggleWindowFloating,
     ToggleFullscreen,
     ToggleFullscreenWithinGaps,
-    ToggleColumnFullscreen,
+    ToggleColumnFullscreen {
+        within_gaps: Option<bool>,
+    },
     ToggleColumnFullscreenWithinGaps,
 
     ResizeWindowGrow,
@@ -1557,10 +1559,14 @@ impl LayoutEngine {
                     }
                 }
             }
-            LayoutCommand::ToggleColumnFullscreen => {
-                let raise_windows = self
-                    .workspace_tree_mut(workspace_id)
-                    .toggle_column_fullscreen_of_selection(layout);
+            LayoutCommand::ToggleColumnFullscreen { within_gaps } => {
+                let raise_windows = if within_gaps == Some(true) {
+                    self.workspace_tree_mut(workspace_id)
+                        .toggle_column_fullscreen_within_gaps_of_selection(layout)
+                } else {
+                    self.workspace_tree_mut(workspace_id)
+                        .toggle_column_fullscreen_of_selection(layout)
+                };
                 if raise_windows.is_empty() {
                     EventResponse::default()
                 } else {

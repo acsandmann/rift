@@ -1483,6 +1483,20 @@ mod tests {
     }
 
     #[test]
+    fn test_toggle_column_fullscreen_within_gaps_option_in_config() {
+        let toml = r#"
+            [settings]
+            animate = false
+
+            [keys]
+            "Meta + Alt + Enter" = { toggle_column_fullscreen = { within_gaps = true } }
+        "#;
+
+        let cfg = Config::parse(toml).unwrap();
+        assert!(!cfg.keys.is_empty());
+    }
+
+    #[test]
     fn test_levenshtein_suggests() {
         let err =
             "unknown variant `toggle_stak`, expected one of `toggle_stack`, `toggle_orientation`";

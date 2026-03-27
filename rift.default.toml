@@ -361,7 +361,8 @@ comb1 = "Alt + Shift"
 # - join_window = "left"|"right"|"up"|"down"
 # - toggle_stack / toggle_orientation / unjoin_windows
 # - toggle_focus_floating / toggle_window_floating / toggle_fullscreen / toggle_fullscreen_within_gaps
-# - toggle_column_fullscreen / toggle_column_fullscreen_within_gaps (scrolling layout only)
+# - toggle_column_fullscreen / toggle_column_fullscreen = { within_gaps = true } (scrolling layout only)
+# - toggle_column_fullscreen_within_gaps (compatibility alias)
 # - resize_window_grow / resize_window_shrink / resize_window_by = 0.05
 # - swap_windows = [123, 456]
 # - exec = "command" | exec = ["cmd", "arg1", "..."]
@@ -378,7 +379,8 @@ comb1 = "Alt + Shift"
 # the following commands *only* work when the scrolling layout is active
 # - scroll_strip = { delta = 0.5 }
 # - snap_strip / center_selection
-# - toggle_column_fullscreen / toggle_column_fullscreen_within_gaps
+# - toggle_column_fullscreen / toggle_column_fullscreen = { within_gaps = true }
+# - toggle_column_fullscreen_within_gaps
 
 "Alt + Z" = "toggle_space_activated"
 
