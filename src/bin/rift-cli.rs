@@ -147,6 +147,10 @@ enum WindowCommands {
     ToggleFullscreen,
     /// Toggle fullscreen within configured outer gaps (respects outer gaps / fills tiling area)
     ToggleFullscreenWithinGaps,
+    /// Toggle fullscreen for the selected scrolling column (fills the whole screen, preserves strip order)
+    ToggleColumnFullscreen,
+    /// Toggle fullscreen within configured outer gaps for the selected scrolling column
+    ToggleColumnFullscreenWithinGaps,
     /// Grow the current window size (increments by ~5%).
     ResizeGrow,
     /// Shrink the current window size (decrements by ~5%).
@@ -174,13 +178,24 @@ enum WorkspaceCommands {
     Prev { skip_empty: Option<bool> },
     /// Switch to specific workspace
     Switch { workspace_id: usize },
+    /// Move the active workspace one position to the left
+    MoveLeft,
+    /// Move the active workspace one position to the right
+    MoveRight,
     /// Move current window to workspace
     MoveWindow {
         workspace_id: usize,
         window_id: Option<u32>,
     },
     /// Create a new workspace
-    Create,
+    Create {
+        /// Insert immediately after the active workspace instead of appending at the end.
+        #[arg(long)]
+        after_current: bool,
+        /// Switch to the newly created workspace immediately.
+        #[arg(long)]
+        focus: bool,
+    },
     /// Switch to the last workspace
     Last,
     /// Set layout mode for a workspace (or active workspace when omitted)
@@ -567,6 +582,12 @@ fn map_window_command(cmd: WindowCommands) -> Result<RiftCommand, String> {
         WindowCommands::ToggleFullscreenWithinGaps => Ok(RiftCommand::Reactor(
             reactor::Command::Layout(LC::ToggleFullscreenWithinGaps),
         )),
+        WindowCommands::ToggleColumnFullscreen => Ok(RiftCommand::Reactor(
+            reactor::Command::Layout(LC::ToggleColumnFullscreen),
+        )),
+        WindowCommands::ToggleColumnFullscreenWithinGaps => Ok(RiftCommand::Reactor(
+            reactor::Command::Layout(LC::ToggleColumnFullscreenWithinGaps),
+        )),
         WindowCommands::ResizeGrow => Ok(RiftCommand::Reactor(reactor::Command::Layout(
             LC::ResizeWindowGrow,
         ))),
@@ -635,14 +656,26 @@ fn map_workspace_command(cmd: WorkspaceCommands) -> Result<RiftCommand, String> 
         WorkspaceCommands::Switch { workspace_id } => Ok(RiftCommand::Reactor(
             reactor::Command::Layout(LC::SwitchToWorkspace(workspace_id)),
         )),
+        WorkspaceCommands::MoveLeft => Ok(RiftCommand::Reactor(reactor::Command::Layout(
+            LC::MoveWorkspaceLeft,
+        ))),
+        WorkspaceCommands::MoveRight => Ok(RiftCommand::Reactor(reactor::Command::Layout(
+            LC::MoveWorkspaceRight,
+        ))),
         WorkspaceCommands::MoveWindow { workspace_id, window_id } => Ok(RiftCommand::Reactor(
             reactor::Command::Layout(LC::MoveWindowToWorkspace {
                 workspace: workspace_id,
                 window_id,
             }),
         )),
-        WorkspaceCommands::Create => Ok(RiftCommand::Reactor(reactor::Command::Layout(
-            LC::CreateWorkspace,
+        WorkspaceCommands::Create {
+            after_current,
+            focus,
+        } => Ok(RiftCommand::Reactor(reactor::Command::Layout(
+            LC::CreateWorkspace {
+                after_current: after_current.then_some(true),
+                focus: focus.then_some(true),
+            },
         ))),
         WorkspaceCommands::Last => Ok(RiftCommand::Reactor(reactor::Command::Layout(
             LC::SwitchToLastWorkspace,

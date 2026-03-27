@@ -64,7 +64,11 @@ pub enum WmCmd {
 
     NextWorkspace,
     PrevWorkspace,
+    MoveWorkspaceLeft,
+    MoveWorkspaceRight,
     SwitchToWorkspace(WorkspaceSelector),
+    MoveWindowToNextWorkspace,
+    MoveWindowToPrevWorkspace,
     MoveWindowToWorkspace(WorkspaceSelector),
     CreateWorkspace,
     SwitchToLastWorkspace,
@@ -179,6 +183,8 @@ impl WmController {
             event,
             Command(Wm(crate::actor::wm_controller::WmCmd::NextWorkspace))
                 | Command(Wm(crate::actor::wm_controller::WmCmd::PrevWorkspace))
+                | Command(Wm(crate::actor::wm_controller::WmCmd::MoveWorkspaceLeft))
+                | Command(Wm(crate::actor::wm_controller::WmCmd::MoveWorkspaceRight))
                 | Command(Wm(crate::actor::wm_controller::WmCmd::SwitchToWorkspace(_)))
                 | Command(Wm(crate::actor::wm_controller::WmCmd::SwitchToLastWorkspace))
                 | SpaceChanged(_)
@@ -303,6 +309,16 @@ impl WmController {
                     layout::LayoutCommand::PrevWorkspace(None),
                 )));
             }
+            Command(Wm(MoveWorkspaceLeft)) => {
+                self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
+                    layout::LayoutCommand::MoveWorkspaceLeft,
+                )));
+            }
+            Command(Wm(MoveWorkspaceRight)) => {
+                self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
+                    layout::LayoutCommand::MoveWorkspaceRight,
+                )));
+            }
             Command(Wm(SwitchToWorkspace(ws_sel))) => {
                 let maybe_index: Option<usize> = match &ws_sel {
                     WorkspaceSelector::Index(i) => Some(*i),
@@ -325,6 +341,26 @@ impl WmController {
                         ws_sel
                     );
                 }
+            }
+            Command(Wm(MoveWindowToNextWorkspace)) => {
+                let skip_empty = if self.config.config.settings.gestures.skip_empty {
+                    Some(true)
+                } else {
+                    None
+                };
+                self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
+                    layout::LayoutCommand::MoveWindowToNextWorkspace(skip_empty),
+                )));
+            }
+            Command(Wm(MoveWindowToPrevWorkspace)) => {
+                let skip_empty = if self.config.config.settings.gestures.skip_empty {
+                    Some(true)
+                } else {
+                    None
+                };
+                self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
+                    layout::LayoutCommand::MoveWindowToPrevWorkspace(skip_empty),
+                )));
             }
             Command(Wm(MoveWindowToWorkspace(ws_sel))) => {
                 let maybe_index: Option<usize> = match &ws_sel {
@@ -354,7 +390,10 @@ impl WmController {
             }
             Command(Wm(CreateWorkspace)) => {
                 self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
-                    layout::LayoutCommand::CreateWorkspace,
+                    layout::LayoutCommand::CreateWorkspace {
+                        after_current: None,
+                        focus: None,
+                    },
                 )));
             }
             Command(Wm(SwitchToLastWorkspace)) => {

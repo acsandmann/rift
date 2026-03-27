@@ -425,6 +425,15 @@ impl VirtualWorkspaceManager {
         space: SpaceId,
         name: Option<String>,
     ) -> Result<VirtualWorkspaceId, WorkspaceError> {
+        self.create_workspace_with_options(space, name, None)
+    }
+
+    pub fn create_workspace_with_options(
+        &mut self,
+        space: SpaceId,
+        name: Option<String>,
+        after_current: Option<bool>,
+    ) -> Result<VirtualWorkspaceId, WorkspaceError> {
         self.ensure_space_initialized(space);
         let count = self
             .workspaces_by_space
@@ -444,22 +453,66 @@ impl VirtualWorkspaceManager {
             name
         });
 
-        let idx = self
-            .workspaces_by_space
-            .get(&space)
-            .map(|v: &Vec<VirtualWorkspaceId>| v.len())
-            .unwrap_or(0);
+        let idx = if after_current == Some(true) {
+            self.active_workspace_idx(space)
+                .map(|idx| idx as usize + 1)
+                .unwrap_or_else(|| {
+                    self.workspaces_by_space
+                        .get(&space)
+                        .map(|v: &Vec<VirtualWorkspaceId>| v.len())
+                        .unwrap_or(0)
+                })
+        } else {
+            self.workspaces_by_space
+                .get(&space)
+                .map(|v: &Vec<VirtualWorkspaceId>| v.len())
+                .unwrap_or(0)
+        };
         let mode = self.resolve_layout_mode_for_workspace(idx, &name);
 
         let workspace = VirtualWorkspace::new(name, space, mode, &self.layout_settings);
         let workspace_id = self.workspaces.insert(workspace);
-        self.workspaces_by_space.entry(space).or_default().push(workspace_id);
+        let workspaces = self.workspaces_by_space.entry(space).or_default();
+        if idx >= workspaces.len() {
+            workspaces.push(workspace_id);
+        } else {
+            workspaces.insert(idx, workspace_id);
+        }
 
         Ok(workspace_id)
     }
 
     pub fn last_workspace(&self, space: SpaceId) -> Option<VirtualWorkspaceId> {
         self.active_workspace_per_space.get(&space)?.0
+    }
+
+    pub fn move_workspace(
+        &mut self,
+        space: SpaceId,
+        workspace_id: VirtualWorkspaceId,
+        direction: Direction,
+    ) -> bool {
+        self.ensure_space_initialized(space);
+
+        let Some(workspaces) = self.workspaces_by_space.get_mut(&space) else {
+            return false;
+        };
+        let Some(index) = workspaces.iter().position(|id| *id == workspace_id) else {
+            return false;
+        };
+
+        let target_index = match direction {
+            Direction::Left if index > 0 => Some(index - 1),
+            Direction::Right if index + 1 < workspaces.len() => Some(index + 1),
+            _ => None,
+        };
+
+        let Some(target_index) = target_index else {
+            return false;
+        };
+
+        workspaces.swap(index, target_index);
+        true
     }
 
     pub fn active_workspace(&self, space: SpaceId) -> Option<VirtualWorkspaceId> {
@@ -1703,6 +1756,57 @@ mod tests {
 
         assert_eq!(manager.prev_workspace(space, ws2_id, None), Some(ws1_id));
         assert_eq!(manager.prev_workspace(space, ws3_id, None), Some(ws2_id));
+    }
+
+    #[test]
+    fn test_move_workspace_reorders_active_workspace_in_place() {
+        let mut manager = VirtualWorkspaceManager::new();
+        let space = SpaceId::new(1);
+        manager.create_workspace(space, Some("WS1".to_string())).unwrap();
+        let ws2_id = manager.create_workspace(space, Some("WS2".to_string())).unwrap();
+        let ws3_id = manager.create_workspace(space, Some("WS3".to_string())).unwrap();
+
+        assert!(manager.set_active_workspace(space, ws2_id));
+        assert!(manager.move_workspace(space, ws2_id, Direction::Right));
+
+        let ordered_ids: Vec<_> = manager
+            .list_workspaces(space)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        let ws2_idx = ordered_ids.iter().position(|id| *id == ws2_id).unwrap();
+        let ws3_idx = ordered_ids.iter().position(|id| *id == ws3_id).unwrap();
+
+        assert_eq!(manager.active_workspace(space), Some(ws2_id));
+        assert_eq!(ws2_idx, ws3_idx + 1);
+    }
+
+    #[test]
+    fn test_create_workspace_after_current_inserts_relative_to_active_workspace() {
+        let mut manager = VirtualWorkspaceManager::new();
+        let space = SpaceId::new(1);
+        manager.create_workspace(space, Some("WS1".to_string())).unwrap();
+        let ws2_id = manager.create_workspace(space, Some("WS2".to_string())).unwrap();
+        let ws3_id = manager.create_workspace(space, Some("WS3".to_string())).unwrap();
+
+        assert!(manager.set_active_workspace(space, ws2_id));
+
+        let inserted_id = manager
+            .create_workspace_with_options(space, Some("Inserted".to_string()), Some(true))
+            .unwrap();
+
+        let ordered_ids: Vec<_> = manager
+            .list_workspaces(space)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+
+        let ws2_idx = ordered_ids.iter().position(|id| *id == ws2_id).unwrap();
+        let inserted_idx = ordered_ids.iter().position(|id| *id == inserted_id).unwrap();
+        let ws3_idx = ordered_ids.iter().position(|id| *id == ws3_id).unwrap();
+
+        assert_eq!(inserted_idx, ws2_idx + 1);
+        assert_eq!(ws3_idx, inserted_idx + 1);
     }
 
     #[test]

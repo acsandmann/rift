@@ -58,6 +58,8 @@ pub enum LayoutCommand {
     ToggleWindowFloating,
     ToggleFullscreen,
     ToggleFullscreenWithinGaps,
+    ToggleColumnFullscreen,
+    ToggleColumnFullscreenWithinGaps,
 
     ResizeWindowGrow,
     ResizeWindowShrink,
@@ -77,7 +79,11 @@ pub enum LayoutCommand {
 
     NextWorkspace(Option<bool>),
     PrevWorkspace(Option<bool>),
+    MoveWorkspaceLeft,
+    MoveWorkspaceRight,
     SwitchToWorkspace(usize),
+    MoveWindowToNextWorkspace(Option<bool>),
+    MoveWindowToPrevWorkspace(Option<bool>),
     MoveWindowToWorkspace {
         workspace: usize,
         window_id: Option<u32>,
@@ -86,7 +92,10 @@ pub enum LayoutCommand {
         workspace: Option<usize>,
         mode: LayoutMode,
     },
-    CreateWorkspace,
+    CreateWorkspace {
+        after_current: Option<bool>,
+        focus: Option<bool>,
+    },
     SwitchToLastWorkspace,
 
     SwapWindows(crate::actor::app::WindowId, crate::actor::app::WindowId),
@@ -1548,13 +1557,45 @@ impl LayoutEngine {
                     }
                 }
             }
+            LayoutCommand::ToggleColumnFullscreen => {
+                let raise_windows = self
+                    .workspace_tree_mut(workspace_id)
+                    .toggle_column_fullscreen_of_selection(layout);
+                if raise_windows.is_empty() {
+                    EventResponse::default()
+                } else {
+                    EventResponse {
+                        raise_windows,
+                        focus_window: None,
+                        boundary_hit: None,
+                    }
+                }
+            }
+            LayoutCommand::ToggleColumnFullscreenWithinGaps => {
+                let raise_windows = self
+                    .workspace_tree_mut(workspace_id)
+                    .toggle_column_fullscreen_within_gaps_of_selection(layout);
+                if raise_windows.is_empty() {
+                    EventResponse::default()
+                } else {
+                    EventResponse {
+                        raise_windows,
+                        focus_window: None,
+                        boundary_hit: None,
+                    }
+                }
+            }
             // handled by upper reactor
             LayoutCommand::NextWorkspace(_)
             | LayoutCommand::PrevWorkspace(_)
+            | LayoutCommand::MoveWorkspaceLeft
+            | LayoutCommand::MoveWorkspaceRight
             | LayoutCommand::SwitchToWorkspace(_)
+            | LayoutCommand::MoveWindowToNextWorkspace(_)
+            | LayoutCommand::MoveWindowToPrevWorkspace(_)
             | LayoutCommand::MoveWindowToWorkspace { .. }
             | LayoutCommand::SetWorkspaceLayout { .. }
-            | LayoutCommand::CreateWorkspace
+            | LayoutCommand::CreateWorkspace { .. }
             | LayoutCommand::SwitchToLastWorkspace => EventResponse::default(),
             LayoutCommand::JoinWindow(direction) => {
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
@@ -2052,6 +2093,36 @@ impl LayoutEngine {
                 }
                 EventResponse::default()
             }
+            LayoutCommand::MoveWorkspaceLeft => {
+                let Some(current_workspace) = self.virtual_workspace_manager.active_workspace(space)
+                else {
+                    return EventResponse::default();
+                };
+
+                if self
+                    .virtual_workspace_manager
+                    .move_workspace(space, current_workspace, Direction::Left)
+                {
+                    self.broadcast_workspace_changed(space);
+                }
+
+                EventResponse::default()
+            }
+            LayoutCommand::MoveWorkspaceRight => {
+                let Some(current_workspace) = self.virtual_workspace_manager.active_workspace(space)
+                else {
+                    return EventResponse::default();
+                };
+
+                if self
+                    .virtual_workspace_manager
+                    .move_workspace(space, current_workspace, Direction::Right)
+                {
+                    self.broadcast_workspace_changed(space);
+                }
+
+                EventResponse::default()
+            }
             LayoutCommand::SwitchToWorkspace(workspace_index) => {
                 let workspaces = self.virtual_workspace_manager_mut().list_workspaces(space);
                 if let Some((workspace_id, _)) = workspaces.get(*workspace_index) {
@@ -2084,6 +2155,12 @@ impl LayoutEngine {
                     return self.refocus_workspace(space, workspace_id);
                 }
                 EventResponse::default()
+            }
+            LayoutCommand::MoveWindowToNextWorkspace(skip_empty) => {
+                self.move_focused_window_to_relative_workspace(space, Direction::Right, *skip_empty)
+            }
+            LayoutCommand::MoveWindowToPrevWorkspace(skip_empty) => {
+                self.move_focused_window_to_relative_workspace(space, Direction::Left, *skip_empty)
             }
             LayoutCommand::MoveWindowToWorkspace {
                 workspace: workspace_index,
@@ -2197,9 +2274,25 @@ impl LayoutEngine {
                 self.broadcast_windows_changed(op_space);
                 EventResponse::default()
             }
-            LayoutCommand::CreateWorkspace => {
-                match self.virtual_workspace_manager.create_workspace(space, None) {
-                    Ok(_workspace_id) => {
+            LayoutCommand::CreateWorkspace {
+                after_current,
+                focus,
+            } => {
+                match self.virtual_workspace_manager.create_workspace_with_options(
+                    space,
+                    None,
+                    *after_current,
+                ) {
+                    Ok(workspace_id) => {
+                        if focus == &Some(true) {
+                            self.virtual_workspace_manager
+                                .set_active_workspace(space, workspace_id);
+                            self.update_active_floating_windows(space);
+                            self.broadcast_workspace_changed(space);
+                            self.broadcast_windows_changed(space);
+                            return self.refocus_workspace(space, workspace_id);
+                        }
+
                         self.broadcast_workspace_changed(space);
                     }
                     Err(e) => {
@@ -2252,6 +2345,65 @@ impl LayoutEngine {
             }
             _ => EventResponse::default(),
         }
+    }
+
+    fn move_focused_window_to_relative_workspace(
+        &mut self,
+        space: SpaceId,
+        direction: Direction,
+        skip_empty: Option<bool>,
+    ) -> EventResponse {
+        let Some(focused_window) = self.focused_window else {
+            return EventResponse::default();
+        };
+
+        let inferred_space = self.space_with_window(focused_window);
+        let op_space = if inferred_space == Some(space) {
+            space
+        } else {
+            inferred_space.unwrap_or(space)
+        };
+
+        let Some(current_workspace_id) = self
+            .virtual_workspace_manager
+            .workspace_for_window(op_space, focused_window)
+        else {
+            return EventResponse::default();
+        };
+
+        let target_workspace_id = match direction {
+            Direction::Right => self.virtual_workspace_manager.next_workspace(
+                op_space,
+                current_workspace_id,
+                skip_empty,
+            ),
+            Direction::Left => self.virtual_workspace_manager.prev_workspace(
+                op_space,
+                current_workspace_id,
+                skip_empty,
+            ),
+            _ => None,
+        };
+
+        let Some(target_workspace_id) = target_workspace_id else {
+            return EventResponse::default();
+        };
+
+        let workspaces = self.virtual_workspace_manager.list_workspaces(op_space);
+        let Some(target_index) = workspaces
+            .iter()
+            .position(|(workspace_id, _)| *workspace_id == target_workspace_id)
+        else {
+            return EventResponse::default();
+        };
+
+        self.handle_virtual_workspace_command(
+            op_space,
+            &LayoutCommand::MoveWindowToWorkspace {
+                workspace: target_index,
+                window_id: Some(focused_window.idx.get()),
+            },
+        )
     }
 
     pub fn virtual_workspace_manager(&self) -> &VirtualWorkspaceManager {

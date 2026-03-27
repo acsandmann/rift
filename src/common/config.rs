@@ -1469,6 +1469,20 @@ mod tests {
     }
 
     #[test]
+    fn test_create_workspace_command_options_in_config() {
+        let toml = r#"
+            [settings]
+            animate = false
+
+            [keys]
+            "Meta + Ctrl + Alt + Shift + N" = { create_workspace = { after_current = true, focus = true } }
+        "#;
+
+        let cfg = Config::parse(toml).unwrap();
+        assert!(!cfg.keys.is_empty());
+    }
+
+    #[test]
     fn test_levenshtein_suggests() {
         let err =
             "unknown variant `toggle_stak`, expected one of `toggle_stack`, `toggle_orientation`";
