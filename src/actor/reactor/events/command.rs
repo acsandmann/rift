@@ -1,7 +1,8 @@
 use tracing::{error, info, warn};
+use tokio_util::sync::CancellationToken;
 
 use super::super::ScreenInfo;
-use crate::actor::app::{AppThreadHandle, Quiet, WindowId};
+use crate::actor::app::{AppThreadHandle, Quiet, Request, WindowId};
 use crate::actor::reactor::transaction_manager::TransactionId;
 use crate::actor::reactor::{
     Command, DisplaySelector, Reactor, ReactorCommand, WorkspaceSwitchOrigin,
@@ -39,6 +40,7 @@ impl CommandEventHandler {
 
     pub fn handle_command_layout(reactor: &mut Reactor, cmd: LayoutCommand) {
         info!(?cmd);
+        let should_prefocus_immediately = matches!(cmd, LayoutCommand::MoveFocus(_));
         let is_workspace_switch = matches!(
             cmd,
             LayoutCommand::NextWorkspace(_)
@@ -114,9 +116,34 @@ impl CommandEventHandler {
             }
         };
 
+        if should_prefocus_immediately
+            && let Some(window_id) = response.focus_window
+        {
+            Self::send_immediate_quiet_focus(reactor, window_id);
+        }
+
         reactor.handle_layout_response(response, workspace_space);
         if requires_workspace_space {
             reactor.update_event_tap_layout_mode();
+        }
+    }
+
+    fn send_immediate_quiet_focus(reactor: &Reactor, window_id: WindowId) {
+        if !reactor.is_window_on_active_space(window_id) {
+            return;
+        }
+
+        let Some(app_state) = reactor.app_manager.apps.get(&window_id.pid) else {
+            return;
+        };
+
+        if let Err(e) = app_state.handle.send(Request::Raise(
+            vec![window_id],
+            CancellationToken::new(),
+            0,
+            Quiet::Yes,
+        )) {
+            warn!(?window_id, ?e, "Failed to send immediate quiet focus request");
         }
     }
 

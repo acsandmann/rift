@@ -126,24 +126,30 @@ impl RaiseManager {
 
     fn handle_message(&mut self, msg: Event) {
         match msg {
-            Event::RaiseRequest(RaiseRequest {
-                raise_windows,
-                focus_window,
-                app_handles,
-                focus_quiet,
-            }) => {
+            Event::RaiseRequest(request) => {
                 debug!(
                     "Processing layout response with {} raise_windows",
-                    raise_windows.len()
+                    request.raise_windows.len()
                 );
 
-                // Always queue the sequence
-                self.queued_sequences.push_back(RaiseRequest {
-                    raise_windows,
-                    focus_window,
-                    app_handles,
-                    focus_quiet,
-                });
+                if request.focus_window.is_some() {
+                    if let Some(active) = self.active_sequence.take() {
+                        debug!(
+                            active_sequence = active.sequence_id,
+                            "Superseding active raise sequence with newer focus request"
+                        );
+                        active.raise_token.cancel();
+                    }
+                    if !self.queued_sequences.is_empty() {
+                        debug!(
+                            dropped = self.queued_sequences.len(),
+                            "Dropping stale queued raise sequences in favor of latest focus request"
+                        );
+                        self.queued_sequences.clear();
+                    }
+                }
+
+                self.queued_sequences.push_back(request);
             }
             Event::RaiseCompleted { window_id, sequence_id } => {
                 trace!("Raise completed for {:?} in sequence {}", window_id, sequence_id);
@@ -574,12 +580,13 @@ mod tests {
     }
 
     #[test]
-    fn test_multiple_layout_responses_wait_for_focus_completion() {
+    fn test_newer_focus_request_supersedes_active_sequence() {
         Executor::run(async {
             let mut raise_manager = RaiseManager::new();
             let (app_handles, mut app_rx) = create_test_app_handles();
 
-            // Send two layout responses - second should be queued
+            // Send two focus-bearing layout responses. The second should
+            // supersede the first rather than waiting behind it.
             let msg1 = create_layout_response(
                 vec![WindowId::new(1, 1)],
                 Some((WindowId::new(1, 2), None)),
@@ -596,54 +603,25 @@ mod tests {
             raise_manager.handle_message(msg1);
             raise_manager.handle_message(msg2);
 
-            // Verify sequential processing: first active, second queued
             assert!(raise_manager.active_sequence.is_some());
-            assert_eq!(raise_manager.active_sequence.as_ref().unwrap().sequence_id, 1);
-            assert_eq!(raise_manager.queued_sequences.len(), 1);
-
-            // Complete first sequence's regular raise
-            raise_manager.handle_message(Event::RaiseCompleted {
-                window_id: WindowId::new(1, 1),
-                sequence_id: 1,
-            });
-
-            // Verify first sequence now has focus pending, second still queued
-            let sequence = raise_manager.active_sequence.as_ref().unwrap();
-            assert_eq!(sequence.pending_raises.len(), 1);
-            assert!(sequence.pending_raises.contains(&WindowId::new(1, 2)));
-            assert_eq!(raise_manager.queued_sequences.len(), 1);
-
-            // Verify only first sequence requests sent (regular + focus)
-            let requests = collect_requests(&mut app_rx);
-            assert_eq!(requests.len(), 2);
-            assert_raise_request(&requests[0], WindowId::new(1, 1), 1, Quiet::Yes);
-            assert_raise_request(&requests[1], WindowId::new(1, 2), 1, Quiet::No);
-
-            // Complete first sequence's focus window
-            raise_manager.handle_message(Event::RaiseCompleted {
-                window_id: WindowId::new(1, 2),
-                sequence_id: 1,
-            });
-
-            // Verify second sequence now active
-            let sequence = raise_manager.active_sequence.as_ref().unwrap();
-            assert_eq!(sequence.sequence_id, 2);
-            assert_eq!(sequence.pending_raises.len(), 1);
-            assert!(sequence.pending_raises.contains(&WindowId::new(1, 3)));
+            assert_eq!(raise_manager.active_sequence.as_ref().unwrap().sequence_id, 2);
             assert_eq!(raise_manager.queued_sequences.len(), 0);
 
-            // Verify second sequence's regular raise sent
             let requests = collect_requests(&mut app_rx);
-            assert_eq!(requests.len(), 1);
-            assert_raise_request(&requests[0], WindowId::new(1, 3), 2, Quiet::Yes);
+            assert!(
+                requests.iter().any(|request| matches!(
+                    request,
+                    Request::Raise(wids, _, 2, Quiet::Yes)
+                        if *wids == vec![WindowId::new(1, 3)]
+                )),
+                "expected latest regular raise request, got {requests:?}"
+            );
 
-            // Complete second sequence's regular raise
             raise_manager.handle_message(Event::RaiseCompleted {
                 window_id: WindowId::new(1, 3),
                 sequence_id: 2,
             });
 
-            // Verify second sequence's focus window sent
             let requests = collect_requests(&mut app_rx);
             assert_eq!(requests.len(), 1);
             assert_raise_request(&requests[0], WindowId::new(1, 4), 2, Quiet::No);
@@ -661,15 +639,13 @@ mod tests {
     }
 
     #[test]
-    fn test_multiple_iterations_required_for_chained_completions() {
+    fn test_latest_focus_request_replaces_older_queued_sequences() {
         Executor::run(async {
             let mut raise_manager = RaiseManager::new();
             let (app_handles, mut app_rx) = create_test_app_handles();
 
-            // Send three layout responses:
-            // 1. First has one regular raise + focus
-            // 2. Second has no regular raises, only focus (will start immediately when first completes)
-            // 3. Third has one regular raise + focus
+            // Send three focus-bearing layout responses rapidly. The newest one
+            // should be the only active sequence left.
             let msg1 = create_layout_response(
                 vec![WindowId::new(1, 1)],
                 Some((WindowId::new(1, 2), None)),
@@ -689,74 +665,25 @@ mod tests {
                 Quiet::No,
             );
 
-            // Queue all three sequences
             raise_manager.handle_message(msg1);
             raise_manager.handle_message(msg2);
             raise_manager.handle_message(msg3);
 
-            // Verify first sequence is active, others queued
             assert!(raise_manager.active_sequence.is_some());
-            assert_eq!(raise_manager.active_sequence.as_ref().unwrap().sequence_id, 1);
-            assert_eq!(raise_manager.queued_sequences.len(), 2);
+            assert_eq!(raise_manager.active_sequence.as_ref().unwrap().sequence_id, 3);
+            assert_eq!(raise_manager.queued_sequences.len(), 0);
 
-            // Complete first sequence's regular raise
-            raise_manager.handle_message(Event::RaiseCompleted {
-                window_id: WindowId::new(1, 1),
-                sequence_id: 1,
-            });
-
-            // First sequence should now have focus pending
-            assert!(raise_manager.active_sequence.is_some());
-            assert_eq!(raise_manager.active_sequence.as_ref().unwrap().sequence_id, 1);
-            assert!(
-                raise_manager
-                    .active_sequence
-                    .as_ref()
-                    .unwrap()
-                    .pending_raises
-                    .contains(&WindowId::new(1, 2))
-            );
-
-            // Complete first sequence's focus window - this should trigger multiple iterations:
-            // 1. First sequence completes
-            // 2. Second sequence starts (no regular raises, immediately sends focus)
-            // 3. Focus window is sent and tracked
-            // Without multiple iterations, the second sequence's focus wouldn't be sent
-            raise_manager.handle_message(Event::RaiseCompleted {
-                window_id: WindowId::new(1, 2),
-                sequence_id: 1,
-            });
-
-            // After the completion, we should have:
-            // - Second sequence active with focus window pending
-            // - Third sequence still queued
-            // - Focus request for second sequence should have been sent
-            assert!(raise_manager.active_sequence.is_some());
-            assert_eq!(raise_manager.active_sequence.as_ref().unwrap().sequence_id, 2);
-            assert!(
-                raise_manager
-                    .active_sequence
-                    .as_ref()
-                    .unwrap()
-                    .pending_raises
-                    .contains(&WindowId::new(1, 3))
-            );
-            assert_eq!(raise_manager.queued_sequences.len(), 1);
-
-            // Verify the focus request for second sequence was sent
-            // This would fail with single iteration because the second sequence
-            // wouldn't have a chance to send its focus request
             let requests = collect_requests(&mut app_rx);
-            let second_focus_sent = requests.iter().any(|r| {
-                if let Request::Raise(wid, _, seq_id, quiet) = r {
-                    *wid == vec![WindowId::new(1, 3)] && *seq_id == 2 && *quiet == Quiet::No
-                } else {
-                    false
-                }
+            let latest_regular_sent = requests.iter().any(|r| {
+                matches!(
+                    r,
+                    Request::Raise(wid, _, 3, Quiet::Yes)
+                        if *wid == vec![WindowId::new(1, 4)]
+                )
             });
             assert!(
-                second_focus_sent,
-                "Second sequence's focus request should have been sent immediately after first sequence completed"
+                latest_regular_sent,
+                "Latest sequence's regular raise should have been sent, got {requests:?}"
             );
         });
     }
