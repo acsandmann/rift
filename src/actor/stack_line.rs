@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::hash_map::Entry;
 use std::rc::Rc;
 
@@ -14,7 +15,23 @@ use crate::common::config::{Config, HorizontalPlacement, VerticalPlacement};
 use crate::layout_engine::LayoutKind;
 use crate::model::tree::NodeId;
 use crate::sys::screen::{CoordinateConverter, SpaceId};
+use crate::sys::window_server;
 use crate::ui::stack_line::{GroupDisplayData, GroupIndicatorWindow, GroupKind, IndicatorConfig};
+
+/// Shared indicator hit-rect state readable from the event tap callback.
+///
+/// Each entry is the screen-space frame of an active indicator together with
+/// the hit-test margins used for that indicator.
+pub type SharedHitRects = Rc<RefCell<Vec<HitRect>>>;
+
+#[derive(Clone, Copy)]
+pub struct HitRect {
+    pub frame: CGRect,
+    pub margin_x: f64,
+    pub margin_y: f64,
+}
+
+pub fn new_shared_hit_rects() -> SharedHitRects { Rc::new(RefCell::new(Vec::new())) }
 
 #[derive(Debug, Clone)]
 pub struct GroupInfo {
@@ -52,6 +69,7 @@ pub struct StackLine {
     coordinate_converter: CoordinateConverter,
     group_sigs_by_space: HashMap<SpaceId, Vec<GroupSig>>,
     cursor_over_indicator: bool,
+    shared_hit_rects: SharedHitRects,
 }
 
 pub type Sender = actor::Sender<Event>;
@@ -64,6 +82,7 @@ impl StackLine {
         mtm: MainThreadMarker,
         reactor_tx: reactor::Sender,
         coordinate_converter: CoordinateConverter,
+        shared_hit_rects: SharedHitRects,
     ) -> Self {
         Self {
             config,
@@ -74,6 +93,7 @@ impl StackLine {
             coordinate_converter,
             group_sigs_by_space: HashMap::default(),
             cursor_over_indicator: false,
+            shared_hit_rects,
         }
     }
 
@@ -89,6 +109,25 @@ impl StackLine {
     }
 
     fn is_enabled(&self) -> bool { self.config.settings.ui.stack_line.enabled }
+
+    /// Publish the current indicator frames so the event tap can suppress
+    /// clicks that land on a visible, non-occluded indicator.
+    fn sync_shared_hit_rects(&self) {
+        let mut rects = self.shared_hit_rects.borrow_mut();
+        rects.clear();
+        if !self.is_enabled() {
+            return;
+        }
+        for indicator in self.indicators.values() {
+            let frame = indicator.frame();
+            let (mx, my) = hit_margins(frame, indicator.recommended_thickness());
+            rects.push(HitRect {
+                frame,
+                margin_x: mx,
+                margin_y: my,
+            });
+        }
+    }
 
     #[instrument(name = "stack_line::handle_event", skip(self))]
     fn handle_event(&mut self, event: Event) {
@@ -116,12 +155,14 @@ impl StackLine {
                     groups,
                     active_workspace_for_space_has_fullscreen,
                 );
+                self.sync_shared_hit_rects();
             }
             Event::ScreenParametersChanged(converter) => {
                 self.handle_screen_parameters_changed(converter);
             }
             Event::ConfigUpdated(config) => {
                 self.handle_config_updated(config);
+                self.sync_shared_hit_rects();
             }
             Event::MouseDown(point) => {
                 self.handle_mouse_down(point);
@@ -244,6 +285,17 @@ impl StackLine {
             let (mx, my) = hit_margins(frame, indicator.recommended_thickness());
 
             if point_in_hit_area(screen_point, frame, mx, my) {
+                // The stack line window is ordered below normal windows, so an
+                // external window at this point would visually occlude the
+                // indicator. Ignore the click if another window is in front.
+                if window_server::is_point_occluded_by_external_window(screen_point) {
+                    tracing::trace!(
+                        ?node_id,
+                        "Ignoring stack line click: occluded by another window"
+                    );
+                    return;
+                }
+
                 let local_point =
                     CGPoint::new(screen_point.x - frame.origin.x, screen_point.y - frame.origin.y);
 
@@ -277,6 +329,7 @@ impl StackLine {
                 };
 
                 point_in_hit_area(screen_point, frame, mx, my)
+                    && !window_server::is_point_occluded_by_external_window(screen_point)
             })
         } else {
             false

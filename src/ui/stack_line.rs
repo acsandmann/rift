@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use objc2::rc::Retained;
-use objc2_app_kit::NSStatusWindowLevel;
+use objc2_app_kit::NSNormalWindowLevel;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_quartz_core::CALayer;
 use tracing::warn;
@@ -139,8 +139,13 @@ impl GroupIndicatorWindow {
         if let Err(err) = cgs_window.set_alpha(1.0) {
             warn!(error=?err, "failed to set stack line window alpha");
         }
-        if let Err(err) = cgs_window.set_level(NSStatusWindowLevel as i32) {
+        if let Err(err) = cgs_window.set_level(NSNormalWindowLevel as i32) {
             warn!(error=?err, "failed to set stack line window level");
+        }
+        // Disable the system window shadow so that macOS does not draw a
+        // drop-shadow around the indicator when it sits between tiled windows.
+        if let Err(err) = cgs_window.set_tags(1 << 3) {
+            warn!(error=?err, "failed to disable stack line window shadow");
         }
 
         Ok(Self {
@@ -173,7 +178,7 @@ impl GroupIndicatorWindow {
         }
 
         self.present();
-        self.cgs_window.order_above(None)
+        self.cgs_window.order_below(None)
     }
 
     pub fn clear(&self) -> Result<(), CgsWindowError> {
@@ -204,7 +209,7 @@ impl GroupIndicatorWindow {
         if fullscreen {
             self.cgs_window.order_out()
         } else {
-            self.cgs_window.order_above(None)
+            self.cgs_window.order_below(None)
         }
     }
 

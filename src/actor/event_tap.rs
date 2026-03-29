@@ -70,6 +70,7 @@ pub struct EventTap {
     hotkeys: RefCell<HashMap<Hotkey, Vec<WmCommand>>>,
     wm_sender: Option<wm_controller::Sender>,
     stack_line_tx: Option<stack_line::Sender>,
+    stack_line_hit_rects: Option<stack_line::SharedHitRects>,
 }
 
 struct State {
@@ -263,6 +264,22 @@ impl EventTap {
         state.stack_line_enabled && self.stack_line_tx.is_some()
     }
 
+    /// Check whether `point` falls inside any active stack-line indicator
+    /// hit-rect and the indicator is not occluded by an external window.
+    fn point_hits_stack_line(&self, point: CGPoint) -> bool {
+        let Some(hit_rects) = &self.stack_line_hit_rects else {
+            return false;
+        };
+        let rects = hit_rects.borrow();
+        let geometrically_hit = rects.iter().any(|hr| {
+            point.x >= hr.frame.origin.x - hr.margin_x
+                && point.x < hr.frame.origin.x + hr.frame.size.width + hr.margin_x
+                && point.y >= hr.frame.origin.y - hr.margin_y
+                && point.y < hr.frame.origin.y + hr.frame.size.height + hr.margin_y
+        });
+        geometrically_hit && !window_server::is_point_occluded_by_external_window(point)
+    }
+
     #[inline]
     fn focus_follows_mouse_handler_enabled(state: &State) -> bool {
         state.focus_follows_mouse_config_enabled && state.focus_follows_mouse_enabled
@@ -372,6 +389,7 @@ impl EventTap {
         requests_rx: Receiver,
         wm_sender: Option<wm_controller::Sender>,
         stack_line_tx: Option<stack_line::Sender>,
+        stack_line_hit_rects: Option<stack_line::SharedHitRects>,
     ) -> Self {
         let disable_hotkey = config
             .settings
@@ -408,6 +426,7 @@ impl EventTap {
             hotkeys: RefCell::new(HashMap::default()),
             wm_sender,
             stack_line_tx,
+            stack_line_hit_rects,
         }
     }
 
@@ -651,6 +670,13 @@ impl EventTap {
                 if let Some(tx) = &self.stack_line_tx {
                     let loc = CGEvent::location(Some(event));
                     let _ = tx.try_send(stack_line::Event::MouseDown(loc));
+
+                    // Suppress the event when the click lands on a visible
+                    // stack-line indicator so it does not propagate to
+                    // desktop widgets behind the indicator.
+                    if self.point_hits_stack_line(loc) {
+                        return false;
+                    }
                 }
             }
             CGEventType::LeftMouseDragged | CGEventType::RightMouseDragged => {
