@@ -3937,6 +3937,7 @@ fn it_retains_windows_without_server_ids_after_login_visibility_failure() {
         is_root: true,
         is_minimized: false,
         is_resizable: true,
+        is_ax_window: true,
         min_size: None,
         max_size: None,
         title: "NoServerId".to_string(),

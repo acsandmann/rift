@@ -27,6 +27,7 @@ fn sync_existing_window_state(
             existing.frame_monotonic = info.frame;
         }
         existing.info.is_standard = info.is_standard;
+        existing.info.is_ax_window = info.is_ax_window;
         existing.info.is_root = info.is_root;
         existing.info.is_resizable = info.is_resizable;
         existing.info.min_size = info.min_size;
