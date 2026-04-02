@@ -669,12 +669,13 @@ impl EventTap {
 
                 if let Some(tx) = &self.stack_line_tx {
                     let loc = CGEvent::location(Some(event));
-                    let _ = tx.try_send(stack_line::Event::MouseDown(loc));
 
-                    // Suppress the event when the click lands on a visible
-                    // stack-line indicator so it does not propagate to
-                    // desktop widgets behind the indicator.
+                    // The event tap is the single source of hit-testing for
+                    // stack-line indicators. Only forward the click and
+                    // suppress propagation when it lands on a visible,
+                    // non-occluded indicator.
                     if self.point_hits_stack_line(loc) {
+                        let _ = tx.try_send(stack_line::Event::MouseDown(loc));
                         return false;
                     }
                 }
@@ -721,7 +722,11 @@ impl EventTap {
                 if state.stack_line_enabled
                     && let Some(tx) = &self.stack_line_tx
                 {
-                    let _ = tx.try_send(stack_line::Event::MouseMoved(loc));
+                    let hits = self.point_hits_stack_line(loc);
+                    let _ = tx.try_send(stack_line::Event::MouseMoved {
+                        point: loc,
+                        hits_indicator: hits,
+                    });
                 }
 
                 // ffm

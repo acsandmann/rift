@@ -15,7 +15,6 @@ use crate::common::config::{Config, HorizontalPlacement, VerticalPlacement};
 use crate::layout_engine::LayoutKind;
 use crate::model::tree::NodeId;
 use crate::sys::screen::{CoordinateConverter, SpaceId};
-use crate::sys::window_server;
 use crate::ui::stack_line::{GroupDisplayData, GroupIndicatorWindow, GroupKind, IndicatorConfig};
 
 /// Shared indicator hit-rect state readable from the event tap callback.
@@ -54,8 +53,13 @@ pub enum Event {
     },
     ScreenParametersChanged(CoordinateConverter),
     ConfigUpdated(Config),
+    /// A click that the event tap already confirmed lands on a visible,
+    /// non-occluded stack-line indicator.
     MouseDown(CGPoint),
-    MouseMoved(CGPoint),
+    /// Cursor moved; `hits_indicator` is `true` when the event tap's
+    /// hit-test (geometry + occlusion) determined the point is over an
+    /// indicator.
+    MouseMoved { point: CGPoint, hits_indicator: bool },
 }
 
 pub struct StackLine {
@@ -137,7 +141,7 @@ impl StackLine {
                 Event::ConfigUpdated(_)
                     | Event::ScreenParametersChanged(_)
                     | Event::MouseDown(_)
-                    | Event::MouseMoved(_)
+                    | Event::MouseMoved { .. }
             )
         {
             return;
@@ -167,8 +171,8 @@ impl StackLine {
             Event::MouseDown(point) => {
                 self.handle_mouse_down(point);
             }
-            Event::MouseMoved(point) => {
-                self.handle_mouse_moved(point);
+            Event::MouseMoved { point, hits_indicator } => {
+                self.handle_mouse_moved(point, hits_indicator);
             }
         }
     }
@@ -280,62 +284,29 @@ impl StackLine {
             return;
         }
 
+        // The event tap already verified that this click lands on a visible,
+        // non-occluded indicator. We only need to find the matching segment.
         for (&node_id, indicator) in &self.indicators {
             let frame = indicator.frame();
-            let (mx, my) = hit_margins(frame, indicator.recommended_thickness());
+            let local_point =
+                CGPoint::new(screen_point.x - frame.origin.x, screen_point.y - frame.origin.y);
 
-            if point_in_hit_area(screen_point, frame, mx, my) {
-                // The stack line window is ordered below normal windows, so an
-                // external window at this point would visually occlude the
-                // indicator. Ignore the click if another window is in front.
-                if window_server::is_point_occluded_by_external_window(screen_point) {
-                    tracing::trace!(
-                        ?node_id,
-                        "Ignoring stack line click: occluded by another window"
-                    );
-                    return;
-                }
-
-                let local_point =
-                    CGPoint::new(screen_point.x - frame.origin.x, screen_point.y - frame.origin.y);
-
-                if let Some(segment_index) = indicator.check_click(local_point) {
-                    tracing::debug!(
-                        ?node_id,
-                        segment_index,
-                        "Detected click on stack line indicator segment"
-                    );
-                    self.handle_indicator_clicked(node_id, segment_index);
-                    return;
-                }
+            if let Some(segment_index) = indicator.check_click(local_point) {
+                tracing::debug!(
+                    ?node_id,
+                    segment_index,
+                    "Detected click on stack line indicator segment"
+                );
+                self.handle_indicator_clicked(node_id, segment_index);
+                return;
             }
         }
     }
 
     // this is very hacky but we don't use nswindow so we have to roll this ourselves
-    fn handle_mouse_moved(&mut self, screen_point: CGPoint) {
-        let over_indicator = if self.is_enabled() {
-            self.indicators.values().any(|indicator| {
-                let frame = indicator.frame();
-                let (mx, my) = hit_margins(frame, indicator.recommended_thickness());
-                let enter_mul = 1.0;
-                let exit_mul = 0.65;
+    fn handle_mouse_moved(&mut self, _screen_point: CGPoint, hits_indicator: bool) {
+        let over_indicator = self.is_enabled() && hits_indicator;
 
-                // enter hitbox is larger than exit
-                let (mx, my) = if self.cursor_over_indicator {
-                    (mx * exit_mul, my * exit_mul)
-                } else {
-                    (mx * enter_mul, my * enter_mul)
-                };
-
-                point_in_hit_area(screen_point, frame, mx, my)
-                    && !window_server::is_point_occluded_by_external_window(screen_point)
-            })
-        } else {
-            false
-        };
-
-        // the hack
         if over_indicator != self.cursor_over_indicator {
             self.cursor_over_indicator = over_indicator;
             if over_indicator {
@@ -539,13 +510,6 @@ fn hit_margins(frame: CGRect, thickness: f64) -> (f64, f64) {
             (base + ((target_short - frame.size.height as f64) * 0.5).max(0.0)).clamp(1.0, 10.0);
         (mx, my)
     }
-}
-
-fn point_in_hit_area(point: CGPoint, frame: CGRect, mx: f64, my: f64) -> bool {
-    point.x >= frame.origin.x - mx
-        && point.x < frame.origin.x + frame.size.width + mx
-        && point.y >= frame.origin.y - my
-        && point.y < frame.origin.y + frame.size.height + my
 }
 
 #[cfg(test)]
