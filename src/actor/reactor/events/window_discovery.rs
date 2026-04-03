@@ -371,6 +371,19 @@ impl WindowDiscoveryHandler {
             let Some(state) = reactor.window_manager.windows.get(&wid) else {
                 continue;
             };
+
+            // The AX API returns all windows regardless of which Space they are
+            // on. Windows on inactive Spaces whose frames overlap an active
+            // display would be frame-mapped to the active Space on that display,
+            // causing every window to cluster on one screen after a Space switch.
+            // Guard against this by skipping windows the window server confirms
+            // are NOT on any active Space.
+            if let Some(wsid) = state.info.sys_id {
+                if !reactor.window_manager.visible_windows.contains(&wsid) {
+                    continue;
+                }
+            }
+
             let Some(space) =
                 reactor.best_space_for_window(&state.frame_monotonic, state.info.sys_id)
             else {
