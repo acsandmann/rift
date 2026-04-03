@@ -878,3 +878,91 @@ fn fullscreen_space_in_screen_params_does_not_trigger_topology_relayout() {
         Some(user_space)
     );
 }
+
+#[test]
+fn fullscreen_screen_params_preserves_window_layout() {
+    // Regression test for #308: waking from sleep while a fullscreen video is
+    // active should not wipe workspace assignments.
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+
+    let user_space = SpaceId::new(1);
+    let fullscreen_space = SpaceId::new(0x400000000 + user_space.get());
+    let full_screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+
+    // Set up a display with a user space and some windows.
+    reactor.handle_event(screen_params_event(
+        vec![full_screen],
+        vec![Some(user_space)],
+        vec![],
+    ));
+    reactor.handle_events(apps.make_app_with_opts(
+        1,
+        make_windows(3),
+        Some(WindowId::new(1, 1)),
+        true,
+        true,
+    ));
+    reactor.handle_event(Event::ApplicationGloballyActivated(1));
+    apps.simulate_until_quiet(&mut reactor);
+
+    // Rearrange layout so we can detect if it gets reset.
+    reactor.handle_event(Event::Command(Command::Layout(LayoutCommand::MoveNode(
+        Direction::Up,
+    ))));
+    apps.simulate_until_quiet(&mut reactor);
+    let layout_before = reactor.layout_manager.layout_engine.calculate_layout(
+        user_space,
+        full_screen,
+        &reactor.config.settings.layout.gaps,
+        0.0,
+        crate::common::config::HorizontalPlacement::Top,
+        crate::common::config::VerticalPlacement::Right,
+    );
+
+    // Simulate sleep/wake while fullscreen: ScreenParametersChanged arrives
+    // with the fullscreen space id.
+    reactor
+        .space_manager
+        .fullscreen_by_space
+        .insert(fullscreen_space.get(), FullscreenSpaceTrack::default());
+    reactor.handle_event(Event::ScreenParametersChanged(vec![ScreenInfo {
+        id: crate::sys::screen::ScreenId::new(0),
+        frame: full_screen,
+        space: Some(fullscreen_space),
+        display_uuid: "test-display-0".to_string(),
+        name: None,
+    }]));
+    apps.simulate_until_quiet(&mut reactor);
+
+    // The fullscreen space must not become the active space for the screen.
+    assert_eq!(
+        reactor.space_manager.screens[0].space, None,
+        "fullscreen space should be nulled out, not stored as screen space"
+    );
+
+    // Return to user space (simulates exiting fullscreen).
+    reactor.handle_event(screen_params_event(
+        vec![full_screen],
+        vec![Some(user_space)],
+        vec![],
+    ));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let layout_after = reactor.layout_manager.layout_engine.calculate_layout(
+        user_space,
+        full_screen,
+        &reactor.config.settings.layout.gaps,
+        0.0,
+        crate::common::config::HorizontalPlacement::Top,
+        crate::common::config::VerticalPlacement::Right,
+    );
+    assert_eq!(
+        layout_before, layout_after,
+        "Window layout on user space must be preserved across fullscreen ScreenParametersChanged"
+    );
+}
