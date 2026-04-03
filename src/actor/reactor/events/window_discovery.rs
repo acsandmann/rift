@@ -484,14 +484,11 @@ impl WindowDiscoveryHandler {
             ));
         }
 
-        if let Some(main_window) = reactor.main_window() {
-            if main_window.pid == pid {
-                if let Some(space) = reactor.main_window_space() {
-                    if reactor.is_space_active(space) {
-                        reactor.send_layout_event(LayoutEvent::WindowFocused(space, main_window));
-                    }
-                }
-            }
+        if let Some(main_window) = reactor.main_window()
+            && let Some(space) = reactor.main_window_space()
+            && reactor.is_space_active(space)
+        {
+            reactor.send_layout_event(LayoutEvent::WindowFocused(space, main_window));
         }
     }
 }
