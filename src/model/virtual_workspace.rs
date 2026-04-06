@@ -932,7 +932,7 @@ impl VirtualWorkspaceManager {
         let visible_height = (rect.max().y.min(screen_frame.max().y)
             - rect.origin.y.max(screen_frame.origin.y))
         .max(0.0);
-        visible_width <= VISIBLE_THRESHOLD_PX || visible_height <= VISIBLE_THRESHOLD_PX
+        visible_width <= VISIBLE_THRESHOLD_PX && visible_height <= VISIBLE_THRESHOLD_PX
     }
 
     pub fn is_hidden_position_multi(
@@ -962,7 +962,7 @@ impl VirtualWorkspaceManager {
         let visible_height = (rect.max().y.min(screen_frame.max().y)
             - rect.origin.y.max(screen_frame.origin.y))
         .max(0.0);
-        visible_width <= VISIBLE_THRESHOLD_PX || visible_height <= VISIBLE_THRESHOLD_PX
+        visible_width <= VISIBLE_THRESHOLD_PX && visible_height <= VISIBLE_THRESHOLD_PX
     }
 
     pub fn set_last_focused_window(
