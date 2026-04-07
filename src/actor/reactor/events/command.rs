@@ -621,6 +621,7 @@ impl CommandEventHandler {
 
         let _ = reactor.update_layout_or_warn(false, false);
     }
+
     pub fn handle_command_reactor_close_window(
         reactor: &mut Reactor,
         window_server_id: Option<WindowServerId>,
