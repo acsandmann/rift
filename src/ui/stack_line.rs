@@ -83,6 +83,13 @@ pub enum GroupKind {
     Vertical,
 }
 
+pub fn point_hits_indicator_frame(point: CGPoint, frame: CGRect) -> bool {
+    point.x >= frame.origin.x
+        && point.x < frame.origin.x + frame.size.width
+        && point.y >= frame.origin.y
+        && point.y < frame.origin.y + frame.size.height
+}
+
 #[derive(Debug, Clone)]
 pub struct GroupDisplayData {
     pub group_kind: GroupKind,
@@ -213,8 +220,6 @@ impl GroupIndicatorWindow {
         }
     }
 
-    pub fn recommended_thickness(&self) -> f64 { self.state.borrow().config.bar_thickness }
-
     pub fn frame(&self) -> CGRect { *self.frame.borrow() }
 
     pub fn set_click_callback(&self, callback: SegmentClickCallback) {
@@ -246,12 +251,7 @@ impl GroupIndicatorWindow {
             return None;
         };
         let bounds = self.bounds();
-        Self::segment_at_point_static(window_point, group_data, &bounds)
-    }
-
-    pub fn segment_at_point(&self, point: CGPoint, group_data: &GroupDisplayData) -> Option<usize> {
-        let bounds = self.bounds();
-        Self::segment_at_point_static(point, group_data, &bounds)
+        Self::segment_at_point_static(window_point, group_data, bounds)
     }
 
     fn bounds(&self) -> CGRect {
@@ -630,15 +630,9 @@ impl GroupIndicatorWindow {
     fn segment_at_point_static(
         point: CGPoint,
         group_data: &GroupDisplayData,
-        bounds: &CGRect,
+        bounds: CGRect,
     ) -> Option<usize> {
-        let bar = *bounds;
-
-        if point.x < bar.origin.x
-            || point.x >= bar.origin.x + bar.size.width
-            || point.y < bar.origin.y
-            || point.y >= bar.origin.y + bar.size.height
-        {
+        if !point_hits_indicator_frame(point, bounds) {
             return None;
         }
 
@@ -647,17 +641,17 @@ impl GroupIndicatorWindow {
         }
 
         let segment_length = match group_data.group_kind {
-            GroupKind::Horizontal => bar.size.width / group_data.total_count as f64,
-            GroupKind::Vertical => bar.size.height / group_data.total_count as f64,
+            GroupKind::Horizontal => bounds.size.width / group_data.total_count as f64,
+            GroupKind::Vertical => bounds.size.height / group_data.total_count as f64,
         };
 
         let segment_index = match group_data.group_kind {
             GroupKind::Horizontal => {
-                let relative_x = point.x - bar.origin.x;
+                let relative_x = point.x - bounds.origin.x;
                 (relative_x / segment_length).floor() as usize
             }
             GroupKind::Vertical => {
-                let relative_y_from_top = (bar.origin.y + bar.size.height) - point.y;
+                let relative_y_from_top = (bounds.origin.y + bounds.size.height) - point.y;
                 (relative_y_from_top / segment_length).floor() as usize
             }
         };

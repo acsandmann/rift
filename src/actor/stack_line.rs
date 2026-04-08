@@ -15,20 +15,12 @@ use crate::common::config::{Config, HorizontalPlacement, VerticalPlacement};
 use crate::layout_engine::LayoutKind;
 use crate::model::tree::NodeId;
 use crate::sys::screen::{CoordinateConverter, SpaceId};
-use crate::ui::stack_line::{GroupDisplayData, GroupIndicatorWindow, GroupKind, IndicatorConfig};
+use crate::ui::stack_line::{
+    GroupDisplayData, GroupIndicatorWindow, GroupKind, IndicatorConfig, point_hits_indicator_frame,
+};
 
 /// Shared indicator hit-rect state readable from the event tap callback.
-///
-/// Each entry is the screen-space frame of an active indicator together with
-/// the hit-test margins used for that indicator.
-pub type SharedHitRects = Rc<RefCell<Vec<HitRect>>>;
-
-#[derive(Clone, Copy)]
-pub struct HitRect {
-    pub frame: CGRect,
-    pub margin_x: f64,
-    pub margin_y: f64,
-}
+pub type SharedHitRects = Rc<RefCell<Vec<CGRect>>>;
 
 pub fn new_shared_hit_rects() -> SharedHitRects { Rc::new(RefCell::new(Vec::new())) }
 
@@ -59,7 +51,10 @@ pub enum Event {
     /// Cursor moved; `hits_indicator` is `true` when the event tap's
     /// hit-test (geometry + occlusion) determined the point is over an
     /// indicator.
-    MouseMoved { point: CGPoint, hits_indicator: bool },
+    MouseMoved {
+        point: CGPoint,
+        hits_indicator: bool,
+    },
 }
 
 pub struct StackLine {
@@ -123,13 +118,7 @@ impl StackLine {
             return;
         }
         for indicator in self.indicators.values() {
-            let frame = indicator.frame();
-            let (mx, my) = hit_margins(frame, indicator.recommended_thickness());
-            rects.push(HitRect {
-                frame,
-                margin_x: mx,
-                margin_y: my,
-            });
+            rects.push(indicator.frame());
         }
     }
 
@@ -288,9 +277,12 @@ impl StackLine {
         // non-occluded indicator. We only need to find the matching segment.
         for (&node_id, indicator) in &self.indicators {
             let frame = indicator.frame();
+            if !point_hits_indicator_frame(screen_point, frame) {
+                continue;
+            }
+
             let local_point =
                 CGPoint::new(screen_point.x - frame.origin.x, screen_point.y - frame.origin.y);
-
             if let Some(segment_index) = indicator.check_click(local_point) {
                 tracing::debug!(
                     ?node_id,
@@ -490,25 +482,6 @@ impl GroupSig {
             selected_index: g.selected_index,
             window_ids: g.window_ids.clone(),
         }
-    }
-}
-
-fn hit_margins(frame: CGRect, thickness: f64) -> (f64, f64) {
-    let base = (thickness * 0.25).clamp(1.0, 5.0);
-    let target_short = 14.0;
-
-    if frame.size.width < frame.size.height {
-        // vertical: widen hitbox more in X
-        let mx =
-            (base + ((target_short - frame.size.width as f64) * 0.5).max(0.0)).clamp(1.0, 10.0);
-        let my = base.clamp(1.0, 4.0);
-        (mx, my)
-    } else {
-        // horizontal: expand more in Y
-        let mx = base.clamp(1.0, 4.0);
-        let my =
-            (base + ((target_short - frame.size.height as f64) * 0.5).max(0.0)).clamp(1.0, 10.0);
-        (mx, my)
     }
 }
 

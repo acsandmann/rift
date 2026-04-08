@@ -32,6 +32,7 @@ use crate::sys::hotkey::{
 use crate::sys::screen::{CoordinateConverter, SpaceId};
 use crate::sys::window_server::{self, WindowServerId, window_level};
 use crate::sys::{haptics, power};
+use crate::ui::stack_line::point_hits_indicator_frame;
 
 // Window levels can change for transient UI windows; cache briefly to reduce
 // query overhead without pinning stale values for long.
@@ -262,22 +263,6 @@ impl EventTap {
     #[inline]
     fn stack_line_hover_enabled(&self, state: &State) -> bool {
         state.stack_line_enabled && self.stack_line_tx.is_some()
-    }
-
-    /// Check whether `point` falls inside any active stack-line indicator
-    /// hit-rect and the indicator is not occluded by an external window.
-    fn point_hits_stack_line(&self, point: CGPoint) -> bool {
-        let Some(hit_rects) = &self.stack_line_hit_rects else {
-            return false;
-        };
-        let rects = hit_rects.borrow();
-        let geometrically_hit = rects.iter().any(|hr| {
-            point.x >= hr.frame.origin.x - hr.margin_x
-                && point.x < hr.frame.origin.x + hr.frame.size.width + hr.margin_x
-                && point.y >= hr.frame.origin.y - hr.margin_y
-                && point.y < hr.frame.origin.y + hr.frame.size.height + hr.margin_y
-        });
-        geometrically_hit && !window_server::is_point_occluded_by_external_window(point)
     }
 
     #[inline]
@@ -674,7 +659,19 @@ impl EventTap {
                     // stack-line indicators. Only forward the click and
                     // suppress propagation when it lands on a visible,
                     // non-occluded indicator.
-                    if self.point_hits_stack_line(loc) {
+                    let hits_stack_line = self
+                        .stack_line_hit_rects
+                        .as_ref()
+                        .map(|hit_rects| {
+                            hit_rects
+                                .borrow()
+                                .iter()
+                                .copied()
+                                .any(|frame| point_hits_indicator_frame(loc, frame))
+                        })
+                        .unwrap_or(false);
+                    if hits_stack_line && !window_server::is_point_occluded_by_external_window(loc)
+                    {
                         let _ = tx.try_send(stack_line::Event::MouseDown(loc));
                         return false;
                     }
@@ -722,7 +719,18 @@ impl EventTap {
                 if state.stack_line_enabled
                     && let Some(tx) = &self.stack_line_tx
                 {
-                    let hits = self.point_hits_stack_line(loc);
+                    let hits = self
+                        .stack_line_hit_rects
+                        .as_ref()
+                        .map(|hit_rects| {
+                            hit_rects
+                                .borrow()
+                                .iter()
+                                .copied()
+                                .any(|frame| point_hits_indicator_frame(loc, frame))
+                        })
+                        .unwrap_or(false)
+                        && !window_server::is_point_occluded_by_external_window(loc);
                     let _ = tx.try_send(stack_line::Event::MouseMoved {
                         point: loc,
                         hits_indicator: hits,
