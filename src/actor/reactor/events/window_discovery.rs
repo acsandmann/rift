@@ -379,7 +379,9 @@ impl WindowDiscoveryHandler {
             // Guard against this by skipping windows the window server confirms
             // are NOT on any active Space.
             if let Some(wsid) = state.info.sys_id {
-                if !reactor.window_manager.visible_windows.contains(&wsid) {
+                if !reactor.window_manager.visible_windows.is_empty()
+                    && !reactor.window_manager.visible_windows.contains(&wsid)
+                {
                     continue;
                 }
             }
