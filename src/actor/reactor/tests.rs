@@ -4,7 +4,7 @@ use test_log::test;
 use super::display_topology::TopologyState;
 use super::testing::*;
 use super::*;
-use crate::actor::app::Request;
+use crate::actor::app::{Quiet, Request};
 use crate::layout_engine::{Direction, LayoutCommand, LayoutEngine};
 use crate::sys::app::WindowInfo;
 use crate::sys::window_server::WindowServerId;
@@ -79,6 +79,46 @@ fn it_sends_writes_when_stale_read_state_looks_same_as_written_state() {
         assert!(state_3.contains_key(&wid), "{wid:?} not in {state_3:#?}");
         assert_eq!(state.frame, state_3[&wid].frame);
     }
+}
+
+#[test]
+fn move_focus_sends_immediate_quiet_raise_for_target_window() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let space = SpaceId::new(1);
+    reactor.handle_event(screen_params_event(
+        vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
+        vec![Some(space)],
+        vec![],
+    ));
+
+    reactor.handle_events(apps.make_app_with_opts(
+        1,
+        make_windows(3),
+        Some(WindowId::new(1, 1)),
+        true,
+        true,
+    ));
+    reactor.handle_event(Event::ApplicationGloballyActivated(1));
+    apps.simulate_until_quiet(&mut reactor);
+    let _ = apps.requests();
+
+    reactor.handle_event(Event::Command(Command::Layout(LayoutCommand::MoveFocus(
+        Direction::Right,
+    ))));
+
+    let requests = apps.requests();
+    assert!(
+        requests.iter().any(|request| matches!(
+            request,
+            Request::Raise(wids, _, 0, Quiet::Yes) if *wids == vec![WindowId::new(1, 2)]
+        )),
+        "expected an immediate quiet raise for the target window, got {requests:?}"
+    );
 }
 
 #[test]
