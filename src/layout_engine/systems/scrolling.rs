@@ -15,6 +15,10 @@ use crate::layout_engine::{Direction, LayoutId, LayoutKind};
 struct Column {
     windows: Vec<WindowId>,
     width_offset: f64,
+    #[serde(default)]
+    fullscreen: bool,
+    #[serde(default)]
+    fullscreen_within_gaps: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
@@ -155,15 +159,27 @@ impl LayoutState {
         self.pending_align.store(false, Ordering::Relaxed);
     }
 
+    fn clear_fullscreen_modes(&mut self) {
+        for col in &mut self.columns {
+            col.fullscreen = false;
+            col.fullscreen_within_gaps = false;
+        }
+    }
+
+    fn clear_window_fullscreen_modes(&mut self) {
+        self.fullscreen.clear();
+        self.fullscreen_within_gaps.clear();
+    }
+
     fn remove_window(&mut self, wid: WindowId) -> Option<WindowId> {
         let (col_idx, row_idx) = self.locate(wid)?;
         let col = &mut self.columns[col_idx];
         col.windows.remove(row_idx);
+        self.fullscreen.remove(&wid);
+        self.fullscreen_within_gaps.remove(&wid);
         if col.windows.is_empty() {
             self.columns.remove(col_idx);
         }
-        self.fullscreen.remove(&wid);
-        self.fullscreen_within_gaps.remove(&wid);
 
         if self.selected == Some(wid) {
             self.selected = None;
@@ -196,6 +212,8 @@ impl LayoutState {
         let column = Column {
             windows: vec![wid],
             width_offset: 0.0,
+            fullscreen: false,
+            fullscreen_within_gaps: false,
         };
         let insert_at = (index + 1).min(self.columns.len());
         self.columns.insert(insert_at, column);
@@ -207,6 +225,8 @@ impl LayoutState {
         self.columns.push(Column {
             windows: vec![wid],
             width_offset: 0.0,
+            fullscreen: false,
+            fullscreen_within_gaps: false,
         });
         self.selected = Some(wid);
         self.align_scroll_to_selected();
@@ -218,6 +238,8 @@ impl LayoutState {
                 return;
             }
             let window = self.columns[col_idx].windows.remove(row_idx);
+            let transferred_fullscreen = self.columns[col_idx].fullscreen;
+            let transferred_fullscreen_within_gaps = self.columns[col_idx].fullscreen_within_gaps;
             let removed_column = self.columns[col_idx].windows.is_empty();
             if removed_column {
                 self.columns.remove(col_idx);
@@ -231,8 +253,15 @@ impl LayoutState {
                 self.columns.push(Column {
                     windows: vec![window],
                     width_offset: 0.0,
+                    fullscreen: removed_column && transferred_fullscreen,
+                    fullscreen_within_gaps: removed_column && transferred_fullscreen_within_gaps,
                 });
             } else {
+                if removed_column {
+                    self.columns[target].fullscreen = transferred_fullscreen;
+                    self.columns[target].fullscreen_within_gaps =
+                        transferred_fullscreen_within_gaps;
+                }
                 self.columns[target].windows.push(window);
             }
             self.selected = Some(window);
@@ -518,16 +547,26 @@ impl ScrollingLayoutSystem {
         // If the current column is stacked, horizontal move should extract the selected
         // window into its own neighbor column. This is a faster way to undo accidental stacks.
         if state.columns[col_idx].windows.len() > 1 {
+            let transferred_fullscreen = state.columns[col_idx].fullscreen;
+            let transferred_fullscreen_within_gaps =
+                state.columns[col_idx].fullscreen_within_gaps;
             let wid = state.columns[col_idx].windows.remove(row_idx);
+            state.columns[col_idx].fullscreen = false;
+            state.columns[col_idx].fullscreen_within_gaps = false;
             let insert_at = match dir {
                 Direction::Left => col_idx,
                 Direction::Right => (col_idx + 1).min(state.columns.len()),
                 _ => return false,
             };
-            state.columns.insert(insert_at, Column {
-                windows: vec![wid],
-                width_offset: 0.0,
-            });
+            state.columns.insert(
+                insert_at,
+                Column {
+                    windows: vec![wid],
+                    width_offset: 0.0,
+                    fullscreen: transferred_fullscreen,
+                    fullscreen_within_gaps: transferred_fullscreen_within_gaps,
+                },
+            );
             state.selected = Some(wid);
             return true;
         }
@@ -638,6 +677,11 @@ impl LayoutSystem for ScrollingLayoutSystem {
             // scrolls between column starts; it does not pan within a single
             // oversized column.
             width = width.min(tiling.size.width.max(1.0));
+            if col.fullscreen {
+                width = screen.size.width.max(1.0);
+            } else if col.fullscreen_within_gaps {
+                width = tiling.size.width.max(1.0);
+            }
             column_widths.push(width);
             column_ratios.push(if tiling.size.width > 0.0 {
                 (width / tiling.size.width).max(0.0)
@@ -769,8 +813,27 @@ impl LayoutSystem for ScrollingLayoutSystem {
             if col.windows.is_empty() {
                 continue;
             }
+            let column_rect = if col.fullscreen {
+                CGRect::new(
+                    CGPoint::new(
+                        (x + (screen.origin.x - tiling.origin.x)).round(),
+                        screen.origin.y.round(),
+                    ),
+                    CGSize::new(screen.size.width.round(), screen.size.height.round()),
+                )
+            } else if col.fullscreen_within_gaps {
+                CGRect::new(
+                    CGPoint::new(x.round(), tiling.origin.y.round()),
+                    CGSize::new(tiling.size.width.round(), tiling.size.height.round()),
+                )
+            } else {
+                CGRect::new(
+                    CGPoint::new(x.round(), tiling.origin.y.round()),
+                    CGSize::new(column_width.round(), tiling.size.height.round()),
+                )
+            };
             let total_gap = gap_y * (col.windows.len().saturating_sub(1) as f64);
-            let available_height = (tiling.size.height - total_gap).max(0.0);
+            let available_height = (column_rect.size.height - total_gap).max(0.0);
             let row_constraints: Vec<AxisConstraints> = col
                 .windows
                 .iter()
@@ -799,7 +862,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
                 .collect();
             let solved_row_heights = solve_axis_lengths(&row_constraints, available_height);
             let fallback_row_height = (available_height / col.windows.len() as f64).max(1.0);
-            let mut y_cursor = tiling.origin.y;
+            let mut y_cursor = column_rect.origin.y;
 
             for (row_idx, wid) in col.windows.iter().enumerate() {
                 let row_height = solved_row_heights
@@ -809,14 +872,20 @@ impl LayoutSystem for ScrollingLayoutSystem {
                     .max(0.0);
                 // round position and size independently to avoid size jitter from min/max rounding.
                 let mut frame = CGRect::new(
-                    CGPoint::new(x.round(), y_cursor.round()),
-                    CGSize::new(column_width.round(), row_height.round()),
+                    CGPoint::new(column_rect.origin.x, y_cursor.round()),
+                    CGSize::new(column_rect.size.width, row_height.round()),
                 );
-                if state.fullscreen.contains(wid) {
+                if !col.fullscreen && !col.fullscreen_within_gaps && state.fullscreen.contains(wid) {
                     frame = screen;
-                } else if state.fullscreen_within_gaps.contains(wid) {
+                } else if !col.fullscreen
+                    && !col.fullscreen_within_gaps
+                    && state.fullscreen_within_gaps.contains(wid)
+                {
                     frame = tiling;
-                } else if let Some(c) = constraints.get(wid).copied() {
+                } else if !col.fullscreen
+                    && !col.fullscreen_within_gaps
+                    && let Some(c) = constraints.get(wid).copied()
+                {
                     let c = c.normalized();
                     let desired_w = c
                         .fixed_for_axis(true)
@@ -1176,6 +1245,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
         if state.fullscreen.remove(&selected) {
             return vec![selected];
         }
+        state.clear_fullscreen_modes();
         state.fullscreen_within_gaps.remove(&selected);
         state.fullscreen.insert(selected);
         vec![selected]
@@ -1191,16 +1261,73 @@ impl LayoutSystem for ScrollingLayoutSystem {
         if state.fullscreen_within_gaps.remove(&selected) {
             return vec![selected];
         }
+        state.clear_fullscreen_modes();
         state.fullscreen.remove(&selected);
         state.fullscreen_within_gaps.insert(selected);
         vec![selected]
+    }
+
+    fn toggle_column_fullscreen_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
+        let Some(state) = self.layout_state_mut(layout) else {
+            return Vec::new();
+        };
+        let Some(selected) = state.selected_or_first() else {
+            return Vec::new();
+        };
+        let Some((col_idx, _)) = state.locate(selected) else {
+            return Vec::new();
+        };
+        let affected = state.columns[col_idx].windows.clone();
+        if affected.is_empty() {
+            return Vec::new();
+        }
+        if state.columns[col_idx].fullscreen {
+            state.columns[col_idx].fullscreen = false;
+            return affected;
+        }
+        state.clear_window_fullscreen_modes();
+        state.columns[col_idx].fullscreen_within_gaps = false;
+        state.columns[col_idx].fullscreen = true;
+        affected
+    }
+
+    fn toggle_column_fullscreen_within_gaps_of_selection(
+        &mut self,
+        layout: LayoutId,
+    ) -> Vec<WindowId> {
+        let Some(state) = self.layout_state_mut(layout) else {
+            return Vec::new();
+        };
+        let Some(selected) = state.selected_or_first() else {
+            return Vec::new();
+        };
+        let Some((col_idx, _)) = state.locate(selected) else {
+            return Vec::new();
+        };
+        let affected = state.columns[col_idx].windows.clone();
+        if affected.is_empty() {
+            return Vec::new();
+        }
+        if state.columns[col_idx].fullscreen_within_gaps {
+            state.columns[col_idx].fullscreen_within_gaps = false;
+            return affected;
+        }
+        state.clear_window_fullscreen_modes();
+        state.columns[col_idx].fullscreen = false;
+        state.columns[col_idx].fullscreen_within_gaps = true;
+        affected
     }
 
     fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
         let Some(state) = self.layout_state(layout) else {
             return false;
         };
-        !state.fullscreen.is_empty() || !state.fullscreen_within_gaps.is_empty()
+        !state.fullscreen.is_empty()
+            || !state.fullscreen_within_gaps.is_empty()
+            || state
+                .columns
+                .iter()
+                .any(|col| col.fullscreen || col.fullscreen_within_gaps)
     }
 
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) {
@@ -1278,10 +1405,15 @@ impl LayoutSystem for ScrollingLayoutSystem {
         state.columns[col_idx].windows = remaining;
         let mut insert_at = col_idx + 1;
         for wid in moved.iter().copied() {
-            state.columns.insert(insert_at, Column {
-                windows: vec![wid],
-                width_offset: 0.0,
-            });
+            state.columns.insert(
+                insert_at,
+                Column {
+                    windows: vec![wid],
+                    width_offset: 0.0,
+                    fullscreen: false,
+                    fullscreen_within_gaps: false,
+                },
+            );
             insert_at += 1;
         }
         moved
@@ -1309,11 +1441,20 @@ impl LayoutSystem for ScrollingLayoutSystem {
             return;
         }
         let wid = state.columns[col_idx].windows.remove(row_idx);
+        let transferred_fullscreen = state.columns[col_idx].fullscreen;
+        let transferred_fullscreen_within_gaps = state.columns[col_idx].fullscreen_within_gaps;
+        state.columns[col_idx].fullscreen = false;
+        state.columns[col_idx].fullscreen_within_gaps = false;
         let insert_at = (col_idx + 1).min(state.columns.len());
-        state.columns.insert(insert_at, Column {
-            windows: vec![wid],
-            width_offset: 0.0,
-        });
+        state.columns.insert(
+            insert_at,
+            Column {
+                windows: vec![wid],
+                width_offset: 0.0,
+                fullscreen: transferred_fullscreen,
+                fullscreen_within_gaps: transferred_fullscreen_within_gaps,
+            },
+        );
         state.selected = Some(wid);
         state.align_scroll_to_selected();
         state.clamp_scroll_offset();
@@ -1362,7 +1503,7 @@ mod tests {
     use super::{Column, ScrollingLayoutSystem};
     use crate::actor::app::{WindowId, pid_t};
     use crate::common::collections::HashMap;
-    use crate::common::config::{GapSettings, ScrollingLayoutSettings};
+    use crate::common::config::{GapSettings, OuterGaps, ScrollingLayoutSettings};
     use crate::layout_engine::systems::{LayoutSystem, WindowLayoutConstraints};
     use crate::layout_engine::utils::compute_tiling_area;
     use crate::layout_engine::{Direction, LayoutId};
@@ -1478,6 +1619,8 @@ mod tests {
         state.columns = vec![Column {
             windows: vec![w1, w2],
             width_offset: 0.0,
+            fullscreen: false,
+            fullscreen_within_gaps: false,
         }];
         state.selected = Some(w1);
 
@@ -1560,6 +1703,8 @@ mod tests {
         state.columns = vec![Column {
             windows: vec![locked, capped],
             width_offset: 0.0,
+            fullscreen: false,
+            fullscreen_within_gaps: false,
         }];
         state.selected = Some(locked);
 
@@ -1947,6 +2092,109 @@ mod tests {
         assert_eq!(state.columns[0].windows, vec![w2]);
         assert_eq!(state.columns[1].windows, vec![w1]);
         assert_eq!(state.selected, Some(w2));
+    }
+
+    #[test]
+    fn fullscreen_in_scrolling_expands_only_the_selected_window() {
+        let mut system = ScrollingLayoutSystem::new(&ScrollingLayoutSettings::default());
+        let layout = system.create_layout();
+        let w1 = wid(49, 1);
+        let w2 = wid(49, 2);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+        system.join_selection_with_direction(layout, Direction::Left);
+
+        let affected = system.toggle_fullscreen_of_selection(layout);
+        assert_eq!(affected, vec![w2]);
+
+        let frames = render(&system, layout, screen(1000.0, 800.0), &GapSettings::default());
+        let top = frame_for(&frames, w1);
+        let bottom = frame_for(&frames, w2);
+
+        assert!(top.size.width < 1000.0);
+        assert!(top.size.height < 800.0);
+        assert_eq!(bottom.origin.x, 0.0);
+        assert_eq!(bottom.origin.y, 0.0);
+        assert_eq!(bottom.size.width, 1000.0);
+        assert_eq!(bottom.size.height, 800.0);
+    }
+
+    #[test]
+    fn column_fullscreen_in_scrolling_expands_the_selected_column_container() {
+        let mut system = ScrollingLayoutSystem::new(&ScrollingLayoutSettings::default());
+        let layout = system.create_layout();
+        let w1 = wid(50, 1);
+        let w2 = wid(50, 2);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+        system.join_selection_with_direction(layout, Direction::Left);
+
+        let affected = system.toggle_column_fullscreen_of_selection(layout);
+        assert_eq!(affected, vec![w1, w2]);
+
+        let frames = render(&system, layout, screen(1000.0, 800.0), &GapSettings::default());
+        let top = frame_for(&frames, w1);
+        let bottom = frame_for(&frames, w2);
+
+        assert_eq!(top.origin.x, 0.0);
+        assert_eq!(top.size.width, 1000.0);
+        assert_eq!(bottom.origin.x, 0.0);
+        assert_eq!(bottom.size.width, 1000.0);
+        assert!(top.size.height > 300.0);
+        assert!(bottom.origin.y >= top.origin.y + top.size.height);
+    }
+
+    #[test]
+    fn column_fullscreen_within_gaps_in_scrolling_uses_the_tiling_area_for_the_column() {
+        let mut system = ScrollingLayoutSystem::new(&ScrollingLayoutSettings::default());
+        let layout = system.create_layout();
+        let w1 = wid(51, 1);
+        let w2 = wid(51, 2);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+
+        let affected = system.toggle_column_fullscreen_within_gaps_of_selection(layout);
+        assert_eq!(affected, vec![w2]);
+
+        let mut gaps = GapSettings::default();
+        gaps.outer = OuterGaps {
+            top: 10.0,
+            left: 20.0,
+            bottom: 30.0,
+            right: 40.0,
+        };
+        let screen = screen(1000.0, 800.0);
+        let tiling = compute_tiling_area(screen, &gaps);
+        let frames = render(&system, layout, screen, &gaps);
+        let frame = frame_for(&frames, w2);
+
+        assert_eq!(frame.origin.x, tiling.origin.x.round());
+        assert_eq!(frame.origin.y, tiling.origin.y.round());
+        assert_eq!(frame.size.width, tiling.size.width.round());
+        assert_eq!(frame.size.height, tiling.size.height.round());
+    }
+
+    #[test]
+    fn multiple_columns_can_remain_column_fullscreen_in_scrolling() {
+        let mut system = ScrollingLayoutSystem::new(&ScrollingLayoutSettings::default());
+        let layout = system.create_layout();
+        let w1 = wid(52, 1);
+        let w2 = wid(52, 2);
+        let w3 = wid(52, 3);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+        system.add_window_after_selection(layout, w3);
+
+        assert_eq!(system.toggle_column_fullscreen_of_selection(layout), vec![w3]);
+        system.move_focus(layout, Direction::Left);
+        assert_eq!(system.toggle_column_fullscreen_of_selection(layout), vec![w2]);
+
+        let frames = render(&system, layout, screen(1000.0, 800.0), &GapSettings::default());
+        let frame2 = frame_for(&frames, w2);
+        let frame3 = frame_for(&frames, w3);
+
+        assert_eq!(frame2.size.width, 1000.0);
+        assert_eq!(frame3.size.width, 1000.0);
     }
 
     #[test]
