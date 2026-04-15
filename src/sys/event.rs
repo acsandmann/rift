@@ -3,14 +3,17 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use objc2_core_foundation::CGPoint;
 use objc2_core_graphics::{
-    CGDisplayHideCursor, CGDisplayShowCursor, CGError, kCGNullDirectDisplay,
+    CGDisplayHideCursor, CGDisplayShowCursor, CGError, CGEventSourceStateID, kCGNullDirectDisplay,
 };
 use serde::{Deserialize, Serialize};
 
 pub use super::window_server::current_cursor_location;
 use crate::sys::cg_ok;
 pub use crate::sys::hotkey::{Hotkey, HotkeySpec, KeyCode, Modifiers};
-use crate::sys::skylight::CGWarpMouseCursorPosition;
+use crate::sys::skylight::{
+    CFRelease, CGEventSourceCreate, CGEventSourceSetLocalEventsSuppressionInterval,
+    CGWarpMouseCursorPosition,
+};
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, Eq, PartialEq)]
 #[repr(u8)]
@@ -49,7 +52,12 @@ pub fn get_mouse_state() -> Option<MouseState> {
 }
 
 pub fn warp_mouse(point: CGPoint) -> Result<(), CGError> {
-    cg_ok(unsafe { CGWarpMouseCursorPosition(point) })
+    let src = unsafe { CGEventSourceCreate(CGEventSourceStateID::CombinedSessionState) };
+    unsafe { CGEventSourceSetLocalEventsSuppressionInterval(src, 0.0) };
+
+    let res = cg_ok(unsafe { CGWarpMouseCursorPosition(point) });
+    unsafe { CFRelease(src) };
+    res
 }
 
 pub fn hide_mouse() -> Result<(), CGError> { cg_ok(CGDisplayHideCursor(kCGNullDirectDisplay)) }
