@@ -380,9 +380,42 @@ impl WindowDiscoveryHandler {
             app_windows.entry(space).or_default().push(wid);
         }
 
-        // For now, we'll assume known_visible is handled elsewhere or we need to pass it.
-        // Looking back, the original method processes known_visible in the main logic.
-        // Actually, the emit_layout_events should be called after processing, and we need to collect all windows.
+        // Pre-pass: update the VWM for all windows definitively assigned to a space before
+        // processing any per-space layout events. Without this, the ordering of space events
+        // determines whether a window removed from one space's tree gets re-added by the
+        // loop in sync_tiled_windows_for_app (which reads the VWM state at event time).
+        // By updating the VWM upfront, the guard logic in sync_tiled_windows_for_app can
+        // correctly identify cross-space moves regardless of event ordering.
+        for (&space, windows_for_space) in &app_windows {
+            if !reactor.is_space_active(space) {
+                continue;
+            }
+            for &wid in windows_for_space {
+                let title_opt =
+                    reactor.window_manager.windows.get(&wid).map(|w| w.info.title.clone());
+                let _ = reactor
+                    .layout_manager
+                    .layout_engine
+                    .virtual_workspace_manager_mut()
+                    .assign_window_with_app_info(
+                        wid,
+                        space,
+                        app_info.as_ref().and_then(|a| a.bundle_id.as_deref()),
+                        app_info.as_ref().and_then(|a| a.localized_name.as_deref()),
+                        title_opt.as_deref(),
+                        reactor
+                            .window_manager
+                            .windows
+                            .get(&wid)
+                            .and_then(|w| w.info.ax_role.as_deref()),
+                        reactor
+                            .window_manager
+                            .windows
+                            .get(&wid)
+                            .and_then(|w| w.info.ax_subrole.as_deref()),
+                    );
+            }
+        }
 
         let screens = reactor.space_manager.screens.clone();
         for screen in screens {

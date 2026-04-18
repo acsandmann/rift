@@ -977,14 +977,28 @@ impl LayoutEngine {
         for (ws_id, layout) in self.workspace_layouts.active_layouts_for_space(space) {
             let mut desired = tiled_by_workspace.get(&ws_id).cloned().unwrap_or_default();
             for wid in self.virtual_workspace_manager.workspace_windows(space, ws_id) {
-                if wid.pid != pid || self.floating.is_floating(wid) || desired.contains(&wid) {
+                // Skip re-adding if the VWM no longer assigns this window to this space
+                // (it was moved to another space during this discovery cycle).
+                if wid.pid != pid
+                    || self.floating.is_floating(wid)
+                    || desired.contains(&wid)
+                    || self.virtual_workspace_manager.workspace_for_window(space, wid).is_none()
+                {
                     continue;
                 }
                 desired.push(wid);
             }
 
             if desired.is_empty() && total_tiled_count == 0 {
-                if self.workspace_tree(ws_id).has_windows_for_app(layout, pid) {
+                // Only skip removal if the windows still in the layout tree are genuinely
+                // assigned to this space in the VWM. If the VWM no longer tracks them here
+                // (they were moved to another space), the empty update is authoritative and
+                // removal should proceed.
+                let tree_windows = self.workspace_tree(ws_id).windows_for_app(layout, pid);
+                let any_moved_away = tree_windows.iter().any(|wid| {
+                    self.virtual_workspace_manager.workspace_for_window(space, *wid).is_none()
+                });
+                if !tree_windows.is_empty() && !any_moved_away {
                     continue;
                 }
             }
