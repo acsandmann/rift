@@ -201,7 +201,7 @@ pub enum Request {
     CloseWindow(WindowId),
 
     SetWindowFrame(WindowId, CGRect, TransactionId, bool),
-    SetBatchWindowFrame(Vec<(WindowId, CGRect)>, TransactionId),
+    SetBatchWindowFrame(Vec<(WindowId, CGRect)>, TransactionId, bool),
     SetWindowPos(WindowId, CGPoint, TransactionId, bool),
 
     BeginWindowAnimation(WindowId),
@@ -599,47 +599,68 @@ impl State {
                     None,
                 ));
             }
-            &mut Request::SetBatchWindowFrame(ref mut frames, txid) => {
-                let app = self.app.clone();
-                let result = with_enhanced_ui_disabled(&app, || -> Result<(), AxError> {
-                    for (wid, desired) in frames.iter() {
-                        let elem = match self.window_mut(*wid) {
-                            Ok(window) => {
-                                window.last_seen_txid = txid;
-                                window.elem.clone()
-                            }
-                            Err(err) => match err {
-                                AxError::Ax(code) => {
-                                    if self.handle_ax_error(*wid, &code) {
-                                        continue;
-                                    }
-                                    return Err(AxError::Ax(code));
-                                }
-                                AxError::NotFound => continue,
-                            },
-                        };
+            &mut Request::SetBatchWindowFrame(ref mut frames, txid, eui) => {
+                let disable_eui_for_batch = eui
+                    && frames.iter().any(|(wid, _)| {
+                        self.windows.get(wid).is_some_and(|window| !window.is_animating)
+                    });
 
+                if disable_eui_for_batch {
+                    let _ = self.app.set_bool_attribute("AXEnhancedUserInterface", false);
+                }
+
+                for (wid, desired) in frames.iter() {
+                    let (elem, is_animating) = match self.window_mut(*wid) {
+                        Ok(window) => {
+                            window.last_seen_txid = txid;
+                            (window.elem.clone(), window.is_animating)
+                        }
+                        Err(err) => match err {
+                            AxError::Ax(code) => {
+                                if self.handle_ax_error(*wid, &code) {
+                                    continue;
+                                }
+                                return Err(AxError::Ax(code));
+                            }
+                            AxError::NotFound => continue,
+                        },
+                    };
+
+                    if disable_eui_for_batch || (eui && !is_animating) {
+                        if disable_eui_for_batch {
+                            let _ = elem.set_size(desired.size);
+                            let _ = elem.set_position(desired.origin);
+                            let _ = elem.set_size(desired.size);
+                        } else {
+                            with_enhanced_ui_disabled(&self.app, || {
+                                let _ = elem.set_size(desired.size);
+                                let _ = elem.set_position(desired.origin);
+                                let _ = elem.set_size(desired.size);
+                            });
+                        }
+                    } else {
                         let _ = elem.set_size(desired.size);
                         let _ = elem.set_position(desired.origin);
                         let _ = elem.set_size(desired.size);
-
-                        let frame = match self.handle_ax_result(*wid, elem.frame())? {
-                            Some(frame) => frame,
-                            None => continue,
-                        };
-
-                        self.send_event(Event::WindowFrameChanged(
-                            *wid,
-                            frame,
-                            Some(txid),
-                            Requested(true),
-                            None,
-                        ));
                     }
-                    Ok(())
-                });
-                if let Err(err) = result {
-                    return Err(err);
+
+                    let frame = match self
+                        .handle_ax_result(*wid, trace("frame", &elem, || elem.frame()))?
+                    {
+                        Some(frame) => frame,
+                        None => continue,
+                    };
+
+                    self.send_event(Event::WindowFrameChanged(
+                        *wid,
+                        frame,
+                        Some(txid),
+                        Requested(true),
+                        None,
+                    ));
+                }
+                if disable_eui_for_batch {
+                    let _ = self.app.set_bool_attribute("AXEnhancedUserInterface", true);
                 }
             }
             &mut Request::BeginWindowAnimation(wid) => {

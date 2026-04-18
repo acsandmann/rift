@@ -352,6 +352,88 @@ fn handle_layout_response_includes_handles_for_raise_and_focus_windows() {
 }
 
 #[test]
+fn workspace_switch_batches_all_windows_with_eui_enabled() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+
+    reactor.handle_event(screen_params_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_events(apps.make_app(1, make_windows(2)));
+    apps.simulate_until_quiet(&mut reactor);
+    let _ = apps.requests();
+
+    reactor.handle_event(Event::Command(Command::Layout(
+        LayoutCommand::MoveWindowToWorkspace {
+            workspace: 1,
+            window_id: Some(2),
+        },
+    )));
+    apps.simulate_until_quiet(&mut reactor);
+    let _ = apps.requests();
+
+    reactor.handle_event(Event::Command(Command::Layout(
+        LayoutCommand::SwitchToWorkspace(1),
+    )));
+
+    let requests = apps.requests();
+    assert!(
+        requests.iter().any(|req| {
+            matches!(
+                req,
+                Request::SetBatchWindowFrame(frames, _, true)
+                    if frames.iter().any(|(wid, _)| *wid == WindowId::new(1, 1))
+                        && frames.iter().any(|(wid, _)| *wid == WindowId::new(1, 2))
+            )
+        }),
+        "expected workspace-switch batch to disable eui for both hidden and visible windows: {requests:?}"
+    );
+}
+
+#[test]
+fn windows_discovered_does_not_reintroduce_inactive_workspace_window() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+
+    reactor.handle_event(screen_params_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_events(apps.make_app(1, make_windows(2)));
+    apps.simulate_until_quiet(&mut reactor);
+
+    reactor.handle_event(Event::Command(Command::Layout(
+        LayoutCommand::MoveWindowToWorkspace {
+            workspace: 1,
+            window_id: Some(2),
+        },
+    )));
+    apps.simulate_until_quiet(&mut reactor);
+
+    reactor.handle_event(Event::Command(Command::Layout(
+        LayoutCommand::SwitchToWorkspace(1),
+    )));
+    apps.simulate_until_quiet(&mut reactor);
+
+    reactor.handle_event(Event::WindowsDiscovered {
+        pid: 1,
+        new: vec![],
+        known_visible: vec![WindowId::new(1, 1), WindowId::new(1, 2)],
+    });
+
+    assert_eq!(
+        reactor.layout_manager.layout_engine.windows_in_active_workspace(space),
+        vec![WindowId::new(1, 2)],
+    );
+}
+
 fn it_preserves_layout_after_login_screen() {
     // TODO: This would be better tested with a more complete simulation.
     let mut apps = Apps::new();

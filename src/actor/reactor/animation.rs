@@ -264,6 +264,7 @@ impl AnimationManager {
 
     pub fn instant_layout(
         reactor: &mut Reactor,
+        space: SpaceId,
         layout: &[(WindowId, CGRect)],
         skip_wid: Option<WindowId>,
     ) -> bool {
@@ -297,14 +298,18 @@ impl AnimationManager {
                 }
             }
             any_frame_changed = true;
+            let is_hidden =
+                !reactor.layout_manager.layout_engine.is_window_in_active_workspace(space, wid);
             trace!(
                 ?wid,
                 ?current_frame,
                 ?target_frame,
+                hidden = is_hidden,
                 "Instant workspace positioning"
             );
 
             per_app.entry(wid.pid).or_default().push((wid, target_frame));
+            window.frame_monotonic = target_frame;
         }
 
         for (pid, frames) in per_app.into_iter() {
@@ -344,7 +349,7 @@ impl AnimationManager {
             }
 
             let frames_to_send = frames.clone();
-            if let Err(e) = handle.send(Request::SetBatchWindowFrame(frames_to_send, txid)) {
+            if let Err(e) = handle.send(Request::SetBatchWindowFrame(frames_to_send, txid, true)) {
                 debug!(
                     ?pid,
                     ?e,

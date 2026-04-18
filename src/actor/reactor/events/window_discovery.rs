@@ -12,6 +12,18 @@ use crate::sys::window_server::{self, WindowServerId};
 pub struct WindowDiscoveryHandler;
 
 impl WindowDiscoveryHandler {
+    fn should_emit_window_for_space(reactor: &Reactor, space: SpaceId, wid: WindowId) -> bool {
+        let engine = &reactor.layout_manager.layout_engine;
+        let assigned_workspace =
+            engine.virtual_workspace_manager().workspace_for_window(space, wid);
+        let active_workspace = engine.active_workspace(space);
+
+        match (assigned_workspace, active_workspace) {
+            (Some(assigned), Some(active)) => assigned == active,
+            _ => true,
+        }
+    }
+
     /// Handle a windows discovered event with app info.
     pub fn handle_discovery(
         reactor: &mut Reactor,
@@ -358,6 +370,9 @@ impl WindowDiscoveryHandler {
             let Some(space) = reactor.best_space_for_window_id(wid) else {
                 continue;
             };
+            if !Self::should_emit_window_for_space(reactor, space, wid) {
+                continue;
+            }
             included.insert(wid);
             app_windows.entry(space).or_default().push(wid);
         }
@@ -376,6 +391,9 @@ impl WindowDiscoveryHandler {
             else {
                 continue;
             };
+            if !Self::should_emit_window_for_space(reactor, space, wid) {
+                continue;
+            }
             included.insert(wid);
             app_windows.entry(space).or_default().push(wid);
         }
