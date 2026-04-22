@@ -552,6 +552,8 @@ pub struct MenuBarSettings {
     pub enabled: bool,
     #[serde(default = "no")]
     pub show_empty: bool,
+    #[serde(default = "no")]
+    pub show_app_icons: bool,
     #[serde(default)]
     pub mode: MenuBarDisplayMode,
     #[serde(default)]
@@ -578,6 +580,7 @@ impl Default for MenuBarSettings {
         Self {
             enabled: false,
             show_empty: false,
+            show_app_icons: false,
             mode: MenuBarDisplayMode::default(),
             active_label: ActiveWorkspaceLabel::default(),
             display_style: WorkspaceDisplayStyle::default(),
