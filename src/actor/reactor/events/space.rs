@@ -175,6 +175,27 @@ impl SpaceEventHandler {
     }
 
     pub fn handle_screen_parameters_changed(reactor: &mut Reactor, screens: Vec<ScreenInfo>) {
+        // Null out fullscreen spaces so they are never stored or processed as
+        // regular user spaces.  Fullscreen transitions create temporary space IDs
+        // that would otherwise cause fresh workspace sets to be created and
+        // windows to be re-assigned, wiping workspace assignments when the user
+        // later exits fullscreen (see #308).
+        let mut screens = screens;
+        for screen in &mut screens {
+            if let Some(space) = screen.space {
+                if crate::sys::window_server::space_is_fullscreen(space.get())
+                    || reactor.space_manager.fullscreen_by_space.contains_key(&space.get())
+                {
+                    debug!(
+                        ?space,
+                        display_uuid = %screen.display_uuid,
+                        "Nulling out fullscreen space in ScreenParametersChanged to preserve workspace state"
+                    );
+                    screen.space = None;
+                }
+            }
+        }
+
         let previous_screens = reactor.space_manager.screens.clone();
         let previous_displays: HashSet<String> =
             previous_screens.iter().map(|s| s.display_uuid.clone()).collect();
