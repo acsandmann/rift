@@ -241,12 +241,14 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
 
     let process_actor = ProcessActor::new(wm_controller_sender.clone());
 
+    let stack_line_hit_rects = rift_wm::actor::stack_line::new_shared_hit_rects();
     let event_tap = EventTap::new(
         config.clone(),
         events_tx.clone(),
         event_tap_rx,
         Some(wm_controller_sender.clone()),
         Some(stack_line_tx.clone()),
+        Some(stack_line_hit_rects.clone()),
     );
     let menu = Menu::new(
         config.clone(),
@@ -261,6 +263,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         mtm,
         events_tx.clone(),
         CoordinateConverter::default(),
+        stack_line_hit_rects,
     );
 
     let mission_control = MissionControlActor::new(config.clone(), mc_rx, reactor.clone(), mtm);
