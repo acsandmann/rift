@@ -965,6 +965,10 @@ impl LayoutEngine {
         Some((workspace_id, workspace_name))
     }
 
+    fn window_no_longer_assigned_to_space(&self, space: SpaceId, wid: WindowId) -> bool {
+        self.virtual_workspace_manager.workspace_for_window(space, wid).is_none()
+    }
+
     fn sync_tiled_windows_for_app(
         &mut self,
         space: SpaceId,
@@ -982,7 +986,7 @@ impl LayoutEngine {
                 if wid.pid != pid
                     || self.floating.is_floating(wid)
                     || desired.contains(&wid)
-                    || self.virtual_workspace_manager.workspace_for_window(space, wid).is_none()
+                    || self.window_no_longer_assigned_to_space(space, wid)
                 {
                     continue;
                 }
@@ -995,9 +999,9 @@ impl LayoutEngine {
                 // (they were moved to another space), the empty update is authoritative and
                 // removal should proceed.
                 let tree_windows = self.workspace_tree(ws_id).windows_for_app(layout, pid);
-                let any_moved_away = tree_windows.iter().any(|wid| {
-                    self.virtual_workspace_manager.workspace_for_window(space, *wid).is_none()
-                });
+                let any_moved_away = tree_windows
+                    .iter()
+                    .any(|wid| self.window_no_longer_assigned_to_space(space, *wid));
                 if !tree_windows.is_empty() && !any_moved_away {
                     continue;
                 }

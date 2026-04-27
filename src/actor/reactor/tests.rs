@@ -880,7 +880,12 @@ fn fullscreen_space_in_screen_params_does_not_trigger_topology_relayout() {
 }
 
 // Helper: check whether any window owned by `pid` appears in the layout tree for `space`.
-fn has_windows_in_layout(reactor: &mut Reactor, space: SpaceId, screen: CGRect, pid: pid_t) -> bool {
+fn has_windows_in_layout(
+    reactor: &mut Reactor,
+    space: SpaceId,
+    screen: CGRect,
+    pid: pid_t,
+) -> bool {
     let gaps = reactor.config.settings.layout.gaps.clone();
     reactor
         .layout_manager
@@ -890,11 +895,62 @@ fn has_windows_in_layout(reactor: &mut Reactor, space: SpaceId, screen: CGRect, 
         .any(|(wid, _)| wid.pid == pid)
 }
 
-fn window_update_tuple(
-    wid: WindowId,
-) -> (WindowId, Option<String>, Option<String>, Option<String>, bool, CGSize, Option<CGSize>, Option<CGSize>)
-{
-    (wid, None, None, None, true, CGSize::new(100.0, 100.0), None, None)
+type WindowUpdateTuple = (
+    WindowId,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    bool,
+    CGSize,
+    Option<CGSize>,
+    Option<CGSize>,
+);
+
+fn window_update_tuple(wid: WindowId) -> WindowUpdateTuple {
+    (
+        wid,
+        None,
+        None,
+        None,
+        true,
+        CGSize::new(100.0, 100.0),
+        None,
+        None,
+    )
+}
+
+struct TwoSpaceFixture {
+    reactor: Reactor,
+    screen1: CGRect,
+    screen2: CGRect,
+    space1: SpaceId,
+    space2: SpaceId,
+}
+
+fn two_space_fixture() -> TwoSpaceFixture {
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let screen1 = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let screen2 = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
+    let space1 = SpaceId::new(1);
+    let space2 = SpaceId::new(2);
+
+    reactor.handle_event(screen_params_event(
+        vec![screen1, screen2],
+        vec![Some(space1), Some(space2)],
+        vec![],
+    ));
+
+    TwoSpaceFixture {
+        reactor,
+        screen1,
+        screen2,
+        space1,
+        space2,
+    }
 }
 
 // --- Display oscillation bug regression tests ---
@@ -911,52 +967,48 @@ fn window_removed_from_source_space_when_dest_claims_it_first() {
     // Case 1: the destination space's WindowsOnScreenUpdated event fires before the
     // source space's empty event.  The VWM is updated by the destination event, so when
     // the source guard logic runs it can see that the window was moved away.
-    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
-        &crate::common::config::VirtualWorkspaceSettings::default(),
-        &crate::common::config::LayoutSettings::default(),
-        None,
-    ));
-    let screen1 = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
-    let screen2 = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
-    let space1 = SpaceId::new(1);
-    let space2 = SpaceId::new(2);
+    let TwoSpaceFixture {
+        mut reactor,
+        screen1,
+        screen2,
+        space1,
+        space2,
+    } = two_space_fixture();
     let pid: pid_t = 42;
     let wid = WindowId::new(pid, 1);
 
-    reactor.handle_event(screen_params_event(
-        vec![screen1, screen2],
-        vec![Some(space1), Some(space2)],
-        vec![],
-    ));
-
     // Place window in space1's layout tree via a direct layout event.
-    let _ = reactor.layout_manager.layout_engine.handle_event(LayoutEvent::WindowsOnScreenUpdated(
-        space1,
-        pid,
-        vec![window_update_tuple(wid)],
-        None,
-    ));
+    let _ = reactor
+        .layout_manager
+        .layout_engine
+        .handle_event(LayoutEvent::WindowsOnScreenUpdated(
+            space1,
+            pid,
+            vec![window_update_tuple(wid)],
+            None,
+        ));
     assert!(has_windows_in_layout(&mut reactor, space1, screen1, pid));
 
     // Destination space2 claims the window first (updates VWM: wid moves out of space1).
-    let _ = reactor.layout_manager.layout_engine.handle_event(LayoutEvent::WindowsOnScreenUpdated(
-        space2,
-        pid,
-        vec![window_update_tuple(wid)],
-        None,
-    ));
+    let _ = reactor
+        .layout_manager
+        .layout_engine
+        .handle_event(LayoutEvent::WindowsOnScreenUpdated(
+            space2,
+            pid,
+            vec![window_update_tuple(wid)],
+            None,
+        ));
 
     // Source space1 receives the authoritative empty update.
     // Before the fix the guard in sync_tiled_windows_for_app checked only
     // has_windows_for_app (true) and skipped removal.  After the fix it also checks
     // whether those tree windows have been moved away in the VWM, and proceeds with
     // removal when they have.
-    let _ = reactor.layout_manager.layout_engine.handle_event(LayoutEvent::WindowsOnScreenUpdated(
-        space1,
-        pid,
-        vec![],
-        None,
-    ));
+    let _ = reactor
+        .layout_manager
+        .layout_engine
+        .handle_event(LayoutEvent::WindowsOnScreenUpdated(space1, pid, vec![], None));
 
     assert!(
         !has_windows_in_layout(&mut reactor, space1, screen1, pid),
@@ -969,40 +1021,29 @@ fn window_removed_from_source_space_when_dest_claims_it_first() {
 }
 
 #[test]
-fn window_removed_from_source_space_when_source_empty_event_fires_first() {
-    // Case 2: the source space's empty WindowsOnScreenUpdated fires before the
-    // destination claims the window.  The reactor-level pre-pass in emit_layout_events
-    // updates the VWM for all claimed windows upfront, so by the time the source event
-    // is processed the VWM no longer lists the window in the source space.  The loop in
-    // sync_tiled_windows_for_app then correctly skips re-adding it to `desired`.
-    //
-    // This test replicates that pre-pass by updating the VWM directly before sending
-    // the source's empty event, mirroring what emit_layout_events does at the reactor
-    // level.
-    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
-        &crate::common::config::VirtualWorkspaceSettings::default(),
-        &crate::common::config::LayoutSettings::default(),
-        None,
-    ));
-    let screen1 = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
-    let screen2 = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
-    let space1 = SpaceId::new(1);
-    let space2 = SpaceId::new(2);
+fn empty_update_removes_window_when_vwm_was_preupdated() {
+    // The reactor-level pre-pass in emit_layout_events updates the VWM for all claimed
+    // windows upfront. This test mirrors that by updating the VWM directly before the
+    // source's empty event.
+    let TwoSpaceFixture {
+        mut reactor,
+        screen1,
+        screen2,
+        space1,
+        space2,
+    } = two_space_fixture();
     let pid: pid_t = 42;
     let wid = WindowId::new(pid, 1);
 
-    reactor.handle_event(screen_params_event(
-        vec![screen1, screen2],
-        vec![Some(space1), Some(space2)],
-        vec![],
-    ));
-
-    let _ = reactor.layout_manager.layout_engine.handle_event(LayoutEvent::WindowsOnScreenUpdated(
-        space1,
-        pid,
-        vec![window_update_tuple(wid)],
-        None,
-    ));
+    let _ = reactor
+        .layout_manager
+        .layout_engine
+        .handle_event(LayoutEvent::WindowsOnScreenUpdated(
+            space1,
+            pid,
+            vec![window_update_tuple(wid)],
+            None,
+        ));
     assert!(has_windows_in_layout(&mut reactor, space1, screen1, pid));
 
     // Simulate the pre-pass: move wid from space1 to space2 in the VWM before any
@@ -1013,20 +1054,18 @@ fn window_removed_from_source_space_when_source_empty_event_fires_first() {
         .virtual_workspace_manager()
         .active_workspace(space2)
         .expect("space2 must have an active workspace");
-    reactor.layout_manager.layout_engine.virtual_workspace_manager_mut().assign_window_to_workspace(
-        space2,
-        wid,
-        space2_workspace,
-    );
+    reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .assign_window_to_workspace(space2, wid, space2_workspace);
 
     // Source space1's empty event fires first.  Because the VWM was pre-updated the
     // loop no longer re-adds wid to `desired`, so removal proceeds.
-    let _ = reactor.layout_manager.layout_engine.handle_event(LayoutEvent::WindowsOnScreenUpdated(
-        space1,
-        pid,
-        vec![],
-        None,
-    ));
+    let _ = reactor
+        .layout_manager
+        .layout_engine
+        .handle_event(LayoutEvent::WindowsOnScreenUpdated(space1, pid, vec![], None));
 
     assert!(
         !has_windows_in_layout(&mut reactor, space1, screen1, pid),
@@ -1034,12 +1073,15 @@ fn window_removed_from_source_space_when_source_empty_event_fires_first() {
     );
 
     // Destination space2 event fires after.
-    let _ = reactor.layout_manager.layout_engine.handle_event(LayoutEvent::WindowsOnScreenUpdated(
-        space2,
-        pid,
-        vec![window_update_tuple(wid)],
-        None,
-    ));
+    let _ = reactor
+        .layout_manager
+        .layout_engine
+        .handle_event(LayoutEvent::WindowsOnScreenUpdated(
+            space2,
+            pid,
+            vec![window_update_tuple(wid)],
+            None,
+        ));
     assert!(has_windows_in_layout(&mut reactor, space2, screen2, pid));
 }
 
@@ -1060,21 +1102,22 @@ fn window_preserved_in_space_on_empty_discovery_without_cross_space_move() {
 
     reactor.handle_event(screen_params_event(vec![screen], vec![Some(space)], vec![]));
 
-    let _ = reactor.layout_manager.layout_engine.handle_event(LayoutEvent::WindowsOnScreenUpdated(
-        space,
-        pid,
-        vec![window_update_tuple(wid)],
-        None,
-    ));
+    let _ = reactor
+        .layout_manager
+        .layout_engine
+        .handle_event(LayoutEvent::WindowsOnScreenUpdated(
+            space,
+            pid,
+            vec![window_update_tuple(wid)],
+            None,
+        ));
     assert!(has_windows_in_layout(&mut reactor, space, screen, pid));
 
     // AX returns empty — window is still in the VWM for this space (it was never moved).
-    let _ = reactor.layout_manager.layout_engine.handle_event(LayoutEvent::WindowsOnScreenUpdated(
-        space,
-        pid,
-        vec![],
-        None,
-    ));
+    let _ = reactor
+        .layout_manager
+        .layout_engine
+        .handle_event(LayoutEvent::WindowsOnScreenUpdated(space, pid, vec![], None));
 
     assert!(
         has_windows_in_layout(&mut reactor, space, screen, pid),
@@ -1091,21 +1134,13 @@ fn discovery_after_display_change_places_window_on_correct_display() {
     // This exercises the full WindowsDiscovered → emit_layout_events path including
     // the pre-pass VWM update (Case 2: source space processed first in screen order).
     let mut apps = Apps::new();
-    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
-        &crate::common::config::VirtualWorkspaceSettings::default(),
-        &crate::common::config::LayoutSettings::default(),
-        None,
-    ));
-    let screen1 = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
-    let screen2 = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
-    let space1 = SpaceId::new(1);
-    let space2 = SpaceId::new(2);
-
-    reactor.handle_event(screen_params_event(
-        vec![screen1, screen2],
-        vec![Some(space1), Some(space2)],
-        vec![],
-    ));
+    let TwoSpaceFixture {
+        mut reactor,
+        screen1,
+        screen2,
+        space1,
+        space2,
+    } = two_space_fixture();
 
     // Window starts on screen1.
     reactor.handle_events(apps.make_app(1, make_windows(1)));
