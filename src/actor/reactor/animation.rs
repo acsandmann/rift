@@ -182,18 +182,22 @@ impl AnimationManager {
                         if target_frame.same_as(current_frame) {
                             continue;
                         }
-                        let wsid = window.info.sys_id.unwrap();
-                        if reactor
-                            .transaction_manager
-                            .get_target_frame(wsid)
-                            .is_some_and(|pending| pending.same_as(target_frame))
-                        {
-                            trace!(?wid, ?target_frame, "Skipping redundant layout request");
-                            continue;
+                        let wsid = window.info.sys_id;
+                        if let Some(wsid) = wsid {
+                            if reactor
+                                .transaction_manager
+                                .get_target_frame(wsid)
+                                .is_some_and(|pending| pending.same_as(target_frame))
+                            {
+                                trace!(?wid, ?target_frame, "Skipping redundant layout request");
+                                continue;
+                            }
                         }
                         any_frame_changed = true;
-                        let txid = reactor.transaction_manager.generate_next_txid(wsid);
-                        (current_frame, Some(wsid), txid)
+                        let txid = wsid
+                            .map(|wsid| reactor.transaction_manager.generate_next_txid(wsid))
+                            .unwrap_or_default();
+                        (current_frame, wsid, txid)
                     }
                     None => {
                         debug!(?wid, "Skipping - window no longer exists");

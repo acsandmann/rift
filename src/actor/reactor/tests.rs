@@ -783,6 +783,53 @@ fn it_retains_windows_without_server_ids_after_login_visibility_failure() {
 }
 
 #[test]
+fn animated_layout_handles_windows_without_server_ids() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let space = SpaceId::new(1);
+    reactor.handle_event(screen_params_event(
+        vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
+        vec![Some(space)],
+        vec![],
+    ));
+
+    let mut window = make_window(1);
+    window.sys_id = None;
+    window.frame = CGRect::new(CGPoint::new(50., 50.), CGSize::new(400., 400.));
+
+    reactor.handle_events(apps.make_app_with_opts(
+        1,
+        vec![window],
+        Some(WindowId::new(1, 1)),
+        true,
+        false,
+    ));
+    apps.requests();
+
+    let target = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    assert!(super::animation::AnimationManager::animate_layout(
+        &mut reactor,
+        space,
+        &[(WindowId::new(1, 1), target)],
+        true,
+        None,
+    ));
+
+    let requests = apps.requests();
+    assert!(
+        requests.iter().any(|request| matches!(
+            request,
+            Request::SetWindowFrame(..) | Request::SetBatchWindowFrame(..)
+        )),
+        "expected layout to still request a frame update without a server id: {requests:?}"
+    );
+}
+
+#[test]
 fn display_index_selector_uses_physical_left_to_right_order() {
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(
         &crate::common::config::VirtualWorkspaceSettings::default(),
