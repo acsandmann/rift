@@ -32,6 +32,7 @@ use crate::sys::hotkey::{
 use crate::sys::screen::{CoordinateConverter, SpaceId};
 use crate::sys::window_server::{self, WindowServerId, window_level};
 use crate::sys::{haptics, power};
+use crate::ui::stack_line::point_hits_indicator_frame;
 
 // Window levels can change for transient UI windows; cache briefly to reduce
 // query overhead without pinning stale values for long.
@@ -70,6 +71,7 @@ pub struct EventTap {
     hotkeys: RefCell<HashMap<Hotkey, Vec<WmCommand>>>,
     wm_sender: Option<wm_controller::Sender>,
     stack_line_tx: Option<stack_line::Sender>,
+    stack_line_hit_rects: Option<stack_line::SharedHitRects>,
 }
 
 struct State {
@@ -372,6 +374,7 @@ impl EventTap {
         requests_rx: Receiver,
         wm_sender: Option<wm_controller::Sender>,
         stack_line_tx: Option<stack_line::Sender>,
+        stack_line_hit_rects: Option<stack_line::SharedHitRects>,
     ) -> Self {
         let disable_hotkey = config
             .settings
@@ -408,6 +411,7 @@ impl EventTap {
             hotkeys: RefCell::new(HashMap::default()),
             wm_sender,
             stack_line_tx,
+            stack_line_hit_rects,
         }
     }
 
@@ -650,7 +654,27 @@ impl EventTap {
 
                 if let Some(tx) = &self.stack_line_tx {
                     let loc = CGEvent::location(Some(event));
-                    let _ = tx.try_send(stack_line::Event::MouseDown(loc));
+
+                    // The event tap is the single source of hit-testing for
+                    // stack-line indicators. Only forward the click and
+                    // suppress propagation when it lands on a visible,
+                    // non-occluded indicator.
+                    let hits_stack_line = self
+                        .stack_line_hit_rects
+                        .as_ref()
+                        .map(|hit_rects| {
+                            hit_rects
+                                .borrow()
+                                .iter()
+                                .copied()
+                                .any(|frame| point_hits_indicator_frame(loc, frame))
+                        })
+                        .unwrap_or(false);
+                    if hits_stack_line && !window_server::is_point_occluded_by_external_window(loc)
+                    {
+                        let _ = tx.try_send(stack_line::Event::MouseDown(loc));
+                        return false;
+                    }
                 }
             }
             CGEventType::LeftMouseDragged | CGEventType::RightMouseDragged => {
@@ -695,7 +719,22 @@ impl EventTap {
                 if state.stack_line_enabled
                     && let Some(tx) = &self.stack_line_tx
                 {
-                    let _ = tx.try_send(stack_line::Event::MouseMoved(loc));
+                    let hits = self
+                        .stack_line_hit_rects
+                        .as_ref()
+                        .map(|hit_rects| {
+                            hit_rects
+                                .borrow()
+                                .iter()
+                                .copied()
+                                .any(|frame| point_hits_indicator_frame(loc, frame))
+                        })
+                        .unwrap_or(false)
+                        && !window_server::is_point_occluded_by_external_window(loc);
+                    let _ = tx.try_send(stack_line::Event::MouseMoved {
+                        point: loc,
+                        hits_indicator: hits,
+                    });
                 }
 
                 // ffm

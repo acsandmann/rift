@@ -388,35 +388,66 @@ fn get_num(dict: &CFDictionary<CFString, CFType>, key: &'static CFString) -> Opt
     dict.get(key)?.downcast::<CFNumber>().ok()?.as_i64()
 }
 
-pub fn get_window_at_point(mut point: CGPoint) -> Option<WindowServerId> {
-    unsafe {
-        let mut window_point = CGPoint { x: 0.0, y: 0.0 };
-        let (mut window_id, mut window_cid) = (0u32, 0i32);
+/// Find the topmost window at `point`, or the next window below
+/// `below_window_id` when given. Returns `(window_id, owner_connection_id)`,
+/// or `None` when no window is found.
+fn find_window_at_point(point: &mut CGPoint, below_window_id: Option<u32>) -> Option<(u32, i32)> {
+    let mut window_point = CGPoint { x: 0.0, y: 0.0 };
+    let (mut wid, mut wcid) = (0u32, 0i32);
 
+    let (start_id, direction) = match below_window_id {
+        Some(id) => (id as i32, -1),
+        None => (0, 1),
+    };
+
+    unsafe {
         SLSFindWindowAndOwner(
             *G_CONNECTION,
+            start_id,
+            direction,
             0,
-            1,
-            0,
-            &mut point,
+            point,
             &mut window_point,
-            &mut window_id,
-            &mut window_cid,
+            &mut wid,
+            &mut wcid,
         );
-        if *G_CONNECTION == window_cid {
-            SLSFindWindowAndOwner(
-                *G_CONNECTION,
-                window_id as i32,
-                -1,
-                0,
-                &mut point,
-                &mut window_point,
-                &mut window_id,
-                &mut window_cid,
-            );
-        }
-        (window_id != 0).then(|| WindowServerId(window_id))
     }
+
+    (wid != 0).then_some((wid, wcid))
+}
+
+fn is_own_window(cid: i32) -> bool { *G_CONNECTION == cid }
+
+pub fn get_window_at_point(mut point: CGPoint) -> Option<WindowServerId> {
+    let (mut wid, cid) = find_window_at_point(&mut point, None)?;
+    if is_own_window(cid) {
+        wid = find_window_at_point(&mut point, Some(wid))?.0;
+    }
+    Some(WindowServerId(wid))
+}
+
+/// Returns `true` if an external application window at normal level or above
+/// occludes the given screen point.
+///
+/// Walks down the window stack at `point`, skipping all Rift-owned CGS
+/// windows (there may be more than one at the same point), until a non-Rift
+/// window is found. Desktop/wallpaper windows sit well below
+/// `NSNormalWindowLevel` and are not considered occluders.
+pub fn is_point_occluded_by_external_window(mut point: CGPoint) -> bool {
+    use objc2_app_kit::NSNormalWindowLevel;
+
+    let mut hit = find_window_at_point(&mut point, None);
+
+    // Skip past any Rift-owned windows stacked at this point.
+    while let Some((wid, cid)) = hit {
+        if !is_own_window(cid) {
+            let level = window_level(wid).unwrap_or(NSWindowLevel::MIN);
+            return level >= NSNormalWindowLevel;
+        }
+        hit = find_window_at_point(&mut point, Some(wid));
+    }
+
+    false
 }
 
 pub fn current_cursor_location() -> Result<CGPoint, CGError> {

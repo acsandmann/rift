@@ -2182,6 +2182,7 @@ impl LayoutEngine {
                     if is_floating {
                         self.floating.add_active(op_space, focused_window.pid, focused_window);
                     }
+                    self.broadcast_windows_changed(op_space);
                     return EventResponse {
                         focus_window: Some(focused_window),
                         raise_windows: vec![],
@@ -2198,6 +2199,7 @@ impl LayoutEngine {
                     let remaining_windows =
                         self.virtual_workspace_manager.windows_in_active_workspace(op_space);
                     if let Some(&new_focus) = remaining_windows.first() {
+                        self.broadcast_windows_changed(op_space);
                         return EventResponse {
                             focus_window: Some(new_focus),
                             raise_windows: vec![],

@@ -413,7 +413,8 @@ impl LayoutManager {
             let suppress_animation = is_workspace_switch
                 || reactor.workspace_switch_manager.active_workspace_switch.is_some();
             if suppress_animation {
-                any_frame_changed |= AnimationManager::instant_layout(reactor, &layout, skip_wid);
+                any_frame_changed |=
+                    AnimationManager::instant_layout(reactor, space, &layout, skip_wid);
             } else {
                 any_frame_changed |=
                     AnimationManager::animate_layout(reactor, space, &layout, is_resize, skip_wid);
