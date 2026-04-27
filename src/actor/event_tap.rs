@@ -26,8 +26,8 @@ use crate::layout_engine::LayoutCommand as LC;
 use crate::sys::event::{self, Hotkey, KeyCode, MouseState, set_mouse_state};
 use crate::sys::geometry::CGRectExt;
 use crate::sys::hotkey::{
-    Modifiers, is_modifier_key, key_code_from_event, modifier_flag_for_key,
-    modifiers_from_flags_with_keys,
+    HotkeySpec, Modifiers, is_modifier_key, key_code_from_event, modifier_flag_for_key,
+    modifiers_from_flags, modifiers_from_flags_with_keys,
 };
 use crate::sys::screen::{CoordinateConverter, SpaceId};
 use crate::sys::window_server::{self, WindowServerId, window_level};
@@ -68,6 +68,7 @@ pub struct EventTap {
     disable_hotkey: RefCell<Option<Hotkey>>,
     swipe: RefCell<Option<SwipeHandler>>,
     scroll: RefCell<Option<ScrollHandler>>,
+    mouse_wheel_handlers: RefCell<Vec<MouseWheelHandler>>,
     hotkeys: RefCell<HashMap<Hotkey, Vec<WmCommand>>>,
     wm_sender: Option<wm_controller::Sender>,
     stack_line_tx: Option<stack_line::Sender>,
@@ -255,6 +256,22 @@ struct ScrollHandler {
     state: RefCell<ScrollState>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MouseWheelAction {
+    ScrollStrip,
+    Resize,
+    MoveColumn,
+}
+
+struct MouseWheelHandler {
+    action: MouseWheelAction,
+    spec: HotkeySpec,
+    invert: bool,
+    sensitivity: f64,
+    threshold: f64,
+    accum: RefCell<f64>,
+}
+
 unsafe fn drop_mouse_ctx(ptr: *mut std::ffi::c_void) {
     unsafe { drop(Box::from_raw(ptr as *mut CallbackCtx)) };
 }
@@ -270,10 +287,15 @@ impl EventTap {
         state.focus_follows_mouse_config_enabled && state.focus_follows_mouse_enabled
     }
 
+    // Also builds mouse wheel handlers since they share the same config reload lifecycle.
     fn build_gesture_handlers(
         config: &Config,
         has_wm: bool,
-    ) -> (Option<SwipeHandler>, Option<ScrollHandler>) {
+    ) -> (
+        Option<SwipeHandler>,
+        Option<ScrollHandler>,
+        Vec<MouseWheelHandler>,
+    ) {
         let swipe_cfg = SwipeConfig::from_config(config);
         let swipe = if swipe_cfg.enabled && has_wm {
             Some(SwipeHandler {
@@ -294,19 +316,66 @@ impl EventTap {
             None
         };
 
-        (swipe, scroll)
+        let mut mouse_wheel = Vec::new();
+        if has_wm {
+            let ms = &config.settings.layout.scrolling.mouse_scroll;
+            if ms.enabled {
+                if let Some(spec) = &ms.modifier {
+                    mouse_wheel.push(MouseWheelHandler {
+                        action: MouseWheelAction::ScrollStrip,
+                        spec: spec.clone(),
+                        invert: ms.invert,
+                        sensitivity: ms.sensitivity.max(0.0),
+                        threshold: 4.0,
+                        accum: RefCell::new(0.0),
+                    });
+                }
+            }
+            let mr = &config.settings.layout.mouse_resize;
+            if mr.enabled {
+                if let Some(spec) = &mr.modifier {
+                    mouse_wheel.push(MouseWheelHandler {
+                        action: MouseWheelAction::Resize,
+                        spec: spec.clone(),
+                        invert: mr.invert,
+                        sensitivity: mr.sensitivity.max(0.0),
+                        threshold: 4.0,
+                        accum: RefCell::new(0.0),
+                    });
+                }
+            }
+            let mc = &config.settings.layout.mouse_move_column;
+            if mc.enabled {
+                if let Some(spec) = &mc.modifier {
+                    mouse_wheel.push(MouseWheelHandler {
+                        action: MouseWheelAction::MoveColumn,
+                        spec: spec.clone(),
+                        invert: mc.invert,
+                        sensitivity: 1.0,
+                        threshold: 5.0,
+                        accum: RefCell::new(0.0),
+                    });
+                }
+            }
+        }
+
+        (swipe, scroll, mouse_wheel)
     }
 
     fn update_gesture_handlers(&self) {
         let config = self.config.borrow();
-        let (swipe, scroll) = Self::build_gesture_handlers(&config, self.wm_sender.is_some());
+        let (swipe, scroll, mouse_wheel) =
+            Self::build_gesture_handlers(&config, self.wm_sender.is_some());
         *self.swipe.borrow_mut() = swipe;
         *self.scroll.borrow_mut() = scroll;
+        *self.mouse_wheel_handlers.borrow_mut() = mouse_wheel;
     }
 
     fn gesture_handlers_enabled(&self) -> bool {
         self.swipe.borrow().is_some() || self.scroll.borrow().is_some()
     }
+
+    fn scroll_wheel_needed(&self) -> bool { !self.mouse_wheel_handlers.borrow().is_empty() }
 
     fn keyboard_handlers_enabled(&self) -> bool {
         self.disable_hotkey.borrow().is_some() || !self.hotkeys.borrow().is_empty()
@@ -324,6 +393,7 @@ impl EventTap {
             self.gesture_handlers_enabled(),
             self.keyboard_handlers_enabled(),
             self.mouse_move_handlers_enabled(),
+            self.scroll_wheel_needed(),
         )
     }
 
@@ -381,7 +451,8 @@ impl EventTap {
             .focus_follows_mouse_disable_hotkey
             .clone()
             .and_then(|spec| spec.to_hotkey());
-        let (swipe, scroll) = Self::build_gesture_handlers(&config, wm_sender.is_some());
+        let (swipe, scroll, mouse_wheel) =
+            Self::build_gesture_handlers(&config, wm_sender.is_some());
         let mut state = State::default();
         state.mouse_hides_on_focus = config.settings.mouse_hides_on_focus;
         state.focus_follows_mouse_config_enabled = config.settings.focus_follows_mouse;
@@ -397,6 +468,7 @@ impl EventTap {
             state.event_processing_enabled
                 && ((state.stack_line_enabled && stack_line_tx.is_some())
                     || Self::focus_follows_mouse_handler_enabled(&state)),
+            !mouse_wheel.is_empty(),
         );
         EventTap {
             config: RefCell::new(config),
@@ -408,6 +480,7 @@ impl EventTap {
             disable_hotkey: RefCell::new(disable_hotkey),
             swipe: RefCell::new(swipe),
             scroll: RefCell::new(scroll),
+            mouse_wheel_handlers: RefCell::new(mouse_wheel),
             hotkeys: RefCell::new(HashMap::default()),
             wm_sender,
             stack_line_tx,
@@ -749,6 +822,51 @@ impl EventTap {
                     }
                 }
             }
+            CGEventType::ScrollWheel => {
+                // Read flags from the event directly to avoid stale state.current_flags.
+                let event_flags = CGEvent::flags(Some(event));
+                let event_mods = modifiers_from_flags(event_flags);
+
+                // Pick the modifier with the most bits.
+                let handlers = self.mouse_wheel_handlers.borrow();
+                let mut best: Option<usize> = None;
+                let mut best_bits: u32 = 0;
+
+                for (i, h) in handlers.iter().enumerate() {
+                    let (required_mods, required_key) = match &h.spec {
+                        HotkeySpec::Hotkey(hk) => (hk.modifiers, Some(hk.key_code)),
+                        HotkeySpec::ModifiersOnly { modifiers } => (*modifiers, None),
+                    };
+                    if !event_mods.contains(required_mods) {
+                        continue;
+                    }
+                    if let Some(key) = required_key {
+                        if !state.pressed_keys.contains(&key) {
+                            continue;
+                        }
+                    }
+                    // ScrollStrip only activates in scrolling layout.
+                    if h.action == MouseWheelAction::ScrollStrip {
+                        let cursor = CGEvent::location(Some(event));
+                        let mode =
+                            state.layout_mode_at_point(cursor).unwrap_or(state.default_layout_mode);
+                        if !matches!(mode, LayoutMode::Scrolling) {
+                            continue;
+                        }
+                    }
+                    let bits = required_mods.bit_count();
+                    if best.is_none() || bits > best_bits {
+                        best = Some(i);
+                        best_bits = bits;
+                    }
+                }
+
+                if let Some(idx) = best {
+                    drop(state);
+                    self.handle_mouse_wheel_event(idx, event);
+                    return false;
+                }
+            }
             _ => (),
         }
 
@@ -1012,6 +1130,71 @@ impl EventTap {
                 }
             }
         }
+    }
+
+    fn handle_mouse_wheel_event(&self, handler_idx: usize, event: &CGEvent) {
+        let Some(wm_sender) = self.wm_sender.as_ref() else {
+            return;
+        };
+
+        let handlers = self.mouse_wheel_handlers.borrow();
+        let handler = &handlers[handler_idx];
+
+        // Prefer horizontal axis, fall back to vertical.
+        let axis2 = CGEvent::integer_value_field(
+            Some(event),
+            CGEventField::ScrollWheelEventPointDeltaAxis2,
+        );
+        let raw = if axis2 != 0 {
+            axis2
+        } else {
+            CGEvent::integer_value_field(Some(event), CGEventField::ScrollWheelEventPointDeltaAxis1)
+        };
+        if raw == 0 {
+            return;
+        }
+
+        // Accumulate delta to batch high-frequency continuous input (trackpad, magic mouse).
+        // Discrete scroll produces large ticks that exceed the threshold immediately.
+        let mut accum = handler.accum.borrow_mut();
+        *accum += raw as f64 * handler.sensitivity;
+        if accum.abs() < handler.threshold {
+            return;
+        }
+
+        let cmd = match handler.action {
+            MouseWheelAction::ScrollStrip => {
+                let mut delta = *accum;
+                *accum = 0.0;
+                if handler.invert {
+                    delta = -delta;
+                }
+                LC::ScrollStrip { delta: delta * 0.05 }
+            }
+            MouseWheelAction::Resize => {
+                let mut amount = *accum;
+                *accum = 0.0;
+                if handler.invert {
+                    amount = -amount;
+                }
+                LC::ResizeWindowBy { amount: amount * 0.01 }
+            }
+            MouseWheelAction::MoveColumn => {
+                let direction = if (*accum > 0.0) ^ handler.invert {
+                    crate::layout_engine::Direction::Left
+                } else {
+                    crate::layout_engine::Direction::Right
+                };
+                *accum = 0.0;
+                LC::MoveNode(direction)
+            }
+        };
+        drop(accum);
+        drop(handlers);
+
+        wm_sender.send(WmEvent::Command(WmCommand::ReactorCommand(
+            reactor::Command::Layout(cmd),
+        )));
     }
 
     fn handle_keyboard_event(
@@ -1315,6 +1498,7 @@ fn build_event_mask(
     gestures_enabled: bool,
     keyboard_enabled: bool,
     mouse_move_enabled: bool,
+    scroll_wheel_enabled: bool,
 ) -> CGEventMask {
     let mut m: u64 = 0;
     let add = |m: &mut u64, ty: CGEventType| *m |= 1u64 << (ty.0 as u64);
@@ -1344,6 +1528,9 @@ fn build_event_mask(
     if gestures_enabled {
         // NSEventType::Gesture is an NSEventType — it maps via .0
         *&mut m |= 1u64 << (NSEventType::Gesture.0 as u64);
+    }
+    if scroll_wheel_enabled {
+        add(&mut m, CGEventType::ScrollWheel);
     }
     m
 }

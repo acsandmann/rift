@@ -566,6 +566,12 @@ pub struct LayoutSettings {
     /// Scrolling layout configuration (niri-style columns)
     #[serde(default)]
     pub scrolling: ScrollingLayoutSettings,
+    /// Mouse scroll wheel to resize focused column
+    #[serde(default)]
+    pub mouse_resize: MouseResizeSettings,
+    /// Mouse scroll wheel to move focused column left/right
+    #[serde(default)]
+    pub mouse_move_column: MouseMoveColumnSettings,
 }
 
 /// Layout mode enum
@@ -623,6 +629,9 @@ pub struct ScrollingLayoutSettings {
     /// Trackpad gestures for scrolling layout
     #[serde(default)]
     pub gestures: ScrollingGestureSettings,
+    /// Mouse scroll wheel support for scrolling layout
+    #[serde(default)]
+    pub mouse_scroll: MouseScrollSettings,
 }
 
 impl Default for ScrollingLayoutSettings {
@@ -635,6 +644,7 @@ impl Default for ScrollingLayoutSettings {
             alignment: ScrollingAlignment::default(),
             focus_navigation_style: ScrollingFocusNavigationStyle::default(),
             gestures: ScrollingGestureSettings::default(),
+            mouse_scroll: MouseScrollSettings::default(),
         }
     }
 }
@@ -727,6 +737,90 @@ impl Default for ScrollingGestureSettings {
             distance_pct: default_distance_pct(),
             propagate_to_workspace_swipe: false,
             workspace_switch_threshold: default_overscroll_threshold(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct MouseScrollSettings {
+    /// Enable mouse scroll wheel to scroll the column strip
+    #[serde(default = "no")]
+    pub enabled: bool,
+    /// Modifier key(s) that must be held (e.g. "Alt", "Ctrl+Alt", "Ctrl+Alt+Z")
+    #[serde(default)]
+    pub modifier: Option<HotkeySpec>,
+    /// Invert scroll direction
+    #[serde(default)]
+    pub invert: bool,
+    /// Scroll sensitivity
+    #[serde(default = "default_mouse_scroll_sensitivity")]
+    pub sensitivity: f64,
+}
+
+fn default_mouse_scroll_sensitivity() -> f64 { 1.0 }
+
+impl Default for MouseScrollSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            modifier: None,
+            invert: false,
+            sensitivity: default_mouse_scroll_sensitivity(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct MouseResizeSettings {
+    /// Enable mouse scroll wheel to resize the focused column
+    #[serde(default = "no")]
+    pub enabled: bool,
+    /// Modifier key(s) that must be held (e.g. "Ctrl+Alt", "Ctrl+Alt+Z")
+    #[serde(default)]
+    pub modifier: Option<HotkeySpec>,
+    /// Invert resize direction
+    #[serde(default)]
+    pub invert: bool,
+    /// Resize sensitivity
+    #[serde(default = "default_mouse_resize_sensitivity")]
+    pub sensitivity: f64,
+}
+
+fn default_mouse_resize_sensitivity() -> f64 { 1.0 }
+
+impl Default for MouseResizeSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            modifier: None,
+            invert: false,
+            sensitivity: default_mouse_resize_sensitivity(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct MouseMoveColumnSettings {
+    /// Enable mouse scroll wheel to move the focused column left/right
+    #[serde(default = "no")]
+    pub enabled: bool,
+    /// Modifier key(s) that must be held (e.g. "Ctrl+Shift", "Ctrl+Shift+Z")
+    #[serde(default)]
+    pub modifier: Option<HotkeySpec>,
+    /// Invert move direction
+    #[serde(default)]
+    pub invert: bool,
+}
+
+impl Default for MouseMoveColumnSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            modifier: None,
+            invert: false,
         }
     }
 }
