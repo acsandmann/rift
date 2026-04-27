@@ -1065,6 +1065,21 @@ fn has_windows_in_layout(
         .any(|(wid, _)| wid.pid == pid)
 }
 
+fn has_window_in_layout(
+    reactor: &mut Reactor,
+    space: SpaceId,
+    screen: CGRect,
+    wid: WindowId,
+) -> bool {
+    let gaps = reactor.config.settings.layout.gaps.clone();
+    reactor
+        .layout_manager
+        .layout_engine
+        .calculate_layout(space, screen, &gaps, 0.0, Default::default(), Default::default())
+        .iter()
+        .any(|(layout_wid, _)| *layout_wid == wid)
+}
+
 type WindowUpdateTuple = (
     WindowId,
     Option<String>,
@@ -1253,6 +1268,72 @@ fn empty_update_removes_window_when_vwm_was_preupdated() {
             None,
         ));
     assert!(has_windows_in_layout(&mut reactor, space2, screen2, pid));
+}
+
+#[test]
+fn empty_update_only_removes_same_app_windows_moved_to_another_space() {
+    // Mixed same-app case: one window moved to another space, while another window is
+    // still assigned here but temporarily omitted from discovery. The empty update
+    // should remove only the moved window from the source layout tree.
+    let TwoSpaceFixture {
+        mut reactor,
+        screen1,
+        screen2,
+        space1,
+        space2,
+    } = two_space_fixture();
+    let pid: pid_t = 42;
+    let moved = WindowId::new(pid, 1);
+    let retained = WindowId::new(pid, 2);
+
+    let _ = reactor
+        .layout_manager
+        .layout_engine
+        .handle_event(LayoutEvent::WindowsOnScreenUpdated(
+            space1,
+            pid,
+            vec![window_update_tuple(moved), window_update_tuple(retained)],
+            None,
+        ));
+    assert!(has_window_in_layout(&mut reactor, space1, screen1, moved));
+    assert!(has_window_in_layout(&mut reactor, space1, screen1, retained));
+
+    let space2_workspace = reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager()
+        .active_workspace(space2)
+        .expect("space2 must have an active workspace");
+    reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .assign_window_to_workspace(space2, moved, space2_workspace);
+
+    let _ = reactor
+        .layout_manager
+        .layout_engine
+        .handle_event(LayoutEvent::WindowsOnScreenUpdated(space1, pid, vec![], None));
+
+    assert!(
+        !has_window_in_layout(&mut reactor, space1, screen1, moved),
+        "moved window must be removed from the source layout tree"
+    );
+    assert!(
+        has_window_in_layout(&mut reactor, space1, screen1, retained),
+        "same-app window still assigned to source space must be preserved"
+    );
+
+    let _ = reactor
+        .layout_manager
+        .layout_engine
+        .handle_event(LayoutEvent::WindowsOnScreenUpdated(
+            space2,
+            pid,
+            vec![window_update_tuple(moved)],
+            None,
+        ));
+    assert!(has_window_in_layout(&mut reactor, space2, screen2, moved));
 }
 
 #[test]

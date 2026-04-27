@@ -994,17 +994,17 @@ impl LayoutEngine {
             }
 
             if desired.is_empty() && total_tiled_count == 0 {
-                // Only skip removal if the windows still in the layout tree are genuinely
-                // assigned to this space in the VWM. If the VWM no longer tracks them here
-                // (they were moved to another space), the empty update is authoritative and
-                // removal should proceed.
+                // Empty discovery can mean AX temporarily omitted the app. Preserve
+                // windows still assigned to this workspace, but allow moved windows
+                // to be removed from this layout tree.
                 let tree_windows = self.workspace_tree(ws_id).windows_for_app(layout, pid);
-                let any_moved_away = tree_windows
-                    .iter()
-                    .any(|wid| self.window_no_longer_assigned_to_space(space, *wid));
-                if !tree_windows.is_empty() && !any_moved_away {
-                    continue;
-                }
+                desired = tree_windows
+                    .into_iter()
+                    .filter(|wid| {
+                        self.virtual_workspace_manager.workspace_for_window(space, *wid)
+                            == Some(ws_id)
+                    })
+                    .collect();
             }
 
             desired.sort_unstable();
