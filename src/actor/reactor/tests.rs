@@ -929,7 +929,7 @@ fn display_churn_quarantines_window_frame_changed_events() {
 }
 
 #[test]
-fn topology_relayout_pending_when_space_ids_change_for_same_displays() {
+fn normal_macos_space_switch_does_not_arm_topology_relayout() {
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(
         &crate::common::config::VirtualWorkspaceSettings::default(),
         &crate::common::config::LayoutSettings::default(),
@@ -952,9 +952,16 @@ fn topology_relayout_pending_when_space_ids_change_for_same_displays() {
         vec![],
     ));
     assert!(
-        reactor.pending_space_change_manager.topology_relayout_pending,
-        "Space-id churn on unchanged displays should trigger topology relayout"
+        !reactor.pending_space_change_manager.topology_relayout_pending,
+        "Normal same-display macOS Space switches must not be treated as display topology changes"
     );
+    assert_eq!(
+        reactor.raw_spaces_for_current_screens(),
+        vec![Some(SpaceId::new(111)), Some(SpaceId::new(222))],
+        "Screen state should still advance to the newly active macOS spaces"
+    );
+    assert!(reactor.is_space_active(SpaceId::new(111)));
+    assert!(reactor.is_space_active(SpaceId::new(222)));
 }
 
 #[test]

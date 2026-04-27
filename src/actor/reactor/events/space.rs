@@ -207,29 +207,6 @@ impl SpaceEventHandler {
             .map(|s| s.display_uuid.as_str())
             .ne(screens.iter().map(|s| s.display_uuid.as_str()));
 
-        let previous_spaces_by_display: HashMap<String, SpaceId> = previous_screens
-            .iter()
-            .filter_map(|screen| screen.space.map(|space| (screen.display_uuid.clone(), space)))
-            .collect();
-        let new_spaces_by_display: HashMap<String, SpaceId> = screens
-            .iter()
-            .filter_map(|screen| screen.space.map(|space| (screen.display_uuid.clone(), space)))
-            .collect();
-        let is_fullscreen_space = |space: SpaceId| {
-            crate::sys::window_server::space_is_fullscreen(space.get())
-                || reactor.space_manager.fullscreen_by_space.contains_key(&space.get())
-        };
-        // Fullscreen transitions create temporary non-user space IDs for the same display.
-        // Treat only user->user space-id changes as topology churn.
-        let display_space_changed =
-            previous_spaces_by_display.iter().any(|(display_uuid, old_space)| {
-                new_spaces_by_display.get(display_uuid).is_some_and(|new_space| {
-                    new_space != old_space
-                        && !is_fullscreen_space(*old_space)
-                        && !is_fullscreen_space(*new_space)
-                })
-            });
-
         // IMPORTANT:
         // Only treat display topology changes as such once we have a prior known set.
         // On startup (previous_displays is empty), display/order/space changes should not
@@ -238,7 +215,9 @@ impl SpaceEventHandler {
         //
         // Once we've seen a non-empty display set, allow topology changes that pass through empty
         // (all displays unplugged/replugged).
-        let topology_changed = displays_changed || display_order_changed || display_space_changed;
+        // A same-display space id change is a normal macOS Space switch, not a display
+        // topology change. Only display set/order changes should arm topology relayout.
+        let topology_changed = displays_changed || display_order_changed;
         let should_trigger_topology = topology_changed
             && (reactor.space_manager.has_seen_display_set || !previous_displays.is_empty());
 
