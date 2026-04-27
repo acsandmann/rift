@@ -434,6 +434,7 @@ fn windows_discovered_does_not_reintroduce_inactive_workspace_window() {
     );
 }
 
+#[test]
 fn it_preserves_layout_after_login_screen() {
     // TODO: This would be better tested with a more complete simulation.
     let mut apps = Apps::new();

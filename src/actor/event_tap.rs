@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::mem::replace;
 use std::panic::AssertUnwindSafe;
 use std::rc::Rc;
+use std::str::FromStr;
 
 use objc2::exception;
 use objc2_app_kit::{
@@ -52,7 +53,8 @@ pub enum Request {
     SpaceChanged(Vec<Option<SpaceId>>),
     SetEventProcessing(bool),
     SetFocusFollowsMouseEnabled(bool),
-    SetHotkeys(Vec<(Hotkey, WmCommand)>),
+    SetHotkeys(Vec<(String, WmCommand)>),
+    KeyboardLayoutChanged,
     ConfigUpdated(Config),
     LayoutModesChanged(Vec<(SpaceId, crate::common::config::LayoutMode)>),
     SetLowPowerMode(bool),
@@ -68,6 +70,7 @@ pub struct EventTap {
     disable_hotkey: RefCell<Option<Hotkey>>,
     swipe: RefCell<Option<SwipeHandler>>,
     scroll: RefCell<Option<ScrollHandler>>,
+    hotkey_specs: RefCell<Vec<(String, WmCommand)>>,
     hotkeys: RefCell<HashMap<Hotkey, Vec<WmCommand>>>,
     wm_sender: Option<wm_controller::Sender>,
     stack_line_tx: Option<stack_line::Sender>,
@@ -408,6 +411,7 @@ impl EventTap {
             disable_hotkey: RefCell::new(disable_hotkey),
             swipe: RefCell::new(swipe),
             scroll: RefCell::new(scroll),
+            hotkey_specs: RefCell::new(Vec::new()),
             hotkeys: RefCell::new(HashMap::default()),
             wm_sender,
             stack_line_tx,
@@ -504,25 +508,12 @@ impl EventTap {
                 should_rebuild_mask = true;
             }
             Request::SetHotkeys(bindings) => {
-                let mut map = self.hotkeys.borrow_mut();
-                map.clear();
-                for (hotkey, command) in bindings {
-                    if hotkey.modifiers.has_generic_modifiers() {
-                        for expanded_mods in hotkey.modifiers.expand_to_specific() {
-                            let expanded_hotkey = Hotkey::new(expanded_mods, hotkey.key_code);
-                            let entry = map.entry(expanded_hotkey).or_default();
-                            if !entry.contains(&command) {
-                                entry.push(command.clone());
-                            }
-                        }
-                    } else {
-                        let entry = map.entry(hotkey).or_default();
-                        if !entry.contains(&command) {
-                            entry.push(command);
-                        }
-                    }
-                }
-                debug!("Updated hotkey bindings: {}", map.len());
+                *self.hotkey_specs.borrow_mut() = bindings;
+                self.rebuild_hotkeys_for_current_layout();
+                should_rebuild_mask = true;
+            }
+            Request::KeyboardLayoutChanged => {
+                self.rebuild_hotkeys_for_current_layout();
                 should_rebuild_mask = true;
             }
             Request::ConfigUpdated(new_config) => {
@@ -1056,6 +1047,39 @@ impl EventTap {
         }
 
         true
+    }
+
+    fn rebuild_hotkeys_for_current_layout(&self) {
+        let specs = self.hotkey_specs.borrow();
+        let mut map = self.hotkeys.borrow_mut();
+        map.clear();
+
+        for (spec, command) in specs.iter() {
+            let Ok(hotkey) = Hotkey::from_str(spec) else {
+                warn!(%spec, "Skipping hotkey that no longer resolves for current keyboard layout");
+                continue;
+            };
+
+            if hotkey.modifiers.has_generic_modifiers() {
+                for expanded_mods in hotkey.modifiers.expand_to_specific() {
+                    let expanded_hotkey = Hotkey::new(expanded_mods, hotkey.key_code);
+                    let entry = map.entry(expanded_hotkey).or_default();
+                    if !entry.contains(command) {
+                        entry.push(command.clone());
+                    }
+                }
+            } else {
+                let entry = map.entry(hotkey).or_default();
+                if !entry.contains(command) {
+                    entry.push(command.clone());
+                }
+            }
+        }
+
+        trace!(
+            "Updated hotkey bindings for current keyboard layout: {}",
+            map.len()
+        );
     }
 }
 

@@ -8,6 +8,7 @@ use std::sync::LazyLock;
 use anyhow::anyhow;
 use objc2_core_foundation::CFData;
 use objc2_core_graphics::{CGEvent, CGEventField, CGEventFlags};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -857,7 +858,7 @@ type CFStringRef = *const c_void;
 #[link(name = "Carbon", kind = "framework")]
 unsafe extern "C" {
     fn TISCopyCurrentASCIICapableKeyboardLayoutInputSource() -> *mut c_void;
-    fn TISGetInputSourceProperty(keyboard: *const c_void, property: CFStringRef) -> *mut CFData;
+    fn TISGetInputSourceProperty(keyboard: *const c_void, property: CFStringRef) -> *mut c_void;
     fn UCKeyTranslate(
         keyLayoutPtr: *const u8,
         virtualKeyCode: u16,
@@ -887,6 +888,8 @@ const VIRTUAL_KEYCODE_NUMS: &[u16] = &[
 
 #[cfg(target_os = "macos")]
 fn generate_virtual_keymap() -> StdHashMap<String, KeyCode> {
+    static KEYMAP_GENERATION_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+    let _guard = KEYMAP_GENERATION_LOCK.lock();
     let mut keymap = StdHashMap::new();
 
     let keyboard = unsafe { TISCopyCurrentASCIICapableKeyboardLayoutInputSource() };
@@ -896,15 +899,14 @@ fn generate_virtual_keymap() -> StdHashMap<String, KeyCode> {
     }
 
     let layout_data = NonNull::new(unsafe {
-        TISGetInputSourceProperty(keyboard, kTISPropertyUnicodeKeyLayoutData)
+        TISGetInputSourceProperty(keyboard, kTISPropertyUnicodeKeyLayoutData).cast::<CFData>()
     });
-
-    unsafe {
-        super::skylight::CFRelease(keyboard.cast());
-    }
 
     let Some(layout_data) = layout_data else {
         tracing::warn!("Could not get keyboard layout data");
+        unsafe {
+            super::skylight::CFRelease(keyboard.cast());
+        }
         return keymap;
     };
 
@@ -952,14 +954,15 @@ fn generate_virtual_keymap() -> StdHashMap<String, KeyCode> {
         }
     }
 
+    unsafe {
+        super::skylight::CFRelease(keyboard.cast());
+    }
+
     keymap
 }
 
-pub static VIRTUAL_KEYMAP: LazyLock<StdHashMap<String, KeyCode>> =
-    LazyLock::new(generate_virtual_keymap);
-
 pub fn keycode_from_char(ch: &str) -> Option<KeyCode> {
-    VIRTUAL_KEYMAP
+    generate_virtual_keymap()
         .get(&ch.to_lowercase())
         .copied()
         .or_else(|| fallback_keycode_from_char(ch))
@@ -1029,7 +1032,7 @@ mod tests {
 
     #[test]
     fn test_keycode_from_char_basic() {
-        let keymap = &*VIRTUAL_KEYMAP;
+        let keymap = generate_virtual_keymap();
         if !keymap.is_empty() {
             let first_char = keymap.keys().next().unwrap();
             let result = keycode_from_char(first_char);

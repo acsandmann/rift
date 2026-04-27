@@ -297,11 +297,45 @@ struct ConfigFile {
     modifier_combinations: HashMap<String, String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Clone, Debug)]
 pub struct Config {
     pub settings: Settings,
     pub keys: Vec<(Hotkey, WmCommand)>,
+    #[serde(default)]
+    pub key_specs: Vec<(String, WmCommand)>,
     pub virtual_workspaces: VirtualWorkspaceSettings,
+}
+
+impl<'de> Deserialize<'de> for Config {
+    fn deserialize<D>(deserializer: D) -> Result<Config, D::Error>
+    where D: serde::Deserializer<'de> {
+        #[derive(Deserialize)]
+        struct ConfigSerde {
+            settings: Settings,
+            keys: Vec<(Hotkey, WmCommand)>,
+            #[serde(default)]
+            key_specs: Vec<(String, WmCommand)>,
+            virtual_workspaces: VirtualWorkspaceSettings,
+        }
+
+        let config = ConfigSerde::deserialize(deserializer)?;
+        let key_specs = if config.key_specs.is_empty() && !config.keys.is_empty() {
+            config
+                .keys
+                .iter()
+                .map(|(hotkey, command)| (hotkey.to_string(), command.clone()))
+                .collect()
+        } else {
+            config.key_specs
+        };
+
+        Ok(Config {
+            settings: config.settings,
+            keys: config.keys,
+            key_specs,
+            virtual_workspaces: config.virtual_workspaces,
+        })
+    }
 }
 
 unsafe impl Send for Config {}
@@ -1131,12 +1165,9 @@ impl Config {
         let config_file = ConfigFile {
             settings: self.settings.clone(),
             keys: self
-                .keys
+                .key_specs
                 .iter()
-                .map(|(hotkey, command)| {
-                    let hotkey_str = format!("{:?}", hotkey);
-                    (hotkey_str, command.clone())
-                })
+                .map(|(hotkey, command)| (hotkey.clone(), command.clone()))
                 .collect(),
             virtual_workspaces: self.virtual_workspaces.clone(),
             modifier_combinations: HashMap::default(),
@@ -1384,6 +1415,7 @@ impl Config {
         match toml::from_str::<ConfigFile>(&buf) {
             Ok(c) => {
                 let mut keys = Vec::new();
+                let mut key_specs = Vec::new();
                 for (key, cmd) in c.keys {
                     let expanded_key =
                         Self::expand_modifier_combinations(&key, &c.modifier_combinations);
@@ -1391,11 +1423,13 @@ impl Config {
                     let Ok(hotkey) = Hotkey::from_str(&normalized_key) else {
                         bail!("Could not parse hotkey: {key}");
                     };
-                    keys.push((hotkey, cmd));
+                    keys.push((hotkey, cmd.clone()));
+                    key_specs.push((normalized_key, cmd));
                 }
                 Ok(Config {
                     settings: c.settings,
                     keys,
+                    key_specs,
                     virtual_workspaces: c.virtual_workspaces,
                 })
             }
@@ -1466,6 +1500,29 @@ mod tests {
         let cfg = Config::parse(toml).unwrap();
         // We expect keys to be parsed into hotkeys
         assert!(!cfg.keys.is_empty());
+    }
+
+    #[test]
+    fn serde_round_trip_preserves_key_specs() {
+        let cfg = Config::default();
+        assert!(!cfg.key_specs.is_empty());
+
+        let json = serde_json::to_string(&cfg).unwrap();
+        let round_tripped: Config = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(round_tripped.key_specs, cfg.key_specs);
+    }
+
+    #[test]
+    fn serde_without_key_specs_reconstructs_from_keys() {
+        let cfg = Config::default();
+        let mut json = serde_json::to_value(&cfg).unwrap();
+        json.as_object_mut().unwrap().remove("key_specs");
+
+        let round_tripped: Config = serde_json::from_value(json).unwrap();
+
+        assert_eq!(round_tripped.key_specs.len(), round_tripped.keys.len());
+        assert!(!round_tripped.key_specs.is_empty());
     }
 
     #[test]
