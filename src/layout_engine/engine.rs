@@ -965,6 +965,10 @@ impl LayoutEngine {
         Some((workspace_id, workspace_name))
     }
 
+    fn window_no_longer_assigned_to_space(&self, space: SpaceId, wid: WindowId) -> bool {
+        self.virtual_workspace_manager.workspace_for_window(space, wid).is_none()
+    }
+
     fn sync_tiled_windows_for_app(
         &mut self,
         space: SpaceId,
@@ -977,16 +981,30 @@ impl LayoutEngine {
         for (ws_id, layout) in self.workspace_layouts.active_layouts_for_space(space) {
             let mut desired = tiled_by_workspace.get(&ws_id).cloned().unwrap_or_default();
             for wid in self.virtual_workspace_manager.workspace_windows(space, ws_id) {
-                if wid.pid != pid || self.floating.is_floating(wid) || desired.contains(&wid) {
+                // Skip re-adding if the VWM no longer assigns this window to this space
+                // (it was moved to another space during this discovery cycle).
+                if wid.pid != pid
+                    || self.floating.is_floating(wid)
+                    || desired.contains(&wid)
+                    || self.window_no_longer_assigned_to_space(space, wid)
+                {
                     continue;
                 }
                 desired.push(wid);
             }
 
             if desired.is_empty() && total_tiled_count == 0 {
-                if self.workspace_tree(ws_id).has_windows_for_app(layout, pid) {
-                    continue;
-                }
+                // Empty discovery can mean AX temporarily omitted the app. Preserve
+                // windows still assigned to this workspace, but allow moved windows
+                // to be removed from this layout tree.
+                let tree_windows = self.workspace_tree(ws_id).windows_for_app(layout, pid);
+                desired = tree_windows
+                    .into_iter()
+                    .filter(|wid| {
+                        self.virtual_workspace_manager.workspace_for_window(space, *wid)
+                            == Some(ws_id)
+                    })
+                    .collect();
             }
 
             desired.sort_unstable();

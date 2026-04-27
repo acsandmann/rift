@@ -3,7 +3,7 @@ use tracing::{trace, warn};
 use crate::actor::app::{AppInfo, WindowId, WindowInfo, pid_t};
 use crate::actor::reactor::{Event, LayoutEvent, Reactor, WindowFilter, WindowState, utils};
 use crate::common::collections::{BTreeMap, HashSet};
-use crate::model::virtual_workspace::AppRuleResult;
+use crate::model::virtual_workspace::{AppRuleResult, WorkspaceError};
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{self, WindowServerId};
 
@@ -344,6 +344,63 @@ impl WindowDiscoveryHandler {
     }
 
     /// Send layout events for discovered windows.
+    fn assign_discovered_window_to_space(
+        reactor: &mut Reactor,
+        wid: WindowId,
+        space: SpaceId,
+        app_info: &Option<AppInfo>,
+    ) -> Result<AppRuleResult, WorkspaceError> {
+        let Some(window) = reactor.window_manager.windows.get(&wid) else {
+            return Err(WorkspaceError::AssignmentFailed);
+        };
+        let title = window.info.title.clone();
+        let ax_role = window.info.ax_role.clone();
+        let ax_subrole = window.info.ax_subrole.clone();
+
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager_mut()
+            .assign_window_with_app_info(
+                wid,
+                space,
+                app_info.as_ref().and_then(|a| a.bundle_id.as_deref()),
+                app_info.as_ref().and_then(|a| a.localized_name.as_deref()),
+                Some(title.as_str()),
+                ax_role.as_deref(),
+                ax_subrole.as_deref(),
+            )
+    }
+
+    fn apply_assignment_result(
+        reactor: &mut Reactor,
+        wid: WindowId,
+        space: SpaceId,
+        assign_result: Result<AppRuleResult, WorkspaceError>,
+    ) {
+        match assign_result {
+            Ok(AppRuleResult::Managed(_)) => {
+                if let Some(window) = reactor.window_manager.windows.get_mut(&wid) {
+                    window.ignore_app_rule = false;
+                }
+            }
+            Ok(AppRuleResult::Unmanaged) => {
+                if let Some(window) = reactor.window_manager.windows.get_mut(&wid) {
+                    window.ignore_app_rule = true;
+                }
+                let needs_removal = {
+                    let engine = &reactor.layout_manager.layout_engine;
+                    engine.virtual_workspace_manager().workspace_for_window(space, wid).is_some()
+                        || engine.is_window_floating(wid)
+                };
+                if needs_removal {
+                    reactor.send_layout_event(LayoutEvent::WindowRemoved(wid));
+                }
+            }
+            Err(e) => warn!("Failed to assign window {:?} to workspace: {:?}", wid, e),
+        }
+    }
+
     fn emit_layout_events(
         reactor: &mut Reactor,
         pid: pid_t,
@@ -398,9 +455,24 @@ impl WindowDiscoveryHandler {
             app_windows.entry(space).or_default().push(wid);
         }
 
-        // For now, we'll assume known_visible is handled elsewhere or we need to pass it.
-        // Looking back, the original method processes known_visible in the main logic.
-        // Actually, the emit_layout_events should be called after processing, and we need to collect all windows.
+        // Pre-pass: update the VWM for all windows definitively assigned to a space before
+        // processing any per-space layout events. Without this, the ordering of space events
+        // determines whether a window removed from one space's tree gets re-added by the
+        // loop in sync_tiled_windows_for_app (which reads the VWM state at event time).
+        // By updating the VWM upfront, the guard logic in sync_tiled_windows_for_app can
+        // correctly identify cross-space moves regardless of event ordering.
+        let mut assignment_results = BTreeMap::new();
+        for (&space, windows_for_space) in &app_windows {
+            if !reactor.is_space_active(space) {
+                continue;
+            }
+            for &wid in windows_for_space {
+                assignment_results.insert(
+                    (space, wid),
+                    Self::assign_discovered_window_to_space(reactor, wid, space, app_info),
+                );
+            }
+        }
 
         let screens = reactor.space_manager.screens.clone();
         for screen in screens {
@@ -413,55 +485,12 @@ impl WindowDiscoveryHandler {
             let windows_for_space = app_windows.remove(&space).unwrap_or_default();
 
             if !windows_for_space.is_empty() {
-                for wid in &windows_for_space {
-                    let title_opt =
-                        reactor.window_manager.windows.get(wid).map(|w| w.info.title.clone());
-                    let assign_result = reactor
-                        .layout_manager
-                        .layout_engine
-                        .virtual_workspace_manager_mut()
-                        .assign_window_with_app_info(
-                            *wid,
-                            space,
-                            app_info.as_ref().and_then(|a| a.bundle_id.as_deref()),
-                            app_info.as_ref().and_then(|a| a.localized_name.as_deref()),
-                            title_opt.as_deref(),
-                            reactor
-                                .window_manager
-                                .windows
-                                .get(wid)
-                                .and_then(|w| w.info.ax_role.as_deref()),
-                            reactor
-                                .window_manager
-                                .windows
-                                .get(wid)
-                                .and_then(|w| w.info.ax_subrole.as_deref()),
-                        );
-
-                    match assign_result {
-                        Ok(AppRuleResult::Managed(_)) => {
-                            if let Some(window) = reactor.window_manager.windows.get_mut(wid) {
-                                window.ignore_app_rule = false;
-                            }
-                        }
-                        Ok(AppRuleResult::Unmanaged) => {
-                            if let Some(window) = reactor.window_manager.windows.get_mut(wid) {
-                                window.ignore_app_rule = true;
-                            }
-                            let needs_removal = {
-                                let engine = &reactor.layout_manager.layout_engine;
-                                engine
-                                    .virtual_workspace_manager()
-                                    .workspace_for_window(space, *wid)
-                                    .is_some()
-                                    || engine.is_window_floating(*wid)
-                            };
-                            if needs_removal {
-                                reactor.send_layout_event(LayoutEvent::WindowRemoved(*wid));
-                            }
-                        }
-                        Err(e) => warn!("Failed to assign window {:?} to workspace: {:?}", wid, e),
-                    }
+                for &wid in &windows_for_space {
+                    let assign_result =
+                        assignment_results.remove(&(space, wid)).unwrap_or_else(|| {
+                            Self::assign_discovered_window_to_space(reactor, wid, space, app_info)
+                        });
+                    Self::apply_assignment_result(reactor, wid, space, assign_result);
                 }
             }
 
