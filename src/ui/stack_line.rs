@@ -108,6 +108,7 @@ struct IndicatorState {
     selected_layer: Option<Retained<CALayer>>,
     click_callback: Option<SegmentClickCallback>,
     space_id: Option<SpaceId>,
+    is_visible: bool,
 }
 
 impl IndicatorState {
@@ -120,6 +121,7 @@ impl IndicatorState {
             selected_layer: None,
             click_callback: None,
             space_id: None,
+            is_visible: false,
         }
     }
 }
@@ -174,6 +176,7 @@ impl GroupIndicatorWindow {
             let mut state = self.state.borrow_mut();
             state.config = config;
             state.group_data = Some(group_data.clone());
+            state.is_visible = true;
         }
 
         self.update_layers();
@@ -190,8 +193,12 @@ impl GroupIndicatorWindow {
 
     pub fn clear(&self) -> Result<(), CgsWindowError> {
         self.clear_layers();
-        self.state.borrow_mut().group_data = None;
-        self.state.borrow_mut().space_id = None;
+        {
+            let mut state = self.state.borrow_mut();
+            state.group_data = None;
+            state.space_id = None;
+            state.is_visible = false;
+        }
         self.present();
         self.cgs_window.order_out()
     }
@@ -213,12 +220,15 @@ impl GroupIndicatorWindow {
     }
 
     pub fn set_visibility(&self, fullscreen: bool) -> Result<(), CgsWindowError> {
+        self.state.borrow_mut().is_visible = !fullscreen;
         if fullscreen {
             self.cgs_window.order_out()
         } else {
             self.cgs_window.order_below(None)
         }
     }
+
+    pub fn is_visible(&self) -> bool { self.state.borrow().is_visible }
 
     pub fn frame(&self) -> CGRect { *self.frame.borrow() }
 

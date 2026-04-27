@@ -117,7 +117,7 @@ impl StackLine {
         if !self.is_enabled() {
             return;
         }
-        for indicator in self.indicators.values() {
+        for indicator in self.indicators.values().filter(|indicator| indicator.is_visible()) {
             rects.push(indicator.frame());
         }
     }
@@ -276,6 +276,10 @@ impl StackLine {
         // The event tap already verified that this click lands on a visible,
         // non-occluded indicator. We only need to find the matching segment.
         for (&node_id, indicator) in &self.indicators {
+            if !indicator.is_visible() {
+                continue;
+            }
+
             let frame = indicator.frame();
             if !point_hits_indicator_frame(screen_point, frame) {
                 continue;
