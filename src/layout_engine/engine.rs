@@ -702,6 +702,12 @@ impl LayoutEngine {
             if let Some(prev_wid) = previous_selection {
                 let _ = self.workspace_tree_mut(ws_id).select_window(layout, prev_wid);
             }
+            // In scrolling layout, don't jump to adjacent displays at the
+            // boundary. Off-screen columns are intentionally hidden, so
+            // cross-display focus here would select a hidden window.
+            if matches!(self.workspace_tree(ws_id), LayoutSystemKind::Scrolling(_)) {
+                return EventResponse::default();
+            }
             if let Some(new_space) = self.next_space_for_direction(
                 space,
                 direction,
