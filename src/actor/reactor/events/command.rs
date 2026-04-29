@@ -213,6 +213,9 @@ impl CommandEventHandler {
             ReactorCommand::MoveWindowToDisplay { selector, window_id } => {
                 Self::handle_command_reactor_move_window_to_display(reactor, &selector, window_id);
             }
+            ReactorCommand::MoveEverythingToDisplay { selector } => {
+                Self::handle_command_reactor_move_everything_to_display(reactor, &selector);
+            }
         }
     }
 
@@ -502,6 +505,119 @@ impl CommandEventHandler {
         );
 
         reactor.handle_layout_response(response, None);
+
+        let _ = reactor.update_layout_or_warn(false, false);
+    }
+
+    pub fn handle_command_reactor_move_everything_to_display(
+        reactor: &mut Reactor,
+        selector: &DisplaySelector,
+    ) {
+        if reactor.is_in_drag() {
+            warn!("Ignoring move-window-to-display while a drag is active");
+            return;
+        }
+
+        let Some(source_space) = reactor.workspace_command_space() else {
+            warn!("No source_space could be identified!");
+            return;
+        };
+        if !reactor.is_space_active(source_space) {
+            warn!("Move everything to display ignored: source space is inactive");
+            return;
+        }
+
+        let origin_screen = reactor.space_manager.screen_by_space(source_space);
+
+        let origin_point =
+            origin_screen.map(|s| s.frame.mid()).or_else(|| reactor.current_screen_center());
+        let target_screen = reactor.screen_for_selector(selector, origin_point).cloned();
+
+        let Some(target_screen) = target_screen else {
+            warn!(
+                ?selector,
+                "Move window to display ignored: target display not found"
+            );
+            return;
+        };
+        let Some(target_space) = target_screen.space else {
+            warn!(
+                uuid = ?target_screen.display_uuid,
+                "Move window to display ignored: display has no active space"
+            );
+            return;
+        };
+        if !reactor.is_space_active(target_space) {
+            warn!(
+                ?selector,
+                ?target_space,
+                "Move window to display ignored: target display space is inactive"
+            );
+            return;
+        }
+
+        if target_space == source_space {
+            return;
+        }
+
+        let windows =
+            reactor.layout_manager.layout_engine.windows_in_active_workspace(source_space);
+
+        for window in windows {
+            let (window_server_id, window_frame) = match reactor.window_manager.windows.get(&window)
+            {
+                Some(state) => (state.info.sys_id, state.frame_monotonic),
+                None => {
+                    warn!(?window, "Move window to display ignored: unknown window");
+                    continue;
+                }
+            };
+            let mut target_frame = window_frame;
+            let size = window_frame.size;
+            let dest_rect = target_screen.frame;
+            let mut origin = dest_rect.mid();
+            origin.x -= size.width / 2.0;
+            origin.y -= size.height / 2.0;
+            let min = dest_rect.min();
+            let max = dest_rect.max();
+            origin.x = origin.x.max(min.x).min(max.x - size.width);
+            origin.y = origin.y.max(min.y).min(max.y - size.height);
+            target_frame.origin = origin;
+
+            if let Some(app) = reactor.app_manager.apps.get(&window.pid) {
+                if let Some(wsid) = window_server_id {
+                    let txid = reactor.transaction_manager.generate_next_txid(wsid);
+                    reactor.transaction_manager.set_last_sent_txid(wsid, txid);
+                    let _ = app.handle.send(crate::actor::app::Request::SetWindowFrame(
+                        window,
+                        target_frame,
+                        txid,
+                        true,
+                    ));
+                } else {
+                    let txid = TransactionId::default();
+                    let _ = app.handle.send(crate::actor::app::Request::SetWindowFrame(
+                        window,
+                        target_frame,
+                        txid,
+                        true,
+                    ));
+                }
+            }
+
+            if let Some(state) = reactor.window_manager.windows.get_mut(&window) {
+                state.frame_monotonic = target_frame;
+            }
+
+            let response = reactor.layout_manager.layout_engine.move_window_to_space(
+                source_space,
+                target_space,
+                target_screen.frame.size,
+                window,
+            );
+
+            reactor.handle_layout_response(response, None);
+        }
 
         let _ = reactor.update_layout_or_warn(false, false);
     }

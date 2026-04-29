@@ -51,6 +51,9 @@ pub enum ReactorCommand {
         selector: DisplaySelector,
         window_id: Option<u32>,
     },
+    MoveEverythingToDisplay {
+        selector: DisplaySelector,
+    },
 }
 
 #[derive(Debug, Clone)]
