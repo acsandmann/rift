@@ -974,9 +974,9 @@ impl LayoutEngine {
         space: SpaceId,
         pid: pid_t,
         tiled_by_workspace: &HashMap<crate::model::VirtualWorkspaceId, Vec<WindowId>>,
-    ) -> bool {
+    ) -> Vec<(crate::model::VirtualWorkspaceId, LayoutId)> {
         let total_tiled_count: usize = tiled_by_workspace.values().map(|v| v.len()).sum();
-        let mut tiled_membership_changed = false;
+        let mut changed_layouts = Vec::new();
 
         for (ws_id, layout) in self.workspace_layouts.active_layouts_for_space(space) {
             let mut desired = tiled_by_workspace.get(&ws_id).cloned().unwrap_or_default();
@@ -1015,10 +1015,10 @@ impl LayoutEngine {
             }
 
             self.workspace_tree_mut(ws_id).set_windows_for_app(layout, pid, desired);
-            tiled_membership_changed = true;
+            changed_layouts.push((ws_id, layout));
         }
 
-        tiled_membership_changed
+        changed_layouts
     }
 
     pub fn update_space_display(&mut self, space: SpaceId, display_uuid: Option<String>) {
@@ -1247,9 +1247,13 @@ impl LayoutEngine {
 
                 // `windows_by_workspace` already excludes floating windows.
                 let tiled_by_workspace = windows_by_workspace;
-                if self.sync_tiled_windows_for_app(space, pid, &tiled_by_workspace) {
+                let changed_layouts =
+                    self.sync_tiled_windows_for_app(space, pid, &tiled_by_workspace);
+                if !changed_layouts.is_empty() {
                     self.broadcast_windows_changed(space);
-                    self.rebalance_all_layouts();
+                    for (ws_id, layout) in changed_layouts {
+                        self.workspace_tree_mut(ws_id).rebalance(layout);
+                    }
                 }
             }
             LayoutEvent::AppClosed(pid) => {
@@ -2647,6 +2651,64 @@ mod tests {
         assert!(
             result.is_ok(),
             "handle_command should not panic before SpaceExposed"
+        );
+    }
+
+    #[test]
+    fn tiled_membership_sync_does_not_rebalance_other_spaces() {
+        let mut engine = test_engine();
+        let space_a = SpaceId::new(101);
+        let space_b = SpaceId::new(202);
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
+        let visible_spaces = vec![space_a, space_b];
+        let visible_space_centers = HashMap::default();
+        let window_a = WindowId::new(1, 1);
+        let window_b = WindowId::new(1, 2);
+        let window_c = WindowId::new(2, 1);
+        let window_info = |wid| (wid, None, None, None, true, CGSize::new(0.0, 0.0), None, None);
+
+        let _ = engine.handle_event(LayoutEvent::SpaceExposed(space_a, screen.size));
+        let _ = engine.handle_event(LayoutEvent::WindowsOnScreenUpdated(
+            space_a,
+            1,
+            vec![window_info(window_a), window_info(window_b)],
+            None,
+        ));
+        let _ = engine.handle_command(
+            Some(space_a),
+            &visible_spaces,
+            &visible_space_centers,
+            LayoutCommand::ResizeWindowBy { amount: 0.2 },
+        );
+
+        let resized_layout = engine.calculate_layout(
+            space_a,
+            screen,
+            &LayoutSettings::default().gaps,
+            0.0,
+            Default::default(),
+            Default::default(),
+        );
+
+        let _ = engine.handle_event(LayoutEvent::SpaceExposed(space_b, screen.size));
+        let _ = engine.handle_event(LayoutEvent::WindowsOnScreenUpdated(
+            space_b,
+            2,
+            vec![window_info(window_c)],
+            None,
+        ));
+
+        let after_other_space_sync = engine.calculate_layout(
+            space_a,
+            screen,
+            &LayoutSettings::default().gaps,
+            0.0,
+            Default::default(),
+            Default::default(),
+        );
+        assert_eq!(
+            resized_layout, after_other_space_sync,
+            "membership sync on one space must not rebalance saved layouts on another space"
         );
     }
 
