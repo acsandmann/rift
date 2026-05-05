@@ -3448,7 +3448,8 @@ mod tests {
                     min_height: 120.0,
                     max_width: 280.0,
                     max_height: 120.0,
-                }
+                                wrap_size: false,
+            }
                 .normalized(),
             );
         }
@@ -3509,6 +3510,7 @@ mod tests {
                 min_height: 200.0,
                 max_width: 320.0,
                 max_height: 200.0,
+                            wrap_size: false,
             }
             .normalized(),
         );
@@ -3572,6 +3574,7 @@ mod tests {
                 min_height: 200.0,
                 max_width: 320.0,
                 max_height: 200.0,
+                            wrap_size: false,
             }
             .normalized(),
         );
@@ -3655,6 +3658,7 @@ mod tests {
                 min_height: 200.0,
                 max_width: 360.0,
                 max_height: 200.0,
+                            wrap_size: false,
             }
             .normalized(),
         );
@@ -3711,6 +3715,7 @@ mod tests {
                 min_height: 300.0,
                 max_width: 200.0,
                 max_height: 300.0,
+                            wrap_size: false,
             }
             .normalized(),
         );
@@ -3767,6 +3772,7 @@ mod tests {
                 min_height: 0.0,
                 max_width: 360.0,
                 max_height: 0.0,
+                            wrap_size: false,
             }
             .normalized(),
         );
@@ -3823,6 +3829,7 @@ mod tests {
                 min_height: 0.0,
                 max_width: 320.0,
                 max_height: 0.0,
+                            wrap_size: false,
             }
             .normalized(),
         );
@@ -3936,6 +3943,7 @@ mod tests {
                 min_height: 0.0,
                 max_width: 0.0,
                 max_height: 200.0,
+                            wrap_size: false,
             }
             .normalized(),
         );
@@ -4000,6 +4008,7 @@ mod tests {
                 min_height: 0.0,
                 max_width: 320.0,
                 max_height: 0.0,
+                            wrap_size: false,
             }
             .normalized(),
         );
@@ -4061,7 +4070,8 @@ mod tests {
                     min_height: 0.0,
                     max_width: 320.0,
                     max_height: 0.0,
-                }
+                                wrap_size: false,
+            }
                 .normalized(),
             );
         }
@@ -4125,7 +4135,8 @@ mod tests {
                     min_height: 0.0,
                     max_width: 0.0,
                     max_height: 0.0,
-                }
+                                wrap_size: false,
+            }
                 .normalized(),
             );
         }
@@ -4180,6 +4191,7 @@ mod tests {
                 min_height: 0.0,
                 max_width: 0.0,
                 max_height: 0.0,
+                            wrap_size: false,
             }
             .normalized(),
         );
@@ -4278,6 +4290,7 @@ mod tests {
                 min_height: 0.0,
                 max_width: 0.0,
                 max_height: 200.0,
+                            wrap_size: false,
             }
             .normalized(),
         );
@@ -4343,6 +4356,7 @@ mod tests {
                 min_height: 200.0,
                 max_width: 280.0,
                 max_height: 200.0,
+                            wrap_size: false,
             }
             .normalized(),
         );
@@ -4691,6 +4705,7 @@ mod tests {
                 min_height: 0.0,
                 max_width: 0.0,
                 max_height: 0.0,
+                            wrap_size: false,
             }
             .normalized(),
         );
@@ -4704,6 +4719,7 @@ mod tests {
                 min_height: 0.0,
                 max_width: 0.0,
                 max_height: 0.0,
+                            wrap_size: false,
             }
             .normalized(),
         );
@@ -4758,6 +4774,7 @@ mod tests {
                 min_height: 0.0,
                 max_width: 0.0,
                 max_height: 0.0,
+                            wrap_size: false,
             }
             .normalized(),
         );
@@ -4771,6 +4788,7 @@ mod tests {
                 min_height: 0.0,
                 max_width: 0.0,
                 max_height: 0.0,
+                            wrap_size: false,
             }
             .normalized(),
         );
@@ -4821,6 +4839,7 @@ mod tests {
                 min_height: 0.0,
                 max_width: 1000.0,
                 max_height: 0.0,
+                            wrap_size: false,
             }
             .normalized(),
         );
@@ -4834,6 +4853,7 @@ mod tests {
                 min_height: 0.0,
                 max_width: 0.0,
                 max_height: 0.0,
+                            wrap_size: false,
             }
             .normalized(),
         );
@@ -4885,6 +4905,7 @@ mod tests {
                 min_height: 0.0,
                 max_width: 600.0,
                 max_height: 0.0,
+                            wrap_size: false,
             }
             .normalized(),
         );

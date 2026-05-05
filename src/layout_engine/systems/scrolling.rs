@@ -607,13 +607,21 @@ impl LayoutSystem for ScrollingLayoutSystem {
         let mut column_ratios = Vec::with_capacity(state.columns.len());
         for col in state.columns.iter() {
             let ratio = self.clamp_ratio(base_ratio + col.width_offset);
-            let base_width = (tiling.size.width * ratio).max(1.0);
+            let normal_base_width = (tiling.size.width * ratio).max(1.0);
             let mut min_w: f64 = 1.0;
             let mut fixed_w: Option<f64> = None;
             let mut max_w: Option<f64> = None;
+            let mut col_has_wrap = false;
+            let mut wrap_width = 0.0f64;
             for wid in &col.windows {
                 if let Some(c) = constraints.get(wid).copied() {
                     let c = c.normalized();
+                    if c.wrap_size {
+                        col_has_wrap = true;
+                        if let Some(locked) = c.fixed_for_axis(true) {
+                            wrap_width = wrap_width.max(locked);
+                        }
+                    }
                     min_w = min_w.max(c.min_for_axis(true));
                     if let Some(locked) = c.fixed_for_axis(true) {
                         fixed_w = Some(match fixed_w {
@@ -630,6 +638,11 @@ impl LayoutSystem for ScrollingLayoutSystem {
                 }
             }
             let required_w = fixed_w.unwrap_or(min_w).max(min_w);
+            let base_width = if col_has_wrap && wrap_width > 0.0 {
+                wrap_width
+            } else {
+                normal_base_width
+            };
             let mut width = base_width.max(required_w);
             if let Some(max_w) = max_w {
                 width = width.min(max_w).max(required_w);
@@ -1446,6 +1459,7 @@ mod tests {
                 min_height: 500.0,
                 max_width: 0.0,
                 max_height: 0.0,
+                            wrap_size: false,
             }
             .normalized(),
         );
@@ -1492,6 +1506,7 @@ mod tests {
                 min_height: 350.0,
                 max_width: 0.0,
                 max_height: 0.0,
+                            wrap_size: false,
             }
             .normalized(),
         );
@@ -1529,6 +1544,7 @@ mod tests {
                 min_height: 0.0,
                 max_width: 600.0,
                 max_height: 0.0,
+                            wrap_size: false,
             }
             .normalized(),
         );
@@ -1574,6 +1590,7 @@ mod tests {
                 min_height: 0.0,
                 max_width: 700.0,
                 max_height: 0.0,
+                            wrap_size: false,
             }
             .normalized(),
         );
@@ -1587,6 +1604,7 @@ mod tests {
                 min_height: 0.0,
                 max_width: 500.0,
                 max_height: 0.0,
+                            wrap_size: false,
             }
             .normalized(),
         );
@@ -1626,6 +1644,7 @@ mod tests {
                 min_height: 0.0,
                 max_width: 0.0,
                 max_height: 0.0,
+                            wrap_size: false,
             }
             .normalized(),
         );
@@ -2011,6 +2030,78 @@ mod tests {
             "expected centered x to persist, got {} -> {}",
             before.origin.x,
             after.origin.x
+        );
+    }
+
+    #[test]
+    fn wrap_size_shrinks_column_to_window_size() {
+        let mut system = ScrollingLayoutSystem::new(&ScrollingLayoutSettings::default());
+        let layout = system.create_layout();
+        let w1 = wid(1, 1);
+        let w2 = wid(1, 2);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+
+        let mut constraints = HashMap::default();
+        constraints.insert(
+            w1,
+            WindowLayoutConstraints {
+                is_resizable: false,
+                locked_width: 400.0,
+                locked_height: 600.0,
+                min_width: 0.0,
+                min_height: 0.0,
+                max_width: 0.0,
+                max_height: 0.0,
+                wrap_size: true,
+            }
+            .normalized(),
+        );
+        constraints.insert(
+            w2,
+            WindowLayoutConstraints {
+                is_resizable: true,
+                locked_width: 0.0,
+                locked_height: 0.0,
+                min_width: 0.0,
+                min_height: 0.0,
+                max_width: 0.0,
+                max_height: 0.0,
+                wrap_size: false,
+            }
+            .normalized(),
+        );
+
+        let s = screen(1000.0, 800.0);
+        let gaps = GapSettings::default();
+        let frames = system.calculate_layout(
+            layout,
+            s,
+            0.0,
+            &constraints,
+            &gaps,
+            0.0,
+            Default::default(),
+            Default::default(),
+        );
+
+        let f1 = frame_for(&frames, w1);
+        let f2 = frame_for(&frames, w2);
+
+        // Wrapped column should be sized to the window's locked width
+        assert!(
+            (f1.size.width - 400.0).abs() < 1.0,
+            "expected wrapped column width ~400, got {}",
+            f1.size.width
+        );
+
+        // Non-wrapped column should use the normal ratio-based width (~700)
+        let expected_normal = 1000.0 * ScrollingLayoutSettings::default().column_width_ratio;
+        assert!(
+            (f2.size.width - expected_normal).abs() < 5.0,
+            "expected normal column width ~{}, got {}",
+            expected_normal,
+            f2.size.width
         );
     }
 }

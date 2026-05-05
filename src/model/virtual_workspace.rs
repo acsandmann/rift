@@ -47,6 +47,7 @@ pub struct AppRuleAssignment {
     pub workspace_id: VirtualWorkspaceId,
     pub floating: bool,
     pub prev_rule_decision: bool,
+    pub wrap_size: bool,
 }
 
 /// Result of evaluating app rules for a window.
@@ -163,6 +164,8 @@ pub struct VirtualWorkspaceManager {
     #[serde(skip)]
     window_rule_floating: HashMap<(SpaceId, WindowId), bool>,
     #[serde(skip)]
+    window_rule_wrap_size: HashMap<(SpaceId, WindowId), bool>,
+    #[serde(skip)]
     last_rule_decision: HashMap<(SpaceId, WindowId), bool>,
     floating_positions: HashMap<(SpaceId, VirtualWorkspaceId), FloatingWindowPositions>,
     workspace_counter: usize,
@@ -220,6 +223,7 @@ impl VirtualWorkspaceManager {
             active_workspace_per_space: HashMap::default(),
             window_to_workspace: HashMap::default(),
             window_rule_floating: HashMap::default(),
+            window_rule_wrap_size: HashMap::default(),
             last_rule_decision: HashMap::default(),
             floating_positions: HashMap::default(),
             workspace_counter: 1,
@@ -398,6 +402,16 @@ impl VirtualWorkspaceManager {
             new_window_rule_floating.insert((target_space, wid), is_float);
         }
         self.window_rule_floating = new_window_rule_floating;
+
+        let mut new_window_rule_wrap_size = HashMap::default();
+        for ((space, wid), wrap) in std::mem::take(&mut self.window_rule_wrap_size) {
+            if space == new_space && old_space != new_space {
+                continue;
+            }
+            let target_space = if space == old_space { new_space } else { space };
+            new_window_rule_wrap_size.insert((target_space, wid), wrap);
+        }
+        self.window_rule_wrap_size = new_window_rule_wrap_size;
 
         let mut new_last_rule_decision = HashMap::default();
         for ((space, wid), decision) in std::mem::take(&mut self.last_rule_decision) {
@@ -690,6 +704,7 @@ impl VirtualWorkspaceManager {
                     workspace.remove_window(wid);
                 }
                 self.window_rule_floating.remove(&(space, wid));
+                self.window_rule_wrap_size.remove(&(space, wid));
                 self.last_rule_decision.remove(&(space, wid));
             }
         }
@@ -714,6 +729,7 @@ impl VirtualWorkspaceManager {
                     workspace.remove_window(window_id);
                 }
                 self.window_rule_floating.remove(&(space, window_id));
+                self.window_rule_wrap_size.remove(&(space, window_id));
                 self.last_rule_decision.remove(&(space, window_id));
             }
         }
@@ -736,6 +752,10 @@ impl VirtualWorkspaceManager {
             }
         }
         true
+    }
+
+    pub fn is_window_wrap_size(&self, space: SpaceId, window_id: WindowId) -> bool {
+        self.window_rule_wrap_size.get(&(space, window_id)).copied().unwrap_or(false)
     }
 
     pub fn windows_in_inactive_workspaces(&self, space: SpaceId) -> Vec<WindowId> {
@@ -1240,10 +1260,16 @@ impl VirtualWorkspaceManager {
                 } else {
                     self.window_rule_floating.remove(&(space, window_id));
                 }
+                if rule.wrap_size && !rule.floating {
+                    self.window_rule_wrap_size.insert((space, window_id), true);
+                } else {
+                    self.window_rule_wrap_size.remove(&(space, window_id));
+                }
                 return Ok(AppRuleResult::Managed(AppRuleAssignment {
                     workspace_id: existing_ws,
                     floating: rule.floating,
                     prev_rule_decision,
+                    wrap_size: rule.wrap_size && !rule.floating,
                 }));
             }
 
@@ -1253,10 +1279,16 @@ impl VirtualWorkspaceManager {
                 } else {
                     self.window_rule_floating.remove(&(space, window_id));
                 }
+                if rule.wrap_size && !rule.floating {
+                    self.window_rule_wrap_size.insert((space, window_id), true);
+                } else {
+                    self.window_rule_wrap_size.remove(&(space, window_id));
+                }
                 return Ok(AppRuleResult::Managed(AppRuleAssignment {
                     workspace_id: target_workspace_id,
                     floating: rule.floating,
                     prev_rule_decision,
+                    wrap_size: rule.wrap_size && !rule.floating,
                 }));
             } else {
                 error!("Failed to assign window to workspace from app rule");
@@ -1265,20 +1297,24 @@ impl VirtualWorkspaceManager {
 
         if let Some(existing_ws) = existing_assignment {
             self.window_rule_floating.remove(&(space, window_id));
+            self.window_rule_wrap_size.remove(&(space, window_id));
             return Ok(AppRuleResult::Managed(AppRuleAssignment {
                 workspace_id: existing_ws,
                 floating: false,
                 prev_rule_decision,
+                wrap_size: false,
             }));
         }
 
         let default_workspace_id = self.get_default_workspace(space)?;
         if self.assign_window_to_workspace(space, window_id, default_workspace_id) {
             self.window_rule_floating.remove(&(space, window_id));
+            self.window_rule_wrap_size.remove(&(space, window_id));
             Ok(AppRuleResult::Managed(AppRuleAssignment {
                 workspace_id: default_workspace_id,
                 floating: false,
                 prev_rule_decision,
+                wrap_size: false,
             }))
         } else {
             error!("Failed to assign window to default workspace");
@@ -1733,6 +1769,7 @@ mod tests {
                 title_substring: None,
                 ax_role: None,
                 ax_subrole: None,
+                wrap_size: false,
             },
             // Match by app_name -> workspace 1
             AppWorkspaceRule {
@@ -1745,6 +1782,7 @@ mod tests {
                 title_substring: None,
                 ax_role: None,
                 ax_subrole: None,
+                wrap_size: false,
             },
             // Title substring -> workspace 0
             AppWorkspaceRule {
@@ -1757,6 +1795,7 @@ mod tests {
                 title_substring: Some("Preferences".into()),
                 ax_role: None,
                 ax_subrole: None,
+                wrap_size: false,
             },
             // Title regex -> workspace 2
             AppWorkspaceRule {
@@ -1769,6 +1808,7 @@ mod tests {
                 title_substring: None,
                 ax_role: None,
                 ax_subrole: None,
+                wrap_size: false,
             },
             // AX role + subrole floating
             AppWorkspaceRule {
@@ -1781,6 +1821,7 @@ mod tests {
                 title_substring: None,
                 ax_role: Some("AXWindow".into()),
                 ax_subrole: Some("AXDialog".into()),
+                wrap_size: false,
             },
             // Workspace by name
             AppWorkspaceRule {
@@ -1793,6 +1834,7 @@ mod tests {
                 title_substring: None,
                 ax_role: None,
                 ax_subrole: None,
+                wrap_size: false,
             },
             // Specificity tie breaking generic vs substring (generic workspace 0, specific workspace 2)
             AppWorkspaceRule {
@@ -1805,6 +1847,7 @@ mod tests {
                 title_substring: None,
                 ax_role: None,
                 ax_subrole: None,
+                wrap_size: false,
             },
             AppWorkspaceRule {
                 app_id: Some("com.example.tie".into()),
@@ -1816,6 +1859,7 @@ mod tests {
                 title_substring: Some("Editor".into()),
                 ax_role: None,
                 ax_subrole: None,
+                wrap_size: false,
             },
             // Reapplication: Bitwarden title becomes floating
             AppWorkspaceRule {
@@ -1828,6 +1872,7 @@ mod tests {
                 title_substring: Some("Bitwarden".into()),
                 ax_role: None,
                 ax_subrole: None,
+                wrap_size: false,
             },
             AppWorkspaceRule {
                 app_id: Some("app.zen-browser.zen".into()),
@@ -1839,6 +1884,7 @@ mod tests {
                 title_substring: None,
                 ax_role: None,
                 ax_subrole: None,
+                wrap_size: false,
             },
             // Workspace override when specific rule matches different workspace + floating
             AppWorkspaceRule {
@@ -1851,6 +1897,7 @@ mod tests {
                 title_substring: None,
                 ax_role: None,
                 ax_subrole: None,
+                wrap_size: false,
             },
             AppWorkspaceRule {
                 app_id: Some("app.zen-browser.zen".into()),
@@ -1862,6 +1909,7 @@ mod tests {
                 title_substring: Some("bitwarden".into()),
                 ax_role: None,
                 ax_subrole: None,
+                wrap_size: false,
             },
         ];
 
@@ -2054,5 +2102,61 @@ mod tests {
                 || bw2_updated_assignment.workspace_id == expected_updated
         );
         assert!(bw2_updated_assignment.floating);
+    }
+
+    #[test]
+    fn app_rule_wrap_size_sets_assignment_and_persists() {
+        let space = SpaceId::new(1);
+        let mut settings = VirtualWorkspaceSettings::default();
+        settings.app_rules = vec![AppWorkspaceRule {
+            app_id: Some("com.example.wrap".into()),
+            workspace: None,
+            floating: false,
+            manage: true,
+            app_name: None,
+            title_regex: None,
+            title_substring: None,
+            ax_role: None,
+            ax_subrole: None,
+            wrap_size: true,
+        }];
+
+        let mut manager = VirtualWorkspaceManager::new_with_config(&settings, &LayoutSettings::default());
+        let w = WindowId::new(1, 1);
+
+        let assignment = assign(&mut manager, w, space, Some("com.example.wrap"), None, None, None, None);
+        assert!(!assignment.floating);
+        assert!(assignment.wrap_size);
+        assert!(manager.is_window_wrap_size(space, w));
+
+        // Reassignment should preserve wrap_size
+        let again = assign(&mut manager, w, space, Some("com.example.wrap"), None, None, None, None);
+        assert!(again.wrap_size);
+    }
+
+    #[test]
+    fn app_rule_wrap_size_ignored_when_floating() {
+        let space = SpaceId::new(1);
+        let mut settings = VirtualWorkspaceSettings::default();
+        settings.app_rules = vec![AppWorkspaceRule {
+            app_id: Some("com.example.both".into()),
+            workspace: None,
+            floating: true,
+            manage: true,
+            app_name: None,
+            title_regex: None,
+            title_substring: None,
+            ax_role: None,
+            ax_subrole: None,
+            wrap_size: true,
+        }];
+
+        let mut manager = VirtualWorkspaceManager::new_with_config(&settings, &LayoutSettings::default());
+        let w = WindowId::new(1, 1);
+
+        let assignment = assign(&mut manager, w, space, Some("com.example.both"), None, None, None, None);
+        assert!(assignment.floating);
+        assert!(!assignment.wrap_size);
+        assert!(!manager.is_window_wrap_size(space, w));
     }
 }
