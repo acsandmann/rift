@@ -25,6 +25,7 @@ impl WindowDiscoveryHandler {
     }
 
     /// Handle a windows discovered event with app info.
+    /// Returns true if any matched app rule requested a workspace follow.
     pub fn handle_discovery(
         reactor: &mut Reactor,
         pid: pid_t,
@@ -32,7 +33,7 @@ impl WindowDiscoveryHandler {
         known_visible: Vec<WindowId>,
         // pending_refresh: bool,
         app_info: Option<AppInfo>,
-    ) {
+    ) -> bool {
         // If app_info wasn't provided, try to look it up from our running app state so
         // we can apply workspace rules immediately on first discovery.
         let app_info =
@@ -44,7 +45,7 @@ impl WindowDiscoveryHandler {
         let new_windows = Self::process_window_list(reactor, new, &app_info);
         Self::update_window_states(reactor, new_windows, &app_info);
 
-        Self::emit_layout_events(reactor, pid, &known_visible, &app_info);
+        Self::emit_layout_events(reactor, pid, &known_visible, &app_info)
     }
 
     fn sync_window_server_id_mapping(
@@ -406,9 +407,9 @@ impl WindowDiscoveryHandler {
         pid: pid_t,
         known_visible: &[WindowId],
         app_info: &Option<AppInfo>,
-    ) {
+    ) -> bool {
         if !reactor.window_manager.windows.iter().any(|(wid, _)| wid.pid == pid) {
-            return;
+            return false;
         }
 
         let mut app_windows: BTreeMap<SpaceId, Vec<WindowId>> = BTreeMap::new();
@@ -474,6 +475,10 @@ impl WindowDiscoveryHandler {
             }
         }
 
+        let needs_follow = assignment_results.values().any(|r| {
+            matches!(r, Ok(AppRuleResult::Managed(a)) if a.follow)
+        });
+
         let screens = reactor.space_manager.screens.clone();
         for screen in screens {
             let Some(space) = screen.space else {
@@ -537,5 +542,7 @@ impl WindowDiscoveryHandler {
         {
             reactor.send_layout_event(LayoutEvent::WindowFocused(space, main_window));
         }
+
+        needs_follow
     }
 }

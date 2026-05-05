@@ -63,7 +63,11 @@ impl WindowEventHandler {
                     if let Some(wsid) = server_id {
                         reactor.app_manager.mark_wsids_recent(std::iter::once(wsid));
                     }
-                    reactor.process_windows_for_app_rules(wid.pid, vec![wid], app_info);
+                    let needs_follow =
+                        reactor.process_windows_for_app_rules(wid.pid, vec![wid], app_info);
+                    if needs_follow && reactor.is_app_frontmost(wid.pid) {
+                        reactor.handle_app_activation_workspace_switch(wid.pid);
+                    }
                 }
                 maybe_dispatch_window_added_in_space(reactor, wid, space);
             }
