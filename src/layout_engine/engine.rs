@@ -1204,6 +1204,7 @@ impl LayoutEngine {
                                     workspace_id: ws,
                                     floating: was_floating,
                                     prev_rule_decision: false,
+                                    follow: false,
                                 }),
                                 Err(_) => {
                                     warn!(
@@ -1220,6 +1221,7 @@ impl LayoutEngine {
                         workspace_id: assigned_workspace,
                         floating: rule_says_float,
                         prev_rule_decision,
+                        follow: _,
                     } = match assignment {
                         Some(assign) => assign,
                         None => continue,

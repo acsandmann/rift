@@ -516,7 +516,7 @@ impl Reactor {
                 continue;
             };
 
-            self.process_windows_for_app_rules(pid, window_ids, app_state.info.clone());
+            let _ = self.process_windows_for_app_rules(pid, window_ids, app_state.info.clone());
         }
     }
 
@@ -1457,7 +1457,7 @@ impl Reactor {
             self.app_manager.mark_wsids_recent(std::iter::once(window_server_id));
         }
 
-        self.process_windows_for_app_rules(window_id.pid, vec![window_id], app_info);
+        let _ = self.process_windows_for_app_rules(window_id.pid, vec![window_id], app_info);
     }
 
     fn try_apply_pending_space_change(&mut self) {
@@ -1515,8 +1515,8 @@ impl Reactor {
         new: Vec<(WindowId, WindowInfo)>,
         known_visible: Vec<WindowId>,
         app_info: Option<AppInfo>,
-    ) {
-        WindowDiscoveryHandler::handle_discovery(self, pid, new, known_visible, app_info);
+    ) -> bool {
+        WindowDiscoveryHandler::handle_discovery(self, pid, new, known_visible, app_info)
     }
 
     fn best_space_for_window(
@@ -1882,9 +1882,9 @@ impl Reactor {
         pid: pid_t,
         window_ids: Vec<WindowId>,
         app_info: AppInfo,
-    ) {
+    ) -> bool {
         if window_ids.is_empty() {
-            return;
+            return false;
         }
 
         let mut windows_by_space: BTreeMap<SpaceId, Vec<WindowId>> = BTreeMap::new();
@@ -1900,6 +1900,8 @@ impl Reactor {
             };
             windows_by_space.entry(space).or_default().push(wid);
         }
+
+        let mut needs_follow = false;
 
         for (space, wids) in windows_by_space {
             if !self.is_space_active(space) {
@@ -1941,6 +1943,9 @@ impl Reactor {
 
                 match assign_result {
                     Ok(AppRuleResult::Managed(assignment)) => {
+                        if assignment.follow && (!was_assigned || was_ignored) {
+                            needs_follow = true;
+                        }
                         if let Some(window) = self.window_manager.windows.get_mut(wid) {
                             window.ignore_app_rule = false;
                         }
@@ -2028,6 +2033,8 @@ impl Reactor {
                 Some(app_info.clone()),
             ));
         }
+
+        needs_follow
     }
 
     fn handle_app_activation_workspace_switch(&mut self, pid: pid_t) {
@@ -2749,6 +2756,8 @@ impl Reactor {
     }
 
     fn main_window(&self) -> Option<WindowId> { self.main_window_tracker.main_window() }
+
+    fn is_app_frontmost(&self, pid: pid_t) -> bool { self.main_window_tracker.is_frontmost(pid) }
 
     fn main_window_space(&self) -> Option<SpaceId> {
         // TODO: Optimize this with a cache or something.
