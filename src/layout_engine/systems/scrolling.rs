@@ -812,9 +812,10 @@ impl LayoutSystem for ScrollingLayoutSystem {
                     CGPoint::new(x.round(), y_cursor.round()),
                     CGSize::new(column_width.round(), row_height.round()),
                 );
-                if state.fullscreen.contains(wid) {
+                let is_selected = state.selected == Some(*wid);
+                if state.fullscreen.contains(wid) && is_selected {
                     frame = screen;
-                } else if state.fullscreen_within_gaps.contains(wid) {
+                } else if state.fullscreen_within_gaps.contains(wid) && is_selected {
                     frame = tiling;
                 } else if let Some(c) = constraints.get(wid).copied() {
                     let c = c.normalized();
@@ -1200,7 +1201,10 @@ impl LayoutSystem for ScrollingLayoutSystem {
         let Some(state) = self.layout_state(layout) else {
             return false;
         };
-        !state.fullscreen.is_empty() || !state.fullscreen_within_gaps.is_empty()
+        let Some(selected) = state.selected else {
+            return false;
+        };
+        state.fullscreen.contains(&selected) || state.fullscreen_within_gaps.contains(&selected)
     }
 
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) {
@@ -2012,5 +2016,67 @@ mod tests {
             before.origin.x,
             after.origin.x
         );
+    }
+
+    #[test]
+    fn fullscreen_window_returns_to_normal_bounds_when_unfocused() {
+        let mut system = ScrollingLayoutSystem::default();
+        let layout = system.create_layout();
+
+        let w1 = wid(1, 100);
+        let w2 = wid(1, 101);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
+        let gaps = crate::common::config::GapSettings::default();
+
+        // Focus w1 and fullscreen it
+        system.select_window(layout, w1);
+        let _ = system.toggle_fullscreen_of_selection(layout);
+
+        let frames = system.calculate_layout(layout, screen, 0.0, &HashMap::default(), &gaps, 0.0, Default::default(), Default::default());
+        let frames: HashMap<WindowId, CGRect> = frames.into_iter().collect();
+        let w1_frame = frames.get(&w1).copied().expect("w1 missing");
+        assert_eq!(w1_frame, screen, "focused fullscreen window should cover screen");
+
+        // Move focus to w2
+        system.select_window(layout, w2);
+
+        let frames = system.calculate_layout(layout, screen, 0.0, &HashMap::default(), &gaps, 0.0, Default::default(), Default::default());
+        let frames: HashMap<WindowId, CGRect> = frames.into_iter().collect();
+        let w1_frame = frames.get(&w1).copied().expect("w1 missing");
+        let w2_frame = frames.get(&w2).copied().expect("w2 missing");
+
+        assert_ne!(w1_frame, screen, "unfocused fullscreen window should return to normal bounds");
+        assert!(w1_frame.size.width < 1000.0, "w1 should be smaller than screen");
+        assert!(w2_frame.size.width > 0.0, "w2 should have some space");
+    }
+
+    #[test]
+    fn fullscreen_window_re_expands_when_refocused() {
+        let mut system = ScrollingLayoutSystem::default();
+        let layout = system.create_layout();
+
+        let w1 = wid(1, 100);
+        let w2 = wid(1, 101);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
+        let gaps = crate::common::config::GapSettings::default();
+
+        // Focus w1 and fullscreen it
+        system.select_window(layout, w1);
+        let _ = system.toggle_fullscreen_of_selection(layout);
+
+        // Move focus away and back
+        system.select_window(layout, w2);
+        system.select_window(layout, w1);
+
+        let frames = system.calculate_layout(layout, screen, 0.0, &HashMap::default(), &gaps, 0.0, Default::default(), Default::default());
+        let frames: HashMap<WindowId, CGRect> = frames.into_iter().collect();
+        let w1_frame = frames.get(&w1).copied().expect("w1 missing");
+        assert_eq!(w1_frame, screen, "refocused fullscreen window should cover screen again");
     }
 }
