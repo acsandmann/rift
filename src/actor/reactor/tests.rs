@@ -1483,3 +1483,105 @@ fn discovery_after_display_change_places_window_on_correct_display() {
         "window must be laid out on screen2"
     );
 }
+
+#[test]
+fn process_windows_for_app_rules_returns_follow_for_new_assignment() {
+    let mut settings = crate::common::config::VirtualWorkspaceSettings::default();
+    settings.app_rules = vec![crate::common::config::AppWorkspaceRule {
+        app_id: Some("com.test.follow".into()),
+        workspace: Some(crate::common::config::WorkspaceSelector::Index(1)),
+        floating: false,
+        manage: true,
+        follow: true,
+        app_name: None,
+        title_regex: None,
+        title_substring: None,
+        ax_role: None,
+        ax_subrole: None,
+    }];
+
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &settings,
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    reactor.handle_event(screen_params_event(vec![screen], vec![Some(space)], vec![]));
+
+    let pid: pid_t = 42;
+    let wid = WindowId::new(pid, 1);
+    let mut window_state: super::WindowState = make_window(1).into();
+    window_state.is_manageable = true;
+    reactor.window_manager.windows.insert(wid, window_state);
+    reactor.app_manager.apps.insert(
+        pid,
+        super::AppState {
+            info: crate::actor::app::AppInfo {
+                bundle_id: Some("com.test.follow".into()),
+                localized_name: Some("FollowApp".into()),
+            },
+            handle: crate::actor::app::AppThreadHandle::new_for_test(
+                crate::actor::channel().0,
+            ),
+        },
+    );
+
+    let needs_follow = reactor.process_windows_for_app_rules(
+        pid,
+        vec![wid],
+        crate::actor::app::AppInfo {
+            bundle_id: Some("com.test.follow".into()),
+            localized_name: Some("FollowApp".into()),
+        },
+    );
+    assert!(needs_follow, "process_windows_for_app_rules should return true when follow=true and window is newly assigned");
+}
+
+#[test]
+fn maybe_auto_switch_to_window_workspace_changes_active_workspace() {
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    reactor.handle_event(screen_params_event(vec![screen], vec![Some(space)], vec![]));
+
+    let pid: pid_t = 42;
+    let wid = WindowId::new(pid, 1);
+    let mut window_state: super::WindowState = make_window(1).into();
+    window_state.is_manageable = true;
+    reactor.window_manager.windows.insert(wid, window_state);
+
+    // Assign window to workspace 1
+    let workspace1 = reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .list_workspaces(space)[1]
+        .0;
+    reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .assign_window_to_workspace(space, wid, workspace1);
+
+    // Active workspace should still be 0 (the default)
+    let active_before = reactor
+        .layout_manager
+        .layout_engine
+        .active_workspace(space)
+        .expect("active workspace should exist");
+    assert_ne!(active_before, workspace1, "test setup: window should be on a different workspace than active");
+
+    reactor.maybe_auto_switch_to_window_workspace(pid, wid, space);
+
+    let active_after = reactor
+        .layout_manager
+        .layout_engine
+        .active_workspace(space)
+        .expect("active workspace should exist");
+    assert_eq!(active_after, workspace1, "maybe_auto_switch_to_window_workspace should switch to the window's workspace");
+}

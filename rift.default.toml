@@ -275,6 +275,7 @@ workspace_names = [
 #     Alternatively, `workspace` may be a workspace name string to target by name.
 #   - floating (boolean): whether matched windows should float by default.
 #   - manage (boolean): whether Rift should manage the matching window. Set to false to ignore the window completely (default = true).
+#   - follow (boolean): if true, switch to the assigned workspace when a matching window opens and the app is frontmost (default = false).
 #
 # Matching behavior (summary):
 #   1. All rules that match a window are evaluated.
@@ -315,6 +316,11 @@ workspace_names = [
 #   - Match by app name substring and workspace:
 #       app_rules = [
 #         { app_name = "Calendar", workspace = 2, floating = true },
+#       ]
+#
+#   - Open an app and automatically switch to its assigned workspace:
+#       app_rules = [
+#         { app_id = "com.apple.dt.Xcode", workspace = 0, follow = true },
 #       ]
 #
 #   - Accessibility example: float dialog windows for a specific app:
