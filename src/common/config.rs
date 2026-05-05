@@ -142,6 +142,10 @@ pub struct AppWorkspaceRule {
     /// non-empty string and will be compared against the accessibility subrole
     /// reported by the AX APIs for a window (exact string match).
     pub ax_subrole: Option<String>,
+    /// When true and floating is false, the layout will size the window's tile/column
+    /// to the window's current natural size rather than stretching it to fill.
+    #[serde(default)]
+    pub wrap_size: bool,
 }
 
 impl Default for VirtualWorkspaceSettings {
@@ -1535,5 +1539,27 @@ mod tests {
         assert!(suggestion.is_some());
         let (s, _maybe_dep) = suggestion.unwrap();
         assert_eq!(s, "toggle_stack");
+    }
+
+    #[test]
+    fn parse_wrap_size_in_app_rules() {
+        let toml = r#"
+            [settings]
+            animate = false
+
+            [virtual_workspaces]
+            app_rules = [
+                { app_id = "com.example.wrap", wrap_size = true },
+                { app_id = "com.example.nofloat", floating = false, wrap_size = true },
+            ]
+
+            [keys]
+        "#;
+
+        let cfg = Config::parse(toml).unwrap();
+        assert_eq!(cfg.virtual_workspaces.app_rules.len(), 2);
+        assert!(cfg.virtual_workspaces.app_rules[0].wrap_size);
+        assert!(cfg.virtual_workspaces.app_rules[1].wrap_size);
+        assert!(!cfg.virtual_workspaces.app_rules[1].floating);
     }
 }

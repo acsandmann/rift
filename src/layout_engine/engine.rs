@@ -1166,20 +1166,6 @@ impl LayoutEngine {
                     max_size,
                 ) in windows_with_titles
                 {
-                    self.window_layout_constraints.insert(
-                        wid,
-                        WindowLayoutConstraints {
-                            is_resizable,
-                            locked_width: size_hint.width,
-                            locked_height: size_hint.height,
-                            min_width: min_size.map_or(0.0, |s| s.width),
-                            min_height: min_size.map_or(0.0, |s| s.height),
-                            max_width: max_size.map_or(0.0, |s| s.width),
-                            max_height: max_size.map_or(0.0, |s| s.height),
-                        }
-                        .normalized(),
-                    );
-
                     let title_ref = title_opt.as_deref();
                     let ax_role_ref = ax_role_opt.as_deref();
                     let ax_subrole_ref = ax_subrole_opt.as_deref();
@@ -1204,6 +1190,7 @@ impl LayoutEngine {
                                     workspace_id: ws,
                                     floating: was_floating,
                                     prev_rule_decision: false,
+                                    wrap_size: false,
                                 }),
                                 Err(_) => {
                                     warn!(
@@ -1220,10 +1207,28 @@ impl LayoutEngine {
                         workspace_id: assigned_workspace,
                         floating: rule_says_float,
                         prev_rule_decision,
+                        wrap_size: rule_wrap_size,
                     } = match assignment {
                         Some(assign) => assign,
                         None => continue,
                     };
+
+                    let has_valid_size = size_hint.width > 0.0 && size_hint.height > 0.0;
+                    let effective_wrap = rule_wrap_size && has_valid_size;
+                    self.window_layout_constraints.insert(
+                        wid,
+                        WindowLayoutConstraints {
+                            is_resizable: if effective_wrap { false } else { is_resizable },
+                            locked_width: size_hint.width,
+                            locked_height: size_hint.height,
+                            min_width: min_size.map_or(0.0, |s| s.width),
+                            min_height: min_size.map_or(0.0, |s| s.height),
+                            max_width: max_size.map_or(0.0, |s| s.width),
+                            max_height: max_size.map_or(0.0, |s| s.height),
+                            wrap_size: effective_wrap,
+                        }
+                        .normalized(),
+                    );
 
                     let should_float = rule_says_float || (!prev_rule_decision && was_floating);
 
@@ -1300,6 +1305,13 @@ impl LayoutEngine {
                 new_frame,
                 screens,
             } => {
+                // Update wrap_size constraints so calculate_layout sees the new size immediately.
+                if let Some(c) = self.window_layout_constraints.get_mut(&wid) {
+                    if c.wrap_size {
+                        c.locked_width = new_frame.size.width;
+                        c.locked_height = new_frame.size.height;
+                    }
+                }
                 for (space, screen_frame, display_uuid) in screens {
                     let Some((ws_id, layout)) = self.workspace_and_layout(space) else {
                         debug!(
@@ -3162,5 +3174,108 @@ mod tests {
             ),
             before
         );
+    }
+
+    #[test]
+    fn windows_on_screen_updated_sets_wrap_size_constraints() {
+        let mut engine = test_engine();
+        let space = SpaceId::new(42);
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
+        let pid = 1;
+        let wid = WindowId::new(pid, 1);
+
+        // Configure app rule with wrap_size
+        let mut settings = VirtualWorkspaceSettings::default();
+        settings.app_rules = vec![crate::common::config::AppWorkspaceRule {
+            app_id: Some("com.example.wrap".into()),
+            workspace: None,
+            floating: false,
+            manage: true,
+            app_name: None,
+            title_regex: None,
+            title_substring: None,
+            ax_role: None,
+            ax_subrole: None,
+            wrap_size: true,
+        }];
+        engine.update_virtual_workspace_settings(&settings);
+
+        let app_info = crate::actor::app::AppInfo {
+            bundle_id: Some("com.example.wrap".into()),
+            localized_name: None,
+        };
+
+        let _ = engine.handle_event(LayoutEvent::SpaceExposed(space, screen.size));
+        let _ = engine.handle_event(LayoutEvent::WindowsOnScreenUpdated(
+            space,
+            pid,
+            vec![(
+                wid,
+                None,
+                None,
+                None,
+                true,
+                CGSize::new(400.0, 600.0),
+                None,
+                None,
+            )],
+            Some(app_info),
+        ));
+
+        let c = engine
+            .window_layout_constraints
+            .get(&wid)
+            .copied()
+            .expect("constraint missing");
+        assert!(c.wrap_size);
+        assert!(!c.is_resizable);
+        assert_eq!(c.locked_width, 400.0);
+        assert_eq!(c.locked_height, 600.0);
+    }
+
+    #[test]
+    fn window_resized_updates_wrap_size_locked_dimensions() {
+        let mut engine = test_engine();
+        let space = SpaceId::new(42);
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
+        let pid = 1;
+        let wid = WindowId::new(pid, 1);
+
+        let _ = engine.handle_event(LayoutEvent::SpaceExposed(space, screen.size));
+        let _ = engine.handle_event(LayoutEvent::WindowsOnScreenUpdated(
+            space,
+            pid,
+            vec![(
+                wid,
+                None,
+                None,
+                None,
+                true,
+                CGSize::new(400.0, 600.0),
+                None,
+                None,
+            )],
+            None,
+        ));
+
+        // Manually mark as wrap_size to simulate what the app rule would have done
+        if let Some(c) = engine.window_layout_constraints.get_mut(&wid) {
+            c.wrap_size = true;
+        }
+
+        let _ = engine.handle_event(LayoutEvent::WindowResized {
+            wid,
+            old_frame: CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(400.0, 600.0)),
+            new_frame: CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(500.0, 700.0)),
+            screens: vec![(space, screen, None)],
+        });
+
+        let c = engine
+            .window_layout_constraints
+            .get(&wid)
+            .copied()
+            .expect("constraint missing");
+        assert_eq!(c.locked_width, 500.0);
+        assert_eq!(c.locked_height, 700.0);
     }
 }

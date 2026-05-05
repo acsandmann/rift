@@ -17,6 +17,7 @@ pub struct WindowLayoutConstraints {
     pub min_height: f64,
     pub max_width: f64,
     pub max_height: f64,
+    pub wrap_size: bool,
 }
 
 impl WindowLayoutConstraints {
@@ -40,6 +41,7 @@ impl WindowLayoutConstraints {
             min_height,
             max_width,
             max_height,
+            wrap_size: self.wrap_size,
         }
     }
 
@@ -192,7 +194,8 @@ mod tests {
             min_height: 470.0,
             max_width: 723.0,
             max_height: 0.0,
-        }
+                        wrap_size: false,
+            }
         .normalized();
 
         assert_eq!(c.fixed_for_axis(true), Some(723.0));
@@ -212,7 +215,8 @@ mod tests {
             min_height: 0.0,
             max_width: 0.0,
             max_height: 0.0,
-        }
+                        wrap_size: false,
+            }
         .normalized();
 
         assert_eq!(c.fixed_for_axis(true), None);
@@ -231,7 +235,8 @@ mod tests {
             min_height: 0.0,
             max_width: 0.0,
             max_height: 0.0,
-        }
+                        wrap_size: false,
+            }
         .normalized();
 
         assert_eq!(c.fixed_for_axis(true), Some(640.0));
@@ -251,7 +256,8 @@ mod tests {
             min_height: 0.0,
             max_width: 600.0,
             max_height: 480.0,
-        }
+                        wrap_size: false,
+            }
         .normalized();
 
         assert_eq!(c.fixed_for_axis(true), None);
