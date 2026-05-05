@@ -654,6 +654,10 @@ pub struct ScrollingLayoutSettings {
     /// - anchored: always align focused column to `alignment`.
     #[serde(default)]
     pub focus_navigation_style: ScrollingFocusNavigationStyle,
+    /// If true, focusing left from the first column wraps to the last,
+    /// and focusing right from the last column wraps to the first.
+    #[serde(default = "no")]
+    pub infinite_loop: bool,
     /// Trackpad gestures for scrolling layout
     #[serde(default)]
     pub gestures: ScrollingGestureSettings,
@@ -668,6 +672,7 @@ impl Default for ScrollingLayoutSettings {
             max_column_width_ratio: default_scrolling_max_column_width_ratio(),
             alignment: ScrollingAlignment::default(),
             focus_navigation_style: ScrollingFocusNavigationStyle::default(),
+            infinite_loop: false,
             gestures: ScrollingGestureSettings::default(),
         }
     }
