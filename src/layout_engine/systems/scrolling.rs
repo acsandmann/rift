@@ -476,13 +476,29 @@ impl ScrollingLayoutSystem {
         Some(new_sel)
     }
 
-    fn move_focus_horizontal(state: &mut LayoutState, dir: Direction) -> Option<WindowId> {
+    fn move_focus_horizontal(
+        state: &mut LayoutState,
+        dir: Direction,
+        wrap: bool,
+    ) -> Option<WindowId> {
         let (col_idx, row_idx) = state.selected_location()?;
         let target_col = match dir {
-            Direction::Left => col_idx.checked_sub(1)?,
-            Direction::Right => (col_idx + 1 < state.columns.len()).then_some(col_idx + 1)?,
+            Direction::Left => {
+                if col_idx == 0 {
+                    if wrap { Some(state.columns.len().saturating_sub(1)) } else { None }
+                } else {
+                    Some(col_idx - 1)
+                }
+            }
+            Direction::Right => {
+                if col_idx + 1 >= state.columns.len() {
+                    if wrap { Some(0) } else { None }
+                } else {
+                    Some(col_idx + 1)
+                }
+            }
             _ => return None,
-        };
+        }?;
         let target_column = &state.columns[target_col];
         if target_column.windows.is_empty() {
             return None;
@@ -890,11 +906,14 @@ impl LayoutSystem for ScrollingLayoutSystem {
             self.settings.focus_navigation_style,
             ScrollingFocusNavigationStyle::Niri
         );
+        let infinite_loop = self.settings.infinite_loop;
         let Some(state) = self.layout_state_mut(layout) else {
             return (None, vec![]);
         };
         let new_sel = match direction {
-            Direction::Left | Direction::Right => Self::move_focus_horizontal(state, direction),
+            Direction::Left | Direction::Right => {
+                Self::move_focus_horizontal(state, direction, infinite_loop)
+            }
             Direction::Up | Direction::Down => Self::move_focus_vertical(state, direction),
         };
         if new_sel.is_some() && niri_navigation {
@@ -916,15 +935,24 @@ impl LayoutSystem for ScrollingLayoutSystem {
     fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
         let state = self.layout_state(layout)?;
         let (col_idx, row_idx) = state.selected_location()?;
+        let wrap = self.settings.infinite_loop;
         match direction {
             Direction::Left => {
-                let target = col_idx.checked_sub(1)?;
+                let target = if col_idx == 0 {
+                    if wrap { Some(state.columns.len().saturating_sub(1)) } else { None }
+                } else {
+                    Some(col_idx - 1)
+                }?;
                 state.columns.get(target).and_then(|col| {
                     col.windows.get(row_idx.min(col.windows.len().saturating_sub(1))).copied()
                 })
             }
             Direction::Right => {
-                let target = col_idx + 1;
+                let target = if col_idx + 1 >= state.columns.len() {
+                    if wrap { Some(0) } else { None }
+                } else {
+                    Some(col_idx + 1)
+                }?;
                 state.columns.get(target).and_then(|col| {
                     col.windows.get(row_idx.min(col.windows.len().saturating_sub(1))).copied()
                 })
@@ -2011,6 +2039,207 @@ mod tests {
             "expected centered x to persist, got {} -> {}",
             before.origin.x,
             after.origin.x
+        );
+    }
+
+    #[test]
+    fn infinite_loop_disabled_does_not_wrap_focus() {
+        let mut system = ScrollingLayoutSystem::new(&ScrollingLayoutSettings::default());
+        let layout = system.create_layout();
+        let w1 = wid(1, 1);
+        let w2 = wid(1, 2);
+        let w3 = wid(1, 3);
+
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+        system.add_window_after_selection(layout, w3);
+        // w3 is selected (rightmost)
+        assert_eq!(system.selected_window(layout), Some(w3));
+
+        let (focus, _) = system.move_focus(layout, Direction::Right);
+        assert_eq!(focus, None, "expected no wrap when infinite_loop is false");
+
+        system.select_window(layout, w1);
+        let (focus, _) = system.move_focus(layout, Direction::Left);
+        assert_eq!(focus, None, "expected no wrap when infinite_loop is false");
+    }
+
+    #[test]
+    fn infinite_loop_wraps_focus_right_from_last_column() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.infinite_loop = true;
+        let mut system = ScrollingLayoutSystem::new(&settings);
+        let layout = system.create_layout();
+        let w1 = wid(1, 1);
+        let w2 = wid(1, 2);
+        let w3 = wid(1, 3);
+
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+        system.add_window_after_selection(layout, w3);
+        // w3 is selected (rightmost)
+        assert_eq!(system.selected_window(layout), Some(w3));
+
+        let (focus, _) = system.move_focus(layout, Direction::Right);
+        assert_eq!(focus, Some(w1), "expected wrap from last to first");
+    }
+
+    #[test]
+    fn infinite_loop_wraps_focus_left_from_first_column() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.infinite_loop = true;
+        let mut system = ScrollingLayoutSystem::new(&settings);
+        let layout = system.create_layout();
+        let w1 = wid(1, 1);
+        let w2 = wid(1, 2);
+        let w3 = wid(1, 3);
+
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+        system.add_window_after_selection(layout, w3);
+        system.select_window(layout, w1);
+
+        let (focus, _) = system.move_focus(layout, Direction::Left);
+        assert_eq!(focus, Some(w3), "expected wrap from first to last");
+    }
+
+    #[test]
+    fn infinite_loop_wraps_window_in_direction() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.infinite_loop = true;
+        let mut system = ScrollingLayoutSystem::new(&settings);
+        let layout = system.create_layout();
+        let w1 = wid(1, 1);
+        let w2 = wid(1, 2);
+        let w3 = wid(1, 3);
+
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+        system.add_window_after_selection(layout, w3);
+        system.select_window(layout, w3);
+
+        assert_eq!(
+            system.window_in_direction(layout, Direction::Right),
+            Some(w1),
+            "expected window_in_direction to wrap from last to first"
+        );
+
+        system.select_window(layout, w1);
+        assert_eq!(
+            system.window_in_direction(layout, Direction::Left),
+            Some(w3),
+            "expected window_in_direction to wrap from first to last"
+        );
+    }
+
+    #[test]
+    fn infinite_loop_single_column_wraps_to_self() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.infinite_loop = true;
+        let mut system = ScrollingLayoutSystem::new(&settings);
+        let layout = system.create_layout();
+        let w1 = wid(1, 1);
+
+        system.add_window_after_selection(layout, w1);
+        assert_eq!(system.selected_window(layout), Some(w1));
+
+        let (focus_right, _) = system.move_focus(layout, Direction::Right);
+        assert_eq!(focus_right, Some(w1), "single column right wrap should stay on self");
+
+        let (focus_left, _) = system.move_focus(layout, Direction::Left);
+        assert_eq!(focus_left, Some(w1), "single column left wrap should stay on self");
+    }
+
+    #[test]
+    fn infinite_loop_two_columns_wraps() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.infinite_loop = true;
+        let mut system = ScrollingLayoutSystem::new(&settings);
+        let layout = system.create_layout();
+        let w1 = wid(1, 1);
+        let w2 = wid(1, 2);
+
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+        // w2 selected
+        assert_eq!(system.selected_window(layout), Some(w2));
+
+        let (focus, _) = system.move_focus(layout, Direction::Right);
+        assert_eq!(focus, Some(w1), "two-column wrap right from last to first");
+
+        let (focus, _) = system.move_focus(layout, Direction::Left);
+        assert_eq!(focus, Some(w2), "two-column wrap left from first to last");
+    }
+
+    #[test]
+    fn infinite_loop_stacked_column_preserves_row_index() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.infinite_loop = true;
+        let mut system = ScrollingLayoutSystem::new(&settings);
+        let layout = system.create_layout();
+        let w1a = wid(1, 1);
+        let w1b = wid(1, 2);
+        let w2a = wid(2, 1);
+        let w2b = wid(2, 2);
+        let w2c = wid(2, 3);
+
+        // Build col0: [w1a, w1b], col1: [w2a, w2b, w2c]
+        system.add_window_after_selection(layout, w1a);
+        system.add_window_after_selection(layout, w1b);
+        system.join_selection_with_direction(layout, Direction::Left);
+        system.add_window_after_selection(layout, w2a);
+        system.add_window_after_selection(layout, w2b);
+        system.join_selection_with_direction(layout, Direction::Left);
+        system.add_window_after_selection(layout, w2c);
+        system.join_selection_with_direction(layout, Direction::Left);
+
+        // w2c is selected (row 2 in col 1); select w1b (row 1 in col 0)
+        system.select_window(layout, w1b);
+        assert_eq!(system.selected_window(layout), Some(w1b));
+
+        // wrap left from first col → last col, row preserved when possible (w2b at row 1)
+        let (focus, _) = system.move_focus(layout, Direction::Left);
+        assert_eq!(focus, Some(w2b), "stacked wrap should preserve row index when possible");
+
+        // wrap right from last col → first col, row clamped to len-1 = 1 (w1b)
+        system.select_window(layout, w2c);
+        let (focus, _) = system.move_focus(layout, Direction::Right);
+        assert_eq!(focus, Some(w1b), "stacked wrap back should clamp row index");
+    }
+
+    #[test]
+    fn infinite_loop_wrap_reveals_wrapped_column() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.infinite_loop = true;
+        settings.alignment = crate::common::config::ScrollingAlignment::Left;
+        let mut system = ScrollingLayoutSystem::new(&settings);
+        let layout = system.create_layout();
+        let w1 = wid(1, 1);
+        let w2 = wid(1, 2);
+        let w3 = wid(1, 3);
+
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+        system.add_window_after_selection(layout, w3);
+        system.select_window(layout, w3);
+
+        let screen = screen(1000.0, 800.0);
+        let gaps = GapSettings::default();
+        let before = render(&system, layout, screen, &gaps);
+        let _before_w1 = frame_for(&before, w1);
+
+        // wrap right from w3 (last) → w1 (first)
+        system.move_focus(layout, Direction::Right);
+        let after = render(&system, layout, screen, &gaps);
+        let after_w1 = frame_for(&after, w1);
+
+        // w1 should be the selected column after wrap
+        assert_eq!(system.selected_window(layout), Some(w1));
+        // and it should actually be positioned on screen (not off-screen)
+        assert!(
+            after_w1.origin.x >= screen.origin.x && after_w1.origin.x < screen.origin.x + screen.size.width,
+            "wrapped column should be on screen, got x={}",
+            after_w1.origin.x
         );
     }
 }

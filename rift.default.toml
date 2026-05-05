@@ -102,6 +102,8 @@ alignment = "center"
 # 			(disrespects alignment setting above)
 # - "anchored": always align focused column according to `alignment`
 focus_navigation_style = "niri"
+# If true, focusing past the first/last column wraps around to the other end.
+# infinite_loop = false
 # the scrolling layout tends to function better without animations,
 # so you can disable them if you like
 # animate = false
