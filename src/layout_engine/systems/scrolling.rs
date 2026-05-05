@@ -1348,6 +1348,68 @@ impl LayoutSystem for ScrollingLayoutSystem {
         }
     }
 
+    fn resize_selection_preset(&mut self, layout: LayoutId, presets: &[f64], reverse: bool) {
+        if presets.is_empty() {
+            return;
+        }
+        let niri_navigation = matches!(
+            self.settings.focus_navigation_style,
+            ScrollingFocusNavigationStyle::Niri
+        );
+        let Some(state) = self.layout_state_mut(layout) else {
+            return;
+        };
+        let base_ratio = state.column_width_ratio;
+
+        let (effective, col_idx_opt, was_fullscreen) =
+            if let Some((col_idx, win_idx)) = state.selected_location() {
+                let wid = state.columns[col_idx].windows[win_idx];
+                let was_fs = state.fullscreen.contains(&wid)
+                    || state.fullscreen_within_gaps.contains(&wid);
+                state.fullscreen.remove(&wid);
+                state.fullscreen_within_gaps.remove(&wid);
+                (
+                    base_ratio + state.columns[col_idx].width_offset,
+                    Some(col_idx),
+                    was_fs,
+                )
+            } else {
+                (base_ratio, None, false)
+            };
+
+        let target = if was_fullscreen {
+            if reverse {
+                *presets.last().unwrap()
+            } else {
+                presets[0]
+            }
+        } else if reverse {
+            presets
+                .iter()
+                .rev()
+                .find(|&&p| p < effective)
+                .copied()
+                .unwrap_or_else(|| *presets.last().unwrap())
+        } else {
+            presets
+                .iter()
+                .find(|&&p| p > effective)
+                .copied()
+                .unwrap_or(presets[0])
+        };
+
+        if let Some(col_idx) = col_idx_opt {
+            state.columns[col_idx].width_offset = target - base_ratio;
+            if niri_navigation {
+                state.reveal_selected_without_direction();
+            } else {
+                state.align_scroll_to_selected();
+            }
+        } else {
+            state.column_width_ratio = target;
+        }
+    }
+
     fn rebalance(&mut self, _layout: LayoutId) {}
 
     fn toggle_tile_orientation(&mut self, _layout: LayoutId) {}
@@ -2011,6 +2073,158 @@ mod tests {
             "expected centered x to persist, got {} -> {}",
             before.origin.x,
             after.origin.x
+        );
+    }
+
+    #[test]
+    fn preset_next_cycles_forward() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.column_width_ratio = 0.33;
+        settings.column_width_presets = vec![0.33, 0.50, 0.66, 0.99];
+        let (mut system, layout, _, _) = setup_two_windows(settings);
+
+        system.resize_selection_preset(layout, &[0.33, 0.50, 0.66, 0.99], false);
+        let state = system.layouts.get(layout).expect("layout state missing");
+        let effective = state.column_width_ratio + state.columns[1].width_offset;
+        assert!(
+            (effective - 0.50).abs() < 0.01,
+            "expected second preset 0.50, got {}",
+            effective
+        );
+
+        system.resize_selection_preset(layout, &[0.33, 0.50, 0.66, 0.99], false);
+        let state = system.layouts.get(layout).expect("layout state missing");
+        let effective = state.column_width_ratio + state.columns[1].width_offset;
+        assert!(
+            (effective - 0.66).abs() < 0.01,
+            "expected third preset 0.66, got {}",
+            effective
+        );
+    }
+
+    #[test]
+    fn preset_prev_cycles_backward() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.column_width_ratio = 0.33;
+        settings.column_width_presets = vec![0.33, 0.50, 0.66, 0.99];
+        let (mut system, layout, _, _) = setup_two_windows(settings);
+
+        system.resize_selection_preset(layout, &[0.33, 0.50, 0.66, 0.99], true);
+        let state = system.layouts.get(layout).expect("layout state missing");
+        let effective = state.column_width_ratio + state.columns[1].width_offset;
+        assert!(
+            (effective - 0.99).abs() < 0.01,
+            "expected last preset 0.99, got {}",
+            effective
+        );
+
+        system.resize_selection_preset(layout, &[0.33, 0.50, 0.66, 0.99], true);
+        let state = system.layouts.get(layout).expect("layout state missing");
+        let effective = state.column_width_ratio + state.columns[1].width_offset;
+        assert!(
+            (effective - 0.66).abs() < 0.01,
+            "expected third preset 0.66, got {}",
+            effective
+        );
+    }
+
+    #[test]
+    fn preset_next_wraps_to_first() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.column_width_ratio = 0.99;
+        settings.column_width_presets = vec![0.33, 0.50, 0.66, 0.99];
+        let (mut system, layout, _, _) = setup_two_windows(settings);
+
+        system.resize_selection_preset(layout, &[0.33, 0.50, 0.66, 0.99], false);
+
+        let state = system.layouts.get(layout).expect("layout state missing");
+        let effective = state.column_width_ratio + state.columns[1].width_offset;
+        assert!(
+            (effective - 0.33).abs() < 0.01,
+            "expected wrap to first preset 0.33, got {}",
+            effective
+        );
+    }
+
+    #[test]
+    fn preset_prev_wraps_to_last() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.column_width_ratio = 0.33;
+        settings.column_width_presets = vec![0.33, 0.50, 0.66, 0.99];
+        let (mut system, layout, _, _) = setup_two_windows(settings);
+
+        system.resize_selection_preset(layout, &[0.33, 0.50, 0.66, 0.99], true);
+
+        let state = system.layouts.get(layout).expect("layout state missing");
+        let effective = state.column_width_ratio + state.columns[1].width_offset;
+        assert!(
+            (effective - 0.99).abs() < 0.01,
+            "expected wrap to last preset 0.99, got {}",
+            effective
+        );
+    }
+
+    #[test]
+    fn preset_next_from_fullscreen_goes_to_first() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.column_width_presets = vec![0.33, 0.50, 0.66, 0.99];
+        let (mut system, layout, _, w2) = setup_two_windows(settings);
+
+        system.toggle_fullscreen_of_selection(layout);
+        system.resize_selection_preset(layout, &[0.33, 0.50, 0.66, 0.99], false);
+
+        let state = system.layouts.get(layout).expect("layout state missing");
+        let effective = state.column_width_ratio + state.columns[1].width_offset;
+        assert!(
+            (effective - 0.33).abs() < 0.01,
+            "expected first preset 0.33 after exiting fullscreen, got {}",
+            effective
+        );
+        assert!(!state.fullscreen.contains(&w2));
+        assert!(!state.fullscreen_within_gaps.contains(&w2));
+    }
+
+    #[test]
+    fn preset_prev_from_fullscreen_goes_to_last() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.column_width_presets = vec![0.33, 0.50, 0.66, 0.99];
+        let (mut system, layout, _, w2) = setup_two_windows(settings);
+
+        system.toggle_fullscreen_within_gaps_of_selection(layout);
+        system.resize_selection_preset(layout, &[0.33, 0.50, 0.66, 0.99], true);
+
+        let state = system.layouts.get(layout).expect("layout state missing");
+        let effective = state.column_width_ratio + state.columns[1].width_offset;
+        assert!(
+            (effective - 0.99).abs() < 0.01,
+            "expected last preset 0.99 after exiting fullscreen, got {}",
+            effective
+        );
+        assert!(!state.fullscreen.contains(&w2));
+        assert!(!state.fullscreen_within_gaps.contains(&w2));
+    }
+
+    #[test]
+    fn preset_without_selection_adjusts_base_ratio() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.column_width_presets = vec![0.33, 0.50, 0.66, 0.99];
+        let mut system = ScrollingLayoutSystem::new(&settings);
+        let layout = system.create_layout();
+        let w1 = wid(1, 1);
+        system.add_window_after_selection(layout, w1);
+        // Clear selection
+        {
+            let state = system.layouts.get_mut(layout).expect("layout state missing");
+            state.selected = None;
+        }
+
+        system.resize_selection_preset(layout, &[0.33, 0.50, 0.66, 0.99], false);
+
+        let state = system.layouts.get(layout).expect("layout state missing");
+        assert!(
+            (state.column_width_ratio - 0.99).abs() < 0.01,
+            "expected base ratio set to next preset 0.99, got {}",
+            state.column_width_ratio
         );
     }
 }

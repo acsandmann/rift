@@ -64,6 +64,10 @@ pub enum LayoutCommand {
     ResizeWindowBy {
         amount: f64,
     },
+    /// Cycle the selected window to the next column width preset.
+    ResizeWindowPresetNext,
+    /// Cycle the selected window to the previous column width preset.
+    ResizeWindowPresetPrev,
 
     /// Scroll the strip by a normalized delta (scaled by column step width)
     ScrollStrip {
@@ -1645,6 +1649,28 @@ impl LayoutEngine {
 
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
                 self.workspace_tree_mut(workspace_id).resize_selection_by(layout, amount);
+                EventResponse::default()
+            }
+            LayoutCommand::ResizeWindowPresetNext => {
+                if is_floating {
+                    return EventResponse::default();
+                }
+
+                self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
+                let presets = self.layout_settings.scrolling.column_width_presets.clone();
+                self.workspace_tree_mut(workspace_id)
+                    .resize_selection_preset(layout, &presets, false);
+                EventResponse::default()
+            }
+            LayoutCommand::ResizeWindowPresetPrev => {
+                if is_floating {
+                    return EventResponse::default();
+                }
+
+                self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
+                let presets = self.layout_settings.scrolling.column_width_presets.clone();
+                self.workspace_tree_mut(workspace_id)
+                    .resize_selection_preset(layout, &presets, true);
                 EventResponse::default()
             }
             LayoutCommand::AdjustMasterRatio { delta } => {

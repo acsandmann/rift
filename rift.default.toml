@@ -95,6 +95,10 @@ column_width_ratio = 0.7
 # min_column_width_ratio / max_column_width_ratio: clamp bounds used by resize commands
 min_column_width_ratio = 0.3
 max_column_width_ratio = 0.9
+# Preset column widths cycled by resize_window_preset_next / resize_window_preset_prev.
+# Each value is a fraction of screen width (0.0–1.0).
+# Empty: disables preset cycling.
+column_width_presets = [0.33, 0.50, 0.66, 0.99]
 # Alignment for the focused column: "left", "center", or "right"
 alignment = "center"
 # Horizontal focus behavior:
@@ -359,6 +363,7 @@ comb1 = "Alt + Shift"
 # - toggle_stack / toggle_orientation / unjoin_windows
 # - toggle_focus_floating / toggle_window_floating / toggle_fullscreen / toggle_fullscreen_within_gaps
 # - resize_window_grow / resize_window_shrink / resize_window_by = 0.05
+# - resize_window_preset_next / resize_window_preset_prev
 # - swap_windows = [123, 456]
 # - exec = "command" | exec = ["cmd", "arg1", "..."]
 # - move_mouse_to_display = "left"|"right"|"up"|"down"|N|"<display_uuid>"
