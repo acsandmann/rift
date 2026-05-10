@@ -2728,6 +2728,7 @@ impl Reactor {
     }
 
     fn refresh_windows_after_mission_control(&mut self) {
+        debug!("Refreshing window state after Mission Control");
         // Skip when on a fullscreen space: kAXWindowsAttribute is space-filtered, so
         // apps omit their Desktop windows. check_for_new_windows sends an untracked
         // GetVisibleWindows whose response bypasses pending_mission_control_refresh,
