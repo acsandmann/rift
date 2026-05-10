@@ -2728,7 +2728,14 @@ impl Reactor {
     }
 
     fn refresh_windows_after_mission_control(&mut self) {
-        debug!("Refreshing window state after Mission Control");
+        // Skip when on a fullscreen space: kAXWindowsAttribute is space-filtered, so
+        // apps omit their Desktop windows. check_for_new_windows sends an untracked
+        // GetVisibleWindows whose response bypasses pending_mission_control_refresh,
+        // causing those Desktop windows to be dropped from the layout, and other
+        // windows in the layout to be incorrecctly resized.
+        if !crate::sys::window_server::active_space_is_user() {
+            return;
+        }
         let ws_info = window_server::get_visible_windows_with_layer(None);
         self.update_partial_window_server_info(ws_info);
         self.mission_control_manager.pending_mission_control_refresh.clear();

@@ -79,6 +79,20 @@ impl WindowEventHandler {
             Some(window) => window.info.sys_id,
             None => return false,
         };
+
+        // Suppress false-positive destructions when on a fullscreen space or during MC.
+        // kAXMainWindowChangedNotification triggers remove_stale_windows in app.rs, which
+        // calls kAXWindowsAttribute (space-filtered), omitting Desktop windows and emitting
+        // WindowDestroyed for them. get_window() uses CGWindowListCopyWindowInfo
+        // (not space-filtered), so Some here means the window still exists.
+        if !crate::sys::window_server::active_space_is_user() || reactor.is_mission_control_active() {
+            if let Some(ws_id) = window_server_id {
+                if crate::sys::window_server::get_window(ws_id).is_some() {
+                    return false;
+                }
+            }
+        }
+
         if let Some(ws_id) = window_server_id {
             reactor.transaction_manager.remove_for_window(ws_id);
             reactor.window_manager.window_ids.remove(&ws_id);

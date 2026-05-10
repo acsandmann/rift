@@ -276,7 +276,12 @@ pub fn window_spaces(id: WindowServerId) -> Vec<crate::sys::screen::SpaceId> {
 }
 
 pub fn window_space(id: WindowServerId) -> Option<crate::sys::screen::SpaceId> {
-    window_spaces(id).into_iter().next()
+    let spaces = window_spaces(id);
+    // SLSCopySpacesForWindows can return multiple space IDs for a window during
+    // Mission Control or fullscreen transitions — the window's real home space plus
+    // a transient fullscreen space. Prefer any user space (type 0) in the list so
+    // that Desktop windows are not misidentified as belonging to a fullscreen space.
+    spaces.iter().copied().find(|s| space_is_user(s.get())).or_else(|| spaces.into_iter().next())
 }
 
 pub fn window_is_ordered_in(id: WindowServerId) -> bool {
@@ -695,6 +700,7 @@ pub fn window_space_id(cid: i32, wid: u32) -> u64 {
 pub fn space_is_user(sid: u64) -> bool { unsafe { SLSSpaceGetType(*G_CONNECTION, sid) == 0 } }
 pub fn space_is_fullscreen(sid: u64) -> bool { unsafe { SLSSpaceGetType(*G_CONNECTION, sid) == 4 } }
 pub fn space_is_system(sid: u64) -> bool { unsafe { SLSSpaceGetType(*G_CONNECTION, sid) == 2 } }
+pub fn active_space_is_user() -> bool { unsafe { space_is_user(CGSGetActiveSpace(*G_CONNECTION)) } }
 pub fn wait_for_native_fullscreen_transition() {
     while !space_is_user(unsafe { CGSGetActiveSpace(*G_CONNECTION) }) {
         std::thread::sleep(Duration::from_millis(100));
