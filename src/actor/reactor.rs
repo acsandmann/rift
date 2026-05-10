@@ -1525,9 +1525,15 @@ impl Reactor {
         window_server_id: Option<WindowServerId>,
     ) -> Option<SpaceId> {
         if let Some(space) = window_server_id.and_then(crate::sys::window_server::window_space) {
-            if self.space_manager.screen_by_space(space).is_some()
-                || crate::sys::window_server::space_is_user(space.get())
-            {
+            // Return None for windows whose resolved space is not a user space (e.g. native
+            // fullscreen app spaces, SLSSpaceGetType != 0). Without this guard, fullscreen
+            // windows fall through to best_space_for_frame which matches by geometry — and
+            // fullscreen windows cover the whole screen, so they match the current user space
+            // and bleed into its tile layout after Mission Control (fixes #357).
+            if !crate::sys::window_server::space_is_user(space.get()) {
+                return None;
+            }
+            if self.space_manager.screen_by_space(space).is_some() {
                 return Some(space);
             }
         }
