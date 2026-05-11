@@ -85,7 +85,8 @@ impl WindowEventHandler {
         // calls kAXWindowsAttribute (space-filtered), omitting Desktop windows and emitting
         // WindowDestroyed for them. get_window() uses CGWindowListCopyWindowInfo
         // (not space-filtered), so Some here means the window still exists.
-        if !crate::sys::window_server::active_space_is_user() || reactor.is_mission_control_active() {
+        if !crate::sys::window_server::active_space_is_user() || reactor.is_mission_control_active()
+        {
             if let Some(ws_id) = window_server_id {
                 if crate::sys::window_server::get_window(ws_id).is_some() {
                     return false;

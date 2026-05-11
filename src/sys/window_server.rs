@@ -281,7 +281,11 @@ pub fn window_space(id: WindowServerId) -> Option<crate::sys::screen::SpaceId> {
     // Mission Control or fullscreen transitions — the window's real home space plus
     // a transient fullscreen space. Prefer any user space (type 0) in the list so
     // that Desktop windows are not misidentified as belonging to a fullscreen space.
-    spaces.iter().copied().find(|s| space_is_user(s.get())).or_else(|| spaces.into_iter().next())
+    spaces
+        .iter()
+        .copied()
+        .find(|s| space_is_user(s.get()))
+        .or_else(|| spaces.into_iter().next())
 }
 
 pub fn window_is_ordered_in(id: WindowServerId) -> bool {
