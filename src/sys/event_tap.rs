@@ -1,4 +1,5 @@
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use objc2_core_foundation::{
     CFMachPort, CFRetained, CFRunLoop, CFRunLoopMode, CFRunLoopSource, kCFRunLoopCommonModes,
@@ -23,6 +24,7 @@ struct TrampolineCtx {
     original_user_info: *mut c_void,
     original_drop: Option<unsafe fn(*mut c_void)>,
     port_ptr: Option<core::ptr::NonNull<CFMachPort>>,
+    was_reenabled: AtomicBool,
 }
 
 extern "C-unwind" fn trampoline_callback(
@@ -42,6 +44,7 @@ extern "C-unwind" fn trampoline_callback(
     if ety == -1 || ety == -2 {
         if let Some(port_ptr) = ctx.port_ptr {
             unsafe { CGEvent::tap_enable(port_ptr.as_ref(), true) };
+            ctx.was_reenabled.store(true, Ordering::Release);
         }
 
         return event_ref.as_ptr();
@@ -87,6 +90,7 @@ impl EventTap {
             original_user_info: user_info,
             original_drop: drop_ctx,
             port_ptr: None,
+            was_reenabled: AtomicBool::new(false),
         });
         let tramp_ptr = Box::into_raw(tramp) as *mut c_void;
 
@@ -142,6 +146,16 @@ impl EventTap {
     }
 
     pub fn set_enabled(&self, enabled: bool) { CGEvent::tap_enable(&self.port, enabled); }
+
+    /// Returns `true` if the tap was re-enabled since the last call, and
+    /// atomically clears the flag. Used by the actor layer to detect that
+    /// key-up events may have been lost while the tap was disabled.
+    pub fn take_reenabled_flag(&self) -> bool {
+        // SAFETY: self.user_info was created by new_with_options and always
+        // points to a live TrampolineCtx as long as this EventTap exists.
+        let ctx = unsafe { &*(self.user_info as *const TrampolineCtx) };
+        ctx.was_reenabled.swap(false, Ordering::AcqRel)
+    }
 }
 
 impl Drop for EventTap {
