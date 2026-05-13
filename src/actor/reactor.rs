@@ -39,6 +39,7 @@ use tracing::{debug, info, instrument, trace, warn};
 use transaction_manager::TransactionId;
 
 use super::event_tap;
+use super::gesture_tap;
 use crate::actor::app::{AppInfo, AppThreadHandle, Quiet, Request, WindowId, WindowInfo, pid_t};
 use crate::actor::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::actor::raise_manager::{self, RaiseManager, RaiseRequest};
@@ -266,6 +267,7 @@ impl Reactor {
         menu_tx: menu_bar::Sender,
         stack_line_tx: stack_line::Sender,
         window_notify: Option<(crate::actor::window_notify::Sender, WindowTxStore)>,
+        gesture_tap_tx: Option<gesture_tap::Sender>,
         one_space: bool,
     ) -> ReactorHandle {
         let (events_tx, events) = actor::channel();
@@ -281,6 +283,7 @@ impl Reactor {
         reactor.communication_manager.event_tap_tx = Some(event_tap_tx);
         reactor.menu_manager.menu_tx = Some(menu_tx);
         reactor.communication_manager.stack_line_tx = Some(stack_line_tx);
+        reactor.communication_manager.gesture_tap_tx = gesture_tap_tx;
         reactor.communication_manager.events_tx = Some(events_tx_clone.clone());
         let query_handle = ReactorQueryHandle::new(events_tx_clone.clone());
         thread::Builder::new()
@@ -345,6 +348,7 @@ impl Reactor {
             recording_manager: managers::RecordingManager { record },
             communication_manager: managers::CommunicationManager {
                 event_tap_tx: None,
+                gesture_tap_tx: None,
                 stack_line_tx: None,
                 raise_manager_tx,
                 event_broadcaster: broadcast_tx,
@@ -2717,6 +2721,9 @@ impl Reactor {
 
         let modes_by_space = modes.iter().copied().collect();
         self.notification_manager.last_layout_modes_by_space = modes_by_space;
+        if let Some(gesture_tap_tx) = self.communication_manager.gesture_tap_tx.as_ref() {
+            gesture_tap_tx.send(gesture_tap::GestureRequest::LayoutModesChanged(modes.clone()));
+        }
         event_tap_tx.send(crate::actor::event_tap::Request::LayoutModesChanged(modes));
     }
 

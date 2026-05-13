@@ -14,7 +14,7 @@ use crate::actor::broadcast::{BroadcastEvent, BroadcastSender, StackInfo};
 use crate::actor::drag_swap::DragManager as DragSwapManager;
 use crate::actor::reactor::Reactor;
 use crate::actor::reactor::animation::AnimationManager;
-use crate::actor::{event_tap, menu_bar, raise_manager, stack_line, window_notify, wm_controller};
+use crate::actor::{event_tap, gesture_tap, menu_bar, raise_manager, stack_line, window_notify, wm_controller};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{LayoutMode, WindowSnappingSettings};
 use crate::layout_engine::LayoutEngine;
@@ -172,6 +172,7 @@ pub struct RefocusManager {
 /// Manages communication channels to other actors
 pub struct CommunicationManager {
     pub event_tap_tx: Option<event_tap::Sender>,
+    pub gesture_tap_tx: Option<gesture_tap::Sender>,
     pub stack_line_tx: Option<stack_line::Sender>,
     pub raise_manager_tx: raise_manager::Sender,
     pub event_broadcaster: BroadcastSender,

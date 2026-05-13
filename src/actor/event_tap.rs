@@ -15,7 +15,7 @@
 //! Requests from the main thread arrive via the actor channel (`Receiver`).
 //! The main thread's `GestureTap` is a separate `ListenOnly` tap for gestures.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::panic::AssertUnwindSafe;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -69,18 +69,17 @@ pub enum Request {
 }
 
 pub struct EventTap {
-    config: RefCell<Config>,
     events_tx: reactor::Sender,
     requests_rx: Option<Receiver>,
     state: RefCell<State>,
-    event_mask: RefCell<CGEventMask>,
+    event_mask: Cell<CGEventMask>,
     tap: RefCell<Option<crate::sys::event_tap::EventTap>>,
     disable_hotkey: RefCell<Option<Hotkey>>,
     hotkey_specs: RefCell<Vec<(String, WmCommand)>>,
     hotkeys: SharedHotkeyTable,
-    wm_sender: Option<wm_controller::Sender>,
-    stack_line_tx: Option<stack_line::Sender>,
-    stack_line_hit_rects: Option<stack_line::SharedHitRects>,
+    wm_sender: wm_controller::Sender,
+    stack_line_tx: stack_line::Sender,
+    stack_line_hit_rects: stack_line::SharedHitRects,
 }
 
 // SAFETY: EventTap is constructed on the input thread and all access occurs on
@@ -150,9 +149,7 @@ unsafe fn drop_mouse_ctx(ptr: *mut std::ffi::c_void) {
 
 impl EventTap {
     #[inline]
-    fn stack_line_hover_enabled(&self, state: &State) -> bool {
-        state.stack_line_enabled && self.stack_line_tx.is_some()
-    }
+    fn stack_line_hover_enabled(&self, state: &State) -> bool { state.stack_line_enabled }
 
     #[inline]
     fn focus_follows_mouse_handler_enabled(state: &State) -> bool {
@@ -203,8 +200,7 @@ impl EventTap {
 
     fn rebuild_event_tap_mask_if_needed(self: &Arc<Self>) {
         let next_mask = self.desired_event_mask();
-        let current_mask = *self.event_mask.borrow();
-        if next_mask == current_mask {
+        if next_mask == self.event_mask.get() {
             return;
         }
 
@@ -215,16 +211,16 @@ impl EventTap {
 
         let old_tap = self.tap.borrow_mut().replace(new_tap);
         drop(old_tap);
-        *self.event_mask.borrow_mut() = next_mask;
+        self.event_mask.set(next_mask);
     }
 
     pub fn new(
         config: Config,
         events_tx: reactor::Sender,
         requests_rx: Receiver,
-        wm_sender: Option<wm_controller::Sender>,
-        stack_line_tx: Option<stack_line::Sender>,
-        stack_line_hit_rects: Option<stack_line::SharedHitRects>,
+        wm_sender: wm_controller::Sender,
+        stack_line_tx: stack_line::Sender,
+        stack_line_hit_rects: stack_line::SharedHitRects,
     ) -> Self {
         let disable_hotkey = config
             .settings
@@ -243,15 +239,14 @@ impl EventTap {
         let event_mask = build_event_mask(
             disable_hotkey.is_some(),
             state.event_processing_enabled
-                && ((state.stack_line_enabled && stack_line_tx.is_some())
+                && (state.stack_line_enabled
                     || Self::focus_follows_mouse_handler_enabled(&state)),
         );
         EventTap {
-            config: RefCell::new(config),
             events_tx,
             requests_rx: Some(requests_rx),
             state: RefCell::new(state),
-            event_mask: RefCell::new(event_mask),
+            event_mask: Cell::new(event_mask),
             tap: RefCell::new(None),
             disable_hotkey: RefCell::new(disable_hotkey),
             hotkey_specs: RefCell::new(Vec::new()),
@@ -275,7 +270,7 @@ impl EventTap {
 
         let this = Arc::new(self);
 
-        let mask = *this.event_mask.borrow();
+        let mask = this.event_mask.get();
         let tap = this.create_tap_with_mask(mask);
 
         if let Some(tap) = tap {
@@ -306,6 +301,7 @@ impl EventTap {
             match tick {
                 Tick::Request(request) => this.on_request(request),
                 Tick::Watchdog => {
+                    let tap_enabled = this.tap.borrow().is_some();
                     if let Some(tap) = this.tap.borrow().as_ref() {
                         tap.set_enabled(true);
                     }
@@ -314,6 +310,8 @@ impl EventTap {
                     let mut state = this.state.borrow_mut();
                     state.reconcile_modifier_keys();
                     trace!(
+                        tap_enabled,
+                        event_mask = this.event_mask.get(),
                         pressed_keys = state.pressed_keys.len(),
                         disable_hotkey_active = state.disable_hotkey_active,
                         event_processing = state.event_processing_enabled,
@@ -399,7 +397,6 @@ impl EventTap {
                     .focus_follows_mouse_disable_hotkey
                     .clone()
                     .and_then(|spec| spec.to_hotkey());
-                *self.config.borrow_mut() = new_config;
                 *self.disable_hotkey.borrow_mut() = disable_hotkey;
                 {
                     let prev_mouse_hides_on_focus = state.mouse_hides_on_focus;
@@ -505,29 +502,21 @@ impl EventTap {
             CGEventType::LeftMouseDown | CGEventType::RightMouseDown => {
                 set_mouse_state(MouseState::Down);
 
-                if let Some(tx) = &self.stack_line_tx {
-                    let loc = CGEvent::location(Some(event));
+                let loc = CGEvent::location(Some(event));
 
-                    // The event tap is the single source of hit-testing for
-                    // stack-line indicators. Only forward the click and
-                    // suppress propagation when it lands on a visible,
-                    // non-occluded indicator.
-                    let hits_stack_line = self
-                        .stack_line_hit_rects
-                        .as_ref()
-                        .map(|hit_rects| {
-                            hit_rects
-                                .load()
-                                .iter()
-                                .copied()
-                                .any(|frame| point_hits_indicator_frame(loc, frame))
-                        })
-                        .unwrap_or(false);
-                    if hits_stack_line && !window_server::is_point_occluded_by_external_window(loc)
-                    {
-                        let _ = tx.try_send(stack_line::Event::MouseDown(loc));
-                        return false;
-                    }
+                // The event tap is the single source of hit-testing for
+                // stack-line indicators. Only forward the click and
+                // suppress propagation when it lands on a visible,
+                // non-occluded indicator.
+                let hits_stack_line = self
+                    .stack_line_hit_rects
+                    .load()
+                    .iter()
+                    .copied()
+                    .any(|frame| point_hits_indicator_frame(loc, frame));
+                if hits_stack_line && !window_server::is_point_occluded_by_external_window(loc) {
+                    let _ = self.stack_line_tx.try_send(stack_line::Event::MouseDown(loc));
+                    return false;
                 }
             }
             CGEventType::LeftMouseDragged | CGEventType::RightMouseDragged => {
@@ -569,22 +558,15 @@ impl EventTap {
                 }
 
                 // stack line hover feedback
-                if state.stack_line_enabled
-                    && let Some(tx) = &self.stack_line_tx
-                {
+                if state.stack_line_enabled {
                     let hits = self
                         .stack_line_hit_rects
-                        .as_ref()
-                        .map(|hit_rects| {
-                            hit_rects
-                                .load()
-                                .iter()
-                                .copied()
-                                .any(|frame| point_hits_indicator_frame(loc, frame))
-                        })
-                        .unwrap_or(false)
+                        .load()
+                        .iter()
+                        .copied()
+                        .any(|frame| point_hits_indicator_frame(loc, frame))
                         && !window_server::is_point_occluded_by_external_window(loc);
-                    let _ = tx.try_send(stack_line::Event::MouseMoved {
+                    let _ = self.stack_line_tx.try_send(stack_line::Event::MouseMoved {
                         point: loc,
                         hits_indicator: hits,
                     });
@@ -639,14 +621,10 @@ impl EventTap {
                     modifiers_from_flags_with_keys(state.current_flags, &state.pressed_keys),
                     key_code,
                 );
-                let Some(wm_sender) = &self.wm_sender else {
-                    debug!(?hotkey, "Hotkey triggered but no WM sender available");
-                    return true;
-                };
                 let bindings = self.hotkeys.load();
                 if let Some(commands) = bindings.get(&hotkey) {
                     for cmd in commands {
-                        wm_sender.send(WmEvent::Command(cmd.clone()));
+                        self.wm_sender.send(WmEvent::Command(cmd.clone()));
                     }
                     return false;
                 }
