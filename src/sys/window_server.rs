@@ -1,4 +1,5 @@
 use std::ffi::{c_int, c_void};
+use std::num::NonZeroU32;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -44,6 +45,9 @@ impl WindowServerId {
 
     #[inline]
     pub fn as_u32(self) -> u32 { self.0 }
+
+    #[inline]
+    pub fn as_nonzero(self) -> Option<NonZeroU32> { NonZeroU32::new(self.0) }
 }
 
 impl From<WindowServerId> for u32 {
@@ -59,6 +63,9 @@ impl TryFrom<&AXUIElement> for WindowServerId {
         let res = unsafe { _AXUIElementGetWindow(element.raw_ptr().as_ptr(), &mut id) };
         if res != AXError::Success {
             return Err(AxError::Ax(res));
+        }
+        if id == 0 {
+            return Err(AxError::NotFound);
         }
         Ok(Self(id))
     }
@@ -915,4 +922,15 @@ pub unsafe fn switch_space(direction: Direction) {
             };
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WindowServerId;
+
+    #[test]
+    fn zero_window_server_id_is_not_a_window_id() {
+        assert!(WindowServerId::new(0).as_nonzero().is_none());
+        assert_eq!(WindowServerId::new(42).as_nonzero().map(|id| id.get()), Some(42));
+    }
 }
