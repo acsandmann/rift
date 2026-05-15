@@ -762,7 +762,7 @@ impl LayoutEngine {
             {
                 let response = EventResponse {
                     focus_window: Some(fallback_focus),
-                    raise_windows: visible_windows,
+                    raise_windows: vec![],
                     boundary_hit: None,
                 };
                 self.apply_focus_response(space, ws_id, layout, &response);
@@ -1279,19 +1279,25 @@ impl LayoutEngine {
                 self.remove_window_internal(wid, true);
             }
             LayoutEvent::WindowFocused(space, wid) => {
-                self.focused_window = Some(wid);
                 if self.floating.is_floating(wid) {
+                    self.focused_window = Some(wid);
                     self.floating.set_last_focus(Some(wid));
-                } else {
-                    let Some((ws_id, layout)) = self.workspace_and_layout(space) else {
+                } else if let Some((ws_id, layout)) = self.workspace_and_layout(space) {
+                    if !self.workspace_tree(ws_id).contains_window(layout, wid) {
                         warn!(
-                            "No active workspace/layout for focused window {:?} on space {:?}",
+                            "WindowFocused ignored: wid={:?} not in active layout for space {:?}",
                             wid, space
                         );
                         return EventResponse::default();
-                    };
+                    }
+                    self.focused_window = Some(wid);
                     let _ = self.workspace_tree_mut(ws_id).select_window(layout, wid);
                     self.virtual_workspace_manager.set_last_focused_window(space, ws_id, Some(wid));
+                } else {
+                    warn!(
+                        "No active workspace/layout for focused window {:?} on space {:?}",
+                        wid, space
+                    );
                 }
             }
             LayoutEvent::WindowResized {
