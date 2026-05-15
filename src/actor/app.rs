@@ -889,15 +889,24 @@ impl State {
 
         let is_frontmost = trace("is_frontmost", &this.app, || this.app.frontmost())?;
 
-        let make_key_result = window_server::make_key_window(
-            this.pid,
-            WindowServerId::try_from(&this.window(first)?.elem)?,
-        );
-        if make_key_result.is_err() {
-            warn!(?this.pid, "Failed to activate app");
+        let window_server_id = match WindowServerId::try_from(&this.window(first)?.elem) {
+            Ok(wsid) => Some(wsid),
+            Err(AxError::NotFound) => {
+                debug!(
+                    ?first,
+                    "Skipping make-key request because window has no server id yet"
+                );
+                None
+            }
+            Err(err) => return Err(err.into()),
+        };
+        let make_key_result =
+            window_server_id.map(|wsid| window_server::make_key_window(this.pid, wsid));
+        if let Some(Err(err)) = &make_key_result {
+            warn!(?this.pid, ?err, "Failed to activate app");
         }
 
-        if !is_frontmost && make_key_result.is_ok() && is_standard {
+        if !is_frontmost && make_key_result.as_ref().is_some_and(Result::is_ok) && is_standard {
             let (tx, rx) = continuation();
             let (quiet_activation, quiet_window_change);
             if wids.len() == 1 {
@@ -1171,7 +1180,7 @@ impl State {
             info.is_root = true;
         }
 
-        let window_server_id = info.sys_id.or_else(|| {
+        let window_server_id = info.sys_id.filter(|sid| sid.as_nonzero().is_some()).or_else(|| {
             WindowServerId::try_from(&elem)
                 .or_else(|e| {
                     info!("Could not get window server id for {elem:?}: {e}");
@@ -1180,12 +1189,10 @@ impl State {
                 .ok()
         });
 
-        let idx = window_server_id
-            .map(|sid| NonZeroU32::new(sid.as_u32()).expect("Window server id was 0"))
-            .unwrap_or_else(|| {
-                self.last_window_idx += 1;
-                NonZeroU32::new(self.last_window_idx).unwrap()
-            });
+        let idx = window_server_id.and_then(WindowServerId::as_nonzero).unwrap_or_else(|| {
+            self.last_window_idx += 1;
+            NonZeroU32::new(self.last_window_idx).unwrap()
+        });
         let wid = WindowId { pid: self.pid, idx };
         if self.windows.contains_key(&wid) {
             trace!(?wid, "Window already registered; skipping duplicate");
@@ -1318,12 +1325,11 @@ impl State {
 
     fn id(&self, elem: &AXUIElement) -> Result<WindowId, AxError> {
         if let Ok(id) = WindowServerId::try_from(elem) {
-            let wid = WindowId {
-                pid: self.pid,
-                idx: NonZeroU32::new(id.as_u32()).expect("Window server id was 0"),
-            };
-            if self.windows.contains_key(&wid) {
-                return Ok(wid);
+            if let Some(idx) = id.as_nonzero() {
+                let wid = WindowId { pid: self.pid, idx };
+                if self.windows.contains_key(&wid) {
+                    return Ok(wid);
+                }
             }
         } else if let Some((&wid, _)) = self.windows.iter().find(|(_, w)| &w.elem == elem) {
             return Ok(wid);
