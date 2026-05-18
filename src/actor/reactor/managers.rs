@@ -167,6 +167,7 @@ impl WorkspaceSwitchManager {
 pub struct RefocusManager {
     pub stale_cleanup_state: super::StaleCleanupState,
     pub refocus_state: super::RefocusState,
+    pub focus_next_window_deadline: Option<Instant>,
 }
 
 /// Manages communication channels to other actors

@@ -352,6 +352,76 @@ fn handle_layout_response_includes_handles_for_raise_and_focus_windows() {
 }
 
 #[test]
+fn focus_next_window_focuses_discovered_new_window() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let (raise_manager_tx, mut raise_manager_rx) = actor::channel();
+    reactor.communication_manager.raise_manager_tx = raise_manager_tx;
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    reactor.handle_event(screen_params_event(vec![screen], vec![Some(space)], vec![]));
+
+    reactor.handle_event(Event::Command(Command::Reactor(ReactorCommand::FocusNextWindow)));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+
+    let mut focus_requests = Vec::new();
+    while let Ok((_, msg)) = raise_manager_rx.try_recv() {
+        if let raise_manager::Event::RaiseRequest(RaiseRequest {
+            focus_window: Some((wid, _)),
+            ..
+        }) = msg
+        {
+            focus_requests.push(wid);
+        }
+    }
+
+    assert!(
+        focus_requests.contains(&WindowId::new(1, 1)),
+        "FocusNextWindow should focus the first manageable window discovered after an exec"
+    );
+    assert_eq!(
+        reactor.layout_manager.layout_engine.selected_window(space),
+        Some(WindowId::new(1, 1))
+    );
+}
+
+#[test]
+fn canceled_focus_next_window_does_not_focus_discovered_window() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let (raise_manager_tx, mut raise_manager_rx) = actor::channel();
+    reactor.communication_manager.raise_manager_tx = raise_manager_tx;
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    reactor.handle_event(screen_params_event(
+        vec![screen],
+        vec![Some(SpaceId::new(1))],
+        vec![],
+    ));
+
+    reactor.handle_event(Event::Command(Command::Reactor(ReactorCommand::FocusNextWindow)));
+    reactor.handle_event(Event::Command(Command::Reactor(ReactorCommand::CancelFocusNextWindow)));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+
+    while let Ok((_, msg)) = raise_manager_rx.try_recv() {
+        if let raise_manager::Event::RaiseRequest(RaiseRequest {
+            focus_window: Some((WindowId { pid: 1, .. }, _)),
+            ..
+        }) = msg
+        {
+            panic!("CancelFocusNextWindow should cancel the pending exec focus request");
+        }
+    }
+}
+
+#[test]
 fn workspace_switch_batches_all_windows_with_eui_enabled() {
     let mut apps = Apps::new();
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(

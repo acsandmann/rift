@@ -181,6 +181,8 @@ impl CommandEventHandler {
             ReactorCommand::FocusWindow { window_id, window_server_id } => {
                 Self::handle_command_reactor_focus_window(reactor, window_id, window_server_id)
             }
+            ReactorCommand::FocusNextWindow => reactor.request_focus_next_window(),
+            ReactorCommand::CancelFocusNextWindow => reactor.cancel_focus_next_window(),
             ReactorCommand::ShowMissionControlAll => {
                 send_wm_cmd(
                     reactor,
