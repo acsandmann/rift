@@ -112,13 +112,45 @@ static CAPTURE_POOL: Lazy<CapturePool> = Lazy::new(|| {
     CapturePool { sender: tx }
 });
 
-extern "C" fn refresh_coalesced_cb(ctx: *mut c_void) {
+#[derive(Clone, Copy)]
+enum DeferredRedrawKind {
+    Refresh,
+    Drag,
+}
+
+/// Context for a coalesced main-queue redraw. The `alive` flag lives in an
+/// `Arc` that outlives the overlay, so a callback that fires *after* the
+/// overlay was disposed can detect that and bail instead of dereferencing
+/// freed memory (the cause of the EXC_BAD_ACCESS crashes during drag-drop).
+/// dispose and these callbacks all run on the main thread, so the
+/// store-before-drop in `invalidate()` strictly happens-before any later
+/// callback observes the flag.
+struct DeferredRedrawCtx {
+    overlay: *const MissionControlOverlay,
+    alive: Arc<AtomicBool>,
+    kind: DeferredRedrawKind,
+}
+
+extern "C" fn deferred_redraw_cb(ctx: *mut c_void) {
     if ctx.is_null() {
         return;
     }
-    let overlay = unsafe { &*(ctx as *const MissionControlOverlay) };
-    overlay.refresh_pending.store(false, Ordering::Release);
-    overlay.refresh_previews();
+    let ctx = unsafe { Box::from_raw(ctx as *mut DeferredRedrawCtx) };
+    if !ctx.alive.load(Ordering::Acquire) {
+        // Overlay was disposed before this fired; do not touch it.
+        return;
+    }
+    let overlay = unsafe { &*ctx.overlay };
+    match ctx.kind {
+        DeferredRedrawKind::Refresh => {
+            overlay.refresh_pending.store(false, Ordering::Release);
+            overlay.refresh_previews();
+        }
+        DeferredRedrawKind::Drag => {
+            overlay.drag_redraw_pending.store(false, Ordering::Release);
+            overlay.draw_and_present();
+        }
+    }
 }
 
 struct FadeCompletionCtx {
@@ -181,6 +213,13 @@ pub enum MissionControlAction {
     FocusWindow {
         window_id: WindowId,
         window_server_id: Option<WindowServerId>,
+    },
+    /// A window thumbnail was dragged onto a different workspace tile in the
+    /// all-workspaces overview and released there.
+    MoveWindowToWorkspace {
+        window_id: WindowId,
+        /// Original (un-filtered) workspace index of the drop target.
+        target_workspace_index: usize,
     },
     Dismiss,
 }
@@ -250,6 +289,10 @@ pub struct MissionControlState {
     render_size: Option<CGSize>,
     // This lets us avoid visible pop-in and reveal once a threshold is met.
     suppress_live_present: bool,
+    // In-progress thumbnail drag (all-workspaces overview only).
+    drag: Option<DragState>,
+    // Layer that follows the cursor while dragging a thumbnail.
+    drag_layer: Option<Retained<CALayer>>,
 }
 
 impl Default for MissionControlState {
@@ -269,6 +312,8 @@ impl Default for MissionControlState {
             render_window_id: None,
             render_size: None,
             suppress_live_present: false,
+            drag: None,
+            drag_layer: None,
         }
     }
 }
@@ -277,6 +322,7 @@ impl MissionControlState {
     fn set_mode(&mut self, mode: MissionControlMode) {
         self.mode = Some(mode);
         self.selection = None;
+        self.drag = None;
         let _new_gen = CURRENT_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
         self.ready_previews.clear();
         self.prune_preview_cache();
@@ -308,6 +354,11 @@ impl MissionControlState {
             layer.removeFromSuperlayer();
         }
         self.workspace_label_strings.clear();
+
+        self.drag = None;
+        if let Some(layer) = self.drag_layer.take() {
+            layer.removeFromSuperlayer();
+        }
 
         self.render_root = None;
         self.render_window_id = None;
@@ -458,6 +509,27 @@ enum Selection {
     Workspace(usize),
     Window(usize),
 }
+
+/// Tracks an in-progress drag of a window thumbnail in the all-workspaces
+/// overview. Created on left-mouse-down over a window preview, updated on
+/// drag, consumed on mouse-up.
+#[derive(Debug, Clone, Copy)]
+struct DragState {
+    window_id: WindowId,
+    /// Original (un-filtered) index of the source workspace.
+    source_ws_original_idx: usize,
+    start_point: CGPoint,
+    cur_point: CGPoint,
+    /// Set once the pointer has moved past the click/drag threshold.
+    moved: bool,
+    /// Visible index of the workspace currently hovered (drop target).
+    target_ws_order_idx: Option<usize>,
+    /// Original index of the workspace currently hovered (drop target).
+    target_ws_original_idx: Option<usize>,
+}
+
+/// Squared pointer travel (in points) past which a press becomes a drag.
+const DRAG_THRESHOLD_SQ: f64 = 6.0 * 6.0;
 
 #[derive(Clone, Copy)]
 enum NavDirection {
@@ -640,6 +712,37 @@ impl MissionControlOverlay {
             if Self::rect_contains_point(rect, point) {
                 return Some((order_idx, *original_idx));
             }
+        }
+        None
+    }
+
+    /// In the all-workspaces overview, find the window thumbnail under `point`.
+    /// Returns the workspace's visible (order) index, its original index, and
+    /// the window id. Returns `None` if the point is not over a window preview
+    /// (even if it is over an empty part of a workspace tile).
+    fn window_in_workspace_at_point(
+        workspaces: &[WorkspaceData],
+        point: CGPoint,
+        bounds: CGRect,
+    ) -> Option<(usize, usize, WindowId)> {
+        if !Self::rect_contains_point(bounds, point) {
+            return None;
+        }
+        let visible = Self::visible_workspaces(workspaces);
+        let grid = WorkspaceGrid::new(visible.len(), bounds)?;
+        for (order_idx, (original_idx, ws)) in visible.iter().enumerate() {
+            let tile = grid.rect_for(order_idx);
+            if !Self::rect_contains_point(tile, point) {
+                continue;
+            }
+            let rects =
+                Self::compute_window_rects(&ws.windows, tile, WindowLayoutKind::PreserveOriginal)?;
+            for idx in (0..ws.windows.len()).rev() {
+                if Self::rect_contains_point(rects[idx], point) {
+                    return Some((order_idx, *original_idx, ws.windows[idx].id));
+                }
+            }
+            return None;
         }
         None
     }
@@ -1346,6 +1449,66 @@ impl MissionControlOverlay {
 
     fn draw_window_outline(_rect: CGRect, _is_selected: bool) {}
 
+    /// Draw (or remove) the floating thumbnail that follows the cursor while a
+    /// window is being dragged between workspaces.
+    fn draw_drag_ghost(&self, parent_layer: &CALayer) {
+        let mut state = match self.state.try_borrow_mut() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        let drag = state.drag;
+        let Some(d) = drag.filter(|d| d.moved) else {
+            if let Some(layer) = state.drag_layer.take() {
+                layer.removeFromSuperlayer();
+            }
+            return;
+        };
+
+        let img_ptr = {
+            let cache = state.preview_cache.read();
+            cache
+                .get(&d.window_id)
+                .map(|img| img.as_ptr() as *mut objc2::runtime::AnyObject)
+        };
+
+        let layer = if let Some(layer) = state.drag_layer.as_ref() {
+            layer.clone()
+        } else {
+            let layer = CALayer::layer();
+            parent_layer.addSublayer(&layer);
+            layer.setContentsScale(self.scale);
+            state.drag_layer = Some(layer.clone());
+            layer
+        };
+
+        let content_w = (self.frame.size.width - 2.0 * MISSION_CONTROL_MARGIN).max(1.0);
+        let ghost_w = (content_w * 0.20).clamp(120.0, 480.0);
+        let ghost_h = ghost_w / 1.6;
+        let rect = CGRect::new(
+            CGPoint::new(d.cur_point.x - ghost_w / 2.0, d.cur_point.y - ghost_h / 2.0),
+            CGSize::new(ghost_w, ghost_h),
+        );
+
+        with_disabled_actions(|| {
+            if let Some(ptr) = img_ptr {
+                unsafe {
+                    let _: () = msg_send![&*layer, setContents: ptr];
+                }
+            } else {
+                layer.setBackgroundColor(Some(&**WORKSPACE_BACKGROUND_COLOR));
+            }
+            layer.setFrame(rect);
+            layer.setMasksToBounds(true);
+            layer.setCornerRadius(6.0);
+            layer.setContentsScale(self.scale);
+            layer.setOpacity(0.85);
+            layer.setZPosition(10.0);
+            layer.setBorderColor(Some(&**SELECTED_BORDER_COLOR));
+            layer.setBorderWidth(2.0);
+        });
+    }
+
     fn schedule_capture(
         &self,
         state: &RefCell<MissionControlState>,
@@ -1601,6 +1764,8 @@ impl MissionControlOverlay {
                 );
             }
         }
+
+        self.draw_drag_ghost(parent_layer);
     }
 }
 
@@ -1612,12 +1777,17 @@ pub struct MissionControlOverlay {
     key_tap: RefCell<Option<crate::sys::event_tap::EventTap>>,
     fade_enabled: bool,
     fade_duration_ms: f64,
+    drag_to_move: bool,
     has_shown: RefCell<bool>,
     state: RefCell<MissionControlState>,
     fade_state: RefCell<Option<FadeState>>,
     fade_counter: AtomicU64,
     pending_hide: RefCell<bool>,
     refresh_pending: AtomicBool,
+    drag_redraw_pending: AtomicBool,
+    // Cleared (and outlives `self`) so deferred main-queue callbacks scheduled
+    // before disposal can detect it and skip touching freed memory.
+    alive: Arc<AtomicBool>,
     scale: f64,
     coordinate_converter: CoordinateConverter,
 }
@@ -1674,27 +1844,53 @@ impl MissionControlOverlay {
             key_tap: RefCell::new(None),
             fade_enabled: config.settings.ui.mission_control.fade_enabled,
             fade_duration_ms: config.settings.ui.mission_control.fade_duration_ms,
+            drag_to_move: config.settings.ui.mission_control.drag_to_move,
             has_shown: RefCell::new(false),
             state: RefCell::new(MissionControlState::default()),
             fade_state: RefCell::new(None),
             fade_counter: AtomicU64::new(0),
             pending_hide: RefCell::new(false),
             refresh_pending: AtomicBool::new(false),
+            drag_redraw_pending: AtomicBool::new(false),
+            alive: Arc::new(AtomicBool::new(true)),
             scale,
             coordinate_converter,
         }
     }
 
+    fn schedule_deferred_redraw(&self, kind: DeferredRedrawKind) {
+        let ctx = Box::new(DeferredRedrawCtx {
+            overlay: self as *const _,
+            alive: self.alive.clone(),
+            kind,
+        });
+        queue::main().after_f(
+            Time::new_after(Time::NOW, 8000000),
+            Box::into_raw(ctx) as *mut c_void,
+            deferred_redraw_cb,
+        );
+    }
+
     fn request_refresh(&self) {
         if !self.refresh_pending.swap(true, Ordering::AcqRel) {
-            let ptr = self as *const _ as usize;
-            queue::main().after_f(
-                Time::new_after(Time::NOW, 8000000),
-                ptr as *mut c_void,
-                refresh_coalesced_cb,
-            );
+            self.schedule_deferred_redraw(DeferredRedrawKind::Refresh);
         }
     }
+
+    /// Schedule a redraw on the main queue, coalescing bursts. Pointer events
+    /// arrive on the event-tap thread at high frequency; doing the full
+    /// `draw_and_present` there starves the tap (sluggish drag, flicker, the
+    /// Esc key not registering). Defer and batch it to the main thread instead.
+    fn request_drag_redraw(&self) {
+        if !self.drag_redraw_pending.swap(true, Ordering::AcqRel) {
+            self.schedule_deferred_redraw(DeferredRedrawKind::Drag);
+        }
+    }
+
+    /// Mark the overlay as gone. Must be called before the overlay is dropped
+    /// so any still-pending deferred redraw becomes a no-op instead of a
+    /// use-after-free.
+    pub fn invalidate(&self) { self.alive.store(false, Ordering::Release); }
 
     pub fn set_action_handler(&self, f: Rc<dyn Fn(MissionControlAction)>) {
         self.state.borrow_mut().on_action = Some(f);
@@ -2029,6 +2225,144 @@ impl MissionControlOverlay {
         handled
     }
 
+    fn local_content_bounds(&self) -> CGRect {
+        Self::content_bounds(CGRect::new(
+            CGPoint::new(0.0, 0.0),
+            CGSize::new(self.frame.size.width, self.frame.size.height),
+        ))
+    }
+
+    /// Left mouse down: in the all-workspaces overview, arm a potential drag if
+    /// the press landed on a window thumbnail. The actual click/activate is
+    /// deferred to mouse-up so a press-and-release without movement still
+    /// behaves like the previous click handler.
+    fn handle_pointer_down(&self, g_pt: CGPoint) {
+        if !self.drag_to_move {
+            // Feature disabled: behave exactly like before (click on mouse-up).
+            return;
+        }
+        let pt = CGPoint::new(g_pt.x - self.frame.origin.x, g_pt.y - self.frame.origin.y);
+        let mut state = match self.state.try_borrow_mut() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let content_bounds = self.local_content_bounds();
+        let candidate = match state.mode() {
+            Some(MissionControlMode::AllWorkspaces(workspaces)) => {
+                Self::window_in_workspace_at_point(workspaces, pt, content_bounds)
+            }
+            _ => None,
+        };
+        state.drag = candidate.map(|(order_idx, original_idx, window_id)| DragState {
+            window_id,
+            source_ws_original_idx: original_idx,
+            start_point: pt,
+            cur_point: pt,
+            moved: false,
+            target_ws_order_idx: Some(order_idx),
+            target_ws_original_idx: Some(original_idx),
+        });
+    }
+
+    /// Left mouse dragged: update the drag, compute the hovered drop-target
+    /// workspace, and (once past the threshold) repaint so the ghost follows
+    /// the cursor and the target tile is highlighted.
+    fn handle_pointer_drag(&self, g_pt: CGPoint) {
+        let pt = CGPoint::new(g_pt.x - self.frame.origin.x, g_pt.y - self.frame.origin.y);
+        let mut state = match self.state.try_borrow_mut() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let Some(mut d) = state.drag else {
+            return;
+        };
+        d.cur_point = pt;
+        if !d.moved {
+            let dx = pt.x - d.start_point.x;
+            let dy = pt.y - d.start_point.y;
+            if dx * dx + dy * dy > DRAG_THRESHOLD_SQ {
+                d.moved = true;
+            }
+        }
+        let content_bounds = self.local_content_bounds();
+        let target = if d.moved {
+            match state.mode() {
+                Some(MissionControlMode::AllWorkspaces(workspaces)) => {
+                    Self::workspace_index_at_point(workspaces, pt, content_bounds)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        match target {
+            Some((order_idx, original_idx)) => {
+                d.target_ws_order_idx = Some(order_idx);
+                d.target_ws_original_idx = Some(original_idx);
+            }
+            None => {
+                d.target_ws_order_idx = None;
+                d.target_ws_original_idx = None;
+            }
+        }
+        let moved = d.moved;
+        let highlight = d.target_ws_order_idx;
+        state.drag = Some(d);
+        if moved {
+            if let Some(order_idx) = highlight {
+                state.set_selection(Selection::Workspace(order_idx));
+            }
+            drop(state);
+            self.request_drag_redraw();
+        }
+    }
+
+    /// Left mouse up: complete a drag (move the window to the hovered
+    /// workspace) or, if no drag occurred, fall back to the original click
+    /// behavior.
+    fn handle_pointer_up(&self, g_pt: CGPoint) {
+        let mut state = match self.state.try_borrow_mut() {
+            Ok(s) => s,
+            Err(_) => {
+                self.handle_click_global(g_pt);
+                return;
+            }
+        };
+        let drag = state.drag.take();
+        if let Some(layer) = state.drag_layer.take() {
+            layer.removeFromSuperlayer();
+        }
+
+        match drag {
+            Some(d) if d.moved => {
+                let do_move = match d.target_ws_original_idx {
+                    Some(target) if target != d.source_ws_original_idx => {
+                        Some((d.window_id, target))
+                    }
+                    _ => None,
+                };
+                drop(state);
+                match do_move {
+                    Some((window_id, target_workspace_index)) => {
+                        self.emit_action(MissionControlAction::MoveWindowToWorkspace {
+                            window_id,
+                            target_workspace_index,
+                        });
+                    }
+                    None => {
+                        // Dropped on the source workspace or outside any tile:
+                        // cancel and restore the normal layout.
+                        self.request_drag_redraw();
+                    }
+                }
+            }
+            _ => {
+                drop(state);
+                self.handle_click_global(g_pt);
+            }
+        }
+    }
+
     fn handle_click_global(&self, g_pt: CGPoint) {
         let lx = g_pt.x - self.frame.origin.x;
         let ly = g_pt.y - self.frame.origin.y;
@@ -2062,7 +2396,7 @@ impl MissionControlOverlay {
             Some(sel) => {
                 state.set_selection(sel);
                 drop(state);
-                self.draw_and_present();
+                self.request_drag_redraw();
                 self.activate_selection_action();
             }
             None => {
@@ -2105,7 +2439,7 @@ impl MissionControlOverlay {
             if state.selection() != Some(sel) {
                 state.set_selection(sel);
                 drop(state);
-                self.draw_and_present();
+                self.request_drag_redraw();
             }
         }
     }
@@ -2149,10 +2483,17 @@ impl MissionControlOverlay {
                     }
                     CGEventType::LeftMouseDown => {
                         let loc = unsafe { CGEvent::location(Some(event.as_ref())) };
-                        overlay.handle_click_global(loc);
+                        overlay.handle_pointer_down(loc);
+                        handled = true;
+                    }
+                    CGEventType::LeftMouseDragged => {
+                        let loc = unsafe { CGEvent::location(Some(event.as_ref())) };
+                        overlay.handle_pointer_drag(loc);
                         handled = true;
                     }
                     CGEventType::LeftMouseUp => {
+                        let loc = unsafe { CGEvent::location(Some(event.as_ref())) };
+                        overlay.handle_pointer_up(loc);
                         handled = true;
                     }
                     CGEventType::MouseMoved => {
@@ -2172,6 +2513,7 @@ impl MissionControlOverlay {
 
         let mask = (1u64 << CGEventType::KeyDown.0 as u64)
             | (1u64 << CGEventType::LeftMouseDown.0 as u64)
+            | (1u64 << CGEventType::LeftMouseDragged.0 as u64)
             | (1u64 << CGEventType::LeftMouseUp.0 as u64)
             | (1u64 << CGEventType::MouseMoved.0 as u64);
 

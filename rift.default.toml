@@ -192,6 +192,11 @@ enabled = false
 fade_enabled = false
 # native macos mission control fade is about 180ms
 fade_duration_ms = 180.0
+# in the all-workspaces overview, drag a window thumbnail onto another
+# workspace tile to move the window there (drop on the source tile or
+# outside cancels). the overview stays open so several windows can be
+# rearranged in a row. opt-in.
+drag_to_move = false
 
 # Trackpad gestures
 [settings.gestures]

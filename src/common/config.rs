@@ -546,6 +546,10 @@ pub struct MissionControlSettings {
     pub fade_enabled: bool,
     #[serde(default = "default_mission_control_fade_duration_ms")]
     pub fade_duration_ms: f64,
+    /// Allow dragging a window thumbnail onto another workspace tile in the
+    /// all-workspaces overview to move the window there. Opt-in.
+    #[serde(default = "no")]
+    pub drag_to_move: bool,
 }
 
 fn default_mission_control_fade_duration_ms() -> f64 { 180.0 }

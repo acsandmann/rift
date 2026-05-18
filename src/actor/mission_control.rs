@@ -120,6 +120,9 @@ impl MissionControlActor {
 
     fn dispose_overlay(&mut self) {
         if let Some(overlay) = self.overlay.take() {
+            // Neutralize any pending deferred main-queue redraws before the
+            // overlay (and its CALayers) are freed, to avoid use-after-free.
+            overlay.invalidate();
             overlay.hide();
         }
         self.mission_control_active = false;
@@ -142,6 +145,31 @@ impl MissionControlActor {
                     reactor::ReactorCommand::FocusWindow { window_id, window_server_id },
                 )));
                 self.dispose_overlay();
+            }
+            MissionControlAction::MoveWindowToWorkspace {
+                window_id,
+                target_workspace_index,
+            } => {
+                let _ = self.reactor.try_send(reactor::Event::Command(reactor::Command::Layout(
+                    crate::layout_engine::LayoutCommand::MoveWindowToWorkspace {
+                        workspace: target_workspace_index,
+                        window_id: Some(window_id.idx.get()),
+                    },
+                )));
+                // Keep the overview open so several windows can be re-arranged
+                // in a row. The reactor processes the move before the query
+                // below (single ordered channel; query blocks on the
+                // response), so the refreshed data reflects the move.
+                if self.mission_control_active
+                    && self.current_view_mode == Some(MissionControlViewMode::AllWorkspaces)
+                {
+                    let resp = self.reactor.query_workspaces(None);
+                    if let Some(overlay) = self.overlay.as_ref() {
+                        overlay.update(MissionControlMode::AllWorkspaces(resp));
+                    }
+                } else {
+                    self.dispose_overlay();
+                }
             }
         }
     }
