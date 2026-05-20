@@ -92,7 +92,7 @@ new_window_placement = "master"
 # master_arrangement = "vertical"
 # Orientation arrangement for the stack area (horizontal | vertical)
 # If omitted, defaults to the direction perpendicular to master_side's split
-# non_master_arrangement = "vertical"
+# stack_arrangement = "vertical"
 
 # these settings only apply when layout mode == "scrolling"
 [settings.layout.scrolling]

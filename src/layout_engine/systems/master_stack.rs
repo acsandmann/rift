@@ -71,7 +71,7 @@ impl MasterStackLayoutSystem {
 
     fn stack_orientation(&self) -> Orientation {
         self.settings
-            .non_master_arrangement
+            .stack_arrangement
             .unwrap_or_else(|| self.container_orientation())
     }
 

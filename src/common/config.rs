@@ -720,7 +720,7 @@ pub struct MasterStackSettings {
     pub master_arrangement: Option<crate::layout_engine::Orientation>,
     /// Orientation arrangement for the stack area (override default derived from master_side)
     #[serde(default)]
-    pub non_master_arrangement: Option<crate::layout_engine::Orientation>,
+    pub stack_arrangement: Option<crate::layout_engine::Orientation>,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
@@ -873,7 +873,7 @@ impl Default for MasterStackSettings {
             master_side: MasterStackSide::Left,
             new_window_placement: default_master_stack_new_window_placement(),
             master_arrangement: None,
-            non_master_arrangement: None,
+            stack_arrangement: None,
         }
     }
 }
