@@ -57,12 +57,12 @@ impl ScratchpadManager {
     }
 
     pub fn get_by_name(&self, name: &str) -> Option<WindowId> {
-        // Find the most recently added window with this name? Or just any?
-        // Since VecDeque is ordered, we can search in reverse to find top-most?
-        // But names map is unordered.
-        // Let's iterate windows (ordered) and check names.
+        // If multiple windows share a name, prefer the most recently added/used.
+        // Our deque order moves forward when cycling, so searching from the back
+        // provides a more intuitive "last" match.
         self.windows
             .iter()
+            .rev()
             .find(|&&w| self.names.get(&w).map(|s| s.as_str()) == Some(name))
             .copied()
     }
@@ -275,7 +275,7 @@ mod tests {
         mgr.add(wid1, Some("term".to_string()));
         mgr.add(wid2, Some("term".to_string()));
 
-        // get_by_name returns first window with that name in order
-        assert_eq!(mgr.get_by_name("term"), Some(wid1));
+        // get_by_name returns the most recent window with that name
+        assert_eq!(mgr.get_by_name("term"), Some(wid2));
     }
 }

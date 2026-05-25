@@ -1301,8 +1301,6 @@ impl LayoutEngine {
 
                 self.broadcast_windows_changed(space);
 
-                self.rebalance_all_layouts();
-
                 if !windows_to_hide.is_empty() {
                     let mut fallback_focus = None;
                     if self.focused_window.map_or(false, |fw| windows_to_hide.contains(&fw)) {
@@ -1950,7 +1948,6 @@ impl LayoutEngine {
             }
             LayoutCommand::ToggleScratchpad => self.handle_toggle_scratchpad(space, None),
             LayoutCommand::ToggleScratchpadNamed(name) => {
-                println!("ToggleScratchpadNamed: {}", name);
                 self.handle_toggle_scratchpad(space, Some(name))
             }
         }
@@ -1961,7 +1958,7 @@ impl LayoutEngine {
         space: SpaceId,
         name_filter: Option<String>,
     ) -> EventResponse {
-        tracing::info!(
+        tracing::debug!(
             "handle_toggle_scratchpad: space={:?}, filter={:?}",
             space,
             name_filter
@@ -1973,7 +1970,7 @@ impl LayoutEngine {
                     None => true,
                 };
                 if matches_filter {
-                    tracing::info!("Hiding scratchpad window {:?}", wid);
+                    tracing::debug!("Hiding scratchpad window {:?}", wid);
                     self.floating.remove_active(space, wid.pid, wid);
                     self.scratchpad.set_active(wid, false);
                     if self.focused_window == Some(wid) {
@@ -2002,7 +1999,7 @@ impl LayoutEngine {
                 && (name_filter.as_ref().is_none()
                     || self.scratchpad.get_name(w) == name_filter.as_ref())
         });
-        tracing::info!("Visible scratchpad found: {:?}", visible_scratchpad);
+        tracing::debug!("Visible scratchpad found: {:?}", visible_scratchpad);
 
         if let Some(&wid) = visible_scratchpad {
             self.floating.remove_active(space, wid.pid, wid);
@@ -2017,7 +2014,7 @@ impl LayoutEngine {
             } else {
                 self.scratchpad.next()
             };
-            tracing::info!("Next scratchpad window to show: {:?}", next);
+            tracing::debug!("Next scratchpad window to show: {:?}", next);
 
             if let Some(wid) = next {
                 self.floating.add_active(space, wid.pid, wid);
@@ -3416,6 +3413,72 @@ mod tests {
             ),
             modified
         );
+    }
+
+    #[test]
+    fn toggle_named_scratchpad_shows_most_recent_matching_window() {
+        let mut engine = test_engine();
+        let space = SpaceId::new(120);
+        let screen_size = CGSize::new(1920.0, 1080.0);
+        let visible_spaces = vec![space];
+        let visible_space_centers = HashMap::default();
+
+        let _ = engine.handle_event(LayoutEvent::SpaceExposed(space, screen_size));
+
+        let w1 = WindowId::new(100, 1);
+        let w2 = WindowId::new(100, 2);
+
+        engine.scratchpad.add(w1, Some("term".to_string()));
+        engine.scratchpad.add(w2, Some("term".to_string()));
+        engine.scratchpad.set_active(w1, false);
+        engine.scratchpad.set_active(w2, false);
+
+        let resp = engine.handle_command(
+            Some(space),
+            &visible_spaces,
+            &visible_space_centers,
+            LayoutCommand::ToggleScratchpadNamed("term".to_string()),
+        );
+
+        assert_eq!(resp.raise_windows, vec![w2]);
+        assert_eq!(resp.focus_window, Some(w2));
+        assert!(engine.scratchpad.is_scratchpad(w2));
+        assert!(engine.scratchpad.is_active(w2));
+        assert!(!engine.scratchpad.is_active(w1));
+    }
+
+    #[test]
+    fn toggle_named_scratchpad_hides_visible_matching_window() {
+        let mut engine = test_engine();
+        let space = SpaceId::new(121);
+        let screen_size = CGSize::new(1920.0, 1080.0);
+        let visible_spaces = vec![space];
+        let visible_space_centers = HashMap::default();
+
+        let _ = engine.handle_event(LayoutEvent::SpaceExposed(space, screen_size));
+
+        let w1 = WindowId::new(200, 1);
+        let w2 = WindowId::new(200, 2);
+
+        // Make w1 a visible active scratchpad named "term".
+        engine.scratchpad.add(w1, Some("term".to_string()));
+        engine.scratchpad.add(w2, Some("notes".to_string()));
+        engine.scratchpad.set_active(w1, true);
+        engine.scratchpad.set_active(w2, true);
+
+        engine.floating.add_floating(w1);
+        engine.floating.add_active(space, w1.pid, w1);
+
+        let resp = engine.handle_command(
+            Some(space),
+            &visible_spaces,
+            &visible_space_centers,
+            LayoutCommand::ToggleScratchpadNamed("term".to_string()),
+        );
+
+        assert_eq!(resp.hide_windows, vec![w1]);
+        assert!(engine.scratchpad.is_scratchpad(w1));
+        assert!(!engine.scratchpad.is_active(w1));
     }
 
     #[test]

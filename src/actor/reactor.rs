@@ -53,7 +53,6 @@ use crate::model::virtual_workspace::{AppRuleResult, HideCorner};
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt};
-use crate::sys::screen::ScreenId;
 pub use crate::sys::screen::ScreenInfo;
 use crate::sys::screen::{SpaceId, get_active_space_number, order_visible_spaces_by_position};
 use crate::sys::window_server::{
@@ -263,29 +262,6 @@ pub struct Reactor {
     pending_space_change_manager: managers::PendingSpaceChangeManager,
     active_spaces: HashSet<SpaceId>,
     display_topology_manager: DisplayTopologyManager,
-}
-
-#[derive(Clone, Debug)]
-struct Screen {
-    frame: CGRect,
-    space: Option<SpaceId>,
-    display_uuid: String,
-    name: Option<String>,
-    screen_id: ScreenId,
-}
-
-impl Screen {
-    fn display_uuid_opt(&self) -> Option<&str> {
-        if self.display_uuid.is_empty() {
-            None
-        } else {
-            Some(self.display_uuid.as_str())
-        }
-    }
-
-    fn display_uuid_owned(&self) -> Option<String> {
-        self.display_uuid_opt().map(|uuid| uuid.to_string())
-    }
 }
 
 impl Reactor {
