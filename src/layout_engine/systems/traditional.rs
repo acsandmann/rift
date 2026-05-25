@@ -2324,10 +2324,22 @@ impl Layout {
 
     fn take_share(&mut self, map: &NodeMap, node: NodeId, from: NodeId, share: f32) {
         assert_eq!(node.parent(map), from.parent(map));
-        let share = share.min(self.info[from].size);
-        let share = share.max(-self.info[node].size);
+        const MIN_NODE_SIZE: f32 = 0.05;
+        let share = share.min(self.info[from].size - MIN_NODE_SIZE);
+        let share = share.max(MIN_NODE_SIZE - self.info[node].size);
         self.info[from].size -= share;
         self.info[node].size += share;
+        let parent = node.parent(map).unwrap();
+        let children: Vec<_> = parent.children(map).collect();
+        let total: f32 = children.iter().map(|&child| self.info[child].size.max(0.0)).sum();
+        if total > f32::EPSILON && total.is_finite() {
+            let target_total = children.len() as f32;
+            let scale = target_total / total;
+            for child in children {
+                self.info[child].size *= scale;
+            }
+            self.info[parent].total = target_total;
+        }
     }
 
     fn set_fullscreen(&mut self, node: NodeId, is_fullscreen: bool) {
@@ -2700,17 +2712,20 @@ impl Layout {
         for &child in &children {
             let sz = self.info[child].size;
             actual_total += sz;
-            if sz < min_size {
+            if !sz.is_finite() || sz < min_size - f32::EPSILON {
                 needs_normalization = true;
             }
         }
-        if (actual_total - expected_total).abs() > 0.01 || needs_normalization {
-            let share = 1.0;
+        if !actual_total.is_finite()
+            || actual_total <= f32::EPSILON
+            || needs_normalization
+            || (actual_total - expected_total).abs() > 0.01
+        {
             unsafe {
                 let info = &mut *(&self.info as *const _
                     as *mut slotmap::SecondaryMap<NodeId, LayoutInfo>);
                 for &child in &children {
-                    info[child].size = share;
+                    info[child].size = 1.0;
                 }
                 info[node].total = children.len() as f32;
             }
@@ -4528,6 +4543,66 @@ mod tests {
         assert!(
             after > 0.515,
             "dominant-edge resize should apply more than the 10px net delta"
+        );
+    }
+
+    #[test]
+    fn manual_resize_keeps_small_node_size_across_layout_pass() {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
+
+        let left = w(83);
+        let right = w(84);
+        system.add_window_after_selection(layout, left);
+        system.add_window_after_selection(layout, right);
+
+        let right_node = system
+            .tree
+            .data
+            .window
+            .node_for(layout, right)
+            .expect("right window node missing");
+
+        let old_frame = CGRect::new(CGPoint::new(500.0, 0.0), CGSize::new(500.0, 800.0));
+        let new_frame = CGRect::new(CGPoint::new(950.0, 0.0), CGSize::new(50.0, 800.0));
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
+
+        system.set_frame_from_resize(right_node, old_frame, new_frame, screen);
+        let before = system
+            .tree
+            .data
+            .layout
+            .proportion(&system.tree.map, right_node)
+            .expect("right node proportion missing");
+
+        let gaps = crate::common::config::GapSettings::default();
+        let _ = system.calculate_layout_for_node(
+            root,
+            screen,
+            screen,
+            0.0,
+            &HashMap::default(),
+            &gaps,
+            0.0,
+            crate::common::config::HorizontalPlacement::Top,
+            crate::common::config::VerticalPlacement::Left,
+        );
+
+        let after = system
+            .tree
+            .data
+            .layout
+            .proportion(&system.tree.map, right_node)
+            .expect("right node proportion missing");
+        assert!(
+            before <= 0.051,
+            "manual resize should reach the small-node clamp, got {before}"
+        );
+        assert!(
+            (after - before).abs() < 0.0001,
+            "layout pass should not rebalance to 50/50"
         );
     }
 

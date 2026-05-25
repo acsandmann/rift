@@ -11,7 +11,8 @@ use objc2::rc::{Allocated, Retained};
 use objc2::{AnyThread, ClassType, DeclaredClass, Encode, Encoding, define_class, msg_send, sel};
 use objc2_app_kit::{self, NSRunningApplication, NSWorkspace, NSWorkspaceApplicationKey};
 use objc2_foundation::{
-    MainThreadMarker, NSNotification, NSNotificationCenter, NSObject, NSProcessInfo, NSString,
+    MainThreadMarker, NSDistributedNotificationCenter, NSNotification, NSNotificationCenter,
+    NSNotificationSuspensionBehavior, NSObject, NSProcessInfo, NSString,
 };
 use tracing::{debug, info_span, trace, warn};
 
@@ -124,6 +125,12 @@ define_class! {
         fn recv_dock_pref_changed(&self, notif: &NSNotification) {
             trace!("{notif:#?}");
             self.handle_dock_pref_changed();
+        }
+
+        #[unsafe(method(recvKeyboardLayoutChanged:))]
+        fn recv_keyboard_layout_changed(&self, notif: &NSNotification) {
+            trace!("{notif:#?}");
+            self.send_event(WmEvent::KeyboardLayoutChanged);
         }
     }
 }
@@ -581,6 +588,7 @@ impl NotificationCenter {
         let workspace = &NSWorkspace::sharedWorkspace();
         let workspace_center = &workspace.notificationCenter();
         let default_center = &NSNotificationCenter::defaultCenter();
+        let distributed_center = &NSDistributedNotificationCenter::defaultCenter();
         unsafe {
             use objc2_app_kit::*;
             workspace_center.addObserver_selector_name_object(
@@ -636,6 +644,15 @@ impl NotificationCenter {
                     "NSProcessInfoPowerStateDidChangeNotification",
                 )),
                 None,
+            );
+            distributed_center.addObserver_selector_name_object_suspensionBehavior(
+                &handler,
+                sel!(recvKeyboardLayoutChanged:),
+                Some(&NSString::from_str(
+                    "com.apple.Carbon.TISNotifySelectedKeyboardInputSourceChanged",
+                )),
+                None,
+                NSNotificationSuspensionBehavior::DeliverImmediately,
             );
         };
 

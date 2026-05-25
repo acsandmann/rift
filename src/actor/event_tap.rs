@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::mem::replace;
 use std::panic::AssertUnwindSafe;
 use std::rc::Rc;
+use std::str::FromStr;
 
 use objc2::exception;
 use objc2_app_kit::{
@@ -32,6 +33,7 @@ use crate::sys::hotkey::{
 use crate::sys::screen::{CoordinateConverter, SpaceId};
 use crate::sys::window_server::{self, WindowServerId, window_level};
 use crate::sys::{haptics, power};
+use crate::ui::stack_line::point_hits_indicator_frame;
 
 // Window levels can change for transient UI windows; cache briefly to reduce
 // query overhead without pinning stale values for long.
@@ -51,7 +53,8 @@ pub enum Request {
     SpaceChanged(Vec<Option<SpaceId>>),
     SetEventProcessing(bool),
     SetFocusFollowsMouseEnabled(bool),
-    SetHotkeys(Vec<(Hotkey, WmCommand)>),
+    SetHotkeys(Vec<(String, WmCommand)>),
+    KeyboardLayoutChanged,
     ConfigUpdated(Config),
     LayoutModesChanged(Vec<(SpaceId, crate::common::config::LayoutMode)>),
     SetLowPowerMode(bool),
@@ -67,9 +70,11 @@ pub struct EventTap {
     disable_hotkey: RefCell<Option<Hotkey>>,
     swipe: RefCell<Option<SwipeHandler>>,
     scroll: RefCell<Option<ScrollHandler>>,
+    hotkey_specs: RefCell<Vec<(String, WmCommand)>>,
     hotkeys: RefCell<HashMap<Hotkey, Vec<WmCommand>>>,
     wm_sender: Option<wm_controller::Sender>,
     stack_line_tx: Option<stack_line::Sender>,
+    stack_line_hit_rects: Option<stack_line::SharedHitRects>,
 }
 
 struct State {
@@ -372,6 +377,7 @@ impl EventTap {
         requests_rx: Receiver,
         wm_sender: Option<wm_controller::Sender>,
         stack_line_tx: Option<stack_line::Sender>,
+        stack_line_hit_rects: Option<stack_line::SharedHitRects>,
     ) -> Self {
         let disable_hotkey = config
             .settings
@@ -405,9 +411,11 @@ impl EventTap {
             disable_hotkey: RefCell::new(disable_hotkey),
             swipe: RefCell::new(swipe),
             scroll: RefCell::new(scroll),
+            hotkey_specs: RefCell::new(Vec::new()),
             hotkeys: RefCell::new(HashMap::default()),
             wm_sender,
             stack_line_tx,
+            stack_line_hit_rects,
         }
     }
 
@@ -500,25 +508,12 @@ impl EventTap {
                 should_rebuild_mask = true;
             }
             Request::SetHotkeys(bindings) => {
-                let mut map = self.hotkeys.borrow_mut();
-                map.clear();
-                for (hotkey, command) in bindings {
-                    if hotkey.modifiers.has_generic_modifiers() {
-                        for expanded_mods in hotkey.modifiers.expand_to_specific() {
-                            let expanded_hotkey = Hotkey::new(expanded_mods, hotkey.key_code);
-                            let entry = map.entry(expanded_hotkey).or_default();
-                            if !entry.contains(&command) {
-                                entry.push(command.clone());
-                            }
-                        }
-                    } else {
-                        let entry = map.entry(hotkey).or_default();
-                        if !entry.contains(&command) {
-                            entry.push(command);
-                        }
-                    }
-                }
-                debug!("Updated hotkey bindings: {}", map.len());
+                *self.hotkey_specs.borrow_mut() = bindings;
+                self.rebuild_hotkeys_for_current_layout();
+                should_rebuild_mask = true;
+            }
+            Request::KeyboardLayoutChanged => {
+                self.rebuild_hotkeys_for_current_layout();
                 should_rebuild_mask = true;
             }
             Request::ConfigUpdated(new_config) => {
@@ -650,7 +645,27 @@ impl EventTap {
 
                 if let Some(tx) = &self.stack_line_tx {
                     let loc = CGEvent::location(Some(event));
-                    let _ = tx.try_send(stack_line::Event::MouseDown(loc));
+
+                    // The event tap is the single source of hit-testing for
+                    // stack-line indicators. Only forward the click and
+                    // suppress propagation when it lands on a visible,
+                    // non-occluded indicator.
+                    let hits_stack_line = self
+                        .stack_line_hit_rects
+                        .as_ref()
+                        .map(|hit_rects| {
+                            hit_rects
+                                .borrow()
+                                .iter()
+                                .copied()
+                                .any(|frame| point_hits_indicator_frame(loc, frame))
+                        })
+                        .unwrap_or(false);
+                    if hits_stack_line && !window_server::is_point_occluded_by_external_window(loc)
+                    {
+                        let _ = tx.try_send(stack_line::Event::MouseDown(loc));
+                        return false;
+                    }
                 }
             }
             CGEventType::LeftMouseDragged | CGEventType::RightMouseDragged => {
@@ -695,7 +710,22 @@ impl EventTap {
                 if state.stack_line_enabled
                     && let Some(tx) = &self.stack_line_tx
                 {
-                    let _ = tx.try_send(stack_line::Event::MouseMoved(loc));
+                    let hits = self
+                        .stack_line_hit_rects
+                        .as_ref()
+                        .map(|hit_rects| {
+                            hit_rects
+                                .borrow()
+                                .iter()
+                                .copied()
+                                .any(|frame| point_hits_indicator_frame(loc, frame))
+                        })
+                        .unwrap_or(false)
+                        && !window_server::is_point_occluded_by_external_window(loc);
+                    let _ = tx.try_send(stack_line::Event::MouseMoved {
+                        point: loc,
+                        hits_indicator: hits,
+                    });
                 }
 
                 // ffm
@@ -1017,6 +1047,39 @@ impl EventTap {
         }
 
         true
+    }
+
+    fn rebuild_hotkeys_for_current_layout(&self) {
+        let specs = self.hotkey_specs.borrow();
+        let mut map = self.hotkeys.borrow_mut();
+        map.clear();
+
+        for (spec, command) in specs.iter() {
+            let Ok(hotkey) = Hotkey::from_str(spec) else {
+                warn!(%spec, "Skipping hotkey that no longer resolves for current keyboard layout");
+                continue;
+            };
+
+            if hotkey.modifiers.has_generic_modifiers() {
+                for expanded_mods in hotkey.modifiers.expand_to_specific() {
+                    let expanded_hotkey = Hotkey::new(expanded_mods, hotkey.key_code);
+                    let entry = map.entry(expanded_hotkey).or_default();
+                    if !entry.contains(command) {
+                        entry.push(command.clone());
+                    }
+                }
+            } else {
+                let entry = map.entry(hotkey).or_default();
+                if !entry.contains(command) {
+                    entry.push(command.clone());
+                }
+            }
+        }
+
+        trace!(
+            "Updated hotkey bindings for current keyboard layout: {}",
+            map.len()
+        );
     }
 }
 

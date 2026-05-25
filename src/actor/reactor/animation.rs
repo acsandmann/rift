@@ -182,18 +182,22 @@ impl AnimationManager {
                         if target_frame.same_as(current_frame) {
                             continue;
                         }
-                        let wsid = window.info.sys_id.unwrap();
-                        if reactor
-                            .transaction_manager
-                            .get_target_frame(wsid)
-                            .is_some_and(|pending| pending.same_as(target_frame))
-                        {
-                            trace!(?wid, ?target_frame, "Skipping redundant layout request");
-                            continue;
+                        let wsid = window.info.sys_id;
+                        if let Some(wsid) = wsid {
+                            if reactor
+                                .transaction_manager
+                                .get_target_frame(wsid)
+                                .is_some_and(|pending| pending.same_as(target_frame))
+                            {
+                                trace!(?wid, ?target_frame, "Skipping redundant layout request");
+                                continue;
+                            }
                         }
                         any_frame_changed = true;
-                        let txid = reactor.transaction_manager.generate_next_txid(wsid);
-                        (current_frame, Some(wsid), txid)
+                        let txid = wsid
+                            .map(|wsid| reactor.transaction_manager.generate_next_txid(wsid))
+                            .unwrap_or_default();
+                        (current_frame, wsid, txid)
                     }
                     None => {
                         debug!(?wid, "Skipping - window no longer exists");
@@ -264,6 +268,7 @@ impl AnimationManager {
 
     pub fn instant_layout(
         reactor: &mut Reactor,
+        space: SpaceId,
         layout: &[(WindowId, CGRect)],
         skip_wid: Option<WindowId>,
     ) -> bool {
@@ -297,14 +302,18 @@ impl AnimationManager {
                 }
             }
             any_frame_changed = true;
+            let is_hidden =
+                !reactor.layout_manager.layout_engine.is_window_in_active_workspace(space, wid);
             trace!(
                 ?wid,
                 ?current_frame,
                 ?target_frame,
+                hidden = is_hidden,
                 "Instant workspace positioning"
             );
 
             per_app.entry(wid.pid).or_default().push((wid, target_frame));
+            window.frame_monotonic = target_frame;
         }
 
         for (pid, frames) in per_app.into_iter() {
@@ -344,7 +353,7 @@ impl AnimationManager {
             }
 
             let frames_to_send = frames.clone();
-            if let Err(e) = handle.send(Request::SetBatchWindowFrame(frames_to_send, txid)) {
+            if let Err(e) = handle.send(Request::SetBatchWindowFrame(frames_to_send, txid, true)) {
                 debug!(
                     ?pid,
                     ?e,

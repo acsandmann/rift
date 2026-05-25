@@ -215,7 +215,7 @@ pub enum Request {
     CloseWindow(WindowId),
 
     SetWindowFrame(WindowId, CGRect, TransactionId, bool),
-    SetBatchWindowFrame(Vec<(WindowId, CGRect)>, TransactionId),
+    SetBatchWindowFrame(Vec<(WindowId, CGRect)>, TransactionId, bool),
     SetWindowPos(WindowId, CGPoint, TransactionId, bool),
 
     BeginWindowAnimation(WindowId),
@@ -614,47 +614,68 @@ impl State {
                     None,
                 ));
             }
-            &mut Request::SetBatchWindowFrame(ref mut frames, txid) => {
-                let app = self.app.clone();
-                let result = with_enhanced_ui_disabled(&app, || -> Result<(), AxError> {
-                    for (wid, desired) in frames.iter() {
-                        let elem = match self.window_mut(*wid) {
-                            Ok(window) => {
-                                window.last_seen_txid = txid;
-                                window.elem.clone()
-                            }
-                            Err(err) => match err {
-                                AxError::Ax(code) => {
-                                    if self.handle_ax_error(*wid, &code) {
-                                        continue;
-                                    }
-                                    return Err(AxError::Ax(code));
-                                }
-                                AxError::NotFound => continue,
-                            },
-                        };
+            &mut Request::SetBatchWindowFrame(ref mut frames, txid, eui) => {
+                let disable_eui_for_batch = eui
+                    && frames.iter().any(|(wid, _)| {
+                        self.windows.get(wid).is_some_and(|window| !window.is_animating)
+                    });
 
+                if disable_eui_for_batch {
+                    let _ = self.app.set_bool_attribute("AXEnhancedUserInterface", false);
+                }
+
+                for (wid, desired) in frames.iter() {
+                    let (elem, is_animating) = match self.window_mut(*wid) {
+                        Ok(window) => {
+                            window.last_seen_txid = txid;
+                            (window.elem.clone(), window.is_animating)
+                        }
+                        Err(err) => match err {
+                            AxError::Ax(code) => {
+                                if self.handle_ax_error(*wid, &code) {
+                                    continue;
+                                }
+                                return Err(AxError::Ax(code));
+                            }
+                            AxError::NotFound => continue,
+                        },
+                    };
+
+                    if disable_eui_for_batch || (eui && !is_animating) {
+                        if disable_eui_for_batch {
+                            let _ = elem.set_size(desired.size);
+                            let _ = elem.set_position(desired.origin);
+                            let _ = elem.set_size(desired.size);
+                        } else {
+                            with_enhanced_ui_disabled(&self.app, || {
+                                let _ = elem.set_size(desired.size);
+                                let _ = elem.set_position(desired.origin);
+                                let _ = elem.set_size(desired.size);
+                            });
+                        }
+                    } else {
                         let _ = elem.set_size(desired.size);
                         let _ = elem.set_position(desired.origin);
                         let _ = elem.set_size(desired.size);
-
-                        let frame = match self.handle_ax_result(*wid, elem.frame())? {
-                            Some(frame) => frame,
-                            None => continue,
-                        };
-
-                        self.send_event(Event::WindowFrameChanged(
-                            *wid,
-                            frame,
-                            Some(txid),
-                            Requested(true),
-                            None,
-                        ));
                     }
-                    Ok(())
-                });
-                if let Err(err) = result {
-                    return Err(err);
+
+                    let frame = match self
+                        .handle_ax_result(*wid, trace("frame", &elem, || elem.frame()))?
+                    {
+                        Some(frame) => frame,
+                        None => continue,
+                    };
+
+                    self.send_event(Event::WindowFrameChanged(
+                        *wid,
+                        frame,
+                        Some(txid),
+                        Requested(true),
+                        None,
+                    ));
+                }
+                if disable_eui_for_batch {
+                    let _ = self.app.set_bool_attribute("AXEnhancedUserInterface", true);
                 }
             }
             &mut Request::BeginWindowAnimation(wid) => {
@@ -890,15 +911,24 @@ impl State {
 
         let is_frontmost = trace("is_frontmost", &this.app, || this.app.frontmost())?;
 
-        let make_key_result = window_server::make_key_window(
-            this.pid,
-            WindowServerId::try_from(&this.window(first)?.elem)?,
-        );
-        if make_key_result.is_err() {
-            warn!(?this.pid, "Failed to activate app");
+        let window_server_id = match WindowServerId::try_from(&this.window(first)?.elem) {
+            Ok(wsid) => Some(wsid),
+            Err(AxError::NotFound) => {
+                debug!(
+                    ?first,
+                    "Skipping make-key request because window has no server id yet"
+                );
+                None
+            }
+            Err(err) => return Err(err.into()),
+        };
+        let make_key_result =
+            window_server_id.map(|wsid| window_server::make_key_window(this.pid, wsid));
+        if let Some(Err(err)) = &make_key_result {
+            warn!(?this.pid, ?err, "Failed to activate app");
         }
 
-        if !is_frontmost && make_key_result.is_ok() && is_standard {
+        if !is_frontmost && make_key_result.as_ref().is_some_and(Result::is_ok) && is_standard {
             let (tx, rx) = continuation();
             let (quiet_activation, quiet_window_change);
             if wids.len() == 1 {
@@ -1172,7 +1202,7 @@ impl State {
             info.is_root = true;
         }
 
-        let window_server_id = info.sys_id.or_else(|| {
+        let window_server_id = info.sys_id.filter(|sid| sid.as_nonzero().is_some()).or_else(|| {
             WindowServerId::try_from(&elem)
                 .or_else(|e| {
                     info!("Could not get window server id for {elem:?}: {e}");
@@ -1181,12 +1211,10 @@ impl State {
                 .ok()
         });
 
-        let idx = window_server_id
-            .map(|sid| NonZeroU32::new(sid.as_u32()).expect("Window server id was 0"))
-            .unwrap_or_else(|| {
-                self.last_window_idx += 1;
-                NonZeroU32::new(self.last_window_idx).unwrap()
-            });
+        let idx = window_server_id.and_then(WindowServerId::as_nonzero).unwrap_or_else(|| {
+            self.last_window_idx += 1;
+            NonZeroU32::new(self.last_window_idx).unwrap()
+        });
         let wid = WindowId { pid: self.pid, idx };
         if self.windows.contains_key(&wid) {
             trace!(?wid, "Window already registered; skipping duplicate");
@@ -1322,12 +1350,11 @@ impl State {
 
     fn id(&self, elem: &AXUIElement) -> Result<WindowId, AxError> {
         if let Ok(id) = WindowServerId::try_from(elem) {
-            let wid = WindowId {
-                pid: self.pid,
-                idx: NonZeroU32::new(id.as_u32()).expect("Window server id was 0"),
-            };
-            if self.windows.contains_key(&wid) {
-                return Ok(wid);
+            if let Some(idx) = id.as_nonzero() {
+                let wid = WindowId { pid: self.pid, idx };
+                if self.windows.contains_key(&wid) {
+                    return Ok(wid);
+                }
             }
         } else if let Some((&wid, _)) = self.windows.iter().find(|(_, w)| &w.elem == elem) {
             return Ok(wid);

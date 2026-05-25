@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::hash_map::Entry;
 use std::rc::Rc;
 
@@ -14,7 +15,14 @@ use crate::common::config::{Config, HorizontalPlacement, VerticalPlacement};
 use crate::layout_engine::LayoutKind;
 use crate::model::tree::NodeId;
 use crate::sys::screen::{CoordinateConverter, SpaceId};
-use crate::ui::stack_line::{GroupDisplayData, GroupIndicatorWindow, GroupKind, IndicatorConfig};
+use crate::ui::stack_line::{
+    GroupDisplayData, GroupIndicatorWindow, GroupKind, IndicatorConfig, point_hits_indicator_frame,
+};
+
+/// Shared indicator hit-rect state readable from the event tap callback.
+pub type SharedHitRects = Rc<RefCell<Vec<CGRect>>>;
+
+pub fn new_shared_hit_rects() -> SharedHitRects { Rc::new(RefCell::new(Vec::new())) }
 
 #[derive(Debug, Clone)]
 pub struct GroupInfo {
@@ -37,8 +45,16 @@ pub enum Event {
     },
     ScreenParametersChanged(CoordinateConverter),
     ConfigUpdated(Config),
+    /// A click that the event tap already confirmed lands on a visible,
+    /// non-occluded stack-line indicator.
     MouseDown(CGPoint),
-    MouseMoved(CGPoint),
+    /// Cursor moved; `hits_indicator` is `true` when the event tap's
+    /// hit-test (geometry + occlusion) determined the point is over an
+    /// indicator.
+    MouseMoved {
+        point: CGPoint,
+        hits_indicator: bool,
+    },
 }
 
 pub struct StackLine {
@@ -52,6 +68,7 @@ pub struct StackLine {
     coordinate_converter: CoordinateConverter,
     group_sigs_by_space: HashMap<SpaceId, Vec<GroupSig>>,
     cursor_over_indicator: bool,
+    shared_hit_rects: SharedHitRects,
 }
 
 pub type Sender = actor::Sender<Event>;
@@ -64,6 +81,7 @@ impl StackLine {
         mtm: MainThreadMarker,
         reactor_tx: reactor::Sender,
         coordinate_converter: CoordinateConverter,
+        shared_hit_rects: SharedHitRects,
     ) -> Self {
         Self {
             config,
@@ -74,6 +92,7 @@ impl StackLine {
             coordinate_converter,
             group_sigs_by_space: HashMap::default(),
             cursor_over_indicator: false,
+            shared_hit_rects,
         }
     }
 
@@ -90,6 +109,19 @@ impl StackLine {
 
     fn is_enabled(&self) -> bool { self.config.settings.ui.stack_line.enabled }
 
+    /// Publish the current indicator frames so the event tap can suppress
+    /// clicks that land on a visible, non-occluded indicator.
+    fn sync_shared_hit_rects(&self) {
+        let mut rects = self.shared_hit_rects.borrow_mut();
+        rects.clear();
+        if !self.is_enabled() {
+            return;
+        }
+        for indicator in self.indicators.values().filter(|indicator| indicator.is_visible()) {
+            rects.push(indicator.frame());
+        }
+    }
+
     #[instrument(name = "stack_line::handle_event", skip(self))]
     fn handle_event(&mut self, event: Event) {
         if !self.is_enabled()
@@ -98,7 +130,7 @@ impl StackLine {
                 Event::ConfigUpdated(_)
                     | Event::ScreenParametersChanged(_)
                     | Event::MouseDown(_)
-                    | Event::MouseMoved(_)
+                    | Event::MouseMoved { .. }
             )
         {
             return;
@@ -116,18 +148,20 @@ impl StackLine {
                     groups,
                     active_workspace_for_space_has_fullscreen,
                 );
+                self.sync_shared_hit_rects();
             }
             Event::ScreenParametersChanged(converter) => {
                 self.handle_screen_parameters_changed(converter);
             }
             Event::ConfigUpdated(config) => {
                 self.handle_config_updated(config);
+                self.sync_shared_hit_rects();
             }
             Event::MouseDown(point) => {
                 self.handle_mouse_down(point);
             }
-            Event::MouseMoved(point) => {
-                self.handle_mouse_moved(point);
+            Event::MouseMoved { point, hits_indicator } => {
+                self.handle_mouse_moved(point, hits_indicator);
             }
         }
     }
@@ -239,50 +273,36 @@ impl StackLine {
             return;
         }
 
+        // The event tap already verified that this click lands on a visible,
+        // non-occluded indicator. We only need to find the matching segment.
         for (&node_id, indicator) in &self.indicators {
+            if !indicator.is_visible() {
+                continue;
+            }
+
             let frame = indicator.frame();
-            let (mx, my) = hit_margins(frame, indicator.recommended_thickness());
+            if !point_hits_indicator_frame(screen_point, frame) {
+                continue;
+            }
 
-            if point_in_hit_area(screen_point, frame, mx, my) {
-                let local_point =
-                    CGPoint::new(screen_point.x - frame.origin.x, screen_point.y - frame.origin.y);
-
-                if let Some(segment_index) = indicator.check_click(local_point) {
-                    tracing::debug!(
-                        ?node_id,
-                        segment_index,
-                        "Detected click on stack line indicator segment"
-                    );
-                    self.handle_indicator_clicked(node_id, segment_index);
-                    return;
-                }
+            let local_point =
+                CGPoint::new(screen_point.x - frame.origin.x, screen_point.y - frame.origin.y);
+            if let Some(segment_index) = indicator.check_click(local_point) {
+                tracing::debug!(
+                    ?node_id,
+                    segment_index,
+                    "Detected click on stack line indicator segment"
+                );
+                self.handle_indicator_clicked(node_id, segment_index);
+                return;
             }
         }
     }
 
     // this is very hacky but we don't use nswindow so we have to roll this ourselves
-    fn handle_mouse_moved(&mut self, screen_point: CGPoint) {
-        let over_indicator = if self.is_enabled() {
-            self.indicators.values().any(|indicator| {
-                let frame = indicator.frame();
-                let (mx, my) = hit_margins(frame, indicator.recommended_thickness());
-                let enter_mul = 1.0;
-                let exit_mul = 0.65;
+    fn handle_mouse_moved(&mut self, _screen_point: CGPoint, hits_indicator: bool) {
+        let over_indicator = self.is_enabled() && hits_indicator;
 
-                // enter hitbox is larger than exit
-                let (mx, my) = if self.cursor_over_indicator {
-                    (mx * exit_mul, my * exit_mul)
-                } else {
-                    (mx * enter_mul, my * enter_mul)
-                };
-
-                point_in_hit_area(screen_point, frame, mx, my)
-            })
-        } else {
-            false
-        };
-
-        // the hack
         if over_indicator != self.cursor_over_indicator {
             self.cursor_over_indicator = over_indicator;
             if over_indicator {
@@ -467,32 +487,6 @@ impl GroupSig {
             window_ids: g.window_ids.clone(),
         }
     }
-}
-
-fn hit_margins(frame: CGRect, thickness: f64) -> (f64, f64) {
-    let base = (thickness * 0.25).clamp(1.0, 5.0);
-    let target_short = 14.0;
-
-    if frame.size.width < frame.size.height {
-        // vertical: widen hitbox more in X
-        let mx =
-            (base + ((target_short - frame.size.width as f64) * 0.5).max(0.0)).clamp(1.0, 10.0);
-        let my = base.clamp(1.0, 4.0);
-        (mx, my)
-    } else {
-        // horizontal: expand more in Y
-        let mx = base.clamp(1.0, 4.0);
-        let my =
-            (base + ((target_short - frame.size.height as f64) * 0.5).max(0.0)).clamp(1.0, 10.0);
-        (mx, my)
-    }
-}
-
-fn point_in_hit_area(point: CGPoint, frame: CGRect, mx: f64, my: f64) -> bool {
-    point.x >= frame.origin.x - mx
-        && point.x < frame.origin.x + frame.size.width + mx
-        && point.y >= frame.origin.y - my
-        && point.y < frame.origin.y + frame.size.height + my
 }
 
 #[cfg(test)]

@@ -248,6 +248,20 @@ impl CgsWindow {
     }
 
     #[inline]
+    pub fn order_below(&self, relative: Option<WindowId>) -> Result<(), CgsWindowError> {
+        let rel = relative.unwrap_or(0);
+        unsafe {
+            cg_ok(SLSOrderWindow(
+                self.connection,
+                self.id,
+                -1, // kCGSOrderBelow
+                rel,
+            ))
+        }
+        .map_err(CgsWindowError::Level)
+    }
+
+    #[inline]
     pub fn order_out(&self) -> Result<(), CgsWindowError> {
         unsafe {
             cg_ok(SLSOrderWindow(

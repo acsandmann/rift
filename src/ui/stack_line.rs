@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use objc2::rc::Retained;
-use objc2_app_kit::NSStatusWindowLevel;
+use objc2_app_kit::NSNormalWindowLevel;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_quartz_core::CALayer;
 use tracing::warn;
@@ -83,6 +83,13 @@ pub enum GroupKind {
     Vertical,
 }
 
+pub fn point_hits_indicator_frame(point: CGPoint, frame: CGRect) -> bool {
+    point.x >= frame.origin.x
+        && point.x < frame.origin.x + frame.size.width
+        && point.y >= frame.origin.y
+        && point.y < frame.origin.y + frame.size.height
+}
+
 #[derive(Debug, Clone)]
 pub struct GroupDisplayData {
     pub group_kind: GroupKind,
@@ -101,6 +108,7 @@ struct IndicatorState {
     selected_layer: Option<Retained<CALayer>>,
     click_callback: Option<SegmentClickCallback>,
     space_id: Option<SpaceId>,
+    is_visible: bool,
 }
 
 impl IndicatorState {
@@ -113,6 +121,7 @@ impl IndicatorState {
             selected_layer: None,
             click_callback: None,
             space_id: None,
+            is_visible: false,
         }
     }
 }
@@ -139,8 +148,13 @@ impl GroupIndicatorWindow {
         if let Err(err) = cgs_window.set_alpha(1.0) {
             warn!(error=?err, "failed to set stack line window alpha");
         }
-        if let Err(err) = cgs_window.set_level(NSStatusWindowLevel as i32) {
+        if let Err(err) = cgs_window.set_level(NSNormalWindowLevel as i32) {
             warn!(error=?err, "failed to set stack line window level");
+        }
+        // Disable the system window shadow so that macOS does not draw a
+        // drop-shadow around the indicator when it sits between tiled windows.
+        if let Err(err) = cgs_window.set_tags(1 << 3) {
+            warn!(error=?err, "failed to disable stack line window shadow");
         }
 
         Ok(Self {
@@ -162,6 +176,7 @@ impl GroupIndicatorWindow {
             let mut state = self.state.borrow_mut();
             state.config = config;
             state.group_data = Some(group_data.clone());
+            state.is_visible = true;
         }
 
         self.update_layers();
@@ -173,13 +188,17 @@ impl GroupIndicatorWindow {
         }
 
         self.present();
-        self.cgs_window.order_above(None)
+        self.cgs_window.order_below(None)
     }
 
     pub fn clear(&self) -> Result<(), CgsWindowError> {
         self.clear_layers();
-        self.state.borrow_mut().group_data = None;
-        self.state.borrow_mut().space_id = None;
+        {
+            let mut state = self.state.borrow_mut();
+            state.group_data = None;
+            state.space_id = None;
+            state.is_visible = false;
+        }
         self.present();
         self.cgs_window.order_out()
     }
@@ -201,14 +220,15 @@ impl GroupIndicatorWindow {
     }
 
     pub fn set_visibility(&self, fullscreen: bool) -> Result<(), CgsWindowError> {
+        self.state.borrow_mut().is_visible = !fullscreen;
         if fullscreen {
             self.cgs_window.order_out()
         } else {
-            self.cgs_window.order_above(None)
+            self.cgs_window.order_below(None)
         }
     }
 
-    pub fn recommended_thickness(&self) -> f64 { self.state.borrow().config.bar_thickness }
+    pub fn is_visible(&self) -> bool { self.state.borrow().is_visible }
 
     pub fn frame(&self) -> CGRect { *self.frame.borrow() }
 
@@ -241,12 +261,7 @@ impl GroupIndicatorWindow {
             return None;
         };
         let bounds = self.bounds();
-        Self::segment_at_point_static(window_point, group_data, &bounds)
-    }
-
-    pub fn segment_at_point(&self, point: CGPoint, group_data: &GroupDisplayData) -> Option<usize> {
-        let bounds = self.bounds();
-        Self::segment_at_point_static(point, group_data, &bounds)
+        Self::segment_at_point_static(window_point, group_data, bounds)
     }
 
     fn bounds(&self) -> CGRect {
@@ -625,15 +640,9 @@ impl GroupIndicatorWindow {
     fn segment_at_point_static(
         point: CGPoint,
         group_data: &GroupDisplayData,
-        bounds: &CGRect,
+        bounds: CGRect,
     ) -> Option<usize> {
-        let bar = *bounds;
-
-        if point.x < bar.origin.x
-            || point.x >= bar.origin.x + bar.size.width
-            || point.y < bar.origin.y
-            || point.y >= bar.origin.y + bar.size.height
-        {
+        if !point_hits_indicator_frame(point, bounds) {
             return None;
         }
 
@@ -642,17 +651,17 @@ impl GroupIndicatorWindow {
         }
 
         let segment_length = match group_data.group_kind {
-            GroupKind::Horizontal => bar.size.width / group_data.total_count as f64,
-            GroupKind::Vertical => bar.size.height / group_data.total_count as f64,
+            GroupKind::Horizontal => bounds.size.width / group_data.total_count as f64,
+            GroupKind::Vertical => bounds.size.height / group_data.total_count as f64,
         };
 
         let segment_index = match group_data.group_kind {
             GroupKind::Horizontal => {
-                let relative_x = point.x - bar.origin.x;
+                let relative_x = point.x - bounds.origin.x;
                 (relative_x / segment_length).floor() as usize
             }
             GroupKind::Vertical => {
-                let relative_y_from_top = (bar.origin.y + bar.size.height) - point.y;
+                let relative_y_from_top = (bounds.origin.y + bounds.size.height) - point.y;
                 (relative_y_from_top / segment_length).floor() as usize
             }
         };

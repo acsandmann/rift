@@ -12,7 +12,7 @@ use objc2_application_services::{AXError, AXUIElement};
 use objc2_core_foundation::{
     CFArray, CFData, CFDictionary, CFNumber, CFString, CFType, CGPoint, CGRect, CGSize,
 };
-use objc2_core_graphics::{CGContext, CGError, CGImage, CGWindowID};
+use objc2_core_graphics::{CGContext, CGError, CGEventSourceStateID, CGImage, CGWindowID};
 use objc2_foundation::NSArray;
 use once_cell::sync::Lazy;
 
@@ -216,10 +216,12 @@ unsafe extern "C" {
     pub fn _AXUIElementCreateWithRemoteToken(data: *mut CFData) -> *mut AXUIElement;
 
     pub fn CGEventCreate(source: *mut CFType) -> *mut CFType;
+    pub fn CGEventSourceCreate(state: CGEventSourceStateID) -> *mut CFType;
     pub fn CGEventSetIntegerValueField(event: *mut CFType, field: u32, value: i64);
     pub fn CGEventSetDoubleValueField(event: *mut CFType, field: u32, value: f64);
     pub fn CGEventPost(tapLocation: CGEventTapLocation, event: *mut CFType);
     pub fn CGWarpMouseCursorPosition(point: CGPoint) -> CGError;
+    pub fn CGEventSourceSetLocalEventsSuppressionInterval(source: *mut CFType, interval: f64);
 
     pub fn CGSGetWindowBounds(cid: cid_t, wid: u32, frame: *mut CGRect) -> i32;
     pub fn CGSSetConnectionProperty(

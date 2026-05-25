@@ -27,7 +27,6 @@ use crate::actor::app::AppInfo;
 use crate::actor::{self, event_tap, mission_control, reactor};
 use crate::model::tx_store::WindowTxStore;
 use crate::sys::dispatch::DispatchExt;
-use crate::sys::event::Hotkey;
 use crate::sys::screen::{CoordinateConverter, ScreenInfo, SpaceId};
 use crate::{layout_engine as layout, sys};
 
@@ -45,6 +44,7 @@ pub enum WmEvent {
     ScreenParametersChanged(Vec<ScreenInfo>, CoordinateConverter),
     SystemWoke,
     PowerStateChanged(bool),
+    KeyboardLayoutChanged,
     ConfigUpdated(crate::common::config::Config),
     Command(WmCommand),
 }
@@ -288,6 +288,9 @@ impl WmController {
                 info!("Power state changed: low power mode = {}", is_low_power_mode);
                 _ = self.event_tap_tx.send(event_tap::Request::SetLowPowerMode(is_low_power_mode));
             }
+            KeyboardLayoutChanged => {
+                _ = self.event_tap_tx.send(event_tap::Request::KeyboardLayoutChanged);
+            }
             Command(Wm(crate::actor::wm_controller::WmCmd::ToggleSpaceActivated)) => {
                 self.events_tx.send(reactor::Event::Command(reactor::Command::Reactor(
                     reactor::ReactorCommand::ToggleSpaceActivated,
@@ -434,7 +437,8 @@ impl WmController {
 
     fn register_hotkeys(&mut self) {
         debug!("register_hotkeys");
-        let bindings: Vec<(Hotkey, WmCommand)> = self.config.config.keys.iter().cloned().collect();
+        let bindings: Vec<(String, WmCommand)> =
+            self.config.config.key_specs.iter().cloned().collect();
         _ = self.event_tap_tx.send(event_tap::Request::SetHotkeys(bindings));
     }
 

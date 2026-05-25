@@ -1,4 +1,5 @@
 use std::ffi::{c_int, c_void};
+use std::num::NonZeroU32;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -44,6 +45,9 @@ impl WindowServerId {
 
     #[inline]
     pub fn as_u32(self) -> u32 { self.0 }
+
+    #[inline]
+    pub fn as_nonzero(self) -> Option<NonZeroU32> { NonZeroU32::new(self.0) }
 }
 
 impl From<WindowServerId> for u32 {
@@ -59,6 +63,9 @@ impl TryFrom<&AXUIElement> for WindowServerId {
         let res = unsafe { _AXUIElementGetWindow(element.raw_ptr().as_ptr(), &mut id) };
         if res != AXError::Success {
             return Err(AxError::Ax(res));
+        }
+        if id == 0 {
+            return Err(AxError::NotFound);
         }
         Ok(Self(id))
     }
@@ -276,7 +283,16 @@ pub fn window_spaces(id: WindowServerId) -> Vec<crate::sys::screen::SpaceId> {
 }
 
 pub fn window_space(id: WindowServerId) -> Option<crate::sys::screen::SpaceId> {
-    window_spaces(id).into_iter().next()
+    let spaces = window_spaces(id);
+    // SLSCopySpacesForWindows can return multiple space IDs for a window during
+    // Mission Control or fullscreen transitions — the window's real home space plus
+    // a transient fullscreen space. Prefer any user space (type 0) in the list so
+    // that Desktop windows are not misidentified as belonging to a fullscreen space.
+    spaces
+        .iter()
+        .copied()
+        .find(|s| space_is_user(s.get()))
+        .or_else(|| spaces.into_iter().next())
 }
 
 pub fn window_is_ordered_in(id: WindowServerId) -> bool {
@@ -388,35 +404,66 @@ fn get_num(dict: &CFDictionary<CFString, CFType>, key: &'static CFString) -> Opt
     dict.get(key)?.downcast::<CFNumber>().ok()?.as_i64()
 }
 
-pub fn get_window_at_point(mut point: CGPoint) -> Option<WindowServerId> {
-    unsafe {
-        let mut window_point = CGPoint { x: 0.0, y: 0.0 };
-        let (mut window_id, mut window_cid) = (0u32, 0i32);
+/// Find the topmost window at `point`, or the next window below
+/// `below_window_id` when given. Returns `(window_id, owner_connection_id)`,
+/// or `None` when no window is found.
+fn find_window_at_point(point: &mut CGPoint, below_window_id: Option<u32>) -> Option<(u32, i32)> {
+    let mut window_point = CGPoint { x: 0.0, y: 0.0 };
+    let (mut wid, mut wcid) = (0u32, 0i32);
 
+    let (start_id, direction) = match below_window_id {
+        Some(id) => (id as i32, -1),
+        None => (0, 1),
+    };
+
+    unsafe {
         SLSFindWindowAndOwner(
             *G_CONNECTION,
+            start_id,
+            direction,
             0,
-            1,
-            0,
-            &mut point,
+            point,
             &mut window_point,
-            &mut window_id,
-            &mut window_cid,
+            &mut wid,
+            &mut wcid,
         );
-        if *G_CONNECTION == window_cid {
-            SLSFindWindowAndOwner(
-                *G_CONNECTION,
-                window_id as i32,
-                -1,
-                0,
-                &mut point,
-                &mut window_point,
-                &mut window_id,
-                &mut window_cid,
-            );
-        }
-        (window_id != 0).then(|| WindowServerId(window_id))
     }
+
+    (wid != 0).then_some((wid, wcid))
+}
+
+fn is_own_window(cid: i32) -> bool { *G_CONNECTION == cid }
+
+pub fn get_window_at_point(mut point: CGPoint) -> Option<WindowServerId> {
+    let (mut wid, cid) = find_window_at_point(&mut point, None)?;
+    if is_own_window(cid) {
+        wid = find_window_at_point(&mut point, Some(wid))?.0;
+    }
+    Some(WindowServerId(wid))
+}
+
+/// Returns `true` if an external application window at normal level or above
+/// occludes the given screen point.
+///
+/// Walks down the window stack at `point`, skipping all Rift-owned CGS
+/// windows (there may be more than one at the same point), until a non-Rift
+/// window is found. Desktop/wallpaper windows sit well below
+/// `NSNormalWindowLevel` and are not considered occluders.
+pub fn is_point_occluded_by_external_window(mut point: CGPoint) -> bool {
+    use objc2_app_kit::NSNormalWindowLevel;
+
+    let mut hit = find_window_at_point(&mut point, None);
+
+    // Skip past any Rift-owned windows stacked at this point.
+    while let Some((wid, cid)) = hit {
+        if !is_own_window(cid) {
+            let level = window_level(wid).unwrap_or(NSWindowLevel::MIN);
+            return level >= NSNormalWindowLevel;
+        }
+        hit = find_window_at_point(&mut point, Some(wid));
+    }
+
+    false
 }
 
 pub fn current_cursor_location() -> Result<CGPoint, CGError> {
@@ -664,6 +711,7 @@ pub fn window_space_id(cid: i32, wid: u32) -> u64 {
 pub fn space_is_user(sid: u64) -> bool { unsafe { SLSSpaceGetType(*G_CONNECTION, sid) == 0 } }
 pub fn space_is_fullscreen(sid: u64) -> bool { unsafe { SLSSpaceGetType(*G_CONNECTION, sid) == 4 } }
 pub fn space_is_system(sid: u64) -> bool { unsafe { SLSSpaceGetType(*G_CONNECTION, sid) == 2 } }
+pub fn active_space_is_user() -> bool { unsafe { space_is_user(CGSGetActiveSpace(*G_CONNECTION)) } }
 pub fn wait_for_native_fullscreen_transition() {
     while !space_is_user(unsafe { CGSGetActiveSpace(*G_CONNECTION) }) {
         std::thread::sleep(Duration::from_millis(100));
@@ -884,4 +932,15 @@ pub unsafe fn switch_space(direction: Direction) {
             };
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WindowServerId;
+
+    #[test]
+    fn zero_window_server_id_is_not_a_window_id() {
+        assert!(WindowServerId::new(0).as_nonzero().is_none());
+        assert_eq!(WindowServerId::new(42).as_nonzero().map(|id| id.get()), Some(42));
+    }
 }
