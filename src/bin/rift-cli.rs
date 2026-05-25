@@ -170,7 +170,7 @@ enum WindowCommands {
     ToggleScratchpad {
         /// Optional name to filter scratchpad toggle
         #[arg(long)]
-        name: String,
+        name: Option<String>,
     },
 }
 
@@ -593,11 +593,12 @@ fn map_window_command(cmd: WindowCommands) -> Result<RiftCommand, String> {
         WindowCommands::AddScratchpad => Ok(RiftCommand::Reactor(reactor::Command::Layout(
             LC::AddScratchpad,
         ))),
-        WindowCommands::ToggleScratchpad { name } =>
-             Ok(RiftCommand::Reactor(reactor::Command::Layout(
-                LC::ToggleScratchpadNamed(name),
-            )))
-                    ,
+        WindowCommands::ToggleScratchpad { name } => Ok(RiftCommand::Reactor(
+            reactor::Command::Layout(match name {
+                Some(name) => LC::ToggleScratchpadNamed(name),
+                None => LC::ToggleScratchpad,
+            }),
+        )),
     }
 }
 

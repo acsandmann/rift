@@ -164,8 +164,6 @@ pub struct VirtualWorkspaceManager {
     #[serde(skip)]
     window_rule_floating: HashMap<(SpaceId, WindowId), bool>,
     #[serde(skip)]
-    window_rule_scratchpad: HashMap<(SpaceId, WindowId), String>,
-    #[serde(skip)]
     last_rule_decision: HashMap<(SpaceId, WindowId), bool>,
     floating_positions: HashMap<(SpaceId, VirtualWorkspaceId), FloatingWindowPositions>,
     workspace_counter: usize,
@@ -223,7 +221,6 @@ impl VirtualWorkspaceManager {
             active_workspace_per_space: HashMap::default(),
             window_to_workspace: HashMap::default(),
             window_rule_floating: HashMap::default(),
-            window_rule_scratchpad: HashMap::default(),
             last_rule_decision: HashMap::default(),
             floating_positions: HashMap::default(),
             workspace_counter: 1,
@@ -1141,7 +1138,6 @@ impl VirtualWorkspaceManager {
         let default_workspace_id = self.get_default_workspace(space)?;
         if self.assign_window_to_workspace(space, window_id, default_workspace_id) {
             self.window_rule_floating.remove(&(space, window_id));
-            self.window_rule_scratchpad.remove(&(space, window_id));
             Ok(default_workspace_id)
         } else {
             Err(WorkspaceError::AssignmentFailed)
@@ -1252,12 +1248,6 @@ impl VirtualWorkspaceManager {
                     crate::common::config::ScratchpadConfig::Named(n) => Some(n.clone()),
                 };
 
-                if let Some(ref name) = scratchpad_name {
-                    self.window_rule_scratchpad.insert((space, window_id), name.clone());
-                } else {
-                    self.window_rule_scratchpad.remove(&(space, window_id));
-                }
-
                 return Ok(AppRuleResult::Managed(AppRuleAssignment {
                     workspace_id: existing_ws,
                     floating: rule.floating,
@@ -1278,17 +1268,6 @@ impl VirtualWorkspaceManager {
                     crate::common::config::ScratchpadConfig::Boolean(false) => None,
                     crate::common::config::ScratchpadConfig::Named(n) => Some(n.clone()),
                 };
-                
-                if let Some(ref name) = scratchpad_name {
-                tracing::info!(
-                    "Assigning window {:?} to scratchpad {:?} based on app rule",
-                    window_id,
-                    scratchpad_name
-                );
-                    self.window_rule_scratchpad.insert((space, window_id), name.clone());
-                } else {
-                    self.window_rule_scratchpad.remove(&(space, window_id));
-                }
 
                 return Ok(AppRuleResult::Managed(AppRuleAssignment {
                     workspace_id: target_workspace_id,
@@ -1303,7 +1282,6 @@ impl VirtualWorkspaceManager {
 
         if let Some(existing_ws) = existing_assignment {
             self.window_rule_floating.remove(&(space, window_id));
-            self.window_rule_scratchpad.remove(&(space, window_id));
             return Ok(AppRuleResult::Managed(AppRuleAssignment {
                 workspace_id: existing_ws,
                 floating: false,
@@ -1315,7 +1293,6 @@ impl VirtualWorkspaceManager {
         let default_workspace_id = self.get_default_workspace(space)?;
         if self.assign_window_to_workspace(space, window_id, default_workspace_id) {
             self.window_rule_floating.remove(&(space, window_id));
-            self.window_rule_scratchpad.remove(&(space, window_id));
             Ok(AppRuleResult::Managed(AppRuleAssignment {
                 workspace_id: default_workspace_id,
                 floating: false,
