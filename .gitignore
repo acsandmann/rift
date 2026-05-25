@@ -4,3 +4,4 @@ rift.toml
 src/bin/dev.rs
 .direnv
 .devenv
+.workspaces/
