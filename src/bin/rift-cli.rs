@@ -423,6 +423,7 @@ fn main() {
         Commands::Verify { config_path } => {
             verify_config(&config_path).unwrap_or_else(|e| {
                 eprintln!("{}", e);
+                println!("{}", e);
                 process::exit(1);
             });
             process::exit(0);
