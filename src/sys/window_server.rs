@@ -1,4 +1,5 @@
 use std::ffi::{c_int, c_void};
+use std::num::NonZeroU32;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -44,6 +45,9 @@ impl WindowServerId {
 
     #[inline]
     pub fn as_u32(self) -> u32 { self.0 }
+
+    #[inline]
+    pub fn as_nonzero(self) -> Option<NonZeroU32> { NonZeroU32::new(self.0) }
 }
 
 impl From<WindowServerId> for u32 {
@@ -59,6 +63,9 @@ impl TryFrom<&AXUIElement> for WindowServerId {
         let res = unsafe { _AXUIElementGetWindow(element.raw_ptr().as_ptr(), &mut id) };
         if res != AXError::Success {
             return Err(AxError::Ax(res));
+        }
+        if id == 0 {
+            return Err(AxError::NotFound);
         }
         Ok(Self(id))
     }
@@ -276,7 +283,16 @@ pub fn window_spaces(id: WindowServerId) -> Vec<crate::sys::screen::SpaceId> {
 }
 
 pub fn window_space(id: WindowServerId) -> Option<crate::sys::screen::SpaceId> {
-    window_spaces(id).into_iter().next()
+    let spaces = window_spaces(id);
+    // SLSCopySpacesForWindows can return multiple space IDs for a window during
+    // Mission Control or fullscreen transitions — the window's real home space plus
+    // a transient fullscreen space. Prefer any user space (type 0) in the list so
+    // that Desktop windows are not misidentified as belonging to a fullscreen space.
+    spaces
+        .iter()
+        .copied()
+        .find(|s| space_is_user(s.get()))
+        .or_else(|| spaces.into_iter().next())
 }
 
 pub fn window_is_ordered_in(id: WindowServerId) -> bool {
@@ -695,6 +711,7 @@ pub fn window_space_id(cid: i32, wid: u32) -> u64 {
 pub fn space_is_user(sid: u64) -> bool { unsafe { SLSSpaceGetType(*G_CONNECTION, sid) == 0 } }
 pub fn space_is_fullscreen(sid: u64) -> bool { unsafe { SLSSpaceGetType(*G_CONNECTION, sid) == 4 } }
 pub fn space_is_system(sid: u64) -> bool { unsafe { SLSSpaceGetType(*G_CONNECTION, sid) == 2 } }
+pub fn active_space_is_user() -> bool { unsafe { space_is_user(CGSGetActiveSpace(*G_CONNECTION)) } }
 pub fn wait_for_native_fullscreen_transition() {
     while !space_is_user(unsafe { CGSGetActiveSpace(*G_CONNECTION) }) {
         std::thread::sleep(Duration::from_millis(100));
@@ -915,4 +932,15 @@ pub unsafe fn switch_space(direction: Direction) {
             };
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WindowServerId;
+
+    #[test]
+    fn zero_window_server_id_is_not_a_window_id() {
+        assert!(WindowServerId::new(0).as_nonzero().is_none());
+        assert_eq!(WindowServerId::new(42).as_nonzero().map(|id| id.get()), Some(42));
+    }
 }

@@ -1560,16 +1560,22 @@ impl Reactor {
         frame: &CGRect,
         window_server_id: Option<WindowServerId>,
     ) -> Option<SpaceId> {
-        if let Some(space) = self.best_space_for_frame(frame) {
-            return Some(space);
-        }
-
         if let Some(space) = window_server_id.and_then(crate::sys::window_server::window_space) {
-            if self.space_manager.screen_by_space(space).is_some()
-                || crate::sys::window_server::space_is_user(space.get())
-            {
+            // Return None for windows whose resolved space is not a user space (e.g. native
+            // fullscreen app spaces, SLSSpaceGetType != 0). Without this guard, fullscreen
+            // windows fall through to best_space_for_frame which matches by geometry — and
+            // fullscreen windows cover the whole screen, so they match the current user space
+            // and bleed into its tile layout after Mission Control (fixes #357).
+            if !crate::sys::window_server::space_is_user(space.get()) {
+                return None;
+            }
+            if self.space_manager.screen_by_space(space).is_some() {
                 return Some(space);
             }
+        }
+
+        if let Some(space) = self.best_space_for_frame(frame) {
+            return Some(space);
         }
 
         None
@@ -2822,6 +2828,14 @@ impl Reactor {
 
     fn refresh_windows_after_mission_control(&mut self) {
         debug!("Refreshing window state after Mission Control");
+        // Skip when on a fullscreen space: kAXWindowsAttribute is space-filtered, so
+        // apps omit their Desktop windows. check_for_new_windows sends an untracked
+        // GetVisibleWindows whose response bypasses pending_mission_control_refresh,
+        // causing those Desktop windows to be dropped from the layout, and other
+        // windows in the layout to be incorrecctly resized.
+        if !crate::sys::window_server::active_space_is_user() {
+            return;
+        }
         let ws_info = window_server::get_visible_windows_with_layer(None);
         self.update_partial_window_server_info(ws_info);
         self.mission_control_manager.pending_mission_control_refresh.clear();

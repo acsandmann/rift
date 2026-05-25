@@ -426,6 +426,7 @@ impl WindowInfo {
         let mut server_info = server_info_hint;
         let id = server_info
             .map(|info| info.id)
+            .filter(|id| id.as_nonzero().is_some())
             .or_else(|| WindowServerId::try_from(element).ok());
         let is_minimized = element.minimized().unwrap_or_default();
         let is_resizable = element.can_resize().unwrap_or(true);
