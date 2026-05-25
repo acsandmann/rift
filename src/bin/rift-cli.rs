@@ -1,9 +1,11 @@
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::process::{self};
 
 use clap::{Parser, Subcommand};
 use rift_wm::actor::app::WindowId;
 use rift_wm::actor::reactor::{self, DisplaySelector};
+use rift_wm::common::config::Config;
 use rift_wm::common::config::LayoutMode;
 use rift_wm::ipc::{RiftCommand, RiftMachClient, RiftRequest, RiftResponse};
 use rift_wm::layout_engine as layout;
@@ -39,6 +41,9 @@ enum Commands {
     Service {
         #[command(subcommand)]
         service: ServiceCommands,
+    },
+    Verify {
+        config_path: PathBuf,
     },
 }
 
@@ -415,6 +420,13 @@ fn main() {
             }
             process::exit(0);
         }
+        Commands::Verify { config_path } => {
+            verify_config(&config_path).unwrap_or_else(|e| {
+                eprintln!("{}", e);
+                process::exit(1);
+            });
+            process::exit(0);
+        }
         command => match build_request(command) {
             Ok(req) => req,
             Err(e) => {
@@ -464,6 +476,11 @@ fn main() {
     }
 }
 
+fn verify_config(config_path: &PathBuf) -> Result<(), String> {
+    Config::read(&config_path).map_err(|e| format!("Config verification failed: {}", e))?;
+    Ok(())
+}
+
 fn build_request(command: Commands) -> Result<RiftRequest, String> {
     match command {
         Commands::Query { query } => build_query_request(query),
@@ -471,6 +488,10 @@ fn build_request(command: Commands) -> Result<RiftRequest, String> {
         Commands::Subscribe { subscribe } => build_subscribe_request(subscribe),
         Commands::Service { .. } => Err(
             "Service commands are handled locally and should not be sent to the rift server."
+                .to_string(),
+        ),
+        Commands::Verify { .. } => Err(
+            "Config verification is handled locally and should not be sent to the rift server."
                 .to_string(),
         ),
     }
@@ -590,15 +611,15 @@ fn map_window_command(cmd: WindowCommands) -> Result<RiftCommand, String> {
                 reactor::ReactorCommand::CloseWindow { window_server_id: Some(wsid) },
             )))
         }
-        WindowCommands::AddScratchpad => Ok(RiftCommand::Reactor(reactor::Command::Layout(
-            LC::AddScratchpad,
-        ))),
-        WindowCommands::ToggleScratchpad { name } => Ok(RiftCommand::Reactor(
-            reactor::Command::Layout(match name {
+        WindowCommands::AddScratchpad => {
+            Ok(RiftCommand::Reactor(reactor::Command::Layout(LC::AddScratchpad)))
+        }
+        WindowCommands::ToggleScratchpad { name } => {
+            Ok(RiftCommand::Reactor(reactor::Command::Layout(match name {
                 Some(name) => LC::ToggleScratchpadNamed(name),
                 None => LC::ToggleScratchpad,
-            }),
-        )),
+            })))
+        }
     }
 }
 

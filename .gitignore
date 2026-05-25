@@ -5,3 +5,4 @@ src/bin/dev.rs
 .direnv
 .devenv
 .workspaces/
+result
