@@ -2,15 +2,13 @@
   description = "Description for the project";
 
   inputs = {
-    devenv-root = {
-      url = "file+file:///dev/null";
-      flake = false;
-    };
     nixpkgs.url = "github:cachix/devenv-nixpkgs/rolling";
     flake-parts.url = "github:hercules-ci/flake-parts";
+    crane.url = "github:ipetkov/crane";
+    rust-flake.url = "github:juspay/rust-flake";
+
     flake-parts.inputs.nixpkgs-lib.follows = "nixpkgs";
     treefmt-nix.url = "github:numtide/treefmt-nix";
-    devenv.url = "github:cachix/devenv";
     nix2container.url = "github:nlewo/nix2container";
     nix2container.inputs.nixpkgs.follows = "nixpkgs";
     mk-shell-bin.url = "github:rrbutani/nix-mk-shell-bin";
@@ -22,11 +20,13 @@
   };
 
   outputs =
-    inputs@{ flake-parts, devenv-root, ... }:
+    inputs@{ flake-parts, ... }:
     flake-parts.lib.mkFlake { inherit inputs; } {
       imports = [
-        inputs.devenv.flakeModule
         inputs.treefmt-nix.flakeModule
+        inputs.rust-flake.flakeModules.default
+        inputs.rust-flake.flakeModules.nixpkgs
+        inputs.flake-parts.flakeModules.easyOverlay
       ];
       systems = [
         "x86_64-linux"
@@ -42,48 +42,47 @@
           self',
           inputs',
           pkgs,
+          lib,
           system,
           ...
         }:
         {
+          overlayAttrs = {
+            rift = config.packages.rift-wm;
+          };
           # Per-system attributes can be defined here. The self' and inputs'
+          rust-project.src = lib.cleanSourceWith {
+            src = inputs.self; # The original, unfiltered source
+            # TODO(DRY): Consolidate with that of default-crates.nix
+            filter =
+              path: type:
+              (
+                config.rust-project.crateNixFile != null
+                && lib.hasSuffix "/${config.rust-project.crateNixFile}" path
+              )
+              || lib.hasSuffix ".plist" path
+              ||
+                # Default filter from crane (allow .rs files)
+                (config.rust-project.crane-lib.filterCargoSources path type);
+          };
           # module parameters provide easy access to attributes of the same
           # system.
 
           # Equivalent to  inputs'.nixpkgs.legacyPackages.hello;
-          packages.default = pkgs.hello;
 
           treefmt.config = {
 
           };
-          devenv.shells.default = {
-            name = "rift";
-            languages.rust = {
-              components = [
-                "rust-analyzer"
-                "cargo"
-                "clippy"
-                "rustfmt"
-              ];
-              enable = true;
-            };
-
-            imports = [
-              # This is just like the imports in devenv.nix.
-              # See https://devenv.sh/guides/using-with-flake-parts/#import-a-devenv-module
-              # ./devenv-foo.nix
-            ];
-
-            # https://devenv.sh/reference/options/
-
-          };
+          devShells.default = config.devShells.rust;
+        };
+      flake =
+        { config, ... }:
+        {
+          # The usual flake attributes can be defined here, including system-
+          # agnostic ones like nixosModule and system-enumerating ones, although
+          # those are more easily expressed in perSystem.
 
         };
-      flake = {
-        # The usual flake attributes can be defined here, including system-
-        # agnostic ones like nixosModule and system-enumerating ones, although
-        # those are more easily expressed in perSystem.
-
-      };
+      debug = true;
     };
 }
