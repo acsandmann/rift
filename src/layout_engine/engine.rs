@@ -256,6 +256,14 @@ impl LayoutEngine {
         true
     }
 
+    fn active_scratchpad_windows(&self) -> Vec<WindowId> {
+        self.scratchpad
+            .iter()
+            .filter(|&&w| self.scratchpad.is_active(w))
+            .copied()
+            .collect()
+    }
+
     fn response_for_raised_windows(raise_windows: Vec<WindowId>) -> EventResponse {
         if raise_windows.is_empty() {
             EventResponse::default()
@@ -2403,7 +2411,10 @@ impl LayoutEngine {
                         self.broadcast_workspace_changed(space);
                         self.broadcast_windows_changed(space);
 
-                        return self.refocus_workspace(space, next_workspace);
+                        let mut resp = self.refocus_workspace(space, next_workspace);
+                        // Keep active scratchpads raised above the newly focused workspace.
+                        resp.raise_windows.extend(self.active_scratchpad_windows());
+                        return resp;
                     }
                 }
                 EventResponse::default()
@@ -2424,7 +2435,10 @@ impl LayoutEngine {
                         self.broadcast_workspace_changed(space);
                         self.broadcast_windows_changed(space);
 
-                        return self.refocus_workspace(space, prev_workspace);
+                        let mut resp = self.refocus_workspace(space, prev_workspace);
+                        // Keep active scratchpads raised above the newly focused workspace.
+                        resp.raise_windows.extend(self.active_scratchpad_windows());
+                        return resp;
                     }
                 }
                 EventResponse::default()
@@ -2446,7 +2460,10 @@ impl LayoutEngine {
                                 self.update_active_floating_windows(space);
                                 self.broadcast_workspace_changed(space);
                                 self.broadcast_windows_changed(space);
-                                return self.refocus_workspace(space, last_workspace);
+                                let mut resp = self.refocus_workspace(space, last_workspace);
+                                // Keep active scratchpads raised above the newly focused workspace.
+                                resp.raise_windows.extend(self.active_scratchpad_windows());
+                                return resp;
                             }
                         }
                         return EventResponse::default();
@@ -2458,7 +2475,10 @@ impl LayoutEngine {
                     self.broadcast_workspace_changed(space);
                     self.broadcast_windows_changed(space);
 
-                    return self.refocus_workspace(space, workspace_id);
+                    let mut resp = self.refocus_workspace(space, workspace_id);
+                    // Keep active scratchpads raised above the newly focused workspace.
+                    resp.raise_windows.extend(self.active_scratchpad_windows());
+                    return resp;
                 }
                 EventResponse::default()
             }
@@ -2598,7 +2618,10 @@ impl LayoutEngine {
                     self.broadcast_workspace_changed(space);
                     self.broadcast_windows_changed(space);
 
-                    return self.refocus_workspace(space, last_workspace);
+                    let mut resp = self.refocus_workspace(space, last_workspace);
+                    // Keep active scratchpads raised above the newly focused workspace.
+                    resp.raise_windows.extend(self.active_scratchpad_windows());
+                    return resp;
                 }
                 EventResponse::default()
             }
