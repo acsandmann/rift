@@ -21,6 +21,7 @@ pub struct Animation<'a> {
     start: Instant,
     interval: Duration,
     frames: u32,
+    easing: AnimationEasing,
 
     windows: Vec<(
         &'a AppThreadHandle,
@@ -33,13 +34,14 @@ pub struct Animation<'a> {
 }
 
 impl<'a> Animation<'a> {
-    pub fn new(fps: f64, duration: f64, _: AnimationEasing) -> Self {
+    pub fn new(fps: f64, duration: f64, easing: AnimationEasing) -> Self {
         let interval = Duration::from_secs_f64(1.0 / fps);
         // let now = unsafe { CFAbsoluteTimeGetCurrent() };
         let now = Instant::now();
         Animation {
             start: now, // + interval, // not necessary, provide one extra frame to get things going
             interval,
+            easing,
             frames: (duration * fps).round() as u32,
             windows: vec![],
         }
@@ -76,7 +78,8 @@ impl<'a> Animation<'a> {
 
         let mut next_frames = Vec::with_capacity(self.windows.len());
         for frame in 1..=self.frames {
-            let t: f64 = f64::from(frame) / f64::from(self.frames);
+            let p: f64 = f64::from(frame) / f64::from(self.frames);
+            let t: f64 = self.easing.apply(p);
 
             next_frames.clear();
             for (_, _, from, to, _, _) in &self.windows {
@@ -118,25 +121,15 @@ impl<'a> Animation<'a> {
 }
 
 fn get_frame(a: CGRect, b: CGRect, t: f64) -> CGRect {
-    let s = ease(t);
     CGRect {
         origin: CGPoint {
-            x: blend(a.origin.x, b.origin.x, s),
-            y: blend(a.origin.y, b.origin.y, s),
+            x: blend(a.origin.x, b.origin.x, t),
+            y: blend(a.origin.y, b.origin.y, t),
         },
         size: CGSize {
-            width: blend(a.size.width, b.size.width, s),
-            height: blend(a.size.height, b.size.height, s),
+            width: blend(a.size.width, b.size.width, t),
+            height: blend(a.size.height, b.size.height, t),
         },
-    }
-}
-
-// https://notes.yvt.jp/Graphics/Easing-Functions/
-fn ease(t: f64) -> f64 {
-    if t < 0.5 {
-        (1.0 - f64::sqrt(1.0 - f64::powi(2.0 * t, 2))) / 2.0
-    } else {
-        (f64::sqrt(1.0 - f64::powi(-2.0 * t + 2.0, 2)) + 1.0) / 2.0
     }
 }
 

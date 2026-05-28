@@ -1,3 +1,4 @@
+use std::f64::consts::PI;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -417,6 +418,62 @@ pub enum AnimationEasing {
     EaseInCirc,
     EaseOutCirc,
     EaseInOutCirc,
+}
+
+impl AnimationEasing {
+    pub fn apply(&self, t: f64) -> f64 {
+        // https://easings.net/
+        match self {
+            AnimationEasing::EaseInSine => 1.0 - (t * PI / 2.0).cos(),
+            AnimationEasing::EaseOutSine => (t * PI / 2.0).sin(),
+            AnimationEasing::EaseInOutSine => -((PI * t).cos() - 1.0) / 2.0,
+
+            AnimationEasing::EaseInQuad => ease_in(t, 2),
+            AnimationEasing::EaseOutQuad => ease_out(t, 2),
+            AnimationEasing::EaseInOut | AnimationEasing::EaseInOutQuad => ease_in_out(t, 2),
+
+            AnimationEasing::EaseInCubic => ease_in(t, 3),
+            AnimationEasing::EaseOutCubic => ease_out(t, 3),
+            AnimationEasing::EaseInOutCubic => ease_in_out(t, 3),
+
+            AnimationEasing::EaseInQuart => ease_in(t, 4),
+            AnimationEasing::EaseOutQuart => ease_out(t, 4),
+            AnimationEasing::EaseInOutQuart => ease_in_out(t, 4),
+
+            AnimationEasing::EaseInQuint => ease_in(t, 5),
+            AnimationEasing::EaseOutQuint => ease_out(t, 5),
+            AnimationEasing::EaseInOutQuint => ease_in_out(t, 5),
+
+            AnimationEasing::EaseInExpo => 10.0f64.mul_add(t.max(0.0), -10.0).exp2(),
+            AnimationEasing::EaseOutExpo => 1.0 - (-10.0 * t.min(1.0)).exp2(),
+            AnimationEasing::EaseInOutExpo => {
+                if t < 0.5 {
+                    20.0f64.mul_add(t.max(0.0), -10.0).exp2() / 2.0
+                } else {
+                    (2.0 - (-20.0f64).mul_add(t.min(1.0), 10.0).exp2()) / 2.0
+                }
+            }
+
+            AnimationEasing::EaseInCirc => 1.0 - t.mul_add(-t, 1.0).sqrt(),
+            AnimationEasing::EaseOutCirc => (t - 1.0).mul_add(-(t - 1.0), 1.0).sqrt(),
+            AnimationEasing::EaseInOutCirc => {
+                if t < 0.5 {
+                    (1.0 - (1.0 - (2.0 * t).powi(2)).sqrt()) / 2.0
+                } else {
+                    ((1.0 - (-2.0 * t + 2.0).powi(2)).sqrt() + 1.0) / 2.0
+                }
+            }
+
+            AnimationEasing::Linear => t,
+        }
+    }
+}
+
+fn ease_in(t: f64, exp: i32) -> f64 { t.powi(exp) }
+fn ease_out(t: f64, exp: i32) -> f64 { 1.0 - (1.0 - t).powi(exp) }
+fn ease_in_out(t: f64, exp: i32) -> f64 {
+    if t < 0.5 { 2.0f64.powi(exp - 1) * t.powi(exp) }
+    else { 1.0 - (-2.0f64).mul_add(t, 2.0).powi(exp) / 2.0 }
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
