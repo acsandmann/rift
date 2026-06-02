@@ -80,6 +80,7 @@ pub struct EventTap {
 struct State {
     hidden: bool,
     above_window: (Option<WindowServerId>, NSWindowLevel),
+    mouse_hiding_enabled: bool,
     mouse_hides_on_focus: bool,
     focus_follows_mouse_config_enabled: bool,
     default_layout_mode: LayoutMode,
@@ -111,6 +112,7 @@ impl Default for State {
         Self {
             hidden: false,
             above_window: (None, NSWindowLevel::MIN),
+            mouse_hiding_enabled: false,
             mouse_hides_on_focus: false,
             focus_follows_mouse_config_enabled: false,
             default_layout_mode: LayoutMode::Traditional,
@@ -433,18 +435,30 @@ impl EventTap {
             return;
         }
 
-        if this.state.borrow().mouse_hides_on_focus {
+        let mut state = this.state.borrow_mut();
+        this.ensure_mouse_hiding_enabled(&mut state);
+        drop(state);
+
+        while let Some((span, request)) = requests_rx.recv().await {
+            let _ = span.enter();
+            this.on_request(request);
+        }
+    }
+
+    fn ensure_mouse_hiding_enabled(self: &Rc<Self>, state: &mut State) {
+        if state.mouse_hiding_enabled {
+            return;
+        }
+
+        if state.mouse_hides_on_focus {
+            // Even if it fails, we tried so no need to try every time
+            state.mouse_hiding_enabled = true;
             if let Err(e) = window_server::allow_hide_mouse() {
                 error!(
                     "Could not enable mouse hiding: {e:?}. \
                     mouse_hides_on_focus will have no effect."
                 );
             }
-        }
-
-        while let Some((span, request)) = requests_rx.recv().await {
-            let _ = span.enter();
-            this.on_request(request);
         }
     }
 
@@ -544,6 +558,9 @@ impl EventTap {
                     if prev_active && !state.disable_hotkey_active {
                         state.reset(true);
                     }
+
+                    self.ensure_mouse_hiding_enabled(&mut state);
+
                     if prev_mouse_hides_on_focus && !state.mouse_hides_on_focus && state.hidden {
                         debug!("Showing mouse after disabling mouse_hides_on_focus");
                         if let Err(e) = event::show_mouse() {
