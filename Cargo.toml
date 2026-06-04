@@ -40,6 +40,7 @@ doctest = false
 
 [dependencies]
 anyhow = { version = "1.0.83", default-features = false }
+arc-swap = "1"
 ascii_tree = "0.1.1"
 thiserror = { version = "2.0.17", default-features = false }
 bitflags = "2.4.1"

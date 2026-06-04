@@ -1,7 +1,8 @@
-use std::cell::RefCell;
 use std::collections::hash_map::Entry;
 use std::rc::Rc;
+use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use objc2::MainThreadMarker;
 use objc2_app_kit::NSCursor;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
@@ -20,9 +21,10 @@ use crate::ui::stack_line::{
 };
 
 /// Shared indicator hit-rect state readable from the event tap callback.
-pub type SharedHitRects = Rc<RefCell<Vec<CGRect>>>;
+/// Uses Arc<ArcSwap<...>> for lock-free reads from the input thread.
+pub type SharedHitRects = Arc<ArcSwap<Vec<CGRect>>>;
 
-pub fn new_shared_hit_rects() -> SharedHitRects { Rc::new(RefCell::new(Vec::new())) }
+pub fn new_shared_hit_rects() -> SharedHitRects { Arc::new(ArcSwap::from_pointee(Vec::new())) }
 
 #[derive(Debug, Clone)]
 pub struct GroupInfo {
@@ -112,14 +114,13 @@ impl StackLine {
     /// Publish the current indicator frames so the event tap can suppress
     /// clicks that land on a visible, non-occluded indicator.
     fn sync_shared_hit_rects(&self) {
-        let mut rects = self.shared_hit_rects.borrow_mut();
-        rects.clear();
-        if !self.is_enabled() {
-            return;
+        let mut rects = Vec::new();
+        if self.is_enabled() {
+            for indicator in self.indicators.values().filter(|i| i.is_visible()) {
+                rects.push(indicator.frame());
+            }
         }
-        for indicator in self.indicators.values().filter(|indicator| indicator.is_visible()) {
-            rects.push(indicator.frame());
-        }
+        self.shared_hit_rects.store(Arc::new(rects));
     }
 
     #[instrument(name = "stack_line::handle_event", skip(self))]

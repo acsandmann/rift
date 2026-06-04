@@ -1,19 +1,35 @@
-use std::cell::RefCell;
-use std::mem::replace;
-use std::panic::AssertUnwindSafe;
-use std::rc::Rc;
-use std::str::FromStr;
+//! Input processing via a CGEventTap on a dedicated thread.
+//!
+//! The `EventTap` (aka input processor) owns a `Default`-mode CGEventTap and
+//! runs its own CFRunLoop on a dedicated thread (`input` thread). This isolates
+//! keyboard/mouse input processing from main-thread stalls (layout computation,
+//! animation, WindowServer IPC).
+//!
+//! Shared state between the input thread and the main thread uses lock-free
+//! `Arc<ArcSwap<T>>` primitives:
+//! - `SharedHotkeyTable`: hotkey bindings, written by the input thread on
+//!   config/layout changes, read by the callback.
+//! - `SharedHitRects`: stack-line indicator frames, written by the main-thread
+//!   `StackLine` actor, read by the callback.
+//!
+//! Requests from the main thread arrive via the actor channel (`Receiver`).
+//! The main thread's `GestureTap` is a separate `ListenOnly` tap for gestures.
 
-use objc2::exception;
-use objc2_app_kit::{
-    NSEvent, NSEventPhase, NSEventType, NSMainMenuWindowLevel, NSPopUpMenuWindowLevel,
-    NSTouchPhase, NSTouchType, NSWindowLevel,
-};
+use std::cell::{Cell, RefCell};
+use std::panic::AssertUnwindSafe;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Duration;
+
+use arc_swap::ArcSwap;
+
 use objc2_core_foundation::{CGPoint, CGRect};
 use objc2_core_graphics::{
     CGEvent, CGEventField, CGEventFlags, CGEventMask, CGEventTapOptions as CGTapOpt,
     CGEventTapProxy, CGEventType,
 };
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, error, trace, warn};
 
 use super::reactor::{self, Event};
@@ -21,25 +37,17 @@ use super::stack_line;
 use crate::actor;
 use crate::actor::wm_controller::{self, WmCommand, WmEvent};
 use crate::common::collections::{HashMap, HashSet};
-use crate::common::config::{Config, HapticPattern, LayoutMode};
-use crate::common::log::trace_misc;
-use crate::layout_engine::LayoutCommand as LC;
+use crate::common::config::{Config, LayoutMode};
 use crate::sys::event::{self, Hotkey, KeyCode, MouseState, set_mouse_state};
-use crate::sys::geometry::CGRectExt;
 use crate::sys::hotkey::{
     Modifiers, is_modifier_key, key_code_from_event, modifier_flag_for_key,
     modifiers_from_flags_with_keys,
 };
 use crate::sys::screen::{CoordinateConverter, SpaceId};
-use crate::sys::window_server::{self, WindowServerId, window_level};
-use crate::sys::{haptics, power};
+use crate::sys::window_server::{self, WindowServerId};
+use crate::sys::power;
 use crate::ui::stack_line::point_hits_indicator_frame;
 
-// Window levels can change for transient UI windows; cache briefly to reduce
-// query overhead without pinning stale values for long.
-const WINDOW_LEVEL_CACHE_TTL_NS: u64 = 300_000_000; // 300ms
-const WINDOW_LEVEL_CACHE_PRUNE_INTERVAL_NS: u64 = 1_000_000_000; // 1s
-const WINDOW_LEVEL_CACHE_MAX_ENTRIES: usize = 512;
 const MOUSE_MOVE_MIN_INTERVAL_NS_NORMAL: u64 = 8_000_000; // 8ms ~= 125 Hz
 const MOUSE_MOVE_MIN_DISTANCE_PX_SQ_NORMAL: f64 = 4.0; // 2px^2
 const MOUSE_MOVE_MIN_INTERVAL_NS_LOW_POWER: u64 = 16_000_000; // 16ms ~= 62 Hz
@@ -61,25 +69,28 @@ pub enum Request {
 }
 
 pub struct EventTap {
-    config: RefCell<Config>,
     events_tx: reactor::Sender,
     requests_rx: Option<Receiver>,
     state: RefCell<State>,
-    event_mask: RefCell<CGEventMask>,
+    event_mask: Cell<CGEventMask>,
     tap: RefCell<Option<crate::sys::event_tap::EventTap>>,
     disable_hotkey: RefCell<Option<Hotkey>>,
-    swipe: RefCell<Option<SwipeHandler>>,
-    scroll: RefCell<Option<ScrollHandler>>,
     hotkey_specs: RefCell<Vec<(String, WmCommand)>>,
-    hotkeys: RefCell<HashMap<Hotkey, Vec<WmCommand>>>,
-    wm_sender: Option<wm_controller::Sender>,
-    stack_line_tx: Option<stack_line::Sender>,
-    stack_line_hit_rects: Option<stack_line::SharedHitRects>,
+    hotkeys: SharedHotkeyTable,
+    wm_sender: wm_controller::Sender,
+    stack_line_tx: stack_line::Sender,
+    stack_line_hit_rects: stack_line::SharedHitRects,
 }
+
+// SAFETY: EventTap is constructed on the input thread and all access occurs on
+// that same thread (CFRunLoop callback + channel recv both run on the input
+// thread's run loop). The Send impl is required only to move the struct across
+// the thread::spawn boundary.
+unsafe impl Send for EventTap {}
 
 struct State {
     hidden: bool,
-    above_window: (Option<WindowServerId>, NSWindowLevel),
+    above_window: Option<WindowServerId>,
     mouse_hides_on_focus: bool,
     focus_follows_mouse_config_enabled: bool,
     default_layout_mode: LayoutMode,
@@ -96,21 +107,13 @@ struct State {
     layout_mode_by_space: HashMap<SpaceId, crate::common::config::LayoutMode>,
     last_mouse_move_loc: Option<CGPoint>,
     last_mouse_move_timestamp: u64,
-    window_level_cache: HashMap<WindowServerId, CachedWindowLevel>,
-    window_level_cache_last_prune_at: u64,
-}
-
-#[derive(Debug, Copy, Clone)]
-struct CachedWindowLevel {
-    level: NSWindowLevel,
-    observed_at: u64,
 }
 
 impl Default for State {
     fn default() -> Self {
         Self {
             hidden: false,
-            above_window: (None, NSWindowLevel::MIN),
+            above_window: None,
             mouse_hides_on_focus: false,
             focus_follows_mouse_config_enabled: false,
             default_layout_mode: LayoutMode::Traditional,
@@ -127,8 +130,6 @@ impl Default for State {
             layout_mode_by_space: HashMap::default(),
             last_mouse_move_loc: None,
             last_mouse_move_timestamp: 0,
-            window_level_cache: HashMap::default(),
-            window_level_cache_last_prune_at: 0,
         }
     }
 }
@@ -136,126 +137,10 @@ impl Default for State {
 pub type Sender = actor::Sender<Request>;
 pub type Receiver = actor::Receiver<Request>;
 
+pub type SharedHotkeyTable = Arc<ArcSwap<HashMap<Hotkey, Vec<WmCommand>>>>;
+
 struct CallbackCtx {
-    this: Rc<EventTap>,
-}
-
-#[derive(Debug, Clone)]
-struct SwipeConfig {
-    enabled: bool,
-    invert_horizontal: bool,
-    vertical_tolerance: f64,
-    skip_empty_workspaces: Option<bool>,
-    fingers: usize,
-    distance_pct: f64,
-    haptics_enabled: bool,
-    haptic_pattern: HapticPattern,
-}
-
-impl SwipeConfig {
-    fn from_config(config: &Config) -> Self {
-        let g = &config.settings.gestures;
-        let vt_norm = if g.swipe_vertical_tolerance > 1.0 && g.swipe_vertical_tolerance <= 100.0 {
-            (g.swipe_vertical_tolerance / 100.0).clamp(0.0, 1.0)
-        } else if g.swipe_vertical_tolerance > 100.0 {
-            1.0
-        } else {
-            g.swipe_vertical_tolerance.max(0.0).min(1.0)
-        };
-        SwipeConfig {
-            enabled: g.enabled,
-            invert_horizontal: g.invert_horizontal_swipe,
-            vertical_tolerance: vt_norm,
-            skip_empty_workspaces: if g.skip_empty { Some(true) } else { None },
-            fingers: g.fingers.max(1),
-            distance_pct: g.distance_pct.clamp(0.01, 1.0),
-            haptics_enabled: g.haptics_enabled,
-            haptic_pattern: g.haptic_pattern,
-        }
-    }
-}
-
-#[derive(Default, Debug)]
-struct SwipeState {
-    phase: GesturePhase,
-    start_x: f64,
-    start_y: f64,
-}
-
-impl SwipeState {
-    fn reset(&mut self) {
-        self.phase = GesturePhase::Idle;
-        self.start_x = 0.0;
-        self.start_y = 0.0;
-    }
-}
-
-#[derive(Default, Debug, Copy, Clone, Eq, PartialEq)]
-enum GesturePhase {
-    #[default]
-    Idle,
-    Armed,
-    Committed,
-}
-
-struct SwipeHandler {
-    cfg: SwipeConfig,
-    state: RefCell<SwipeState>,
-}
-
-#[derive(Debug, Clone)]
-struct ScrollConfig {
-    enabled: bool,
-    invert_horizontal: bool,
-    vertical_tolerance: f64,
-    fingers: usize,
-    distance_pct: f64,
-}
-
-impl ScrollConfig {
-    fn from_config(config: &Config) -> Self {
-        let g = &config.settings.layout.scrolling.gestures;
-        let vt_norm = if g.vertical_tolerance > 1.0 && g.vertical_tolerance <= 100.0 {
-            (g.vertical_tolerance / 100.0).clamp(0.0, 1.0)
-        } else if g.vertical_tolerance > 100.0 {
-            1.0
-        } else {
-            g.vertical_tolerance.max(0.0).min(1.0)
-        };
-        ScrollConfig {
-            enabled: g.enabled,
-            invert_horizontal: g.invert_horizontal,
-            vertical_tolerance: vt_norm,
-            fingers: g.fingers.max(1),
-            distance_pct: g.distance_pct.clamp(0.01, 1.0),
-        }
-    }
-}
-
-#[derive(Default, Debug)]
-struct ScrollState {
-    phase: GesturePhase,
-    start_x: f64,
-    start_y: f64,
-    last_x: f64,
-    last_y: f64,
-    accum_dx: f64,
-}
-
-impl ScrollState {
-    fn reset(&mut self) {
-        self.phase = GesturePhase::Idle;
-        self.start_x = 0.0;
-        self.start_y = 0.0;
-        self.last_x = 0.0;
-        self.last_y = 0.0;
-        self.accum_dx = 0.0;
-    }
-}
-
-struct ScrollHandler {
-    cfg: ScrollConfig,
-    state: RefCell<ScrollState>,
+    this: Arc<EventTap>,
 }
 
 unsafe fn drop_mouse_ctx(ptr: *mut std::ffi::c_void) {
@@ -264,55 +149,15 @@ unsafe fn drop_mouse_ctx(ptr: *mut std::ffi::c_void) {
 
 impl EventTap {
     #[inline]
-    fn stack_line_hover_enabled(&self, state: &State) -> bool {
-        state.stack_line_enabled && self.stack_line_tx.is_some()
-    }
+    fn stack_line_hover_enabled(&self, state: &State) -> bool { state.stack_line_enabled }
 
     #[inline]
     fn focus_follows_mouse_handler_enabled(state: &State) -> bool {
         state.focus_follows_mouse_config_enabled && state.focus_follows_mouse_enabled
     }
 
-    fn build_gesture_handlers(
-        config: &Config,
-        has_wm: bool,
-    ) -> (Option<SwipeHandler>, Option<ScrollHandler>) {
-        let swipe_cfg = SwipeConfig::from_config(config);
-        let swipe = if swipe_cfg.enabled && has_wm {
-            Some(SwipeHandler {
-                cfg: swipe_cfg,
-                state: RefCell::new(SwipeState::default()),
-            })
-        } else {
-            None
-        };
-
-        let scroll_cfg = ScrollConfig::from_config(config);
-        let scroll = if scroll_cfg.enabled && has_wm {
-            Some(ScrollHandler {
-                cfg: scroll_cfg,
-                state: RefCell::new(ScrollState::default()),
-            })
-        } else {
-            None
-        };
-
-        (swipe, scroll)
-    }
-
-    fn update_gesture_handlers(&self) {
-        let config = self.config.borrow();
-        let (swipe, scroll) = Self::build_gesture_handlers(&config, self.wm_sender.is_some());
-        *self.swipe.borrow_mut() = swipe;
-        *self.scroll.borrow_mut() = scroll;
-    }
-
-    fn gesture_handlers_enabled(&self) -> bool {
-        self.swipe.borrow().is_some() || self.scroll.borrow().is_some()
-    }
-
     fn keyboard_handlers_enabled(&self) -> bool {
-        self.disable_hotkey.borrow().is_some() || !self.hotkeys.borrow().is_empty()
+        self.disable_hotkey.borrow().is_some() || !self.hotkeys.load().is_empty()
     }
 
     fn mouse_move_handlers_enabled(&self) -> bool {
@@ -324,17 +169,16 @@ impl EventTap {
 
     fn desired_event_mask(&self) -> CGEventMask {
         build_event_mask(
-            self.gesture_handlers_enabled(),
             self.keyboard_handlers_enabled(),
             self.mouse_move_handlers_enabled(),
         )
     }
 
     fn create_tap_with_mask(
-        self: &Rc<Self>,
+        self: &Arc<Self>,
         mask: CGEventMask,
     ) -> Option<crate::sys::event_tap::EventTap> {
-        let ctx = Box::new(CallbackCtx { this: Rc::clone(self) });
+        let ctx = Box::new(CallbackCtx { this: Arc::clone(self) });
         let ctx_ptr = Box::into_raw(ctx) as *mut std::ffi::c_void;
 
         let tap = unsafe {
@@ -354,10 +198,9 @@ impl EventTap {
         tap
     }
 
-    fn rebuild_event_tap_mask_if_needed(self: &Rc<Self>) {
+    fn rebuild_event_tap_mask_if_needed(self: &Arc<Self>) {
         let next_mask = self.desired_event_mask();
-        let current_mask = *self.event_mask.borrow();
-        if next_mask == current_mask {
+        if next_mask == self.event_mask.get() {
             return;
         }
 
@@ -368,23 +211,22 @@ impl EventTap {
 
         let old_tap = self.tap.borrow_mut().replace(new_tap);
         drop(old_tap);
-        *self.event_mask.borrow_mut() = next_mask;
+        self.event_mask.set(next_mask);
     }
 
     pub fn new(
         config: Config,
         events_tx: reactor::Sender,
         requests_rx: Receiver,
-        wm_sender: Option<wm_controller::Sender>,
-        stack_line_tx: Option<stack_line::Sender>,
-        stack_line_hit_rects: Option<stack_line::SharedHitRects>,
+        wm_sender: wm_controller::Sender,
+        stack_line_tx: stack_line::Sender,
+        stack_line_hit_rects: stack_line::SharedHitRects,
     ) -> Self {
         let disable_hotkey = config
             .settings
             .focus_follows_mouse_disable_hotkey
             .clone()
             .and_then(|spec| spec.to_hotkey());
-        let (swipe, scroll) = Self::build_gesture_handlers(&config, wm_sender.is_some());
         let mut state = State::default();
         state.mouse_hides_on_focus = config.settings.mouse_hides_on_focus;
         state.focus_follows_mouse_config_enabled = config.settings.focus_follows_mouse;
@@ -395,24 +237,20 @@ impl EventTap {
             .map(|target| state.compute_disable_hotkey_active(target))
             .unwrap_or(false);
         let event_mask = build_event_mask(
-            swipe.is_some() || scroll.is_some(),
             disable_hotkey.is_some(),
             state.event_processing_enabled
-                && ((state.stack_line_enabled && stack_line_tx.is_some())
+                && (state.stack_line_enabled
                     || Self::focus_follows_mouse_handler_enabled(&state)),
         );
         EventTap {
-            config: RefCell::new(config),
             events_tx,
             requests_rx: Some(requests_rx),
             state: RefCell::new(state),
-            event_mask: RefCell::new(event_mask),
+            event_mask: Cell::new(event_mask),
             tap: RefCell::new(None),
             disable_hotkey: RefCell::new(disable_hotkey),
-            swipe: RefCell::new(swipe),
-            scroll: RefCell::new(scroll),
             hotkey_specs: RefCell::new(Vec::new()),
-            hotkeys: RefCell::new(HashMap::default()),
+            hotkeys: Arc::new(ArcSwap::from_pointee(HashMap::default())),
             wm_sender,
             stack_line_tx,
             stack_line_hit_rects,
@@ -420,11 +258,19 @@ impl EventTap {
     }
 
     pub async fn run(mut self) {
-        let mut requests_rx = self.requests_rx.take().unwrap();
+        use crate::sys::timer::Timer;
+        use tracing::Span;
 
-        let this = Rc::new(self);
+        enum Tick {
+            Request(Request),
+            Watchdog,
+        }
 
-        let mask = *this.event_mask.borrow();
+        let requests_rx = self.requests_rx.take().unwrap();
+
+        let this = Arc::new(self);
+
+        let mask = this.event_mask.get();
         let tap = this.create_tap_with_mask(mask);
 
         if let Some(tap) = tap {
@@ -442,22 +288,49 @@ impl EventTap {
             }
         }
 
-        while let Some((span, request)) = requests_rx.recv().await {
-            let _ = span.enter();
-            this.on_request(request);
+        let watchdog = Timer::repeating(Duration::from_secs(5), Duration::from_secs(5));
+
+        let mut merged = StreamExt::merge(
+            UnboundedReceiverStream::new(requests_rx)
+                .map(|(span, req)| (span, Tick::Request(req))),
+            watchdog.map(|()| (Span::none(), Tick::Watchdog)),
+        );
+
+        while let Some((span, tick)) = merged.next().await {
+            let _guard = span.enter();
+            match tick {
+                Tick::Request(request) => this.on_request(request),
+                Tick::Watchdog => {
+                    let tap_enabled = this.tap.borrow().is_some();
+                    if let Some(tap) = this.tap.borrow().as_ref() {
+                        tap.set_enabled(true);
+                    }
+                    // Full modifier reconciliation: prune any pressed_keys not
+                    // reflected in the last known flags.
+                    let mut state = this.state.borrow_mut();
+                    state.reconcile_modifier_keys();
+                    trace!(
+                        tap_enabled,
+                        event_mask = this.event_mask.get(),
+                        pressed_keys = state.pressed_keys.len(),
+                        disable_hotkey_active = state.disable_hotkey_active,
+                        event_processing = state.event_processing_enabled,
+                        "watchdog tick"
+                    );
+                }
+            }
         }
     }
 
-    fn on_request(self: &Rc<Self>, request: Request) {
+    fn on_request(self: &Arc<Self>, request: Request) {
         let mut should_rebuild_mask = false;
-        let mut should_update_gesture_handlers = false;
         let mut state = self.state.borrow_mut();
         match request {
             Request::Warp(point) => {
                 if let Err(e) = event::warp_mouse(point) {
                     warn!("Failed to warp mouse: {e:?}");
                 } else {
-                    state.above_window = (None, NSWindowLevel::MIN);
+                    state.above_window = None;
                 }
                 if state.mouse_hides_on_focus && !state.hidden {
                     debug!("Hiding mouse");
@@ -481,8 +354,6 @@ impl EventTap {
                     .filter_map(|(frame, maybe_space)| maybe_space.map(|space| (frame, space)))
                     .collect();
                 state.converter = converter;
-                state.window_level_cache.clear();
-                state.window_level_cache_last_prune_at = 0;
             }
             Request::SpaceChanged(spaces) => {
                 state.screen_spaces = state
@@ -526,7 +397,6 @@ impl EventTap {
                     .focus_follows_mouse_disable_hotkey
                     .clone()
                     .and_then(|spec| spec.to_hotkey());
-                *self.config.borrow_mut() = new_config;
                 *self.disable_hotkey.borrow_mut() = disable_hotkey;
                 {
                     let prev_mouse_hides_on_focus = state.mouse_hides_on_focus;
@@ -552,7 +422,6 @@ impl EventTap {
                         state.hidden = false;
                     }
                 }
-                should_update_gesture_handlers = true;
                 should_rebuild_mask = true;
             }
             Request::LayoutModesChanged(modes) => {
@@ -576,9 +445,6 @@ impl EventTap {
         }
         drop(state);
 
-        if should_update_gesture_handlers {
-            self.update_gesture_handlers();
-        }
         if should_rebuild_mask {
             self.rebuild_event_tap_mask_if_needed();
         }
@@ -600,28 +466,20 @@ impl EventTap {
         }
     }
 
-    fn on_event(self: &Rc<Self>, event_type: CGEventType, event: &CGEvent) -> bool {
-        if event_type.0 == NSEventType::Gesture.0 as u32 {
-            let scroll_handler = self.scroll.borrow();
-            let swipe_handler = self.swipe.borrow();
-            if scroll_handler.is_none() && swipe_handler.is_none() {
-                return true;
+    fn on_event(self: &Arc<Self>, event_type: CGEventType, event: &CGEvent) -> bool {
+        // Check if the tap was re-enabled after being disabled by timeout or
+        // user input. If so, clear pressed_keys to avoid phantom modifiers
+        // from lost key-up events during the disabled period.
+        if let Some(tap) = self.tap.borrow().as_ref() {
+            if tap.take_reenabled_flag() {
+                let mut state = self.state.borrow_mut();
+                debug!("Event tap was re-enabled; clearing pressed_keys to prevent phantom modifiers");
+                state.pressed_keys.clear();
+                state.current_flags = CGEvent::flags(Some(event));
+                state.reconcile_modifier_keys();
+                drop(state);
+                self.refresh_disable_hotkey_state(&mut self.state.borrow_mut());
             }
-
-            let state = self.state.borrow_mut();
-            if let Some(nsevent) = NSEvent::eventWithCGEvent(event)
-                && nsevent.r#type() == NSEventType::Gesture
-            {
-                let cursor = CGEvent::location(Some(event));
-                let mode = state.layout_mode_at_point(cursor).unwrap_or(state.default_layout_mode);
-                let is_scrolling_mode = matches!(mode, LayoutMode::Scrolling);
-                if is_scrolling_mode && let Some(handler) = scroll_handler.as_ref() {
-                    self.handle_scroll_gesture_event(handler, &nsevent);
-                } else if let Some(handler) = swipe_handler.as_ref() {
-                    self.handle_gesture_event(handler, &nsevent);
-                }
-            }
-            return true;
         }
 
         let mut state = self.state.borrow_mut();
@@ -635,6 +493,7 @@ impl EventTap {
             let flags = CGEvent::flags(Some(event));
             if flags != state.current_flags {
                 state.current_flags = flags;
+                state.reconcile_modifier_keys();
                 self.refresh_disable_hotkey_state(&mut state);
             }
         }
@@ -643,29 +502,21 @@ impl EventTap {
             CGEventType::LeftMouseDown | CGEventType::RightMouseDown => {
                 set_mouse_state(MouseState::Down);
 
-                if let Some(tx) = &self.stack_line_tx {
-                    let loc = CGEvent::location(Some(event));
+                let loc = CGEvent::location(Some(event));
 
-                    // The event tap is the single source of hit-testing for
-                    // stack-line indicators. Only forward the click and
-                    // suppress propagation when it lands on a visible,
-                    // non-occluded indicator.
-                    let hits_stack_line = self
-                        .stack_line_hit_rects
-                        .as_ref()
-                        .map(|hit_rects| {
-                            hit_rects
-                                .borrow()
-                                .iter()
-                                .copied()
-                                .any(|frame| point_hits_indicator_frame(loc, frame))
-                        })
-                        .unwrap_or(false);
-                    if hits_stack_line && !window_server::is_point_occluded_by_external_window(loc)
-                    {
-                        let _ = tx.try_send(stack_line::Event::MouseDown(loc));
-                        return false;
-                    }
+                // The event tap is the single source of hit-testing for
+                // stack-line indicators. Only forward the click and
+                // suppress propagation when it lands on a visible,
+                // non-occluded indicator.
+                let hits_stack_line = self
+                    .stack_line_hit_rects
+                    .load()
+                    .iter()
+                    .copied()
+                    .any(|frame| point_hits_indicator_frame(loc, frame));
+                if hits_stack_line && !window_server::is_point_occluded_by_external_window(loc) {
+                    let _ = self.stack_line_tx.try_send(stack_line::Event::MouseDown(loc));
+                    return false;
                 }
             }
             CGEventType::LeftMouseDragged | CGEventType::RightMouseDragged => {
@@ -707,36 +558,33 @@ impl EventTap {
                 }
 
                 // stack line hover feedback
-                if state.stack_line_enabled
-                    && let Some(tx) = &self.stack_line_tx
-                {
+                if state.stack_line_enabled {
                     let hits = self
                         .stack_line_hit_rects
-                        .as_ref()
-                        .map(|hit_rects| {
-                            hit_rects
-                                .borrow()
-                                .iter()
-                                .copied()
-                                .any(|frame| point_hits_indicator_frame(loc, frame))
-                        })
-                        .unwrap_or(false)
+                        .load()
+                        .iter()
+                        .copied()
+                        .any(|frame| point_hits_indicator_frame(loc, frame))
                         && !window_server::is_point_occluded_by_external_window(loc);
-                    let _ = tx.try_send(stack_line::Event::MouseMoved {
+                    let _ = self.stack_line_tx.try_send(stack_line::Event::MouseMoved {
                         point: loc,
                         hits_indicator: hits,
                     });
                 }
 
-                // ffm
+                // ffm — forward deduped window-under-cursor changes to the
+                // reactor. All level-based filtering (popup suppression,
+                // menu-bar gap) happens in the reactor where SLS calls don't
+                // block the event tap.
                 if state.focus_follows_mouse_config_enabled
                     && state.focus_follows_mouse_enabled
                     && !state.disable_hotkey_active
                 {
-                    if let Some(wsid) =
-                        state.track_mouse_move(loc, window_from_mouse_event(event), ts)
-                    {
-                        _ = self.events_tx.send(Event::MouseMovedOverWindow(wsid));
+                    let wsid = window_from_mouse_event(event);
+                    if let Some(wsid) = wsid {
+                        if state.above_window_changed(wsid) {
+                            _ = self.events_tx.send(Event::MouseMovedOverWindow(wsid));
+                        }
                     }
                 }
             }
@@ -744,265 +592,6 @@ impl EventTap {
         }
 
         true
-    }
-
-    fn handle_gesture_event(&self, handler: &SwipeHandler, nsevent: &NSEvent) {
-        let cfg = &handler.cfg;
-        let state = &handler.state;
-        let Some(wm_sender) = self.wm_sender.as_ref() else {
-            state.borrow_mut().reset();
-            return;
-        };
-
-        let mut st = state.borrow_mut();
-
-        let phase = nsevent.phase();
-        if matches!(
-            phase,
-            NSEventPhase::Ended | NSEventPhase::Cancelled | NSEventPhase::Began
-        ) {
-            st.reset();
-            return;
-        }
-
-        let touches = nsevent.allTouches();
-        let mut sum_x = 0.0f64;
-        let mut sum_y = 0.0f64;
-        let mut touch_count = 0usize;
-        let mut active_count = 0usize;
-        let mut too_many_touches = false;
-
-        for t in touches.iter() {
-            let phase = t.phase();
-            if phase.contains(NSTouchPhase::Stationary) {
-                continue;
-            }
-
-            let ended =
-                phase.contains(NSTouchPhase::Ended) || phase.contains(NSTouchPhase::Cancelled);
-
-            touch_count += 1;
-            if touch_count > cfg.fingers {
-                too_many_touches = true;
-                break;
-            }
-
-            if !ended && let Some((x, y)) = touch_normalized_position(&t) {
-                sum_x += x;
-                sum_y += y;
-                active_count += 1;
-            }
-        }
-
-        if too_many_touches || touch_count != cfg.fingers || active_count == 0 {
-            st.reset();
-            return;
-        }
-
-        let avg_x = sum_x / active_count as f64;
-        let avg_y = sum_y / active_count as f64;
-
-        match st.phase {
-            GesturePhase::Idle => {
-                st.start_x = avg_x;
-                st.start_y = avg_y;
-                st.phase = GesturePhase::Armed;
-                trace!(
-                    "swipe armed: start_x={:.3} start_y={:.3}",
-                    st.start_x, st.start_y
-                );
-            }
-            GesturePhase::Armed => {
-                let dx = avg_x - st.start_x;
-                let dy = avg_y - st.start_y;
-                let horizontal = dx.abs();
-                let vertical = dy.abs();
-
-                if horizontal >= cfg.distance_pct && vertical <= cfg.vertical_tolerance {
-                    let mut dir_left = dx < 0.0;
-                    if cfg.invert_horizontal {
-                        dir_left = !dir_left;
-                    }
-                    let cmd = if dir_left {
-                        LC::NextWorkspace(cfg.skip_empty_workspaces)
-                    } else {
-                        LC::PrevWorkspace(cfg.skip_empty_workspaces)
-                    };
-
-                    if cfg.haptics_enabled {
-                        let _ = haptics::perform_haptic(cfg.haptic_pattern);
-                    }
-                    wm_sender.send(WmEvent::Command(WmCommand::ReactorCommand(
-                        reactor::Command::Layout(cmd),
-                    )));
-                    st.phase = GesturePhase::Committed;
-                }
-            }
-            GesturePhase::Committed => {
-                if active_count == 0 {
-                    st.reset();
-                }
-            }
-        }
-    }
-
-    fn handle_scroll_gesture_event(&self, handler: &ScrollHandler, nsevent: &NSEvent) {
-        let cfg = &handler.cfg;
-        let state = &handler.state;
-        let Some(wm_sender) = self.wm_sender.as_ref() else {
-            state.borrow_mut().reset();
-            return;
-        };
-
-        let mut st = state.borrow_mut();
-
-        let phase = nsevent.phase();
-        if matches!(
-            phase,
-            NSEventPhase::Ended | NSEventPhase::Cancelled | NSEventPhase::Began
-        ) {
-            st.reset();
-            return;
-        }
-
-        // let phase = nsevent.phase();
-        // if [NSEventPhase::Ended, NSEventPhase::Cancelled].contains(&phase) {
-        //     wm_sender.send(WmEvent::Command(WmCommand::ReactorCommand(
-        //         reactor::Command::Layout(LC::SnapStrip),
-        //     )));
-        //     st.reset();
-        //     return;
-        // }
-        // if phase == NSEventPhase::Began {
-        //     st.reset();
-        //     return;
-        // }
-
-        let touches = nsevent.allTouches();
-        let mut sum_x = 0.0f64;
-        let mut sum_y = 0.0f64;
-        let mut touch_count = 0usize;
-        let mut active_count = 0usize;
-        let mut too_many_touches = false;
-        let mut all_moved = true;
-
-        for t in touches.iter() {
-            let phase = t.phase();
-            if phase.contains(NSTouchPhase::Stationary) {
-                all_moved = false;
-                continue;
-            }
-
-            if !phase.contains(NSTouchPhase::Moved) {
-                all_moved = false;
-            }
-
-            let ended =
-                phase.contains(NSTouchPhase::Ended) || phase.contains(NSTouchPhase::Cancelled);
-
-            touch_count += 1;
-            if touch_count > cfg.fingers {
-                too_many_touches = true;
-                break;
-            }
-
-            if !ended && let Some((x, y)) = touch_normalized_position(&t) {
-                sum_x += x;
-                sum_y += y;
-                active_count += 1;
-            }
-        }
-
-        if too_many_touches || touch_count != cfg.fingers || active_count == 0 {
-            st.reset();
-            return;
-        }
-
-        let avg_x = sum_x / active_count as f64;
-        let avg_y = sum_y / active_count as f64;
-
-        match st.phase {
-            GesturePhase::Idle => {
-                st.start_x = avg_x;
-                st.start_y = avg_y;
-                st.last_x = avg_x;
-                st.last_y = avg_y;
-                st.accum_dx = 0.0;
-                st.phase = GesturePhase::Armed;
-                trace!(
-                    "scroll armed: start_x={:.3} start_y={:.3}",
-                    st.start_x, st.start_y
-                );
-            }
-            GesturePhase::Armed => {
-                if !all_moved {
-                    st.last_x = avg_x;
-                    st.last_y = avg_y;
-                    return;
-                }
-
-                let dx = avg_x - st.last_x;
-                let dy = avg_y - st.last_y;
-                let horizontal = dx.abs();
-                let vertical = dy.abs();
-
-                st.last_x = avg_x;
-                st.last_y = avg_y;
-
-                if vertical > cfg.vertical_tolerance || vertical >= horizontal {
-                    return;
-                }
-
-                st.accum_dx += dx;
-                let step = cfg.distance_pct;
-                if st.accum_dx.abs() >= step {
-                    let delta = if cfg.invert_horizontal {
-                        -st.accum_dx
-                    } else {
-                        st.accum_dx
-                    };
-                    let cmd = LC::ScrollStrip { delta };
-
-                    wm_sender.send(WmEvent::Command(WmCommand::ReactorCommand(
-                        reactor::Command::Layout(cmd),
-                    )));
-
-                    st.accum_dx = 0.0;
-                    st.phase = GesturePhase::Committed;
-                }
-            }
-            GesturePhase::Committed => {
-                if active_count == 0 {
-                    st.reset();
-                } else if all_moved {
-                    let dx = avg_x - st.last_x;
-                    let dy = avg_y - st.last_y;
-                    let horizontal = dx.abs();
-                    let vertical = dy.abs();
-                    st.last_x = avg_x;
-                    st.last_y = avg_y;
-                    if vertical > cfg.vertical_tolerance || vertical >= horizontal {
-                        return;
-                    }
-                    st.accum_dx += dx;
-                    let step = cfg.distance_pct;
-                    if st.accum_dx.abs() >= step {
-                        let delta = if cfg.invert_horizontal {
-                            -st.accum_dx
-                        } else {
-                            st.accum_dx
-                        };
-                        let cmd = LC::ScrollStrip { delta };
-
-                        wm_sender.send(WmEvent::Command(WmCommand::ReactorCommand(
-                            reactor::Command::Layout(cmd),
-                        )));
-
-                        st.accum_dx = 0.0;
-                    }
-                }
-            }
-        }
     }
 
     fn handle_keyboard_event(
@@ -1032,14 +621,10 @@ impl EventTap {
                     modifiers_from_flags_with_keys(state.current_flags, &state.pressed_keys),
                     key_code,
                 );
-                let Some(wm_sender) = &self.wm_sender else {
-                    debug!(?hotkey, "Hotkey triggered but no WM sender available");
-                    return true;
-                };
-                let bindings = self.hotkeys.borrow();
+                let bindings = self.hotkeys.load();
                 if let Some(commands) = bindings.get(&hotkey) {
                     for cmd in commands {
-                        wm_sender.send(WmEvent::Command(cmd.clone()));
+                        self.wm_sender.send(WmEvent::Command(cmd.clone()));
                     }
                     return false;
                 }
@@ -1051,8 +636,7 @@ impl EventTap {
 
     fn rebuild_hotkeys_for_current_layout(&self) {
         let specs = self.hotkey_specs.borrow();
-        let mut map = self.hotkeys.borrow_mut();
-        map.clear();
+        let mut map: HashMap<Hotkey, Vec<WmCommand>> = HashMap::default();
 
         for (spec, command) in specs.iter() {
             let Ok(hotkey) = Hotkey::from_str(spec) else {
@@ -1080,6 +664,7 @@ impl EventTap {
             "Updated hotkey bindings for current keyboard layout: {}",
             map.len()
         );
+        self.hotkeys.store(Arc::new(map));
     }
 }
 
@@ -1130,7 +715,9 @@ impl State {
         true
     }
 
+    #[cfg(test)]
     fn layout_mode_at_point(&self, loc: CGPoint) -> Option<crate::common::config::LayoutMode> {
+        use crate::sys::geometry::CGRectExt;
         self.screen_spaces
             .iter()
             .find(|(frame, _)| frame.contains(loc))
@@ -1142,9 +729,28 @@ impl State {
     fn note_key_up(&mut self, key_code: KeyCode) { self.pressed_keys.remove(&key_code); }
 
     fn note_flags_changed(&mut self, key_code: KeyCode) {
-        if is_modifier_key(key_code) {
-            self.pressed_keys.remove(&key_code);
+        if !is_modifier_key(key_code) {
+            return;
         }
+        // Determine whether this modifier is currently pressed by checking
+        // the authoritative CGEventFlags, not our tracked set.
+        if let Some(flag) = modifier_flag_for_key(key_code) {
+            if self.current_flags.contains(flag) {
+                self.pressed_keys.insert(key_code);
+            } else {
+                self.pressed_keys.remove(&key_code);
+            }
+        }
+    }
+
+    fn reconcile_modifier_keys(&mut self) {
+        self.pressed_keys.retain(|key| {
+            if let Some(flag) = modifier_flag_for_key(*key) {
+                self.current_flags.contains(flag)
+            } else {
+                true // non-modifier keys are not reconciled here
+            }
+        });
     }
 
     fn compute_disable_hotkey_active(&self, target: &Hotkey) -> bool {
@@ -1189,110 +795,21 @@ impl State {
         }
     }
 
-    fn track_mouse_move(
-        &mut self,
-        loc: CGPoint,
-        hinted_window: Option<WindowServerId>,
-        event_timestamp: u64,
-    ) -> Option<WindowServerId> {
-        let new_window = hinted_window.or_else(|| window_server::get_window_at_point(loc));
-        if self.above_window.0 == new_window {
-            return None;
+    /// Returns true if the window under the cursor changed.
+    fn above_window_changed(&mut self, wsid: WindowServerId) -> bool {
+        if self.above_window == Some(wsid) {
+            return false;
         }
-
-        let new_window_level = new_window
-            .map(|id| self.cached_window_level(id, event_timestamp))
-            .unwrap_or(NSWindowLevel::MIN);
-
-        debug!("Mouse is now above window {new_window:?} (level {new_window_level:?}) at {loc:?}");
-
-        // There is a gap between the menu bar and the actual menu pop-ups when
-        // a menu is opened. When the mouse goes over this gap, the system
-        // reports it to be over whatever window happens to be below the menu
-        // bar and behind the pop-up. Ignore anything in this gap so we don't
-        // dismiss the pop-up. Strangely, it only seems to happen when the mouse
-        // travels down from the menu bar and not when it travels back up.
-        // First observed on 13.5.2.
-        if self.above_window.1 == NSMainMenuWindowLevel {
-            const WITHIN: f64 = 1.0;
-            for screen in &self.screens {
-                if screen.contains(CGPoint::new(loc.x, loc.y + WITHIN))
-                    && loc.y < screen.min().y + WITHIN
-                {
-                    self.above_window = (new_window, new_window_level);
-                    return None;
-                }
-            }
-        }
-
-        let (old_window, old_window_level) =
-            replace(&mut self.above_window, (new_window, new_window_level));
-        debug!(?old_window, ?old_window_level, ?new_window, ?new_window_level);
-
-        if old_window_level >= NSPopUpMenuWindowLevel {
-            // Ignore one transition out of pop-up/menu-like windows to avoid
-            // stealing focus while transient UI is closing, but clear the
-            // latch so the next move over the same window can recover.
-            self.above_window = (None, NSWindowLevel::MIN);
-            return None;
-        }
-
-        if !(0..NSPopUpMenuWindowLevel).contains(&new_window_level)
-            && new_window_level != NSWindowLevel::MIN
-        {
-            return None;
-        }
-
-        new_window
+        self.above_window = Some(wsid);
+        true
     }
 
     fn reset(&mut self, enabled: bool) {
         if enabled {
-            self.above_window = (None, NSWindowLevel::MIN);
+            self.above_window = None;
             self.last_mouse_move_loc = None;
             self.last_mouse_move_timestamp = 0;
-            self.window_level_cache.clear();
-            self.window_level_cache_last_prune_at = 0;
         }
-    }
-
-    #[inline]
-    fn cached_window_level(&mut self, id: WindowServerId, event_timestamp: u64) -> NSWindowLevel {
-        if event_timestamp.saturating_sub(self.window_level_cache_last_prune_at)
-            >= WINDOW_LEVEL_CACHE_PRUNE_INTERVAL_NS
-        {
-            let cutoff = event_timestamp.saturating_sub(WINDOW_LEVEL_CACHE_TTL_NS);
-            self.window_level_cache.retain(|_, cached| cached.observed_at >= cutoff);
-            self.window_level_cache_last_prune_at = event_timestamp;
-
-            // Defensive bound for long sessions with heavy transient-window churn.
-            if self.window_level_cache.len() > WINDOW_LEVEL_CACHE_MAX_ENTRIES {
-                let mut items: Vec<(WindowServerId, u64)> = self
-                    .window_level_cache
-                    .iter()
-                    .map(|(wid, cached)| (*wid, cached.observed_at))
-                    .collect();
-                items.sort_unstable_by_key(|(_, observed_at)| *observed_at);
-                let drop_count = items.len() - WINDOW_LEVEL_CACHE_MAX_ENTRIES;
-                for (wid, _) in items.into_iter().take(drop_count) {
-                    self.window_level_cache.remove(&wid);
-                }
-            }
-        }
-
-        if let Some(cached) = self.window_level_cache.get(&id) {
-            if event_timestamp.saturating_sub(cached.observed_at) <= WINDOW_LEVEL_CACHE_TTL_NS {
-                return cached.level;
-            }
-        }
-
-        let level =
-            trace_misc("window_level", || window_level(id.into())).unwrap_or(NSWindowLevel::MIN);
-        self.window_level_cache.insert(id, CachedWindowLevel {
-            level,
-            observed_at: event_timestamp,
-        });
-        level
     }
 }
 
@@ -1319,24 +836,7 @@ fn mouse_move_sampling_profile(low_power_mode: bool) -> (u64, f64) {
     }
 }
 
-#[inline]
-fn touch_normalized_position(touch: &objc2_app_kit::NSTouch) -> Option<(f64, f64)> {
-    if touch.r#type() != NSTouchType::Indirect || touch.isResting() {
-        return None;
-    }
-
-    let position = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        exception::catch(AssertUnwindSafe(|| touch.normalizedPosition())).ok()
-    }))
-    .ok()
-    .flatten()?;
-    let x = position.x.clamp(0.0, 1.0) as f64;
-    let y = position.y.clamp(0.0, 1.0) as f64;
-    Some((x, y))
-}
-
 fn build_event_mask(
-    gestures_enabled: bool,
     keyboard_enabled: bool,
     mouse_move_enabled: bool,
 ) -> CGEventMask {
@@ -1364,10 +864,6 @@ fn build_event_mask(
         ] {
             add(&mut m, ty);
         }
-    }
-    if gestures_enabled {
-        // NSEventType::Gesture is an NSEventType — it maps via .0
-        *&mut m |= 1u64 << (NSEventType::Gesture.0 as u64);
     }
     m
 }

@@ -16,6 +16,7 @@ use strum::VariantNames;
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::common::config::WorkspaceSelector;
+use crate::actor::gesture_tap;
 use crate::sys::app::{NSRunningApplicationExt, pid_t};
 
 pub type Sender = actor::Sender<WmEvent>;
@@ -120,6 +121,7 @@ pub struct WmController {
     config: Config,
     events_tx: reactor::Sender,
     event_tap_tx: event_tap::Sender,
+    gesture_tap_tx: Option<gesture_tap::Sender>,
     stack_line_tx: Option<crate::actor::stack_line::Sender>,
     mission_control_tx: Option<mission_control::Sender>,
     window_tx_store: Option<WindowTxStore>,
@@ -135,6 +137,7 @@ impl WmController {
         event_tap_tx: event_tap::Sender,
         stack_line_tx: crate::actor::stack_line::Sender,
         mission_control_tx: crate::actor::mission_control::Sender,
+        gesture_tap_tx: Option<gesture_tap::Sender>,
         window_tx_store: Option<WindowTxStore>,
     ) -> (Self, actor::Sender<WmEvent>) {
         let (sender, receiver) = actor::channel();
@@ -150,6 +153,7 @@ impl WmController {
             config,
             events_tx,
             event_tap_tx,
+            gesture_tap_tx,
             stack_line_tx: Some(stack_line_tx),
             mission_control_tx: Some(mission_control_tx),
             window_tx_store,
@@ -242,6 +246,9 @@ impl WmController {
                 _ = self
                     .event_tap_tx
                     .send(event_tap::Request::ConfigUpdated(self.config.config.clone()));
+                if let Some(tx) = &self.gesture_tap_tx {
+                    tx.send(gesture_tap::GestureRequest::ConfigUpdated(self.config.config.clone()));
+                }
 
                 if !self.hotkeys_installed {
                     debug!(
@@ -271,9 +278,14 @@ impl WmController {
                 self.events_tx.send(Event::ScreenParametersChanged(screens));
 
                 _ = self.event_tap_tx.send(event_tap::Request::ScreenParametersChanged(
-                    frames_with_spaces,
+                    frames_with_spaces.clone(),
                     converter,
                 ));
+                if let Some(tx) = &self.gesture_tap_tx {
+                    tx.send(gesture_tap::GestureRequest::ScreenParametersChanged(
+                        frames_with_spaces,
+                    ));
+                }
                 if let Some(tx) = &self.stack_line_tx {
                     _ = tx.try_send(crate::actor::stack_line::Event::ScreenParametersChanged(
                         converter,
@@ -282,7 +294,10 @@ impl WmController {
             }
             SpaceChanged(spaces) => {
                 self.events_tx.send(reactor::Event::SpaceChanged(spaces.clone()));
-                _ = self.event_tap_tx.send(event_tap::Request::SpaceChanged(spaces));
+                _ = self.event_tap_tx.send(event_tap::Request::SpaceChanged(spaces.clone()));
+                if let Some(tx) = &self.gesture_tap_tx {
+                    tx.send(gesture_tap::GestureRequest::SpaceChanged(spaces));
+                }
             }
             PowerStateChanged(is_low_power_mode) => {
                 info!("Power state changed: low power mode = {}", is_low_power_mode);

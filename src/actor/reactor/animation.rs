@@ -11,7 +11,6 @@ use crate::common::config::AnimationEasing;
 use crate::sys::geometry::{Round, SameAs};
 use crate::sys::power;
 use crate::sys::screen::SpaceId;
-use crate::sys::timer::Timer;
 use crate::sys::window_server::WindowServerId;
 
 #[derive(Debug)]
@@ -88,7 +87,7 @@ impl<'a> Animation<'a> {
             if duration < Duration::ZERO {
                 continue;
             }
-            Timer::sleep(duration);
+            std::thread::sleep(duration);
 
             for (&(handle, wid, _, to, _, txid), rect) in self.windows.iter().zip(&next_frames) {
                 let mut rect = *rect;

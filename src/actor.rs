@@ -8,6 +8,7 @@ pub mod config;
 pub mod config_watcher;
 pub mod drag_swap;
 pub mod event_tap;
+pub mod gesture_tap;
 pub mod menu_bar;
 pub mod mission_control;
 pub mod mission_control_observer;
