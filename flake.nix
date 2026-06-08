@@ -24,8 +24,6 @@
     flake-parts.lib.mkFlake { inherit inputs; } {
       imports = [
         inputs.treefmt-nix.flakeModule
-        inputs.rust-flake.flakeModules.default
-        inputs.rust-flake.flakeModules.nixpkgs
         inputs.flake-parts.flakeModules.easyOverlay
       ];
       systems = [
@@ -46,25 +44,20 @@
           system,
           ...
         }:
+        let
+          craneLib = inputs.crane.mkLib pkgs;
+        in
         {
           overlayAttrs = {
-            rift = config.packages.rift-wm;
+            rift = config.packages.rift;
           };
+          packages.rift = pkgs.callPackage ./package.nix {
+            inherit (inputs) crane;
+            pkgs = pkgs;
+          };
+
           # Per-system attributes can be defined here. The self' and inputs'
-          rust-project.src = lib.cleanSourceWith {
-            src = inputs.self; # The original, unfiltered source
-            # TODO(DRY): Consolidate with that of default-crates.nix
-            filter =
-              path: type:
-              (
-                config.rust-project.crateNixFile != null
-                && lib.hasSuffix "/${config.rust-project.crateNixFile}" path
-              )
-              || lib.hasSuffix ".plist" path
-              ||
-                # Default filter from crane (allow .rs files)
-                (config.rust-project.crane-lib.filterCargoSources path type);
-          };
+
           # module parameters provide easy access to attributes of the same
           # system.
 
@@ -73,7 +66,13 @@
           treefmt.config = {
 
           };
-          devShells.default = config.devShells.rust;
+          devShells.default = craneLib.devShell {
+            name = "default-dev-shell";
+            inputsFrom = [
+              self'.packages.rift
+            ];
+          };
+
         };
       flake =
         { config, ... }:

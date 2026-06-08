@@ -35,51 +35,7 @@ use tokio::join;
 
 embed_plist::embed_info_plist!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/Info.plist"));
 
-#[derive(Parser)]
-struct Cli {
-    /// Only run the window manager on the current space.
-    #[arg(long)]
-    one: bool,
-
-    /// Disable new spaces by default.
-    ///
-    /// Ignored if --one is used.
-    #[arg(long)]
-    default_disable: bool,
-
-    /// Disable animations.
-    #[arg(long)]
-    no_animate: bool,
-
-    /// No-op compatibility check for the deprecated restore file path.
-    #[arg(long)]
-    validate: bool,
-
-    /// Deprecated no-op flag retained for CLI compatibility.
-    #[arg(long)]
-    restore: bool,
-
-    /// Record reactor events to the specified file path. Overwrites the file if
-    /// exists.
-    #[arg(long)]
-    record: Option<PathBuf>,
-
-    /// Path to configuration file to use (overrides default).
-    #[arg(long, value_name = "PATH")]
-    config: Option<PathBuf>,
-
-    #[command(subcommand)]
-    command: Option<Commands>,
-}
-
-#[derive(Subcommand)]
-enum Commands {
-    /// Manage the launchd service for rift
-    Service {
-        #[command(subcommand)]
-        service: ServiceCommands,
-    },
-}
+use rift_wm::cli::rift::*;
 
 /// this is okay because there is no recovery mechanism for actors
 /// so we want to immediately exit (and most likely restart since
