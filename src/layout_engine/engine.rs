@@ -256,6 +256,14 @@ impl LayoutEngine {
         true
     }
 
+    fn active_scratchpad_windows(&self) -> Vec<WindowId> {
+        self.scratchpad
+            .iter()
+            .filter(|&&w| self.scratchpad.is_active(w))
+            .copied()
+            .collect()
+    }
+
     fn response_for_raised_windows(raise_windows: Vec<WindowId>) -> EventResponse {
         if raise_windows.is_empty() {
             EventResponse::default()
@@ -1964,7 +1972,10 @@ impl LayoutEngine {
             name_filter
         );
         if let Some(wid) = self.focused_window {
-            if self.scratchpad.is_scratchpad(wid) {
+            // Only treat this as a hide if the focused scratchpad lives on the space we're
+            // being commanded for. Otherwise (focused scratchpad is on another display)
+            // fall through to the show branch so it gets pulled onto this space.
+            if self.scratchpad.is_scratchpad(wid) && self.floating.is_active(space, wid) {
                 let matches_filter = match &name_filter {
                     Some(n) => self.scratchpad.get_name(wid).map(|s| s == n).unwrap_or(false),
                     None => true,
@@ -2017,6 +2028,16 @@ impl LayoutEngine {
             tracing::debug!("Next scratchpad window to show: {:?}", next);
 
             if let Some(wid) = next {
+                // If the scratchpad is currently visible on a different space (e.g. another
+                // display), pull it onto this one rather than leaving a duplicate behind, and
+                // forget any stored floating position so it re-centers on this display.
+                let on_other_space =
+                    self.scratchpad.is_active(wid) && !self.floating.is_active(space, wid);
+                if on_other_space {
+                    self.floating.remove_active_for_window(wid);
+                    self.virtual_workspace_manager.remove_floating_position(wid);
+                }
+
                 self.floating.add_active(space, wid.pid, wid);
                 self.scratchpad.set_active(wid, true);
                 if name_filter.is_none() {
@@ -2226,11 +2247,12 @@ impl LayoutEngine {
             if !positions.contains_key(&wid) {
                 let size = window_size(wid);
                 let app_bundle_id = self.get_app_bundle_id_for_window(wid);
-                let hidden_rect = self.virtual_workspace_manager.calculate_hidden_position(
+                let hidden_rect = self.virtual_workspace_manager.calculate_hidden_position_multi(
                     screen,
                     size,
                     HideCorner::BottomRight,
                     app_bundle_id.as_deref(),
+                    all_screens,
                 );
                 positions.insert(wid, hidden_rect);
             }
@@ -2403,7 +2425,10 @@ impl LayoutEngine {
                         self.broadcast_workspace_changed(space);
                         self.broadcast_windows_changed(space);
 
-                        return self.refocus_workspace(space, next_workspace);
+                        let mut resp = self.refocus_workspace(space, next_workspace);
+                        // Keep active scratchpads raised above the newly focused workspace.
+                        resp.raise_windows.extend(self.active_scratchpad_windows());
+                        return resp;
                     }
                 }
                 EventResponse::default()
@@ -2424,7 +2449,10 @@ impl LayoutEngine {
                         self.broadcast_workspace_changed(space);
                         self.broadcast_windows_changed(space);
 
-                        return self.refocus_workspace(space, prev_workspace);
+                        let mut resp = self.refocus_workspace(space, prev_workspace);
+                        // Keep active scratchpads raised above the newly focused workspace.
+                        resp.raise_windows.extend(self.active_scratchpad_windows());
+                        return resp;
                     }
                 }
                 EventResponse::default()
@@ -2446,7 +2474,10 @@ impl LayoutEngine {
                                 self.update_active_floating_windows(space);
                                 self.broadcast_workspace_changed(space);
                                 self.broadcast_windows_changed(space);
-                                return self.refocus_workspace(space, last_workspace);
+                                let mut resp = self.refocus_workspace(space, last_workspace);
+                                // Keep active scratchpads raised above the newly focused workspace.
+                                resp.raise_windows.extend(self.active_scratchpad_windows());
+                                return resp;
                             }
                         }
                         return EventResponse::default();
@@ -2458,7 +2489,10 @@ impl LayoutEngine {
                     self.broadcast_workspace_changed(space);
                     self.broadcast_windows_changed(space);
 
-                    return self.refocus_workspace(space, workspace_id);
+                    let mut resp = self.refocus_workspace(space, workspace_id);
+                    // Keep active scratchpads raised above the newly focused workspace.
+                    resp.raise_windows.extend(self.active_scratchpad_windows());
+                    return resp;
                 }
                 EventResponse::default()
             }
@@ -2598,7 +2632,10 @@ impl LayoutEngine {
                     self.broadcast_workspace_changed(space);
                     self.broadcast_windows_changed(space);
 
-                    return self.refocus_workspace(space, last_workspace);
+                    let mut resp = self.refocus_workspace(space, last_workspace);
+                    // Keep active scratchpads raised above the newly focused workspace.
+                    resp.raise_windows.extend(self.active_scratchpad_windows());
+                    return resp;
                 }
                 EventResponse::default()
             }
@@ -2829,15 +2866,17 @@ impl LayoutEngine {
         let mut windows_in_workspace =
             self.virtual_workspace_manager.windows_in_active_workspace(space);
 
-        // Keep currently active scratchpads visible
-        let active_scratchpads: Vec<_> = self
-            .scratchpad
-            .iter()
-            .filter(|&&w| self.scratchpad.is_active(w))
-            .copied()
+        // Preserve scratchpads that were already visible on THIS space across the rebuild.
+        // Scratchpads visible on other spaces must not leak into this space's active set,
+        // or toggling on one display would also show them on the other.
+        let active_scratchpads_here: Vec<_> = self
+            .floating
+            .active_flat(space)
+            .into_iter()
+            .filter(|w| self.scratchpad.is_scratchpad(*w))
             .collect();
 
-        for wid in active_scratchpads {
+        for wid in active_scratchpads_here {
             windows_in_workspace.push(wid);
         }
 
@@ -3479,6 +3518,78 @@ mod tests {
         assert_eq!(resp.hide_windows, vec![w1]);
         assert!(engine.scratchpad.is_scratchpad(w1));
         assert!(!engine.scratchpad.is_active(w1));
+    }
+
+    #[test]
+    fn toggle_scratchpad_moves_window_to_command_space() {
+        let mut engine = test_engine();
+        let space_a = SpaceId::new(301);
+        let space_b = SpaceId::new(302);
+        let screen_size = CGSize::new(1920.0, 1080.0);
+        let visible_spaces = vec![space_a, space_b];
+        let visible_space_centers = HashMap::default();
+
+        let _ = engine.handle_event(LayoutEvent::SpaceExposed(space_a, screen_size));
+        let _ = engine.handle_event(LayoutEvent::SpaceExposed(space_b, screen_size));
+
+        let w = WindowId::new(300, 1);
+        engine.scratchpad.add(w, Some("term".to_string()));
+        engine.floating.add_floating(w);
+
+        // Scratchpad is currently visible on space_a.
+        engine.scratchpad.set_active(w, true);
+        engine.floating.add_active(space_a, w.pid, w);
+
+        // Toggle from space_b should move it onto space_b, not duplicate or hide it.
+        let resp = engine.handle_command(
+            Some(space_b),
+            &visible_spaces,
+            &visible_space_centers,
+            LayoutCommand::ToggleScratchpadNamed("term".to_string()),
+        );
+
+        assert_eq!(resp.raise_windows, vec![w]);
+        assert_eq!(resp.focus_window, Some(w));
+        assert!(resp.hide_windows.is_empty());
+        assert!(engine.floating.is_active(space_b, w));
+        assert!(!engine.floating.is_active(space_a, w));
+        assert!(engine.scratchpad.is_active(w));
+    }
+
+    #[test]
+    fn toggle_scratchpad_moves_focused_scratchpad_from_other_display() {
+        let mut engine = test_engine();
+        let space_a = SpaceId::new(311);
+        let space_b = SpaceId::new(312);
+        let screen_size = CGSize::new(1920.0, 1080.0);
+        let visible_spaces = vec![space_a, space_b];
+        let visible_space_centers = HashMap::default();
+
+        let _ = engine.handle_event(LayoutEvent::SpaceExposed(space_a, screen_size));
+        let _ = engine.handle_event(LayoutEvent::SpaceExposed(space_b, screen_size));
+
+        let w = WindowId::new(310, 1);
+        engine.scratchpad.add(w, Some("term".to_string()));
+        engine.floating.add_floating(w);
+        engine.scratchpad.set_active(w, true);
+        engine.floating.add_active(space_a, w.pid, w);
+
+        // Focus is on the scratchpad (lives on space_a), but command is issued for space_b.
+        engine.focused_window = Some(w);
+
+        let resp = engine.handle_command(
+            Some(space_b),
+            &visible_spaces,
+            &visible_space_centers,
+            LayoutCommand::ToggleScratchpad,
+        );
+
+        // Should move (not hide) since the scratchpad is on a different space.
+        assert!(resp.hide_windows.is_empty());
+        assert_eq!(resp.raise_windows, vec![w]);
+        assert_eq!(resp.focus_window, Some(w));
+        assert!(engine.floating.is_active(space_b, w));
+        assert!(!engine.floating.is_active(space_a, w));
     }
 
     #[test]

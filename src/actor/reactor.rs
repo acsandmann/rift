@@ -2275,6 +2275,9 @@ impl Reactor {
             }
         }
 
+        let all_screen_frames: Vec<CGRect> =
+            self.space_manager.screens.iter().map(|s| s.frame).collect();
+
         for wid in hide_windows {
             if let Some(app) = self.app_manager.apps.get(&wid.pid) {
                 let wsid = self
@@ -2296,11 +2299,12 @@ impl Reactor {
                                 .layout_manager
                                 .layout_engine
                                 .virtual_workspace_manager
-                                .calculate_hidden_position(
+                                .calculate_hidden_position_multi(
                                     screen.frame,
                                     w.frame_monotonic.size,
                                     HideCorner::BottomRight,
                                     bundle_id,
+                                    &all_screen_frames,
                                 );
                             offscreen = hidden_rect.origin;
                         }
