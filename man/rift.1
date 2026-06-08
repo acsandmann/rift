@@ -1,0 +1,2066 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH rift 1  "rift " "rift manual"
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.SH NAME
+rift \- rift: a tiling window manager for macOS
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.SH SYNOPSIS
+\fBrift\fR [\fB\-\-one\fR] [\fB\-\-default\-disable\fR] [\fB\-\-no\-animate\fR] [\fB\-\-validate\fR] [\fB\-\-restore\fR] [\fB\-\-record\fR] [\fB\-\-config\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fIsubcommands\fR]
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.SH DESCRIPTION
+rift: a tiling window manager for macOS
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.SH OPTIONS
+rift: a tiling window manager for macOS
+.TP
+\fBUsage: rift [OPTIONS] [COMMAND]\fR
+.TP
+\fB\-\-one\fR
+Only run the window manager on the current space
+.TP
+\fB\-\-default\-disable\fR
+Disable new spaces by default.
+
+Ignored if \-\-one is used.
+.TP
+\fB\-\-no\-animate\fR
+Disable animations
+.TP
+\fB\-\-validate\fR
+No\-op compatibility check for the deprecated restore file path
+.TP
+\fB\-\-restore\fR
+Deprecated no\-op flag retained for CLI compatibility
+.TP
+\fB\-\-record\fR
+Record reactor events to the specified file path. Overwrites the file if exists
+.TP
+\fB\-\-config\fR
+Path to configuration file to use (overrides default)
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.SH "SUBCOMMAND: rift service"
+Manage the launchd service for rift
+.TP
+\fBUsage: rift service <COMMAND>\fR
+.PP
+\fBCommands:\fR
+.TP
+\fBrift service install\fR
+Install the per\-user launchd service
+.TP
+\fBrift service uninstall\fR
+Uninstall the per\-user launchd service
+.TP
+\fBrift service start\fR
+Start (or bootstrap) the service
+.TP
+\fBrift service stop\fR
+Stop (or bootout/kill) the service
+.TP
+\fBrift service restart\fR
+Restart the service (kickstart \-k)
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.SH CONFIGURATION
+Rift reads \fB~/.config/rift/config.toml\fR on startup. Each table below describes a section of that file. Descriptions are pulled directly from the source\*(Aqs doc comments via the documented crate, so they stay in sync with the code.
+.SS [settings]
+Top\-level user settings (the `[settings]` TOML table).
+.PP
+\fIExample (from rift.default.toml):\fR
+.PP
+.nf
+.RS 4
+# Animations
+.br
+# \- animate: master switch for all window animations
+.br
+# \- animation_duration: seconds per animation (>= 0.0, typical 0.15–0.35)
+.br
+# \- animation_fps: frames per second (0.0 = display refresh rate). 60–120 recommended.
+.br
+#   ease_in_circ, ease_out_circ, ease_in_out_circ
+.br
+animate = false
+.br
+animation_duration = 0.3
+.br
+animation_fps = 100.0
+.br
+
+.br
+# Space activation behavior
+.br
+# \- If true, spaces start inactive (rift does not manage windows there)
+.br
+#   and you must toggle activation via a keybind (toggle_space_activated).
+.br
+# \- If false, spaces are managed by default and you can disable specific ones.
+.br
+# Default is true; uncomment to change.
+.br
+#default_disable = false
+.br
+
+.br
+# Mouse/Focus behavior
+.br
+# \- focus_follows_mouse: moving the mouse into a window focuses it
+.br
+# \- mouse_follows_focus: when focus changes, move the mouse to the focused window
+.br
+# \- mouse_hides_on_focus: hide the mouse cursor after focusing a window
+.br
+focus_follows_mouse = true
+.br
+mouse_follows_focus = true
+.br
+mouse_hides_on_focus = true
+.br
+# focus_follows_mouse_disable_hotkey temporarily suspends focus\-follows\-mouse while held
+.br
+# e.g. "Fn"; omit or set to null to keep focus\-follows\-mouse always active
+.br
+#focus_follows_mouse_disable_hotkey = "Fn"
+.br
+
+.br
+# Prevent certain apps from stealing focus/causing workspace switches
+.br
+# Provide bundle identifiers (e.g., "com.apple.Spotlight")
+.br
+# Examples:
+.br
+#   "com.apple.dock", "com.apple.systemuiserver", "com.apple.SecurityAgent",
+.br
+#   "com.raycast.macos", "com.apple.Spotlight"
+.br
+auto_focus_blacklist = []
+.br
+
+.br
+# Run commands on start
+.br
+#
+.br
+# Tip: You can subscribe to rift events and trigger your own scripts. The command will
+.br
+# receive environment variables with context:
+.br
+#   RIFT_EVENT_TYPE            # "workspace_changed" | "windows_changed" | "window_title_changed"
+.br
+#   RIFT_WORKSPACE_ID          # workspace id
+.br
+#   RIFT_WORKSPACE_NAME        # workspace name
+.br
+#   RIFT_WORKSPACE_INDEX       # workspace index (window_title_changed only)
+.br
+#   RIFT_WINDOW_COUNT          # number of windows (windows_changed only)
+.br
+#   RIFT_WINDOWS               # comma\-separated window ids (windows_changed only)
+.br
+#   RIFT_WINDOW_ID             # window id (window_title_changed only)
+.br
+#   RIFT_PREVIOUS_WINDOW_TITLE # previous title (window_title_changed only)
+.br
+#   RIFT_WINDOW_TITLE          # new title (window_title_changed only)
+.br
+#   RIFT_EVENT_JSON            # full JSON payload of the event
+.br
+#
+.br
+# Example (sketchybar integration):
+.br
+# run_on_start = [
+.br
+#   "rift\-cli subscribe cli \-\-event workspace_changed \-\-command sh \-\-args \-c \-\-args \*(Aqsketchybar \-\-trigger rift_workspace_changed RIFT_WORKSPACE_NAME=\\"$RIFT_WORKSPACE_NAME\\" RIFT_WORKSPACE_ID=\\"$RIFT_WORKSPACE_ID\\"\*(Aq",
+.br
+#   "rift\-cli subscribe cli \-\-event windows_changed \-\-command sh \-\-args \-c \-\-args \*(Aqsketchybar \-\-trigger rift_windows_changed RIFT_WORKSPACE_NAME=\\"$RIFT_WORKSPACE_NAME\\" RIFT_WINDOW_COUNT=\\"$RIFT_WINDOW_COUNT\\"\*(Aq"
+.br
+# ]
+.br
+
+.br
+run_on_start = []
+.br
+
+.br
+# Hot Reloading
+.br
+# \- If true, rift will watch the config file for changes and reload automatically.
+.br
+# \- If false, your config changes will only apply when restarting rift.
+.br
+hot_reload = true
+.br
+.RE
+.fi
+.TP
+\fBanimate\fR
+Master switch for all window animations.
+.TP
+\fBanimation_duration\fR
+Animation duration in seconds (>= 0.0; typical 0.15\-0.35).
+.TP
+\fBanimation_fps\fR
+Target animation frame rate. `0.0` follows the display refresh rate.
+.TP
+\fBanimation_easing\fR
+Easing curve applied to window animations.
+.TP
+\fBdefault_disable\fR
+If true, new macOS spaces start unmanaged and must be toggled in.
+.TP
+\fBmouse_follows_focus\fR
+When focus changes, move the mouse to the focused window.
+.TP
+\fBmouse_hides_on_focus\fR
+Hide the mouse cursor after a focus change.
+.TP
+\fBfocus_follows_mouse\fR
+Moving the mouse over a window gives it focus.
+.TP
+\fBfocus_follows_mouse_disable_hotkey\fR
+Hotkey that disables focus\-follows\-mouse while held.
+Accepts either a full hotkey (e.g. "Ctrl + A") or a modifier\-only spec (e.g. "Ctrl")
+.TP
+\fBauto_focus_blacklist\fR
+Apps that should not trigger automatic workspace switching when activated.
+List of bundle identifiers (e.g., "com.apple.Spotlight") that often
+inappropriately steal focus and shouldn\*(Aqt cause workspace switches.
+.TP
+\fBlayout\fR
+Layout\-related sub\-settings (see [`LayoutSettings`]).
+.TP
+\fBui\fR
+UI chrome sub\-settings (menu bar, stack line, mission control).
+.TP
+\fBgestures\fR
+Trackpad gesture settings
+.TP
+\fBwindow_snapping\fR
+Drag\-to\-swap snapping behaviour.
+.TP
+\fBrun_on_start\fR
+Commands to run on startup (e.g., for subscribing to events)
+.TP
+\fBhot_reload\fR
+Whether to reapply app rules when a window title changes.
+Enable hot\-reloading of the config file when it changes
+.SS [settings.layout]
+Container for layout\-related sub\-settings.
+.PP
+\fIExample (from rift.default.toml):\fR
+.PP
+.nf
+.RS 4
+# Layout Types:
+.br
+# 	\- "traditional" (i3/sway\-like containers)
+.br
+#	\- "bsp" (binary space partitioning),
+.br
+#   \- "stack" (single stacked container)
+.br
+#   \- "master_stack" (master area + stack area)
+.br
+# defaults to "traditional" if omitted
+.br
+#
+.br
+# This is the default layout mode if there is nothing else configured
+.br
+# in the `workspace_rules` section below.
+.br
+# You can set different layouts per workspace using `workspace_rules`.
+.br
+mode = "traditional"
+.br
+.RE
+.fi
+.TP
+\fBmode\fR
+Layout mode: "traditional", "bsp", "stack", "master_stack", or "scrolling"
+.TP
+\fBstack\fR
+Stack system configuration
+.TP
+\fBmaster_stack\fR
+Master/stack layout configuration
+.TP
+\fBgaps\fR
+Gap configuration for window spacing
+.TP
+\fBscrolling\fR
+Scrolling layout configuration (niri\-style columns)
+.SS [settings.layout.master_stack]
+Settings for the master/stack layout.
+.PP
+\fIExample (from rift.default.toml):\fR
+.PP
+.nf
+.RS 4
+# Fraction of space reserved for the master area (0.05..0.95)
+.br
+master_ratio = 0.6
+.br
+# Number of windows kept in the master area (>= 1)
+.br
+master_count = 1
+.br
+# Which side the master area occupies (left | right | top | bottom)
+.br
+master_side = "left"
+.br
+# Where new windows go when the master area is already full (master | stack | focused)
+.br
+new_window_placement = "master"
+.br
+.RE
+.fi
+.TP
+\fBmaster_ratio\fR
+Fraction of space reserved for the master area (0.05..0.95)
+.TP
+\fBmaster_count\fR
+Number of windows kept in the master area (>= 1)
+.TP
+\fBmaster_side\fR
+Which side the master area occupies
+.TP
+\fBnew_window_placement\fR
+Where new windows are inserted when the master area is already full
+.SS [settings.layout.scrolling]
+Settings for the scrolling (niri\-style) layout.
+.PP
+\fIExample (from rift.default.toml):\fR
+.PP
+.nf
+.RS 4
+# width of the active column (0..1 of screen width)
+.br
+column_width_ratio = 0.7
+.br
+# min_column_width_ratio / max_column_width_ratio: clamp bounds used by resize commands
+.br
+min_column_width_ratio = 0.3
+.br
+max_column_width_ratio = 0.9
+.br
+# Alignment for the focused column: "left", "center", or "right"
+.br
+alignment = "center"
+.br
+# Horizontal focus behavior:
+.br
+# \- "niri": reveal columns only when needed based on navigation direction
+.br
+# 			(disrespects alignment setting above)
+.br
+# \- "anchored": always align focused column according to `alignment`
+.br
+focus_navigation_style = "niri"
+.br
+.RE
+.fi
+.TP
+\fBanimate\fR
+Whether to animate window transitions in this layout.
+.TP
+\fBcolumn_width_ratio\fR
+Default width of the active column, as a fraction of the screen width.
+.TP
+\fBmin_column_width_ratio\fR
+Minimum column width ratio allowed by resize commands.
+.TP
+\fBmax_column_width_ratio\fR
+Maximum column width ratio allowed by resize commands.
+.TP
+\fBalignment\fR
+Alignment for the focused column (left, center, right).
+.TP
+\fBfocus_navigation_style\fR
+Horizontal focus navigation behavior:
+\- niri: reveal only as needed based on navigation direction.
+\- anchored: always align focused column to `alignment`.
+.TP
+\fBgestures\fR
+Trackpad gestures for scrolling layout
+.SS [settings.layout.scrolling.gestures]
+Trackpad gesture configuration specific to the scrolling layout.
+.PP
+\fIExample (from rift.default.toml):\fR
+.PP
+.nf
+.RS 4
+# Enable horizontal scroll gestures to switch columns
+.br
+enabled = false
+.br
+# Invert horizontal direction (swap left/right)
+.br
+invert_horizontal = false
+.br
+# Number of fingers required for gesture
+.br
+fingers = 3
+.br
+# If true, scrolling past the end of the strip will trigger a workspace switch
+.br
+propagate_to_workspace_swipe = false
+.br
+.RE
+.fi
+.TP
+\fBenabled\fR
+Enable horizontal scroll gestures to switch columns
+.TP
+\fBinvert_horizontal\fR
+Invert horizontal direction (swap left/right)
+.TP
+\fBvertical_tolerance\fR
+Maximum absolute Y delta allowed for the gesture to count as horizontal
+.TP
+\fBfingers\fR
+Number of fingers required for scroll gesture
+.TP
+\fBdistance_pct\fR
+Normalized horizontal distance (0..1) required to fire a scroll step
+.TP
+\fBpropagate_to_workspace_swipe\fR
+If true, scrolling past the end of the strip will trigger a workspace switch
+.TP
+\fBworkspace_switch_threshold\fR
+Amount of overscroll (in steps) required to trigger a workspace switch
+.SS [settings.layout.stack]
+Settings for the stack layout.
+.PP
+\fIExample (from rift.default.toml):\fR
+.PP
+.nf
+.RS 4
+# How much of each stacked window sticks out (in pixels)
+.br
+# Set to 0.0 to have them directly on top of each other.
+.br
+# Recommended: 30\-50 for clear edges while keeping focus visible.
+.br
+stack_offset = 40.0
+.br
+
+.br
+# Default stacking orientation when creating a new stack.
+.br
+# Options:
+.br
+# \- "perpendicular" (default): choose the perpendicular orientation to the parent layout
+.br
+# \- "same": use the same orientation as the parent layout
+.br
+# \- "horizontal"/"vertical": force a specific orientation
+.br
+default_orientation = "perpendicular"
+.br
+.RE
+.fi
+.TP
+\fBstack_offset\fR
+Stack offset \- how much each stacked window is offset (in pixels)
+With the enhanced stacking system, this creates meaningful visible edges
+for each window in the stack while the focused window remains fully visible.
+Recommended values: 30\-50 pixels for good visibility.
+.TP
+\fBdefault_orientation\fR
+Default orientation behavior when stacking windows.
+Options:
+\- "perpendicular" (default): choose the perpendicular orientation to the parent layout
+\- "same": use the same orientation as the parent layout
+\- "horizontal"/"vertical": explicitly use a specific orientation
+.SS [settings.layout.gaps]
+Gap configuration for window spacing
+.TP
+\fBouter\fR
+Outer gaps (space between windows and screen edges)
+.TP
+\fBinner\fR
+Inner gaps (space between windows)
+.TP
+\fBper_display\fR
+Display\-specific gap overrides keyed by display UUID
+.SS [settings.layout.gaps.outer]
+Outer gap configuration (space between windows and screen edges)
+.PP
+\fIExample (from rift.default.toml):\fR
+.PP
+.nf
+.RS 4
+top = 0
+.br
+left = 0
+.br
+bottom = 0
+.br
+right = 0
+.br
+.RE
+.fi
+.TP
+\fBtop\fR
+Gap at the top of the screen
+.TP
+\fBleft\fR
+Gap at the left of the screen
+.TP
+\fBbottom\fR
+Gap at the bottom of the screen
+.TP
+\fBright\fR
+Gap at the right of the screen
+.SS [settings.layout.gaps.inner]
+Inner gap configuration (space between windows)
+.PP
+\fIExample (from rift.default.toml):\fR
+.PP
+.nf
+.RS 4
+horizontal = 0
+.br
+vertical = 0
+.br
+.RE
+.fi
+.TP
+\fBhorizontal\fR
+Horizontal gap between windows
+.TP
+\fBvertical\fR
+Vertical gap between windows
+.SS [settings.layout.gaps.per_display.<UUID>]
+Overrides for gaps on a per\-display basis
+.TP
+\fBouter\fR
+Override outer gaps completely for the display
+.TP
+\fBinner\fR
+Override inner gaps completely for the display
+.SS [settings.ui]
+User\-interface chrome rendered by rift (menu bar, stack line, mission control).
+.TP
+\fBmenu_bar\fR
+Menu\-bar indicator settings.
+.TP
+\fBstack_line\fR
+Stack\-line indicator settings.
+.TP
+\fBmission_control\fR
+Mission\-control overlay settings.
+.SS [settings.ui.menu_bar]
+Menu\-bar workspace indicator configuration.
+.PP
+\fIExample (from rift.default.toml):\fR
+.PP
+.nf
+.RS 4
+# enable menu bar workspace indicators
+.br
+enabled = false
+.br
+# if enabled, it will show all workspaces including empty ones. disabled because this
+.br
+# tends to take up too much room in the menubar and then is auto hidden by macos
+.br
+show_empty = false
+.br
+# choose between drawing every workspace or only the active workspace
+.br
+mode = "all"
+.br
+# when showing workspaces as labels ("index" or "name"), choose which label to render
+.br
+active_label = "index"
+.br
+# when displaying workspaces, choose whether to draw the layout preview or a set of labels
+.br
+# options are "layout" or "label"
+.br
+display_style = "layout"
+.br
+.RE
+.fi
+.TP
+\fBenabled\fR
+Enable menu\-bar workspace indicators.
+.TP
+\fBshow_empty\fR
+Include empty workspaces when rendering the indicator.
+.TP
+\fBmode\fR
+Which workspaces are rendered (all or only the active one).
+.TP
+\fBactive_label\fR
+Label to use when rendering labelled workspaces.
+.TP
+\fBdisplay_style\fR
+Display style for each workspace (layout preview or label).
+.SS [settings.ui.stack_line]
+Stack\-line indicator configuration (visual hint shown next to a stack).
+.PP
+\fIExample (from rift.default.toml):\fR
+.PP
+.nf
+.RS 4
+# experimental stack line indicator (defaults to off)
+.br
+enabled = false
+.br
+# in a horizontal stack where the line will be (top/bottom)
+.br
+horiz_placement = "top"
+.br
+# in a vertical stack where the line will be (left/right)
+.br
+vert_placement = "left"
+.br
+# how thick the indicator will be (in px)
+.br
+thickness = 20.0
+.br
+# spacing between the stack line and window edges (in px)
+.br
+spacing = 1.0
+.br
+.RE
+.fi
+.TP
+\fBenabled\fR
+Enable rendering of the stack line indicator.
+.TP
+\fBthickness\fR
+Indicator thickness in points.
+.TP
+\fBhoriz_placement\fR
+Which horizontal edge the indicator sits on for vertical stacks.
+.TP
+\fBvert_placement\fR
+Which vertical edge the indicator sits on for horizontal stacks.
+.TP
+\fBspacing\fR
+Distance to position the stack line away from the window edge (in points)
+This creates spacing between the window and the stack line
+.SS [settings.ui.mission_control]
+Configuration for rift\*(Aqs own mission\-control overlay.
+.PP
+\fIExample (from rift.default.toml):\fR
+.PP
+.nf
+.RS 4
+enabled = false
+.br
+# enable fade animation when entering/exiting mission control
+.br
+fade_enabled = false
+.br
+# native macos mission control fade is about 180ms
+.br
+fade_duration_ms = 180.0
+.br
+.RE
+.fi
+.TP
+\fBenabled\fR
+Enable rift\*(Aqs mission\-control overlay.
+.TP
+\fBfade_enabled\fR
+Fade in/out when entering/exiting the overlay.
+.TP
+\fBfade_duration_ms\fR
+Fade animation duration in milliseconds.
+.SS [settings.gestures]
+Trackpad gesture configuration for workspace switching.
+.PP
+\fIExample (from rift.default.toml):\fR
+.PP
+.nf
+.RS 4
+# Enable horizontal swipes to switch virtual workspaces
+.br
+enabled = false
+.br
+# Invert horizontal direction (swap next/prev)
+.br
+invert_horizontal_swipe = false
+.br
+# Maximum vertical travel allowed for the horizontal swipe to register.
+.br
+# Accepts normalized fraction (0..1) or percent (0..100). Example: 0.4 or 40.0
+.br
+swipe_vertical_tolerance = 0.4
+.br
+# Skip empty workspaces when swiping
+.br
+skip_empty = true
+.br
+# Number of fingers required for swipe
+.br
+fingers = 3
+.br
+# Normalized horizontal distance (0..1) to trigger swipe for NSTouch\-based detection
+.br
+distance_pct = 0.08
+.br
+# Haptic feedback on commit (generic | alignment | level_change)
+.br
+haptics_enabled = true
+.br
+haptic_pattern = "level_change"
+.br
+.RE
+.fi
+.TP
+\fBenabled\fR
+Enable horizontal swipes to switch virtual workspaces
+.TP
+\fBinvert_horizontal_swipe\fR
+Invert horizontal direction (swap next/prev)
+.TP
+\fBswipe_vertical_tolerance\fR
+Maximum absolute Y delta allowed for the gesture to count as horizontal
+.TP
+\fBskip_empty\fR
+If true, attempt to skip empty workspaces on swipe (if supported)
+.TP
+\fBfingers\fR
+Number of fingers required for swipe (default = 3)
+.TP
+\fBdistance_pct\fR
+Normalized horizontal distance (0..1) required to fire a swipe
+.TP
+\fBhaptics_enabled\fR
+Enable haptic feedback when a swipe commits
+.TP
+\fBhaptic_pattern\fR
+Haptic feedback pattern (generic | alignment | level_change)
+.SS [settings.window_snapping]
+Drag\-and\-snap behaviour for tiled windows.
+.PP
+\fIExample (from rift.default.toml):\fR
+.PP
+.nf
+.RS 4
+# Fraction threshold (0.0..1.0) specifying how much of the dragged window
+.br
+# area must be overlapped by a candidate window in order to trigger a
+.br
+# swap while dragging. Typical values are around 0.2–0.4.
+.br
+# If you prefer more aggressive swapping, lower the value; increase it
+.br
+# to require greater overlap before a swap occurs.
+.br
+drag_swap_fraction = 0.3
+.br
+.RE
+.fi
+.TP
+\fBdrag_swap_fraction\fR
+Fraction (0.0..1.0) of overlap required to swap windows while dragging.
+.SS [virtual_workspaces]
+Settings controlling rift\*(Aqs virtual workspaces.
+.PP
+\fIExample (from rift.default.toml):\fR
+.PP
+.nf
+.RS 4
+# Virtual workspaces
+.br
+# \- enabled: if false, rift behaves like a simple tiling WM with a single space
+.br
+# \- default_workspace_count: number of workspaces to create on startup (1–32)
+.br
+# \- auto_assign_windows: when true, new windows can be auto\-assigned using app_rules
+.br
+# \- preserve_focus_per_workspace: remember last focused window per workspace
+.br
+# \- workspace_auto_back_and_forth: when enabled, if you try to switch to the same workspace
+.br
+#   that\*(Aqs already active, it will switch to the last workspace instead
+.br
+# \- reapply_app_rules_on_title_change: if true, app rules are re\-evaluated when a window\*(Aqs title changes
+.br
+enabled = true
+.br
+default_workspace_count = 4
+.br
+auto_assign_windows = true
+.br
+preserve_focus_per_workspace = true
+.br
+workspace_auto_back_and_forth = false
+.br
+reapply_app_rules_on_title_change = false
+.br
+
+.br
+# Workspace\-specific rules
+.br
+# \- workspace: target workspace by index (integer) or name (string)
+.br
+# \- layout: layout mode to use ("traditional", "bsp", "stack", "master_stack", "scrolling")
+.br
+# workspace_rules = [
+.br
+#   { workspace = 1, layout = "bsp" },
+.br
+#   { workspace = "second", layout = "scrolling" }
+.br
+# ]
+.br
+workspace_rules = []
+.br
+
+.br
+
+.br
+# Default workspace to activate on startup (0\-based index).
+.br
+# If omitted, defaults to 0 (first workspace). Must be less than default_workspace_count.
+.br
+# Uncomment to change:
+.br
+# default_workspace = 0
+.br
+
+.br
+# Workspace names (indexed order). If fewer than default_workspace_count are provided,
+.br
+# remaining workspaces are named "Workspace X".
+.br
+# Do not provide more names than default_workspace_count.
+.br
+workspace_names = [
+.br
+	"first",
+.br
+	"second"
+.br
+]
+.br
+
+.br
+# App rules (automatic assignment)
+.br
+# Define rules that match new windows and set properties (workspace, floating, etc).
+.br
+#
+.br
+# Matchable fields:
+.br
+#   \- app_id         : application bundle identifier (exact)
+.br
+#   \- app_name       : substring match against application name
+.br
+#   \- title_regex    : regular expression matched against the window title
+.br
+#   \- title_substring: literal substring (case\-sensitive) matched against the title
+.br
+#   \- ax_role / ax_subrole: exact match against macOS Accessibility (AX) role/subrole
+.br
+#
+.br
+# Rule options:
+.br
+#   \- workspace (integer, 0\-based): target workspace index. If omitted or invalid, uses the active workspace.
+.br
+#     Alternatively, `workspace` may be a workspace name string to target by name.
+.br
+#   \- floating (boolean): whether matched windows should float by default.
+.br
+#   \- manage (boolean): whether Rift should manage the matching window. Set to false to ignore the window completely (default = true).
+.br
+#
+.br
+# Matching behavior (summary):
+.br
+#   1. All rules that match a window are evaluated.
+.br
+#   2. If multiple matching rules share the same non\-empty `app_id`, the rule
+.br
+#      with the most specified conditions (the most non\-empty fields) wins.
+.br
+#      If there\*(Aqs a tie, the earlier rule in the file wins.
+.br
+#   3. If matching rules do NOT share the same `app_id`, the rule with the
+.br
+#      highest specificity (most non\-empty fields) is selected; ties are broken by order.
+.br
+#   4. Within a single rule, all specified fields are combined conjunctively:
+.br
+#      the rule matches only if every non\-empty field matches the window.
+.br
+#
+.br
+# Tips:
+.br
+#   \- To make exceptions for a specific app, place a more specific rule before
+.br
+#     a general `app_id` rule. Example:
+.br
+#       app_rules = [
+.br
+#         { app_id = "com.example.X", title_regex = "Dialog", floating = true },
+.br
+#         { app_id = "com.example.X", floating = false },
+.br
+#       ]
+.br
+#
+.br
+#   \- Use `title_substring` for simple, literal (case\-sensitive) substring matches.
+.br
+#     Use `title_regex` for advanced patterns.
+.br
+#
+.br
+# Accessibility (AX) matching:
+.br
+#   \- `ax_role` and `ax_subrole` match the exact AX values reported by macOS
+.br
+#     (e.g., "AXWindow", "AXDialog", "AXSystemDialog", "AXToolbar").
+.br
+#   \- Useful for distinguishing dialogs, sheets, toolbars, etc., when bundle/name/title aren\*(Aqt enough.
+.br
+#
+.br
+# Validation:
+.br
+#   \- `title_regex` must be a valid regular expression. Invalid regexes cause the rule
+.br
+#     to be ignored and a warning to be logged.
+.br
+#
+.br
+# Examples:
+.br
+#   \- Float any window with "Preferences" in the title:
+.br
+#       app_rules = [
+.br
+#         { title_substring = "Preferences", floating = true },
+.br
+#       ]
+.br
+#
+.br
+#   \- Match by app name substring and workspace:
+.br
+#       app_rules = [
+.br
+#         { app_name = "Calendar", workspace = 2, floating = true },
+.br
+#       ]
+.br
+#
+.br
+#   \- Accessibility example: float dialog windows for a specific app:
+.br
+#       app_rules = [
+.br
+#         { app_id = "com.example.X", ax_subrole = "AXDialog", floating = true },
+.br
+#       ]
+.br
+#
+.br
+# By default there are no app rules; add or uncomment rules below as needed.
+.br
+app_rules = []
+.br
+.RE
+.fi
+.TP
+\fBenabled\fR
+Enable virtual workspaces. When false, rift behaves like a single\-workspace tiler.
+.TP
+\fBdefault_workspace_count\fR
+Number of workspaces to create on startup (1..=32).
+.TP
+\fBauto_assign_windows\fR
+Apply `app_rules` to newly observed windows automatically.
+.TP
+\fBpreserve_focus_per_workspace\fR
+Remember the last focused window for each workspace.
+.TP
+\fBworkspace_auto_back_and_forth\fR
+Switching to the active workspace re\-activates the previously focused one.
+.TP
+\fBworkspace_names\fR
+Ordered list of workspace names. Extra workspaces fall back to `Workspace N`.
+.TP
+\fBdefault_workspace\fR
+Workspace to activate on startup (0\-based).
+.TP
+\fBreapply_app_rules_on_title_change\fR
+Re\-evaluate `app_rules` when a window\*(Aqs title changes.
+.TP
+\fBapp_rules\fR
+Rules used to match windows and assign workspace/floating properties.
+.TP
+\fBworkspace_rules\fR
+Per\-workspace layout overrides.
+.SS "  app_rules[].<item>"
+Rule that matches windows and assigns workspace/floating properties.
+.TP
+\fBapp_id\fR
+Application bundle identifier (e.g., "com.apple.Terminal")
+.TP
+\fBworkspace\fR
+Target workspace index (0 based) OR workspace name. If None, window goes to active workspace.
+.TP
+\fBfloating\fR
+Whether windows should be floating in this workspace
+.TP
+\fBscratchpad\fR
+Whether windows should be treated as scratchpad windows.
+Can be `true` (generic scratchpad) or a string name (named scratchpad).
+.TP
+\fBmanage\fR
+Whether Rift should manage matching windows (defaults to true). `false` makes the
+window invisible to Rift (no tiling, floating, or assignments).
+.TP
+\fBapp_name\fR
+Optional: Application name pattern (alternative to app_id)
+.TP
+\fBtitle_regex\fR
+Optional: Regular expression to match window title (applies to window.title)
+
+If present, this regex will be used when attempting to match a window by
+title.
+.TP
+\fBtitle_substring\fR
+Optional: Substring to search for in window title (applies to window.title)
+
+If present, rift will internally treat this as a substring match and will
+construct a regex to match titles containing this substring. This allows
+people who don\*(Aqt want to write full regexes to match by a simple substring.
+.TP
+\fBax_role\fR
+Optional: Accessibility role to match (AXRole). If present, it must be a
+non\-empty string and will be compared against the accessibility role
+reported by the AX APIs for a window (exact string match).
+.TP
+\fBax_subrole\fR
+Optional: Accessibility subrole to match (AXSubrole). If present, it must be a
+non\-empty string and will be compared against the accessibility subrole
+reported by the AX APIs for a window (exact string match).
+.SS "  workspace_rules[].<item>"
+Rule that pins a workspace to a specific layout mode.
+.TP
+\fBworkspace\fR
+Target workspace by index or name
+.TP
+\fBlayout\fR
+Layout mode to use for this workspace
+.SS "Enumerated values"
+.SS LayoutMode
+Layout mode enum
+.SS AnimationEasing
+Easing curve used for window animations.
+.SS MasterStackSide
+Which screen edge the master area occupies in the master/stack layout.
+.SS MasterStackNewWindowPlacement
+Where new windows are inserted when the master area is full.
+.SS ScrollingAlignment
+Alignment for the focused column in the scrolling layout.
+.SS ScrollingFocusNavigationStyle
+Focus navigation behaviour for the scrolling layout.
+.SS StackDefaultOrientation
+Default orientation behaviour when creating a new stack.
+.SS HorizontalPlacement
+Horizontal placement of an indicator on a window edge.
+.SS VerticalPlacement
+Vertical placement of an indicator on a window edge.
+.SS MenuBarDisplayMode
+Which workspaces to render in the menu\-bar indicator.
+.SS ActiveWorkspaceLabel
+Label rendered for a workspace when using the labelled menu\-bar style.
+.SS WorkspaceDisplayStyle
+How workspaces are rendered in the menu bar.
+.SS HapticPattern
+Haptic feedback pattern used when a gesture commits.
+.SS ScratchpadConfig
+Configuration for marking a matched window as a scratchpad.
+.SS WorkspaceSelector
+Selector for referring to a workspace either by numeric index or by name.
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.SH KEYS
+The [keys] table maps hotkey specs to commands. A hotkey spec is a string like "Alt + Shift + H". Supported modifiers are Alt, Ctrl, Shift, and Meta (the Command ⌘ key on macOS). Arrow keys may be written as ArrowUp / ArrowDown / ArrowLeft / ArrowRight or simply Up / Down / Left / Right. The [modifier_combinations] table lets you alias modifier groups (for example, comb1 = "Alt + Shift") and then use them in [keys] ("comb1 + H").
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.SH "EXAMPLE CONFIG"
+The configuration below is rift\*(Aqs built\-in default. It is reproduced verbatim from rift.default.toml and is used as a fallback when no user config exists.
+.PP
+.nf
+.RS 4
+# rift config
+.br
+# Copy this file to ~/.config/rift/config.toml or $HOME~/.config/rift/config.toml
+.br
+
+.br
+[settings]
+.br
+# Animations
+.br
+# \- animate: master switch for all window animations
+.br
+# \- animation_duration: seconds per animation (>= 0.0, typical 0.15–0.35)
+.br
+# \- animation_fps: frames per second (0.0 = display refresh rate). 60–120 recommended.
+.br
+#   ease_in_circ, ease_out_circ, ease_in_out_circ
+.br
+animate = false
+.br
+animation_duration = 0.3
+.br
+animation_fps = 100.0
+.br
+
+.br
+# Space activation behavior
+.br
+# \- If true, spaces start inactive (rift does not manage windows there)
+.br
+#   and you must toggle activation via a keybind (toggle_space_activated).
+.br
+# \- If false, spaces are managed by default and you can disable specific ones.
+.br
+# Default is true; uncomment to change.
+.br
+#default_disable = false
+.br
+
+.br
+# Mouse/Focus behavior
+.br
+# \- focus_follows_mouse: moving the mouse into a window focuses it
+.br
+# \- mouse_follows_focus: when focus changes, move the mouse to the focused window
+.br
+# \- mouse_hides_on_focus: hide the mouse cursor after focusing a window
+.br
+focus_follows_mouse = true
+.br
+mouse_follows_focus = true
+.br
+mouse_hides_on_focus = true
+.br
+# focus_follows_mouse_disable_hotkey temporarily suspends focus\-follows\-mouse while held
+.br
+# e.g. "Fn"; omit or set to null to keep focus\-follows\-mouse always active
+.br
+#focus_follows_mouse_disable_hotkey = "Fn"
+.br
+
+.br
+# Prevent certain apps from stealing focus/causing workspace switches
+.br
+# Provide bundle identifiers (e.g., "com.apple.Spotlight")
+.br
+# Examples:
+.br
+#   "com.apple.dock", "com.apple.systemuiserver", "com.apple.SecurityAgent",
+.br
+#   "com.raycast.macos", "com.apple.Spotlight"
+.br
+auto_focus_blacklist = []
+.br
+
+.br
+# Run commands on start
+.br
+#
+.br
+# Tip: You can subscribe to rift events and trigger your own scripts. The command will
+.br
+# receive environment variables with context:
+.br
+#   RIFT_EVENT_TYPE            # "workspace_changed" | "windows_changed" | "window_title_changed"
+.br
+#   RIFT_WORKSPACE_ID          # workspace id
+.br
+#   RIFT_WORKSPACE_NAME        # workspace name
+.br
+#   RIFT_WORKSPACE_INDEX       # workspace index (window_title_changed only)
+.br
+#   RIFT_WINDOW_COUNT          # number of windows (windows_changed only)
+.br
+#   RIFT_WINDOWS               # comma\-separated window ids (windows_changed only)
+.br
+#   RIFT_WINDOW_ID             # window id (window_title_changed only)
+.br
+#   RIFT_PREVIOUS_WINDOW_TITLE # previous title (window_title_changed only)
+.br
+#   RIFT_WINDOW_TITLE          # new title (window_title_changed only)
+.br
+#   RIFT_EVENT_JSON            # full JSON payload of the event
+.br
+#
+.br
+# Example (sketchybar integration):
+.br
+# run_on_start = [
+.br
+#   "rift\-cli subscribe cli \-\-event workspace_changed \-\-command sh \-\-args \-c \-\-args \*(Aqsketchybar \-\-trigger rift_workspace_changed RIFT_WORKSPACE_NAME=\\"$RIFT_WORKSPACE_NAME\\" RIFT_WORKSPACE_ID=\\"$RIFT_WORKSPACE_ID\\"\*(Aq",
+.br
+#   "rift\-cli subscribe cli \-\-event windows_changed \-\-command sh \-\-args \-c \-\-args \*(Aqsketchybar \-\-trigger rift_windows_changed RIFT_WORKSPACE_NAME=\\"$RIFT_WORKSPACE_NAME\\" RIFT_WINDOW_COUNT=\\"$RIFT_WINDOW_COUNT\\"\*(Aq"
+.br
+# ]
+.br
+
+.br
+run_on_start = []
+.br
+
+.br
+# Hot Reloading
+.br
+# \- If true, rift will watch the config file for changes and reload automatically.
+.br
+# \- If false, your config changes will only apply when restarting rift.
+.br
+hot_reload = true
+.br
+
+.br
+[settings.layout]
+.br
+# Layout Types:
+.br
+# 	\- "traditional" (i3/sway\-like containers)
+.br
+#	\- "bsp" (binary space partitioning),
+.br
+#   \- "stack" (single stacked container)
+.br
+#   \- "master_stack" (master area + stack area)
+.br
+# defaults to "traditional" if omitted
+.br
+#
+.br
+# This is the default layout mode if there is nothing else configured
+.br
+# in the `workspace_rules` section below.
+.br
+# You can set different layouts per workspace using `workspace_rules`.
+.br
+mode = "traditional"
+.br
+
+.br
+# these settings only apply when layout mode == "master_stack"
+.br
+[settings.layout.master_stack]
+.br
+# Fraction of space reserved for the master area (0.05..0.95)
+.br
+master_ratio = 0.6
+.br
+# Number of windows kept in the master area (>= 1)
+.br
+master_count = 1
+.br
+# Which side the master area occupies (left | right | top | bottom)
+.br
+master_side = "left"
+.br
+# Where new windows go when the master area is already full (master | stack | focused)
+.br
+new_window_placement = "master"
+.br
+
+.br
+# these settings only apply when layout mode == "scrolling"
+.br
+[settings.layout.scrolling]
+.br
+# width of the active column (0..1 of screen width)
+.br
+column_width_ratio = 0.7
+.br
+# min_column_width_ratio / max_column_width_ratio: clamp bounds used by resize commands
+.br
+min_column_width_ratio = 0.3
+.br
+max_column_width_ratio = 0.9
+.br
+# Alignment for the focused column: "left", "center", or "right"
+.br
+alignment = "center"
+.br
+# Horizontal focus behavior:
+.br
+# \- "niri": reveal columns only when needed based on navigation direction
+.br
+# 			(disrespects alignment setting above)
+.br
+# \- "anchored": always align focused column according to `alignment`
+.br
+focus_navigation_style = "niri"
+.br
+# the scrolling layout tends to function better without animations,
+.br
+# so you can disable them if you like
+.br
+# animate = false
+.br
+
+.br
+[settings.layout.scrolling.gestures]
+.br
+# Enable horizontal scroll gestures to switch columns
+.br
+enabled = false
+.br
+# Invert horizontal direction (swap left/right)
+.br
+invert_horizontal = false
+.br
+# Number of fingers required for gesture
+.br
+fingers = 3
+.br
+# If true, scrolling past the end of the strip will trigger a workspace switch
+.br
+propagate_to_workspace_swipe = false
+.br
+
+.br
+[settings.layout.stack]
+.br
+# How much of each stacked window sticks out (in pixels)
+.br
+# Set to 0.0 to have them directly on top of each other.
+.br
+# Recommended: 30\-50 for clear edges while keeping focus visible.
+.br
+stack_offset = 40.0
+.br
+
+.br
+# Default stacking orientation when creating a new stack.
+.br
+# Options:
+.br
+# \- "perpendicular" (default): choose the perpendicular orientation to the parent layout
+.br
+# \- "same": use the same orientation as the parent layout
+.br
+# \- "horizontal"/"vertical": force a specific orientation
+.br
+default_orientation = "perpendicular"
+.br
+
+.br
+[settings.layout.gaps]
+.br
+# Gap configuration
+.br
+# \- outer: space between windows and screen edges
+.br
+# \- inner: space between tiled windows
+.br
+# \- per_display: optional display\-specific overrides keyed by display UUID.
+.br
+#   When present, the values in a per\-display override replace the defaults
+.br
+#   (you may override only `outer`, only `inner`, or both for a display).
+.br
+#   Use the display\*(Aqs UUID as the key (for example, from system profiler or via rift CLI).
+.br
+
+.br
+[settings.layout.gaps.outer]
+.br
+top = 0
+.br
+left = 0
+.br
+bottom = 0
+.br
+right = 0
+.br
+
+.br
+[settings.layout.gaps.inner]
+.br
+horizontal = 0
+.br
+vertical = 0
+.br
+
+.br
+# Example per\-display overrides:
+.br
+# Replace the quoted key with your display\*(Aqs UUID. Only specify values you want to override.
+.br
+# [settings.layout.gaps.per_display."11111111\-2222\-3333\-4444\-555555555555".outer]
+.br
+# top = 20
+.br
+# left = 20
+.br
+# bottom = 20
+.br
+# right = 20
+.br
+#
+.br
+# [settings.layout.gaps.per_display."11111111\-2222\-3333\-4444\-555555555555".inner]
+.br
+# horizontal = 8
+.br
+# vertical = 8
+.br
+[settings.ui.menu_bar]
+.br
+# enable menu bar workspace indicators
+.br
+enabled = false
+.br
+# if enabled, it will show all workspaces including empty ones. disabled because this
+.br
+# tends to take up too much room in the menubar and then is auto hidden by macos
+.br
+show_empty = false
+.br
+# choose between drawing every workspace or only the active workspace
+.br
+mode = "all"
+.br
+# when showing workspaces as labels ("index" or "name"), choose which label to render
+.br
+active_label = "index"
+.br
+# when displaying workspaces, choose whether to draw the layout preview or a set of labels
+.br
+# options are "layout" or "label"
+.br
+display_style = "layout"
+.br
+
+.br
+[settings.ui.stack_line]
+.br
+# experimental stack line indicator (defaults to off)
+.br
+enabled = false
+.br
+# in a horizontal stack where the line will be (top/bottom)
+.br
+horiz_placement = "top"
+.br
+# in a vertical stack where the line will be (left/right)
+.br
+vert_placement = "left"
+.br
+# how thick the indicator will be (in px)
+.br
+thickness = 20.0
+.br
+# spacing between the stack line and window edges (in px)
+.br
+spacing = 1.0
+.br
+
+.br
+# experimental mission control
+.br
+[settings.ui.mission_control]
+.br
+enabled = false
+.br
+# enable fade animation when entering/exiting mission control
+.br
+fade_enabled = false
+.br
+# native macos mission control fade is about 180ms
+.br
+fade_duration_ms = 180.0
+.br
+
+.br
+# Trackpad gestures
+.br
+[settings.gestures]
+.br
+# Enable horizontal swipes to switch virtual workspaces
+.br
+enabled = false
+.br
+# Invert horizontal direction (swap next/prev)
+.br
+invert_horizontal_swipe = false
+.br
+# Maximum vertical travel allowed for the horizontal swipe to register.
+.br
+# Accepts normalized fraction (0..1) or percent (0..100). Example: 0.4 or 40.0
+.br
+swipe_vertical_tolerance = 0.4
+.br
+# Skip empty workspaces when swiping
+.br
+skip_empty = true
+.br
+# Number of fingers required for swipe
+.br
+fingers = 3
+.br
+# Normalized horizontal distance (0..1) to trigger swipe for NSTouch\-based detection
+.br
+distance_pct = 0.08
+.br
+# Haptic feedback on commit (generic | alignment | level_change)
+.br
+haptics_enabled = true
+.br
+haptic_pattern = "level_change"
+.br
+
+.br
+# Window snapping / drag\-swap behavior
+.br
+[settings.window_snapping]
+.br
+# Fraction threshold (0.0..1.0) specifying how much of the dragged window
+.br
+# area must be overlapped by a candidate window in order to trigger a
+.br
+# swap while dragging. Typical values are around 0.2–0.4.
+.br
+# If you prefer more aggressive swapping, lower the value; increase it
+.br
+# to require greater overlap before a swap occurs.
+.br
+drag_swap_fraction = 0.3
+.br
+
+.br
+[virtual_workspaces]
+.br
+# Virtual workspaces
+.br
+# \- enabled: if false, rift behaves like a simple tiling WM with a single space
+.br
+# \- default_workspace_count: number of workspaces to create on startup (1–32)
+.br
+# \- auto_assign_windows: when true, new windows can be auto\-assigned using app_rules
+.br
+# \- preserve_focus_per_workspace: remember last focused window per workspace
+.br
+# \- workspace_auto_back_and_forth: when enabled, if you try to switch to the same workspace
+.br
+#   that\*(Aqs already active, it will switch to the last workspace instead
+.br
+# \- reapply_app_rules_on_title_change: if true, app rules are re\-evaluated when a window\*(Aqs title changes
+.br
+enabled = true
+.br
+default_workspace_count = 4
+.br
+auto_assign_windows = true
+.br
+preserve_focus_per_workspace = true
+.br
+workspace_auto_back_and_forth = false
+.br
+reapply_app_rules_on_title_change = false
+.br
+
+.br
+# Workspace\-specific rules
+.br
+# \- workspace: target workspace by index (integer) or name (string)
+.br
+# \- layout: layout mode to use ("traditional", "bsp", "stack", "master_stack", "scrolling")
+.br
+# workspace_rules = [
+.br
+#   { workspace = 1, layout = "bsp" },
+.br
+#   { workspace = "second", layout = "scrolling" }
+.br
+# ]
+.br
+workspace_rules = []
+.br
+
+.br
+
+.br
+# Default workspace to activate on startup (0\-based index).
+.br
+# If omitted, defaults to 0 (first workspace). Must be less than default_workspace_count.
+.br
+# Uncomment to change:
+.br
+# default_workspace = 0
+.br
+
+.br
+# Workspace names (indexed order). If fewer than default_workspace_count are provided,
+.br
+# remaining workspaces are named "Workspace X".
+.br
+# Do not provide more names than default_workspace_count.
+.br
+workspace_names = [
+.br
+	"first",
+.br
+	"second"
+.br
+]
+.br
+
+.br
+# App rules (automatic assignment)
+.br
+# Define rules that match new windows and set properties (workspace, floating, etc).
+.br
+#
+.br
+# Matchable fields:
+.br
+#   \- app_id         : application bundle identifier (exact)
+.br
+#   \- app_name       : substring match against application name
+.br
+#   \- title_regex    : regular expression matched against the window title
+.br
+#   \- title_substring: literal substring (case\-sensitive) matched against the title
+.br
+#   \- ax_role / ax_subrole: exact match against macOS Accessibility (AX) role/subrole
+.br
+#
+.br
+# Rule options:
+.br
+#   \- workspace (integer, 0\-based): target workspace index. If omitted or invalid, uses the active workspace.
+.br
+#     Alternatively, `workspace` may be a workspace name string to target by name.
+.br
+#   \- floating (boolean): whether matched windows should float by default.
+.br
+#   \- manage (boolean): whether Rift should manage the matching window. Set to false to ignore the window completely (default = true).
+.br
+#
+.br
+# Matching behavior (summary):
+.br
+#   1. All rules that match a window are evaluated.
+.br
+#   2. If multiple matching rules share the same non\-empty `app_id`, the rule
+.br
+#      with the most specified conditions (the most non\-empty fields) wins.
+.br
+#      If there\*(Aqs a tie, the earlier rule in the file wins.
+.br
+#   3. If matching rules do NOT share the same `app_id`, the rule with the
+.br
+#      highest specificity (most non\-empty fields) is selected; ties are broken by order.
+.br
+#   4. Within a single rule, all specified fields are combined conjunctively:
+.br
+#      the rule matches only if every non\-empty field matches the window.
+.br
+#
+.br
+# Tips:
+.br
+#   \- To make exceptions for a specific app, place a more specific rule before
+.br
+#     a general `app_id` rule. Example:
+.br
+#       app_rules = [
+.br
+#         { app_id = "com.example.X", title_regex = "Dialog", floating = true },
+.br
+#         { app_id = "com.example.X", floating = false },
+.br
+#       ]
+.br
+#
+.br
+#   \- Use `title_substring` for simple, literal (case\-sensitive) substring matches.
+.br
+#     Use `title_regex` for advanced patterns.
+.br
+#
+.br
+# Accessibility (AX) matching:
+.br
+#   \- `ax_role` and `ax_subrole` match the exact AX values reported by macOS
+.br
+#     (e.g., "AXWindow", "AXDialog", "AXSystemDialog", "AXToolbar").
+.br
+#   \- Useful for distinguishing dialogs, sheets, toolbars, etc., when bundle/name/title aren\*(Aqt enough.
+.br
+#
+.br
+# Validation:
+.br
+#   \- `title_regex` must be a valid regular expression. Invalid regexes cause the rule
+.br
+#     to be ignored and a warning to be logged.
+.br
+#
+.br
+# Examples:
+.br
+#   \- Float any window with "Preferences" in the title:
+.br
+#       app_rules = [
+.br
+#         { title_substring = "Preferences", floating = true },
+.br
+#       ]
+.br
+#
+.br
+#   \- Match by app name substring and workspace:
+.br
+#       app_rules = [
+.br
+#         { app_name = "Calendar", workspace = 2, floating = true },
+.br
+#       ]
+.br
+#
+.br
+#   \- Accessibility example: float dialog windows for a specific app:
+.br
+#       app_rules = [
+.br
+#         { app_id = "com.example.X", ax_subrole = "AXDialog", floating = true },
+.br
+#       ]
+.br
+#
+.br
+# By default there are no app rules; add or uncomment rules below as needed.
+.br
+app_rules = []
+.br
+
+.br
+# Modifier combinations that can be reused in key bindings
+.br
+# Define common modifier combinations to avoid repetition.
+.br
+# Example usage: with `comb1 = "Alt + Shift"`, you can write:
+.br
+#   "comb1 + H" = { move_node = "left" }
+.br
+[modifier_combinations]
+.br
+comb1 = "Alt + Shift"
+.br
+
+.br
+[keys]
+.br
+# Key binding syntax
+.br
+# \- Use quotes around the key: "Alt + Shift + H"
+.br
+# \- Supported modifiers: Alt, Ctrl, Shift, Meta (Meta = Command ⌘ on macOS)
+.br
+# \- Arrow keys can be written as ArrowUp/ArrowDown/ArrowLeft/ArrowRight, or just Up/Down/Left/Right
+.br
+# \- Spacing is flexible: "Alt+Down" and "Alt + Down" are equivalent
+.br
+# \- Key values map to commands (see list below)
+.br
+
+.br
+# Commands
+.br
+# \- toggle_space_activated
+.br
+# \- next_workspace / prev_workspace
+.br
+# \- next_workspace = true|false (optional skip\-empty override)
+.br
+# \- prev_workspace = true|false (optional skip\-empty override)
+.br
+# \- switch_to_workspace = N
+.br
+# \- move_window_to_workspace = N / move_window_to_workspace = { workspace = N, window_id = 123 } (optional window id)
+.br
+# \- create_workspace
+.br
+# \- switch_to_last_workspace
+.br
+# \- set_workspace_layout = { mode = "traditional"|"bsp"|"stack"|"master_stack"|"scrolling" } (active workspace)
+.br
+# \- set_workspace_layout = { workspace = N, mode = "traditional"|"bsp"|"stack"|"master_stack"|"scrolling" }
+.br
+# \- next_window / prev_window (focus wraps when it reaches last window in current workspace)
+.br
+# \- ascend / descend
+.br
+# \- move_focus = "left"|"right"|"up"|"down"
+.br
+# \- move_node = "left"|"right"|"up"|"down"
+.br
+# \- join_window = "left"|"right"|"up"|"down"
+.br
+# \- toggle_stack / toggle_orientation / unjoin_windows
+.br
+# \- toggle_focus_floating / toggle_window_floating / toggle_fullscreen / toggle_fullscreen_within_gaps
+.br
+# \- resize_window_grow / resize_window_shrink / resize_window_by = 0.05
+.br
+# \- swap_windows = [123, 456]
+.br
+# \- exec = "command" | exec = ["cmd", "arg1", "..."]
+.br
+# \- move_mouse_to_display = "left"|"right"|"up"|"down"|N|"<display_uuid>"
+.br
+# \- move_window_to_display = { selector = "left"|"right"|"up"|"down"|N|"<display_uuid>", window_id = 123 }
+.br
+# \- close_window = { window_server_id = 123 }
+.br
+# \- focus_window = { window_id = 123, window_server_id = 456 }
+.br
+# \- show_mission_control_all / show_mission_control_current / dismiss_mission_control (this is rift\*(Aqs own mission control, not macOS\*(Aqs)
+.br
+
+.br
+# the following commands *only* work when the master stack layout is active
+.br
+# \- adjust_master_ratio = 0.05 / adjust_master_count = 1
+.br
+# \- promote_to_master / swap_master_stack
+.br
+
+.br
+# the following commands *only* work when the scrolling layout is active
+.br
+# \- scroll_strip = { delta = 0.5 }
+.br
+# \- snap_strip / center_selection
+.br
+
+.br
+"Alt + Z" = "toggle_space_activated"
+.br
+
+.br
+"Alt + H" = { move_focus = "left" }
+.br
+"Alt + J" = { move_focus = "down" }
+.br
+"Alt + K" = { move_focus = "up" }
+.br
+"Alt + L" = { move_focus = "right" }
+.br
+
+.br
+"comb1 + H" = { move_node = "left" }
+.br
+"comb1 + J" = { move_node = "down" }
+.br
+"comb1 + K" = { move_node = "up" }
+.br
+"comb1 + L" = { move_node = "right" }
+.br
+
+.br
+"Alt + 0" = { switch_to_workspace = 0 }
+.br
+"Alt + 1" = { switch_to_workspace = 1 }
+.br
+"Alt + 2" = { switch_to_workspace = 2 }
+.br
+"Alt + 3" = { switch_to_workspace = 3 }
+.br
+
+.br
+"comb1 + 0" = { move_window_to_workspace = 0 }
+.br
+"comb1 + 1" = { move_window_to_workspace = 1 }
+.br
+"comb1 + 2" = { move_window_to_workspace = 2 }
+.br
+"comb1 + 3" = { move_window_to_workspace = 3 }
+.br
+
+.br
+# scratchpad
+.br
+"Alt + Shift + S" = "add_scratchpad"
+.br
+#"Alt + S" = "toggle_scratchpad"
+.br
+
+.br
+"Alt + Tab" = "switch_to_last_workspace"
+.br
+
+.br
+# commands to change the layout engine of the active workspace
+.br
+# "Alt + Ctrl + 1" = { set_workspace_layout = { mode = "traditional" } }
+.br
+# "Alt + Ctrl + 2" = { set_workspace_layout = { mode = "bsp" } }
+.br
+# "Alt + Ctrl + 3" = { set_workspace_layout = { mode = "master_stack" } }
+.br
+# "Alt + Ctrl + 4" = { set_workspace_layout = { mode = "scrolling" } }
+.br
+
+.br
+"Alt + Shift + Left" = { join_window = "left" }
+.br
+"Alt + Shift + Right" = { join_window = "right" }
+.br
+"Alt + Shift + Up" = { join_window = "up" }
+.br
+"Alt + Shift + Down" = { join_window = "down" }
+.br
+"Alt + Comma" = "toggle_stack"
+.br
+"Alt + Slash" = "toggle_orientation"
+.br
+"Alt + Ctrl + E" = "unjoin_windows"
+.br
+
+.br
+"Alt + Shift + Space" = "toggle_window_floating"
+.br
+"Alt + F" = "toggle_fullscreen"
+.br
+"Alt + Shift + F" = "toggle_fullscreen_within_gaps"
+.br
+"comb1 + Ctrl + Space" = "toggle_focus_floating" # briefly bring focus to floating window
+.br
+
+.br
+# smartly resize windows
+.br
+"Alt + Shift + Equal" = "resize_window_grow"
+.br
+"Alt + Shift + Minus" = "resize_window_shrink"
+.br
+
+.br
+# Move mouse cursor to display by index (0\-based) or UUID
+.br
+# Examples:
+.br
+# "Alt + Shift + A" = { move_mouse_to_display = 0 }
+.br
+# "Alt + Shift + S" = { move_mouse_to_display = 1 }
+.br
+# "Alt + Shift + D" = { move_mouse_to_display = "e9a4f5a1\-2f8b\-45c1\-9f4e\-5a6b7c8d9e0f" }
+.br
+# Focus another display (direction/index/uuid)
+.br
+# "Alt + Shift + F" = { focus_display = "right" }
+.br
+
+.br
+# Move a window to a display (by index, UUID, or direction)
+.br
+# "Alt + Ctrl + Up" = { move_window_to_display = { selector = "up" } }
+.br
+# "Alt + Ctrl + Down" = { move_window_to_display = { selector = "down" } }
+.br
+# "Alt + Ctrl + Left" = { move_window_to_display = { selector = "left" } }
+.br
+# "Alt + Ctrl + Right" = { move_window_to_display = { selector = "right" } }
+.br
+# "Alt + Ctrl + A" = { move_window_to_display = { selector = 0 } }
+.br
+
+.br
+# if mission control is enabled
+.br
+# this will show an exploded view of the windows in the active workspace
+.br
+# "Alt + Ctrl + Shift + M" = "show_mission_control_current"
+.br
+# this will show the mission control view shown in the readme
+.br
+# "Alt + Ctrl + M" = "show_mission_control_all"
+.br
+
+.br
+"Alt + Enter" = { "exec" = ["/bin/bash", "\-c", "open \-a \\"/System/Applications/Utilities/Terminal.app\\""] }
+.br
+
+.br
+"Alt + Shift + D" = "debug" # prints layout tree
+.br
+
+.br
+"Alt + Ctrl + S" = "serialize"
+.br
+"Alt + Ctrl + Q" = "save_and_exit"
+.br
+.RE
+.fi
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.SH ENVIRONMENT
+.IP RUST_LOG
+Tracing/log filter (tracing\-subscriber EnvFilter syntax, e.g. "rift_wm=debug" or "info,rift_wm::actor=trace").
+.IP RUST_BACKTRACE
+Standard Rust backtrace control. rift forces this to "1" if unset.
+.IP RIFT_BS_NAME
+Mach bootstrap name used for the rift IPC server. Override only when running multiple rift instances side\-by\-side.
+.IP RIFT_EVENT_TYPE
+Set on subscriber commands: event name ("workspace_changed", "windows_changed", "window_title_changed", "stacks_changed").
+.IP RIFT_WORKSPACE_ID
+Set on subscriber commands: workspace identifier for the event.
+.IP RIFT_WORKSPACE_NAME
+Set on subscriber commands: workspace name for the event.
+.IP RIFT_WORKSPACE_INDEX
+Set on subscriber commands: workspace index (when available).
+.IP RIFT_WINDOW_COUNT
+Set on subscriber commands for windows_changed events.
+.IP RIFT_WINDOWS
+Set on subscriber commands: comma\-separated list of window ids.
+.IP RIFT_WINDOW_TITLE
+Set on subscriber commands for window_title_changed events.
+.IP RIFT_PREVIOUS_WINDOW_TITLE
+Previous title before a window_title_changed event.
+.IP RIFT_EVENT_JSON
+Full JSON payload of the event being delivered.
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.SH FILES
+.IP ~/.config/rift/config.toml
+User configuration file.
+.IP ~/.rift/
+Runtime data directory.
+.IP ~/.rift/layout.ron
+Layout restore file (legacy).
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.SH "EXIT STATUS"
+.IP 0
+Successful program execution.
+.IP 1
+Unsuccessful program execution.
+.IP 101
+The program panicked.

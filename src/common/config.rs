@@ -1,7 +1,16 @@
+//! Configuration types for Rift.
+//!
+//! This module defines the configuration schema loaded from the user's
+//! `config.toml`. All public items in this module are documented because the
+//! manpage generator (`xtask man`) reads documentation directly from the
+//! [`Documented`] / [`DocumentedFields`] derives on these types.
+#![warn(missing_docs)]
+
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::bail;
+use documented::{Documented, DocumentedFields};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -18,76 +27,116 @@ const DEPRECATED_MAP: &[(&str, &str)] = &[
     ("toggle_tile_orientation", "toggle_orientation"),
 ];
 
+/// IPC command that mutates the running configuration.
+///
+/// Not part of the user-facing TOML schema; consumed by `rift-cli execute config ...`.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigCommand {
+    /// Toggle window animations on or off.
     SetAnimate(bool),
+    /// Set animation duration in seconds.
     SetAnimationDuration(f64),
+    /// Set target animation frame rate (0 = display refresh).
     SetAnimationFps(f64),
+    /// Set the easing curve used for animations.
     SetAnimationEasing(AnimationEasing),
 
+    /// Toggle whether the mouse warps to the focused window.
     SetMouseFollowsFocus(bool),
+    /// Toggle whether the mouse hides after a focus change.
     SetMouseHidesOnFocus(bool),
+    /// Toggle whether mouse movement changes focus.
     SetFocusFollowsMouse(bool),
 
+    /// Set the visible offset (px) between stacked windows.
     SetStackOffset(f64),
+    /// Set outer gaps (screen edges) for all displays.
     SetOuterGaps {
+        /// Gap at the top of the screen.
         top: f64,
+        /// Gap at the left of the screen.
         left: f64,
+        /// Gap at the bottom of the screen.
         bottom: f64,
+        /// Gap at the right of the screen.
         right: f64,
     },
+    /// Set inner gaps between tiled windows.
     SetInnerGaps {
+        /// Horizontal gap between windows.
         horizontal: f64,
+        /// Vertical gap between windows.
         vertical: f64,
     },
 
+    /// Set the ordered list of workspace names.
     SetWorkspaceNames(Vec<String>),
 
     /// Generic setter for arbitrary config paths using dot-separated keys.
     /// Example: key = "settings.animate", value = true
     Set {
+        /// Dot-separated path identifying the field to update.
         key: String,
+        /// JSON value (any shape) to assign at that path.
         value: Value,
     },
 
+    /// Request the current effective configuration.
     GetConfig,
+    /// Save the current in-memory configuration to disk.
     SaveConfig,
+    /// Reload the configuration from disk.
     ReloadConfig,
 }
 
+/// Directory used for rift's runtime data (e.g. layout restore files).
 pub fn data_dir() -> PathBuf { dirs::home_dir().unwrap().join(".rift") }
+/// Path to the layout restore file (legacy; kept for backwards compatibility).
 pub fn restore_file() -> PathBuf { data_dir().join("layout.ron") }
+/// Default path to the user's `config.toml`.
 pub fn config_file() -> PathBuf {
     dirs::home_dir().unwrap().join(".config").join("rift").join("config.toml")
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+/// Settings controlling rift's virtual workspaces.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Documented, DocumentedFields)]
 #[serde(deny_unknown_fields)]
 pub struct VirtualWorkspaceSettings {
+    /// Enable virtual workspaces. When false, rift behaves like a single-workspace tiler.
     #[serde(default = "yes")]
     pub enabled: bool,
+    /// Number of workspaces to create on startup (1..=32).
     #[serde(default = "default_workspace_count")]
     pub default_workspace_count: usize,
+    /// Apply `app_rules` to newly observed windows automatically.
     #[serde(default = "yes")]
     pub auto_assign_windows: bool,
+    /// Remember the last focused window for each workspace.
     #[serde(default = "yes")]
     pub preserve_focus_per_workspace: bool,
+    /// Switching to the active workspace re-activates the previously focused one.
     #[serde(default = "no")]
     pub workspace_auto_back_and_forth: bool,
+    /// Ordered list of workspace names. Extra workspaces fall back to `Workspace N`.
     #[serde(default = "default_workspace_names")]
     pub workspace_names: Vec<String>,
+    /// Workspace to activate on startup (0-based).
     #[serde(default)]
     pub default_workspace: usize,
+    /// Re-evaluate `app_rules` when a window's title changes.
     #[serde(default)]
     pub reapply_app_rules_on_title_change: bool,
+    /// Rules used to match windows and assign workspace/floating properties.
     #[serde(default)]
     pub app_rules: Vec<AppWorkspaceRule>,
+    /// Per-workspace layout overrides.
     #[serde(default)]
     pub workspace_rules: Vec<WorkspaceLayoutRule>,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+/// Rule that pins a workspace to a specific layout mode.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Documented, DocumentedFields)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceLayoutRule {
     /// Target workspace by index or name
@@ -98,17 +147,23 @@ pub struct WorkspaceLayoutRule {
 
 // Allow specifying a workspace by numeric index or by name in the config.
 // This supports both `workspace = 2` and `workspace = "coding"` in app rules.
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Eq)]
+/// Selector for referring to a workspace either by numeric index or by name.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Eq, Documented)]
 #[serde(untagged)]
 pub enum WorkspaceSelector {
+    /// Select a workspace by zero-based index.
     Index(usize),
+    /// Select a workspace by its configured name.
     Name(String),
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+/// Configuration for marking a matched window as a scratchpad.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Documented)]
 #[serde(untagged)]
 pub enum ScratchpadConfig {
+    /// `true` to mark the window as a generic scratchpad, `false` to disable.
     Boolean(bool),
+    /// Name of a specific named scratchpad to assign the window to.
     Named(String),
 }
 
@@ -118,7 +173,8 @@ impl Default for ScratchpadConfig {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+/// Rule that matches windows and assigns workspace/floating properties.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Documented, DocumentedFields)]
 #[serde(deny_unknown_fields)]
 pub struct AppWorkspaceRule {
     /// Application bundle identifier (e.g., "com.apple.Terminal")
@@ -179,6 +235,7 @@ impl Default for VirtualWorkspaceSettings {
 }
 
 impl VirtualWorkspaceSettings {
+    /// Returns a list of human-readable validation errors for these settings.
     pub fn validate(&self) -> Vec<String> {
         let mut issues = Vec::new();
 
@@ -314,12 +371,18 @@ struct ConfigFile {
     modifier_combinations: HashMap<String, String>,
 }
 
+/// Parsed configuration. Top-level container for all settings, key bindings,
+/// and virtual workspace rules.
 #[derive(Serialize, Clone, Debug)]
 pub struct Config {
+    /// User-facing settings parsed from the `[settings]` table.
     pub settings: Settings,
+    /// Parsed hotkey bindings, in declaration order.
     pub keys: Vec<(Hotkey, WmCommand)>,
+    /// String form of each binding alongside its command, preserved for save/reload.
     #[serde(default)]
     pub key_specs: Vec<(String, WmCommand)>,
+    /// Virtual workspace configuration, parsed from `[virtual_workspaces]`.
     pub virtual_workspaces: VirtualWorkspaceSettings,
 }
 
@@ -358,23 +421,32 @@ impl<'de> Deserialize<'de> for Config {
 unsafe impl Send for Config {}
 unsafe impl Sync for Config {}
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+/// Top-level user settings (the `[settings]` TOML table).
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Documented, DocumentedFields)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
+    /// Master switch for all window animations.
     #[serde(default = "no")]
     pub animate: bool,
+    /// Animation duration in seconds (>= 0.0; typical 0.15-0.35).
     #[serde(default = "default_animation_duration")]
     pub animation_duration: f64,
+    /// Target animation frame rate. `0.0` follows the display refresh rate.
     #[serde(default = "default_animation_fps")]
     pub animation_fps: f64,
+    /// Easing curve applied to window animations.
     #[serde(default)]
     pub animation_easing: AnimationEasing,
+    /// If true, new macOS spaces start unmanaged and must be toggled in.
     #[serde(default = "yes")]
     pub default_disable: bool,
+    /// When focus changes, move the mouse to the focused window.
     #[serde(default = "yes")]
     pub mouse_follows_focus: bool,
+    /// Hide the mouse cursor after a focus change.
     #[serde(default = "yes")]
     pub mouse_hides_on_focus: bool,
+    /// Moving the mouse over a window gives it focus.
     #[serde(default = "yes")]
     pub focus_follows_mouse: bool,
     /// Hotkey that disables focus-follows-mouse while held.
@@ -386,14 +458,17 @@ pub struct Settings {
     /// inappropriately steal focus and shouldn't cause workspace switches.
     #[serde(default)]
     pub auto_focus_blacklist: Vec<String>,
+    /// Layout-related sub-settings (see [`LayoutSettings`]).
     #[serde(default)]
     pub layout: LayoutSettings,
+    /// UI chrome sub-settings (menu bar, stack line, mission control).
     #[serde(default)]
     pub ui: UiSettings,
     /// Trackpad gesture settings
     #[serde(default)]
     pub gestures: GestureSettings,
 
+    /// Drag-to-swap snapping behaviour.
     #[serde(default)]
     pub window_snapping: WindowSnappingSettings,
 
@@ -407,47 +482,76 @@ pub struct Settings {
     pub hot_reload: bool,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default, Copy)]
+/// Easing curve used for window animations.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default, Copy, Documented)]
 #[serde(rename_all = "snake_case")]
 pub enum AnimationEasing {
+    /// Smooth ease in then out (default).
     #[default]
     EaseInOut,
+    /// Constant velocity.
     Linear,
+    /// Sine in.
     EaseInSine,
+    /// Sine out.
     EaseOutSine,
+    /// Sine in then out.
     EaseInOutSine,
+    /// Quadratic in.
     EaseInQuad,
+    /// Quadratic out.
     EaseOutQuad,
+    /// Quadratic in then out.
     EaseInOutQuad,
+    /// Cubic in.
     EaseInCubic,
+    /// Cubic out.
     EaseOutCubic,
+    /// Cubic in then out.
     EaseInOutCubic,
+    /// Quartic in.
     EaseInQuart,
+    /// Quartic out.
     EaseOutQuart,
+    /// Quartic in then out.
     EaseInOutQuart,
+    /// Quintic in.
     EaseInQuint,
+    /// Quintic out.
     EaseOutQuint,
+    /// Quintic in then out.
     EaseInOutQuint,
+    /// Exponential in.
     EaseInExpo,
+    /// Exponential out.
     EaseOutExpo,
+    /// Exponential in then out.
     EaseInOutExpo,
+    /// Circular in.
     EaseInCirc,
+    /// Circular out.
     EaseOutCirc,
+    /// Circular in then out.
     EaseInOutCirc,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
+/// User-interface chrome rendered by rift (menu bar, stack line, mission control).
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default, Documented, DocumentedFields)]
 #[serde(deny_unknown_fields)]
 pub struct UiSettings {
+    /// Menu-bar indicator settings.
     #[serde(default)]
     pub menu_bar: MenuBarSettings,
+    /// Stack-line indicator settings.
     #[serde(default)]
     pub stack_line: StackLineSettings,
+    /// Mission-control overlay settings.
     #[serde(default)]
     pub mission_control: MissionControlSettings,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+/// Trackpad gesture configuration for workspace switching.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Documented, DocumentedFields)]
 #[serde(deny_unknown_fields)]
 pub struct GestureSettings {
     /// Enable horizontal swipes to switch virtual workspaces
@@ -491,61 +595,83 @@ impl Default for GestureSettings {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default, Copy)]
+/// Drag-and-snap behaviour for tiled windows.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default, Copy, Documented, DocumentedFields)]
 #[serde(deny_unknown_fields)]
 pub struct WindowSnappingSettings {
+    /// Fraction (0.0..1.0) of overlap required to swap windows while dragging.
     #[serde(default = "default_drag_swap_fraction")]
     pub drag_swap_fraction: f64,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
+/// Which workspaces to render in the menu-bar indicator.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, Documented)]
 #[serde(rename_all = "snake_case")]
 pub enum MenuBarDisplayMode {
+    /// Show all workspaces.
     #[default]
     All,
+    /// Show only the active workspace.
     Active,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
+/// Label rendered for a workspace when using the labelled menu-bar style.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, Documented)]
 #[serde(rename_all = "snake_case")]
 pub enum ActiveWorkspaceLabel {
+    /// Use the workspace index as its label.
     #[default]
     Index,
+    /// Use the workspace's configured name as its label.
     Name,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
+/// How workspaces are rendered in the menu bar.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, Documented)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceDisplayStyle {
+    /// Render a miniature layout preview.
     #[default]
     Layout,
+    /// Render a textual label (see [`ActiveWorkspaceLabel`]).
     Label,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
+/// Menu-bar workspace indicator configuration.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default, Documented, DocumentedFields)]
 #[serde(deny_unknown_fields)]
 pub struct MenuBarSettings {
+    /// Enable menu-bar workspace indicators.
     #[serde(default = "no")]
     pub enabled: bool,
+    /// Include empty workspaces when rendering the indicator.
     #[serde(default = "no")]
     pub show_empty: bool,
+    /// Which workspaces are rendered (all or only the active one).
     #[serde(default)]
     pub mode: MenuBarDisplayMode,
+    /// Label to use when rendering labelled workspaces.
     #[serde(default)]
     pub active_label: ActiveWorkspaceLabel,
+    /// Display style for each workspace (layout preview or label).
     #[serde(default)]
     pub display_style: WorkspaceDisplayStyle,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
+/// Stack-line indicator configuration (visual hint shown next to a stack).
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default, Documented, DocumentedFields)]
 #[serde(deny_unknown_fields)]
 pub struct StackLineSettings {
+    /// Enable rendering of the stack line indicator.
     #[serde(default = "no")]
     pub enabled: bool,
+    /// Indicator thickness in points.
     #[serde(default = "default_stack_line_thickness")]
     pub thickness: f64,
+    /// Which horizontal edge the indicator sits on for vertical stacks.
     #[serde(default)]
     pub horiz_placement: HorizontalPlacement,
+    /// Which vertical edge the indicator sits on for horizontal stacks.
     #[serde(default)]
     pub vert_placement: VerticalPlacement,
     /// Distance to position the stack line away from the window edge (in points)
@@ -554,13 +680,17 @@ pub struct StackLineSettings {
     pub spacing: f64,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
+/// Configuration for rift's own mission-control overlay.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default, Documented, DocumentedFields)]
 #[serde(deny_unknown_fields)]
 pub struct MissionControlSettings {
+    /// Enable rift's mission-control overlay.
     #[serde(default = "no")]
     pub enabled: bool,
+    /// Fade in/out when entering/exiting the overlay.
     #[serde(default = "no")]
     pub fade_enabled: bool,
+    /// Fade animation duration in milliseconds.
     #[serde(default = "default_mission_control_fade_duration_ms")]
     pub fade_duration_ms: f64,
 }
@@ -579,27 +709,35 @@ fn default_scrolling_min_column_width_ratio() -> f64 { 0.3 }
 
 fn default_scrolling_max_column_width_ratio() -> f64 { 0.9 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
+/// Horizontal placement of an indicator on a window edge.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, Documented)]
 #[serde(rename_all = "snake_case")]
 pub enum HorizontalPlacement {
+    /// Place the indicator on the top edge.
     #[default]
     Top,
+    /// Place the indicator on the bottom edge.
     Bottom,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
+/// Vertical placement of an indicator on a window edge.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, Documented)]
 #[serde(rename_all = "snake_case")]
 pub enum VerticalPlacement {
+    /// Place the indicator on the left edge.
     #[default]
     Left,
+    /// Place the indicator on the right edge.
     Right,
 }
 
 impl StackLineSettings {
+    /// Effective thickness of the stack line, or `0.0` if disabled.
     pub fn thickness(&self) -> f64 { if self.enabled { self.thickness } else { 0.0 } }
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
+/// Container for layout-related sub-settings.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default, Documented, DocumentedFields)]
 #[serde(deny_unknown_fields)]
 pub struct LayoutSettings {
     /// Layout mode: "traditional", "bsp", "stack", "master_stack", or "scrolling"
@@ -620,7 +758,7 @@ pub struct LayoutSettings {
 }
 
 /// Layout mode enum
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, Documented)]
 #[serde(rename_all = "snake_case")]
 pub enum LayoutMode {
     /// Traditional container-based tiling (i3/sway style)
@@ -648,7 +786,8 @@ impl ToString for LayoutMode {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+/// Settings for the scrolling (niri-style) layout.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Documented, DocumentedFields)]
 #[serde(deny_unknown_fields)]
 pub struct ScrollingLayoutSettings {
     /// Whether to animate window transitions in this layout.
@@ -690,34 +829,47 @@ impl Default for ScrollingLayoutSettings {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
+/// Which screen edge the master area occupies in the master/stack layout.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, Documented)]
 #[serde(rename_all = "snake_case")]
 pub enum MasterStackSide {
+    /// Master area on the left.
     #[default]
     Left,
+    /// Master area on the right.
     Right,
+    /// Master area on top.
     Top,
+    /// Master area on the bottom.
     Bottom,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
+/// Alignment for the focused column in the scrolling layout.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, Documented)]
 #[serde(rename_all = "snake_case")]
 pub enum ScrollingAlignment {
+    /// Align the focused column to the left edge.
     Left,
+    /// Center the focused column.
     #[default]
     Center,
+    /// Align the focused column to the right edge.
     Right,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
+/// Focus navigation behaviour for the scrolling layout.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, Documented)]
 #[serde(rename_all = "snake_case")]
 pub enum ScrollingFocusNavigationStyle {
+    /// Reveal columns as needed based on navigation direction (niri-style).
     #[default]
     Niri,
+    /// Always align the focused column according to `alignment`.
     Anchored,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+/// Settings for the master/stack layout.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Documented, DocumentedFields)]
 #[serde(deny_unknown_fields)]
 pub struct MasterStackSettings {
     /// Fraction of space reserved for the master area (0.05..0.95)
@@ -734,15 +886,20 @@ pub struct MasterStackSettings {
     pub new_window_placement: MasterStackNewWindowPlacement,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
+/// Where new windows are inserted when the master area is full.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Documented)]
 #[serde(rename_all = "snake_case")]
 pub enum MasterStackNewWindowPlacement {
+    /// Insert into the master area, pushing the oldest master into the stack.
     Master,
+    /// Insert into the stack area.
     Stack,
+    /// Insert next to the focused window.
     Focused,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
+/// Trackpad gesture configuration specific to the scrolling layout.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Documented, DocumentedFields)]
 #[serde(rename_all = "snake_case")]
 pub struct ScrollingGestureSettings {
     /// Enable horizontal scroll gestures to switch columns
@@ -782,16 +939,22 @@ impl Default for ScrollingGestureSettings {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
+/// Default orientation behaviour when creating a new stack.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Documented)]
 #[serde(rename_all = "snake_case")]
 pub enum StackDefaultOrientation {
+    /// Use the orientation perpendicular to the parent layout.
     Perpendicular,
+    /// Use the same orientation as the parent layout.
     Same,
+    /// Force horizontal orientation.
     Horizontal,
+    /// Force vertical orientation.
     Vertical,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+/// Settings for the stack layout.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Documented, DocumentedFields)]
 #[serde(deny_unknown_fields)]
 pub struct StackSettings {
     /// Stack offset - how much each stacked window is offset (in pixels)
@@ -811,7 +974,7 @@ pub struct StackSettings {
 }
 
 /// Gap configuration for window spacing
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default, Documented, DocumentedFields)]
 #[serde(deny_unknown_fields)]
 pub struct GapSettings {
     /// Outer gaps (space between windows and screen edges)
@@ -826,7 +989,7 @@ pub struct GapSettings {
 }
 
 /// Outer gap configuration (space between windows and screen edges)
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default, Documented, DocumentedFields)]
 #[serde(deny_unknown_fields)]
 pub struct OuterGaps {
     /// Gap at the top of the screen
@@ -844,7 +1007,7 @@ pub struct OuterGaps {
 }
 
 /// Inner gap configuration (space between windows)
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default, Documented, DocumentedFields)]
 #[serde(deny_unknown_fields)]
 pub struct InnerGaps {
     /// Horizontal gap between windows
@@ -856,7 +1019,7 @@ pub struct InnerGaps {
 }
 
 /// Overrides for gaps on a per-display basis
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default, Documented, DocumentedFields)]
 #[serde(deny_unknown_fields)]
 pub struct GapOverride {
     /// Override outer gaps completely for the display
@@ -888,6 +1051,7 @@ impl Default for MasterStackSettings {
 }
 
 impl Settings {
+    /// Returns a list of validation issues for [`Settings`] (and its sub-settings).
     pub fn validate(&self) -> Vec<String> {
         let mut issues = Vec::new();
 
@@ -919,6 +1083,7 @@ impl Settings {
 }
 
 impl LayoutSettings {
+    /// Returns a list of validation issues for [`LayoutSettings`].
     pub fn validate(&self) -> Vec<String> {
         let mut issues = Vec::new();
 
@@ -935,6 +1100,7 @@ impl LayoutSettings {
 }
 
 impl ScrollingLayoutSettings {
+    /// Returns a list of validation issues for [`ScrollingLayoutSettings`].
     pub fn validate(&self) -> Vec<String> {
         let mut issues = Vec::new();
 
@@ -987,6 +1153,7 @@ impl ScrollingLayoutSettings {
 }
 
 impl StackSettings {
+    /// Returns a list of validation issues for [`StackSettings`].
     pub fn validate(&self) -> Vec<String> {
         let mut issues = Vec::new();
 
@@ -1002,6 +1169,7 @@ impl StackSettings {
 }
 
 impl MasterStackSettings {
+    /// Returns a list of validation issues for [`MasterStackSettings`].
     pub fn validate(&self) -> Vec<String> {
         let mut issues = Vec::new();
 
@@ -1021,6 +1189,7 @@ impl MasterStackSettings {
 }
 
 impl GapSettings {
+    /// Returns a list of validation issues for [`GapSettings`].
     pub fn validate(&self) -> Vec<String> {
         let mut issues = Vec::new();
 
@@ -1046,6 +1215,7 @@ impl GapSettings {
         issues
     }
 
+    /// Returns a copy of these gap settings with any per-display overrides applied.
     pub fn effective_for_display(&self, display_uuid: Option<&str>) -> GapSettings {
         let mut resolved = GapSettings {
             outer: self.outer.clone(),
@@ -1124,6 +1294,7 @@ fn yes() -> bool { true }
 
 fn default_stack_offset() -> f64 { 40.0 }
 
+/// Default value for [`StackSettings::default_orientation`].
 pub fn default_stack_orientation() -> StackDefaultOrientation {
     StackDefaultOrientation::Perpendicular
 }
@@ -1160,21 +1331,27 @@ fn default_overscroll_threshold() -> f64 { 0.625 }
 fn default_stack_line_spacing() -> f64 { 1.0 }
 fn default_stack_line_thickness() -> f64 { 20.0 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
+/// Haptic feedback pattern used when a gesture commits.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default, Documented)]
 #[serde(rename_all = "snake_case")]
 pub enum HapticPattern {
+    /// Generic haptic tap.
     Generic,
+    /// Alignment-style haptic feedback.
     Alignment,
+    /// Level-change haptic feedback (default).
     #[default]
     LevelChange,
 }
 
 impl Config {
+    /// Read and parse a config file from `path`.
     pub fn read(path: &Path) -> anyhow::Result<Config> {
         let buf = std::fs::read_to_string(path)?;
         Self::parse(&buf)
     }
 
+    /// Returns the embedded default configuration parsed from `rift.default.toml`.
     pub fn default() -> Config { Self::parse(include_str!("../../rift.default.toml")).unwrap() }
 
     /// Save the current config to a file

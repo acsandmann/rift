@@ -1,0 +1,315 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH rift-cli 1  "rift-cli " "rift-cli manual"
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.SH NAME
+rift\-cli \- Command\-line interface for rift window manager
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.SH SYNOPSIS
+\fBrift\-cli\fR [\fB\-h\fR|\fB\-\-help\fR] <\fIsubcommands\fR>
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.SH DESCRIPTION
+Command\-line interface for rift window manager
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.SH OPTIONS
+Command\-line interface for rift window manager
+.TP
+\fBUsage: rift\-cli <COMMAND>\fR
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.SH "SUBCOMMAND: rift-cli query"
+Query information from rift
+.TP
+\fBUsage: rift\-cli query <COMMAND>\fR
+.PP
+\fBCommands:\fR
+.TP
+\fBrift\-cli query workspaces [\-\-space\-id]\fR
+List virtual workspaces (optionally for a specific MacOS space)
+.TP
+\fBrift\-cli query windows [\-\-space\-id]\fR
+List windows (optionally filtered by space)
+.TP
+\fBrift\-cli query displays\fR
+List connected displays
+.TP
+\fBrift\-cli query window <WINDOW_ID>\fR
+Get information about a specific window
+.TP
+\fBrift\-cli query applications\fR
+List running applications
+.TP
+\fBrift\-cli query layout <SPACE_ID>\fR
+Get layout state for a space
+.TP
+\fBrift\-cli query workspace\-layout [\-\-space\-id] [\-\-workspace\-id]\fR
+Get workspace layout\-engine mode(s)
+.TP
+\fBrift\-cli query metrics\fR
+Get performance metrics
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.SH "SUBCOMMAND: rift-cli execute"
+Execute commands in rift
+.TP
+\fBUsage: rift\-cli execute <COMMAND>\fR
+.PP
+\fBCommands:\fR
+.TP
+\fBrift\-cli execute window next\fR
+Focus the next window
+.TP
+\fBrift\-cli execute window prev\fR
+Focus the previous window
+.TP
+\fBrift\-cli execute window focus <DIRECTION>\fR
+Move focus in a direction
+.TP
+\fBrift\-cli execute window toggle\-float\fR
+Toggle window floating state
+.TP
+\fBrift\-cli execute window toggle\-fullscreen\fR
+Toggle fullscreen mode (fills the whole screen, ignores outer gaps)
+.TP
+\fBrift\-cli execute window toggle\-fullscreen\-within\-gaps\fR
+Toggle fullscreen within configured outer gaps (respects outer gaps / fills tiling area)
+.TP
+\fBrift\-cli execute window resize\-grow\fR
+Grow the current window size (increments by ~5%)
+.TP
+\fBrift\-cli execute window resize\-shrink\fR
+Shrink the current window size (decrements by ~5%)
+.TP
+\fBrift\-cli execute window resize\-by <AMOUNT>\fR
+Resize the selected window by a fractional amount. \- Pass a signed floating value: positive to grow, negative to shrink. \- The value is a fraction of the current size (e.g. `0.05` = 5%). Examples: rift\-cli execute window resize\-by \-\-amount 0.05    # grow by 5% rift\-cli execute window resize\-by \-\-amount \-0.10   # shrink by 10%
+.TP
+\fBrift\-cli execute window close \-\-window\-id <WINDOW_ID>\fR
+Close a window by window server identifier
+.TP
+\fBrift\-cli execute window add\-scratchpad\fR
+.TP
+\fBrift\-cli execute window toggle\-scratchpad [\-\-name]\fR
+.TP
+\fBrift\-cli execute workspace next [SKIP_EMPTY]\fR
+Switch to next workspace
+.TP
+\fBrift\-cli execute workspace prev [SKIP_EMPTY]\fR
+Switch to previous workspace
+.TP
+\fBrift\-cli execute workspace switch <WORKSPACE_ID>\fR
+Switch to specific workspace
+.TP
+\fBrift\-cli execute workspace move\-window <WORKSPACE_ID> [WINDOW_ID]\fR
+Move current window to workspace
+.TP
+\fBrift\-cli execute workspace create\fR
+Create a new workspace
+.TP
+\fBrift\-cli execute workspace last\fR
+Switch to the last workspace
+.TP
+\fBrift\-cli execute workspace set\-layout [\-\-workspace\-id] <MODE>\fR
+Set layout mode for a workspace (or active workspace when omitted)
+.TP
+\fBrift\-cli execute layout ascend\fR
+Move selection up the tree
+.TP
+\fBrift\-cli execute layout descend\fR
+Move selection down the tree
+.TP
+\fBrift\-cli execute layout move\-node <DIRECTION>\fR
+Move the selected node in a direction
+.TP
+\fBrift\-cli execute layout join\-window <DIRECTION>\fR
+Join the selected window with neighbor in a direction
+.TP
+\fBrift\-cli execute layout toggle\-stack\fR
+Toggle stacked state for the selected container
+.TP
+\fBrift\-cli execute layout toggle\-orientation\fR
+Global orientation toggle that works consistently across layout modes (and between splits/stacks)
+.TP
+\fBrift\-cli execute layout unjoin\fR
+Unjoin previously joined windows
+.TP
+\fBrift\-cli execute layout toggle\-focus\-float\fR
+Toggle floating on the focused selection (tree focus)
+.TP
+\fBrift\-cli execute layout adjust\-master\-ratio <DELTA>\fR
+Adjust master ratio by a delta (master/stack layout only)
+.TP
+\fBrift\-cli execute layout adjust\-master\-count <DELTA>\fR
+Adjust master count by a delta (master/stack layout only)
+.TP
+\fBrift\-cli execute layout promote\-to\-master\fR
+Promote the selected window into the master area (master/stack layout only)
+.TP
+\fBrift\-cli execute layout swap\-master\-stack\fR
+Swap the first master with the first stack window (master/stack layout only)
+.TP
+\fBrift\-cli execute layout swap\-windows <A> <B>\fR
+Swap two windows by window id (`WindowId { pid: ..., idx: ... }`)
+.TP
+\fBrift\-cli execute layout scroll\-strip <DELTA>\fR
+Scroll the strip by a normalized delta (scrolling layout only)
+.TP
+\fBrift\-cli execute layout snap\-strip\fR
+Snap the strip to the nearest column boundary (scrolling layout only)
+.TP
+\fBrift\-cli execute layout center\-selection\fR
+Toggle centering of the selected column in scrolling layout. If invoked again on the same selection, centering is removed
+.TP
+\fBrift\-cli execute config set\-animate <VALUE>\fR
+Update animation settings
+.TP
+\fBrift\-cli execute config set\-animation\-duration <VALUE>\fR
+.TP
+\fBrift\-cli execute config set\-animation\-fps <VALUE>\fR
+.TP
+\fBrift\-cli execute config set\-animation\-easing <VALUE>\fR
+.TP
+\fBrift\-cli execute config set\-mouse\-follows\-focus <VALUE>\fR
+Update mouse settings
+.TP
+\fBrift\-cli execute config set\-mouse\-hides\-on\-focus <VALUE>\fR
+.TP
+\fBrift\-cli execute config set\-focus\-follows\-mouse <VALUE>\fR
+.TP
+\fBrift\-cli execute config set\-stack\-offset <VALUE>\fR
+Update layout settings
+.TP
+\fBrift\-cli execute config set\-stack\-default\-orientation <VALUE>\fR
+Set the default stack orientation behavior. Value should be one of: "perpendicular", "same", "horizontal", or "vertical"
+.TP
+\fBrift\-cli execute config set\-outer\-gaps <TOP> <LEFT> <BOTTOM> <RIGHT>\fR
+.TP
+\fBrift\-cli execute config set\-inner\-gaps <HORIZONTAL> <VERTICAL>\fR
+.TP
+\fBrift\-cli execute config set\-workspace\-names [NAMES]\fR
+Update workspace settings
+.TP
+\fBrift\-cli execute config set <KEY> <VALUE>\fR
+Generic set: set an arbitrary config key (dot\-separated path) to a JSON value. Example: rift\-cli execute config set \-\-key settings.animate \-\-value true
+.TP
+\fBrift\-cli execute config get\fR
+Get current config
+.TP
+\fBrift\-cli execute config save\fR
+Save current config to file
+.TP
+\fBrift\-cli execute config reload\fR
+Reload config from file
+.TP
+\fBrift\-cli execute mission\-control show\-all\fR
+Show all workspaces in mission control
+.TP
+\fBrift\-cli execute mission\-control show\-current\fR
+Show current workspace in mission control
+.TP
+\fBrift\-cli execute mission\-control dismiss\fR
+Dismiss mission control
+.TP
+\fBrift\-cli execute display focus [\-\-direction] [\-\-index] [\-\-uuid]\fR
+Focus a display by direction, index, or UUID
+.TP
+\fBrift\-cli execute display move\-mouse\-to\-index <INDEX>\fR
+Move mouse cursor to a display by index (0\-based)
+.TP
+\fBrift\-cli execute display move\-mouse\-to\-uuid <UUID>\fR
+Move mouse cursor to a display by UUID
+.TP
+\fBrift\-cli execute display move\-window [\-\-direction] [\-\-index] [\-\-uuid] [\-\-window\-id]\fR
+Move a window to a display by direction, index, or UUID
+.TP
+\fBrift\-cli execute save\-and\-exit\fR
+Save current state and exit rift
+.TP
+\fBrift\-cli execute debug\fR
+Print layout tree debugging output in the running rift instance
+.TP
+\fBrift\-cli execute serialize\fR
+Serialize and print runtime state
+.TP
+\fBrift\-cli execute toggle\-space\-activated\fR
+Toggle whether the current space is managed by rift
+.TP
+\fBrift\-cli execute show\-timing\fR
+Show timing metrics
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.SH "SUBCOMMAND: rift-cli subscribe"
+Event subscription commands
+.TP
+\fBUsage: rift\-cli subscribe <COMMAND>\fR
+.PP
+\fBCommands:\fR
+.TP
+\fBrift\-cli subscribe mach <EVENT>\fR
+Subscribe to Mach IPC events
+.TP
+\fBrift\-cli subscribe cli \-\-event <EVENT> \-\-command <COMMAND> [\-\-args]\fR
+Subscribe to events via CLI command execution
+.TP
+\fBrift\-cli subscribe unsub\-mach <EVENT>\fR
+Unsubscribe from Mach IPC events
+.TP
+\fBrift\-cli subscribe unsub\-cli <EVENT>\fR
+Unsubscribe from CLI events
+.TP
+\fBrift\-cli subscribe list\-cli\fR
+List current CLI subscriptions
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.SH "SUBCOMMAND: rift-cli service"
+Manage the launchd service for rift
+.TP
+\fBUsage: rift\-cli service <COMMAND>\fR
+.PP
+\fBCommands:\fR
+.TP
+\fBrift\-cli service install\fR
+Install the per\-user launchd service
+.TP
+\fBrift\-cli service uninstall\fR
+Uninstall the per\-user launchd service
+.TP
+\fBrift\-cli service start\fR
+Start (or bootstrap) the service
+.TP
+\fBrift\-cli service stop\fR
+Stop (or bootout/kill) the service
+.TP
+\fBrift\-cli service restart\fR
+Restart the service (kickstart \-k)
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.SH "SUBCOMMAND: rift-cli verify"
+.TP
+\fBUsage: rift\-cli verify <CONFIG_PATH>\fR
+.TP
+\fB<CONFIG_PATH>\fR
+ [required]
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.SH ENVIRONMENT
+.IP RUST_LOG
+Tracing/log filter (tracing\-subscriber EnvFilter syntax, e.g. "rift_wm=debug" or "info,rift_wm::actor=trace").
+.IP RUST_BACKTRACE
+Standard Rust backtrace control. rift forces this to "1" if unset.
+.IP RIFT_BS_NAME
+Mach bootstrap name used for the rift IPC server. Override only when running multiple rift instances side\-by\-side.
+.IP RIFT_CLI_PRETTY
+If set to anything other than "0", rift\-cli pretty\-prints JSON output. Defaults to compact output.
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.SH "EXIT STATUS"
+.IP 0
+Successful program execution.
+.IP 1
+Unsuccessful program execution.
+.IP 101
+The program panicked.
