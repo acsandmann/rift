@@ -171,6 +171,7 @@ dashmap = "6.1.0"
 sigpipe = "0.1.3"
 embed_plist = "1.2.2"
 rustc-hash = "2.1.1"
+documented = "0.9"
 
 [dev-dependencies]
 pretty_assertions = "1.4.0"

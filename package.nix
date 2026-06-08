@@ -41,13 +41,16 @@ craneLib.buildPackage (
 
     postInstall = ''
       # Generate shell completions and the man page using the installed xtask.
-      $out/bin/xtask
+      $out/bin/xtask dist
 
       # Remove xtask from the final output; it is only needed during install.
       rm $out/bin/xtask
 
       installShellCompletion --cmd rift ./comp/rift.{bash,fish,zsh,nu}
       installShellCompletion --cmd rift-cli ./comp/rift-cli.{bash,fish,zsh,nu}
+
+      installManPage ./man/rift.1
+      installManPage ./man/rift-cli.1
     '';
 
     nativeInstallCheckInputs = [ pkgs.versionCheckHook ];
