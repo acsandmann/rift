@@ -3,6 +3,7 @@
 #![allow(invalid_reference_casting)]
 
 pub mod actor;
+pub mod cli;
 pub mod common;
 pub mod ipc;
 pub mod layout_engine;

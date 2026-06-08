@@ -1,3 +1,9 @@
+[workspace]
+members = [
+    "./.", "xtask",
+    ]
+resolver = "2"
+
 [package]
 name = "rift-wm"
 version = "0.1.0"
@@ -171,3 +177,8 @@ tokio = { version = "1.35.1", features = ["sync", "tokio-macros"] }
 test-log = { version = "0.2.16", default-features = false }
 test_bin = "0.5.0"
 tempfile = { version = "3.17.1", default-features = false }
+
+[build-dependencies]
+clap_complete = "4.6.5"
+clap = { version = "4.5.4", features = ["derive"] }
+anyhow = { version = "1.0.83", default-features = false }
