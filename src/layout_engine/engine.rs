@@ -256,14 +256,6 @@ impl LayoutEngine {
         true
     }
 
-    fn active_scratchpad_windows(&self) -> Vec<WindowId> {
-        self.scratchpad
-            .iter()
-            .filter(|&&w| self.scratchpad.is_active(w))
-            .copied()
-            .collect()
-    }
-
     fn response_for_raised_windows(raise_windows: Vec<WindowId>) -> EventResponse {
         if raise_windows.is_empty() {
             EventResponse::default()
@@ -2242,22 +2234,11 @@ impl LayoutEngine {
             positions.insert(wid, hidden_rect);
         }
 
-        let scratchpad_windows: Vec<WindowId> = self.scratchpad.iter().copied().collect();
-        for wid in scratchpad_windows {
-            if !positions.contains_key(&wid) {
-                let size = window_size(wid);
-                let app_bundle_id = self.get_app_bundle_id_for_window(wid);
-                let hidden_rect = self.virtual_workspace_manager.calculate_hidden_position_multi(
-                    screen,
-                    size,
-                    HideCorner::BottomRight,
-                    app_bundle_id.as_deref(),
-                    all_screens,
-                );
-                positions.insert(wid, hidden_rect);
-            }
-        }
-
+        // Scratchpads that aren't active on this space are intentionally omitted from
+        // the layout: in multi-monitor setups every space has its own offscreen corner,
+        // so adding a hidden position here on every layout recompute makes the window
+        // bounce between corners. The hide_windows path (used on add, toggle-off, and
+        // workspace switch) handles initial offscreen positioning once.
         positions.into_iter().collect()
     }
 
@@ -2420,14 +2401,13 @@ impl LayoutEngine {
                     ) {
                         self.virtual_workspace_manager.set_active_workspace(space, next_workspace);
 
-                        self.update_active_floating_windows(space);
+                        let hidden_scratchpads = self.update_active_floating_windows(space);
 
                         self.broadcast_workspace_changed(space);
                         self.broadcast_windows_changed(space);
 
                         let mut resp = self.refocus_workspace(space, next_workspace);
-                        // Keep active scratchpads raised above the newly focused workspace.
-                        resp.raise_windows.extend(self.active_scratchpad_windows());
+                        resp.hide_windows.extend(hidden_scratchpads);
                         return resp;
                     }
                 }
@@ -2444,14 +2424,13 @@ impl LayoutEngine {
                     ) {
                         self.virtual_workspace_manager.set_active_workspace(space, prev_workspace);
 
-                        self.update_active_floating_windows(space);
+                        let hidden_scratchpads = self.update_active_floating_windows(space);
 
                         self.broadcast_workspace_changed(space);
                         self.broadcast_windows_changed(space);
 
                         let mut resp = self.refocus_workspace(space, prev_workspace);
-                        // Keep active scratchpads raised above the newly focused workspace.
-                        resp.raise_windows.extend(self.active_scratchpad_windows());
+                        resp.hide_windows.extend(hidden_scratchpads);
                         return resp;
                     }
                 }
@@ -2471,12 +2450,11 @@ impl LayoutEngine {
                             {
                                 self.virtual_workspace_manager
                                     .set_active_workspace(space, last_workspace);
-                                self.update_active_floating_windows(space);
+                                let hidden_scratchpads = self.update_active_floating_windows(space);
                                 self.broadcast_workspace_changed(space);
                                 self.broadcast_windows_changed(space);
                                 let mut resp = self.refocus_workspace(space, last_workspace);
-                                // Keep active scratchpads raised above the newly focused workspace.
-                                resp.raise_windows.extend(self.active_scratchpad_windows());
+                                resp.hide_windows.extend(hidden_scratchpads);
                                 return resp;
                             }
                         }
@@ -2484,14 +2462,13 @@ impl LayoutEngine {
                     }
                     self.virtual_workspace_manager.set_active_workspace(space, workspace_id);
 
-                    self.update_active_floating_windows(space);
+                    let hidden_scratchpads = self.update_active_floating_windows(space);
 
                     self.broadcast_workspace_changed(space);
                     self.broadcast_windows_changed(space);
 
                     let mut resp = self.refocus_workspace(space, workspace_id);
-                    // Keep active scratchpads raised above the newly focused workspace.
-                    resp.raise_windows.extend(self.active_scratchpad_windows());
+                    resp.hide_windows.extend(hidden_scratchpads);
                     return resp;
                 }
                 EventResponse::default()
@@ -2627,14 +2604,13 @@ impl LayoutEngine {
                 if let Some(last_workspace) = self.virtual_workspace_manager.last_workspace(space) {
                     self.virtual_workspace_manager.set_active_workspace(space, last_workspace);
 
-                    self.update_active_floating_windows(space);
+                    let hidden_scratchpads = self.update_active_floating_windows(space);
 
                     self.broadcast_workspace_changed(space);
                     self.broadcast_windows_changed(space);
 
                     let mut resp = self.refocus_workspace(space, last_workspace);
-                    // Keep active scratchpads raised above the newly focused workspace.
-                    resp.raise_windows.extend(self.active_scratchpad_windows());
+                    resp.hide_windows.extend(hidden_scratchpads);
                     return resp;
                 }
                 EventResponse::default()
@@ -2862,25 +2838,26 @@ impl LayoutEngine {
         self.floating.is_floating(window_id)
     }
 
-    fn update_active_floating_windows(&mut self, space: SpaceId) {
-        let mut windows_in_workspace =
+    /// Rebuilds the active floating set for `space` for the new active workspace, and
+    /// deactivates any scratchpads that were visible on that space. Returns those
+    /// scratchpad windows so the caller can hide them in the layout response.
+    fn update_active_floating_windows(&mut self, space: SpaceId) -> Vec<WindowId> {
+        let windows_in_workspace =
             self.virtual_workspace_manager.windows_in_active_workspace(space);
 
-        // Preserve scratchpads that were already visible on THIS space across the rebuild.
-        // Scratchpads visible on other spaces must not leak into this space's active set,
-        // or toggling on one display would also show them on the other.
-        let active_scratchpads_here: Vec<_> = self
+        let scratchpads_to_hide: Vec<WindowId> = self
             .floating
             .active_flat(space)
             .into_iter()
             .filter(|w| self.scratchpad.is_scratchpad(*w))
             .collect();
 
-        for wid in active_scratchpads_here {
-            windows_in_workspace.push(wid);
+        for &wid in &scratchpads_to_hide {
+            self.scratchpad.set_active(wid, false);
         }
 
         self.floating.rebuild_active_for_workspace(space, windows_in_workspace);
+        scratchpads_to_hide
     }
 
     pub fn store_floating_window_positions(
