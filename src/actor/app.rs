@@ -758,6 +758,7 @@ impl State {
             kAXMenuClosedNotification => self.send_event(Event::MenuClosed(self.pid)),
             kAXUIElementDestroyedNotification => {
                 let Ok(wid) = self.id(&elem) else {
+                    self.remove_stale_windows();
                     return;
                 };
                 self.remove_window(wid);
