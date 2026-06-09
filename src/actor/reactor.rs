@@ -194,7 +194,7 @@ pub enum Event {
     MouseUp,
     /// The mouse cursor moved over a new window. Only sent if focus-follows-
     /// mouse is enabled.
-    MouseMovedOverWindow(WindowServerId),
+    MouseMoved(#[serde(with = "crate::sys::geometry::CGPointDef")] CGPoint),
     /// System woke from sleep; used to re-subscribe SLS notifications.
     SystemWoke,
 
@@ -255,6 +255,7 @@ pub struct Reactor {
     pending_space_change_manager: managers::PendingSpaceChangeManager,
     active_spaces: HashSet<SpaceId>,
     display_topology_manager: DisplayTopologyManager,
+    pub above_window: Option<WindowServerId>,
 }
 
 impl Reactor {
@@ -379,6 +380,7 @@ impl Reactor {
             },
             active_spaces: HashSet::default(),
             display_topology_manager: DisplayTopologyManager::default(),
+            above_window: None,
         }
     }
 
@@ -797,7 +799,7 @@ impl Reactor {
             Event::WindowDestroyed(wid) => Some(wid.idx.get()),
             Event::WindowMinimized(wid) => Some(wid.idx.get()),
             Event::WindowDeminiaturized(wid) => Some(wid.idx.get()),
-            Event::MouseMovedOverWindow(wsid) => Some(wsid.as_u32()),
+            Event::MouseMoved(_) => None,
             Event::ResyncAppForWindow(wsid) => Some(wsid.as_u32()),
             Event::WindowServerDestroyed(wsid, _) => Some(wsid.as_u32()),
             Event::WindowServerAppeared(wsid, _) => Some(wsid.as_u32()),
@@ -1049,8 +1051,16 @@ impl Reactor {
             }
             Event::MenuOpened(pid) => SystemEventHandler::handle_menu_opened(self, pid),
             Event::MenuClosed(pid) => SystemEventHandler::handle_menu_closed(self, pid),
-            Event::MouseMovedOverWindow(wsid) => {
-                WindowEventHandler::handle_mouse_moved_over_window(self, wsid);
+            Event::MouseMoved(point) => {
+                if let Some(wsid) = window_server::get_window_at_point(point) {
+                    window_server::note_windowserver_activity(wsid.as_u32());
+                    if self.above_window != Some(wsid) {
+                        self.above_window = Some(wsid);
+                        WindowEventHandler::handle_mouse_moved_over_window(self, wsid);
+                    }
+                } else {
+                    self.above_window = None;
+                }
             }
             Event::SystemWoke => SystemEventHandler::handle_system_woke(self),
             Event::MissionControlNativeEntered => {
@@ -1094,6 +1104,7 @@ impl Reactor {
         }
 
         if let Some(raised_window) = raised_window {
+            self.above_window = None;
             if let Some(space) = self.best_space_for_window_id(raised_window) {
                 self.send_layout_event(LayoutEvent::WindowFocused(space, raised_window));
             }
@@ -1119,10 +1130,8 @@ impl Reactor {
 
         // Execute deferred mouse warp after workspace switch completes
         if let Some(wid) = self.workspace_switch_manager.pending_workspace_mouse_warp.take() {
-            if let Some(window_center) = self.window_center_on_known_screen(wid)
-                && let Some(event_tap_tx) = self.communication_manager.event_tap_tx.as_ref()
-            {
-                event_tap_tx.send(crate::actor::event_tap::Request::Warp(window_center));
+            if let Some(window_center) = self.window_center_on_known_screen(wid) {
+                self.warp_mouse(window_center);
             }
         }
 
@@ -1757,14 +1766,18 @@ impl Reactor {
             .any(|wsid| self.window_manager.window_ids.get(wsid).is_some_and(|wid| wid.pid == pid))
     }
 
-    fn warp_mouse_to_space_center(&self, space: SpaceId) -> bool {
+    pub fn warp_mouse(&mut self, point: CGPoint) {
+        if let Some(event_tap_tx) = self.communication_manager.event_tap_tx.as_ref() {
+            self.above_window = None;
+            _ = event_tap_tx.send(crate::actor::event_tap::Request::Warp(point));
+        }
+    }
+
+    fn warp_mouse_to_space_center(&mut self, space: SpaceId) -> bool {
         let Some(screen) = self.space_manager.screen_by_space(space) else {
             return false;
         };
-        let Some(event_tap_tx) = self.communication_manager.event_tap_tx.as_ref() else {
-            return false;
-        };
-        event_tap_tx.send(crate::actor::event_tap::Request::Warp(screen.frame.mid()));
+        self.warp_mouse(screen.frame.mid());
         true
     }
 
@@ -2416,6 +2429,9 @@ impl Reactor {
             .filter(|wid| self.is_window_on_active_space(*wid))
             .collect();
         let focus_window = focus_window.filter(|wid| self.is_window_on_active_space(*wid));
+        if focus_window.is_some() {
+            self.above_window = None;
+        }
 
         let mut windows_by_app_and_screen = HashMap::default();
         for &wid in &raise_windows {

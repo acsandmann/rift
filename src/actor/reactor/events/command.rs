@@ -328,9 +328,7 @@ impl CommandEventHandler {
                 return;
             }
             let center = screen.frame.mid();
-            if let Some(event_tap_tx) = reactor.communication_manager.event_tap_tx.as_ref() {
-                event_tap_tx.send(crate::actor::event_tap::Request::Warp(center));
-            }
+            reactor.warp_mouse(center);
             let _ = Self::focus_first_window_on_screen(reactor, &screen);
         }
     }
@@ -353,9 +351,7 @@ impl CommandEventHandler {
             return;
         }
 
-        if let Some(event_tap_tx) = reactor.communication_manager.event_tap_tx.as_ref() {
-            event_tap_tx.send(crate::actor::event_tap::Request::Warp(screen.frame.mid()));
-        }
+        reactor.warp_mouse(screen.frame.mid());
     }
 
     pub fn handle_command_reactor_move_window_to_display(
