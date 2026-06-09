@@ -1230,13 +1230,15 @@ impl Reactor {
     }
 
     fn handle_fullscreen_space_transition(&mut self, spaces: &mut Vec<Option<SpaceId>>) -> bool {
+        self.preserve_user_spaces_during_fullscreen_transition(spaces);
+
         let mut saw_fullscreen = false;
         let mut all_fullscreen = !spaces.is_empty();
         let mut refresh_spaces = Vec::new();
 
         for slot in spaces.iter_mut() {
             match slot {
-                Some(space) if space_is_fullscreen(space.get()) => {
+                Some(space) if self.is_fullscreen_space(*space) => {
                     saw_fullscreen = true;
                     *slot = None;
                 }
@@ -1300,6 +1302,52 @@ impl Reactor {
         }
 
         false
+    }
+
+    fn is_fullscreen_space(&self, space: SpaceId) -> bool {
+        space_is_fullscreen(space.get())
+            || self.space_manager.fullscreen_by_space.contains_key(&space.get())
+    }
+
+    fn preserve_user_spaces_during_fullscreen_transition(&self, spaces: &mut [Option<SpaceId>]) {
+        let entering_fullscreen =
+            self.space_manager.screens.iter().zip(spaces.iter()).any(|(screen, slot)| {
+                let Some(new_space) = *slot else {
+                    return false;
+                };
+                if !self.is_fullscreen_space(new_space) {
+                    return false;
+                }
+                screen
+                    .space
+                    .is_some_and(|previous_space| !self.is_fullscreen_space(previous_space))
+            });
+        if !entering_fullscreen {
+            return;
+        }
+
+        for (screen, slot) in self.space_manager.screens.iter().zip(spaces.iter_mut()) {
+            let Some(new_space) = *slot else {
+                continue;
+            };
+            if self.is_fullscreen_space(new_space) {
+                continue;
+            }
+            let Some(previous_space) = screen.space else {
+                continue;
+            };
+            if previous_space == new_space || self.is_fullscreen_space(previous_space) {
+                continue;
+            }
+
+            debug!(
+                display_uuid = %screen.display_uuid,
+                ?previous_space,
+                ?new_space,
+                "Preserving previous user space during fullscreen transition"
+            );
+            *slot = Some(previous_space);
+        }
     }
 
     fn set_screen_spaces(&mut self, spaces: &[Option<SpaceId>]) {

@@ -181,11 +181,14 @@ impl SpaceEventHandler {
         // windows to be re-assigned, wiping workspace assignments when the user
         // later exits fullscreen (see #308).
         let mut screens = screens;
+        let mut spaces: Vec<Option<SpaceId>> = screens.iter().map(|screen| screen.space).collect();
+        reactor.preserve_user_spaces_during_fullscreen_transition(&mut spaces);
+        for (screen, space) in screens.iter_mut().zip(spaces.into_iter()) {
+            screen.space = space;
+        }
         for screen in &mut screens {
             if let Some(space) = screen.space {
-                if crate::sys::window_server::space_is_fullscreen(space.get())
-                    || reactor.space_manager.fullscreen_by_space.contains_key(&space.get())
-                {
+                if reactor.is_fullscreen_space(space) {
                     debug!(
                         ?space,
                         display_uuid = %screen.display_uuid,

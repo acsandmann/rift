@@ -1017,6 +1017,122 @@ fn fullscreen_space_in_screen_params_does_not_trigger_topology_relayout() {
 }
 
 #[test]
+fn fullscreen_screen_params_preserves_other_display_space() {
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+
+    let left = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let right = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
+    let left_space_2 = SpaceId::new(12);
+    let left_space_1 = SpaceId::new(11);
+    let right_space_1 = SpaceId::new(21);
+    let right_fullscreen = SpaceId::new(0x400000000 + right_space_1.get());
+
+    reactor.handle_event(screen_params_event(
+        vec![left, right],
+        vec![Some(left_space_2), Some(right_space_1)],
+        vec![],
+    ));
+    reactor
+        .space_manager
+        .fullscreen_by_space
+        .insert(right_fullscreen.get(), FullscreenSpaceTrack::default());
+
+    reactor.handle_event(screen_params_event(
+        vec![left, right],
+        vec![Some(left_space_1), Some(right_fullscreen)],
+        vec![],
+    ));
+
+    assert_eq!(
+        reactor.raw_spaces_for_current_screens(),
+        vec![Some(left_space_2), None],
+        "Entering fullscreen on one display must not accept a transient user-space change on another display"
+    );
+}
+
+#[test]
+fn fullscreen_space_changed_preserves_other_display_space() {
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+
+    let left = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let right = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
+    let left_space_2 = SpaceId::new(12);
+    let left_space_1 = SpaceId::new(11);
+    let right_space_1 = SpaceId::new(21);
+    let right_fullscreen = SpaceId::new(0x400000000 + right_space_1.get());
+
+    reactor.handle_event(screen_params_event(
+        vec![left, right],
+        vec![Some(left_space_2), Some(right_space_1)],
+        vec![],
+    ));
+    reactor
+        .space_manager
+        .fullscreen_by_space
+        .insert(right_fullscreen.get(), FullscreenSpaceTrack::default());
+
+    reactor.handle_event(Event::SpaceChanged(vec![
+        Some(left_space_1),
+        Some(right_fullscreen),
+    ]));
+
+    assert_eq!(
+        reactor.raw_spaces_for_current_screens(),
+        vec![Some(left_space_2), None],
+        "Fullscreen SpaceChanged snapshots must preserve unrelated displays' previous user spaces"
+    );
+}
+
+#[test]
+fn user_space_switch_is_allowed_while_other_display_already_fullscreen() {
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+
+    let left = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let right = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
+    let left_space_2 = SpaceId::new(12);
+    let left_space_1 = SpaceId::new(11);
+    let right_space_1 = SpaceId::new(21);
+    let right_fullscreen = SpaceId::new(0x400000000 + right_space_1.get());
+
+    reactor.handle_event(screen_params_event(
+        vec![left, right],
+        vec![Some(left_space_2), Some(right_space_1)],
+        vec![],
+    ));
+    reactor
+        .space_manager
+        .fullscreen_by_space
+        .insert(right_fullscreen.get(), FullscreenSpaceTrack::default());
+    reactor.handle_event(Event::SpaceChanged(vec![
+        Some(left_space_2),
+        Some(right_fullscreen),
+    ]));
+
+    reactor.handle_event(Event::SpaceChanged(vec![
+        Some(left_space_1),
+        Some(right_fullscreen),
+    ]));
+
+    assert_eq!(
+        reactor.raw_spaces_for_current_screens(),
+        vec![Some(left_space_1), None],
+        "Once another display is already fullscreen, user space switches on this display should still be accepted"
+    );
+}
+
+#[test]
 fn fullscreen_screen_params_preserves_window_layout() {
     // Regression test for #308: waking from sleep while a fullscreen video is
     // active should not wipe workspace assignments.
