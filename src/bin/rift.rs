@@ -254,11 +254,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         stack_line_tx.clone(),
         stack_line_hit_rects.clone(),
     );
-    let gesture_tap = GestureTap::new(
-        config.clone(),
-        wm_controller_sender.clone(),
-        gesture_tap_rx,
-    );
+    let gesture_tap = GestureTap::new(config.clone(), wm_controller_sender.clone(), gesture_tap_rx);
     let menu = Menu::new(
         config.clone(),
         menu_rx,

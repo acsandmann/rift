@@ -15,8 +15,8 @@ use serde_json;
 use strum::VariantNames;
 use tracing::{debug, error, info, instrument, warn};
 
-use crate::common::config::WorkspaceSelector;
 use crate::actor::gesture_tap;
+use crate::common::config::WorkspaceSelector;
 use crate::sys::app::{NSRunningApplicationExt, pid_t};
 
 pub type Sender = actor::Sender<WmEvent>;
@@ -247,7 +247,9 @@ impl WmController {
                     .event_tap_tx
                     .send(event_tap::Request::ConfigUpdated(self.config.config.clone()));
                 if let Some(tx) = &self.gesture_tap_tx {
-                    tx.send(gesture_tap::GestureRequest::ConfigUpdated(self.config.config.clone()));
+                    tx.send(gesture_tap::GestureRequest::ConfigUpdated(
+                        self.config.config.clone(),
+                    ));
                 }
 
                 if !self.hotkeys_installed {

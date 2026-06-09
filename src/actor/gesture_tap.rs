@@ -12,19 +12,17 @@ use std::rc::Rc;
 use objc2::exception;
 use objc2_app_kit::{NSEvent, NSEventPhase, NSEventType, NSTouchPhase, NSTouchType};
 use objc2_core_foundation::{CGPoint, CGRect};
-use objc2_core_graphics::{
-    CGEvent, CGEventMask, CGEventTapProxy, CGEventType,
-};
+use objc2_core_graphics::{CGEvent, CGEventMask, CGEventTapProxy, CGEventType};
 use tracing::trace;
 
 use crate::actor;
-use crate::actor::wm_controller::{self, WmCommand, WmEvent};
 use crate::actor::reactor;
+use crate::actor::wm_controller::{self, WmCommand, WmEvent};
 use crate::common::collections::HashMap;
 use crate::common::config::{Config, HapticPattern, LayoutMode};
 use crate::layout_engine::LayoutCommand as LC;
+use crate::sys::haptics;
 use crate::sys::screen::SpaceId;
-use crate::sys::{haptics};
 
 #[derive(Debug)]
 pub enum GestureRequest {
@@ -176,11 +174,7 @@ unsafe fn drop_gesture_ctx(ptr: *mut std::ffi::c_void) {
 }
 
 impl GestureTap {
-    pub fn new(
-        config: Config,
-        wm_sender: wm_controller::Sender,
-        requests_rx: Receiver,
-    ) -> Self {
+    pub fn new(config: Config, wm_sender: wm_controller::Sender, requests_rx: Receiver) -> Self {
         let default_layout_mode = config.settings.layout.mode;
         let (swipe, scroll) = Self::build_gesture_handlers(&config);
         GestureTap {
@@ -232,12 +226,8 @@ impl GestureTap {
                     .collect();
             }
             GestureRequest::SpaceChanged(spaces) => {
-                let screens: Vec<CGRect> = self
-                    .screen_spaces
-                    .borrow()
-                    .iter()
-                    .map(|(frame, _)| *frame)
-                    .collect();
+                let screens: Vec<CGRect> =
+                    self.screen_spaces.borrow().iter().map(|(frame, _)| *frame).collect();
                 *self.screen_spaces.borrow_mut() = screens
                     .into_iter()
                     .zip(spaces.into_iter())
@@ -327,9 +317,8 @@ impl GestureTap {
             && nsevent.r#type() == NSEventType::Gesture
         {
             let cursor = CGEvent::location(Some(event));
-            let mode = self
-                .layout_mode_at_point(cursor)
-                .unwrap_or(*self.default_layout_mode.borrow());
+            let mode =
+                self.layout_mode_at_point(cursor).unwrap_or(*self.default_layout_mode.borrow());
             let is_scrolling_mode = matches!(mode, LayoutMode::Scrolling);
             if is_scrolling_mode && let Some(handler) = scroll_handler.as_ref() {
                 self.handle_scroll_gesture_event(handler, &nsevent);
@@ -592,9 +581,7 @@ impl GestureTap {
     }
 }
 
-fn gesture_event_mask() -> CGEventMask {
-    1u64 << (NSEventType::Gesture.0 as u64)
-}
+fn gesture_event_mask() -> CGEventMask { 1u64 << (NSEventType::Gesture.0 as u64) }
 
 #[inline]
 fn touch_normalized_position(touch: &objc2_app_kit::NSTouch) -> Option<(f64, f64)> {

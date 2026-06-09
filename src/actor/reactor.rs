@@ -38,8 +38,7 @@ use serde_with::serde_as;
 use tracing::{debug, info, instrument, trace, warn};
 use transaction_manager::TransactionId;
 
-use super::event_tap;
-use super::gesture_tap;
+use super::{event_tap, gesture_tap};
 use crate::actor::app::{AppInfo, AppThreadHandle, Quiet, Request, WindowId, WindowInfo, pid_t};
 use crate::actor::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::actor::raise_manager::{self, RaiseManager, RaiseRequest};
