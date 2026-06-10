@@ -88,7 +88,9 @@ impl WindowEventHandler {
         if !crate::sys::window_server::active_space_is_user() || reactor.is_mission_control_active()
         {
             if let Some(ws_id) = window_server_id {
-                if crate::sys::window_server::get_window(ws_id).is_some() {
+                if crate::sys::window_server::get_window(ws_id)
+                    .is_some_and(|ws_info| ws_info.pid == wid.pid)
+                {
                     return false;
                 }
             }

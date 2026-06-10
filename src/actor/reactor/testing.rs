@@ -136,6 +136,19 @@ impl Apps {
         is_frontmost: bool,
         with_ws_info: bool,
     ) -> Vec<Event> {
+        let windows: Vec<WindowInfo> = windows
+            .into_iter()
+            .enumerate()
+            .map(|(idx, mut info)| {
+                // Keep synthetic window-server ids unique across apps so tests
+                // exercise the same invariants as production.
+                info.sys_id = Some(WindowServerId::new(
+                    (pid as u32).saturating_mul(10_000) + idx as u32 + 1,
+                ));
+                info
+            })
+            .collect();
+
         for (id, info) in (1..).map(|idx| WindowId::new(pid, idx)).zip(&windows) {
             self.windows.insert(id, TestWindowState {
                 frame: info.frame,
