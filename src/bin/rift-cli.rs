@@ -158,6 +158,11 @@ enum WindowCommands {
     ///   rift-cli execute window resize-by --amount 0.05    # grow by 5%
     ///   rift-cli execute window resize-by --amount -0.10   # shrink by 10%
     ResizeBy { amount: f64 },
+    /// Cycle the selected window to the next column width preset.
+    /// The presets are defined in settings.layout.scrolling.column_width_presets.
+    ResizePresetNext,
+    /// Cycle the selected window to the previous column width preset.
+    ResizePresetPrev,
     /// Close a window by window server identifier
     Close {
         /// Window Id (window server id or idx from window id)
@@ -575,6 +580,12 @@ fn map_window_command(cmd: WindowCommands) -> Result<RiftCommand, String> {
         ))),
         WindowCommands::ResizeBy { amount } => Ok(RiftCommand::Reactor(reactor::Command::Layout(
             LC::ResizeWindowBy { amount },
+        ))),
+        WindowCommands::ResizePresetNext => Ok(RiftCommand::Reactor(reactor::Command::Layout(
+            LC::ResizeWindowPresetNext,
+        ))),
+        WindowCommands::ResizePresetPrev => Ok(RiftCommand::Reactor(reactor::Command::Layout(
+            LC::ResizeWindowPresetPrev,
         ))),
         WindowCommands::Close { window_id } => {
             let wsid = parse_window_server_id(&window_id)?;

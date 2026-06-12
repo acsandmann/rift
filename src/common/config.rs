@@ -657,6 +657,11 @@ pub struct ScrollingLayoutSettings {
     /// Trackpad gestures for scrolling layout
     #[serde(default)]
     pub gestures: ScrollingGestureSettings,
+    /// Preset column widths cycled by ResizeWindowPresetCycle.
+    /// Each value is a fraction of screen width (0.0–1.0).
+    /// Empty: preset cycling is disabled.
+    #[serde(default)]
+    pub column_width_presets: Vec<f64>,
 }
 
 impl Default for ScrollingLayoutSettings {
@@ -669,6 +674,7 @@ impl Default for ScrollingLayoutSettings {
             alignment: ScrollingAlignment::default(),
             focus_navigation_style: ScrollingFocusNavigationStyle::default(),
             gestures: ScrollingGestureSettings::default(),
+            column_width_presets: Vec::new(),
         }
     }
 }
@@ -963,6 +969,15 @@ impl ScrollingLayoutSettings {
                 "layout.scrolling.gestures.vertical_tolerance must be non-negative, got {}",
                 self.gestures.vertical_tolerance
             ));
+        }
+
+        for (i, preset) in self.column_width_presets.iter().enumerate() {
+            if !(0.0..=1.0).contains(preset) {
+                issues.push(format!(
+                    "layout.scrolling.column_width_presets[{}] must be between 0.0 and 1.0, got {}",
+                    i, preset
+                ));
+            }
         }
 
         issues
