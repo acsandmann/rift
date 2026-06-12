@@ -143,6 +143,7 @@ impl TraditionalLayoutSystem {
     pub(crate) fn calculate_layout_for_node(
         &self,
         node: NodeId,
+        focused_node: NodeId,
         screen: CGRect,
         rect: CGRect,
         stack_offset: f64,
@@ -157,6 +158,7 @@ impl TraditionalLayoutSystem {
             &self.tree.map,
             &self.tree.data.window,
             &self.tree.data.selection,
+            focused_node,
             node,
             rect,
             screen,
@@ -476,11 +478,13 @@ impl LayoutSystem for TraditionalLayoutSystem {
     ) -> Vec<(WindowId, CGRect)> {
         let mut sizes = vec![];
         let tiling_area = compute_tiling_area(screen, gaps);
+        let focused = self.selection(layout);
 
         self.tree.data.layout.apply_with_gaps(
             &self.tree.map,
             &self.tree.data.window,
             &self.tree.data.selection,
+            focused,
             self.root(layout),
             tiling_area,
             screen,
@@ -749,8 +753,12 @@ impl LayoutSystem for TraditionalLayoutSystem {
 
     fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
         let root = self.root(layout);
+        let focused = self.selection(layout);
         root.traverse_preorder(&self.tree.map)
-            .any(|node| self.tree.data.layout.is_effectively_fullscreen(node))
+            .any(|node| {
+                self.tree.data.layout.is_effectively_fullscreen(node)
+                    && (node == focused || focused.ancestors(&self.tree.map).any(|a| a == node))
+            })
     }
 
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) {
@@ -1275,11 +1283,13 @@ impl TraditionalLayoutSystem {
         let map = &self.tree.map;
 
         let tiling_area = compute_tiling_area(screen, gaps);
+        let focused = self.selection(layout);
 
         let mut stack: Vec<(NodeId, CGRect)> = vec![(self.root(layout), tiling_area)];
 
         while let Some((node, rect)) = stack.pop() {
-            if self.tree.data.layout.is_effectively_fullscreen(node) {
+            let is_focused = node == focused || focused.ancestors(map).any(|a| a == node);
+            if self.tree.data.layout.is_effectively_fullscreen(node) && is_focused {
                 continue;
             }
 
@@ -1315,7 +1325,8 @@ impl TraditionalLayoutSystem {
                 );
 
                 for (i, &child) in children.iter().enumerate().rev() {
-                    if self.tree.data.layout.is_effectively_fullscreen(child) {
+                    let child_is_focused = child == focused || focused.ancestors(map).any(|a| a == child);
+                    if self.tree.data.layout.is_effectively_fullscreen(child) && child_is_focused {
                         continue;
                     }
                     let child_rect = layout_res.get_focused_frame_for_index(i, i);
@@ -2540,6 +2551,7 @@ impl Layout {
         map: &NodeMap,
         window: &WindowIndex,
         selection: &Selection,
+        focused_node: NodeId,
         node: NodeId,
         rect: CGRect,
         screen: CGRect,
@@ -2552,9 +2564,10 @@ impl Layout {
         stack_line_vert: crate::common::config::VerticalPlacement,
     ) {
         let info = &self.info[node];
-        let rect = if info.is_fullscreen {
+        let is_focused = node == focused_node || focused_node.ancestors(map).any(|a| a == node);
+        let rect = if info.is_fullscreen && is_focused {
             screen
-        } else if info.is_fullscreen_within_gaps {
+        } else if info.is_fullscreen_within_gaps && is_focused {
             compute_tiling_area(screen, gaps)
         } else {
             rect
@@ -2635,6 +2648,7 @@ impl Layout {
                         map,
                         window,
                         selection,
+                        focused_node,
                         child,
                         frame,
                         screen,
@@ -2652,6 +2666,7 @@ impl Layout {
                 map,
                 window,
                 selection,
+                focused_node,
                 node,
                 rect,
                 screen,
@@ -2668,6 +2683,7 @@ impl Layout {
                 map,
                 window,
                 selection,
+                focused_node,
                 node,
                 rect,
                 screen,
@@ -2688,6 +2704,7 @@ impl Layout {
         map: &NodeMap,
         window: &WindowIndex,
         selection: &Selection,
+        focused_node: NodeId,
         node: NodeId,
         rect: CGRect,
         screen: CGRect,
@@ -2808,6 +2825,7 @@ impl Layout {
                 map,
                 window,
                 selection,
+                focused_node,
                 child,
                 child_rect,
                 screen,
@@ -4580,6 +4598,7 @@ mod tests {
         let gaps = crate::common::config::GapSettings::default();
         let _ = system.calculate_layout_for_node(
             root,
+            root,
             screen,
             screen,
             0.0,
@@ -5066,5 +5085,105 @@ mod tests {
             .proportion(&system.tree.map, right_node)
             .expect("right node proportion missing");
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn fullscreen_window_returns_to_normal_bounds_when_unfocused() {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
+
+        let w1 = w(100);
+        let w2 = w(101);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
+        let gaps = crate::common::config::GapSettings::default();
+
+        // Focus w1 and fullscreen it
+        system.select_window(layout, w1);
+        let _ = system.toggle_fullscreen_of_selection(layout);
+
+        let frames = system.calculate_layout(layout, screen, 0.0, &HashMap::default(), &gaps, 0.0, Default::default(), Default::default());
+        let frames: HashMap<WindowId, CGRect> = frames.into_iter().collect();
+        let w1_frame = frames.get(&w1).copied().expect("w1 missing");
+        assert_eq!(w1_frame, screen, "focused fullscreen window should cover screen");
+
+        // Move focus to w2
+        system.select_window(layout, w2);
+
+        let frames = system.calculate_layout(layout, screen, 0.0, &HashMap::default(), &gaps, 0.0, Default::default(), Default::default());
+        let frames: HashMap<WindowId, CGRect> = frames.into_iter().collect();
+        let w1_frame = frames.get(&w1).copied().expect("w1 missing");
+        let w2_frame = frames.get(&w2).copied().expect("w2 missing");
+
+        assert_ne!(w1_frame, screen, "unfocused fullscreen window should return to normal bounds");
+        assert_eq!(w1_frame.size.width + w2_frame.size.width, 1000.0, "windows should share space");
+    }
+
+    #[test]
+    fn fullscreen_window_re_expands_when_refocused() {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
+
+        let w1 = w(100);
+        let w2 = w(101);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
+        let gaps = crate::common::config::GapSettings::default();
+
+        // Focus w1 and fullscreen it
+        system.select_window(layout, w1);
+        let _ = system.toggle_fullscreen_of_selection(layout);
+
+        // Move focus away and back
+        system.select_window(layout, w2);
+        system.select_window(layout, w1);
+
+        let frames = system.calculate_layout(layout, screen, 0.0, &HashMap::default(), &gaps, 0.0, Default::default(), Default::default());
+        let frames: HashMap<WindowId, CGRect> = frames.into_iter().collect();
+        let w1_frame = frames.get(&w1).copied().expect("w1 missing");
+        assert_eq!(w1_frame, screen, "refocused fullscreen window should cover screen again");
+    }
+
+    #[test]
+    fn fullscreen_within_gaps_only_applies_when_focused() {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
+
+        let w1 = w(100);
+        let w2 = w(101);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
+        let gaps = crate::common::config::GapSettings::default();
+
+        // Focus w1 and fullscreen within gaps
+        system.select_window(layout, w1);
+        let _ = system.toggle_fullscreen_within_gaps_of_selection(layout);
+
+        let tiling = crate::layout_engine::utils::compute_tiling_area(screen, &gaps);
+
+        let frames = system.calculate_layout(layout, screen, 0.0, &HashMap::default(), &gaps, 0.0, Default::default(), Default::default());
+        let frames: HashMap<WindowId, CGRect> = frames.into_iter().collect();
+        let w1_frame = frames.get(&w1).copied().expect("w1 missing");
+        assert_eq!(w1_frame, tiling, "focused fullscreen-within-gaps should cover tiling area");
+
+        // Move focus to w2
+        system.select_window(layout, w2);
+
+        let frames = system.calculate_layout(layout, screen, 0.0, &HashMap::default(), &gaps, 0.0, Default::default(), Default::default());
+        let frames: HashMap<WindowId, CGRect> = frames.into_iter().collect();
+        let w1_frame = frames.get(&w1).copied().expect("w1 missing");
+        assert_ne!(w1_frame, tiling, "unfocused fullscreen-within-gaps should return to normal bounds");
     }
 }

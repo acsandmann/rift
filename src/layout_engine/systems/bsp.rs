@@ -282,20 +282,6 @@ impl BspLayoutSystem {
         }
     }
 
-    fn has_fullscreen_in_subtree(&self, node: NodeId) -> bool {
-        match self.kind.get(node) {
-            Some(NodeKind::Leaf {
-                fullscreen,
-                fullscreen_within_gaps,
-                ..
-            }) => *fullscreen || *fullscreen_within_gaps,
-            Some(NodeKind::Split { .. }) => {
-                node.children(&self.tree.map).any(|child| self.has_fullscreen_in_subtree(child))
-            }
-            None => false,
-        }
-    }
-
     fn find_layout_root(&self, mut node: NodeId) -> NodeId {
         while let Some(p) = node.parent(&self.tree.map) {
             node = p;
@@ -453,6 +439,7 @@ impl BspLayoutSystem {
         screen: CGRect,
         constraints: &HashMap<WindowId, WindowLayoutConstraints>,
         gaps: &crate::common::config::GapSettings,
+        focused_node: NodeId,
         out: &mut Vec<(WindowId, CGRect)>,
     ) {
         match self.kind.get(node) {
@@ -463,9 +450,10 @@ impl BspLayoutSystem {
                 ..
             }) => {
                 if let Some(w) = window {
-                    let mut target = if *fullscreen {
+                    let is_focused = node == focused_node;
+                    let mut target = if *fullscreen && is_focused {
                         screen
-                    } else if *fullscreen_within_gaps {
+                    } else if *fullscreen_within_gaps && is_focused {
                         Self::apply_outer_gaps(screen, gaps)
                     } else {
                         rect
@@ -549,10 +537,10 @@ impl BspLayoutSystem {
                     );
                     let mut it = node.children(&self.tree.map);
                     if let Some(first) = it.next() {
-                        self.calculate_layout_recursive(first, r1, screen, constraints, gaps, out);
+                        self.calculate_layout_recursive(first, r1, screen, constraints, gaps, focused_node, out);
                     }
                     if let Some(second) = it.next() {
-                        self.calculate_layout_recursive(second, r2, screen, constraints, gaps, out);
+                        self.calculate_layout_recursive(second, r2, screen, constraints, gaps, focused_node, out);
                     }
                 }
                 Orientation::Vertical => {
@@ -604,10 +592,10 @@ impl BspLayoutSystem {
                     );
                     let mut it = node.children(&self.tree.map);
                     if let Some(first) = it.next() {
-                        self.calculate_layout_recursive(first, r1, screen, constraints, gaps, out);
+                        self.calculate_layout_recursive(first, r1, screen, constraints, gaps, focused_node, out);
                     }
                     if let Some(second) = it.next() {
-                        self.calculate_layout_recursive(second, r2, screen, constraints, gaps, out);
+                        self.calculate_layout_recursive(second, r2, screen, constraints, gaps, focused_node, out);
                     }
                 }
             },
@@ -918,6 +906,68 @@ mod tests {
             "orthogonal max-only constraint should not change the parent split allocation"
         );
     }
+
+    #[test]
+    fn fullscreen_window_returns_to_normal_bounds_when_unfocused() {
+        let mut system = BspLayoutSystem::default();
+        let layout = system.create_layout();
+
+        let w1 = w(100);
+        let w2 = w(101);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
+        let gaps = crate::common::config::GapSettings::default();
+
+        // Focus w1 and fullscreen it
+        system.select_window(layout, w1);
+        let _ = system.toggle_fullscreen_of_selection(layout);
+
+        let frames = system.calculate_layout(layout, screen, 0.0, &HashMap::default(), &gaps, 0.0, Default::default(), Default::default());
+        let frames: HashMap<WindowId, CGRect> = frames.into_iter().collect();
+        let w1_frame = frames.get(&w1).copied().expect("w1 missing");
+        assert_eq!(w1_frame, screen, "focused fullscreen window should cover screen");
+
+        // Move focus to w2
+        system.select_window(layout, w2);
+
+        let frames = system.calculate_layout(layout, screen, 0.0, &HashMap::default(), &gaps, 0.0, Default::default(), Default::default());
+        let frames: HashMap<WindowId, CGRect> = frames.into_iter().collect();
+        let w1_frame = frames.get(&w1).copied().expect("w1 missing");
+        let w2_frame = frames.get(&w2).copied().expect("w2 missing");
+
+        assert_ne!(w1_frame, screen, "unfocused fullscreen window should return to normal bounds");
+        assert!(w1_frame.size.width < 1000.0, "w1 should be smaller than screen");
+        assert!(w2_frame.size.width > 0.0, "w2 should have some space");
+    }
+
+    #[test]
+    fn fullscreen_window_re_expands_when_refocused() {
+        let mut system = BspLayoutSystem::default();
+        let layout = system.create_layout();
+
+        let w1 = w(100);
+        let w2 = w(101);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
+        let gaps = crate::common::config::GapSettings::default();
+
+        // Focus w1 and fullscreen it
+        system.select_window(layout, w1);
+        let _ = system.toggle_fullscreen_of_selection(layout);
+
+        // Move focus away and back
+        system.select_window(layout, w2);
+        system.select_window(layout, w1);
+
+        let frames = system.calculate_layout(layout, screen, 0.0, &HashMap::default(), &gaps, 0.0, Default::default(), Default::default());
+        let frames: HashMap<WindowId, CGRect> = frames.into_iter().collect();
+        let w1_frame = frames.get(&w1).copied().expect("w1 missing");
+        assert_eq!(w1_frame, screen, "refocused fullscreen window should cover screen again");
+    }
 }
 
 impl LayoutSystem for BspLayoutSystem {
@@ -1000,7 +1050,8 @@ impl LayoutSystem for BspLayoutSystem {
         let mut out = Vec::new();
         if let Some(state) = self.layouts.get(layout).copied() {
             let rect = Self::apply_outer_gaps(screen, gaps);
-            self.calculate_layout_recursive(state.root, rect, screen, constraints, gaps, &mut out);
+            let focused = self.tree.data.selection.current_selection(state.root);
+            self.calculate_layout_recursive(state.root, rect, screen, constraints, gaps, focused, &mut out);
         }
         out
     }
@@ -1459,11 +1510,19 @@ impl LayoutSystem for BspLayoutSystem {
     }
 
     fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
-        if let Some(state) = self.layouts.get(layout).copied() {
-            self.has_fullscreen_in_subtree(state.root)
-        } else {
-            false
-        }
+        let Some(state) = self.layouts.get(layout).copied() else {
+            return false;
+        };
+        let focused = self.tree.data.selection.current_selection(state.root);
+        state.root.traverse_preorder(&self.tree.map).any(|node| {
+            match self.kind.get(node) {
+                Some(NodeKind::Leaf { fullscreen, fullscreen_within_gaps, .. }) => {
+                    (*fullscreen || *fullscreen_within_gaps)
+                        && (node == focused || focused.ancestors(&self.tree.map).any(|a| a == node))
+                }
+                _ => false,
+            }
+        })
     }
 
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) {

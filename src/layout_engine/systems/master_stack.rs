@@ -491,6 +491,7 @@ impl LayoutSystem for MasterStackLayoutSystem {
                 let rect = compute_tiling_area(screen, gaps);
                 return self.inner.calculate_layout_for_node(
                     master,
+                    master,
                     screen,
                     rect,
                     stack_offset,
