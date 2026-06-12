@@ -830,6 +830,7 @@ mod tests {
                 min_height: 0.0,
                 max_width: 600.0,
                 max_height: 0.0,
+                            wrap_size: false,
             }
             .normalized(),
         );
@@ -882,6 +883,7 @@ mod tests {
                 min_height: 0.0,
                 max_width: 0.0,
                 max_height: 200.0,
+                            wrap_size: false,
             }
             .normalized(),
         );
