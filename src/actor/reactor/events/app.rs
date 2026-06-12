@@ -16,12 +16,16 @@ impl AppEventHandler {
         handle: AppThreadHandle,
         visible_windows: Vec<(WindowId, WindowInfo)>,
         window_server_info: Vec<WindowServerInfo>,
-        _is_frontmost: bool,
+        is_frontmost: bool,
         _main_window: Option<WindowId>,
     ) {
         reactor.app_manager.apps.insert(pid, AppState { info: info.clone(), handle });
         reactor.update_partial_window_server_info(window_server_info);
-        reactor.on_windows_discovered_with_app_info(pid, visible_windows, vec![], Some(info));
+        let needs_follow =
+            reactor.on_windows_discovered_with_app_info(pid, visible_windows, vec![], Some(info));
+        if is_frontmost && needs_follow {
+            reactor.handle_app_activation_workspace_switch(pid);
+        }
     }
 
     pub fn handle_application_terminated(reactor: &mut Reactor, pid: i32) {

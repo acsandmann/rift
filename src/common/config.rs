@@ -119,6 +119,9 @@ pub struct AppWorkspaceRule {
     /// window invisible to Rift (no tiling, floating, or assignments).
     #[serde(default = "yes")]
     pub manage: bool,
+    /// If true, switch to the assigned workspace when this rule matches a newly opened window.
+    #[serde(default)]
+    pub follow: bool,
     /// Optional: Application name pattern (alternative to app_id)
     pub app_name: Option<String>,
     /// Optional: Regular expression to match window title (applies to window.title)

@@ -47,6 +47,7 @@ pub struct AppRuleAssignment {
     pub workspace_id: VirtualWorkspaceId,
     pub floating: bool,
     pub prev_rule_decision: bool,
+    pub follow: bool,
 }
 
 /// Result of evaluating app rules for a window.
@@ -1244,6 +1245,7 @@ impl VirtualWorkspaceManager {
                     workspace_id: existing_ws,
                     floating: rule.floating,
                     prev_rule_decision,
+                    follow: rule.follow,
                 }));
             }
 
@@ -1257,6 +1259,7 @@ impl VirtualWorkspaceManager {
                     workspace_id: target_workspace_id,
                     floating: rule.floating,
                     prev_rule_decision,
+                    follow: rule.follow,
                 }));
             } else {
                 error!("Failed to assign window to workspace from app rule");
@@ -1269,6 +1272,7 @@ impl VirtualWorkspaceManager {
                 workspace_id: existing_ws,
                 floating: false,
                 prev_rule_decision,
+                follow: false,
             }));
         }
 
@@ -1279,6 +1283,7 @@ impl VirtualWorkspaceManager {
                 workspace_id: default_workspace_id,
                 floating: false,
                 prev_rule_decision,
+                follow: false,
             }))
         } else {
             error!("Failed to assign window to default workspace");
@@ -1728,6 +1733,7 @@ mod tests {
                 workspace: None,
                 floating: true,
                 manage: true,
+                follow: false,
                 app_name: None,
                 title_regex: None,
                 title_substring: None,
@@ -1740,6 +1746,7 @@ mod tests {
                 workspace: Some(WorkspaceSelector::Index(1)),
                 floating: false,
                 manage: true,
+                follow: false,
                 app_name: Some("Calendar".into()),
                 title_regex: None,
                 title_substring: None,
@@ -1752,6 +1759,7 @@ mod tests {
                 workspace: Some(WorkspaceSelector::Index(0)),
                 floating: false,
                 manage: true,
+                follow: false,
                 app_name: None,
                 title_regex: None,
                 title_substring: Some("Preferences".into()),
@@ -1764,6 +1772,7 @@ mod tests {
                 workspace: Some(WorkspaceSelector::Index(2)),
                 floating: false,
                 manage: true,
+                follow: false,
                 app_name: None,
                 title_regex: Some(r"Dialog\s+\d+".into()),
                 title_substring: None,
@@ -1776,6 +1785,7 @@ mod tests {
                 workspace: None,
                 floating: true,
                 manage: true,
+                follow: false,
                 app_name: None,
                 title_regex: None,
                 title_substring: None,
@@ -1788,6 +1798,7 @@ mod tests {
                 workspace: Some(WorkspaceSelector::Name("coding".into())),
                 floating: false,
                 manage: true,
+                follow: false,
                 app_name: None,
                 title_regex: None,
                 title_substring: None,
@@ -1800,6 +1811,7 @@ mod tests {
                 workspace: Some(WorkspaceSelector::Index(0)),
                 floating: false,
                 manage: true,
+                follow: false,
                 app_name: None,
                 title_regex: None,
                 title_substring: None,
@@ -1811,6 +1823,7 @@ mod tests {
                 workspace: Some(WorkspaceSelector::Index(2)),
                 floating: false,
                 manage: true,
+                follow: false,
                 app_name: None,
                 title_regex: None,
                 title_substring: Some("Editor".into()),
@@ -1823,6 +1836,7 @@ mod tests {
                 workspace: None,
                 floating: true,
                 manage: true,
+                follow: false,
                 app_name: None,
                 title_regex: None,
                 title_substring: Some("Bitwarden".into()),
@@ -1834,6 +1848,7 @@ mod tests {
                 workspace: Some(WorkspaceSelector::Index(2)),
                 floating: false,
                 manage: true,
+                follow: false,
                 app_name: None,
                 title_regex: None,
                 title_substring: None,
@@ -1846,6 +1861,7 @@ mod tests {
                 workspace: Some(WorkspaceSelector::Index(1)),
                 floating: false,
                 manage: true,
+                follow: false,
                 app_name: None,
                 title_regex: None,
                 title_substring: None,
@@ -1857,6 +1873,7 @@ mod tests {
                 workspace: Some(WorkspaceSelector::Index(3)),
                 floating: true,
                 manage: true,
+                follow: false,
                 app_name: None,
                 title_regex: None,
                 title_substring: Some("bitwarden".into()),
@@ -2054,5 +2071,66 @@ mod tests {
                 || bw2_updated_assignment.workspace_id == expected_updated
         );
         assert!(bw2_updated_assignment.floating);
+    }
+
+    #[test]
+    fn app_rule_follow_propagated() {
+        let space = SpaceId::new(1);
+        let mut settings = VirtualWorkspaceSettings::default();
+        settings.app_rules = vec![
+            AppWorkspaceRule {
+                app_id: Some("com.example.follow".into()),
+                workspace: Some(WorkspaceSelector::Index(1)),
+                floating: false,
+                manage: true,
+                follow: true,
+                app_name: None,
+                title_regex: None,
+                title_substring: None,
+                ax_role: None,
+                ax_subrole: None,
+            },
+            AppWorkspaceRule {
+                app_id: Some("com.example.nofollow".into()),
+                workspace: Some(WorkspaceSelector::Index(1)),
+                floating: false,
+                manage: true,
+                follow: false,
+                app_name: None,
+                title_regex: None,
+                title_substring: None,
+                ax_role: None,
+                ax_subrole: None,
+            },
+        ];
+
+        let mut manager =
+            VirtualWorkspaceManager::new_with_config(&settings, &LayoutSettings::default());
+
+        let w_follow = WindowId::new(1, 1);
+        let assignment = assign(
+            &mut manager,
+            w_follow,
+            space,
+            Some("com.example.follow"),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(assignment.follow);
+
+        let w_nofollow = WindowId::new(2, 1);
+        let assignment_no = assign(
+            &mut manager,
+            w_nofollow,
+            space,
+            Some("com.example.nofollow"),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(!assignment_no.follow);
     }
 }

@@ -82,6 +82,10 @@ impl MainWindowTracker {
             _ => None,
         }
     }
+
+    pub fn is_frontmost(&self, pid: pid_t) -> bool {
+        self.apps.get(&pid).map(|app| app.is_frontmost).unwrap_or(false)
+    }
 }
 
 #[cfg(test)]
