@@ -87,6 +87,12 @@ master_count = 1
 master_side = "left"
 # Where new windows go when the master area is already full (master | stack | focused)
 new_window_placement = "master"
+# Orientation arrangement for the master area (horizontal | vertical)
+# If omitted, defaults to the direction perpendicular to master_side's split
+# master_arrangement = "vertical"
+# Orientation arrangement for the stack area (horizontal | vertical)
+# If omitted, defaults to the direction perpendicular to master_side's split
+# stack_arrangement = "vertical"
 
 # these settings only apply when layout mode == "scrolling"
 [settings.layout.scrolling]

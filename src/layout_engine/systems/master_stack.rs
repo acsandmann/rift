@@ -63,6 +63,14 @@ impl MasterStackLayoutSystem {
         }
     }
 
+    fn master_orientation(&self) -> Orientation {
+        self.settings.master_arrangement.unwrap_or_else(|| self.container_orientation())
+    }
+
+    fn stack_orientation(&self) -> Orientation {
+        self.settings.stack_arrangement.unwrap_or_else(|| self.container_orientation())
+    }
+
     fn master_first(&self) -> bool {
         matches!(
             self.settings.master_side,
@@ -140,16 +148,16 @@ impl MasterStackLayoutSystem {
 
     fn create_containers(&mut self, root: NodeId) -> (NodeId, NodeId) {
         self.inner.set_layout(root, LayoutKind::from(self.root_orientation()));
-        let container_kind = LayoutKind::from(self.container_orientation());
         let first = self.inner.tree.mk_node().push_back(root);
-        self.inner.set_layout(first, container_kind);
         let second = self.inner.tree.mk_node().push_back(root);
-        self.inner.set_layout(second, container_kind);
-        if self.master_first() {
+        let (master, stack) = if self.master_first() {
             (first, second)
         } else {
             (second, first)
-        }
+        };
+        self.inner.set_layout(master, LayoutKind::from(self.master_orientation()));
+        self.inner.set_layout(stack, LayoutKind::from(self.stack_orientation()));
+        (master, stack)
     }
 
     fn apply_master_ratio(&mut self, root: NodeId, master: NodeId, stack: NodeId) {
@@ -180,14 +188,13 @@ impl MasterStackLayoutSystem {
         let first = children[0];
         let second = children[1];
         self.inner.set_layout(root, LayoutKind::from(self.root_orientation()));
-        let container_kind = LayoutKind::from(self.container_orientation());
-        self.inner.set_layout(first, container_kind);
-        self.inner.set_layout(second, container_kind);
         let (master, stack) = if self.master_first() {
             (first, second)
         } else {
             (second, first)
         };
+        self.inner.set_layout(master, LayoutKind::from(self.master_orientation()));
+        self.inner.set_layout(stack, LayoutKind::from(self.stack_orientation()));
         self.apply_master_ratio(root, master, stack);
         (root, master, stack)
     }
@@ -665,7 +672,11 @@ impl LayoutSystem for MasterStackLayoutSystem {
         let Some(container) = self.focused_container(layout, master, stack) else {
             return false;
         };
-        let container_axis = self.container_orientation();
+        let container_axis = if container == master {
+            self.master_orientation()
+        } else {
+            self.stack_orientation()
+        };
         let (towards_master, towards_stack) = match self.settings.master_side {
             MasterStackSide::Left => (direction == Direction::Left, direction == Direction::Right),
             MasterStackSide::Right => (direction == Direction::Right, direction == Direction::Left),

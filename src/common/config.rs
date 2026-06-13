@@ -719,6 +719,12 @@ pub struct MasterStackSettings {
     /// Where new windows are inserted when the master area is already full
     #[serde(default = "default_master_stack_new_window_placement")]
     pub new_window_placement: MasterStackNewWindowPlacement,
+    /// Orientation arrangement for the master area (override default derived from master_side)
+    #[serde(default)]
+    pub master_arrangement: Option<crate::layout_engine::Orientation>,
+    /// Orientation arrangement for the stack area (override default derived from master_side)
+    #[serde(default)]
+    pub stack_arrangement: Option<crate::layout_engine::Orientation>,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
@@ -870,6 +876,8 @@ impl Default for MasterStackSettings {
             master_count: default_master_stack_count(),
             master_side: MasterStackSide::Left,
             new_window_placement: default_master_stack_new_window_placement(),
+            master_arrangement: None,
+            stack_arrangement: None,
         }
     }
 }
