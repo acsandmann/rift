@@ -1,6 +1,7 @@
 [package]
 name = "rift-wm"
 version = "0.1.0"
+description = "A tiling window manager for macOS, written in Rust."
 edition = "2024"
 build = "build.rs"
 
