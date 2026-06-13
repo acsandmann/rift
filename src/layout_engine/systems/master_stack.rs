@@ -64,15 +64,11 @@ impl MasterStackLayoutSystem {
     }
 
     fn master_orientation(&self) -> Orientation {
-        self.settings
-            .master_arrangement
-            .unwrap_or_else(|| self.container_orientation())
+        self.settings.master_arrangement.unwrap_or_else(|| self.container_orientation())
     }
 
     fn stack_orientation(&self) -> Orientation {
-        self.settings
-            .stack_arrangement
-            .unwrap_or_else(|| self.container_orientation())
+        self.settings.stack_arrangement.unwrap_or_else(|| self.container_orientation())
     }
 
     fn master_first(&self) -> bool {
