@@ -1,4 +1,7 @@
-use std::collections::BTreeMap;
+// references:
+// https://github.com/mgbowen/FasterSwiper
+// https://github.com/jurplel/InstantSpaceSwitcher/issues/72
+
 use std::mem::size_of;
 
 use dispatchr::queue;
@@ -8,6 +11,7 @@ use objc2_core_graphics::{CGEvent, CGEventField};
 use objc2_foundation::NSProcessInfo;
 use once_cell::sync::Lazy;
 
+use crate::common::collections::BTreeMap;
 use crate::layout_engine::Direction;
 use crate::sys::dispatch::DispatchExt;
 use crate::sys::skylight::{CGEventPost, CGEventTapLocation};
@@ -53,6 +57,9 @@ const K_LEGACY_TINY_FLOAT: f64 = f32::MIN_POSITIVE as f64;
 const K_LEGACY_ONE: i64 = 1;
 const K_GESTURE_DELAY_NS: i64 = 15 * 1_000_000;
 const K_CGEVENT_DATA_HID_FIELD: u16 = 4205;
+const K_CGEVENT_DATA_VERSION: i32 = 2;
+const K_FIXED_16_16_SCALE: f64 = 65536.0;
+const K_IOHID_EVENT_PHASE_SHIFT: u32 = 24;
 
 static IS_MACOS_27_OR_NEWER: Lazy<bool> = Lazy::new(|| {
     let version = NSProcessInfo::processInfo().operatingSystemVersion();
@@ -66,6 +73,55 @@ enum CGEventDataElement {
     F32(f32),
     F64(f64),
     Blob(Vec<u8>),
+}
+
+impl CGEventDataElement {
+    fn deserialize(tag: u16, element_size: u16, data: &mut &[u8]) -> Option<Self> {
+        match tag {
+            0 => {
+                if element_size == 1 {
+                    Some(Self::I64(read_be_i64(data)?))
+                } else {
+                    Some(Self::Blob(read_exact(data, element_size as usize)?.to_vec()))
+                }
+            }
+            1 if element_size == 1 => Some(Self::I32(read_be_i32(data)?)),
+            3 => match element_size {
+                1 => Some(Self::F32(read_be_f32(data)?)),
+                2 => Some(Self::F64(read_be_f64(data)?)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn serialize(self, field: u16, out: &mut Vec<u8>) -> Option<()> {
+        match self {
+            Self::I32(value) => {
+                write_field_header(out, 1, 0b01, field);
+                out.extend_from_slice(&value.to_be_bytes());
+            }
+            Self::I64(value) => {
+                write_field_header(out, 1, 0b00, field);
+                out.extend_from_slice(&value.to_be_bytes());
+            }
+            Self::F32(value) => {
+                write_field_header(out, 1, 0b11, field);
+                out.extend_from_slice(&value.to_bits().to_be_bytes());
+            }
+            Self::F64(value) => {
+                write_field_header(out, 2, 0b11, field);
+                out.extend_from_slice(&value.to_bits().to_be_bytes());
+            }
+            Self::Blob(value) => {
+                let element_size = u16::try_from(value.len()).ok()?;
+                write_field_header(out, element_size, 0b00, field);
+                out.extend_from_slice(&value);
+            }
+        }
+
+        Some(())
+    }
 }
 
 struct CGEventData {
@@ -120,53 +176,29 @@ pub unsafe fn switch_space(direction: Direction) {
 }
 
 unsafe fn switch_space_legacy(direction: Direction) {
-    let magnitude = match direction {
-        Direction::Left => -2.25,
-        Direction::Right => 2.25,
-        _ => return,
+    let Some(magnitude) = horizontal_direction_value(direction, -2.25, 2.25) else {
+        return;
     };
 
-    let event1a = raw_marker_event();
-    let event1b = raw_legacy_gesture_event(K_GESTURE_BEGAN, magnitude, None);
-
-    unsafe {
-        CGEventPost(
-            CGEventTapLocation::HID,
-            CFRetained::as_ptr(&event1b).as_ptr().cast(),
-        );
-        CGEventPost(
-            CGEventTapLocation::HID,
-            CFRetained::as_ptr(&event1a).as_ptr().cast(),
-        );
-    }
+    let begin_marker = raw_marker_event();
+    let begin_gesture = raw_legacy_gesture_event(K_GESTURE_BEGAN, magnitude, None);
+    post_events(CGEventTapLocation::HID, [&begin_gesture, &begin_marker]);
 
     queue::main().after_f_s(
         Time::new_after(Time::NOW, K_GESTURE_DELAY_NS),
         magnitude,
         |magnitude| {
             let gesture = 200.0 * magnitude;
-            let event2a = raw_marker_event();
-            let event2b = raw_legacy_gesture_event(K_GESTURE_ENDED, magnitude, Some(gesture));
-
-            unsafe {
-                CGEventPost(
-                    CGEventTapLocation::HID,
-                    CFRetained::as_ptr(&event2b).as_ptr().cast(),
-                );
-                CGEventPost(
-                    CGEventTapLocation::HID,
-                    CFRetained::as_ptr(&event2a).as_ptr().cast(),
-                );
-            }
+            let end_marker = raw_marker_event();
+            let end_gesture = raw_legacy_gesture_event(K_GESTURE_ENDED, magnitude, Some(gesture));
+            post_events(CGEventTapLocation::HID, [&end_gesture, &end_marker]);
         },
     );
 }
 
 unsafe fn switch_space_macos_27(direction: Direction) {
-    let gesture_sign = match direction {
-        Direction::Left => 1.0,
-        Direction::Right => -1.0,
-        _ => return,
+    let Some(gesture_sign) = horizontal_direction_value(direction, 1.0, -1.0) else {
+        return;
     };
 
     let begin_progress = K_EPSILON * gesture_sign;
@@ -191,9 +223,11 @@ unsafe fn switch_space_macos_27(direction: Direction) {
 }
 
 fn raw_marker_event() -> CFRetained<CGEvent> {
-    let event = CGEvent::new(None).expect("CGEventCreate should succeed");
-    CGEvent::set_integer_value_field(Some(&event), K_CGS_EVENT_TYPE_FIELD, K_CGS_EVENT_MARKER);
-    CGEvent::set_integer_value_field(Some(&event), K_GESTURE_SUBTYPE_FIELD, K_GESTURE_SUBTYPE);
+    let event = new_event();
+    set_integer_fields(&event, &[
+        (K_CGS_EVENT_TYPE_FIELD, K_CGS_EVENT_MARKER),
+        (K_GESTURE_SUBTYPE_FIELD, K_GESTURE_SUBTYPE),
+    ]);
     event
 }
 
@@ -202,45 +236,27 @@ fn raw_legacy_gesture_event(
     magnitude: f64,
     velocity_x: Option<f64>,
 ) -> CFRetained<CGEvent> {
-    let event = CGEvent::new(None).expect("CGEventCreate should succeed");
+    let event = new_event();
     let magnitude_bits = (magnitude as f32).to_bits() as i64;
 
-    CGEvent::set_integer_value_field(
-        Some(&event),
-        K_CGS_EVENT_TYPE_FIELD,
-        K_CGS_EVENT_DOCK_CONTROL,
-    );
-    CGEvent::set_integer_value_field(
-        Some(&event),
-        K_GESTURE_HID_TYPE_FIELD,
-        K_IOHID_EVENT_TYPE_DOCK_SWIPE,
-    );
-    CGEvent::set_integer_value_field(Some(&event), K_GESTURE_PHASE_FIELD, phase);
-    CGEvent::set_integer_value_field(Some(&event), K_GESTURE_PHASE_MIRROR_FIELD, phase);
-    CGEvent::set_double_value_field(Some(&event), K_GESTURE_SWIPE_PROGRESS_FIELD, magnitude);
-    CGEvent::set_integer_value_field(Some(&event), K_GESTURE_PROGRESS_BITS_FIELD, magnitude_bits);
-    CGEvent::set_integer_value_field(
-        Some(&event),
-        K_GESTURE_SWIPE_MOTION_FIELD,
-        K_CG_GESTURE_MOTION_HORIZONTAL,
-    );
-    CGEvent::set_integer_value_field(Some(&event), K_GESTURE_LEGACY_ONE_FIELD, K_LEGACY_ONE);
-    CGEvent::set_double_value_field(
-        Some(&event),
-        K_GESTURE_SWIPE_POSITION_X_FIELD,
-        K_LEGACY_TINY_FLOAT,
-    );
-    CGEvent::set_double_value_field(
-        Some(&event),
-        K_GESTURE_POSITION_FALLBACK_FIELD,
-        K_LEGACY_TINY_FLOAT,
-    );
-    CGEvent::set_integer_value_field(Some(&event), K_GESTURE_SUBTYPE_FIELD, K_GESTURE_SUBTYPE);
-    CGEvent::set_integer_value_field(Some(&event), K_GESTURE_UNUSED_ZERO_FIELD, 0);
+    configure_dock_swipe_event(&event, phase);
+    set_integer_fields(&event, &[
+        (K_GESTURE_PROGRESS_BITS_FIELD, magnitude_bits),
+        (K_GESTURE_LEGACY_ONE_FIELD, K_LEGACY_ONE),
+        (K_GESTURE_SUBTYPE_FIELD, K_GESTURE_SUBTYPE),
+        (K_GESTURE_UNUSED_ZERO_FIELD, 0),
+    ]);
+    set_double_fields(&event, &[
+        (K_GESTURE_SWIPE_PROGRESS_FIELD, magnitude),
+        (K_GESTURE_SWIPE_POSITION_X_FIELD, K_LEGACY_TINY_FLOAT),
+        (K_GESTURE_POSITION_FALLBACK_FIELD, K_LEGACY_TINY_FLOAT),
+    ]);
 
     if let Some(velocity_x) = velocity_x {
-        CGEvent::set_double_value_field(Some(&event), K_GESTURE_SWIPE_VELOCITY_X_FIELD, velocity_x);
-        CGEvent::set_double_value_field(Some(&event), K_GESTURE_SWIPE_VELOCITY_Y_FIELD, velocity_x);
+        set_double_fields(&event, &[
+            (K_GESTURE_SWIPE_VELOCITY_X_FIELD, velocity_x),
+            (K_GESTURE_SWIPE_VELOCITY_Y_FIELD, velocity_x),
+        ]);
     }
 
     event
@@ -252,60 +268,30 @@ fn dock_control_gesture_event(
     progress: f64,
     velocity_x: Option<f64>,
 ) -> CFRetained<CGEvent> {
-    let event = CGEvent::new(None).expect("CGEventCreate should succeed");
-    CGEvent::set_integer_value_field(
-        Some(&event),
-        K_CGS_EVENT_TYPE_FIELD,
-        K_CGS_EVENT_DOCK_CONTROL,
-    );
-    CGEvent::set_integer_value_field(
-        Some(&event),
-        K_GESTURE_HID_TYPE_FIELD,
-        K_IOHID_EVENT_TYPE_DOCK_SWIPE,
-    );
-    CGEvent::set_integer_value_field(Some(&event), K_GESTURE_PHASE_FIELD, phase);
-    CGEvent::set_integer_value_field(Some(&event), K_GESTURE_PHASE_MIRROR_FIELD, phase);
-    CGEvent::set_integer_value_field(
-        Some(&event),
-        K_GESTURE_SWIPE_MOTION_FIELD,
-        K_CG_GESTURE_MOTION_HORIZONTAL,
-    );
-    CGEvent::set_integer_value_field(
-        Some(&event),
+    let event = new_event();
+    configure_dock_swipe_event(&event, phase);
+    set_integer_fields(&event, &[(
         K_GESTURE_SWIPE_MASK_FIELD,
         swipe_mask_for_direction(direction) as i64,
-    );
-    CGEvent::set_double_value_field(Some(&event), K_GESTURE_SWIPE_PROGRESS_FIELD, progress);
+    )]);
+    set_double_fields(&event, &[(K_GESTURE_SWIPE_PROGRESS_FIELD, progress)]);
 
     if let Some(velocity_x) = velocity_x {
-        CGEvent::set_double_value_field(Some(&event), K_GESTURE_SWIPE_VELOCITY_X_FIELD, velocity_x);
+        set_double_fields(&event, &[(K_GESTURE_SWIPE_VELOCITY_X_FIELD, velocity_x)]);
     }
 
-    CGEvent::set_double_value_field(
-        Some(&event),
-        K_GESTURE_FLAVOR_FIELD,
-        K_GESTURE_FLAVOR_DOCK_PRIMARY,
-    );
-    CGEvent::set_double_value_field(Some(&event), K_GESTURE_TIMESTAMP_FIELD, unsafe {
-        mach_absolute_time() as f64
-    });
-    CGEvent::set_double_value_field(
-        Some(&event),
-        K_GESTURE_SWIPE_POSITION_X_FIELD,
-        K_GESTURE_SWIPE_POSITION_X,
-    );
+    set_double_fields(&event, &[
+        (K_GESTURE_FLAVOR_FIELD, K_GESTURE_FLAVOR_DOCK_PRIMARY),
+        (K_GESTURE_TIMESTAMP_FIELD, unsafe { mach_absolute_time() as f64 }),
+        (K_GESTURE_SWIPE_POSITION_X_FIELD, K_GESTURE_SWIPE_POSITION_X),
+    ]);
     event
 }
 
 fn post_augmented_session_event(event: &CGEvent) {
     let posted = augment_event_with_hid_payload(event).or_else(|| CGEvent::new_copy(Some(event)));
     if let Some(posted) = posted {
-        unsafe {
-            CGEventPost(
-                CGEventTapLocation::Session,
-                CFRetained::as_ptr(&posted).as_ptr().cast(),
-            )
-        };
+        post_events(CGEventTapLocation::Session, [&posted]);
     }
 }
 
@@ -328,7 +314,7 @@ fn augment_event_with_hid_payload(event: &CGEvent) -> Option<CFRetained<CGEvent>
 
 fn deserialize_cgevent_data(mut data: &[u8]) -> Option<CGEventData> {
     let version = read_be_i32(&mut data)?;
-    if version != 2 {
+    if version != K_CGEVENT_DATA_VERSION {
         return None;
     }
 
@@ -338,37 +324,17 @@ fn deserialize_cgevent_data(mut data: &[u8]) -> Option<CGEventData> {
         let tag_and_field = read_be_u16(&mut data)?;
         let tag = (tag_and_field >> 14) & 0x0003;
         let field = tag_and_field & 0x3FFF;
-
-        let element = match tag {
-            0 => {
-                if element_size == 1 {
-                    CGEventDataElement::I64(read_be_i64(&mut data)?)
-                } else {
-                    CGEventDataElement::Blob(read_exact(&mut data, element_size as usize)?.to_vec())
-                }
-            }
-            1 => {
-                if element_size != 1 {
-                    return None;
-                }
-                CGEventDataElement::I32(read_be_i32(&mut data)?)
-            }
-            3 => match element_size {
-                1 => CGEventDataElement::F32(read_be_f32(&mut data)?),
-                2 => CGEventDataElement::F64(read_be_f64(&mut data)?),
-                _ => return None,
-            },
-            _ => return None,
-        };
-
-        fields.insert(field, element);
+        fields.insert(
+            field,
+            CGEventDataElement::deserialize(tag, element_size, &mut data)?,
+        );
     }
 
     Some(CGEventData { version, fields })
 }
 
 fn serialize_cgevent_data(event_data: CGEventData) -> Option<Vec<u8>> {
-    if event_data.version != 2 {
+    if event_data.version != K_CGEVENT_DATA_VERSION {
         return None;
     }
 
@@ -376,29 +342,7 @@ fn serialize_cgevent_data(event_data: CGEventData) -> Option<Vec<u8>> {
     out.extend_from_slice(&event_data.version.to_be_bytes());
 
     for (field, element) in event_data.fields {
-        match element {
-            CGEventDataElement::I32(value) => {
-                write_field_header(&mut out, 1, 0b01, field);
-                out.extend_from_slice(&value.to_be_bytes());
-            }
-            CGEventDataElement::I64(value) => {
-                write_field_header(&mut out, 1, 0b00, field);
-                out.extend_from_slice(&value.to_be_bytes());
-            }
-            CGEventDataElement::F32(value) => {
-                write_field_header(&mut out, 1, 0b11, field);
-                out.extend_from_slice(&value.to_bits().to_be_bytes());
-            }
-            CGEventDataElement::F64(value) => {
-                write_field_header(&mut out, 2, 0b11, field);
-                out.extend_from_slice(&value.to_bits().to_be_bytes());
-            }
-            CGEventDataElement::Blob(value) => {
-                let element_size = u16::try_from(value.len()).ok()?;
-                write_field_header(&mut out, element_size, 0b00, field);
-                out.extend_from_slice(&value);
-            }
-        }
+        element.serialize(field, &mut out)?;
     }
 
     Some(out)
@@ -433,7 +377,7 @@ fn generate_iohid_system_queue_element(event: &CGEvent) -> Vec<u8> {
         base: IOHIDEventBase {
             size: size_of::<IOHIDFluidTouchGestureData>() as u32,
             event_type: K_IOHID_EVENT_TYPE_FLUID_TOUCH_GESTURE,
-            options: ((phase as u32) & 0xFF) << 24,
+            options: ((phase as u32) & 0xFF) << K_IOHID_EVENT_PHASE_SHIFT,
             depth: 0,
             reserved: [0; 3],
         },
@@ -477,6 +421,47 @@ fn generate_iohid_system_queue_element(event: &CGEvent) -> Vec<u8> {
     out
 }
 
+fn new_event() -> CFRetained<CGEvent> { CGEvent::new(None).expect("CGEventCreate should succeed") }
+
+fn configure_dock_swipe_event(event: &CGEvent, phase: i64) {
+    set_integer_fields(event, &[
+        (K_CGS_EVENT_TYPE_FIELD, K_CGS_EVENT_DOCK_CONTROL),
+        (K_GESTURE_HID_TYPE_FIELD, K_IOHID_EVENT_TYPE_DOCK_SWIPE),
+        (K_GESTURE_PHASE_FIELD, phase),
+        (K_GESTURE_PHASE_MIRROR_FIELD, phase),
+        (K_GESTURE_SWIPE_MOTION_FIELD, K_CG_GESTURE_MOTION_HORIZONTAL),
+    ]);
+}
+
+fn set_integer_fields(event: &CGEvent, fields: &[(CGEventField, i64)]) {
+    for &(field, value) in fields {
+        CGEvent::set_integer_value_field(Some(event), field, value);
+    }
+}
+
+fn set_double_fields(event: &CGEvent, fields: &[(CGEventField, f64)]) {
+    for &(field, value) in fields {
+        CGEvent::set_double_value_field(Some(event), field, value);
+    }
+}
+
+fn post_events<'a>(
+    location: CGEventTapLocation,
+    events: impl IntoIterator<Item = &'a CFRetained<CGEvent>>,
+) {
+    for event in events {
+        unsafe { CGEventPost(location, CFRetained::as_ptr(event).as_ptr().cast()) };
+    }
+}
+
+fn horizontal_direction_value<T>(direction: Direction, left: T, right: T) -> Option<T> {
+    match direction {
+        Direction::Left => Some(left),
+        Direction::Right => Some(right),
+        _ => None,
+    }
+}
+
 fn swipe_mask_for_direction(direction: Direction) -> u32 {
     match direction {
         Direction::Left => 8,
@@ -496,7 +481,7 @@ fn cg_event_timestamp_or_now(event: &CGEvent) -> u64 {
 }
 
 fn double_to_fixed_16_16(value: f64) -> i32 {
-    let fixed = (value * 65536.0) as i32;
+    let fixed = (value * K_FIXED_16_16_SCALE) as i32;
     if fixed == 0 && value != 0.0 {
         if value.is_sign_negative() { -1 } else { 1 }
     } else {
