@@ -129,6 +129,16 @@ struct ModFamily {
     right_key: KeyCode,
 
     mask: CGEventFlags,
+    left_mask: u64,
+    right_mask: u64,
+}
+
+impl ModFamily {
+    fn is_active(&self, flags: CGEventFlags) -> bool {
+        flags.contains(self.mask)
+            || (flags.bits() & self.left_mask) != 0
+            || (flags.bits() & self.right_mask) != 0
+    }
 }
 
 const MOD_FAMILIES: &[ModFamily] = &[
@@ -142,6 +152,8 @@ const MOD_FAMILIES: &[ModFamily] = &[
         left_key: KeyCode::ControlLeft,
         right_key: KeyCode::ControlRight,
         mask: CGEventFlags::MaskControl,
+        left_mask: 0x00000001,
+        right_mask: 0x00002000,
     },
     ModFamily {
         name: "Alt",
@@ -153,6 +165,8 @@ const MOD_FAMILIES: &[ModFamily] = &[
         left_key: KeyCode::AltLeft,
         right_key: KeyCode::AltRight,
         mask: CGEventFlags::MaskAlternate,
+        left_mask: 0x00000020,
+        right_mask: 0x00000040,
     },
     ModFamily {
         name: "Shift",
@@ -164,6 +178,8 @@ const MOD_FAMILIES: &[ModFamily] = &[
         left_key: KeyCode::ShiftLeft,
         right_key: KeyCode::ShiftRight,
         mask: CGEventFlags::MaskShift,
+        left_mask: 0x00000002,
+        right_mask: 0x00000004,
     },
     ModFamily {
         name: "Meta",
@@ -175,6 +191,8 @@ const MOD_FAMILIES: &[ModFamily] = &[
         left_key: KeyCode::MetaLeft,
         right_key: KeyCode::MetaRight,
         mask: CGEventFlags::MaskCommand,
+        left_mask: 0x00000008,
+        right_mask: 0x00000010,
     },
 ];
 
@@ -656,7 +674,7 @@ impl From<HotkeySpec> for Hotkey {
 pub fn modifiers_from_flags(flags: CGEventFlags) -> Modifiers {
     let mut mods = Modifiers::empty();
     for m in MOD_FAMILIES {
-        if flags.contains(m.mask) {
+        if m.is_active(flags) {
             mods.insert(m.generic);
         }
     }
@@ -670,7 +688,7 @@ pub fn modifiers_from_flags_with_keys<S: std::hash::BuildHasher>(
     let mut mods = Modifiers::empty();
 
     for m in MOD_FAMILIES {
-        if !flags.contains(m.mask) {
+        if !m.is_active(flags) {
             continue;
         }
 
