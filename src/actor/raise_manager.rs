@@ -166,7 +166,18 @@ impl RaiseManager {
                             sequence_id, sequence.pending_raises
                         );
                         sequence.pending_raises.clear();
+                        // Cancel the raises that hung, then install a fresh
+                        // token. The focus raise is sent next (in
+                        // process_active_sequence) and must use a live token, or
+                        // the app rejects it as cancelled and never reports
+                        // completion, blocking the manager permanently.
                         sequence.raise_token.cancel();
+                        sequence.raise_token = CancellationToken::new();
+                        // Restart the timeout window so the focus phase gets its
+                        // own timeout. Otherwise a hung focus raise could never
+                        // time out again and would block all future raises.
+                        sequence.started_at = Instant::now();
+                        sequence.timed_out = false;
                     }
                 }
             }
