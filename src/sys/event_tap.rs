@@ -78,7 +78,8 @@ pub struct EventTap {
 }
 
 impl EventTap {
-    pub unsafe fn new_with_options(
+    pub unsafe fn new_at_location_with_options(
+        location: CGTapLoc,
         options: CGTapOpt,
         mask: CGEventMask,
         callback: TapCallback,
@@ -96,7 +97,7 @@ impl EventTap {
 
         let port = unsafe {
             CGEvent::tap_create(
-                CGTapLoc::SessionEventTap,
+                location,
                 CGTapPlace::HeadInsertEventTap,
                 options,
                 mask,
@@ -108,7 +109,7 @@ impl EventTap {
         let source = CFMachPort::new_run_loop_source(None, Some(&port), 0)?;
         if let Some(rl) = CFRunLoop::current() {
             debug!(
-                "EventTap::new_with_options: CFRunLoop::current() returned a run loop; adding source to common modes"
+                "EventTap::new_at_location_with_options: CFRunLoop::current() returned a run loop; adding source to common modes"
             );
             let mode: &CFRunLoopMode = unsafe {
                 kCFRunLoopCommonModes.expect("kCFRunLoopCommonModes should be available on macOS")
@@ -116,7 +117,7 @@ impl EventTap {
             rl.add_source(Some(&source), Some(mode));
         } else {
             debug!(
-                "EventTap::new_with_options: CFRunLoop::current() returned None; run loop not present"
+                "EventTap::new_at_location_with_options: CFRunLoop::current() returned None; run loop not present"
             );
         }
         CGEvent::tap_enable(&port, true);
@@ -136,6 +137,25 @@ impl EventTap {
         Some(event_tap)
     }
 
+    pub unsafe fn new_with_options(
+        options: CGTapOpt,
+        mask: CGEventMask,
+        callback: TapCallback,
+        user_info: *mut c_void,
+        drop_ctx: Option<unsafe fn(*mut c_void)>,
+    ) -> Option<Self> {
+        unsafe {
+            Self::new_at_location_with_options(
+                CGTapLoc::SessionEventTap,
+                options,
+                mask,
+                callback,
+                user_info,
+                drop_ctx,
+            )
+        }
+    }
+
     pub unsafe fn new_listen_only(
         mask: CGEventMask,
         callback: TapCallback,
@@ -143,6 +163,25 @@ impl EventTap {
         drop_ctx: Option<unsafe fn(*mut c_void)>,
     ) -> Option<Self> {
         unsafe { Self::new_with_options(CGTapOpt::ListenOnly, mask, callback, user_info, drop_ctx) }
+    }
+
+    pub unsafe fn new_at_location_listen_only(
+        location: CGTapLoc,
+        mask: CGEventMask,
+        callback: TapCallback,
+        user_info: *mut c_void,
+        drop_ctx: Option<unsafe fn(*mut c_void)>,
+    ) -> Option<Self> {
+        unsafe {
+            Self::new_at_location_with_options(
+                location,
+                CGTapOpt::ListenOnly,
+                mask,
+                callback,
+                user_info,
+                drop_ctx,
+            )
+        }
     }
 
     pub fn set_enabled(&self, enabled: bool) { CGEvent::tap_enable(&self.port, enabled); }

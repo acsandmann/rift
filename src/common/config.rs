@@ -436,6 +436,9 @@ pub struct GestureSettings {
     /// Enable horizontal swipes to switch virtual workspaces
     #[serde(default = "no")]
     pub enabled: bool,
+    /// If true, consume low-level dock swipe events to prevent macOS from also handling them
+    #[serde(default = "yes")]
+    pub consume_dock_swipe: bool,
     /// Invert horizontal direction (swap next/prev)
     #[serde(default)]
     pub invert_horizontal_swipe: bool,
@@ -463,6 +466,7 @@ impl Default for GestureSettings {
     fn default() -> Self {
         Self {
             enabled: false,
+            consume_dock_swipe: true,
             invert_horizontal_swipe: false,
             swipe_vertical_tolerance: default_swipe_vertical_tolerance(),
             skip_empty: true,

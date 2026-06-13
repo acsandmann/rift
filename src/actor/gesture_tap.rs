@@ -1,9 +1,7 @@
-//! Gesture handling via a dedicated ListenOnly CGEventTap.
+//! Gesture handling via a dedicated CGEventTap.
 //!
 //! This actor runs on the main thread and handles trackpad swipe/scroll
-//! gestures for workspace switching. It uses a ListenOnly tap which is more
-//! resilient than a Default tap (macOS never disables listen-only taps via
-//! timeout).
+//! gestures for workspace switching.
 
 use std::cell::RefCell;
 use std::panic::AssertUnwindSafe;
@@ -12,8 +10,11 @@ use std::rc::Rc;
 use objc2::exception;
 use objc2_app_kit::{NSEvent, NSEventPhase, NSEventType, NSTouchPhase, NSTouchType};
 use objc2_core_foundation::{CGPoint, CGRect};
-use objc2_core_graphics::{CGEvent, CGEventMask, CGEventTapProxy, CGEventType};
-use tracing::trace;
+use objc2_core_graphics::{
+    CGEvent, CGEventField, CGEventMask, CGEventTapLocation as CGTapLoc,
+    CGEventTapOptions as CGTapOpt, CGEventTapProxy, CGEventType,
+};
+use tracing::{trace, warn};
 
 use crate::actor;
 use crate::actor::reactor;
@@ -23,6 +24,13 @@ use crate::common::config::{Config, HapticPattern, LayoutMode};
 use crate::layout_engine::LayoutCommand as LC;
 use crate::sys::haptics;
 use crate::sys::screen::SpaceId;
+
+const K_CGS_EVENT_TYPE_FIELD: CGEventField = CGEventField(55);
+const K_CGS_EVENT_DOCK_CONTROL: i64 = 30;
+const K_GESTURE_HID_TYPE_FIELD: CGEventField = CGEventField(110);
+const K_GESTURE_SWIPE_MOTION_FIELD: CGEventField = CGEventField(123);
+const K_IOHID_EVENT_TYPE_DOCK_SWIPE: i64 = 23;
+const K_CG_GESTURE_MOTION_HORIZONTAL: i64 = 1;
 
 #[derive(Debug)]
 pub enum GestureRequest {
@@ -50,6 +58,7 @@ pub struct GestureTap {
 #[derive(Debug, Clone)]
 struct SwipeConfig {
     enabled: bool,
+    consume_dock_swipe: bool,
     invert_horizontal: bool,
     vertical_tolerance: f64,
     skip_empty_workspaces: Option<bool>,
@@ -71,6 +80,7 @@ impl SwipeConfig {
         };
         SwipeConfig {
             enabled: g.enabled,
+            consume_dock_swipe: g.consume_dock_swipe,
             invert_horizontal: g.invert_horizontal_swipe,
             vertical_tolerance: vt_norm,
             skip_empty_workspaces: if g.skip_empty { Some(true) } else { None },
@@ -113,6 +123,7 @@ struct SwipeHandler {
 #[derive(Debug, Clone)]
 struct ScrollConfig {
     enabled: bool,
+    consume_dock_swipe: bool,
     invert_horizontal: bool,
     vertical_tolerance: f64,
     fingers: usize,
@@ -131,6 +142,7 @@ impl ScrollConfig {
         };
         ScrollConfig {
             enabled: g.enabled,
+            consume_dock_swipe: config.settings.gestures.consume_dock_swipe,
             invert_horizontal: g.invert_horizontal,
             vertical_tolerance: vt_norm,
             fingers: g.fingers.max(1),
@@ -167,6 +179,7 @@ struct ScrollHandler {
 
 struct CallbackCtx {
     this: Rc<GestureTap>,
+    consumes: bool,
 }
 
 unsafe fn drop_gesture_ctx(ptr: *mut std::ffi::c_void) {
@@ -282,49 +295,105 @@ impl GestureTap {
 
     fn create_and_install_tap(self: &Rc<Self>) {
         let mask = gesture_event_mask();
-        let ctx = Box::new(CallbackCtx { this: Rc::clone(self) });
-        let ctx_ptr = Box::into_raw(ctx) as *mut std::ffi::c_void;
-
+        let tap_location = CGTapLoc::HIDEventTap;
         let tap = unsafe {
-            crate::sys::event_tap::EventTap::new_listen_only(
+            let ctx_ptr = Box::into_raw(Box::new(CallbackCtx {
+                this: Rc::clone(self),
+                consumes: true,
+            })) as *mut std::ffi::c_void;
+            match crate::sys::event_tap::EventTap::new_at_location_with_options(
+                tap_location,
+                CGTapOpt::Default,
                 mask,
                 Some(gesture_callback),
                 ctx_ptr,
                 Some(drop_gesture_ctx),
-            )
+            ) {
+                Some(tap) => Some(tap),
+                None => {
+                    drop(Box::from_raw(ctx_ptr as *mut CallbackCtx));
+                    let ctx_ptr = Box::into_raw(Box::new(CallbackCtx {
+                        this: Rc::clone(self),
+                        consumes: false,
+                    })) as *mut std::ffi::c_void;
+                    match crate::sys::event_tap::EventTap::new_at_location_listen_only(
+                        tap_location,
+                        mask,
+                        Some(gesture_callback),
+                        ctx_ptr,
+                        Some(drop_gesture_ctx),
+                    ) {
+                        Some(tap) => {
+                            warn!(
+                                "Falling back to listen-only HID gesture tap; workspace swipe events will pass through to macOS"
+                            );
+                            Some(tap)
+                        }
+                        None => {
+                            drop(Box::from_raw(ctx_ptr as *mut CallbackCtx));
+                            None
+                        }
+                    }
+                }
+            }
         };
 
         if let Some(tap) = tap {
             *self.tap.borrow_mut() = Some(tap);
         } else {
-            unsafe { drop(Box::from_raw(ctx_ptr as *mut CallbackCtx)) };
-            tracing::warn!("Failed to create gesture ListenOnly tap");
+            tracing::warn!("Failed to create gesture event tap");
         }
     }
 
-    fn on_event(self: &Rc<Self>, event_type: CGEventType, event: &CGEvent) {
-        if event_type.0 != NSEventType::Gesture.0 as u32 {
-            return;
-        }
-
+    fn on_event(self: &Rc<Self>, event_type: CGEventType, event: &CGEvent) -> bool {
         let scroll_handler = self.scroll.borrow();
         let swipe_handler = self.swipe.borrow();
         if scroll_handler.is_none() && swipe_handler.is_none() {
-            return;
+            return true;
+        }
+
+        let cursor = CGEvent::location(Some(event));
+        let mode = self.layout_mode_at_point(cursor).unwrap_or(*self.default_layout_mode.borrow());
+        let is_scrolling_mode = matches!(mode, LayoutMode::Scrolling);
+
+        if is_physical_horizontal_dock_swipe(event_type, event) {
+            if self.should_consume_physical_dock_swipe(
+                is_scrolling_mode,
+                scroll_handler.as_ref(),
+                swipe_handler.as_ref(),
+            ) {
+                return false;
+            }
+            return true;
+        }
+
+        if event_type.0 != NSEventType::Gesture.0 as u32 {
+            return true;
         }
 
         if let Some(nsevent) = NSEvent::eventWithCGEvent(event)
             && nsevent.r#type() == NSEventType::Gesture
         {
-            let cursor = CGEvent::location(Some(event));
-            let mode =
-                self.layout_mode_at_point(cursor).unwrap_or(*self.default_layout_mode.borrow());
-            let is_scrolling_mode = matches!(mode, LayoutMode::Scrolling);
             if is_scrolling_mode && let Some(handler) = scroll_handler.as_ref() {
                 self.handle_scroll_gesture_event(handler, &nsevent);
             } else if let Some(handler) = swipe_handler.as_ref() {
                 self.handle_gesture_event(handler, &nsevent);
             }
+        }
+
+        true
+    }
+
+    fn should_consume_physical_dock_swipe(
+        &self,
+        is_scrolling_mode: bool,
+        scroll_handler: Option<&ScrollHandler>,
+        swipe_handler: Option<&SwipeHandler>,
+    ) -> bool {
+        if is_scrolling_mode {
+            scroll_handler.is_some_and(|handler| handler.cfg.consume_dock_swipe)
+        } else {
+            swipe_handler.is_some_and(|handler| handler.cfg.consume_dock_swipe)
         }
     }
 
@@ -349,12 +418,12 @@ impl GestureTap {
         let mut st = state.borrow_mut();
 
         let phase = nsevent.phase();
-        if matches!(
-            phase,
-            NSEventPhase::Ended | NSEventPhase::Cancelled | NSEventPhase::Began
-        ) {
+        if matches!(phase, NSEventPhase::Ended | NSEventPhase::Cancelled) {
             st.reset();
             return;
+        }
+        if matches!(phase, NSEventPhase::Began) {
+            st.reset();
         }
 
         let touches = nsevent.allTouches();
@@ -366,10 +435,6 @@ impl GestureTap {
 
         for t in touches.iter() {
             let phase = t.phase();
-            if phase.contains(NSTouchPhase::Stationary) {
-                continue;
-            }
-
             let ended =
                 phase.contains(NSTouchPhase::Ended) || phase.contains(NSTouchPhase::Cancelled);
 
@@ -445,12 +510,12 @@ impl GestureTap {
         let mut st = state.borrow_mut();
 
         let phase = nsevent.phase();
-        if matches!(
-            phase,
-            NSEventPhase::Ended | NSEventPhase::Cancelled | NSEventPhase::Began
-        ) {
+        if matches!(phase, NSEventPhase::Ended | NSEventPhase::Cancelled) {
             st.reset();
             return;
+        }
+        if matches!(phase, NSEventPhase::Began) {
+            st.reset();
         }
 
         let touches = nsevent.allTouches();
@@ -549,6 +614,7 @@ impl GestureTap {
             GesturePhase::Committed => {
                 if active_count == 0 {
                     st.reset();
+                    return;
                 } else if all_moved {
                     let dx = avg_x - st.last_x;
                     let dy = avg_y - st.last_y;
@@ -581,7 +647,19 @@ impl GestureTap {
     }
 }
 
-fn gesture_event_mask() -> CGEventMask { 1u64 << (NSEventType::Gesture.0 as u64) }
+fn gesture_event_mask() -> CGEventMask {
+    (1u64 << (NSEventType::Gesture.0 as u64)) | (1u64 << (K_CGS_EVENT_DOCK_CONTROL as u64))
+}
+
+fn is_physical_horizontal_dock_swipe(event_type: CGEventType, event: &CGEvent) -> bool {
+    let cgs_type = CGEvent::integer_value_field(Some(event), K_CGS_EVENT_TYPE_FIELD);
+    let hid_type = CGEvent::integer_value_field(Some(event), K_GESTURE_HID_TYPE_FIELD);
+    let motion = CGEvent::integer_value_field(Some(event), K_GESTURE_SWIPE_MOTION_FIELD);
+
+    (event_type.0 as i64 == K_CGS_EVENT_DOCK_CONTROL || cgs_type == K_CGS_EVENT_DOCK_CONTROL)
+        && hid_type == K_IOHID_EVENT_TYPE_DOCK_SWIPE
+        && motion == K_CG_GESTURE_MOTION_HORIZONTAL
+}
 
 #[inline]
 fn touch_normalized_position(touch: &objc2_app_kit::NSTouch) -> Option<(f64, f64)> {
@@ -608,13 +686,13 @@ unsafe extern "C-unwind" fn gesture_callback(
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
         let ctx = unsafe { &*(user_info as *const CallbackCtx) };
         let event = unsafe { event_ref.as_ref() };
-        ctx.this.on_event(event_type, event);
+        (ctx.this.on_event(event_type, event), ctx.consumes)
     }));
 
-    if let Err(_) = result {
-        // Gesture callback panicked; pass event through.
+    match result {
+        Ok((true, _)) => event_ref.as_ptr(),
+        Ok((false, true)) => core::ptr::null_mut(),
+        Ok((false, false)) => event_ref.as_ptr(),
+        Err(_) => event_ref.as_ptr(),
     }
-
-    // ListenOnly taps must always return the event pointer.
-    event_ref.as_ptr()
 }

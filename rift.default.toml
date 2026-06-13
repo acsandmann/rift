@@ -197,6 +197,9 @@ fade_duration_ms = 180.0
 [settings.gestures]
 # Enable horizontal swipes to switch virtual workspaces
 enabled = false
+# If true, Rift consumes low-level dock swipe events for its trackpad gesture handlers
+# to prevent interference with rift's own swipe detection
+consume_dock_swipe = true
 # Invert horizontal direction (swap next/prev)
 invert_horizontal_swipe = false
 # Maximum vertical travel allowed for the horizontal swipe to register.
