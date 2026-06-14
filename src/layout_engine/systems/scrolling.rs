@@ -15,6 +15,16 @@ use crate::layout_engine::{Direction, LayoutId, LayoutKind};
 struct Column {
     windows: Vec<WindowId>,
     width_offset: f64,
+    #[serde(default)]
+    height_weights: Vec<f64>,
+}
+
+impl Column {
+    fn ensure_height_weights(&mut self) {
+        if self.height_weights.len() != self.windows.len() {
+            self.height_weights.resize(self.windows.len(), 1.0);
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
@@ -158,7 +168,9 @@ impl LayoutState {
     fn remove_window(&mut self, wid: WindowId) -> Option<WindowId> {
         let (col_idx, row_idx) = self.locate(wid)?;
         let col = &mut self.columns[col_idx];
+        col.ensure_height_weights();
         col.windows.remove(row_idx);
+        col.height_weights.remove(row_idx);
         if col.windows.is_empty() {
             self.columns.remove(col_idx);
         }
@@ -196,6 +208,7 @@ impl LayoutState {
         let column = Column {
             windows: vec![wid],
             width_offset: 0.0,
+            height_weights: vec![1.0],
         };
         let insert_at = (index + 1).min(self.columns.len());
         self.columns.insert(insert_at, column);
@@ -207,6 +220,7 @@ impl LayoutState {
         self.columns.push(Column {
             windows: vec![wid],
             width_offset: 0.0,
+            height_weights: vec![1.0],
         });
         self.selected = Some(wid);
         self.align_scroll_to_selected();
@@ -217,7 +231,9 @@ impl LayoutState {
             if col_idx == target_col {
                 return;
             }
+            self.columns[col_idx].ensure_height_weights();
             let window = self.columns[col_idx].windows.remove(row_idx);
+            let weight = self.columns[col_idx].height_weights.remove(row_idx);
             let removed_column = self.columns[col_idx].windows.is_empty();
             if removed_column {
                 self.columns.remove(col_idx);
@@ -231,9 +247,12 @@ impl LayoutState {
                 self.columns.push(Column {
                     windows: vec![window],
                     width_offset: 0.0,
+                    height_weights: vec![1.0],
                 });
             } else {
+                self.columns[target].ensure_height_weights();
                 self.columns[target].windows.push(window);
+                self.columns[target].height_weights.push(weight);
             }
             self.selected = Some(window);
             self.align_scroll_to_selected();
@@ -505,7 +524,9 @@ impl ScrollingLayoutSystem {
             _ => None,
         };
         let Some(target_idx) = target_idx else { return false };
+        column.ensure_height_weights();
         column.windows.swap(row_idx, target_idx);
+        column.height_weights.swap(row_idx, target_idx);
         state.selected = Some(column.windows[target_idx]);
         true
     }
@@ -518,7 +539,9 @@ impl ScrollingLayoutSystem {
         // If the current column is stacked, horizontal move should extract the selected
         // window into its own neighbor column. This is a faster way to undo accidental stacks.
         if state.columns[col_idx].windows.len() > 1 {
+            state.columns[col_idx].ensure_height_weights();
             let wid = state.columns[col_idx].windows.remove(row_idx);
+            let weight = state.columns[col_idx].height_weights.remove(row_idx);
             let insert_at = match dir {
                 Direction::Left => col_idx,
                 Direction::Right => (col_idx + 1).min(state.columns.len()),
@@ -527,6 +550,7 @@ impl ScrollingLayoutSystem {
             state.columns.insert(insert_at, Column {
                 windows: vec![wid],
                 width_offset: 0.0,
+                height_weights: vec![weight],
             });
             state.selected = Some(wid);
             return true;
@@ -774,7 +798,8 @@ impl LayoutSystem for ScrollingLayoutSystem {
             let row_constraints: Vec<AxisConstraints> = col
                 .windows
                 .iter()
-                .map(|wid| {
+                .enumerate()
+                .map(|(row_idx, wid)| {
                     let (min, fixed, max, can_grow) = constraints
                         .get(wid)
                         .copied()
@@ -788,11 +813,22 @@ impl LayoutSystem for ScrollingLayoutSystem {
                             )
                         })
                         .unwrap_or((0.0, None, None, true));
+                    let raw_weight = col.height_weights.get(row_idx).copied().unwrap_or(1.0);
+                    // The constraint solver first assigns `min` to every item,
+                    // then distributes the *remainder* proportionally by weight.
+                    // Our height_weights store desired pixel heights, so we must
+                    // subtract `min` to turn them into "growth above min" weights.
+                    // Without this adjustment, weights like [900, 100] with
+                    // min=[100,100] would produce [820, 180] instead of [900, 100].
+                    //
+                    // For default weights (all 1.0), the subtraction would make
+                    // them near-zero but still equal, preserving equal distribution.
+                    let weight = (raw_weight - min).max(0.001);
                     AxisConstraints {
                         min,
                         fixed,
                         max,
-                        weight: 1.0,
+                        weight,
                         can_grow,
                     }
                 })
@@ -1088,10 +1124,59 @@ impl LayoutSystem for ScrollingLayoutSystem {
         let clamped = ratio.clamp(min_ratio, max_ratio).max(0.05);
 
         let base_ratio = state.column_width_ratio;
-        let Some((col_idx, _)) = state.locate(wid) else {
+        let Some((col_idx, row_idx)) = state.locate(wid) else {
             return;
         };
         state.columns[col_idx].width_offset = clamped - base_ratio;
+
+        // Handle vertical resizing within columns
+        let col = &mut state.columns[col_idx];
+        if col.windows.len() > 1 && tiling.size.height > 0.0 {
+            col.ensure_height_weights();
+            let total_gap = gaps.inner.vertical * (col.windows.len().saturating_sub(1) as f64);
+            let available_height = (tiling.size.height - total_gap).max(0.0);
+
+            if available_height > 0.0 {
+                // Set weights directly to desired pixel heights. The constraint
+                // solver (`solve_axis_lengths`) first reserves each window's
+                // minimum height, then distributes the remainder proportionally
+                // by weight.  Using actual pixel heights as weights means the
+                // solver will naturally produce the user's intended split,
+                // subject only to the macOS-reported min/max constraints.
+                let new_resized_height = new_frame.size.height.max(1.0);
+                let new_other_total = (available_height - new_resized_height).max(1.0);
+
+                // Distribute the "other" portion among non-resized windows,
+                // preserving their relative proportions.
+                let other_weight_sum: f64 = col.height_weights.iter().enumerate()
+                    .filter(|&(i, _)| i != row_idx)
+                    .map(|(_, &w)| w)
+                    .sum();
+
+                if other_weight_sum > 0.0 {
+                    for i in 0..col.windows.len() {
+                        if i == row_idx {
+                            col.height_weights[i] = new_resized_height;
+                        } else {
+                            // Scale each other window's weight so their sum equals new_other_total.
+                            col.height_weights[i] = new_other_total * (col.height_weights[i] / other_weight_sum);
+                        }
+                    }
+                } else {
+                    // Fallback: no prior weights for other windows.
+                    let other_count = (col.windows.len() - 1).max(1) as f64;
+                    let share = new_other_total / other_count;
+                    for i in 0..col.windows.len() {
+                        if i == row_idx {
+                            col.height_weights[i] = new_resized_height;
+                        } else {
+                            col.height_weights[i] = share;
+                        }
+                    }
+                }
+            }
+        }
+
         if niri_navigation && state.selected == Some(wid) {
             state.reveal_selected_without_direction();
         } else if state.selected == Some(wid) {
@@ -1112,12 +1197,21 @@ impl LayoutSystem for ScrollingLayoutSystem {
             None => return false,
         };
         if a_col == b_col {
+            state.columns[a_col].ensure_height_weights();
             state.columns[a_col].windows.swap(a_row, b_row);
+            state.columns[a_col].height_weights.swap(a_row, b_row);
         } else {
+            state.columns[a_col].ensure_height_weights();
+            state.columns[b_col].ensure_height_weights();
             let a_window = state.columns[a_col].windows[a_row];
             let b_window = state.columns[b_col].windows[b_row];
             state.columns[a_col].windows[a_row] = b_window;
             state.columns[b_col].windows[b_row] = a_window;
+
+            let a_weight = state.columns[a_col].height_weights[a_row];
+            let b_weight = state.columns[b_col].height_weights[b_row];
+            state.columns[a_col].height_weights[a_row] = b_weight;
+            state.columns[b_col].height_weights[b_row] = a_weight;
         }
         true
     }
@@ -1265,22 +1359,31 @@ impl LayoutSystem for ScrollingLayoutSystem {
         if state.columns[col_idx].windows.len() <= 1 {
             return Vec::new();
         }
+        state.columns[col_idx].ensure_height_weights();
         let selected = state.columns[col_idx].windows[row_idx];
+        let windows = std::mem::take(&mut state.columns[col_idx].windows);
+        let weights = std::mem::take(&mut state.columns[col_idx].height_weights);
         let mut moved = Vec::new();
         let mut remaining = Vec::new();
-        for wid in state.columns[col_idx].windows.drain(..) {
+        let mut remaining_weights = Vec::new();
+        let mut moved_weights = Vec::new();
+        for (wid, w) in windows.into_iter().zip(weights.into_iter()) {
             if wid == selected {
                 remaining.push(wid);
+                remaining_weights.push(w);
             } else {
                 moved.push(wid);
+                moved_weights.push(w);
             }
         }
         state.columns[col_idx].windows = remaining;
+        state.columns[col_idx].height_weights = remaining_weights;
         let mut insert_at = col_idx + 1;
-        for wid in moved.iter().copied() {
+        for (idx, wid) in moved.iter().copied().enumerate() {
             state.columns.insert(insert_at, Column {
                 windows: vec![wid],
                 width_offset: 0.0,
+                height_weights: vec![moved_weights[idx]],
             });
             insert_at += 1;
         }
@@ -1308,11 +1411,14 @@ impl LayoutSystem for ScrollingLayoutSystem {
         if state.columns[col_idx].windows.len() <= 1 {
             return;
         }
+        state.columns[col_idx].ensure_height_weights();
         let wid = state.columns[col_idx].windows.remove(row_idx);
+        let weight = state.columns[col_idx].height_weights.remove(row_idx);
         let insert_at = (col_idx + 1).min(state.columns.len());
         state.columns.insert(insert_at, Column {
             windows: vec![wid],
             width_offset: 0.0,
+            height_weights: vec![weight],
         });
         state.selected = Some(wid);
         state.align_scroll_to_selected();
@@ -1478,6 +1584,7 @@ mod tests {
         state.columns = vec![Column {
             windows: vec![w1, w2],
             width_offset: 0.0,
+            height_weights: vec![1.0, 1.0],
         }];
         state.selected = Some(w1);
 
@@ -1560,6 +1667,7 @@ mod tests {
         state.columns = vec![Column {
             windows: vec![locked, capped],
             width_offset: 0.0,
+            height_weights: vec![1.0, 1.0],
         }];
         state.selected = Some(locked);
 
@@ -2012,5 +2120,43 @@ mod tests {
             before.origin.x,
             after.origin.x
         );
+    }
+
+    #[test]
+    fn vertical_resize_adjusts_height_weights_and_calculates_correctly() {
+        let mut system = ScrollingLayoutSystem::new(&ScrollingLayoutSettings::default());
+        let layout = system.create_layout();
+        let w1 = wid(1, 1);
+        let w2 = wid(1, 2);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+
+        // Join them to the same column
+        system.join_selection_with_direction(layout, Direction::Left);
+
+        let screen = screen(1000.0, 800.0);
+        let gaps = GapSettings::default();
+
+        // 1. Initial layout calculation (should be split equally)
+        let frames_before = render(&system, layout, screen, &gaps);
+        let f1_before = frame_for(&frames_before, w1);
+        let f2_before = frame_for(&frames_before, w2);
+        assert!((f1_before.size.height - f2_before.size.height).abs() < 1.0);
+
+        // 2. Select w1 and resize it
+        assert!(system.select_window(layout, w1));
+        let mut new_f1 = f1_before;
+        new_f1.size.height = f1_before.size.height + 100.0;
+
+        system.on_window_resized(layout, w1, f1_before, new_f1, screen, &gaps);
+
+        // 3. Re-calculate layout and verify resized heights are preserved
+        let frames_after = render(&system, layout, screen, &gaps);
+        let f1_after = frame_for(&frames_after, w1);
+        let f2_after = frame_for(&frames_after, w2);
+
+        assert!((f1_after.size.height - (f1_before.size.height + 100.0)).abs() < 2.0);
+        assert!((f2_after.size.height - (f2_before.size.height - 100.0)).abs() < 2.0);
+        assert!((f1_after.size.height + f2_after.size.height - (f1_before.size.height + f2_before.size.height)).abs() < 2.0);
     }
 }
