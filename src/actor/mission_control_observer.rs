@@ -16,6 +16,12 @@ const K_AX_EXPOSE_SHOW_FRONT_WINDOWS: &str = "AXExposeShowFrontWindows";
 const K_AX_EXPOSE_SHOW_DESKTOP: &str = "AXExposeShowDesktop";
 const K_AX_EXPOSE_EXIT: &str = "AXExposeExit";
 
+#[derive(Copy, Clone)]
+enum MissionControlNotification {
+    Enter = 1,
+    Exit = 2,
+}
+
 #[derive(Debug)]
 pub enum Request {
     Stop,
@@ -75,14 +81,12 @@ impl NativeMissionControl {
 
         let tx_clone = self.events_tx.clone();
         let active_clone = self.active.clone();
-        let observer = builder.install(move |_elem: AXUIElement, notif: &str| match notif {
-            K_AX_EXPOSE_SHOW_ALL_WINDOWS
-            | K_AX_EXPOSE_SHOW_FRONT_WINDOWS
-            | K_AX_EXPOSE_SHOW_DESKTOP => {
+        let observer = builder.install(move |_elem: AXUIElement, data: usize| match data {
+            value if value == MissionControlNotification::Enter as usize => {
                 active_clone.store(true, Ordering::SeqCst);
                 let _ = tx_clone.send(Event::MissionControlNativeEntered);
             }
-            K_AX_EXPOSE_EXIT => {
+            value if value == MissionControlNotification::Exit as usize => {
                 active_clone.store(false, Ordering::SeqCst);
                 let _ = tx_clone.send(Event::MissionControlNativeExited);
             }
@@ -91,10 +95,12 @@ impl NativeMissionControl {
 
         let elem = AXUIElement::application(pid);
 
-        let _ = observer.add_notification(&elem, K_AX_EXPOSE_SHOW_ALL_WINDOWS);
-        let _ = observer.add_notification(&elem, K_AX_EXPOSE_SHOW_FRONT_WINDOWS);
-        let _ = observer.add_notification(&elem, K_AX_EXPOSE_SHOW_DESKTOP);
-        let _ = observer.add_notification(&elem, K_AX_EXPOSE_EXIT);
+        let enter = MissionControlNotification::Enter as usize;
+        let exit = MissionControlNotification::Exit as usize;
+        let _ = observer.add_notification_with_data(&elem, K_AX_EXPOSE_SHOW_ALL_WINDOWS, enter);
+        let _ = observer.add_notification_with_data(&elem, K_AX_EXPOSE_SHOW_FRONT_WINDOWS, enter);
+        let _ = observer.add_notification_with_data(&elem, K_AX_EXPOSE_SHOW_DESKTOP, enter);
+        let _ = observer.add_notification_with_data(&elem, K_AX_EXPOSE_EXIT, exit);
 
         self.observer = Some(observer);
         self.app_elem = Some(elem);

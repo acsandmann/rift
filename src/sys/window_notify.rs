@@ -35,9 +35,6 @@ pub struct EventData {
     pub len: usize,
 }
 
-static EVENT_SENDERS: Lazy<RwLock<HashMap<CGSEventType, actor::Sender<EventData>>>> =
-    Lazy::new(|| RwLock::new(HashMap::default()));
-
 static EVENT_RECEIVERS: Lazy<Mutex<HashMap<CGSEventType, Option<actor::Receiver<EventData>>>>> =
     Lazy::new(|| Mutex::new(HashMap::default()));
 
@@ -46,28 +43,40 @@ static G_CONNECTION: Lazy<cid_t> = Lazy::new(|| unsafe { SLSMainConnectionID() }
 static REGISTERED_EVENTS: Lazy<Mutex<HashSet<CGSEventType>>> =
     Lazy::new(|| Mutex::new(HashSet::default()));
 
+static CALLBACK_CTXS: Lazy<RwLock<HashMap<CGSEventType, Box<CallbackContext>>>> =
+    Lazy::new(|| RwLock::new(HashMap::default()));
+
+struct CallbackContext {
+    event_type: CGSEventType,
+    sender: actor::Sender<EventData>,
+}
+
 pub fn init(event: CGSEventType) -> i32 {
     if REGISTERED_EVENTS.lock().contains(&event) {
         debug!("Event {} already registered, skipping", event);
         return 1;
     }
 
-    let mut senders = EVENT_SENDERS.write();
-    if !senders.contains_key(&event) {
-        let (tx, rx) = actor::channel::<EventData>();
-        senders.insert(event, tx);
+    let (tx, rx) = actor::channel::<EventData>();
+    EVENT_RECEIVERS.lock().insert(event, Some(rx));
 
-        let mut receivers = EVENT_RECEIVERS.lock();
-        receivers.insert(event, Some(rx));
-    }
+    let mut callback_ctxs = CALLBACK_CTXS.write();
+    let callback_ctx = callback_ctxs.entry(event).or_insert_with(|| {
+        Box::new(CallbackContext {
+            event_type: event,
+            sender: tx.clone(),
+        })
+    });
+    callback_ctx.sender = tx;
 
     let raw: u32 = event.into();
+    let callback_ctx_ptr = (&mut **callback_ctx as *mut CallbackContext).cast::<c_void>();
     let res = unsafe {
         SLSRegisterConnectionNotifyProc(
             *G_CONNECTION,
             connection_callback,
             raw,
-            std::ptr::null_mut(),
+            callback_ctx_ptr,
         )
     };
 
@@ -131,18 +140,17 @@ extern "C" fn connection_callback(
     event_raw: u32,
     data: *mut c_void,
     len: usize,
-    _context: *mut c_void,
+    context: *mut c_void,
     _cid: cid_t,
 ) {
-    let kind = CGSEventType::from(event_raw);
-
-    let sender = {
-        let senders = EVENT_SENDERS.read();
-        senders.get(&kind).cloned()
-    };
-    let Some(sender) = sender else {
+    if context.is_null() {
         return;
-    };
+    }
+
+    let ctx = unsafe { &*(context as *const CallbackContext) };
+    let kind = ctx.event_type;
+    debug_assert_eq!(event_raw, u32::from(kind));
+    let sender = ctx.sender.clone();
 
     let bytes = if data.is_null() || len == 0 {
         &[]

@@ -20,7 +20,7 @@ use tokio::{join, select};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, Span, debug, error, info, instrument, trace, warn};
+use tracing::{Instrument, Span, debug, info, instrument, trace, warn};
 
 use crate::actor;
 use crate::actor::reactor::transaction_manager::TransactionId;
@@ -54,6 +54,61 @@ const kAXWindowResizedNotification: &str = "AXWindowResized";
 const kAXWindowMiniaturizedNotification: &str = "AXWindowMiniaturized";
 const kAXWindowDeminiaturizedNotification: &str = "AXWindowDeminiaturized";
 const kAXTitleChangedNotification: &str = "AXTitleChanged";
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum AxNotificationKind {
+    ApplicationActivated = 1,
+    ApplicationDeactivated,
+    ApplicationHidden,
+    ApplicationShown,
+    MainWindowChanged,
+    WindowCreated,
+    MenuOpened,
+    MenuClosed,
+    WindowDestroyed,
+    WindowMoved,
+    WindowResized,
+    WindowMiniaturized,
+    WindowDeminiaturized,
+    TitleChanged,
+}
+
+const APP_NOTIFICATIONS: &[(AxNotificationKind, &str)] = &[
+    (
+        AxNotificationKind::ApplicationActivated,
+        kAXApplicationActivatedNotification,
+    ),
+    (
+        AxNotificationKind::ApplicationDeactivated,
+        kAXApplicationDeactivatedNotification,
+    ),
+    (AxNotificationKind::ApplicationHidden, kAXApplicationHiddenNotification),
+    (AxNotificationKind::ApplicationShown, kAXApplicationShownNotification),
+    (AxNotificationKind::MainWindowChanged, kAXMainWindowChangedNotification),
+    (AxNotificationKind::WindowCreated, kAXWindowCreatedNotification),
+    (AxNotificationKind::MenuOpened, kAXMenuOpenedNotification),
+    (AxNotificationKind::MenuClosed, kAXMenuClosedNotification),
+    (AxNotificationKind::TitleChanged, kAXTitleChangedNotification),
+];
+
+const WINDOW_NOTIFICATIONS: &[(AxNotificationKind, &str)] = &[
+    (AxNotificationKind::WindowDestroyed, kAXUIElementDestroyedNotification),
+    (AxNotificationKind::WindowMoved, kAXWindowMovedNotification),
+    (AxNotificationKind::WindowResized, kAXWindowResizedNotification),
+    (
+        AxNotificationKind::WindowMiniaturized,
+        kAXWindowMiniaturizedNotification,
+    ),
+    (
+        AxNotificationKind::WindowDeminiaturized,
+        kAXWindowDeminiaturizedNotification,
+    ),
+];
+
+const WINDOW_ANIMATION_NOTIFICATIONS: &[AxNotificationKind] = &[
+    AxNotificationKind::WindowMoved,
+    AxNotificationKind::WindowResized,
+];
 
 /// An identifier representing a window.
 ///
@@ -173,6 +228,64 @@ impl WindowId {
     pub fn to_debug_string(&self) -> String { format!("{:?}", self) }
 }
 
+impl AxNotificationKind {
+    fn from_tag(tag: u8) -> Option<Self> {
+        Some(match tag {
+            1 => Self::ApplicationActivated,
+            2 => Self::ApplicationDeactivated,
+            3 => Self::ApplicationHidden,
+            4 => Self::ApplicationShown,
+            5 => Self::MainWindowChanged,
+            6 => Self::WindowCreated,
+            7 => Self::MenuOpened,
+            8 => Self::MenuClosed,
+            9 => Self::WindowDestroyed,
+            10 => Self::WindowMoved,
+            11 => Self::WindowResized,
+            12 => Self::WindowMiniaturized,
+            13 => Self::WindowDeminiaturized,
+            14 => Self::TitleChanged,
+            _ => return None,
+        })
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::ApplicationActivated => kAXApplicationActivatedNotification,
+            Self::ApplicationDeactivated => kAXApplicationDeactivatedNotification,
+            Self::ApplicationHidden => kAXApplicationHiddenNotification,
+            Self::ApplicationShown => kAXApplicationShownNotification,
+            Self::MainWindowChanged => kAXMainWindowChangedNotification,
+            Self::WindowCreated => kAXWindowCreatedNotification,
+            Self::MenuOpened => kAXMenuOpenedNotification,
+            Self::MenuClosed => kAXMenuClosedNotification,
+            Self::WindowDestroyed => kAXUIElementDestroyedNotification,
+            Self::WindowMoved => kAXWindowMovedNotification,
+            Self::WindowResized => kAXWindowResizedNotification,
+            Self::WindowMiniaturized => kAXWindowMiniaturizedNotification,
+            Self::WindowDeminiaturized => kAXWindowDeminiaturizedNotification,
+            Self::TitleChanged => kAXTitleChangedNotification,
+        }
+    }
+}
+
+fn encode_notification_data(kind: AxNotificationKind, wid: Option<WindowId>) -> usize {
+    const KIND_BITS: usize = 8;
+    let idx = wid.map_or(0, |wid| wid.idx.get()) as usize;
+    (idx << KIND_BITS) | kind as usize
+}
+
+fn decode_notification_data(
+    pid: pid_t,
+    data: usize,
+) -> Option<(AxNotificationKind, Option<WindowId>)> {
+    const KIND_MASK: usize = (1 << 8) - 1;
+    let kind = AxNotificationKind::from_tag((data & KIND_MASK) as u8)?;
+    let idx = NonZeroU32::new((data >> 8) as u32);
+    let wid = idx.map(|idx| WindowId { pid, idx });
+    Some((kind, wid))
+}
+
 #[derive(Clone)]
 pub struct AppThreadHandle {
     requests_tx: actor::Sender<Request>,
@@ -262,29 +375,6 @@ struct AppWindowState {
     is_animating: bool,
 }
 
-const APP_NOTIFICATIONS: &[&str] = &[
-    kAXApplicationActivatedNotification,
-    kAXApplicationDeactivatedNotification,
-    kAXApplicationHiddenNotification,
-    kAXApplicationShownNotification,
-    kAXMainWindowChangedNotification,
-    kAXWindowCreatedNotification,
-    kAXMenuOpenedNotification,
-    kAXMenuClosedNotification,
-    kAXTitleChangedNotification,
-];
-
-const WINDOW_NOTIFICATIONS: &[&str] = &[
-    kAXUIElementDestroyedNotification,
-    kAXWindowMovedNotification,
-    kAXWindowResizedNotification,
-    kAXWindowMiniaturizedNotification,
-    kAXWindowDeminiaturizedNotification,
-];
-
-const WINDOW_ANIMATION_NOTIFICATIONS: &[&str] =
-    &[kAXWindowMovedNotification, kAXWindowResizedNotification];
-
 impl State {
     fn txid_from_store(&self, wsid: Option<WindowServerId>) -> Option<TransactionId> {
         let store = self.tx_store.as_ref()?;
@@ -311,7 +401,7 @@ impl State {
         info: AppInfo,
         requests_tx: actor::Sender<Request>,
         requests_rx: actor::Receiver<Request>,
-        notifications_rx: actor::Receiver<(AXUIElement, String)>,
+        notifications_rx: actor::Receiver<(AXUIElement, AxNotificationKind, Option<WindowId>)>,
         raises_rx: actor::Receiver<RaiseRequest>,
     ) {
         let handle = AppThreadHandle { requests_tx };
@@ -329,10 +419,10 @@ impl State {
     async fn handle_incoming(
         this: &RefCell<Self>,
         requests_rx: actor::Receiver<Request>,
-        notifications_rx: actor::Receiver<(AXUIElement, String)>,
+        notifications_rx: actor::Receiver<(AXUIElement, AxNotificationKind, Option<WindowId>)>,
     ) {
         pub enum Incoming {
-            Notification((Span, (AXUIElement, String))),
+            Notification((Span, (AXUIElement, AxNotificationKind, Option<WindowId>))),
             Request((Span, Request)),
         }
 
@@ -367,8 +457,8 @@ impl State {
                         }
                     }
                 }
-                Incoming::Notification((_, (elem, notif))) => {
-                    this.handle_notification(elem, &notif);
+                Incoming::Notification((_, (elem, notif, hinted_wid))) => {
+                    this.handle_notification(elem, notif, hinted_wid);
                 }
             }
         }
@@ -389,8 +479,12 @@ impl State {
     #[instrument(skip_all, fields(?info))]
     #[must_use]
     fn init(&mut self, handle: AppThreadHandle, info: AppInfo) -> bool {
-        for notif in APP_NOTIFICATIONS {
-            let res = self.observer.add_notification(&self.app, notif);
+        for &(kind, notif) in APP_NOTIFICATIONS {
+            let res = self.observer.add_notification_with_data(
+                &self.app,
+                notif,
+                encode_notification_data(kind, None),
+            );
             if let Err(err) = res {
                 debug!(pid = ?self.pid, ?err, "Watching app failed");
                 return false;
@@ -728,23 +822,28 @@ impl State {
     }
 
     #[instrument(skip_all, fields(app = ?self.app, ?notif))]
-    fn handle_notification(&mut self, elem: AXUIElement, notif: &str) {
+    fn handle_notification(
+        &mut self,
+        elem: AXUIElement,
+        notif: AxNotificationKind,
+        hinted_wid: Option<WindowId>,
+    ) {
         trace!(?notif, ?elem, "Got notification");
-        #[allow(non_upper_case_globals)]
         match notif {
-            kAXApplicationHiddenNotification => self.on_application_hidden(),
-            kAXApplicationShownNotification => self.on_application_shown(),
-            kAXApplicationActivatedNotification | kAXApplicationDeactivatedNotification => {
+            AxNotificationKind::ApplicationHidden => self.on_application_hidden(),
+            AxNotificationKind::ApplicationShown => self.on_application_shown(),
+            AxNotificationKind::ApplicationActivated
+            | AxNotificationKind::ApplicationDeactivated => {
                 _ = self.on_activation_changed();
             }
-            kAXMainWindowChangedNotification => {
+            AxNotificationKind::MainWindowChanged => {
                 // NOTE(acsandmann):
                 // because of apps like firefox that send delayed(or dont send at all) axuielementdestroyed/windowserverdisappeared
                 // this is a fallback to ensure we handle windows being closed
                 self.remove_stale_windows();
                 self.on_main_window_changed(None, false);
             }
-            kAXWindowCreatedNotification => {
+            AxNotificationKind::WindowCreated => {
                 if self.id(&elem).is_ok() {
                     return;
                 }
@@ -761,19 +860,21 @@ impl State {
                     event::get_mouse_state(),
                 ));
             }
-            kAXMenuOpenedNotification => self.send_event(Event::MenuOpened(self.pid)),
-            kAXMenuClosedNotification => self.send_event(Event::MenuClosed(self.pid)),
-            kAXUIElementDestroyedNotification => {
-                let Ok(wid) = self.id(&elem) else {
+            AxNotificationKind::MenuOpened => self.send_event(Event::MenuOpened(self.pid)),
+            AxNotificationKind::MenuClosed => self.send_event(Event::MenuClosed(self.pid)),
+            AxNotificationKind::WindowDestroyed => {
+                let Ok(wid) = self.wid_for_notification(&elem, hinted_wid) else {
                     return;
                 };
-                self.remove_window(wid);
+                if self.remove_window(wid).is_none() {
+                    return;
+                }
                 self.send_event(Event::WindowDestroyed(wid));
 
                 self.on_main_window_changed(Some(wid), false);
             }
-            kAXWindowMovedNotification | kAXWindowResizedNotification => {
-                let Ok(wid) = self.id(&elem) else {
+            AxNotificationKind::WindowMoved | AxNotificationKind::WindowResized => {
+                let Ok(wid) = self.wid_for_notification(&elem, hinted_wid) else {
                     return;
                 };
 
@@ -813,8 +914,8 @@ impl State {
                     event::get_mouse_state(),
                 ));
             }
-            kAXWindowMiniaturizedNotification => {
-                let Ok(wid) = self.id(&elem) else {
+            AxNotificationKind::WindowMiniaturized => {
+                let Ok(wid) = self.wid_for_notification(&elem, hinted_wid) else {
                     return;
                 };
                 if let Some(window) = self.windows.get_mut(&wid) {
@@ -822,8 +923,8 @@ impl State {
                 }
                 self.send_event(Event::WindowMinimized(wid));
             }
-            kAXWindowDeminiaturizedNotification => {
-                let Ok(wid) = self.id(&elem) else {
+            AxNotificationKind::WindowDeminiaturized => {
+                let Ok(wid) = self.wid_for_notification(&elem, hinted_wid) else {
                     return;
                 };
                 if let Some(window) = self.windows.get_mut(&wid) {
@@ -831,8 +932,8 @@ impl State {
                 }
                 self.send_event(Event::WindowDeminiaturized(wid));
             }
-            kAXTitleChangedNotification => {
-                let Ok(wid) = self.id(&elem) else {
+            AxNotificationKind::TitleChanged => {
+                let Ok(wid) = self.wid_for_notification(&elem, hinted_wid) else {
                     return;
                 };
                 match elem.title() {
@@ -844,7 +945,6 @@ impl State {
                     ),
                 }
             }
-            _ => error!("Unhandled notification {notif:?} on {elem:#?}"),
         }
     }
 }
@@ -1210,7 +1310,7 @@ impl State {
             return None;
         }
 
-        if !register_notifs(&elem, self) {
+        if !register_notifs(&elem, self, wid) {
             return None;
         }
         let hidden_by_app = self.is_hidden;
@@ -1229,13 +1329,17 @@ impl State {
         }
         return Some((info, wid, server_info));
 
-        fn register_notifs(win: &AXUIElement, state: &State) -> bool {
+        fn register_notifs(win: &AXUIElement, state: &State, wid: WindowId) -> bool {
             match win.role() {
                 Ok(role) if role == AX_WINDOW_ROLE => (),
                 _ => return false,
             }
-            for notif in WINDOW_NOTIFICATIONS {
-                let res = state.observer.add_notification(win, notif);
+            for &(kind, notif) in WINDOW_NOTIFICATIONS {
+                let res = state.observer.add_notification_with_data(
+                    win,
+                    notif,
+                    encode_notification_data(kind, Some(wid)),
+                );
                 if let Err(err) = res {
                     let is_already_registered = matches!(
                         err,
@@ -1368,20 +1472,43 @@ impl State {
         Err(AxError::NotFound)
     }
 
+    fn wid_for_notification(
+        &self,
+        elem: &AXUIElement,
+        hinted_wid: Option<WindowId>,
+    ) -> Result<WindowId, AxError> {
+        hinted_wid
+            .filter(|wid| wid.pid == self.pid)
+            .or_else(|| self.id(elem).ok())
+            .ok_or(AxError::NotFound)
+    }
+
     fn stop_notifications_for_animation(&self, elem: &AXUIElement) {
-        for notif in WINDOW_ANIMATION_NOTIFICATIONS {
-            let res = self.observer.remove_notification(elem, notif);
+        for &kind in WINDOW_ANIMATION_NOTIFICATIONS {
+            let res = self.observer.remove_notification(elem, kind.name());
             if let Err(err) = res {
-                debug!(?notif, ?elem, "Removing notification failed with error {err}");
+                debug!(notif = kind.name(), ?elem, "Removing notification failed with error {err}");
             }
         }
     }
 
     fn restart_notifications_after_animation(&self, elem: &AXUIElement) {
-        for notif in WINDOW_ANIMATION_NOTIFICATIONS {
-            let res = self.observer.add_notification(elem, notif);
+        let hinted_wid = self.id(elem).ok();
+        for &kind in WINDOW_ANIMATION_NOTIFICATIONS {
+            let res = match hinted_wid {
+                Some(wid) => self.observer.add_notification_with_data(
+                    elem,
+                    kind.name(),
+                    encode_notification_data(kind, Some(wid)),
+                ),
+                None => self.observer.add_notification_with_data(
+                    elem,
+                    kind.name(),
+                    encode_notification_data(kind, None),
+                ),
+            };
             if let Err(err) = res {
-                debug!(?notif, ?elem, "Adding notification failed with error {err}");
+                debug!(notif = kind.name(), ?elem, "Adding notification failed with error {err}");
             }
         }
     }
@@ -1437,8 +1564,11 @@ fn app_thread_main(
         return;
     };
     let (notifications_tx, notifications_rx) = actor::channel();
-    let observer =
-        observer.install(move |elem, notif| _ = notifications_tx.send((elem, notif.to_owned())));
+    let observer = observer.install(move |elem, data| {
+        if let Some((notif, wid)) = decode_notification_data(pid, data) {
+            _ = notifications_tx.send((elem, notif, wid));
+        }
+    });
 
     let (raises_tx, raises_rx) = actor::channel();
     let state = State {
