@@ -973,6 +973,10 @@ impl LayoutSystem for ScrollingLayoutSystem {
     }
 
     fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId) {
+        let niri_navigation = matches!(
+            self.settings.focus_navigation_style,
+            ScrollingFocusNavigationStyle::Niri
+        );
         let Some(state) = self.layout_state_mut(layout) else {
             return;
         };
@@ -982,6 +986,9 @@ impl LayoutSystem for ScrollingLayoutSystem {
             state.insert_column_after(0, wid);
         } else {
             state.insert_column_at_end(wid);
+        }
+        if niri_navigation {
+            state.reveal_selected_without_direction();
         }
     }
 
@@ -1019,6 +1026,10 @@ impl LayoutSystem for ScrollingLayoutSystem {
     }
 
     fn set_windows_for_app(&mut self, layout: LayoutId, pid: pid_t, desired: Vec<WindowId>) {
+        let niri_navigation = matches!(
+            self.settings.focus_navigation_style,
+            ScrollingFocusNavigationStyle::Niri
+        );
         let Some(state) = self.layout_state_mut(layout) else {
             return;
         };
@@ -1054,6 +1065,9 @@ impl LayoutSystem for ScrollingLayoutSystem {
                 }
                 (None, None) => break,
             }
+        }
+        if niri_navigation {
+            state.reveal_selected_without_direction();
         }
     }
 
@@ -1243,12 +1257,20 @@ impl LayoutSystem for ScrollingLayoutSystem {
         from_layout: LayoutId,
         to_layout: LayoutId,
     ) {
+        let niri_navigation = matches!(
+            self.settings.focus_navigation_style,
+            ScrollingFocusNavigationStyle::Niri
+        );
         let Some(selected) = self.selected_window(from_layout) else {
             return;
         };
         if let Some(state) = self.layout_state_mut(from_layout) {
             state.remove_window(selected);
-            state.align_scroll_to_selected();
+            if niri_navigation {
+                state.reveal_selected_without_direction();
+            } else {
+                state.align_scroll_to_selected();
+            }
         }
         if let Some(state) = self.layout_state_mut(to_layout) {
             if let Some((col_idx, _)) = state.selected_location() {
@@ -1256,7 +1278,11 @@ impl LayoutSystem for ScrollingLayoutSystem {
             } else {
                 state.insert_column_at_end(selected);
             }
-            state.align_scroll_to_selected();
+            if niri_navigation {
+                state.reveal_selected_without_direction();
+            } else {
+                state.align_scroll_to_selected();
+            }
         }
     }
 
@@ -1405,6 +1431,10 @@ impl LayoutSystem for ScrollingLayoutSystem {
     }
 
     fn unjoin_selection(&mut self, layout: LayoutId) {
+        let niri_navigation = matches!(
+            self.settings.focus_navigation_style,
+            ScrollingFocusNavigationStyle::Niri
+        );
         let Some(state) = self.layout_state_mut(layout) else {
             return;
         };
@@ -1425,7 +1455,11 @@ impl LayoutSystem for ScrollingLayoutSystem {
             height_weights: vec![weight],
         });
         state.selected = Some(wid);
-        state.align_scroll_to_selected();
+        if niri_navigation {
+            state.reveal_selected_without_direction();
+        } else {
+            state.align_scroll_to_selected();
+        }
         state.clamp_scroll_offset();
     }
 
@@ -2167,5 +2201,42 @@ mod tests {
                 .abs()
                 < 2.0
         );
+    }
+
+    #[test]
+    fn niri_new_window_reveal_does_not_unnecessarily_push_offscreen() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.alignment = crate::common::config::ScrollingAlignment::Center;
+        settings.focus_navigation_style =
+            crate::common::config::ScrollingFocusNavigationStyle::Niri;
+        settings.column_width_ratio = 0.4;
+        let mut system = ScrollingLayoutSystem::new(&settings);
+        let layout = system.create_layout();
+        let w1 = wid(1, 1);
+        let w2 = wid(1, 2);
+
+        // Add first window
+        system.add_window_after_selection(layout, w1);
+        let screen = screen(1000.0, 800.0);
+        let gaps = GapSettings::default();
+        let _ = render(&system, layout, screen, &gaps);
+        assert_eq!(scroll_offset(&system, layout), 0.0);
+
+        // Add second window
+        system.add_window_after_selection(layout, w2);
+        let frames = render(&system, layout, screen, &gaps);
+        let offset = scroll_offset(&system, layout);
+
+        // Both windows fit on screen (0.4 * 1000 = 400 width each, total 800 width < 1000 screen width).
+        // Since we are in Niri mode, adding a new window w2 to the right of w1
+        // should reveal it, but since w2 already fits fully on screen at offset 0.0
+        // (starts at 400.0, ends at 800.0), the scroll offset should remain 0.0,
+        // keeping both windows on screen!
+        assert_eq!(offset, 0.0);
+
+        let w1_frame = frame_for(&frames, w1);
+        let w2_frame = frame_for(&frames, w2);
+        assert!(w1_frame.origin.x >= 0.0);
+        assert!(w2_frame.origin.x + w2_frame.size.width <= 1000.0);
     }
 }
