@@ -1742,6 +1742,15 @@ impl Reactor {
                     .workspace_for_window(space, wid)
                     .or_else(|| self.layout_manager.layout_engine.active_workspace(space))
                 {
+                    // Drop any floating position stored under the source workspace before
+                    // recording the new one. Otherwise the origin display's layout pass keeps
+                    // re-positioning the window (get_workspace_floating_positions only checks
+                    // is_floating, not current assignment) while the destination positions it
+                    // too - the window ping-pongs between displays after a cross-display drag.
+                    self.layout_manager
+                        .layout_engine
+                        .virtual_workspace_manager_mut()
+                        .remove_floating_position(wid);
                     self.layout_manager
                         .layout_engine
                         .virtual_workspace_manager_mut()

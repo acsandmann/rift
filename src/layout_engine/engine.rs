@@ -2407,6 +2407,14 @@ impl LayoutEngine {
         }
 
         if was_floating {
+            // Drop any floating position stored under the source workspace. The window has
+            // left that space, but get_workspace_floating_positions() during layout only
+            // checks is_floating() - not current assignment - so a stale source-space entry
+            // makes the source display keep re-positioning the window while the target display
+            // also positions it, producing a frame-change feedback loop (the window visibly
+            // ping-pongs between displays). Clearing it leaves the target layout pass as the
+            // sole authority, which centers the window on the destination screen.
+            self.virtual_workspace_manager.remove_floating_position(window_id);
             self.floating.add_active(target_space, window_id.pid, window_id);
             self.floating.set_last_focus(Some(window_id));
         } else if let Some(target_layout) =
