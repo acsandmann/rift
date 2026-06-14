@@ -1148,7 +1148,10 @@ impl LayoutSystem for ScrollingLayoutSystem {
 
                 // Distribute the "other" portion among non-resized windows,
                 // preserving their relative proportions.
-                let other_weight_sum: f64 = col.height_weights.iter().enumerate()
+                let other_weight_sum: f64 = col
+                    .height_weights
+                    .iter()
+                    .enumerate()
                     .filter(|&(i, _)| i != row_idx)
                     .map(|(_, &w)| w)
                     .sum();
@@ -1159,7 +1162,8 @@ impl LayoutSystem for ScrollingLayoutSystem {
                             col.height_weights[i] = new_resized_height;
                         } else {
                             // Scale each other window's weight so their sum equals new_other_total.
-                            col.height_weights[i] = new_other_total * (col.height_weights[i] / other_weight_sum);
+                            col.height_weights[i] =
+                                new_other_total * (col.height_weights[i] / other_weight_sum);
                         }
                     }
                 } else {
@@ -2157,6 +2161,11 @@ mod tests {
 
         assert!((f1_after.size.height - (f1_before.size.height + 100.0)).abs() < 2.0);
         assert!((f2_after.size.height - (f2_before.size.height - 100.0)).abs() < 2.0);
-        assert!((f1_after.size.height + f2_after.size.height - (f1_before.size.height + f2_before.size.height)).abs() < 2.0);
+        assert!(
+            (f1_after.size.height + f2_after.size.height
+                - (f1_before.size.height + f2_before.size.height))
+                .abs()
+                < 2.0
+        );
     }
 }
