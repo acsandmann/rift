@@ -82,9 +82,18 @@ const APP_NOTIFICATIONS: &[(AxNotificationKind, &str)] = &[
         AxNotificationKind::ApplicationDeactivated,
         kAXApplicationDeactivatedNotification,
     ),
-    (AxNotificationKind::ApplicationHidden, kAXApplicationHiddenNotification),
-    (AxNotificationKind::ApplicationShown, kAXApplicationShownNotification),
-    (AxNotificationKind::MainWindowChanged, kAXMainWindowChangedNotification),
+    (
+        AxNotificationKind::ApplicationHidden,
+        kAXApplicationHiddenNotification,
+    ),
+    (
+        AxNotificationKind::ApplicationShown,
+        kAXApplicationShownNotification,
+    ),
+    (
+        AxNotificationKind::MainWindowChanged,
+        kAXMainWindowChangedNotification,
+    ),
     (AxNotificationKind::WindowCreated, kAXWindowCreatedNotification),
     (AxNotificationKind::MenuOpened, kAXMenuOpenedNotification),
     (AxNotificationKind::MenuClosed, kAXMenuClosedNotification),
@@ -92,7 +101,10 @@ const APP_NOTIFICATIONS: &[(AxNotificationKind, &str)] = &[
 ];
 
 const WINDOW_NOTIFICATIONS: &[(AxNotificationKind, &str)] = &[
-    (AxNotificationKind::WindowDestroyed, kAXUIElementDestroyedNotification),
+    (
+        AxNotificationKind::WindowDestroyed,
+        kAXUIElementDestroyedNotification,
+    ),
     (AxNotificationKind::WindowMoved, kAXWindowMovedNotification),
     (AxNotificationKind::WindowResized, kAXWindowResizedNotification),
     (
@@ -1487,7 +1499,11 @@ impl State {
         for &kind in WINDOW_ANIMATION_NOTIFICATIONS {
             let res = self.observer.remove_notification(elem, kind.name());
             if let Err(err) = res {
-                debug!(notif = kind.name(), ?elem, "Removing notification failed with error {err}");
+                debug!(
+                    notif = kind.name(),
+                    ?elem,
+                    "Removing notification failed with error {err}"
+                );
             }
         }
     }
@@ -1508,7 +1524,11 @@ impl State {
                 ),
             };
             if let Err(err) = res {
-                debug!(notif = kind.name(), ?elem, "Adding notification failed with error {err}");
+                debug!(
+                    notif = kind.name(),
+                    ?elem,
+                    "Adding notification failed with error {err}"
+                );
             }
         }
     }

@@ -72,12 +72,7 @@ pub fn init(event: CGSEventType) -> i32 {
     let raw: u32 = event.into();
     let callback_ctx_ptr = (&mut **callback_ctx as *mut CallbackContext).cast::<c_void>();
     let res = unsafe {
-        SLSRegisterConnectionNotifyProc(
-            *G_CONNECTION,
-            connection_callback,
-            raw,
-            callback_ctx_ptr,
-        )
+        SLSRegisterConnectionNotifyProc(*G_CONNECTION, connection_callback, raw, callback_ctx_ptr)
     };
 
     if res == 0 {
