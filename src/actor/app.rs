@@ -398,29 +398,29 @@ impl State {
         }
 
         let initial_window_elements = self.app.windows().unwrap_or_default();
+        let server_info_by_id = self.visible_window_server_info_map(&initial_window_elements);
 
         let window_count = initial_window_elements.len() as usize;
         self.windows.reserve(window_count);
         let mut windows = Vec::with_capacity(window_count);
 
         let mut elements_with_ids = Vec::with_capacity(window_count);
-        let mut wsids = Vec::with_capacity(window_count);
         for elem in initial_window_elements.into_iter() {
             let wsid = WindowServerId::try_from(&elem).ok();
-            if let Some(id) = wsid {
-                wsids.push(id);
-            }
             elements_with_ids.push((elem, wsid));
         }
 
-        let window_server_info = window_server::get_windows(&wsids);
-        let mut server_info_by_id: HashMap<WindowServerId, WindowServerInfo> = HashMap::default();
-        for info in &window_server_info {
-            server_info_by_id.insert(info.id, *info);
-        }
+        let window_server_info: Vec<WindowServerInfo> = elements_with_ids
+            .iter()
+            .filter_map(|(_, wsid)| wsid.and_then(|id| server_info_by_id.get(&id).copied()))
+            .collect();
 
         for (elem, wsid) in elements_with_ids {
             let hint = wsid.and_then(|id| server_info_by_id.get(&id).copied());
+            if !Self::has_visible_cg_peer(wsid, hint) {
+                trace!(pid = ?self.pid, ?wsid, "Ignoring AX window without a visible CG window");
+                continue;
+            }
             let Some((info, wid, _)) = self.register_window(elem, hint) else {
                 continue;
             };
@@ -486,14 +486,21 @@ impl State {
                         return Err(e);
                     }
                 };
+                let server_info_by_id = self.visible_window_server_info_map(&window_elems);
                 let mut new = Vec::with_capacity(window_elems.len() as usize);
                 let mut known_visible = Vec::with_capacity(window_elems.len() as usize);
                 for elem in window_elems.iter() {
                     let elem = elem.clone();
+                    let wsid = WindowServerId::try_from(&elem).ok();
+                    let hint = wsid.and_then(|id| server_info_by_id.get(&id).copied());
+                    if !Self::has_visible_cg_peer(wsid, hint) {
+                        trace!(pid = ?self.pid, ?wsid, "Ignoring AX window without a visible CG window");
+                        continue;
+                    }
                     if let Ok(id) = self.id(&elem) {
-                        known_visible.push(id);
-                        match WindowInfo::from_ax_element(&elem, None) {
+                        match WindowInfo::from_ax_element(&elem, hint) {
                             Ok((info, _)) => {
+                                known_visible.push(id);
                                 new.push((id, info));
                             }
                             Err(err) => {
@@ -506,7 +513,7 @@ impl State {
                         }
                         continue;
                     }
-                    let Some((info, wid, _)) = self.register_window(elem, None) else {
+                    let Some((info, wid, _)) = self.register_window(elem, hint) else {
                         continue;
                     };
                     new.push((wid, info));
@@ -1139,6 +1146,10 @@ impl State {
         else {
             return None;
         };
+        if !Self::has_visible_cg_peer(info.sys_id, server_info) && !info.is_minimized {
+            trace!(pid = ?self.pid, sys_id = ?info.sys_id, "Ignoring AX window without a visible CG window");
+            return None;
+        }
 
         let bundle_is_widget = info.bundle_id.as_deref().map_or(false, |id| {
             let id_lower = id.to_ascii_lowercase();
@@ -1238,6 +1249,26 @@ impl State {
             }
             true
         }
+    }
+
+    fn visible_window_server_info_map(
+        &self,
+        window_elements: &[AXUIElement],
+    ) -> HashMap<WindowServerId, WindowServerInfo> {
+        let wsids: Vec<WindowServerId> = window_elements
+            .iter()
+            .filter_map(|elem| WindowServerId::try_from(elem).ok())
+            .collect();
+        let mut info_by_id = HashMap::default();
+        for info in window_server::get_windows(&wsids) {
+            info_by_id.insert(info.id, info);
+        }
+        info_by_id
+    }
+
+    #[inline]
+    fn has_visible_cg_peer(wsid: Option<WindowServerId>, hint: Option<WindowServerInfo>) -> bool {
+        wsid.is_none() || hint.is_some()
     }
 
     fn handle_ax_error(&mut self, wid: WindowId, err: &AXError) -> bool {
