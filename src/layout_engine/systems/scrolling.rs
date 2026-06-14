@@ -630,7 +630,11 @@ impl LayoutSystem for ScrollingLayoutSystem {
         let mut column_widths = Vec::with_capacity(state.columns.len());
         let mut column_ratios = Vec::with_capacity(state.columns.len());
         for col in state.columns.iter() {
-            let ratio = self.clamp_ratio(base_ratio + col.width_offset);
+            let ratio = if state.columns.len() == 1 {
+                1.0
+            } else {
+                self.clamp_ratio(base_ratio + col.width_offset)
+            };
             let base_width = (tiling.size.width * ratio).max(1.0);
             let mut min_w: f64 = 1.0;
             let mut fixed_w: Option<f64> = None;
@@ -697,12 +701,32 @@ impl LayoutSystem for ScrollingLayoutSystem {
             tiling.origin.x
         } else {
             match self.settings.alignment {
-                crate::common::config::ScrollingAlignment::Left => tiling.origin.x,
+                crate::common::config::ScrollingAlignment::Left => {
+                    if !niri_navigation && state.center_override_window.is_none() && state.columns.len() > 1 && selected_col_idx == state.columns.len() - 1 {
+                        tiling.origin.x + tiling.size.width - selected_width
+                    } else {
+                        tiling.origin.x
+                    }
+                }
                 crate::common::config::ScrollingAlignment::Center => {
-                    tiling.origin.x + (tiling.size.width - selected_width) / 2.0
+                    if !niri_navigation && state.center_override_window.is_none() && state.columns.len() > 1 {
+                        if selected_col_idx == 0 {
+                            tiling.origin.x
+                        } else if selected_col_idx == state.columns.len() - 1 {
+                            tiling.origin.x + tiling.size.width - selected_width
+                        } else {
+                            tiling.origin.x + (tiling.size.width - selected_width) / 2.0
+                        }
+                    } else {
+                        tiling.origin.x + (tiling.size.width - selected_width) / 2.0
+                    }
                 }
                 crate::common::config::ScrollingAlignment::Right => {
-                    tiling.origin.x + tiling.size.width - selected_width
+                    if !niri_navigation && state.center_override_window.is_none() && state.columns.len() > 1 && selected_col_idx == 0 {
+                        tiling.origin.x
+                    } else {
+                        tiling.origin.x + tiling.size.width - selected_width
+                    }
                 }
             }
         };
@@ -2238,5 +2262,130 @@ mod tests {
         let w2_frame = frame_for(&frames, w2);
         assert!(w1_frame.origin.x >= 0.0);
         assert!(w2_frame.origin.x + w2_frame.size.width <= 1000.0);
+    }
+
+    #[test]
+    fn anchored_alignments_adjust_outer_columns() {
+        let screen = screen(1000.0, 800.0);
+        let gaps = GapSettings::default();
+
+        // Test Left Alignment: last column is anchored to the right.
+        {
+            let mut settings = ScrollingLayoutSettings::default();
+            settings.alignment = crate::common::config::ScrollingAlignment::Left;
+            settings.focus_navigation_style =
+                crate::common::config::ScrollingFocusNavigationStyle::Anchored;
+            settings.column_width_ratio = 0.4;
+            let mut system = ScrollingLayoutSystem::new(&settings);
+            let layout = system.create_layout();
+            let w1 = wid(1, 1);
+            let w2 = wid(1, 2);
+            let w3 = wid(1, 3);
+            system.add_window_after_selection(layout, w1);
+            system.add_window_after_selection(layout, w2);
+            system.add_window_after_selection(layout, w3);
+
+            assert!(system.select_window(layout, w1));
+            let w1_frame = frame_for(&render(&system, layout, screen, &gaps), w1);
+            assert!((w1_frame.origin.x - 0.0).abs() < 1.0); // left-aligned
+
+            assert!(system.select_window(layout, w2));
+            let w2_frame = frame_for(&render(&system, layout, screen, &gaps), w2);
+            assert!((w2_frame.origin.x - 0.0).abs() < 1.0); // left-aligned
+
+            assert!(system.select_window(layout, w3));
+            let w3_frame = frame_for(&render(&system, layout, screen, &gaps), w3);
+            assert!((w3_frame.origin.x - 600.0).abs() < 1.0); // right-aligned
+        }
+
+        // Test Right Alignment: first column is anchored to the left.
+        {
+            let mut settings = ScrollingLayoutSettings::default();
+            settings.alignment = crate::common::config::ScrollingAlignment::Right;
+            settings.focus_navigation_style =
+                crate::common::config::ScrollingFocusNavigationStyle::Anchored;
+            settings.column_width_ratio = 0.4;
+            let mut system = ScrollingLayoutSystem::new(&settings);
+            let layout = system.create_layout();
+            let w1 = wid(1, 1);
+            let w2 = wid(1, 2);
+            let w3 = wid(1, 3);
+            system.add_window_after_selection(layout, w1);
+            system.add_window_after_selection(layout, w2);
+            system.add_window_after_selection(layout, w3);
+
+            assert!(system.select_window(layout, w1));
+            let w1_frame = frame_for(&render(&system, layout, screen, &gaps), w1);
+            assert!((w1_frame.origin.x - 0.0).abs() < 1.0); // left-aligned
+
+            assert!(system.select_window(layout, w2));
+            let w2_frame = frame_for(&render(&system, layout, screen, &gaps), w2);
+            assert!((w2_frame.origin.x - 600.0).abs() < 1.0); // right-aligned
+
+            assert!(system.select_window(layout, w3));
+            let w3_frame = frame_for(&render(&system, layout, screen, &gaps), w3);
+            assert!((w3_frame.origin.x - 600.0).abs() < 1.0); // right-aligned
+        }
+
+        // Test Center Alignment: first column is left-anchored, last is right-anchored, middle is centered.
+        {
+            let mut settings = ScrollingLayoutSettings::default();
+            settings.alignment = crate::common::config::ScrollingAlignment::Center;
+            settings.focus_navigation_style =
+                crate::common::config::ScrollingFocusNavigationStyle::Anchored;
+            settings.column_width_ratio = 0.4;
+            let mut system = ScrollingLayoutSystem::new(&settings);
+            let layout = system.create_layout();
+            let w1 = wid(1, 1);
+            let w2 = wid(1, 2);
+            let w3 = wid(1, 3);
+            system.add_window_after_selection(layout, w1);
+            system.add_window_after_selection(layout, w2);
+            system.add_window_after_selection(layout, w3);
+
+            assert!(system.select_window(layout, w1));
+            let w1_frame = frame_for(&render(&system, layout, screen, &gaps), w1);
+            assert!((w1_frame.origin.x - 0.0).abs() < 1.0); // left-aligned
+
+            assert!(system.select_window(layout, w2));
+            let w2_frame = frame_for(&render(&system, layout, screen, &gaps), w2);
+            assert!((w2_frame.origin.x - 300.0).abs() < 1.0); // centered
+
+            assert!(system.select_window(layout, w3));
+            let w3_frame = frame_for(&render(&system, layout, screen, &gaps), w3);
+            assert!((w3_frame.origin.x - 600.0).abs() < 1.0); // right-aligned
+        }
+    }
+
+    #[test]
+    fn single_column_fills_full_width() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.column_width_ratio = 0.4;
+        let mut system = ScrollingLayoutSystem::new(&settings);
+        let layout = system.create_layout();
+        let w1 = wid(1, 1);
+
+        system.add_window_after_selection(layout, w1);
+
+        let screen = screen(1000.0, 800.0);
+        let gaps = GapSettings::default();
+        let frames1 = render(&system, layout, screen, &gaps);
+        let w1_frame1 = frame_for(&frames1, w1);
+
+        // With only 1 column, width should be 100% of tiling width (1000.0)
+        assert!((w1_frame1.size.width - 1000.0).abs() < 1.0);
+        assert!((w1_frame1.origin.x - 0.0).abs() < 1.0);
+
+        // Add a second window (w2)
+        let w2 = wid(1, 2);
+        system.add_window_after_selection(layout, w2);
+
+        let frames2 = render(&system, layout, screen, &gaps);
+        let w1_frame2 = frame_for(&frames2, w1);
+        let w2_frame2 = frame_for(&frames2, w2);
+
+        // With 2 columns, they should respect the configured column_width_ratio (0.4 * 1000 = 400.0)
+        assert!((w1_frame2.size.width - 400.0).abs() < 1.0);
+        assert!((w2_frame2.size.width - 400.0).abs() < 1.0);
     }
 }
