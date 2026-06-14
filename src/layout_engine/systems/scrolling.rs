@@ -702,14 +702,21 @@ impl LayoutSystem for ScrollingLayoutSystem {
         } else {
             match self.settings.alignment {
                 crate::common::config::ScrollingAlignment::Left => {
-                    if !niri_navigation && state.center_override_window.is_none() && state.columns.len() > 1 && selected_col_idx == state.columns.len() - 1 {
+                    if !niri_navigation
+                        && state.center_override_window.is_none()
+                        && state.columns.len() > 1
+                        && selected_col_idx == state.columns.len() - 1
+                    {
                         tiling.origin.x + tiling.size.width - selected_width
                     } else {
                         tiling.origin.x
                     }
                 }
                 crate::common::config::ScrollingAlignment::Center => {
-                    if !niri_navigation && state.center_override_window.is_none() && state.columns.len() > 1 {
+                    if !niri_navigation
+                        && state.center_override_window.is_none()
+                        && state.columns.len() > 1
+                    {
                         if selected_col_idx == 0 {
                             tiling.origin.x
                         } else if selected_col_idx == state.columns.len() - 1 {
@@ -722,7 +729,11 @@ impl LayoutSystem for ScrollingLayoutSystem {
                     }
                 }
                 crate::common::config::ScrollingAlignment::Right => {
-                    if !niri_navigation && state.center_override_window.is_none() && state.columns.len() > 1 && selected_col_idx == 0 {
+                    if !niri_navigation
+                        && state.center_override_window.is_none()
+                        && state.columns.len() > 1
+                        && selected_col_idx == 0
+                    {
                         tiling.origin.x
                     } else {
                         tiling.origin.x + tiling.size.width - selected_width
