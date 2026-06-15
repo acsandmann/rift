@@ -40,8 +40,10 @@ impl AppEventHandler {
     pub fn handle_resync_app_for_window(reactor: &mut Reactor, wsid: WindowServerId) {
         if let Some(wid) = reactor.window_manager.tracked_window_id(wsid) {
             request_visible_windows(reactor, wid.pid);
-        } else if let Some(info) =
-            reactor.window_manager.get_window_server_info(wsid).or_else(|| window_server::get_window(wsid))
+        } else if let Some(info) = reactor
+            .window_manager
+            .get_window_server_info(wsid)
+            .or_else(|| window_server::get_window(wsid))
         {
             request_visible_windows(reactor, info.pid);
         }

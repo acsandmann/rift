@@ -1711,7 +1711,10 @@ fn unfullscreen_restores_window_tracking() {
             saw_get_visible_windows = true;
         }
     }
-    assert!(saw_get_visible_windows, "Should send GetVisibleWindows to app on unfullscreen");
+    assert!(
+        saw_get_visible_windows,
+        "Should send GetVisibleWindows to app on unfullscreen"
+    );
 
     // The fullscreen track should be removed.
     assert!(

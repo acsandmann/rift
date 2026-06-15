@@ -1272,10 +1272,7 @@ impl Reactor {
                 .fullscreen_by_space
                 .iter()
                 .filter(|(_, track)| {
-                    track
-                        .windows
-                        .iter()
-                        .any(|w| w.last_known_user_space == Some(space))
+                    track.windows.iter().any(|w| w.last_known_user_space == Some(space))
                 })
                 .map(|(&key, _)| key)
                 .collect();
@@ -1340,9 +1337,10 @@ impl Reactor {
 
     pub(crate) fn has_fullscreen_windows_for_spaces(&self, spaces: &[Option<SpaceId>]) -> bool {
         spaces.iter().flatten().any(|space| {
-            self.space_manager.fullscreen_by_space.values().any(|track| {
-                track.windows.iter().any(|w| w.last_known_user_space == Some(*space))
-            })
+            self.space_manager
+                .fullscreen_by_space
+                .values()
+                .any(|track| track.windows.iter().any(|w| w.last_known_user_space == Some(*space)))
         })
     }
 
@@ -1654,8 +1652,7 @@ impl Reactor {
         let needs_new_session =
             self.get_active_drag_session().map_or(true, |session| session.window != wid);
         if needs_new_session {
-            let server_id =
-                self.window_manager.window(wid).and_then(|window| window.info.sys_id);
+            let server_id = self.window_manager.window(wid).and_then(|window| window.info.sys_id);
             let origin_space = self.best_space_for_window(frame, server_id);
             let session = DragSession {
                 window: wid,
@@ -1695,7 +1692,8 @@ impl Reactor {
     }
 
     fn resolve_drag_space(&self, session: &DragSession, frame: &CGRect) -> Option<SpaceId> {
-        let server_id = self.window_manager.window(session.window).and_then(|window| window.info.sys_id);
+        let server_id =
+            self.window_manager.window(session.window).and_then(|window| window.info.sys_id);
         if frame.area() <= 0.0 {
             return session.settled_space.or_else(|| self.best_space_for_window(frame, server_id));
         }
@@ -1792,9 +1790,9 @@ impl Reactor {
     }
 
     fn has_visible_window_server_ids_for_pid(&self, pid: pid_t) -> bool {
-        self.window_manager
-            .iter_visible_window_server_ids()
-            .any(|wsid| self.window_manager.tracked_window_id(wsid).is_some_and(|wid| wid.pid == pid))
+        self.window_manager.iter_visible_window_server_ids().any(|wsid| {
+            self.window_manager.tracked_window_id(wsid).is_some_and(|wid| wid.pid == pid)
+        })
     }
 
     pub fn warp_mouse(&mut self, point: CGPoint) {

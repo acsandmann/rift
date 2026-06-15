@@ -444,8 +444,7 @@ impl Reactor {
             .apps
             .iter()
             .map(|(&pid, app)| {
-                let window_count =
-                    self.window_manager.window_ids_for_pid(pid).count();
+                let window_count = self.window_manager.window_ids_for_pid(pid).count();
 
                 let is_frontmost = self
                     .main_window_tracker

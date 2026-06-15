@@ -12,10 +12,10 @@ use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{LayoutMode, LayoutSettings, VirtualWorkspaceSettings};
 use crate::layout_engine::LayoutSystem;
 use crate::layout_engine::systems::WindowLayoutConstraints;
+use crate::model::WindowRegistryHandle;
 use crate::model::virtual_workspace::{
     AppRuleAssignment, AppRuleResult, VirtualWorkspace, VirtualWorkspaceId, VirtualWorkspaceManager,
 };
-use crate::model::WindowRegistryHandle;
 use crate::sys::screen::SpaceId;
 
 #[derive(Debug, Clone)]

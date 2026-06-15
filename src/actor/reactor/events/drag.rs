@@ -18,8 +18,7 @@ impl DragEventHandler {
 
             let windows_exist = {
                 let registry = reactor.window_manager.as_ref();
-                registry.contains_window(dragged_wid)
-                    && registry.contains_window(target_wid)
+                registry.contains_window(dragged_wid) && registry.contains_window(target_wid)
             };
             if !windows_exist {
                 trace!(

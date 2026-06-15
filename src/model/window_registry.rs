@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::actor::app::WindowId;
 use crate::common::collections::HashMap;
-use crate::model::reactor::WindowState;
 use crate::model::VirtualWorkspaceId;
+use crate::model::reactor::WindowState;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 
@@ -52,18 +52,16 @@ impl WindowRegistry {
         self.windows.entry(window_id).or_default().state = Some(window);
     }
 
-    pub fn contains_window(&self, window_id: WindowId) -> bool {
-        self.window(window_id).is_some()
-    }
+    pub fn contains_window(&self, window_id: WindowId) -> bool { self.window(window_id).is_some() }
 
     pub fn tracked_window_count(&self) -> usize {
         self.windows.values().filter(|record| record.state.is_some()).count()
     }
 
     pub(crate) fn iter_windows(&self) -> impl Iterator<Item = (WindowId, &WindowState)> + '_ {
-        self.windows
-            .iter()
-            .filter_map(|(&window_id, record)| record.state.as_ref().map(|state| (window_id, state)))
+        self.windows.iter().filter_map(|(&window_id, record)| {
+            record.state.as_ref().map(|state| (window_id, state))
+        })
     }
 
     pub fn window_ids_for_pid(&self, pid: i32) -> impl Iterator<Item = WindowId> + '_ {
@@ -256,10 +254,7 @@ impl WindowRegistry {
             .unwrap_or_default()
     }
 
-    pub fn remove_window_assignment(
-        &mut self,
-        window_id: WindowId,
-    ) -> Option<WindowWorkspaceInfo> {
+    pub fn remove_window_assignment(&mut self, window_id: WindowId) -> Option<WindowWorkspaceInfo> {
         let old = self.windows.get_mut(&window_id).and_then(|record| record.workspace.take());
         self.prune_window_record(window_id);
         old
@@ -310,12 +305,8 @@ impl WindowRegistry {
     }
 
     pub fn remove_windows_for_app(&mut self, pid: i32) {
-        let window_ids: Vec<_> = self
-            .windows
-            .keys()
-            .copied()
-            .filter(|window_id| window_id.pid == pid)
-            .collect();
+        let window_ids: Vec<_> =
+            self.windows.keys().copied().filter(|window_id| window_id.pid == pid).collect();
         for window_id in window_ids {
             self.remove_window(window_id);
         }
@@ -324,9 +315,9 @@ impl WindowRegistry {
     pub fn iter_workspace_assignments(
         &self,
     ) -> impl Iterator<Item = (WindowId, WindowWorkspaceInfo)> + '_ {
-        self.windows
-            .iter()
-            .filter_map(|(&window_id, record)| record.workspace.map(|workspace| (window_id, workspace)))
+        self.windows.iter().filter_map(|(&window_id, record)| {
+            record.workspace.map(|workspace| (window_id, workspace))
+        })
     }
 
     pub fn workspace_assignment_count(&self) -> usize {

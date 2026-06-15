@@ -18,8 +18,8 @@ use crate::actor::{
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{LayoutMode, WindowSnappingSettings};
 use crate::layout_engine::LayoutEngine;
-use crate::sys::screen::SpaceId;
 use crate::model::WindowRegistry;
+use crate::sys::screen::SpaceId;
 
 /// Manages window state and lifecycle
 pub type WindowManager = Box<WindowRegistry>;
@@ -30,11 +30,7 @@ pub struct AppManager {
 }
 
 impl AppManager {
-    pub fn new() -> Self {
-        AppManager {
-            apps: HashMap::default(),
-        }
-    }
+    pub fn new() -> Self { AppManager { apps: HashMap::default() } }
 }
 
 /// Manages space and screen state
@@ -387,7 +383,6 @@ impl LayoutManager {
         Ok(any_frame_changed)
     }
 }
-
 
 /// Manages pending space changes
 pub struct PendingSpaceChangeManager {
