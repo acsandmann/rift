@@ -395,6 +395,60 @@ fn workspace_switch_batches_all_windows_with_eui_enabled() {
 }
 
 #[test]
+fn auto_workspace_switch_focuses_activated_window_not_stale_workspace_focus() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let (raise_manager_tx, mut raise_manager_rx) = actor::channel();
+    reactor.communication_manager.raise_manager_tx = raise_manager_tx;
+
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let stale_focus = WindowId::new(1, 1);
+    let activated = WindowId::new(2, 1);
+
+    reactor.handle_event(screen_params_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    reactor.handle_events(apps.make_app(2, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, stale_focus));
+    reactor.handle_event(Event::Command(Command::Layout(
+        LayoutCommand::MoveWindowToWorkspace { workspace: 1, window_id: None },
+    )));
+    apps.simulate_until_quiet(&mut reactor);
+
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, activated));
+    reactor.handle_event(Event::Command(Command::Layout(
+        LayoutCommand::MoveWindowToWorkspace { workspace: 1, window_id: None },
+    )));
+    apps.simulate_until_quiet(&mut reactor);
+
+    reactor.handle_event(Event::Command(Command::Layout(
+        LayoutCommand::SwitchToWorkspace(1),
+    )));
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, stale_focus));
+    reactor.handle_event(Event::Command(Command::Layout(
+        LayoutCommand::SwitchToWorkspace(0),
+    )));
+    while raise_manager_rx.try_recv().is_ok() {}
+
+    reactor.maybe_auto_switch_to_window_workspace(activated.pid, activated, space);
+
+    let msg = raise_manager_rx.try_recv().expect("Should have sent an event").1;
+    match msg {
+        raise_manager::Event::RaiseRequest(RaiseRequest { focus_window, focus_quiet, .. }) => {
+            assert_eq!(focus_window.map(|(wid, _)| wid), Some(activated));
+            assert_eq!(focus_quiet, Quiet::Yes);
+        }
+        _ => panic!("Unexpected event: {msg:?}"),
+    }
+}
+
+#[test]
 fn windows_discovered_does_not_reintroduce_inactive_workspace_window() {
     let mut apps = Apps::new();
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(

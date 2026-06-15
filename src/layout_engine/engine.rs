@@ -489,14 +489,21 @@ impl LayoutEngine {
         &mut self,
         space: SpaceId,
         workspace_id: VirtualWorkspaceId,
+        preferred_focus_window: Option<WindowId>,
     ) -> EventResponse {
-        let mut focus_window = self
-            .virtual_workspace_manager
-            .last_focused_window(space, workspace_id)
-            .filter(|wid| {
-                self.virtual_workspace_manager.workspace_for_window(space, *wid)
-                    == Some(workspace_id)
-            });
+        let mut focus_window = preferred_focus_window.filter(|wid| {
+            self.virtual_workspace_manager.workspace_for_window(space, *wid) == Some(workspace_id)
+        });
+
+        if focus_window.is_none() {
+            focus_window = self
+                .virtual_workspace_manager
+                .last_focused_window(space, workspace_id)
+                .filter(|wid| {
+                    self.virtual_workspace_manager.workspace_for_window(space, *wid)
+                        == Some(workspace_id)
+                });
+        }
 
         if focus_window.is_none() {
             if let Some(layout) = self.workspace_layouts.active(space, workspace_id) {
@@ -544,6 +551,43 @@ impl LayoutEngine {
             raise_windows: vec![],
             boundary_hit: None,
         }
+    }
+
+    fn switch_to_workspace(
+        &mut self,
+        space: SpaceId,
+        workspace_index: usize,
+        preferred_focus_window: Option<WindowId>,
+    ) -> EventResponse {
+        let workspaces = self.virtual_workspace_manager_mut().list_workspaces(space);
+        if let Some((workspace_id, _)) = workspaces.get(workspace_index) {
+            let workspace_id = *workspace_id;
+            if self.virtual_workspace_manager.active_workspace(space) == Some(workspace_id) {
+                // Check if workspace_auto_back_and_forth is enabled
+                if self.virtual_workspace_manager.workspace_auto_back_and_forth() {
+                    // Switch to last workspace instead
+                    if let Some(last_workspace) =
+                        self.virtual_workspace_manager.last_workspace(space)
+                    {
+                        self.virtual_workspace_manager.set_active_workspace(space, last_workspace);
+                        self.update_active_floating_windows(space);
+                        self.broadcast_workspace_changed(space);
+                        self.broadcast_windows_changed(space);
+                        return self.refocus_workspace(space, last_workspace, None);
+                    }
+                }
+                return EventResponse::default();
+            }
+            self.virtual_workspace_manager.set_active_workspace(space, workspace_id);
+
+            self.update_active_floating_windows(space);
+
+            self.broadcast_workspace_changed(space);
+            self.broadcast_windows_changed(space);
+
+            return self.refocus_workspace(space, workspace_id, preferred_focus_window);
+        }
+        EventResponse::default()
     }
 
     fn filter_active_workspace_windows(
@@ -2055,7 +2099,7 @@ impl LayoutEngine {
                         self.broadcast_workspace_changed(space);
                         self.broadcast_windows_changed(space);
 
-                        return self.refocus_workspace(space, next_workspace);
+                        return self.refocus_workspace(space, next_workspace, None);
                     }
                 }
                 EventResponse::default()
@@ -2076,43 +2120,13 @@ impl LayoutEngine {
                         self.broadcast_workspace_changed(space);
                         self.broadcast_windows_changed(space);
 
-                        return self.refocus_workspace(space, prev_workspace);
+                        return self.refocus_workspace(space, prev_workspace, None);
                     }
                 }
                 EventResponse::default()
             }
             LayoutCommand::SwitchToWorkspace(workspace_index) => {
-                let workspaces = self.virtual_workspace_manager_mut().list_workspaces(space);
-                if let Some((workspace_id, _)) = workspaces.get(*workspace_index) {
-                    let workspace_id = *workspace_id;
-                    if self.virtual_workspace_manager.active_workspace(space) == Some(workspace_id)
-                    {
-                        // Check if workspace_auto_back_and_forth is enabled
-                        if self.virtual_workspace_manager.workspace_auto_back_and_forth() {
-                            // Switch to last workspace instead
-                            if let Some(last_workspace) =
-                                self.virtual_workspace_manager.last_workspace(space)
-                            {
-                                self.virtual_workspace_manager
-                                    .set_active_workspace(space, last_workspace);
-                                self.update_active_floating_windows(space);
-                                self.broadcast_workspace_changed(space);
-                                self.broadcast_windows_changed(space);
-                                return self.refocus_workspace(space, last_workspace);
-                            }
-                        }
-                        return EventResponse::default();
-                    }
-                    self.virtual_workspace_manager.set_active_workspace(space, workspace_id);
-
-                    self.update_active_floating_windows(space);
-
-                    self.broadcast_workspace_changed(space);
-                    self.broadcast_windows_changed(space);
-
-                    return self.refocus_workspace(space, workspace_id);
-                }
-                EventResponse::default()
+                self.switch_to_workspace(space, *workspace_index, None)
             }
             LayoutCommand::MoveWindowToWorkspace {
                 workspace: workspace_index,
@@ -2248,7 +2262,7 @@ impl LayoutEngine {
                     self.broadcast_workspace_changed(space);
                     self.broadcast_windows_changed(space);
 
-                    return self.refocus_workspace(space, last_workspace);
+                    return self.refocus_workspace(space, last_workspace, None);
                 }
                 EventResponse::default()
             }
@@ -2283,6 +2297,15 @@ impl LayoutEngine {
             }
             _ => EventResponse::default(),
         }
+    }
+
+    pub fn switch_to_workspace_with_focus(
+        &mut self,
+        space: SpaceId,
+        workspace_index: usize,
+        focus_window: WindowId,
+    ) -> EventResponse {
+        self.switch_to_workspace(space, workspace_index, Some(focus_window))
     }
 
     pub fn virtual_workspace_manager(&self) -> &VirtualWorkspaceManager {

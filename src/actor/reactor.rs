@@ -2280,9 +2280,10 @@ impl Reactor {
                 self.workspace_switch_manager
                     .start_workspace_switch(WorkspaceSwitchOrigin::Auto);
 
-                let response = self.layout_manager.layout_engine.handle_virtual_workspace_command(
+                let response = self.layout_manager.layout_engine.switch_to_workspace_with_focus(
                     window_space,
-                    &layout::LayoutCommand::SwitchToWorkspace(workspace_index),
+                    workspace_index,
+                    app_window_id,
                 );
                 self.handle_layout_response(response, Some(window_space));
                 self.update_event_tap_layout_mode();
