@@ -370,11 +370,13 @@ struct State {
     observer: Observer,
     events_tx: reactor::Sender,
     windows: HashMap<WindowId, AppWindowState>,
+    elem_to_wid: HashMap<AXUIElement, WindowId>,
     last_window_idx: u32,
     main_window: Option<WindowId>,
     last_activated: Option<(Instant, Quiet, Option<WindowId>, r#continue::Sender<()>)>,
     is_hidden: bool,
     is_frontmost: bool,
+    active_animation_count: usize,
     raises_tx: actor::Sender<RaiseRequest>,
     tx_store: Option<WindowTxStore>,
 }
@@ -388,6 +390,64 @@ struct AppWindowState {
 }
 
 impl State {
+    fn refresh_visible_windows(&mut self) -> Result<(), AxError> {
+        let window_elems = match self.app.windows() {
+            Ok(elems) => elems,
+            Err(e) => {
+                self.send_event(Event::WindowsDiscovered {
+                    pid: self.pid,
+                    new: Default::default(),
+                    known_visible: Default::default(),
+                });
+                return Err(e);
+            }
+        };
+        let server_info_by_id = self.visible_window_server_info_map(&window_elems);
+        let mut new = Vec::with_capacity(window_elems.len());
+        let mut known_visible = Vec::with_capacity(window_elems.len());
+
+        for elem in window_elems {
+            let wsid = WindowServerId::try_from(&elem).ok();
+            let hint = wsid.and_then(|id| server_info_by_id.get(&id).copied());
+            let info = match WindowInfo::from_ax_element(&elem, hint) {
+                Ok((info, _)) => info,
+                Err(err) => {
+                    let id = self.id(&elem).ok();
+                    trace!(?id, ?err, "Failed to refresh window info; will retry later");
+                    continue;
+                }
+            };
+            if !Self::has_visible_cg_peer(wsid, hint) && !info.is_minimized {
+                trace!(pid = ?self.pid, ?wsid, "Ignoring AX window without a visible CG window");
+                continue;
+            }
+
+            let Some(wid) = self.id(&elem).ok().or_else(|| {
+                self.register_window(elem, hint).map(|(info, wid, _)| {
+                    if !info.is_minimized {
+                        known_visible.push(wid);
+                    }
+                    new.push((wid, info));
+                    wid
+                })
+            }) else {
+                continue;
+            };
+
+            if !info.is_minimized {
+                known_visible.push(wid);
+            }
+            new.push((wid, info));
+        }
+
+        self.send_event(Event::WindowsDiscovered {
+            pid: self.pid,
+            new,
+            known_visible,
+        });
+        Ok(())
+    }
+
     fn txid_from_store(&self, wsid: Option<WindowServerId>) -> Option<TransactionId> {
         let store = self.tx_store.as_ref()?;
         let wsid = wsid?;
@@ -446,10 +506,11 @@ impl State {
         while let Some(incoming) = merged.next().await {
             let mut this = this.borrow_mut();
             match incoming {
-                Incoming::Request((span, mut request)) => {
+                Incoming::Request((span, request)) => {
                     let _guard = span.enter();
                     debug!(?this.bundle_id, ?this.pid, ?request, "Got request");
-                    match this.handle_request(&mut request) {
+                    let request_dbg = format!("{request:?}");
+                    match this.handle_request(request) {
                         Ok(should_terminate) if should_terminate => break,
                         Ok(_) => (),
                         #[allow(non_upper_case_globals)]
@@ -465,7 +526,7 @@ impl State {
                             break;
                         }
                         Err(err) => {
-                            warn!(?this.bundle_id, ?this.pid, ?request, "Error handling request: {:?}", err);
+                            warn!(?this.bundle_id, ?this.pid, request = %request_dbg, "Error handling request: {:?}", err);
                         }
                     }
                 }
@@ -506,23 +567,18 @@ impl State {
         let initial_window_elements = self.app.windows().unwrap_or_default();
         let server_info_by_id = self.visible_window_server_info_map(&initial_window_elements);
 
-        let window_count = initial_window_elements.len() as usize;
+        let window_count = initial_window_elements.len();
         self.windows.reserve(window_count);
+        self.elem_to_wid.reserve(window_count);
         let mut windows = Vec::with_capacity(window_count);
+        let mut window_server_info = Vec::with_capacity(window_count);
 
-        let mut elements_with_ids = Vec::with_capacity(window_count);
-        for elem in initial_window_elements.into_iter() {
+        for elem in initial_window_elements {
             let wsid = WindowServerId::try_from(&elem).ok();
-            elements_with_ids.push((elem, wsid));
-        }
-
-        let window_server_info: Vec<WindowServerInfo> = elements_with_ids
-            .iter()
-            .filter_map(|(_, wsid)| wsid.and_then(|id| server_info_by_id.get(&id).copied()))
-            .collect();
-
-        for (elem, wsid) in elements_with_ids {
             let hint = wsid.and_then(|id| server_info_by_id.get(&id).copied());
+            if let Some(info) = hint {
+                window_server_info.push(info);
+            }
             if !Self::has_visible_cg_peer(wsid, hint) {
                 trace!(pid = ?self.pid, ?wsid, "Ignoring AX window without a visible CG window");
                 continue;
@@ -550,7 +606,7 @@ impl State {
     }
 
     #[instrument(skip_all, fields(app = ?self.app, ?request))]
-    fn handle_request(&mut self, request: &mut Request) -> Result<bool, AxError> {
+    fn handle_request(&mut self, request: Request) -> Result<bool, AxError> {
         match request {
             Request::Terminate => {
                 CFRunLoop::current().unwrap().stop();
@@ -558,7 +614,6 @@ impl State {
                 return Ok(true);
             }
             Request::WindowMaybeDestroyed(wid) => {
-                let wid = *wid;
                 if wid.pid != self.pid {
                     return Ok(false);
                 }
@@ -570,69 +625,20 @@ impl State {
 
                 // Trigger a visible windows refresh. If the window is gone, the reactor
                 // will detect it via missing membership and tear down state.
-                *request = Request::GetVisibleWindows;
-                return self.handle_request(request);
+                self.refresh_visible_windows()?;
+                return Ok(false);
             }
             Request::CloseWindow(wid) => {
-                if let Some(window) = self.windows.get(wid)
+                if let Some(window) = self.windows.get(&wid)
                     && let Err(err) = window.elem.close()
                 {
                     warn!(?wid, error = ?err, "Failed to close window");
                 }
             }
             Request::GetVisibleWindows => {
-                let window_elems = match self.app.windows() {
-                    Ok(elems) => elems,
-                    Err(e) => {
-                        self.send_event(Event::WindowsDiscovered {
-                            pid: self.pid,
-                            new: Default::default(),
-                            known_visible: Default::default(),
-                        });
-                        return Err(e);
-                    }
-                };
-                let server_info_by_id = self.visible_window_server_info_map(&window_elems);
-                let mut new = Vec::with_capacity(window_elems.len() as usize);
-                let mut known_visible = Vec::with_capacity(window_elems.len() as usize);
-                for elem in window_elems.iter() {
-                    let elem = elem.clone();
-                    let wsid = WindowServerId::try_from(&elem).ok();
-                    let hint = wsid.and_then(|id| server_info_by_id.get(&id).copied());
-                    let info = match WindowInfo::from_ax_element(&elem, hint) {
-                        Ok((info, _)) => info,
-                        Err(err) => {
-                            let id = self.id(&elem).ok();
-                            trace!(?id, ?err, "Failed to refresh window info; will retry later");
-                            continue;
-                        }
-                    };
-                    if !Self::has_visible_cg_peer(wsid, hint) && !info.is_minimized {
-                        trace!(pid = ?self.pid, ?wsid, "Ignoring AX window without a visible CG window");
-                        continue;
-                    }
-                    if let Ok(id) = self.id(&elem) {
-                        if !info.is_minimized {
-                            known_visible.push(id);
-                        }
-                        new.push((id, info));
-                        continue;
-                    }
-                    let Some((info, wid, _)) = self.register_window(elem, hint) else {
-                        continue;
-                    };
-                    if !info.is_minimized {
-                        known_visible.push(wid);
-                    }
-                    new.push((wid, info));
-                }
-                self.send_event(Event::WindowsDiscovered {
-                    pid: self.pid,
-                    new,
-                    known_visible,
-                });
+                self.refresh_visible_windows()?;
             }
-            &mut Request::SetWindowPos(wid, pos, txid, eui) => {
+            Request::SetWindowPos(wid, pos, txid, eui) => {
                 let (elem, is_animating) = match self.window_mut(wid) {
                     Ok(window) => {
                         window.last_seen_txid = txid;
@@ -671,7 +677,7 @@ impl State {
                     None,
                 ));
             }
-            &mut Request::SetWindowFrame(wid, desired, txid, eui) => {
+            Request::SetWindowFrame(wid, desired, txid, eui) => {
                 let (elem, is_animating) = match self.window_mut(wid) {
                     Ok(window) => {
                         window.last_seen_txid = txid;
@@ -714,7 +720,7 @@ impl State {
                     None,
                 ));
             }
-            &mut Request::SetBatchWindowFrame(ref mut frames, txid, eui) => {
+            Request::SetBatchWindowFrame(frames, txid, eui) => {
                 let disable_eui_for_batch = eui
                     && frames.iter().any(|(wid, _)| {
                         self.windows.get(wid).is_some_and(|window| !window.is_animating)
@@ -778,23 +784,35 @@ impl State {
                     let _ = self.app.set_bool_attribute("AXEnhancedUserInterface", true);
                 }
             }
-            &mut Request::BeginWindowAnimation(wid) => {
-                let had_animations = self.has_active_window_animations();
+            Request::BeginWindowAnimation(wid) => {
                 let (elem, started_animation) = {
                     let window = self.window_mut(wid)?;
                     let started_animation = !std::mem::replace(&mut window.is_animating, true);
                     (window.elem.clone(), started_animation)
                 };
-                if started_animation && !had_animations {
+                if started_animation {
+                    self.active_animation_count += 1;
+                }
+                if started_animation && self.active_animation_count == 1 {
                     let _ = self.app.set_bool_attribute("AXEnhancedUserInterface", false);
                 }
                 self.stop_notifications_for_animation(&elem);
 
                 SLSDisableUpdate(*G_CONNECTION);
             }
-            &mut Request::EndWindowAnimation(wid) => {
-                let (elem, txid) = match self.window(wid) {
-                    Ok(window) => (window.elem.clone(), self.txid_for_window_state(window)),
+            Request::EndWindowAnimation(wid) => {
+                let (elem, window_server_id, last_seen_txid, ended_animation) = match self
+                    .window_mut(wid)
+                {
+                    Ok(window) => {
+                        let ended_animation = std::mem::replace(&mut window.is_animating, false);
+                        (
+                            window.elem.clone(),
+                            window.window_server_id,
+                            window.last_seen_txid,
+                            ended_animation,
+                        )
+                    }
                     Err(err) => match err {
                         AxError::Ax(code) => {
                             if self.handle_ax_error(wid, &code) {
@@ -805,11 +823,13 @@ impl State {
                         AxError::NotFound => return Ok(false),
                     },
                 };
-                let ended_animation = self
-                    .window_mut(wid)
-                    .map(|window| std::mem::replace(&mut window.is_animating, false))
-                    .unwrap_or(false);
-                if ended_animation && !self.has_active_window_animations() {
+                let txid = self
+                    .txid_from_store(window_server_id)
+                    .or_else(|| Self::some_txid(last_seen_txid));
+                if ended_animation {
+                    self.active_animation_count = self.active_animation_count.saturating_sub(1);
+                }
+                if ended_animation && self.active_animation_count == 0 {
                     let _ = self.app.set_bool_attribute("AXEnhancedUserInterface", true);
                 }
                 self.restart_notifications_after_animation(&elem);
@@ -827,9 +847,8 @@ impl State {
                 ));
                 SLSReenableUpdate(*G_CONNECTION);
             }
-            &mut Request::Raise(ref wids, ref token, sequence_id, quiet) => {
-                self.raises_tx
-                    .send(RaiseRequest(wids.clone(), token.clone(), sequence_id, quiet));
+            Request::Raise(wids, token, sequence_id, quiet) => {
+                self.raises_tx.send(RaiseRequest(wids, token, sequence_id, quiet));
             }
         }
         Ok(false)
@@ -892,14 +911,14 @@ impl State {
                     return;
                 };
 
-                if let Ok(window) = self.window(wid) {
-                    if window.is_animating {
-                        trace!(?wid, ?notif, "Ignoring notification during animation");
-                        return;
-                    }
-                }
                 let txid = match self.window(wid) {
-                    Ok(window) => self.txid_for_window_state(window),
+                    Ok(window) => {
+                        if window.is_animating {
+                            trace!(?wid, ?notif, "Ignoring notification during animation");
+                            return;
+                        }
+                        self.txid_for_window_state(window)
+                    }
                     Err(err) => {
                         match err {
                             AxError::Ax(code) => {
@@ -1331,13 +1350,14 @@ impl State {
         let last_seen_txid = self.txid_from_store(window_server_id).unwrap_or_default();
 
         let old = self.windows.insert(wid, AppWindowState {
-            elem,
+            elem: elem.clone(),
             last_seen_txid,
             hidden_by_app,
             window_server_id,
             is_animating: false,
         });
         debug_assert!(old.is_none(), "Duplicate window id {wid:?}");
+        self.elem_to_wid.insert(elem, wid);
         if hidden_by_app {
             self.send_event(Event::WindowMinimized(wid));
         }
@@ -1377,7 +1397,7 @@ impl State {
             .iter()
             .filter_map(|elem| WindowServerId::try_from(elem).ok())
             .collect();
-        let mut info_by_id = HashMap::default();
+        let mut info_by_id = HashMap::with_capacity_and_hasher(wsids.len(), Default::default());
         for info in window_server::get_windows(&wsids) {
             info_by_id.insert(info.id, info);
         }
@@ -1427,8 +1447,15 @@ impl State {
     }
 
     fn remove_stale_windows(&mut self) {
-        let current_window_ids: HashSet<WindowId> = match self.app.windows() {
-            Ok(elems) => elems.iter().filter_map(|elem| self.id(&elem).ok()).collect(),
+        let mut stale_wids: HashSet<WindowId> = self.windows.keys().copied().collect();
+        match self.app.windows() {
+            Ok(elems) => {
+                for elem in elems {
+                    if let Ok(wid) = self.id(&elem) {
+                        stale_wids.remove(&wid);
+                    }
+                }
+            }
             Err(e) => {
                 trace!(?e, "Failed to get windows; checking each tracked window");
                 let mut to_remove = Vec::new();
@@ -1443,13 +1470,10 @@ impl State {
                 }
                 return;
             }
-        };
+        }
 
-        let tracked_wids: Vec<WindowId> = self.windows.keys().copied().collect();
-        for wid in tracked_wids {
-            if !current_window_ids.contains(&wid) {
-                self.remove_tracked_window(wid, "Removed stale window (not in current list)");
-            }
+        for wid in stale_wids {
+            self.remove_tracked_window(wid, "Removed stale window (not in current list)");
         }
     }
 
@@ -1480,7 +1504,8 @@ impl State {
                     return Ok(wid);
                 }
             }
-        } else if let Some((&wid, _)) = self.windows.iter().find(|(_, w)| &w.elem == elem) {
+        }
+        if let Some(&wid) = self.elem_to_wid.get(elem) {
             return Ok(wid);
         }
         Err(AxError::NotFound)
@@ -1535,11 +1560,13 @@ impl State {
         }
     }
 
-    fn has_active_window_animations(&self) -> bool { self.windows.values().any(|w| w.is_animating) }
-
     fn remove_window(&mut self, wid: WindowId) -> Option<AppWindowState> {
         let window = self.windows.remove(&wid)?;
-        if window.is_animating && !self.has_active_window_animations() {
+        self.elem_to_wid.remove(&window.elem);
+        if window.is_animating {
+            self.active_animation_count = self.active_animation_count.saturating_sub(1);
+        }
+        if window.is_animating && self.active_animation_count == 0 {
             let _ = self.app.set_bool_attribute("AXEnhancedUserInterface", true);
         }
         Some(window)
@@ -1601,11 +1628,13 @@ fn app_thread_main(
         observer,
         events_tx,
         windows: HashMap::default(),
+        elem_to_wid: HashMap::default(),
         last_window_idx: 0,
         main_window: None,
         last_activated: None,
         is_hidden: false,
         is_frontmost: false,
+        active_animation_count: 0,
         raises_tx,
         tx_store,
     };
