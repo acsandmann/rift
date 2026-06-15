@@ -10,15 +10,13 @@ use std::sync::LazyLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use r#continue::continuation;
 use objc2::rc::Retained;
 use objc2_app_kit::NSRunningApplication;
 use objc2_application_services::AXError;
 use objc2_core_foundation::{CFRunLoop, CGPoint, CGRect};
 use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot;
 use tokio::{join, select};
-use tokio_stream::StreamExt;
-use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, Span, debug, info, instrument, trace, warn};
 
@@ -38,6 +36,7 @@ use crate::sys::executor::Executor;
 use crate::sys::observer::Observer;
 use crate::sys::process::ProcessInfo;
 use crate::sys::skylight::{G_CONNECTION, SLSDisableUpdate, SLSReenableUpdate};
+use crate::sys::timer::Timer;
 use crate::sys::window_server::{self, WindowServerId, WindowServerInfo};
 
 const kAXApplicationActivatedNotification: &str = "AXApplicationActivated";
@@ -328,6 +327,12 @@ pub enum Request {
     SetWindowFrame(WindowId, CGRect, TransactionId, bool),
     SetBatchWindowFrame(Vec<(WindowId, CGRect)>, TransactionId, bool),
     SetWindowPos(WindowId, CGPoint, TransactionId, bool),
+    AnimationFrame {
+        wid: WindowId,
+        frame: CGRect,
+        set_size: bool,
+        txid: TransactionId,
+    },
 
     BeginWindowAnimation(WindowId),
     EndWindowAnimation(WindowId),
@@ -373,12 +378,13 @@ struct State {
     elem_to_wid: HashMap<AXUIElement, WindowId>,
     last_window_idx: u32,
     main_window: Option<WindowId>,
-    last_activated: Option<(Instant, Quiet, Option<WindowId>, r#continue::Sender<()>)>,
+    last_activated: Option<(Instant, Quiet, Option<WindowId>, oneshot::Sender<()>)>,
     is_hidden: bool,
     is_frontmost: bool,
     active_animation_count: usize,
     raises_tx: actor::Sender<RaiseRequest>,
     tx_store: Option<WindowTxStore>,
+    pending_frames: HashMap<WindowId, PendingFrame>,
 }
 
 struct AppWindowState {
@@ -387,6 +393,14 @@ struct AppWindowState {
     hidden_by_app: bool,
     window_server_id: Option<WindowServerId>,
     is_animating: bool,
+    last_animation_frame: Option<CGRect>,
+}
+
+struct PendingFrame {
+    span: Span,
+    frame: CGRect,
+    set_size: bool,
+    txid: TransactionId,
 }
 
 impl State {
@@ -490,49 +504,80 @@ impl State {
 
     async fn handle_incoming(
         this: &RefCell<Self>,
-        requests_rx: actor::Receiver<Request>,
-        notifications_rx: actor::Receiver<(AXUIElement, AxNotificationKind, Option<WindowId>)>,
+        mut requests_rx: actor::Receiver<Request>,
+        mut notifications_rx: actor::Receiver<(AXUIElement, AxNotificationKind, Option<WindowId>)>,
     ) {
-        pub enum Incoming {
-            Notification((Span, (AXUIElement, AxNotificationKind, Option<WindowId>))),
-            Request((Span, Request)),
-        }
-
-        let mut merged = StreamExt::merge(
-            UnboundedReceiverStream::new(requests_rx).map(Incoming::Request),
-            UnboundedReceiverStream::new(notifications_rx).map(Incoming::Notification),
-        );
-
-        while let Some(incoming) = merged.next().await {
-            let mut this = this.borrow_mut();
-            match incoming {
-                Incoming::Request((span, request)) => {
-                    let _guard = span.enter();
-                    debug!(?this.bundle_id, ?this.pid, ?request, "Got request");
-                    let request_dbg = format!("{request:?}");
-                    match this.handle_request(request) {
-                        Ok(should_terminate) if should_terminate => break,
-                        Ok(_) => (),
-                        #[allow(non_upper_case_globals)]
-                        Err(AxError::Ax(AXError::CannotComplete))
-                        // SAFETY: NSRunningApplication is thread-safe.
-                        if this.running_app.isTerminated() =>
-                        {
-                            // The app does not appear to be running anymore.
-                            // Normally this would be noticed by notification_center,
-                            // but the notification doesn't always happen.
-                            warn!(?this.bundle_id, ?this.pid, "Application terminated without notification");
-                            this.send_event(Event::ApplicationThreadTerminated(this.pid));
-                            break;
-                        }
-                        Err(err) => {
-                            warn!(?this.bundle_id, ?this.pid, request = %request_dbg, "Error handling request: {:?}", err);
-                        }
+        loop {
+            let batch = select! {
+                biased;
+                req = requests_rx.recv() => {
+                    let Some(req) = req else { break };
+                    let mut batch = vec![req];
+                    while let Ok(req) = requests_rx.try_recv() {
+                        batch.push(req);
                     }
+                    batch
                 }
-                Incoming::Notification((_, (elem, notif, hinted_wid))) => {
-                    this.handle_notification(elem, notif, hinted_wid);
+                notif = notifications_rx.recv() => {
+                    let Some((_, (elem, notif, hinted_wid))) = notif else { break };
+                    this.borrow_mut().handle_notification(elem, notif, hinted_wid);
+                    continue;
                 }
+            };
+            if Self::handle_request_batch(this, batch) {
+                break;
+            }
+        }
+    }
+
+    fn handle_request_batch(this: &RefCell<Self>, batch: Vec<(Span, Request)>) -> bool {
+        for (span, request) in batch {
+            let mut this = this.borrow_mut();
+            let _guard = span.enter();
+            debug!(?this.bundle_id, ?this.pid, ?request, "Got request");
+            let request_dbg = format!("{request:?}");
+            match this.handle_request(request) {
+                Ok(should_terminate) if should_terminate => return true,
+                Ok(_) => (),
+                #[allow(non_upper_case_globals)]
+                Err(AxError::Ax(AXError::CannotComplete)) if this.running_app.isTerminated() => {
+                    warn!(?this.bundle_id, ?this.pid, "Application terminated without notification");
+                    this.send_event(Event::ApplicationThreadTerminated(this.pid));
+                    return true;
+                }
+                Err(err) => {
+                    warn!(?this.bundle_id, ?this.pid, request = %request_dbg, "Error handling request: {:?}", err);
+                }
+            }
+        }
+        this.borrow_mut().flush_all_frames();
+        false
+    }
+
+    fn flush_frames(&mut self, wid: WindowId) -> Result<(), AxError> {
+        let Some(PendingFrame { span, frame, set_size, txid }) = self.pending_frames.remove(&wid)
+        else {
+            return Ok(());
+        };
+        let _guard = span.enter();
+        let window = self.window_mut(wid)?;
+        window.last_seen_txid = txid;
+        if set_size {
+            window.last_animation_frame = Some(frame);
+            let _ = window.elem.set_size(frame.size);
+            let _ = window.elem.set_position(frame.origin);
+            let _ = window.elem.set_size(frame.size);
+        } else {
+            let _ = window.elem.set_position(frame.origin);
+        }
+        Ok(())
+    }
+
+    fn flush_all_frames(&mut self) {
+        let wids: Vec<WindowId> = self.pending_frames.keys().copied().collect();
+        for wid in wids {
+            if let Err(err) = self.flush_frames(wid) {
+                warn!(?wid, ?err, "Failed to apply animation frame");
             }
         }
     }
@@ -708,6 +753,14 @@ impl State {
                     None,
                 ));
             }
+            Request::AnimationFrame { wid, frame, set_size, txid } => {
+                self.pending_frames.insert(wid, PendingFrame {
+                    span: Span::current(),
+                    frame,
+                    set_size,
+                    txid,
+                });
+            }
             Request::SetWindowFrame(wid, desired, txid, eui) => {
                 let (elem, is_animating) = match self.window_mut(wid) {
                     Ok(window) => {
@@ -819,6 +872,7 @@ impl State {
                 let (elem, started_animation) = {
                     let window = self.window_mut(wid)?;
                     let started_animation = !std::mem::replace(&mut window.is_animating, true);
+                    window.last_animation_frame = None;
                     (window.elem.clone(), started_animation)
                 };
                 if started_animation {
@@ -832,31 +886,40 @@ impl State {
                 SLSDisableUpdate(*G_CONNECTION);
             }
             Request::EndWindowAnimation(wid) => {
-                let (elem, window_server_id, last_seen_txid, ended_animation) = match self
-                    .window_mut(wid)
-                {
-                    Ok(window) => {
-                        let ended_animation = std::mem::replace(&mut window.is_animating, false);
-                        (
-                            window.elem.clone(),
-                            window.window_server_id,
-                            window.last_seen_txid,
-                            ended_animation,
-                        )
-                    }
-                    Err(err) => match err {
-                        AxError::Ax(code) => {
-                            if self.handle_ax_error(wid, &code) {
-                                return Ok(false);
-                            }
-                            return Err(AxError::Ax(code));
+                if let Err(err) = self.flush_frames(wid) {
+                    warn!(?wid, ?err, "Failed to flush animation frame on end");
+                }
+                let (elem, window_server_id, last_seen_txid, last_animation_frame, ended_animation) =
+                    match self.window_mut(wid) {
+                        Ok(window) => {
+                            let ended_animation =
+                                std::mem::replace(&mut window.is_animating, false);
+                            (
+                                window.elem.clone(),
+                                window.window_server_id,
+                                window.last_seen_txid,
+                                window.last_animation_frame.take(),
+                                ended_animation,
+                            )
                         }
-                        AxError::NotFound => return Ok(false),
-                    },
-                };
+                        Err(err) => match err {
+                            AxError::Ax(code) => {
+                                if self.handle_ax_error(wid, &code) {
+                                    return Ok(false);
+                                }
+                                return Err(AxError::Ax(code));
+                            }
+                            AxError::NotFound => return Ok(false),
+                        },
+                    };
                 let txid = self
                     .txid_from_store(window_server_id)
                     .or_else(|| Self::some_txid(last_seen_txid));
+                if let Some(frame) = last_animation_frame {
+                    let _ = elem.set_size(frame.size);
+                    let _ = elem.set_position(frame.origin);
+                    let _ = elem.set_size(frame.size);
+                }
                 if ended_animation {
                     self.active_animation_count = self.active_animation_count.saturating_sub(1);
                 }
@@ -1078,38 +1141,14 @@ impl State {
         }
 
         if !is_frontmost && make_key_result.as_ref().is_some_and(Result::is_ok) && is_standard {
-            let (tx, rx) = continuation();
-            let (quiet_activation, quiet_window_change);
             if wids.len() == 1 {
                 // `quiet` only applies if the first window is also the last.
-                quiet_activation = quiet;
-                quiet_window_change = (quiet == Quiet::Yes).then_some(first);
+                let quiet_window_change = (quiet == Quiet::Yes).then_some(first);
+                Self::wait_for_activation(this, quiet, quiet_window_change, &token).await?;
             } else {
                 // Windows before the last are always quiet.
-                quiet_activation = Quiet::Yes;
-                quiet_window_change = Some(first);
+                Self::wait_for_activation(this, Quiet::Yes, Some(first), &token).await?;
             }
-            // this.last_activated = Some((Instant::now(), quiet_activation, quiet_window_change, tx));
-
-            if let Some((_, _, _, prev_tx)) = this.last_activated.replace((
-                Instant::now(),
-                quiet_activation,
-                quiet_window_change,
-                tx,
-            )) {
-                let _ = prev_tx.send(());
-            }
-
-            drop(this);
-            trace!("Awaiting activation");
-            select! {
-                _ = rx => {}
-                _ = token.cancelled() => {
-                    debug!("Raise cancelled while awaiting activation event");
-                    return Err(RaiseError::RaiseCancelled);
-                }
-            }
-            trace!("Activation complete");
             this = this_ref.borrow_mut();
         } else {
             trace!(
@@ -1121,7 +1160,7 @@ impl State {
         for (i, &wid) in wids.iter().enumerate() {
             debug_assert_eq!(wid.pid, this.pid);
             let window = this.window(wid)?;
-            let _ = trace("raise", &window.elem, || window.elem.raise());
+            trace("raise", &window.elem, || window.elem.raise())?;
 
             // TODO: Check the frontmost (layer 0) window of the window server and retry if necessary.
 
@@ -1246,6 +1285,42 @@ impl State {
         if old_frontmost != is_frontmost {
             self.send_event(event);
         }
+        Ok(())
+    }
+
+    async fn wait_for_activation(
+        mut this: std::cell::RefMut<'_, Self>,
+        quiet_activation: Quiet,
+        quiet_window_change: Option<WindowId>,
+        token: &CancellationToken,
+    ) -> Result<(), RaiseError> {
+        let app = this.app.clone();
+        let (tx, rx) = oneshot::channel();
+        if let Some((_, _, _, prev_tx)) =
+            this.last_activated
+                .replace((Instant::now(), quiet_activation, quiet_window_change, tx))
+        {
+            let _ = prev_tx.send(());
+        }
+        drop(this);
+        trace!("Awaiting activation");
+        tokio::pin!(rx);
+        loop {
+            select! {
+                _ = &mut rx => break,
+                _ = token.cancelled() => {
+                    debug!("Raise cancelled while awaiting activation event");
+                    return Err(RaiseError::RaiseCancelled);
+                }
+                _ = Timer::sleep(Duration::from_millis(10)) => {
+                    if app.frontmost().unwrap_or(false) {
+                        trace!("Activation observed via frontmost polling");
+                        break;
+                    }
+                }
+            }
+        }
+        trace!("Activation complete");
         Ok(())
     }
 
@@ -1386,6 +1461,7 @@ impl State {
             hidden_by_app,
             window_server_id,
             is_animating: false,
+            last_animation_frame: None,
         });
         debug_assert!(old.is_none(), "Duplicate window id {wid:?}");
         self.elem_to_wid.insert(elem, wid);
@@ -1668,6 +1744,7 @@ fn app_thread_main(
         active_animation_count: 0,
         raises_tx,
         tx_store,
+        pending_frames: HashMap::default(),
     };
 
     let (requests_tx, requests_rx) = actor::channel();

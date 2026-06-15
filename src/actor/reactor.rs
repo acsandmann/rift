@@ -23,6 +23,7 @@ mod tests;
 use std::thread;
 use std::time::Duration;
 
+use animation::Sender as AnimationSender;
 use events::app::AppEventHandler;
 use events::command::CommandEventHandler;
 use events::drag::DragEventHandler;
@@ -254,6 +255,7 @@ pub struct Reactor {
     active_spaces: HashSet<SpaceId>,
     display_topology_manager: DisplayTopologyManager,
     pub above_window: Option<WindowServerId>,
+    pub animation_tx: Option<AnimationSender>,
 }
 
 impl Reactor {
@@ -371,6 +373,7 @@ impl Reactor {
             active_spaces: HashSet::default(),
             display_topology_manager: DisplayTopologyManager::default(),
             above_window: None,
+            animation_tx: None,
         };
         reactor
             .layout_manager
@@ -750,11 +753,14 @@ impl Reactor {
 
     async fn run(mut reactor: Reactor, events: Receiver, events_tx: Sender) {
         let (raise_manager_tx, raise_manager_rx) = actor::channel();
+        let (animation_tx, animation_rx) = tokio::sync::mpsc::unbounded_channel();
         reactor.communication_manager.raise_manager_tx = raise_manager_tx.clone();
+        reactor.animation_tx = Some(animation_tx);
         let event_tap_tx = reactor.communication_manager.event_tap_tx.clone();
         let reactor_task = Self::run_reactor_loop(reactor, events);
         let raise_manager_task = RaiseManager::run(raise_manager_rx, events_tx, event_tap_tx);
-        let _ = tokio::join!(reactor_task, raise_manager_task);
+        let animation_task = animation::AnimationManager::run(animation_rx);
+        let _ = tokio::join!(reactor_task, raise_manager_task, animation_task);
     }
 
     async fn run_reactor_loop(mut reactor: Reactor, mut events: Receiver) {
@@ -808,7 +814,9 @@ impl Reactor {
 
     fn log_event(&self, event: &Event) {
         match event {
-            Event::WindowFrameChanged(..) | Event::MouseUp => trace!(?event, "Event"),
+            Event::WindowFrameChanged(..) | Event::MouseUp | Event::MouseMoved(..) => {
+                trace!(?event, "Event")
+            }
             _ => debug!(?event, "Event"),
         }
     }
