@@ -341,6 +341,7 @@ impl SpaceEventHandler {
         if spaces == reactor.raw_spaces_for_current_screens()
             && !reactor.pending_space_change_manager.topology_relayout_pending
             && !reactor.display_topology_manager.is_churning_or_awaiting_commit()
+            && !reactor.has_fullscreen_windows_for_spaces(&spaces)
         {
             trace!(?spaces, "Ignoring duplicate space change snapshot");
             return;

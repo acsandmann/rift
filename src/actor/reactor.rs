@@ -1262,7 +1262,31 @@ impl Reactor {
         }
 
         for space in refresh_spaces {
+            let mut tracks = Vec::new();
             if let Some(track) = self.space_manager.fullscreen_by_space.remove(&space.get()) {
+                tracks.push(track);
+            }
+
+            let keys_to_remove: Vec<u64> = self
+                .space_manager
+                .fullscreen_by_space
+                .iter()
+                .filter(|(_, track)| {
+                    track
+                        .windows
+                        .iter()
+                        .any(|w| w.last_known_user_space == Some(space))
+                })
+                .map(|(&key, _)| key)
+                .collect();
+
+            for key in keys_to_remove {
+                if let Some(track) = self.space_manager.fullscreen_by_space.remove(&key) {
+                    tracks.push(track);
+                }
+            }
+
+            for track in tracks {
                 wait_for_native_fullscreen_transition();
                 thread::sleep(Duration::from_millis(50));
 
@@ -1312,6 +1336,14 @@ impl Reactor {
     fn is_fullscreen_space(&self, space: SpaceId) -> bool {
         space_is_fullscreen(space.get())
             || self.space_manager.fullscreen_by_space.contains_key(&space.get())
+    }
+
+    pub(crate) fn has_fullscreen_windows_for_spaces(&self, spaces: &[Option<SpaceId>]) -> bool {
+        spaces.iter().flatten().any(|space| {
+            self.space_manager.fullscreen_by_space.values().any(|track| {
+                track.windows.iter().any(|w| w.last_known_user_space == Some(*space))
+            })
+        })
     }
 
     fn preserve_user_spaces_during_fullscreen_transition(&self, spaces: &mut [Option<SpaceId>]) {

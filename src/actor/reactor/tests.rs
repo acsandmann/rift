@@ -1599,3 +1599,69 @@ fn discovery_after_display_change_places_window_on_correct_display() {
         "window must be laid out on screen2"
     );
 }
+
+#[test]
+fn unfullscreen_restores_window_tracking() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+
+    let user_space = SpaceId::new(1);
+    let fullscreen_space = SpaceId::new(0x400000000 + user_space.get());
+    let full_screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+
+    // Set up a display with a user space and some windows.
+    reactor.handle_event(screen_params_event(
+        vec![full_screen],
+        vec![Some(user_space)],
+        vec![],
+    ));
+    reactor.handle_events(apps.make_app_with_opts(
+        1,
+        make_windows(1),
+        Some(WindowId::new(1, 1)),
+        true,
+        true,
+    ));
+    reactor.handle_event(Event::ApplicationGloballyActivated(1));
+    apps.simulate_until_quiet(&mut reactor);
+
+    // Record the window as fullscreened.
+    let window_id = WindowId::new(1, 1);
+    reactor.space_manager.fullscreen_by_space.insert(
+        fullscreen_space.get(),
+        FullscreenSpaceTrack {
+            windows: vec![FullscreenWindowTrack {
+                pid: 1,
+                window_id: Some(window_id),
+                last_known_user_space: Some(user_space),
+                _last_seen_fullscreen_space: fullscreen_space,
+            }],
+        },
+    );
+
+    // Transition to fullscreen space.
+    reactor.handle_event(Event::SpaceChanged(vec![Some(fullscreen_space)]));
+    apps.simulate_until_quiet(&mut reactor);
+
+    // Exit fullscreen (return to user space).
+    reactor.handle_event(Event::SpaceChanged(vec![Some(user_space)]));
+
+    // The reactor should trigger a GetVisibleWindows request.
+    let mut saw_get_visible_windows = false;
+    for request in apps.requests() {
+        if matches!(request, Request::GetVisibleWindows) {
+            saw_get_visible_windows = true;
+        }
+    }
+    assert!(saw_get_visible_windows, "Should send GetVisibleWindows to app on unfullscreen");
+
+    // The fullscreen track should be removed.
+    assert!(
+        !reactor.space_manager.fullscreen_by_space.contains_key(&fullscreen_space.get()),
+        "Fullscreen track should be removed from space manager"
+    );
+}
