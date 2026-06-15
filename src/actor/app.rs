@@ -552,15 +552,46 @@ impl State {
     #[instrument(skip_all, fields(?info))]
     #[must_use]
     fn init(&mut self, handle: AppThreadHandle, info: AppInfo) -> bool {
-        for &(kind, notif) in APP_NOTIFICATIONS {
-            let res = self.observer.add_notification_with_data(
-                &self.app,
-                notif,
-                encode_notification_data(kind, None),
-            );
-            if let Err(err) = res {
-                debug!(pid = ?self.pid, ?err, "Watching app failed");
+        let extended_timeout_prefixes = ["com.jetbrains.", "org.gnu.Emacs"];
+        let timeout = Instant::now()
+            + match info.bundle_id.as_deref() {
+                Some(id)
+                    if extended_timeout_prefixes.iter().any(|prefix| id.starts_with(prefix)) =>
+                {
+                    Duration::from_secs(60)
+                }
+
+                _ => Duration::ZERO,
+            };
+        let mut sleep_dur = Duration::from_millis(20);
+        let mut sleep = || {
+            let now = Instant::now();
+            let Some(remaining) = timeout.checked_duration_since(now) else {
                 return false;
+            };
+            thread::sleep(Duration::min(sleep_dur, remaining));
+            sleep_dur = Duration::min(sleep_dur * 2, Duration::from_secs(1));
+            true
+        };
+        for &(_kind, notif) in APP_NOTIFICATIONS {
+            loop {
+                match self.observer.add_notification(&self.app, notif) {
+                    Ok(()) => break,
+                    #[allow(non_upper_case_globals)]
+                    Err(AxError::Ax(AXError::NotificationAlreadyRegistered)) => {
+                        debug!(
+                            pid = ?self.pid,
+                            "Watching app for {notif} was already registered; continuing"
+                        );
+                        break;
+                    }
+                    Err(err) => {
+                        debug!(pid = ?self.pid, ?err, "Watching app for {notif} failed");
+                        if !sleep() {
+                            return false;
+                        }
+                    }
+                }
             }
         }
 
