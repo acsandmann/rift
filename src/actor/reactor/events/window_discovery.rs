@@ -1,5 +1,6 @@
-use tracing::{trace, warn};
+use tracing::{debug, trace, warn};
 
+use super::window::WindowEventHandler;
 use crate::actor::app::{AppInfo, WindowId, WindowInfo, pid_t};
 use crate::actor::reactor::{Event, LayoutEvent, Reactor, WindowFilter, WindowState, utils};
 use crate::common::collections::{BTreeMap, HashSet};
@@ -12,6 +13,66 @@ use crate::sys::window_server::{self, WindowServerId};
 pub struct WindowDiscoveryHandler;
 
 impl WindowDiscoveryHandler {
+    fn sync_existing_window_state(
+        reactor: &mut Reactor,
+        wid: WindowId,
+        info: &WindowInfo,
+        old_sys_id: Option<WindowServerId>,
+    ) {
+        Self::sync_window_server_id_mapping(reactor, wid, old_sys_id, info.sys_id);
+
+        let was_minimized = reactor
+            .window_manager
+            .window(wid)
+            .is_some_and(|window| window.info.is_minimized);
+
+        if let Some(existing) = reactor.window_manager.window_mut(wid) {
+            existing.info.title = info.title.clone();
+            if info.frame.size.width != 0.0 || info.frame.size.height != 0.0 {
+                existing.frame_monotonic = info.frame;
+            }
+            existing.info.is_standard = info.is_standard;
+            existing.info.is_root = info.is_root;
+            existing.info.is_resizable = info.is_resizable;
+            existing.info.min_size = info.min_size;
+            existing.info.max_size = info.max_size;
+            existing.info.sys_id = info.sys_id;
+            existing.info.bundle_id = info.bundle_id.clone();
+            existing.info.path = info.path.clone();
+            existing.info.ax_role = info.ax_role.clone();
+            existing.info.ax_subrole = info.ax_subrole.clone();
+        } else {
+            return;
+        }
+
+        match (was_minimized, info.is_minimized) {
+            (false, true) => WindowEventHandler::handle_window_minimized(reactor, wid),
+            (true, false) => WindowEventHandler::handle_window_deminiaturized(reactor, wid),
+            _ => {
+                let manageable = utils::compute_window_manageability(
+                    info.sys_id,
+                    info.is_minimized,
+                    info.is_standard,
+                    info.is_root,
+                    |wsid| reactor.window_manager.get_window_server_info(wsid),
+                );
+                if let Some(existing) = reactor.window_manager.window_mut(wid) {
+                    existing.info.is_minimized = info.is_minimized;
+                    existing.is_manageable = manageable;
+                }
+            }
+        }
+
+        if was_minimized != info.is_minimized {
+            debug!(
+                ?wid,
+                was_minimized,
+                is_minimized = info.is_minimized,
+                "Window minimize state reconciled from discovery"
+            );
+        }
+    }
+
     fn should_emit_window_for_space(reactor: &Reactor, space: SpaceId, wid: WindowId) -> bool {
         let engine = &reactor.layout_manager.layout_engine;
         let assigned_workspace =
@@ -232,32 +293,7 @@ impl WindowDiscoveryHandler {
                 if reactor.window_manager.contains_window(*wid) {
                     let old_sys_id =
                         reactor.window_manager.window(*wid).and_then(|window| window.info.sys_id);
-                    Self::sync_window_server_id_mapping(reactor, *wid, old_sys_id, info.sys_id);
-                    let manageable = utils::compute_window_manageability(
-                        info.sys_id,
-                        info.is_minimized,
-                        info.is_standard,
-                        info.is_root,
-                        |wsid| reactor.window_manager.get_window_server_info(wsid),
-                    );
-                    if let Some(existing) = reactor.window_manager.window_mut(*wid) {
-                        existing.info.title = info.title.clone();
-                        if info.frame.size.width != 0.0 || info.frame.size.height != 0.0 {
-                            existing.frame_monotonic = info.frame;
-                        }
-                        existing.info.is_standard = info.is_standard;
-                        existing.info.is_root = info.is_root;
-                        existing.info.is_minimized = info.is_minimized;
-                        existing.info.is_resizable = info.is_resizable;
-                        existing.info.min_size = info.min_size;
-                        existing.info.max_size = info.max_size;
-                        existing.info.sys_id = info.sys_id;
-                        existing.info.bundle_id = info.bundle_id.clone();
-                        existing.info.path = info.path.clone();
-                        existing.info.ax_role = info.ax_role.clone();
-                        existing.info.ax_subrole = info.ax_subrole.clone();
-                        existing.is_manageable = manageable;
-                    }
+                    Self::sync_existing_window_state(reactor, *wid, info, old_sys_id);
                 } else {
                     let mut state: WindowState = WindowState::from((*info).clone());
                     let manageable = utils::compute_window_manageability(
@@ -280,32 +316,7 @@ impl WindowDiscoveryHandler {
             if reactor.window_manager.contains_window(wid) {
                 let old_sys_id =
                     reactor.window_manager.window(wid).and_then(|window| window.info.sys_id);
-                Self::sync_window_server_id_mapping(reactor, wid, old_sys_id, info.sys_id);
-                let manageable = utils::compute_window_manageability(
-                    info.sys_id,
-                    info.is_minimized,
-                    info.is_standard,
-                    info.is_root,
-                    |wsid| reactor.window_manager.get_window_server_info(wsid),
-                );
-                if let Some(existing) = reactor.window_manager.window_mut(wid) {
-                    existing.info.title = info.title.clone();
-                    if info.frame.size.width != 0.0 || info.frame.size.height != 0.0 {
-                        existing.frame_monotonic = info.frame;
-                    }
-                    existing.info.is_standard = info.is_standard;
-                    existing.info.is_root = info.is_root;
-                    existing.info.is_minimized = info.is_minimized;
-                    existing.info.is_resizable = info.is_resizable;
-                    existing.info.min_size = info.min_size;
-                    existing.info.max_size = info.max_size;
-                    existing.info.sys_id = info.sys_id;
-                    existing.info.bundle_id = info.bundle_id.clone();
-                    existing.info.path = info.path.clone();
-                    existing.info.ax_role = info.ax_role.clone();
-                    existing.info.ax_subrole = info.ax_subrole.clone();
-                    existing.is_manageable = manageable;
-                }
+                Self::sync_existing_window_state(reactor, wid, &info, old_sys_id);
             } else {
                 Self::sync_window_server_id_mapping(reactor, wid, None, info.sys_id);
                 new_windows.push((wid, info));

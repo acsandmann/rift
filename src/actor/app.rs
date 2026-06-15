@@ -599,29 +599,31 @@ impl State {
                     let elem = elem.clone();
                     let wsid = WindowServerId::try_from(&elem).ok();
                     let hint = wsid.and_then(|id| server_info_by_id.get(&id).copied());
-                    if !Self::has_visible_cg_peer(wsid, hint) {
+                    let info = match WindowInfo::from_ax_element(&elem, hint) {
+                        Ok((info, _)) => info,
+                        Err(err) => {
+                            let id = self.id(&elem).ok();
+                            trace!(?id, ?err, "Failed to refresh window info; will retry later");
+                            continue;
+                        }
+                    };
+                    if !Self::has_visible_cg_peer(wsid, hint) && !info.is_minimized {
                         trace!(pid = ?self.pid, ?wsid, "Ignoring AX window without a visible CG window");
                         continue;
                     }
                     if let Ok(id) = self.id(&elem) {
-                        match WindowInfo::from_ax_element(&elem, hint) {
-                            Ok((info, _)) => {
-                                known_visible.push(id);
-                                new.push((id, info));
-                            }
-                            Err(err) => {
-                                trace!(
-                                    ?id,
-                                    ?err,
-                                    "Failed to refresh window info; will retry later"
-                                );
-                            }
+                        if !info.is_minimized {
+                            known_visible.push(id);
                         }
+                        new.push((id, info));
                         continue;
                     }
                     let Some((info, wid, _)) = self.register_window(elem, hint) else {
                         continue;
                     };
+                    if !info.is_minimized {
+                        known_visible.push(wid);
+                    }
                     new.push((wid, info));
                 }
                 self.send_event(Event::WindowsDiscovered {
