@@ -86,7 +86,7 @@ pub struct EventTap {
 unsafe impl Send for EventTap {}
 
 struct State {
-    hidden: bool,
+    hide_count: u32,
     mouse_hides_on_focus: bool,
     focus_follows_mouse_config_enabled: bool,
     default_layout_mode: LayoutMode,
@@ -108,7 +108,7 @@ struct State {
 impl Default for State {
     fn default() -> Self {
         Self {
-            hidden: false,
+            hide_count: 0,
             mouse_hides_on_focus: false,
             focus_follows_mouse_config_enabled: false,
             default_layout_mode: LayoutMode::Traditional,
@@ -324,19 +324,14 @@ impl EventTap {
                 if let Err(e) = event::warp_mouse(point) {
                     warn!("Failed to warp mouse: {e:?}");
                 }
-                if state.mouse_hides_on_focus && !state.hidden {
+                if state.mouse_hides_on_focus && state.hide_count == 0 {
                     debug!("Hiding mouse");
-                    if let Err(e) = event::hide_mouse() {
-                        warn!("Failed to hide mouse: {e:?}");
-                    }
-                    state.hidden = true;
+                    state.hide_mouse();
                 }
             }
             Request::EnforceHidden => {
-                if state.mouse_hides_on_focus && state.hidden {
-                    if let Err(e) = event::hide_mouse() {
-                        warn!("Failed to hide mouse: {e:?}");
-                    }
+                if state.hide_count > 0 {
+                    state.hide_mouse();
                 }
             }
             Request::ScreenParametersChanged(screens_with_spaces, converter) => {
@@ -406,12 +401,12 @@ impl EventTap {
                     if prev_active && !state.disable_hotkey_active {
                         state.reset(true);
                     }
-                    if prev_mouse_hides_on_focus && !state.mouse_hides_on_focus && state.hidden {
+                    if prev_mouse_hides_on_focus
+                        && !state.mouse_hides_on_focus
+                        && state.hide_count > 0
+                    {
                         debug!("Showing mouse after disabling mouse_hides_on_focus");
-                        if let Err(e) = event::show_mouse() {
-                            warn!("Failed to show mouse: {e:?}");
-                        }
-                        state.hidden = false;
+                        state.show_mouse();
                     }
                 }
                 should_rebuild_mask = true;
@@ -532,12 +527,9 @@ impl EventTap {
             return true;
         }
 
-        if state.hidden {
+        if state.hide_count > 0 {
             debug!("Showing mouse");
-            if let Err(e) = event::show_mouse() {
-                warn!("Failed to show mouse: {e:?}");
-            }
-            state.hidden = false;
+            state.show_mouse();
         }
         match event_type {
             CGEventType::RightMouseUp | CGEventType::LeftMouseUp => {
@@ -677,6 +669,22 @@ unsafe extern "C-unwind" fn mouse_callback(
 }
 
 impl State {
+    fn hide_mouse(&mut self) {
+        if let Err(e) = event::hide_mouse() {
+            warn!("Failed to hide mouse: {e:?}");
+        }
+        self.hide_count += 1;
+    }
+
+    fn show_mouse(&mut self) {
+        while self.hide_count > 0 {
+            if let Err(e) = event::show_mouse() {
+                warn!("Failed to show mouse: {e:?}");
+            }
+            self.hide_count -= 1;
+        }
+    }
+
     #[inline]
     fn should_sample_mouse_move(
         &mut self,
