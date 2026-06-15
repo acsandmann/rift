@@ -1,12 +1,10 @@
-use std::time::Instant;
-
 use objc2_core_foundation::{CGPoint, CGRect};
 use tracing::trace;
 
 use super::replay::Record;
 use super::{
-    AppState, Event, FullscreenSpaceTrack, PendingSpaceChange, ScreenInfo, WindowState,
-    WorkspaceSwitchOrigin, WorkspaceSwitchState,
+    AppState, Event, FullscreenSpaceTrack, PendingSpaceChange, ScreenInfo, WorkspaceSwitchOrigin,
+    WorkspaceSwitchState,
 };
 use crate::actor;
 use crate::actor::app::{WindowId, pid_t};
@@ -21,59 +19,20 @@ use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{LayoutMode, WindowSnappingSettings};
 use crate::layout_engine::LayoutEngine;
 use crate::sys::screen::SpaceId;
-use crate::sys::window_server::{WindowServerId, WindowServerInfo};
+use crate::model::WindowRegistry;
 
 /// Manages window state and lifecycle
-pub struct WindowManager {
-    pub windows: HashMap<WindowId, WindowState>,
-    pub window_ids: HashMap<WindowServerId, WindowId>,
-    pub visible_windows: HashSet<WindowServerId>,
-    pub observed_window_server_ids: HashSet<WindowServerId>,
-}
+pub type WindowManager = Box<WindowRegistry>;
 
 /// Manages application state and rules
 pub struct AppManager {
     pub apps: HashMap<pid_t, AppState>,
-    pub app_rules_recent_targets: HashMap<crate::sys::window_server::WindowServerId, Instant>,
 }
 
 impl AppManager {
     pub fn new() -> Self {
         AppManager {
             apps: HashMap::default(),
-            app_rules_recent_targets: HashMap::default(),
-        }
-    }
-
-    pub fn mark_wsids_recent<I>(&mut self, wsids: I)
-    where I: IntoIterator<Item = crate::sys::window_server::WindowServerId> {
-        let now = std::time::Instant::now();
-        for ws in wsids {
-            self.app_rules_recent_targets.insert(ws, now);
-        }
-    }
-
-    pub fn is_wsid_recent(
-        &self,
-        wsid: crate::sys::window_server::WindowServerId,
-        ttl_ms: u64,
-    ) -> bool {
-        if let Some(&ts) = self.app_rules_recent_targets.get(&wsid) {
-            return ts.elapsed().as_millis() < (ttl_ms as u128);
-        }
-        false
-    }
-
-    pub fn purge_expired(&mut self, ttl_ms: u64) {
-        let now = std::time::Instant::now();
-        let mut to_remove = Vec::new();
-        for (k, &v) in self.app_rules_recent_targets.iter() {
-            if now.duration_since(v).as_millis() >= (ttl_ms as u128) {
-                to_remove.push(*k);
-            }
-        }
-        for k in to_remove {
-            self.app_rules_recent_targets.remove(&k);
         }
     }
 }
@@ -243,7 +202,7 @@ impl LayoutManager {
     }
 
     fn calculate_layout(reactor: &mut Reactor) -> LayoutResult {
-        if reactor.window_manager.windows.is_empty() {
+        if reactor.window_manager.tracked_window_count() == 0 {
             return LayoutResult::new();
         }
         let screens = reactor.space_manager.screens.clone();
@@ -281,7 +240,7 @@ impl LayoutManager {
                     reactor.config.settings.ui.stack_line.thickness(),
                     reactor.config.settings.ui.stack_line.horiz_placement,
                     reactor.config.settings.ui.stack_line.vert_placement,
-                    |wid| reactor.window_manager.windows.get(&wid).map(|w| w.frame_monotonic),
+                    |wid| reactor.window_manager.window(wid).map(|w| w.frame_monotonic),
                     &all_screen_frames,
                 );
             if active_space_count > 1
@@ -429,10 +388,6 @@ impl LayoutManager {
     }
 }
 
-/// Manages window server information
-pub struct WindowServerInfoManager {
-    pub window_server_info: HashMap<WindowServerId, WindowServerInfo>,
-}
 
 /// Manages pending space changes
 pub struct PendingSpaceChangeManager {

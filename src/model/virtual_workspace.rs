@@ -12,6 +12,7 @@ use crate::common::config::{
 use crate::common::log::trace_misc;
 use crate::layout_engine::Direction;
 use crate::layout_engine::systems::LayoutSystemKind;
+use crate::model::{WindowRegistryHandle, WindowWorkspaceInfo};
 use crate::sys::app::pid_t;
 use crate::sys::geometry::CGRectDef;
 use crate::sys::screen::SpaceId;
@@ -159,11 +160,6 @@ pub struct VirtualWorkspaceManager {
     workspaces_by_space: HashMap<SpaceId, Vec<VirtualWorkspaceId>>,
     pub active_workspace_per_space:
         HashMap<SpaceId, (Option<VirtualWorkspaceId>, VirtualWorkspaceId)>,
-    pub window_to_workspace: HashMap<(SpaceId, WindowId), VirtualWorkspaceId>,
-    #[serde(skip)]
-    window_rule_floating: HashMap<(SpaceId, WindowId), bool>,
-    #[serde(skip)]
-    last_rule_decision: HashMap<(SpaceId, WindowId), bool>,
     floating_positions: HashMap<(SpaceId, VirtualWorkspaceId), FloatingWindowPositions>,
     workspace_counter: usize,
     #[serde(skip)]
@@ -186,6 +182,12 @@ pub struct VirtualWorkspaceManager {
     pub default_layout_mode: LayoutMode,
     #[serde(skip)]
     pub layout_settings: LayoutSettings,
+    // skipping serializiation but proper layout restores will need window registry to be saved
+    #[serde(skip, default = "WindowRegistryHandle::new")]
+    window_registry: WindowRegistryHandle,
+    #[serde(skip, default)]
+    #[allow(dead_code)]
+    owned_window_registry: Box<crate::model::WindowRegistry>,
 }
 
 impl Default for VirtualWorkspaceManager {
@@ -214,13 +216,14 @@ impl VirtualWorkspaceManager {
         let target_count = config.default_workspace_count.max(1).min(max_workspaces);
         let default_workspace = config.default_workspace.min(target_count - 1);
 
+        let mut owned_window_registry: Box<crate::model::WindowRegistry> = Box::default();
+        let mut window_registry = WindowRegistryHandle::new();
+        window_registry.attach(owned_window_registry.as_mut());
+
         let mut manager = Self {
             workspaces: SlotMap::default(),
             workspaces_by_space: HashMap::default(),
             active_workspace_per_space: HashMap::default(),
-            window_to_workspace: HashMap::default(),
-            window_rule_floating: HashMap::default(),
-            last_rule_decision: HashMap::default(),
             floating_positions: HashMap::default(),
             workspace_counter: 1,
             app_rules: config.app_rules.clone(),
@@ -233,10 +236,18 @@ impl VirtualWorkspaceManager {
             workspace_rules: config.workspace_rules.clone(),
             default_layout_mode: layout_settings.mode,
             layout_settings: layout_settings.clone(),
+            window_registry,
+            owned_window_registry,
         };
 
         manager.rebuild_app_rule_regex_cache();
         manager
+    }
+
+    pub fn window_registry(&self) -> WindowRegistryHandle { self.window_registry.clone() }
+
+    pub fn attach_window_registry(&mut self, registry: &mut crate::model::WindowRegistry) {
+        self.window_registry.attach(registry);
     }
 
     pub fn update_settings(
@@ -377,37 +388,7 @@ impl VirtualWorkspaceManager {
             self.active_workspace_per_space.insert(new_space, (last, active));
         }
 
-        let mut new_window_to_workspace = HashMap::default();
-        for ((space, wid), ws_id) in std::mem::take(&mut self.window_to_workspace) {
-            if space == new_space && old_space != new_space {
-                // Drop auto-created mappings for the target space; migrated
-                // state will replace them.
-                continue;
-            }
-            let target_space = if space == old_space { new_space } else { space };
-            new_window_to_workspace.insert((target_space, wid), ws_id);
-        }
-        self.window_to_workspace = new_window_to_workspace;
-
-        let mut new_window_rule_floating = HashMap::default();
-        for ((space, wid), is_float) in std::mem::take(&mut self.window_rule_floating) {
-            if space == new_space && old_space != new_space {
-                continue;
-            }
-            let target_space = if space == old_space { new_space } else { space };
-            new_window_rule_floating.insert((target_space, wid), is_float);
-        }
-        self.window_rule_floating = new_window_rule_floating;
-
-        let mut new_last_rule_decision = HashMap::default();
-        for ((space, wid), decision) in std::mem::take(&mut self.last_rule_decision) {
-            if space == new_space && old_space != new_space {
-                continue;
-            }
-            let target_space = if space == old_space { new_space } else { space };
-            new_last_rule_decision.insert((target_space, wid), decision);
-        }
-        self.last_rule_decision = new_last_rule_decision;
+        self.window_registry.get_mut().remap_space(old_space, new_space);
 
         let mut new_positions = HashMap::default();
         for ((space, ws_id), positions) in std::mem::take(&mut self.floating_positions) {
@@ -606,34 +587,30 @@ impl VirtualWorkspaceManager {
                 return false;
             }
 
-            let existing_mapping: Option<(SpaceId, VirtualWorkspaceId)> =
-                self.window_to_workspace.iter().find_map(|(&(existing_space, wid), &ws_id)| {
-                    if wid == window_id {
-                        Some((existing_space, ws_id))
-                    } else {
-                        None
-                    }
-                });
+            let existing_mapping = self.window_registry.get().workspace_info_for_window(window_id);
 
-            if let Some((existing_space, old_workspace_id)) = existing_mapping {
+            if let Some(WindowWorkspaceInfo {
+                space: existing_space,
+                workspace_id: old_workspace_id,
+            }) = existing_mapping
+            {
                 if existing_space != space {
                     if let Some(old_workspace) = self.workspaces.get_mut(old_workspace_id) {
                         old_workspace.remove_window(window_id);
                     }
-                    self.window_to_workspace.remove(&(existing_space, window_id));
-                    self.window_rule_floating.remove(&(existing_space, window_id));
                 } else {
                     if let Some(old_workspace) = self.workspaces.get_mut(old_workspace_id) {
                         old_workspace.remove_window(window_id);
                     }
-                    self.window_to_workspace.remove(&(existing_space, window_id));
-                    self.window_rule_floating.remove(&(existing_space, window_id));
                 }
             }
 
             if let Some(workspace) = self.workspaces.get_mut(workspace_id) {
                 workspace.add_window(window_id);
-                self.window_to_workspace.insert((space, window_id), workspace_id);
+                self.window_registry.get_mut().assign_window_to_workspace(
+                    window_id,
+                    WindowWorkspaceInfo { space, workspace_id },
+                );
                 true
             } else {
                 error!(
@@ -650,72 +627,52 @@ impl VirtualWorkspaceManager {
         space: SpaceId,
         window_id: WindowId,
     ) -> Option<VirtualWorkspaceId> {
-        self.window_to_workspace.get(&(space, window_id)).copied()
+        self.window_registry.get().workspace_for_window(space, window_id)
     }
 
     pub fn workspace_for_window_any(&self, window_id: WindowId) -> Option<VirtualWorkspaceId> {
-        self.window_to_workspace.iter().find_map(|((_, wid), ws_id)| {
-            if *wid == window_id {
-                Some(*ws_id)
-            } else {
-                None
-            }
-        })
+        self.window_registry
+            .get()
+            .workspace_info_for_window(window_id)
+            .map(|info| info.workspace_id)
     }
 
     pub fn workspaces_for_window(&self, window_id: WindowId) -> Vec<VirtualWorkspaceId> {
-        let mut ids = HashSet::default();
-        for ((_, wid), ws_id) in self.window_to_workspace.iter() {
-            if *wid == window_id {
-                ids.insert(*ws_id);
-            }
-        }
-        ids.into_iter().collect()
+        self.window_registry.get().workspaces_for_window(window_id)
     }
 
     pub fn set_last_rule_decision(&mut self, space: SpaceId, window_id: WindowId, value: bool) {
-        self.last_rule_decision.insert((space, window_id), value);
+        let _ = space;
+        self.window_registry.get_mut().set_last_rule_decision(window_id, value);
     }
 
     pub fn remove_window(&mut self, window_id: WindowId) {
-        let keys: Vec<(SpaceId, WindowId)> = self
-            .window_to_workspace
-            .keys()
-            .copied()
-            .filter(|(_, wid)| *wid == window_id)
-            .collect();
-        for (space, wid) in keys {
-            if let Some(workspace_id) = self.window_to_workspace.remove(&(space, wid)) {
-                if let Some(workspace) = self.workspaces.get_mut(workspace_id) {
-                    workspace.remove_window(wid);
-                }
-                self.window_rule_floating.remove(&(space, wid));
-                self.last_rule_decision.remove(&(space, wid));
+        if let Some(assignment) = self.window_registry.get_mut().remove_window_assignment(window_id)
+        {
+            if let Some(workspace) = self.workspaces.get_mut(assignment.workspace_id) {
+                workspace.remove_window(window_id);
             }
         }
+        self.window_registry.get_mut().clear_rule_metadata(window_id);
     }
 
     pub fn remove_windows_for_app(&mut self, pid: pid_t) {
         let windows_to_remove: Vec<_> = self
-            .window_to_workspace
-            .keys()
-            .filter_map(|(space, wid)| {
-                if wid.pid == pid {
-                    Some((*space, *wid))
-                } else {
-                    None
-                }
-            })
+            .window_registry
+            .get()
+            .iter_workspace_assignments()
+            .map(|(window_id, _)| window_id)
+            .filter(|wid| wid.pid == pid)
             .collect();
 
-        for (space, window_id) in windows_to_remove {
-            if let Some(ws_id) = self.window_to_workspace.remove(&(space, window_id)) {
-                if let Some(workspace) = self.workspaces.get_mut(ws_id) {
+        for window_id in windows_to_remove {
+            let assignment = self.window_registry.get_mut().remove_window_assignment(window_id);
+            if let Some(info) = assignment {
+                if let Some(workspace) = self.workspaces.get_mut(info.workspace_id) {
                     workspace.remove_window(window_id);
                 }
-                self.window_rule_floating.remove(&(space, window_id));
-                self.last_rule_decision.remove(&(space, window_id));
             }
+            self.window_registry.get_mut().clear_rule_metadata(window_id);
         }
     }
 
@@ -731,8 +688,10 @@ impl VirtualWorkspaceManager {
 
     pub fn is_window_in_active_workspace(&self, space: SpaceId, window_id: WindowId) -> bool {
         if let Some(active_workspace_id) = self.active_workspace(space) {
-            if let Some(window_workspace_id) = self.window_to_workspace.get(&(space, window_id)) {
-                return *window_workspace_id == active_workspace_id;
+            if let Some(window_workspace_id) =
+                self.window_registry.get().workspace_for_window(space, window_id)
+            {
+                return window_workspace_id == active_workspace_id;
             }
         }
         true
@@ -749,16 +708,10 @@ impl VirtualWorkspaceManager {
     }
 
     pub fn find_window_by_idx(&self, space: SpaceId, idx: u32) -> Option<WindowId> {
-        self.window_to_workspace
-            .keys()
-            .filter_map(|(s, wid)| {
-                if *s == space && wid.idx.get() == idx {
-                    Some(*wid)
-                } else {
-                    None
-                }
-            })
-            .next()
+        self.window_registry
+            .get()
+            .iter_workspace_assignments()
+            .find_map(|(wid, info)| (info.space == space && wid.idx.get() == idx).then_some(wid))
     }
 
     pub fn find_window_in_workspace_by_idx(
@@ -1136,7 +1089,7 @@ impl VirtualWorkspaceManager {
     ) -> Result<VirtualWorkspaceId, WorkspaceError> {
         let default_workspace_id = self.get_default_workspace(space)?;
         if self.assign_window_to_workspace(space, window_id, default_workspace_id) {
-            self.window_rule_floating.remove(&(space, window_id));
+            self.window_registry.get_mut().clear_rule_floating(window_id);
             Ok(default_workspace_id)
         } else {
             Err(WorkspaceError::AssignmentFailed)
@@ -1153,8 +1106,7 @@ impl VirtualWorkspaceManager {
         ax_role: Option<&str>,
         ax_subrole: Option<&str>,
     ) -> Result<AppRuleResult, WorkspaceError> {
-        let prev_rule_decision =
-            self.last_rule_decision.get(&(space, window_id)).copied().unwrap_or(false);
+        let prev_rule_decision = self.window_registry.get().last_rule_decision(window_id);
 
         self.ensure_space_initialized(space);
         if self
@@ -1170,11 +1122,11 @@ impl VirtualWorkspaceManager {
             .find_matching_app_rule(app_bundle_id, app_name, window_title, ax_role, ax_subrole)
             .cloned();
 
-        let existing_assignment = self.window_to_workspace.get(&(space, window_id)).copied();
+        let existing_assignment = self.window_registry.get().workspace_for_window(space, window_id);
 
         if let Some(rule) = rule_match {
             if !rule.manage {
-                self.window_rule_floating.remove(&(space, window_id));
+                self.window_registry.get_mut().clear_rule_floating(window_id);
                 return Ok(AppRuleResult::Unmanaged);
             }
 
@@ -1235,11 +1187,7 @@ impl VirtualWorkspaceManager {
             };
 
             if let Some(existing_ws) = existing_assignment {
-                if rule.floating {
-                    self.window_rule_floating.insert((space, window_id), true);
-                } else {
-                    self.window_rule_floating.remove(&(space, window_id));
-                }
+                self.window_registry.get_mut().set_rule_floating(window_id, rule.floating);
                 return Ok(AppRuleResult::Managed(AppRuleAssignment {
                     workspace_id: existing_ws,
                     floating: rule.floating,
@@ -1248,11 +1196,7 @@ impl VirtualWorkspaceManager {
             }
 
             if self.assign_window_to_workspace(space, window_id, target_workspace_id) {
-                if rule.floating {
-                    self.window_rule_floating.insert((space, window_id), true);
-                } else {
-                    self.window_rule_floating.remove(&(space, window_id));
-                }
+                self.window_registry.get_mut().set_rule_floating(window_id, rule.floating);
                 return Ok(AppRuleResult::Managed(AppRuleAssignment {
                     workspace_id: target_workspace_id,
                     floating: rule.floating,
@@ -1264,7 +1208,7 @@ impl VirtualWorkspaceManager {
         }
 
         if let Some(existing_ws) = existing_assignment {
-            self.window_rule_floating.remove(&(space, window_id));
+            self.window_registry.get_mut().clear_rule_floating(window_id);
             return Ok(AppRuleResult::Managed(AppRuleAssignment {
                 workspace_id: existing_ws,
                 floating: false,
@@ -1274,7 +1218,7 @@ impl VirtualWorkspaceManager {
 
         let default_workspace_id = self.get_default_workspace(space)?;
         if self.assign_window_to_workspace(space, window_id, default_workspace_id) {
-            self.window_rule_floating.remove(&(space, window_id));
+            self.window_registry.get_mut().clear_rule_floating(window_id);
             Ok(AppRuleResult::Managed(AppRuleAssignment {
                 workspace_id: default_workspace_id,
                 floating: false,
@@ -1490,7 +1434,7 @@ impl VirtualWorkspaceManager {
     pub fn get_stats(&self) -> WorkspaceStats {
         let mut stats = WorkspaceStats {
             total_workspaces: self.workspaces.len(),
-            total_windows: self.window_to_workspace.len(),
+            total_windows: self.window_registry.get().workspace_assignment_count(),
             active_spaces: self.active_workspace_per_space.len(),
             workspace_window_counts: HashMap::default(),
         };

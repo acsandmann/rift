@@ -16,9 +16,12 @@ impl DragEventHandler {
 
             reactor.drag_manager.skip_layout_for_window = Some(dragged_wid);
 
-            if !reactor.window_manager.windows.contains_key(&dragged_wid)
-                || !reactor.window_manager.windows.contains_key(&target_wid)
-            {
+            let windows_exist = {
+                let registry = reactor.window_manager.as_ref();
+                registry.contains_window(dragged_wid)
+                    && registry.contains_window(target_wid)
+            };
+            if !windows_exist {
                 trace!(
                     ?dragged_wid,
                     ?target_wid,
@@ -30,8 +33,7 @@ impl DragEventHandler {
 
                 let swap_space = reactor
                     .window_manager
-                    .windows
-                    .get(&dragged_wid)
+                    .window(dragged_wid)
                     .and_then(|w| reactor.best_space_for_window(&w.frame_monotonic, w.info.sys_id))
                     .or_else(|| {
                         reactor

@@ -261,7 +261,7 @@ impl CommandEventHandler {
         window_id: WindowId,
         window_server_id: Option<WindowServerId>,
     ) {
-        if let Some(window) = reactor.window_manager.windows.get(&window_id) {
+        if let Some(window) = reactor.window_manager.window(window_id) {
             let Some(space) =
                 reactor.best_space_for_window(&window.frame_monotonic, window.info.sys_id)
             else {
@@ -393,8 +393,7 @@ impl CommandEventHandler {
             return;
         };
 
-        let (window_server_id, window_frame) = match reactor.window_manager.windows.get(&window_id)
-        {
+        let (window_server_id, window_frame) = match reactor.window_manager.window(window_id) {
             Some(state) => (state.info.sys_id, state.frame_monotonic),
             None => {
                 warn!(?window_id, "Move window to display ignored: unknown window");
@@ -486,7 +485,7 @@ impl CommandEventHandler {
             }
         }
 
-        if let Some(state) = reactor.window_manager.windows.get_mut(&window_id) {
+        if let Some(state) = reactor.window_manager.window_mut(window_id) {
             state.frame_monotonic = target_frame;
         }
 
@@ -507,7 +506,7 @@ impl CommandEventHandler {
         window_server_id: Option<WindowServerId>,
     ) {
         let target = window_server_id
-            .and_then(|wsid| reactor.window_manager.window_ids.get(&wsid).copied())
+            .and_then(|wsid| reactor.window_manager.tracked_window_id(wsid))
             .or_else(|| reactor.main_window());
         if let Some(wid) = target {
             reactor.request_close_window(wid);

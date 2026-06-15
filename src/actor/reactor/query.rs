@@ -428,9 +428,9 @@ impl Reactor {
                 .collect()
         } else {
             self.window_manager
-                .windows
-                .keys()
-                .filter_map(|&wid| self.create_window_data(wid))
+                .iter_windows()
+                .map(|(wid, _)| wid)
+                .filter_map(|wid| self.create_window_data(wid))
                 .collect()
         }
     }
@@ -445,7 +445,7 @@ impl Reactor {
             .iter()
             .map(|(&pid, app)| {
                 let window_count =
-                    self.window_manager.windows.keys().filter(|wid| wid.pid == pid).count();
+                    self.window_manager.window_ids_for_pid(pid).count();
 
                 let is_frontmost = self
                     .main_window_tracker
@@ -510,7 +510,7 @@ impl Reactor {
             .collect();
 
         serde_json::json!({
-               "windows_managed": self.window_manager.windows.len(),
+               "windows_managed": self.window_manager.tracked_window_count(),
             "workspaces": stats.total_workspaces,
             "applications": self.app_manager.apps.len(),
             "screens": self.space_manager.screens.len(),
@@ -578,8 +578,9 @@ impl Reactor {
             crate::actor::app::WindowId,
             crate::model::VirtualWorkspaceId,
         )> = Vec::new();
-        for ((space, window_id), workspace_id) in &vwm.window_to_workspace {
-            mapping_intermediate.push((space.get(), *window_id, *workspace_id));
+        let registry = vwm.window_registry();
+        for (window_id, assignment) in registry.get().iter_workspace_assignments() {
+            mapping_intermediate.push((assignment.space.get(), window_id, assignment.workspace_id));
         }
 
         let _ = vwm;
@@ -669,11 +670,11 @@ impl Reactor {
 
         let known_managed_windows: Vec<serde_json::Value> = self
             .window_manager
-            .windows
-            .keys()
-            .filter(|w| !included_windows.contains(*w))
+            .iter_windows()
+            .map(|(wid, _)| wid)
+            .filter(|w| !included_windows.contains(w))
             .map(|w| {
-                if let Some(window_data) = self.create_window_data(*w) {
+                if let Some(window_data) = self.create_window_data(w) {
                     serde_json::to_value(&window_data)
                         .unwrap_or_else(|_| serde_json::json!({ "id": w.to_debug_string() }))
                 } else {
@@ -684,9 +685,9 @@ impl Reactor {
 
         let reactor_summary = serde_json::json!({
             "apps": self.app_manager.apps.len(),
-            "managed_windows": self.window_manager.windows.len(),
-            "window_server_info": self.window_server_info_manager.window_server_info.len(),
-            "visible_window_server_ids": self.window_manager.visible_windows.len(),
+            "managed_windows": self.window_manager.tracked_window_count(),
+            "window_server_info": self.window_manager.window_server_info_count(),
+            "visible_window_server_ids": self.window_manager.visible_window_server_count(),
             "screens": self.space_manager.screens.len(),
             "known_managed_windows": known_managed_windows,
         });

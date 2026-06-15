@@ -15,6 +15,7 @@ use crate::layout_engine::systems::WindowLayoutConstraints;
 use crate::model::virtual_workspace::{
     AppRuleAssignment, AppRuleResult, VirtualWorkspace, VirtualWorkspaceId, VirtualWorkspaceManager,
 };
+use crate::model::WindowRegistryHandle;
 use crate::sys::screen::SpaceId;
 
 #[derive(Debug, Clone)]
@@ -2290,6 +2291,10 @@ impl LayoutEngine {
 
     pub fn virtual_workspace_manager_mut(&mut self) -> &mut VirtualWorkspaceManager {
         &mut self.virtual_workspace_manager
+    }
+
+    pub fn window_registry(&self) -> WindowRegistryHandle {
+        self.virtual_workspace_manager.window_registry()
     }
 
     pub fn active_workspace(&self, space: SpaceId) -> Option<crate::model::VirtualWorkspaceId> {

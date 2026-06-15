@@ -174,8 +174,9 @@ impl AnimationManager {
             }
 
             let target_frame = target_frame.round();
-            let (current_frame, window_server_id, txid) =
-                match reactor.window_manager.windows.get_mut(&wid) {
+            let (current_frame, window_server_id, txid) = {
+                let registry = reactor.window_manager.as_mut();
+                match registry.window_mut(wid) {
                     Some(window) => {
                         let current_frame = window.frame_monotonic;
                         if target_frame.same_as(current_frame) {
@@ -202,7 +203,8 @@ impl AnimationManager {
                         debug!(?wid, "Skipping - window no longer exists");
                         continue;
                     }
-                };
+                }
+            };
 
             let Some(app_state) = &reactor.app_manager.apps.get(&wid.pid) else {
                 debug!(?wid, "Skipping for window - app no longer exists");
@@ -242,7 +244,7 @@ impl AnimationManager {
                 }
             }
 
-            if let Some(window) = reactor.window_manager.windows.get_mut(&wid) {
+            if let Some(window) = reactor.window_manager.window_mut(wid) {
                 window.frame_monotonic = target_frame;
             }
         }
@@ -281,7 +283,8 @@ impl AnimationManager {
                 continue;
             }
 
-            let Some(window) = reactor.window_manager.windows.get_mut(&wid) else {
+            let registry = reactor.window_manager.as_mut();
+            let Some(window) = registry.window_mut(wid) else {
                 debug!(?wid, "Skipping layout - window no longer exists");
                 continue;
             };
@@ -331,7 +334,7 @@ impl AnimationManager {
             let mut txid = TransactionId::default();
             let mut has_txid = false;
             let mut txid_entries: Vec<(WindowServerId, TransactionId, CGRect)> = Vec::new();
-            if let Some(window) = reactor.window_manager.windows.get_mut(&first_wid) {
+            if let Some(window) = reactor.window_manager.window_mut(first_wid) {
                 if let Some(wsid) = window.info.sys_id {
                     txid = reactor.transaction_manager.generate_next_txid(wsid);
                     has_txid = true;
@@ -341,7 +344,7 @@ impl AnimationManager {
 
             if has_txid {
                 for (wid, frame) in frames.iter().skip(1) {
-                    if let Some(w) = reactor.window_manager.windows.get_mut(wid) {
+                    if let Some(w) = reactor.window_manager.window_mut(*wid) {
                         if let Some(wsid) = w.info.sys_id {
                             reactor.transaction_manager.set_last_sent_txid(wsid, txid);
                             txid_entries.push((wsid, txid, *frame));
@@ -362,7 +365,7 @@ impl AnimationManager {
             }
 
             for (wid, target_frame) in &frames {
-                if let Some(window) = reactor.window_manager.windows.get_mut(wid) {
+                if let Some(window) = reactor.window_manager.window_mut(*wid) {
                     window.frame_monotonic = *target_frame;
                 }
             }

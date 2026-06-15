@@ -26,12 +26,10 @@ impl SpaceEventHandler {
         sid: SpaceId,
     ) {
         if crate::sys::window_server::space_is_fullscreen(sid.get()) {
-            let (pid, window_id) = if let Some(&wid) = reactor.window_manager.window_ids.get(&wsid)
+            let (pid, window_id) = if let Some(wid) = reactor.window_manager.tracked_window_id(wsid)
             {
                 (wid.pid, Some(wid))
-            } else if let Some(info) =
-                reactor.window_server_info_manager.window_server_info.get(&wsid)
-            {
+            } else if let Some(info) = reactor.window_manager.get_window_server_info(wsid) {
                 (info.pid, None)
             } else {
                 // We don't know who owned this fullscreen window.
@@ -63,10 +61,7 @@ impl SpaceEventHandler {
                 return;
             }
 
-            if let Some(&wid) = reactor.window_manager.window_ids.get(&wsid) {
-                reactor.window_manager.window_ids.remove(&wsid);
-                reactor.window_server_info_manager.window_server_info.remove(&wsid);
-                reactor.window_manager.visible_windows.remove(&wsid);
+            if let Some(wid) = reactor.window_manager.remove_window_server_state(wsid) {
                 if let Some(app_state) = reactor.app_manager.apps.get(&wid.pid) {
                     if let Err(e) = app_state.handle.send(Request::WindowMaybeDestroyed(wid)) {
                         warn!("Failed to send WindowMaybeDestroyed: {}", e);
@@ -90,8 +85,8 @@ impl SpaceEventHandler {
         wsid: WindowServerId,
         sid: SpaceId,
     ) {
-        if reactor.window_server_info_manager.window_server_info.contains_key(&wsid)
-            || reactor.window_manager.observed_window_server_ids.contains(&wsid)
+        if reactor.window_manager.knows_window_server_id(wsid)
+            || reactor.window_manager.is_window_server_observed(wsid)
         {
             debug!(
                 ?wsid,
@@ -100,7 +95,7 @@ impl SpaceEventHandler {
             return;
         }
 
-        reactor.window_manager.observed_window_server_ids.insert(wsid);
+        reactor.window_manager.mark_window_server_observed(wsid);
         // TODO: figure out why this is happening, we should really know about this app,
         // why dont we get notifications that its being launched?
         if let Some(window_server_info) = crate::sys::window_server::get_window(wsid) {
@@ -129,7 +124,7 @@ impl SpaceEventHandler {
             }
 
             if crate::sys::window_server::space_is_fullscreen(sid.get()) {
-                let window_id = reactor.window_manager.window_ids.get(&wsid).copied();
+                let window_id = reactor.window_manager.tracked_window_id(wsid);
                 let last_known_user_space = resolve_last_known_user_space(reactor, window_id);
                 record_fullscreen_window(
                     reactor,

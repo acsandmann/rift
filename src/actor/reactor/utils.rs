@@ -1,6 +1,5 @@
 use objc2_app_kit::NSNormalWindowLevel;
 
-use crate::common::collections::HashMap;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo, window_is_sticky, window_level};
 
 /// Computes whether a window is manageable based on its properties and window server information.
@@ -16,14 +15,14 @@ pub fn compute_window_manageability(
     is_minimized: bool,
     is_ax_standard: bool,
     is_ax_root: bool,
-    window_server_info: &HashMap<WindowServerId, WindowServerInfo>,
+    mut window_server_info: impl FnMut(WindowServerId) -> Option<WindowServerInfo>,
 ) -> bool {
     if is_minimized {
         return false;
     }
 
     if let Some(wsid) = window_server_id {
-        if let Some(info) = window_server_info.get(&wsid) {
+        if let Some(info) = window_server_info(wsid) {
             if info.layer != 0 {
                 return false;
             }
