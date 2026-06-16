@@ -8,6 +8,10 @@ build = "build.rs"
 name = "rift"
 test = false
 
+[[bin]]
+name = "dev"
+test = false
+
 [profile.dev]
 opt-level = 0
 debug = 1
@@ -76,6 +80,8 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
 	"NSView",
 	"NSWindow",
 	"NSWorkspace",
+	"NSTextField",
+	"NSText",
 	"libc",
 	"objc2-core-foundation",
 	"objc2-core-graphics",

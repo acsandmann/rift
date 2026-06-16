@@ -332,6 +332,15 @@ impl AXUIElement {
 
         None
     }
+
+    pub fn process_id(&self) -> Result<pid_t> {
+        let pid = unsafe { NonNull::new_unchecked(&mut 0i32) };
+        if unsafe { self.inner.pid(pid) } == AXError::Success {
+            Ok(unsafe { *pid.as_ref() })
+        } else {
+            Err(Error::Ax(unsafe { self.inner.pid(pid) }))
+        }
+    }
 }
 
 impl Deref for AXUIElement {
