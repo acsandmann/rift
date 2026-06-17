@@ -482,7 +482,17 @@ impl SpacesActor {
             .iter()
             .map(|screen| screen.display_uuid.as_str())
             .ne(screens.iter().map(|screen| screen.display_uuid.as_str()));
-        let topology_changed = display_set_changed || display_order_changed;
+        let previous_frames: HashMap<_, _> = previous_screens
+            .iter()
+            .map(|screen| (screen.display_uuid.as_str(), screen.frame))
+            .collect();
+        let display_geometry_changed = screens.iter().any(|screen| {
+            previous_frames
+                .get(screen.display_uuid.as_str())
+                .is_some_and(|previous| *previous != screen.frame)
+        });
+        let topology_changed =
+            display_set_changed || display_order_changed || display_geometry_changed;
         let should_force_refresh_layout =
             topology_changed && (self.state.has_seen_display_set || !previous_displays.is_empty());
 
@@ -1001,14 +1011,14 @@ impl SpacesActor {
 
         let Some((screens, converter)) = self.collect_state() else {
             if !self.retry_display_stabilization(expected_epoch, attempt) {
-                self.finish_display_churn(expected_epoch);
+                self.finish_display_churn(expected_epoch, true);
             }
             return;
         };
 
         if screens.is_empty() {
             if !self.retry_display_stabilization(expected_epoch, attempt) {
-                self.finish_display_churn(expected_epoch);
+                self.finish_display_churn(expected_epoch, true);
             }
             return;
         }
@@ -1046,7 +1056,7 @@ impl SpacesActor {
         if hits >= DISPLAY_STABLE_REQUIRED_HITS {
             if !window_server::windowserver_quiet_for_us(window_server::WINDOWSERVER_QUIET_US) {
                 if !self.retry_display_stabilization(expected_epoch, attempt) {
-                    self.finish_display_churn(expected_epoch);
+                    self.finish_display_churn(expected_epoch, true);
                 }
                 return;
             }
@@ -1055,16 +1065,16 @@ impl SpacesActor {
             self.state.pending_screen_parameters = None;
             self.state.pending_spaces = None;
             self.forward_screen_parameters(screens, converter);
-            self.finish_display_churn(expected_epoch);
+            self.finish_display_churn(expected_epoch, false);
             return;
         }
 
         if !self.retry_display_stabilization(expected_epoch, attempt) {
-            self.finish_display_churn(expected_epoch);
+            self.finish_display_churn(expected_epoch, true);
         }
     }
 
-    fn finish_display_churn(&mut self, expected_epoch: u64) {
+    fn finish_display_churn(&mut self, expected_epoch: u64, schedule_refresh: bool) {
         if expected_epoch != self.state.display_churn_epoch || !self.state.display_churn_active {
             return;
         }
@@ -1078,7 +1088,9 @@ impl SpacesActor {
         if self.state.refresh_deferred_until_stable {
             self.state.refresh_deferred_until_stable = false;
         }
-        self.schedule_screen_refresh_after(0, 0);
+        if schedule_refresh {
+            self.schedule_screen_refresh_after(0, 0);
+        }
     }
 }
 

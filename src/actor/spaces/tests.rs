@@ -719,7 +719,7 @@ fn duplicate_visible_spaces_disable_remaps_and_layout_forcing() {
 }
 
 #[test]
-fn resize_only_updates_report_resized_spaces_without_topology_change() {
+fn resize_updates_are_treated_as_topology_changes_and_report_resized_spaces() {
     let (mut actor, mut wm_rx, _reactor_rx) = build_actor();
     let space = SpaceId::new(101);
 
@@ -737,9 +737,36 @@ fn resize_only_updates_report_resized_spaces_without_topology_change() {
     match recv_wm(&mut wm_rx) {
         wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
             assert!(!state.display_set_changed);
-            assert!(!state.topology_changed);
-            assert!(!state.should_force_refresh_layout);
+            assert!(state.topology_changed);
+            assert!(state.should_force_refresh_layout);
             assert_eq!(state.resized_spaces, vec![(space, CGSize::new(1200.0, 800.0))]);
+        }
+        other => panic!("unexpected wm event: {other:?}"),
+    }
+}
+
+#[test]
+fn display_origin_change_is_treated_as_topology_change() {
+    let (mut actor, mut wm_rx, _reactor_rx) = build_actor();
+    let space = SpaceId::new(111);
+
+    actor.handle_event(Event::ScreenParametersChanged(
+        vec![make_screen_with(1, "display-1", 0.0, 1000.0, Some(space))],
+        CoordinateConverter::from_height(800.0),
+    ));
+    let _ = recv_wm(&mut wm_rx);
+
+    actor.handle_event(Event::ScreenParametersChanged(
+        vec![make_screen_with(1, "display-1", 200.0, 1000.0, Some(space))],
+        CoordinateConverter::from_height(800.0),
+    ));
+
+    match recv_wm(&mut wm_rx) {
+        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
+            assert!(!state.display_set_changed);
+            assert!(state.topology_changed);
+            assert!(state.should_force_refresh_layout);
+            assert!(state.resized_spaces.is_empty());
         }
         other => panic!("unexpected wm event: {other:?}"),
     }
