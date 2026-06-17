@@ -85,8 +85,7 @@ impl WindowEventHandler {
         // calls kAXWindowsAttribute (space-filtered), omitting Desktop windows and emitting
         // WindowDestroyed for them. get_window() uses CGWindowListCopyWindowInfo
         // (not space-filtered), so Some here means the window still exists.
-        if !crate::sys::window_server::active_space_is_user() || reactor.is_mission_control_active()
-        {
+        if !reactor.has_user_space_context() || reactor.is_mission_control_active() {
             if let Some(ws_id) = window_server_id {
                 if crate::sys::window_server::get_window(ws_id)
                     .is_some_and(|ws_info| ws_info.pid == wid.pid)
@@ -297,8 +296,8 @@ impl WindowEventHandler {
                 return false;
             }
 
-            let old_space = reactor.best_space_for_window(&old_frame, server_id);
-            let new_space = reactor.best_space_for_window(&new_frame, server_id);
+            let old_space = reactor.geometry_space_for_window(&old_frame, server_id);
+            let new_space = reactor.geometry_space_for_window(&new_frame, server_id);
             let old_active = old_space.is_some_and(|space| reactor.is_space_active(space));
             let new_active = new_space.is_some_and(|space| reactor.is_space_active(space));
 
@@ -329,7 +328,7 @@ impl WindowEventHandler {
                 if is_resize {
                     if active_space_for_window(reactor, &new_frame, server_id).is_some() {
                         let screens = reactor
-                            .space_manager
+                            .space_state
                             .screens
                             .iter()
                             .filter_map(|screen| {
@@ -396,7 +395,7 @@ impl WindowEventHandler {
                     if let Some(space) = old_space {
                         if reactor.is_space_active(space) {
                             let screens = reactor
-                                .space_manager
+                                .space_state
                                 .screens
                                 .iter()
                                 .filter_map(|screen| {
@@ -486,6 +485,13 @@ fn maybe_dispatch_window_added_in_space(reactor: &mut Reactor, wid: WindowId, sp
 }
 
 fn handle_mouse_up_if_needed(reactor: &mut Reactor, mouse_state: Option<MouseState>) {
+    if reactor.is_mission_control_active() {
+        reactor.drag_manager.reset();
+        reactor.drag_manager.drag_state = DragState::Inactive;
+        reactor.drag_manager.skip_layout_for_window = None;
+        return;
+    }
+
     if mouse_state == Some(MouseState::Up)
         && (matches!(
             reactor.drag_manager.drag_state,

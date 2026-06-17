@@ -135,11 +135,6 @@ pub(crate) struct AppState {
     pub(crate) handle: AppThreadHandle,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct PendingSpaceChange {
-    pub(crate) spaces: Vec<Option<SpaceId>>,
-}
-
 #[derive(Debug)]
 pub(crate) struct WindowState {
     pub(crate) info: WindowInfo,

@@ -637,6 +637,10 @@ impl VirtualWorkspaceManager {
             .map(|info| info.workspace_id)
     }
 
+    pub fn workspace_info_for_window_any(&self, window_id: WindowId) -> Option<WindowWorkspaceInfo> {
+        self.window_registry.get().workspace_info_for_window(window_id)
+    }
+
     pub fn workspaces_for_window(&self, window_id: WindowId) -> Vec<VirtualWorkspaceId> {
         self.window_registry.get().workspaces_for_window(window_id)
     }

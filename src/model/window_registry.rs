@@ -23,6 +23,7 @@ struct WindowServerRecord {
     window_id: Option<WindowId>,
     visible: bool,
     observed: bool,
+    space: Option<SpaceId>,
     info: Option<WindowServerInfo>,
     recent_at: Option<Instant>,
 }
@@ -210,12 +211,23 @@ impl WindowRegistry {
         self.window_servers.get(&wsid).is_some_and(|record| record.observed)
     }
 
+    pub fn set_window_server_space(&mut self, wsid: WindowServerId, space: Option<SpaceId>) {
+        let record = self.server_record_mut(wsid);
+        record.space = space;
+        self.prune_window_server_record(wsid);
+    }
+
+    pub fn window_server_space(&self, wsid: WindowServerId) -> Option<SpaceId> {
+        self.window_servers.get(&wsid).and_then(|record| record.space)
+    }
+
     pub fn remove_window_server_state(&mut self, wsid: WindowServerId) -> Option<WindowId> {
         let wid = self.tracked_window_id(wsid);
         if let Some(record) = self.window_servers.get_mut(&wsid) {
             record.window_id = None;
             record.visible = false;
             record.observed = false;
+            record.space = None;
             record.info = None;
             record.recent_at = None;
         }

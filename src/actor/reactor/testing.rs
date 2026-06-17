@@ -4,6 +4,7 @@ use tracing::debug;
 use super::{Event, Reactor, Record, Requested, ScreenInfo, TransactionId};
 use crate::actor;
 use crate::actor::app::{AppThreadHandle, Request, WindowId};
+use crate::actor::spaces::ForwardedSpaceState;
 use crate::common::collections::BTreeMap;
 use crate::common::config::Config;
 use crate::layout_engine::LayoutEngine;
@@ -45,12 +46,32 @@ pub fn make_screen_snapshots(frames: Vec<CGRect>, spaces: Vec<Option<SpaceId>>) 
         .collect()
 }
 
-pub fn screen_params_event(
+pub fn space_state_event(
     frames: Vec<CGRect>,
     spaces: Vec<Option<SpaceId>>,
     _ws_info: Vec<WindowServerInfo>,
 ) -> Event {
-    Event::ScreenParametersChanged(make_screen_snapshots(frames, spaces))
+    space_state_event_from_screens(make_screen_snapshots(frames, spaces))
+}
+
+pub fn space_state_event_from_screens(screens: Vec<ScreenInfo>) -> Event {
+    let command_space = screens.iter().find_map(|screen| screen.space);
+    let active_spaces = screens.iter().filter_map(|screen| screen.space).collect();
+    Event::SpaceStateChanged(ForwardedSpaceState {
+        screens,
+        fullscreen_by_space: Default::default(),
+        has_seen_display_set: false,
+        active_spaces,
+        command_space,
+        display_space_ids: Default::default(),
+        last_user_space_by_display: Default::default(),
+        space_remaps: Vec::new(),
+        display_set_changed: false,
+        topology_changed: false,
+        allow_space_remap: false,
+        should_force_refresh_layout: false,
+        resized_spaces: Vec::new(),
+    })
 }
 
 /*impl Drop for Reactor {

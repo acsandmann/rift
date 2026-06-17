@@ -16,6 +16,7 @@ pub mod notification_center;
 pub mod process;
 pub mod raise_manager;
 pub mod reactor;
+pub mod spaces;
 pub mod stack_line;
 pub mod window_notify;
 pub mod wm_controller;

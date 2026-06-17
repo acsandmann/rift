@@ -21,6 +21,7 @@ mod testing;
 mod tests;
 
 use std::thread;
+#[cfg(not(test))]
 use std::time::Duration;
 
 use animation::Sender as AnimationSender;
@@ -44,6 +45,7 @@ use crate::actor::app::{AppInfo, AppThreadHandle, Quiet, Request, WindowId, Wind
 use crate::actor::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::actor::raise_manager::{self, RaiseManager, RaiseRequest};
 use crate::actor::reactor::events::window_discovery::WindowDiscoveryHandler;
+use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::{self, menu_bar, stack_line};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
 use crate::common::config::Config;
@@ -55,19 +57,18 @@ use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt};
 pub use crate::sys::screen::ScreenInfo;
-use crate::sys::screen::{SpaceId, get_active_space_number, order_visible_spaces_by_position};
-use crate::sys::window_server::{
-    self, WindowServerId, WindowServerInfo, current_cursor_location, space_is_fullscreen,
-    wait_for_native_fullscreen_transition, window_level, window_sub_level,
-};
+use crate::sys::screen::{SpaceId, order_visible_spaces_by_position};
+use crate::sys::skylight::DisplayReconfigFlags;
+use crate::sys::window_server::{self, WindowServerId, WindowServerInfo, space_is_fullscreen, window_level, window_sub_level};
+#[cfg(not(test))]
+use crate::sys::window_server::wait_for_native_fullscreen_transition;
 
 pub type Sender = actor::Sender<Event>;
 type Receiver = actor::Receiver<Event>;
 pub use query::ReactorQueryHandle;
 
 pub(crate) use crate::model::reactor::{
-    AppState, FullscreenSpaceTrack, FullscreenWindowTrack, PendingSpaceChange, WindowFilter,
-    WindowState,
+    AppState, FullscreenSpaceTrack, FullscreenWindowTrack, WindowFilter, WindowState,
 };
 pub use crate::model::reactor::{
     Command, DisplaySelector, DragSession, DragState, MenuState, MissionControlState,
@@ -102,26 +103,21 @@ impl std::ops::Deref for ReactorHandle {
     fn deref(&self) -> &Self::Target { &self.queries }
 }
 
-use display_topology::{DisplaySnapshot, DisplayTopologyManager, WindowSnapshot};
+use display_topology::{DisplaySnapshot, WindowSnapshot};
 
 use crate::model::server::WindowData;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpaceEventKind {
+    User,
+    Fullscreen,
+}
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Event {
-    /// The screen layout, including resolution, changed. This is always the
-    /// first event sent on startup.
-    ///
-    /// The first vec is the snapshot for each screen. The main screen is always
-    /// first in the list.
-    ScreenParametersChanged(Vec<ScreenInfo>),
-
-    /// The current space changed.
-    ///
-    /// There is one SpaceId per screen in the last ScreenParametersChanged
-    /// event. `None` in the SpaceId vec disables managing windows on that
-    /// screen until the next space change.
-    SpaceChanged(Vec<Option<SpaceId>>),
+    #[serde(skip)]
+    SpaceStateChanged(ForwardedSpaceState),
 
     /// An application was launched. This event is also sent for every running
     /// application on startup.
@@ -162,9 +158,9 @@ pub enum Event {
     ),
     WindowDestroyed(WindowId),
     #[serde(skip)]
-    WindowServerDestroyed(crate::sys::window_server::WindowServerId, SpaceId),
+    WindowServerDestroyed(crate::sys::window_server::WindowServerId, SpaceId, SpaceEventKind),
     #[serde(skip)]
-    WindowServerAppeared(crate::sys::window_server::WindowServerId, SpaceId),
+    WindowServerAppeared(crate::sys::window_server::WindowServerId, SpaceId, SpaceEventKind),
     #[serde(skip)]
     SpaceCreated(SpaceId),
     #[serde(skip)]
@@ -239,7 +235,7 @@ pub struct Reactor {
     app_manager: managers::AppManager,
     layout_manager: managers::LayoutManager,
     window_manager: managers::WindowManager,
-    space_manager: managers::SpaceManager,
+    space_state: ForwardedSpaceState,
     space_activation_policy: SpaceActivationPolicy,
     main_window_tracker: MainWindowTracker,
     drag_manager: managers::DragManager,
@@ -253,9 +249,17 @@ pub struct Reactor {
     refocus_manager: managers::RefocusManager,
     pending_space_change_manager: managers::PendingSpaceChangeManager,
     active_spaces: HashSet<SpaceId>,
-    display_topology_manager: DisplayTopologyManager,
+    pending_display_topology_commit: Option<PendingDisplayTopologyCommit>,
     pub above_window: Option<WindowServerId>,
     pub animation_tx: Option<AnimationSender>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingDisplayTopologyCommit {
+    epoch: u64,
+    started_at: std::time::Instant,
+    flags: DisplayReconfigFlags,
+    pre_known_wsids: HashSet<WindowServerId>,
 }
 
 impl Reactor {
@@ -317,11 +321,7 @@ impl Reactor {
             app_manager: managers::AppManager::new(),
             layout_manager: managers::LayoutManager { layout_engine },
             window_manager: Box::default(),
-            space_manager: managers::SpaceManager {
-                screens: vec![],
-                fullscreen_by_space: HashMap::default(),
-                has_seen_display_set: false,
-            },
+            space_state: ForwardedSpaceState::default(),
             space_activation_policy: SpaceActivationPolicy::new(),
             main_window_tracker: MainWindowTracker::default(),
             drag_manager: managers::DragManager {
@@ -368,10 +368,9 @@ impl Reactor {
             },
             pending_space_change_manager: managers::PendingSpaceChangeManager {
                 pending_space_change: None,
-                topology_relayout_pending: false,
             },
             active_spaces: HashSet::default(),
-            display_topology_manager: DisplayTopologyManager::default(),
+            pending_display_topology_commit: None,
             above_window: None,
             animation_tx: None,
         };
@@ -412,19 +411,10 @@ impl Reactor {
         }
     }
 
-    fn screens_for_current_spaces(&self) -> Vec<ScreenInfo> { self.space_manager.screens.clone() }
-
-    fn screens_for_spaces(&self, spaces: &[Option<SpaceId>]) -> Vec<ScreenInfo> {
-        self.space_manager
-            .screens
-            .iter()
-            .zip(spaces.iter().copied())
-            .map(|(screen, space)| ScreenInfo { space, ..screen.clone() })
-            .collect()
-    }
+    fn screens_for_current_spaces(&self) -> Vec<ScreenInfo> { self.space_state.screens.clone() }
 
     fn display_uuids_for_current_screens(&self) -> Vec<Option<String>> {
-        self.space_manager
+        self.space_state
             .screens
             .iter()
             .map(|screen| screen.display_uuid_owned())
@@ -432,17 +422,17 @@ impl Reactor {
     }
 
     fn raw_spaces_for_current_screens(&self) -> Vec<Option<SpaceId>> {
-        self.space_manager.screens.iter().map(|s| s.space).collect()
+        self.space_state.screens.iter().map(|s| s.space).collect()
     }
 
     fn display_uuid_for_space(&self, space: SpaceId) -> Option<String> {
-        self.space_manager
+        self.space_state
             .screen_by_space(space)
             .and_then(|screen| screen.display_uuid_owned())
     }
 
     fn expose_space_if_known(&mut self, space: SpaceId) {
-        let Some(screen) = self.space_manager.screen_by_space(space) else {
+        let Some(screen) = self.space_state.screen_by_space(space) else {
             return;
         };
         self.layout_manager
@@ -459,6 +449,12 @@ impl Reactor {
             self.space_activation_policy.compute_active_spaces(cfg, spaces, &display_uuids);
         let previous_active = self.active_spaces.clone();
         self.set_active_spaces(&active_spaces);
+        self.handle_active_space_change(previous_active);
+    }
+
+    fn apply_authoritative_active_spaces(&mut self, spaces: impl IntoIterator<Item = SpaceId>) {
+        let previous_active = self.active_spaces.clone();
+        self.active_spaces = spaces.into_iter().collect();
         self.handle_active_space_change(previous_active);
     }
 
@@ -505,7 +501,7 @@ impl Reactor {
             if !state.matches_filter(WindowFilter::Manageable) {
                 continue;
             }
-            let Some(space) = self.best_space_for_window_state(state) else {
+            let Some(space) = self.best_space_for_window_id(wid) else {
                 continue;
             };
 
@@ -536,7 +532,7 @@ impl Reactor {
     }
 
     fn build_display_snapshot(&self, ws_info: Vec<WindowServerInfo>) -> DisplaySnapshot {
-        let ordered_screens = self.space_manager.screens.clone();
+        let ordered_screens = self.space_state.screens.clone();
         let active_spaces = self.active_spaces.clone();
 
         let mut inactive_spaces: HashSet<SpaceId> = HashSet::default();
@@ -557,35 +553,26 @@ impl Reactor {
     }
 
     fn maybe_commit_display_topology_snapshot(&mut self) {
-        let Some((epoch, started_at, flags, pre_known_wsids)) =
-            self.display_topology_manager.take_awaiting_commit()
-        else {
+        let Some(commit) = self.pending_display_topology_commit.take() else {
             return;
         };
 
-        if self.space_manager.screens.is_empty()
-            || self.space_manager.screens.iter().any(|screen| screen.space.is_none())
+        if self.space_state.screens.is_empty()
+            || self.space_state.screens.iter().any(|screen| screen.space.is_none())
         {
-            // Topology is not stable yet; keep waiting for the next complete snapshot.
-            self.display_topology_manager.restore_awaiting_commit(
-                epoch,
-                started_at,
-                flags,
-                pre_known_wsids,
-            );
+            self.pending_display_topology_commit = Some(commit);
             return;
         }
 
         let ws_info = self.authoritative_window_snapshot_for_active_spaces();
         let snapshot = self.build_display_snapshot(ws_info);
         self.reconcile_windows_after_topology_commit(
-            epoch,
-            started_at,
-            flags,
-            pre_known_wsids,
+            commit.epoch,
+            commit.started_at,
+            commit.flags,
+            commit.pre_known_wsids,
             snapshot,
         );
-        self.display_topology_manager.mark_stable();
     }
 
     fn reconcile_windows_after_topology_commit(
@@ -613,31 +600,50 @@ impl Reactor {
             if snapshot_window.info.layer != 0 {
                 continue;
             }
-            let Some(space) = window_server::window_space(wsid) else {
+            let Some(space) = self.best_space_for_frame(&snapshot_window.info.frame) else {
                 continue;
             };
-            if !self.is_space_active(space) && !window_server::space_is_user(space.get()) {
+            if !self.is_space_active(space) {
                 continue;
             }
-            SpaceEventHandler::handle_window_server_appeared(self, wsid, space);
+            SpaceEventHandler::handle_window_server_appeared(
+                self,
+                wsid,
+                space,
+                SpaceEventKind::User,
+            );
             synthetic_appeared += 1;
         }
 
         for wsid in disappeared {
-            let still_exists = window_server::get_window(wsid).is_some();
-            let spaces = window_server::window_spaces(wsid);
-            let in_user_or_active = spaces.iter().any(|space| {
-                window_server::space_is_user(space.get()) || self.is_space_active(*space)
-            });
-            if still_exists && in_user_or_active {
+            if window_server::get_window(wsid).is_some() {
                 continue;
             }
-            let sid = window_server::window_space(wsid)
-                .or_else(|| self.space_manager.first_known_space());
+
+            let sid = self
+                .window_manager
+                .window_server_space(wsid)
+                .or_else(|| self.assigned_space_for_window_id(self.window_manager.tracked_window_id(wsid)?))
+                .or_else(|| {
+                    self.window_manager
+                        .tracked_window_id(wsid)
+                        .and_then(|wid| self.best_space_for_window_id(wid))
+                })
+                .or_else(|| {
+                    self.window_manager
+                        .get_window_server_info(wsid)
+                        .and_then(|info| self.best_space_for_frame(&info.frame))
+                })
+                .or_else(|| self.raw_command_space());
             let Some(sid) = sid else {
                 continue;
             };
-            SpaceEventHandler::handle_window_server_destroyed(self, wsid, sid);
+            SpaceEventHandler::handle_window_server_destroyed(
+                self,
+                wsid,
+                sid,
+                SpaceEventKind::User,
+            );
             synthetic_destroyed += 1;
         }
 
@@ -670,18 +676,14 @@ impl Reactor {
             return Vec::new();
         }
 
-        let active_window_ids: std::collections::HashSet<u32> =
-            crate::sys::window_server::space_window_list_for_connection(
-                &active_space_ids,
-                0,
-                false,
-            )
-            .into_iter()
-            .collect();
-
         ws_info
             .into_iter()
-            .filter(|w| active_window_ids.contains(&w.id.as_u32()))
+            .filter(|window| {
+                self.window_manager
+                    .window_server_space(window.id)
+                    .or_else(|| self.best_space_for_frame(&window.frame))
+                    .is_some_and(|space| active_space_ids.contains(&space.get()))
+            })
             .collect()
     }
 
@@ -785,9 +787,8 @@ impl Reactor {
             self.handle_query_request(req);
             return;
         }
-        if self.maybe_quarantine_during_churn(&event) {
-            Self::note_windowserver_activity(&event);
-            trace!(?event, "quarantined event during display churn");
+        if self.should_quarantine_during_display_churn(&event) {
+            trace!(?event, "quarantined during display churn");
             return;
         }
         Self::note_windowserver_activity(&event);
@@ -803,8 +804,8 @@ impl Reactor {
             Event::WindowDeminiaturized(wid) => Some(wid.idx.get()),
             Event::MouseMoved(_) => None,
             Event::ResyncAppForWindow(wsid) => Some(wsid.as_u32()),
-            Event::WindowServerDestroyed(wsid, _) => Some(wsid.as_u32()),
-            Event::WindowServerAppeared(wsid, _) => Some(wsid.as_u32()),
+            Event::WindowServerDestroyed(wsid, ..) => Some(wsid.as_u32()),
+            Event::WindowServerAppeared(wsid, ..) => Some(wsid.as_u32()),
             _ => None,
         };
         if let Some(wsid) = wsid {
@@ -832,58 +833,25 @@ impl Reactor {
                 | Event::ApplicationLaunched { .. }
                 | Event::ApplicationTerminated(..)
                 | Event::ApplicationThreadTerminated(..)
-                | Event::SpaceChanged(..)
-                | Event::ScreenParametersChanged(..)
+                | Event::SpaceStateChanged(..)
         )
     }
 
-    fn should_process_during_churn(event: &Event) -> bool {
+    fn should_quarantine_during_display_churn(&self, event: &Event) -> bool {
+        if !crate::sys::display_churn::is_active() && self.pending_display_topology_commit.is_none() {
+            return false;
+        }
+
         matches!(
             event,
-            Event::DisplayChurnBegin
-                | Event::DisplayChurnEnd
-                | Event::ScreenParametersChanged(..)
-                | Event::SpaceChanged(..)
-                | Event::SpaceCreated(..)
-                | Event::SpaceDestroyed(..)
-                | Event::MissionControlNativeEntered
-                | Event::MissionControlNativeExited
-                | Event::SystemWoke
-                | Event::ApplicationLaunched { .. }
-                | Event::ApplicationTerminated(..)
-                | Event::ApplicationThreadTerminated(..)
-                | Event::ApplicationActivated(..)
-                | Event::ApplicationDeactivated(..)
-                | Event::ApplicationGloballyActivated(..)
-                | Event::ApplicationGloballyDeactivated(..)
-                | Event::ApplicationMainWindowChanged(..)
-                | Event::RegisterWmSender(..)
-                | Event::ConfigUpdated(..)
-                | Event::Command(..)
-                | Event::RaiseCompleted { .. }
-                | Event::RaiseTimeout { .. }
-                | Event::MenuOpened(..)
-                | Event::MenuClosed(..)
+            Event::WindowCreated(..)
+                | Event::WindowDestroyed(..)
+                | Event::WindowFrameChanged(..)
+                | Event::WindowMinimized(..)
+                | Event::WindowDeminiaturized(..)
+                | Event::WindowTitleChanged(..)
+                | Event::WindowsDiscovered { .. }
         )
-    }
-
-    fn maybe_quarantine_during_churn(&mut self, event: &Event) -> bool {
-        if !self.display_topology_manager.is_churning_or_awaiting_commit() {
-            return false;
-        }
-        if Self::should_process_during_churn(event) {
-            return false;
-        }
-
-        match event {
-            Event::ResyncAppForWindow(..) => self.display_topology_manager.quarantine_resync(),
-            Event::WindowServerDestroyed(..) => {
-                self.display_topology_manager.quarantine_destroyed()
-            }
-            Event::WindowServerAppeared(..) => self.display_topology_manager.quarantine_appeared(),
-            _ => {}
-        }
-        true
     }
 
     fn set_login_window_active(&mut self, active: bool) {
@@ -910,26 +878,18 @@ impl Reactor {
                 let mut pre_known_wsids: HashSet<WindowServerId> = HashSet::default();
                 pre_known_wsids.extend(self.window_manager.iter_window_server_ids());
 
-                let epoch = crate::sys::display_churn::epoch();
-                let flags = crate::sys::display_churn::flags();
-                self.display_topology_manager.begin_churn(epoch, flags, pre_known_wsids);
+                self.pending_display_topology_commit = Some(PendingDisplayTopologyCommit {
+                    epoch: crate::sys::display_churn::epoch(),
+                    started_at: std::time::Instant::now(),
+                    flags: crate::sys::display_churn::flags(),
+                    pre_known_wsids,
+                });
                 return;
             }
             Event::DisplayChurnEnd => {
-                let (epoch, _, flags) = self.display_topology_manager.current_churn().unwrap_or((
-                    crate::sys::display_churn::epoch(),
-                    std::time::Instant::now(),
-                    crate::sys::display_churn::flags(),
-                ));
-                self.display_topology_manager.end_churn_to_awaiting(epoch, flags);
                 return;
             }
             _ => {}
-        }
-
-        if self.maybe_quarantine_during_churn(&event) {
-            trace!(?event, "quarantined event during display churn");
-            return;
         }
 
         let should_update_notifications = Self::should_update_notifications(&event);
@@ -986,10 +946,6 @@ impl Reactor {
                 self.clear_menu_state_for_non_owner(pid);
                 if self.is_login_window_pid(pid) {
                     self.set_login_window_active(true);
-
-                    let raw_spaces = self.raw_spaces_for_current_screens();
-                    self.reconcile_spaces_with_display_history(&raw_spaces, false);
-
                     self.force_refresh_all_windows();
                 } else if self.space_activation_policy.login_window_active {
                     // macOS sometimes activates loginwindow during wake without sending a
@@ -1010,11 +966,11 @@ impl Reactor {
             Event::WindowDestroyed(wid) => {
                 window_was_destroyed = WindowEventHandler::handle_window_destroyed(self, wid);
             }
-            Event::WindowServerDestroyed(wsid, sid) => {
-                SpaceEventHandler::handle_window_server_destroyed(self, wsid, sid);
+            Event::WindowServerDestroyed(wsid, sid, kind) => {
+                SpaceEventHandler::handle_window_server_destroyed(self, wsid, sid, kind);
             }
-            Event::WindowServerAppeared(wsid, sid) => {
-                SpaceEventHandler::handle_window_server_appeared(self, wsid, sid);
+            Event::WindowServerAppeared(wsid, sid, kind) => {
+                SpaceEventHandler::handle_window_server_appeared(self, wsid, sid, kind);
             }
             Event::SpaceCreated(space) => {
                 self.handle_space_lifecycle(space, true);
@@ -1041,11 +997,8 @@ impl Reactor {
             Event::WindowTitleChanged(wid, new_title) => {
                 WindowEventHandler::handle_window_title_changed(self, wid, new_title);
             }
-            Event::ScreenParametersChanged(screens) => {
-                SpaceEventHandler::handle_screen_parameters_changed(self, screens);
-            }
-            Event::SpaceChanged(spaces) => {
-                SpaceEventHandler::handle_space_changed(self, spaces);
+            Event::SpaceStateChanged(space_state) => {
+                SpaceEventHandler::handle_space_state_changed(self, space_state);
             }
             Event::MouseUp => {
                 DragEventHandler::handle_mouse_up(self);
@@ -1100,10 +1053,6 @@ impl Reactor {
         window_was_destroyed: bool,
         should_update_notifications: bool,
     ) {
-        if self.display_topology_manager.is_churning_or_awaiting_commit() {
-            return;
-        }
-
         if let Some(raised_window) = raised_window {
             self.above_window = None;
             if let Some(space) = self.best_space_for_window_id(raised_window) {
@@ -1242,41 +1191,22 @@ impl Reactor {
         }
     }
 
-    fn handle_fullscreen_space_transition(&mut self, spaces: &mut Vec<Option<SpaceId>>) -> bool {
-        self.preserve_user_spaces_during_fullscreen_transition(spaces);
-
-        let mut saw_fullscreen = false;
-        let mut all_fullscreen = !spaces.is_empty();
-        let mut refresh_spaces = Vec::new();
-
-        for slot in spaces.iter_mut() {
-            match slot {
-                Some(space) if self.is_fullscreen_space(*space) => {
-                    saw_fullscreen = true;
-                    *slot = None;
-                }
-                Some(space) => {
-                    all_fullscreen = false;
-                    refresh_spaces.push(*space);
-                }
-                None => {
-                    all_fullscreen = false;
-                }
-            }
-        }
-
-        if saw_fullscreen && all_fullscreen {
-            return true;
-        }
+    fn restore_windows_after_fullscreen_exit(&mut self, spaces: &[Option<SpaceId>]) {
+        let refresh_spaces: Vec<SpaceId> = spaces
+            .iter()
+            .copied()
+            .flatten()
+            .filter(|space| !self.is_fullscreen_space(*space))
+            .collect();
 
         for space in refresh_spaces {
             let mut tracks = Vec::new();
-            if let Some(track) = self.space_manager.fullscreen_by_space.remove(&space.get()) {
+            if let Some(track) = self.space_state.fullscreen_by_space.remove(&space.get()) {
                 tracks.push(track);
             }
 
             let keys_to_remove: Vec<u64> = self
-                .space_manager
+                .space_state
                 .fullscreen_by_space
                 .iter()
                 .filter(|(_, track)| {
@@ -1286,14 +1216,13 @@ impl Reactor {
                 .collect();
 
             for key in keys_to_remove {
-                if let Some(track) = self.space_manager.fullscreen_by_space.remove(&key) {
+                if let Some(track) = self.space_state.fullscreen_by_space.remove(&key) {
                     tracks.push(track);
                 }
             }
 
             for track in tracks {
-                wait_for_native_fullscreen_transition();
-                thread::sleep(Duration::from_millis(50));
+                Self::wait_for_native_fullscreen_exit();
 
                 for window in track.windows {
                     if let Some(app) = self.app_manager.apps.get(&window.pid) {
@@ -1311,7 +1240,7 @@ impl Reactor {
                         {
                             if source_space != target_space {
                                 let target_screen_size = self
-                                    .space_manager
+                                    .space_state
                                     .screen_by_space(target_space)
                                     .map(|screen| screen.frame.size)
                                     .unwrap_or_else(|| CGSize::new(0.0, 0.0));
@@ -1334,115 +1263,24 @@ impl Reactor {
                 self.update_focus_follows_mouse_state();
             }
         }
+    }
 
-        false
+    fn wait_for_native_fullscreen_exit() {
+        #[cfg(not(test))]
+        {
+            wait_for_native_fullscreen_transition();
+            thread::sleep(Duration::from_millis(50));
+        }
     }
 
     fn is_fullscreen_space(&self, space: SpaceId) -> bool {
         space_is_fullscreen(space.get())
-            || self.space_manager.fullscreen_by_space.contains_key(&space.get())
-    }
-
-    pub(crate) fn has_fullscreen_windows_for_spaces(&self, spaces: &[Option<SpaceId>]) -> bool {
-        spaces.iter().flatten().any(|space| {
-            self.space_manager
-                .fullscreen_by_space
-                .values()
-                .any(|track| track.windows.iter().any(|w| w.last_known_user_space == Some(*space)))
-        })
-    }
-
-    fn preserve_user_spaces_during_fullscreen_transition(&self, spaces: &mut [Option<SpaceId>]) {
-        let entering_fullscreen =
-            self.space_manager.screens.iter().zip(spaces.iter()).any(|(screen, slot)| {
-                let Some(new_space) = *slot else {
-                    return false;
-                };
-                if !self.is_fullscreen_space(new_space) {
-                    return false;
-                }
-                screen
-                    .space
-                    .is_some_and(|previous_space| !self.is_fullscreen_space(previous_space))
-            });
-        if !entering_fullscreen {
-            return;
-        }
-
-        for (screen, slot) in self.space_manager.screens.iter().zip(spaces.iter_mut()) {
-            let Some(new_space) = *slot else {
-                continue;
-            };
-            if self.is_fullscreen_space(new_space) {
-                continue;
-            }
-            let Some(previous_space) = screen.space else {
-                continue;
-            };
-            if previous_space == new_space || self.is_fullscreen_space(previous_space) {
-                continue;
-            }
-
-            debug!(
-                display_uuid = %screen.display_uuid,
-                ?previous_space,
-                ?new_space,
-                "Preserving previous user space during fullscreen transition"
-            );
-            *slot = Some(previous_space);
-        }
+            || self.space_state.fullscreen_by_space.contains_key(&space.get())
     }
 
     fn set_screen_spaces(&mut self, spaces: &[Option<SpaceId>]) {
-        for (space, screen) in spaces.iter().copied().zip(&mut self.space_manager.screens) {
+        for (space, screen) in spaces.iter().copied().zip(&mut self.space_state.screens) {
             screen.space = space;
-        }
-    }
-
-    fn reconcile_spaces_with_display_history(
-        &mut self,
-        spaces: &[Option<SpaceId>],
-        allow_remap: bool,
-    ) {
-        let mut seen_displays: HashSet<String> = HashSet::default();
-
-        for (screen, space_opt) in self.space_manager.screens.iter().zip(spaces.iter()) {
-            let Some(space) = space_opt else {
-                continue;
-            };
-            let is_fullscreen_space = window_server::space_is_fullscreen(space.get())
-                || self.space_manager.fullscreen_by_space.contains_key(&space.get());
-            if is_fullscreen_space {
-                continue;
-            }
-            let Some(display_uuid) = screen.display_uuid_opt() else {
-                continue;
-            };
-            if !seen_displays.insert(display_uuid.to_string()) {
-                continue;
-            }
-
-            let seen_before = self.layout_manager.layout_engine.display_seen_before(display_uuid);
-            let last_space = if allow_remap && seen_before {
-                self.layout_manager.layout_engine.last_space_for_display_uuid(display_uuid)
-            } else {
-                None
-            };
-
-            // When a display reconnects, remap the most recent space observed for
-            // that display to the newly reported space so layout state follows the
-            // monitor. During routine space switches (allow_remap=false), we simply
-            // record the mapping without remapping.
-            if allow_remap {
-                if let Some(previous_space) = last_space {
-                    if previous_space != *space {
-                        self.layout_manager.layout_engine.remap_space(previous_space, *space);
-                    }
-                }
-            }
-            self.layout_manager
-                .layout_engine
-                .update_space_display(*space, Some(display_uuid.to_string()));
         }
     }
 
@@ -1556,19 +1394,14 @@ impl Reactor {
     }
 
     fn try_apply_pending_space_change(&mut self) {
-        if let Some(mut pending) = self.pending_space_change_manager.pending_space_change.take() {
-            if pending.spaces.len() == self.space_manager.screens.len() {
-                if self.handle_fullscreen_space_transition(&mut pending.spaces) {
-                    return;
-                }
-                // A pending space change is queued specifically when Mission Control is active.
-                // When we apply it later, we must also recompute active spaces (normally done in
-                // the regular SpaceChanged handler) to avoid staying "space-less" until the next
-                // user-initiated space switch.
-                self.recompute_and_set_active_spaces(&pending.spaces);
-                self.set_screen_spaces(&pending.spaces);
-                let ws_info = self.authoritative_window_snapshot_for_active_spaces();
-                self.finalize_space_change(&pending.spaces, ws_info);
+        if let Some(pending) = self.pending_space_change_manager.pending_space_change.take() {
+            if pending.screens.len() == self.space_state.screens.len() {
+                // During native Mission Control we must preserve the full forwarded snapshot,
+                // not just the raw spaces vector, otherwise command-space and per-display space
+                // metadata can remain stale after exit.
+                crate::actor::reactor::events::space::SpaceEventHandler::handle_space_state_changed(
+                    self, pending,
+                );
             } else {
                 self.pending_space_change_manager.pending_space_change = Some(pending);
             }
@@ -1584,21 +1417,25 @@ impl Reactor {
         // a transient "all None" spaces vector during Mission Control and then doesn't emit
         // a corresponding steady-state update when exiting back to the same space.
         let needs_repair = self.active_spaces.is_empty()
-            || self.space_manager.screens.iter().all(|s| s.space.is_none());
-        if !needs_repair || self.space_manager.screens.is_empty() {
+            || self.space_state.screens.iter().all(|s| s.space.is_none());
+        if !needs_repair || self.space_state.screens.is_empty() {
             return;
         }
 
         let spaces: Vec<Option<SpaceId>> = self
-            .space_manager
+            .space_state
             .screens
             .iter()
             .map(|s| {
-                crate::sys::screen::current_space_for_display_uuid(&s.display_uuid).or(s.space)
+                self.space_state
+                    .last_user_space_by_display
+                    .get(&s.display_uuid)
+                    .copied()
+                    .or(s.space)
             })
             .collect();
 
-        if spaces.iter().any(|s| s.is_some()) && spaces.len() == self.space_manager.screens.len() {
+        if spaces.iter().any(|s| s.is_some()) && spaces.len() == self.space_state.screens.len() {
             self.set_screen_spaces(&spaces);
             self.recompute_and_set_active_spaces(&spaces);
         }
@@ -1619,31 +1456,25 @@ impl Reactor {
         frame: &CGRect,
         window_server_id: Option<WindowServerId>,
     ) -> Option<SpaceId> {
-        if let Some(space) = window_server_id.and_then(crate::sys::window_server::window_space) {
-            // Return None for windows whose resolved space is not a user space (e.g. native
-            // fullscreen app spaces, SLSSpaceGetType != 0). Without this guard, fullscreen
-            // windows fall through to best_space_for_frame which matches by geometry — and
-            // fullscreen windows cover the whole screen, so they match the current user space
-            // and bleed into its tile layout after Mission Control (fixes #357).
-            if !crate::sys::window_server::space_is_user(space.get()) {
-                return None;
-            }
-            if self.space_manager.screen_by_space(space).is_some() {
-                return Some(space);
-            }
+        if let Some(wsid) = window_server_id
+            && self.is_known_fullscreen_window(wsid)
+        {
+            return None;
         }
 
-        if let Some(space) = self.best_space_for_frame(frame) {
+        if let Some(wsid) = window_server_id
+            && let Some(space) = self.window_manager.window_server_space(wsid)
+        {
             return Some(space);
         }
 
-        None
+        self.best_space_for_frame(frame)
     }
 
     fn best_space_for_frame(&self, frame: &CGRect) -> Option<SpaceId> {
         let center = frame.mid();
         self.screen_for_point(center).and_then(|screen| screen.space).or_else(|| {
-            self.space_manager
+            self.space_state
                 .screens
                 .iter()
                 .filter_map(|screen| {
@@ -1703,11 +1534,13 @@ impl Reactor {
         let server_id =
             self.window_manager.window(session.window).and_then(|window| window.info.sys_id);
         if frame.area() <= 0.0 {
-            return session.settled_space.or_else(|| self.best_space_for_window(frame, server_id));
+            return session
+                .settled_space
+                .or_else(|| self.geometry_space_for_window(frame, server_id));
         }
 
         self.drag_space_candidate(frame)
-            .or_else(|| self.best_space_for_window(frame, server_id))
+            .or_else(|| self.geometry_space_for_window(frame, server_id))
             .or(session.settled_space)
     }
 
@@ -1715,10 +1548,138 @@ impl Reactor {
         self.best_space_for_window(&window.frame_monotonic, window.info.sys_id)
     }
 
-    fn best_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
+    fn assigned_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
+        self.layout_manager
+            .layout_engine
+            .virtual_workspace_manager()
+            .workspace_info_for_window_any(wid)
+            .map(|info| info.space)
+    }
+
+    fn reassign_window_to_authoritative_space(
+        &mut self,
+        wid: WindowId,
+        authoritative_space: SpaceId,
+    ) -> bool {
+        let assigned_space = self.assigned_space_for_window_id(wid);
+        if assigned_space == Some(authoritative_space) {
+            return false;
+        }
+
+        self.send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
+
+        let _ = self
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager_mut()
+            .list_workspaces(authoritative_space);
+
+        let Some(target_workspace) = self
+            .layout_manager
+            .layout_engine
+            .ensure_active_workspace_info(authoritative_space)
+            .map(|(workspace_id, _)| workspace_id)
+            .or_else(|| self.layout_manager.layout_engine.active_workspace(authoritative_space))
+        else {
+            return assigned_space.is_some_and(|space| self.is_space_active(space));
+        };
+
+        let assigned = self
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager_mut()
+            .assign_window_to_workspace(authoritative_space, wid, target_workspace);
+        if !assigned {
+            return assigned_space.is_some_and(|space| self.is_space_active(space));
+        }
+
+        let target_active = self.is_space_active(authoritative_space);
+        if target_active
+            && let Some(wsid) = self.window_manager.window(wid).and_then(|window| window.info.sys_id)
+            && self.window_manager.is_window_visible(wsid)
+        {
+            self.send_layout_event(LayoutEvent::WindowAdded(authoritative_space, wid));
+        }
+
+        assigned_space.is_some_and(|space| self.is_space_active(space)) || target_active
+    }
+
+    fn reconcile_windows_with_authoritative_spaces(&mut self) -> bool {
+        let windows: Vec<_> = self.window_manager.iter_windows().map(|(wid, _)| wid).collect();
+        let mut layout_changed = false;
+
+        for wid in windows {
+            let Some(authoritative_space) = self.authoritative_space_for_window_id(wid) else {
+                continue;
+            };
+            layout_changed |= self.reassign_window_to_authoritative_space(wid, authoritative_space);
+        }
+
+        layout_changed
+    }
+
+    fn authoritative_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
         self.window_manager
             .window(wid)
-            .and_then(|window| self.best_space_for_window_state(window))
+            .and_then(|window| window.info.sys_id)
+            .and_then(|wsid| self.window_manager.window_server_space(wsid))
+            .or_else(|| self.assigned_space_for_window_id(wid))
+    }
+
+    fn best_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
+        self.authoritative_space_for_window_id(wid).or_else(|| {
+            self.window_manager
+                .window(wid)
+                .and_then(|window| self.best_space_for_window_state(window))
+        })
+    }
+
+    fn is_window_on_known_inactive_space(&self, wid: WindowId) -> bool {
+        self.authoritative_space_for_window_id(wid)
+            .is_some_and(|space| !self.is_space_active(space))
+    }
+
+    fn discovery_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
+        let window = self.window_manager.window(wid)?;
+        let authoritative = self.authoritative_space_for_window_id(wid);
+
+        if authoritative.is_some_and(|space| !self.is_space_active(space)) {
+            return authoritative;
+        }
+
+        if let Some(space) = self.best_space_for_frame(&window.frame_monotonic)
+            && self.is_space_active(space)
+        {
+            return Some(space);
+        }
+
+        authoritative.or_else(|| self.best_space_for_window_id(wid))
+    }
+
+    pub(crate) fn geometry_space_for_window(
+        &self,
+        frame: &CGRect,
+        window_server_id: Option<WindowServerId>,
+    ) -> Option<SpaceId> {
+        if let Some(wsid) = window_server_id
+            && self.is_known_fullscreen_window(wsid)
+        {
+            return None;
+        }
+
+        self.best_space_for_frame(frame)
+    }
+
+    fn is_known_fullscreen_window(&self, wsid: WindowServerId) -> bool {
+        let tracked_window = self.window_manager.tracked_window_id(wsid);
+        let tracked_pid = self.window_manager.get_window_server_info(wsid).map(|info| info.pid);
+
+        self.space_state.fullscreen_by_space.values().any(|track| {
+            track.windows.iter().any(|window| {
+                tracked_window.is_some_and(|wid| window.window_id == Some(wid))
+                    || tracked_pid.is_some_and(|pid| window.pid == pid)
+            })
+        })
     }
 
     fn finalize_active_drag(&mut self) -> bool {
@@ -1811,7 +1772,7 @@ impl Reactor {
     }
 
     fn warp_mouse_to_space_center(&mut self, space: SpaceId) -> bool {
-        let Some(screen) = self.space_manager.screen_by_space(space) else {
+        let Some(screen) = self.space_state.screen_by_space(space) else {
             return false;
         };
         self.warp_mouse(screen.frame.mid());
@@ -1846,7 +1807,7 @@ impl Reactor {
 
     fn expose_all_spaces(&mut self) {
         let spaces: Vec<SpaceId> = self
-            .space_manager
+            .space_state
             .screens
             .iter()
             .filter_map(|screen| screen.space)
@@ -1868,7 +1829,7 @@ impl Reactor {
         include_inactive: bool,
     ) -> (Vec<SpaceId>, HashMap<SpaceId, CGPoint>) {
         let visible_spaces_input: Vec<(SpaceId, CGPoint)> = self
-            .space_manager
+            .space_state
             .screens
             .iter()
             .filter_map(|screen| {
@@ -1895,7 +1856,7 @@ impl Reactor {
         let response = self.layout_manager.layout_engine.handle_event(event);
         self.prepare_refocus_after_layout_event(&event_clone);
         self.handle_layout_response(response, None);
-        for space in self.space_manager.iter_known_spaces() {
+        for space in self.space_state.iter_known_spaces() {
             self.layout_manager.layout_engine.debug_tree_desc(space, "after event", false);
         }
     }
@@ -2002,7 +1963,7 @@ impl Reactor {
             if !state.matches_filter(WindowFilter::Manageable) {
                 continue;
             }
-            let Some(space) = self.best_space_for_window_state(state) else {
+            let Some(space) = self.best_space_for_window_id(wid) else {
                 continue;
             };
             windows_by_space.entry(space).or_default().push(wid);
@@ -2157,7 +2118,7 @@ impl Reactor {
             return;
         }
 
-        if let Some(active_space) = get_active_space_number()
+        if let Some(active_space) = self.raw_command_space()
             && space_is_fullscreen(active_space.get())
         {
             debug!(
@@ -2178,11 +2139,11 @@ impl Reactor {
 
         let visible_spaces: HashSet<SpaceId> = self.iter_active_spaces().collect();
         let app_is_on_visible_workspace =
-            self.window_manager.iter_windows().any(|(wid, window_state)| {
+            self.window_manager.iter_windows().any(|(wid, _window_state)| {
                 if wid.pid != pid {
                     return false;
                 }
-                let Some(space) = self.best_space_for_window_state(window_state) else {
+                let Some(space) = self.best_space_for_window_id(wid) else {
                     return false;
                 };
                 if !visible_spaces.contains(&space) {
@@ -2239,10 +2200,7 @@ impl Reactor {
             return;
         };
 
-        let Some(window_state) = self.window_manager.window(app_window_id) else {
-            return;
-        };
-        let Some(window_space) = self.best_space_for_window_state(window_state) else {
+        let Some(window_space) = self.best_space_for_window_id(app_window_id) else {
             return;
         };
 
@@ -2255,9 +2213,9 @@ impl Reactor {
         app_window_id: WindowId,
         window_space: SpaceId,
     ) {
-        let workspace_manager = self.layout_manager.layout_engine.virtual_workspace_manager();
+        let workspace_state = self.layout_manager.layout_engine.virtual_workspace_manager();
         let Some(window_workspace) =
-            workspace_manager.workspace_for_window(window_space, app_window_id)
+            workspace_state.workspace_for_window(window_space, app_window_id)
         else {
             return;
         };
@@ -2317,6 +2275,15 @@ impl Reactor {
             mut focus_window,
             boundary_hit,
         } = response;
+
+        if let Some(space) = workspace_switch_space
+            && matches!(
+                self.workspace_switch_manager.workspace_switch_state,
+                WorkspaceSwitchState::Active
+            )
+        {
+            focus_window = self.visible_focus_candidate_in_active_workspace(space, focus_window);
+        }
 
         if let Some(dir) = boundary_hit
             && self.config.settings.layout.scrolling.gestures.propagate_to_workspace_swipe
@@ -2411,21 +2378,20 @@ impl Reactor {
             false
         };
 
-        let require_visible_focus = matches!(
-            self.workspace_switch_manager.workspace_switch_state,
-            WorkspaceSwitchState::Inactive
-        );
-
         if let Some(wid) = focus_window
             && let Some(state) = self.window_manager.window(wid)
             && let Some(wsid) = state.info.sys_id
         {
-            if require_visible_focus && !self.window_manager.is_window_visible(wsid) {
+            let is_visible = self.window_manager.is_window_visible(wsid);
+            let best_space = self.best_space_for_window_state(state);
+            if !is_visible {
                 focus_window = None;
-            } else if !self
-                .best_space_for_window_state(state)
-                .is_some_and(|space| self.is_space_active(space))
-            {
+                if let Some(space) = workspace_switch_space
+                    && !self.is_in_drag()
+                {
+                    let _ = self.try_focus_or_warp_without_raise(Some(space), &mut focus_window);
+                }
+            } else if !best_space.is_some_and(|space| self.is_space_active(space)) {
                 focus_window = None;
             }
         }
@@ -2465,6 +2431,11 @@ impl Reactor {
             .filter(|wid| self.is_window_on_active_space(*wid))
             .collect();
         let focus_window = focus_window.filter(|wid| self.is_window_on_active_space(*wid));
+        if let Some(space) = workspace_switch_space {
+            self.layout_manager
+                .layout_engine
+                .commit_workspace_focus(space, focus_window);
+        }
         if focus_window.is_some() {
             self.above_window = None;
         }
@@ -2704,6 +2675,41 @@ impl Reactor {
         Some(wid)
     }
 
+    fn visible_focus_candidate_in_active_workspace(
+        &self,
+        space: SpaceId,
+        preferred: Option<WindowId>,
+    ) -> Option<WindowId> {
+        let is_visible_in_space = |wid: WindowId| {
+            let Some(window) = self.window_manager.window(wid) else {
+                return false;
+            };
+            let Some(wsid) = window.info.sys_id else {
+                return false;
+            };
+            self.window_manager.is_window_visible(wsid)
+                && self.best_space_for_window_id(wid) == Some(space)
+                && self
+                    .layout_manager
+                    .layout_engine
+                    .is_window_in_active_workspace(space, wid)
+        };
+
+        if let Some(wid) = preferred.filter(|wid| is_visible_in_space(*wid)) {
+            return Some(wid);
+        }
+
+        if let Some(wid) = self.last_focused_window_in_space(space).filter(|wid| is_visible_in_space(*wid)) {
+            return Some(wid);
+        }
+
+        self.layout_manager
+            .layout_engine
+            .windows_in_active_workspace(space)
+            .into_iter()
+            .find(|wid| is_visible_in_space(*wid))
+    }
+
     fn request_refocus_if_hidden(&mut self, space: SpaceId, window_id: WindowId) {
         if self.window_in_non_active_workspace(space, window_id) {
             self.refocus_manager.refocus_state = RefocusState::Pending(space);
@@ -2792,10 +2798,10 @@ impl Reactor {
 
         let last_modes = &self.notification_manager.last_layout_modes_by_space;
         let mut modes: Vec<(SpaceId, crate::common::config::LayoutMode)> =
-            Vec::with_capacity(self.space_manager.screens.len());
+            Vec::with_capacity(self.space_state.screens.len());
         let mut changed = false;
 
-        for screen in &self.space_manager.screens {
+        for screen in &self.space_state.screens {
             let Some(space) = screen.space else {
                 continue;
             };
@@ -2844,12 +2850,41 @@ impl Reactor {
         // GetVisibleWindows whose response bypasses pending_mission_control_refresh,
         // causing those Desktop windows to be dropped from the layout, and other
         // windows in the layout to be incorrecctly resized.
-        if !crate::sys::window_server::active_space_is_user() {
+        if !self.has_user_space_context() {
             return;
         }
         let ws_info = window_server::get_visible_windows_with_layer(None);
-        self.update_partial_window_server_info(ws_info);
+        self.refresh_windows_after_mission_control_with_ws_info(ws_info);
+    }
+
+    fn refresh_windows_after_mission_control_with_ws_info(
+        &mut self,
+        ws_info: Vec<WindowServerInfo>,
+    ) {
+        let previously_visible_wsids: Vec<_> = self.window_manager.iter_visible_window_server_ids().collect();
+
+        // Mission Control can move windows between native spaces without emitting a
+        // matching destroy/appear pair for the origin space. Treat the post-exit
+        // WindowServer snapshot as authoritative for visibility so stale origin-space
+        // windows are not kept visible until the user later changes spaces.
+        self.update_complete_window_server_info(ws_info);
+        for wsid in previously_visible_wsids {
+            if self.window_manager.is_window_visible(wsid) {
+                continue;
+            }
+            let Some(wid) = self.window_manager.tracked_window_id(wsid) else {
+                continue;
+            };
+            let Some(space) = self.assigned_space_for_window_id(wid) else {
+                continue;
+            };
+            if !self.is_space_active(space) || self.is_window_on_known_inactive_space(wid) {
+                continue;
+            }
+            self.send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
+        }
         self.mission_control_manager.pending_mission_control_refresh.clear();
+        self.reconcile_windows_with_authoritative_spaces();
         self.force_refresh_all_windows();
         self.check_for_new_windows();
         self.update_layout_or_warn(false, false);
@@ -2857,6 +2892,11 @@ impl Reactor {
     }
 
     fn force_refresh_all_windows(&mut self) { self.request_visible_windows_for_apps(true); }
+
+    fn has_user_space_context(&self) -> bool {
+        self.raw_command_space()
+            .is_some_and(|space| !self.is_fullscreen_space(space))
+    }
 
     fn request_close_window(&mut self, wid: WindowId) {
         if let Some(app) = self.app_manager.apps.get(&wid.pid) {
@@ -2874,83 +2914,24 @@ impl Reactor {
         self.best_space_for_window_id(wid)
     }
 
+    fn raw_command_space(&self) -> Option<SpaceId> { self.space_state.command_space }
+
     fn workspace_command_space(&self) -> Option<SpaceId> {
-        let candidate = self
-            .space_for_cursor_screen()
-            .or_else(|| self.main_window_space())
-            .or_else(|| get_active_space_number())
-            .or_else(|| self.space_manager.first_known_space());
-
-        candidate.filter(|space| self.is_space_active(*space))
-    }
-
-    fn space_for_cursor_screen(&self) -> Option<SpaceId> {
-        current_cursor_location().ok().and_then(|point| self.space_for_point(point))
-    }
-
-    fn space_for_point(&self, point: CGPoint) -> Option<SpaceId> {
-        self.screen_for_point(point)
-            .or_else(|| self.closest_screen_to_point(point))
-            .and_then(|screen| screen.space)
+        self.raw_command_space().filter(|space| self.is_space_active(*space))
     }
 
     fn screen_for_point(&self, point: CGPoint) -> Option<&ScreenInfo> {
-        self.space_manager.screens.iter().find(|screen| screen.frame.contains(point))
-    }
-
-    fn closest_screen_to_point(&self, point: CGPoint) -> Option<&ScreenInfo> {
-        self.space_manager.screens.iter().min_by(|a, b| {
-            let da = Self::rectangle_distance_sq(a.frame, point);
-            let db = Self::rectangle_distance_sq(b.frame, point);
-            da.total_cmp(&db)
-        })
-    }
-
-    fn rectangle_distance_sq(frame: CGRect, point: CGPoint) -> f64 {
-        let min_x = frame.origin.x;
-        let max_x = frame.origin.x + frame.size.width;
-        let min_y = frame.origin.y;
-        let max_y = frame.origin.y + frame.size.height;
-
-        let dx = if point.x < min_x {
-            min_x - point.x
-        } else if point.x > max_x {
-            point.x - max_x
-        } else {
-            0.0
-        };
-
-        let dy = if point.y < min_y {
-            min_y - point.y
-        } else if point.y > max_y {
-            point.y - max_y
-        } else {
-            0.0
-        };
-
-        dx * dx + dy * dy
+        self.space_state.screens.iter().find(|screen| screen.frame.contains(point))
     }
 
     fn current_screen_center(&self) -> Option<CGPoint> {
-        if let Ok(point) = current_cursor_location() {
-            if let Some(screen) = self.screen_for_point(point) {
+        if let Some(space) = self.raw_command_space() {
+            if let Some(screen) = self.space_state.screen_by_space(space) {
                 return Some(screen.frame.mid());
             }
         }
 
-        if let Some(space) = self.main_window_space() {
-            if let Some(screen) = self.space_manager.screen_by_space(space) {
-                return Some(screen.frame.mid());
-            }
-        }
-
-        if let Some(space) = get_active_space_number() {
-            if let Some(screen) = self.space_manager.screen_by_space(space) {
-                return Some(screen.frame.mid());
-            }
-        }
-
-        self.space_manager.screens.first().map(|screen| screen.frame.mid())
+        self.space_state.screens.first().map(|screen| screen.frame.mid())
     }
 
     fn screen_for_direction_from_point(
@@ -2970,7 +2951,7 @@ impl Reactor {
 
         let mut best: Option<(f64, f64, &ScreenInfo)> = None;
 
-        for screen in &self.space_manager.screens {
+        for screen in &self.space_state.screens {
             let frame = screen.frame;
 
             if frame.contains(origin) {
@@ -3033,13 +3014,13 @@ impl Reactor {
             }
             DisplaySelector::Index(index) => self.screens_in_physical_order().get(*index).copied(),
             DisplaySelector::Uuid(uuid) => {
-                self.space_manager.screens.iter().find(|screen| screen.display_uuid == *uuid)
+                self.space_state.screens.iter().find(|screen| screen.display_uuid == *uuid)
             }
         }
     }
 
     fn screens_in_physical_order(&self) -> Vec<&ScreenInfo> {
-        let mut screens: Vec<&ScreenInfo> = self.space_manager.screens.iter().collect();
+        let mut screens: Vec<&ScreenInfo> = self.space_state.screens.iter().collect();
         screens.sort_by(|a, b| {
             let x_order = a.frame.origin.x.total_cmp(&b.frame.origin.x);
             if x_order == std::cmp::Ordering::Equal {

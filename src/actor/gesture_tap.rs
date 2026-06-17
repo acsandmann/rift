@@ -17,6 +17,7 @@ use objc2_core_graphics::{
 use tracing::{trace, warn};
 
 use crate::actor;
+use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::reactor;
 use crate::actor::wm_controller::{self, WmCommand, WmEvent};
 use crate::common::collections::HashMap;
@@ -36,8 +37,7 @@ const K_CG_GESTURE_MOTION_HORIZONTAL: i64 = 1;
 pub enum GestureRequest {
     ConfigUpdated(Config),
     LayoutModesChanged(Vec<(SpaceId, LayoutMode)>),
-    ScreenParametersChanged(Vec<(CGRect, Option<SpaceId>)>),
-    SpaceChanged(Vec<Option<SpaceId>>),
+    SpaceStateUpdated(ForwardedSpaceState),
 }
 
 pub type Sender = actor::Sender<GestureRequest>;
@@ -232,19 +232,11 @@ impl GestureTap {
                     map.insert(space, mode);
                 }
             }
-            GestureRequest::ScreenParametersChanged(screens_with_spaces) => {
-                *self.screen_spaces.borrow_mut() = screens_with_spaces
+            GestureRequest::SpaceStateUpdated(space_state) => {
+                *self.screen_spaces.borrow_mut() = space_state
+                    .screens
                     .into_iter()
-                    .filter_map(|(frame, maybe_space)| maybe_space.map(|space| (frame, space)))
-                    .collect();
-            }
-            GestureRequest::SpaceChanged(spaces) => {
-                let screens: Vec<CGRect> =
-                    self.screen_spaces.borrow().iter().map(|(frame, _)| *frame).collect();
-                *self.screen_spaces.borrow_mut() = screens
-                    .into_iter()
-                    .zip(spaces.into_iter())
-                    .filter_map(|(frame, maybe_space)| maybe_space.map(|space| (frame, space)))
+                    .filter_map(|screen| screen.space.map(|space| (screen.frame, space)))
                     .collect();
             }
         }

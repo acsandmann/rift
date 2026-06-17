@@ -32,6 +32,7 @@ use tracing::{debug, error, trace, warn};
 
 use super::reactor::{self, Event};
 use super::stack_line;
+use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor;
 use crate::actor::wm_controller::{self, WmCommand, WmEvent};
 use crate::common::collections::{HashMap, HashSet};
@@ -54,8 +55,7 @@ const MOUSE_MOVE_MIN_DISTANCE_PX_SQ_LOW_POWER: f64 = 9.0; // 3px^2
 pub enum Request {
     Warp(CGPoint),
     EnforceHidden,
-    ScreenParametersChanged(Vec<(CGRect, Option<SpaceId>)>, CoordinateConverter),
-    SpaceChanged(Vec<Option<SpaceId>>),
+    SpaceStateUpdated(ForwardedSpaceState, CoordinateConverter),
     SetEventProcessing(bool),
     SetFocusFollowsMouseEnabled(bool),
     SetHotkeys(Vec<(String, WmCommand)>),
@@ -334,22 +334,14 @@ impl EventTap {
                     state.hide_mouse();
                 }
             }
-            Request::ScreenParametersChanged(screens_with_spaces, converter) => {
-                state.screens = screens_with_spaces.iter().map(|(frame, _)| *frame).collect();
-                state.screen_spaces = screens_with_spaces
+            Request::SpaceStateUpdated(space_state, converter) => {
+                state.screens = space_state.screens.iter().map(|screen| screen.frame).collect();
+                state.screen_spaces = space_state
+                    .screens
                     .into_iter()
-                    .filter_map(|(frame, maybe_space)| maybe_space.map(|space| (frame, space)))
+                    .filter_map(|screen| screen.space.map(|space| (screen.frame, space)))
                     .collect();
                 state.converter = converter;
-            }
-            Request::SpaceChanged(spaces) => {
-                state.screen_spaces = state
-                    .screens
-                    .iter()
-                    .copied()
-                    .zip(spaces.into_iter())
-                    .filter_map(|(frame, maybe_space)| maybe_space.map(|space| (frame, space)))
-                    .collect();
             }
             Request::SetEventProcessing(enabled) => {
                 state.event_processing_enabled = enabled;

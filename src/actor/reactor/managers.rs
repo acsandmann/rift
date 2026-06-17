@@ -2,15 +2,13 @@ use objc2_core_foundation::{CGPoint, CGRect};
 use tracing::trace;
 
 use super::replay::Record;
-use super::{
-    AppState, Event, FullscreenSpaceTrack, PendingSpaceChange, ScreenInfo, WorkspaceSwitchOrigin,
-    WorkspaceSwitchState,
-};
+use super::{AppState, Event, WorkspaceSwitchOrigin, WorkspaceSwitchState};
 use crate::actor;
 use crate::actor::app::{WindowId, pid_t};
 use crate::actor::broadcast::{BroadcastEvent, BroadcastSender, StackInfo};
 use crate::actor::drag_swap::DragManager as DragSwapManager;
 use crate::actor::reactor::Reactor;
+use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::reactor::animation::AnimationManager;
 use crate::actor::{
     event_tap, gesture_tap, menu_bar, raise_manager, stack_line, window_notify, wm_controller,
@@ -31,25 +29,6 @@ pub struct AppManager {
 
 impl AppManager {
     pub fn new() -> Self { AppManager { apps: HashMap::default() } }
-}
-
-/// Manages space and screen state
-pub struct SpaceManager {
-    pub screens: Vec<ScreenInfo>,
-    pub fullscreen_by_space: HashMap<u64, FullscreenSpaceTrack>,
-    pub has_seen_display_set: bool,
-}
-
-impl SpaceManager {
-    pub fn screen_by_space(&self, space: SpaceId) -> Option<&ScreenInfo> {
-        self.screens.iter().find(|screen| screen.space == Some(space))
-    }
-
-    pub fn iter_known_spaces(&self) -> impl Iterator<Item = SpaceId> + '_ {
-        self.screens.iter().filter_map(|screen| screen.space)
-    }
-
-    pub fn first_known_space(&self) -> Option<SpaceId> { self.iter_known_spaces().next() }
 }
 
 /// Manages drag operations and window swapping
@@ -201,7 +180,7 @@ impl LayoutManager {
         if reactor.window_manager.tracked_window_count() == 0 {
             return LayoutResult::new();
         }
-        let screens = reactor.space_manager.screens.clone();
+        let screens = reactor.space_state.screens.clone();
         let all_screen_frames: Vec<CGRect> = screens.iter().map(|s| s.frame).collect();
         let active_space_count = screens
             .iter()
@@ -279,7 +258,7 @@ impl LayoutManager {
 
         let active_space = reactor.main_window_space();
         for (space, layout) in layout_result {
-            if let Some(screen) = reactor.space_manager.screen_by_space(space) {
+            if let Some(screen) = reactor.space_state.screen_by_space(space) {
                 let screen_frame = screen.frame;
                 let display_uuid = screen.display_uuid_owned();
                 let gaps = reactor
@@ -386,8 +365,7 @@ impl LayoutManager {
 
 /// Manages pending space changes
 pub struct PendingSpaceChangeManager {
-    pub pending_space_change: Option<PendingSpaceChange>,
-    pub topology_relayout_pending: bool,
+    pub pending_space_change: Option<ForwardedSpaceState>,
 }
 
 #[cfg(test)]
