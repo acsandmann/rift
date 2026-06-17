@@ -40,7 +40,9 @@ impl SpaceEventHandler {
         } = space_state;
 
         reactor.space_state.has_seen_display_set = has_seen_display_set;
-        reactor.space_state.fullscreen_by_space = fullscreen_by_space;
+        if !fullscreen_by_space.is_empty() {
+            reactor.space_state.fullscreen_by_space = fullscreen_by_space;
+        }
         let spaces: Vec<Option<SpaceId>> = screens.iter().map(|screen| screen.space).collect();
 
         if display_set_changed {

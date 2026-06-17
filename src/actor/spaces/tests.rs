@@ -511,6 +511,56 @@ fn topology_window_delta_is_emitted_when_windows_leave_space_during_churn_withou
 }
 
 #[test]
+fn topology_window_delta_treats_same_window_space_move_as_remove_then_add() {
+    let (mut actor, mut wm_rx, _reactor_rx) = build_actor();
+    let old_space = SpaceId::new(311);
+    let new_space = SpaceId::new(312);
+    let wsid = WindowServerId::new(78);
+
+    actor.state.visible_window_spaces.insert(wsid, old_space);
+    actor.state.pre_churn_visible_window_spaces.insert(wsid, old_space);
+    actor.state.display_churn_flags = crate::sys::skylight::DisplayReconfigFlags::MOVED;
+
+    actor.forward_screen_parameters(
+        vec![
+            make_screen_with(1, "display-left", 0.0, 1000.0, Some(old_space)),
+            make_screen_with(2, "display-right", 1000.0, 1000.0, Some(new_space)),
+        ],
+        CoordinateConverter::from_height(800.0),
+    );
+    let _ = recv_wm(&mut wm_rx);
+
+    actor.state.visible_window_spaces.clear();
+    actor.state.visible_window_spaces.insert(wsid, new_space);
+    actor.synthesize_topology_window_delta(
+        10,
+        actor.state.display_churn_flags,
+        &[
+            make_screen_with(1, "display-left", 0.0, 1000.0, Some(old_space)),
+            make_screen_with(2, "display-right", 1000.0, 1000.0, Some(new_space)),
+        ],
+    );
+    actor.forward_screen_parameters(
+        vec![
+            make_screen_with(1, "display-left", 0.0, 1000.0, Some(old_space)),
+            make_screen_with(2, "display-right", 1000.0, 1000.0, Some(new_space)),
+        ],
+        CoordinateConverter::from_height(800.0),
+    );
+
+    match recv_wm(&mut wm_rx) {
+        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
+            let delta = state
+                .topology_window_delta
+                .expect("expected topology window delta");
+            assert_eq!(delta.disappeared, vec![(wsid, old_space)]);
+            assert_eq!(delta.appeared, vec![(wsid, new_space)]);
+        }
+        other => panic!("unexpected wm event: {other:?}"),
+    }
+}
+
+#[test]
 fn display_order_change_is_topology_change_without_display_set_change() {
     let (mut actor, mut wm_rx, _reactor_rx) = build_actor();
     let left_space = SpaceId::new(401);

@@ -1578,6 +1578,57 @@ fn topology_window_delta_removes_missing_window_from_active_layout() {
 }
 
 #[test]
+fn forwarded_space_state_does_not_clear_existing_fullscreen_tracks_when_snapshot_has_none() {
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let tracked_user_space = SpaceId::new(1);
+    let current_space = SpaceId::new(2);
+    let fullscreen_space = SpaceId::new(0x400000001);
+    let window_id = WindowId::new(42, 1);
+
+    reactor.space_state.fullscreen_by_space.insert(
+        fullscreen_space.get(),
+        FullscreenSpaceTrack {
+            windows: vec![FullscreenWindowTrack {
+                pid: window_id.pid,
+                window_id: Some(window_id),
+                last_known_user_space: Some(tracked_user_space),
+                _last_seen_fullscreen_space: fullscreen_space,
+            }],
+        },
+    );
+
+    reactor.handle_event(Event::SpaceStateChanged(ForwardedSpaceState {
+        screens: make_screen_snapshots(vec![frame], vec![Some(current_space)]),
+        fullscreen_by_space: Default::default(),
+        has_seen_display_set: true,
+        active_spaces: [current_space].into_iter().collect(),
+        command_space: Some(current_space),
+        display_space_ids: Default::default(),
+        last_user_space_by_display: Default::default(),
+        space_remaps: Vec::new(),
+        display_set_changed: false,
+        topology_changed: false,
+        allow_space_remap: false,
+        should_force_refresh_layout: false,
+        resized_spaces: Vec::new(),
+        topology_window_delta: None,
+    }));
+
+    assert!(
+        reactor
+            .space_state
+            .fullscreen_by_space
+            .contains_key(&fullscreen_space.get()),
+        "empty forwarded fullscreen state must not clear existing fullscreen exit tracking"
+    );
+}
+
+#[test]
 fn display_churn_quarantines_window_frame_changed_events() {
     let reactor = Reactor::new_for_test(LayoutEngine::new(
         &crate::common::config::VirtualWorkspaceSettings::default(),

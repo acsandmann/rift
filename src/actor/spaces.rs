@@ -787,8 +787,13 @@ impl SpacesActor {
         let mut disappeared = Vec::new();
 
         for (&wsid, &space) in &current {
-            if !previous.contains_key(&wsid) {
-                appeared.push((wsid, space));
+            match previous.get(&wsid).copied() {
+                None => appeared.push((wsid, space)),
+                Some(previous_space) if previous_space != space => {
+                    disappeared.push((wsid, previous_space));
+                    appeared.push((wsid, space));
+                }
+                Some(_) => {}
             }
         }
 
