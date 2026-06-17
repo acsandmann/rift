@@ -116,6 +116,7 @@ impl WindowRegistry {
             record.window_id.is_none()
                 && !record.visible
                 && !record.observed
+                && record.space.is_none()
                 && record.info.is_none()
                 && record.recent_at.is_none()
         });
@@ -403,5 +404,34 @@ impl WindowRegistryHandle {
 
     pub fn get_mut(&mut self) -> &mut WindowRegistry {
         unsafe { self.0.expect("window registry was not attached").as_mut() }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authoritative_space_only_record_is_not_pruned() {
+        let mut registry = WindowRegistry::default();
+        let wsid = WindowServerId::new(77);
+        let space = SpaceId::new(9);
+
+        registry.set_window_server_space(wsid, Some(space));
+
+        assert_eq!(registry.window_server_space(wsid), Some(space));
+        assert_eq!(registry.iter_window_server_ids().collect::<Vec<_>>(), vec![wsid]);
+    }
+
+    #[test]
+    fn authoritative_space_record_is_pruned_when_space_is_cleared() {
+        let mut registry = WindowRegistry::default();
+        let wsid = WindowServerId::new(78);
+
+        registry.set_window_server_space(wsid, Some(SpaceId::new(10)));
+        registry.set_window_server_space(wsid, None);
+
+        assert_eq!(registry.window_server_space(wsid), None);
+        assert!(registry.iter_window_server_ids().next().is_none());
     }
 }

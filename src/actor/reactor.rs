@@ -171,7 +171,6 @@ pub enum Event {
         Option<MouseState>,
     ),
     WindowTitleChanged(WindowId, String),
-    ResyncAppForWindow(WindowServerId),
     MenuOpened(pid_t),
     MenuClosed(pid_t),
 
@@ -655,7 +654,6 @@ impl Reactor {
             Event::WindowMinimized(wid) => Some(wid.idx.get()),
             Event::WindowDeminiaturized(wid) => Some(wid.idx.get()),
             Event::MouseMoved(_) => None,
-            Event::ResyncAppForWindow(wsid) => Some(wsid.as_u32()),
             Event::WindowServerDestroyed(wsid, ..) => Some(wsid.as_u32()),
             Event::WindowServerAppeared(wsid, ..) => Some(wsid.as_u32()),
             _ => None,
@@ -779,9 +777,6 @@ impl Reactor {
                 if self.is_login_window_pid(pid) {
                     self.set_login_window_active(false);
                 }
-            }
-            Event::ResyncAppForWindow(wsid) => {
-                AppEventHandler::handle_resync_app_for_window(self, wsid);
             }
             Event::ApplicationGloballyActivated(pid) => {
                 self.clear_menu_state_for_non_owner(pid);

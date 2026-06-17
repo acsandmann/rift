@@ -227,21 +227,6 @@ impl WindowNotify {
                             SpaceId::new(space_id),
                         ))
                     }
-                    CGSEventType::Known(KnownCGSEvent::WorkspaceWindowIsViewable)
-                    | CGSEventType::Known(KnownCGSEvent::WorkspaceWindowIsNotViewable)
-                    | CGSEventType::Known(
-                        KnownCGSEvent::WorkspacesWindowDidOrderInOnNonCurrentManagedSpacesOnly,
-                    )
-                    | CGSEventType::Known(
-                        KnownCGSEvent::WorkspacesWindowDidOrderOutOnNonCurrentManagedSpaces,
-                    ) => {
-                        let Some(window_id) = evt.window_id else {
-                            continue;
-                        };
-                        spaces_tx.send(spaces::Event::ResyncAppForWindow(WindowServerId::new(
-                            window_id,
-                        )));
-                    }
                     CGSEventType::Known(KnownCGSEvent::WindowMoved)
                     | CGSEventType::Known(KnownCGSEvent::WindowResized) => {
                         // TODO: suppress move/resize while Mission Control is active

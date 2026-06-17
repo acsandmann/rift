@@ -52,7 +52,6 @@ pub enum Event {
     SpaceDestroyed(SpaceId),
     WindowServerAppeared(WindowServerId, SpaceId),
     WindowServerDestroyed(WindowServerId, SpaceId),
-    ResyncAppForWindow(WindowServerId),
     ProcessScreenRefresh {
         attempt: u8,
     },
@@ -345,11 +344,6 @@ impl SpacesActor {
                     }
                     self.reactor_tx
                         .send(reactor::Event::WindowServerDestroyed(wsid, sid, kind));
-                }
-            }
-            Event::ResyncAppForWindow(wsid) => {
-                if !self.should_quarantine_window_space_event() {
-                    self.reactor_tx.send(reactor::Event::ResyncAppForWindow(wsid));
                 }
             }
             Event::ProcessScreenRefresh { attempt } => {
