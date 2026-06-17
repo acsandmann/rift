@@ -5,7 +5,6 @@
 //! changes by sending requests out to the other actors in the system.
 
 mod animation;
-mod display_topology;
 mod events;
 mod main_window;
 mod managers;
@@ -37,7 +36,7 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 pub use replay::{Record, replay};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
-use tracing::{debug, info, instrument, trace, warn};
+use tracing::{debug, instrument, trace, warn};
 use transaction_manager::TransactionId;
 
 use super::{event_tap, gesture_tap};
@@ -58,8 +57,7 @@ use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt};
 pub use crate::sys::screen::ScreenInfo;
 use crate::sys::screen::{SpaceId, order_visible_spaces_by_position};
-use crate::sys::skylight::DisplayReconfigFlags;
-use crate::sys::window_server::{self, WindowServerId, WindowServerInfo, space_is_fullscreen, window_level, window_sub_level};
+use crate::sys::window_server::{self, WindowServerId, WindowServerInfo, window_level, window_sub_level};
 #[cfg(not(test))]
 use crate::sys::window_server::wait_for_native_fullscreen_transition;
 
@@ -102,8 +100,6 @@ impl std::ops::Deref for ReactorHandle {
 
     fn deref(&self) -> &Self::Target { &self.queries }
 }
-
-use display_topology::{DisplaySnapshot, WindowSnapshot};
 
 use crate::model::server::WindowData;
 
@@ -249,17 +245,8 @@ pub struct Reactor {
     refocus_manager: managers::RefocusManager,
     pending_space_change_manager: managers::PendingSpaceChangeManager,
     active_spaces: HashSet<SpaceId>,
-    pending_display_topology_commit: Option<PendingDisplayTopologyCommit>,
     pub above_window: Option<WindowServerId>,
     pub animation_tx: Option<AnimationSender>,
-}
-
-#[derive(Debug, Clone)]
-struct PendingDisplayTopologyCommit {
-    epoch: u64,
-    started_at: std::time::Instant,
-    flags: DisplayReconfigFlags,
-    pre_known_wsids: HashSet<WindowServerId>,
 }
 
 impl Reactor {
@@ -370,7 +357,6 @@ impl Reactor {
                 pending_space_change: None,
             },
             active_spaces: HashSet::default(),
-            pending_display_topology_commit: None,
             above_window: None,
             animation_tx: None,
         };
@@ -529,142 +515,6 @@ impl Reactor {
     fn authoritative_window_snapshot_for_active_spaces(&self) -> Vec<WindowServerInfo> {
         let ws_info = window_server::get_visible_windows_with_layer(None);
         self.filter_ws_info_to_active_spaces(ws_info)
-    }
-
-    fn build_display_snapshot(&self, ws_info: Vec<WindowServerInfo>) -> DisplaySnapshot {
-        let ordered_screens = self.space_state.screens.clone();
-        let active_spaces = self.active_spaces.clone();
-
-        let mut inactive_spaces: HashSet<SpaceId> = HashSet::default();
-        for space in ordered_screens.iter().filter_map(|s| s.space) {
-            if !active_spaces.contains(&space) {
-                inactive_spaces.insert(space);
-            }
-        }
-
-        let windows = ws_info.into_iter().map(|info| (info.id, WindowSnapshot { info })).collect();
-
-        DisplaySnapshot {
-            ordered_screens,
-            active_spaces,
-            inactive_spaces,
-            windows,
-        }
-    }
-
-    fn maybe_commit_display_topology_snapshot(&mut self) {
-        let Some(commit) = self.pending_display_topology_commit.take() else {
-            return;
-        };
-
-        if self.space_state.screens.is_empty()
-            || self.space_state.screens.iter().any(|screen| screen.space.is_none())
-        {
-            self.pending_display_topology_commit = Some(commit);
-            return;
-        }
-
-        let ws_info = self.authoritative_window_snapshot_for_active_spaces();
-        let snapshot = self.build_display_snapshot(ws_info);
-        self.reconcile_windows_after_topology_commit(
-            commit.epoch,
-            commit.started_at,
-            commit.flags,
-            commit.pre_known_wsids,
-            snapshot,
-        );
-    }
-
-    fn reconcile_windows_after_topology_commit(
-        &mut self,
-        epoch: u64,
-        started_at: std::time::Instant,
-        flags: crate::sys::skylight::DisplayReconfigFlags,
-        pre_known_wsids: HashSet<WindowServerId>,
-        snapshot: DisplaySnapshot,
-    ) {
-        let post_visible_wsids: HashSet<WindowServerId> =
-            snapshot.windows.keys().copied().collect();
-        let appeared: Vec<WindowServerId> =
-            post_visible_wsids.difference(&pre_known_wsids).copied().collect();
-        let disappeared: Vec<WindowServerId> =
-            pre_known_wsids.difference(&post_visible_wsids).copied().collect();
-
-        let mut synthetic_appeared = 0u64;
-        let mut synthetic_destroyed = 0u64;
-
-        for wsid in appeared {
-            let Some(snapshot_window) = snapshot.windows.get(&wsid) else {
-                continue;
-            };
-            if snapshot_window.info.layer != 0 {
-                continue;
-            }
-            let Some(space) = self.best_space_for_frame(&snapshot_window.info.frame) else {
-                continue;
-            };
-            if !self.is_space_active(space) {
-                continue;
-            }
-            SpaceEventHandler::handle_window_server_appeared(
-                self,
-                wsid,
-                space,
-                SpaceEventKind::User,
-            );
-            synthetic_appeared += 1;
-        }
-
-        for wsid in disappeared {
-            if window_server::get_window(wsid).is_some() {
-                continue;
-            }
-
-            let sid = self
-                .window_manager
-                .window_server_space(wsid)
-                .or_else(|| self.assigned_space_for_window_id(self.window_manager.tracked_window_id(wsid)?))
-                .or_else(|| {
-                    self.window_manager
-                        .tracked_window_id(wsid)
-                        .and_then(|wid| self.best_space_for_window_id(wid))
-                })
-                .or_else(|| {
-                    self.window_manager
-                        .get_window_server_info(wsid)
-                        .and_then(|info| self.best_space_for_frame(&info.frame))
-                })
-                .or_else(|| self.raw_command_space());
-            let Some(sid) = sid else {
-                continue;
-            };
-            SpaceEventHandler::handle_window_server_destroyed(
-                self,
-                wsid,
-                sid,
-                SpaceEventKind::User,
-            );
-            synthetic_destroyed += 1;
-        }
-
-        self.force_refresh_all_windows();
-        let _ = self.update_layout_or_warn_with(
-            false,
-            false,
-            "Layout update failed after display churn commit",
-        );
-
-        info!(
-            epoch,
-            flags = ?flags,
-            duration_ms = started_at.elapsed().as_millis(),
-            synthetic_appeared,
-            synthetic_destroyed,
-            active_spaces = snapshot.active_spaces.len(),
-            inactive_spaces = snapshot.inactive_spaces.len(),
-            screens = snapshot.ordered_screens.len(),
-            "display topology commit reconciled"
-        );
     }
 
     fn filter_ws_info_to_active_spaces(
@@ -838,7 +688,7 @@ impl Reactor {
     }
 
     fn should_quarantine_during_display_churn(&self, event: &Event) -> bool {
-        if !crate::sys::display_churn::is_active() && self.pending_display_topology_commit.is_none() {
+        if !crate::sys::display_churn::is_active() {
             return false;
         }
 
@@ -874,18 +724,7 @@ impl Reactor {
         self.recording_manager.record.on_event(&event);
 
         match event {
-            Event::DisplayChurnBegin => {
-                let mut pre_known_wsids: HashSet<WindowServerId> = HashSet::default();
-                pre_known_wsids.extend(self.window_manager.iter_window_server_ids());
-
-                self.pending_display_topology_commit = Some(PendingDisplayTopologyCommit {
-                    epoch: crate::sys::display_churn::epoch(),
-                    started_at: std::time::Instant::now(),
-                    flags: crate::sys::display_churn::flags(),
-                    pre_known_wsids,
-                });
-                return;
-            }
+            Event::DisplayChurnBegin => return,
             Event::DisplayChurnEnd => {
                 return;
             }
@@ -1274,8 +1113,7 @@ impl Reactor {
     }
 
     fn is_fullscreen_space(&self, space: SpaceId) -> bool {
-        space_is_fullscreen(space.get())
-            || self.space_state.fullscreen_by_space.contains_key(&space.get())
+        self.space_state.fullscreen_by_space.contains_key(&space.get())
     }
 
     fn set_screen_spaces(&mut self, spaces: &[Option<SpaceId>]) {
@@ -2119,7 +1957,7 @@ impl Reactor {
         }
 
         if let Some(active_space) = self.raw_command_space()
-            && space_is_fullscreen(active_space.get())
+            && self.is_fullscreen_space(active_space)
         {
             debug!(
                 "Skipping auto workspace switch for pid {} because the active space is fullscreen",

@@ -14,6 +14,8 @@ use crate::sys::screen::{CoordinateConverter, ScreenCache, ScreenInfo, SpaceId};
 use crate::sys::screen::managed_display_space_ids;
 use crate::sys::skylight::DisplayReconfigFlags;
 use crate::sys::window_server::WindowServerId;
+#[cfg(not(test))]
+use crate::sys::window_server::WindowServerInfo;
 use crate::sys::{display_churn, window_server};
 use objc2_foundation::MainThreadMarker;
 
@@ -95,6 +97,7 @@ pub struct ForwardedSpaceState {
     pub allow_space_remap: bool,
     pub should_force_refresh_layout: bool,
     pub resized_spaces: Vec<(SpaceId, CGSize)>,
+    pub topology_window_delta: Option<TopologyWindowDelta>,
 }
 
 impl ForwardedSpaceState {
@@ -113,6 +116,25 @@ impl ForwardedSpaceState {
 struct PendingScreenParameters {
     screens: Vec<ScreenInfo>,
     converter: CoordinateConverter,
+}
+
+#[derive(Debug, Clone)]
+pub struct TopologyWindowDelta {
+    pub epoch: u64,
+    pub flags: DisplayReconfigFlags,
+    pub appeared: Vec<(WindowServerId, SpaceId)>,
+    pub disappeared: Vec<(WindowServerId, SpaceId)>,
+}
+
+impl Default for TopologyWindowDelta {
+    fn default() -> Self {
+        Self {
+            epoch: 0,
+            flags: DisplayReconfigFlags::empty(),
+            appeared: Vec::new(),
+            disappeared: Vec::new(),
+        }
+    }
 }
 
 pub struct AuthorityState {
@@ -134,6 +156,9 @@ pub struct AuthorityState {
     refresh_deferred_until_stable: bool,
     pending_screen_parameters: Option<PendingScreenParameters>,
     pending_spaces: Option<Vec<Option<SpaceId>>>,
+    visible_window_spaces: HashMap<WindowServerId, SpaceId>,
+    pre_churn_visible_window_spaces: HashMap<WindowServerId, SpaceId>,
+    pending_topology_window_delta: Option<TopologyWindowDelta>,
     timers_enabled: bool,
 }
 
@@ -158,6 +183,9 @@ impl Default for AuthorityState {
             refresh_deferred_until_stable: false,
             pending_screen_parameters: None,
             pending_spaces: None,
+            visible_window_spaces: HashMap::default(),
+            pre_churn_visible_window_spaces: HashMap::default(),
+            pending_topology_window_delta: None,
             timers_enabled: true,
         }
     }
@@ -297,6 +325,7 @@ impl SpacesActor {
                 self.handle_space_inventory_changed();
             }
             Event::WindowServerAppeared(wsid, sid) => {
+                self.state.visible_window_spaces.insert(wsid, sid);
                 if self.should_quarantine_window_space_event() {
                     self.state.quarantine_stats.appeared_dropped += 1;
                 } else if let Some(kind) = self.classify_space(sid) {
@@ -305,6 +334,7 @@ impl SpacesActor {
                 }
             }
             Event::WindowServerDestroyed(wsid, sid) => {
+                self.state.visible_window_spaces.remove(&wsid);
                 if self.should_quarantine_window_space_event() {
                     self.state.quarantine_stats.destroyed_dropped += 1;
                 } else if let Some(kind) = self.classify_space(sid) {
@@ -514,6 +544,7 @@ impl SpacesActor {
         if !screens.is_empty() {
             self.state.has_seen_display_set = true;
         }
+        self.state.visible_window_spaces = self.visible_window_spaces_for_screens(&screens);
         self.state.screens = screens.clone();
 
         ForwardedSpaceState {
@@ -530,6 +561,7 @@ impl SpacesActor {
             allow_space_remap,
             should_force_refresh_layout,
             resized_spaces,
+            topology_window_delta: self.state.pending_topology_window_delta.take(),
         }
     }
 
@@ -692,6 +724,89 @@ impl SpacesActor {
         }
     }
 
+    fn visible_window_spaces_for_screens(
+        &self,
+        screens: &[ScreenInfo],
+    ) -> HashMap<WindowServerId, SpaceId> {
+        #[cfg(test)]
+        {
+            self.state
+                .visible_window_spaces
+                .iter()
+                .filter_map(|(&wsid, &space)| {
+                    screens.iter().any(|screen| screen.space == Some(space)).then_some((wsid, space))
+                })
+                .collect()
+        }
+        #[cfg(not(test))]
+        {
+            let active_spaces: HashSet<SpaceId> = screens.iter().filter_map(|screen| screen.space).collect();
+            window_server::get_visible_windows_with_layer(None)
+                .into_iter()
+                .filter_map(|info| {
+                    let space = self.resolve_space_for_window_info(screens, &info)?;
+                    active_spaces.contains(&space).then_some((info.id, space))
+                })
+                .collect()
+        }
+    }
+
+    #[cfg(not(test))]
+    fn resolve_space_for_window_info(
+        &self,
+        screens: &[ScreenInfo],
+        info: &WindowServerInfo,
+    ) -> Option<SpaceId> {
+        if let Some(space) = window_server::window_space(info.id)
+            && screens.iter().any(|screen| screen.space == Some(space))
+        {
+            return Some(space);
+        }
+
+        let frame = info.frame;
+        let center = objc2_core_foundation::CGPoint::new(
+            frame.origin.x + frame.size.width / 2.0,
+            frame.origin.y + frame.size.height / 2.0,
+        );
+        screens
+            .iter()
+            .find(|screen| screen.frame.contains(center))
+            .and_then(|screen| screen.space)
+    }
+
+    fn synthesize_topology_window_delta(
+        &mut self,
+        epoch: u64,
+        flags: DisplayReconfigFlags,
+        screens: &[ScreenInfo],
+    ) {
+        let current = self.visible_window_spaces_for_screens(screens);
+        let previous = std::mem::take(&mut self.state.pre_churn_visible_window_spaces);
+
+        let mut appeared = Vec::new();
+        let mut disappeared = Vec::new();
+
+        for (&wsid, &space) in &current {
+            if !previous.contains_key(&wsid) {
+                appeared.push((wsid, space));
+            }
+        }
+
+        for (&wsid, &space) in &previous {
+            if !current.contains_key(&wsid) {
+                disappeared.push((wsid, space));
+            }
+        }
+
+        self.state.pending_topology_window_delta = Some(TopologyWindowDelta {
+            epoch,
+            flags,
+            appeared,
+            disappeared,
+        });
+        self.state.visible_window_spaces = current;
+    }
+
     fn flush_pending_if_stable(&mut self) {
         if self.should_buffer_topology_updates() {
             return;
@@ -829,6 +944,9 @@ impl SpacesActor {
         self.state.display_topology_state = None;
         self.state.last_sent_spaces = None;
         if !was_active {
+            self.state.pre_churn_visible_window_spaces = self.state.visible_window_spaces.clone();
+        }
+        if !was_active {
             let _ = display_churn::begin(flags);
             self.reactor_tx.send(reactor::Event::DisplayChurnBegin);
         } else {
@@ -876,7 +994,7 @@ impl SpacesActor {
             return;
         }
 
-        let Some((screens, _)) = self.collect_state() else {
+        let Some((screens, converter)) = self.collect_state() else {
             if !self.retry_display_stabilization(expected_epoch, attempt) {
                 self.finish_display_churn(expected_epoch);
             }
@@ -927,6 +1045,11 @@ impl SpacesActor {
                 }
                 return;
             }
+            let flags = self.state.display_churn_flags;
+            self.synthesize_topology_window_delta(expected_epoch, flags, &screens);
+            self.state.pending_screen_parameters = None;
+            self.state.pending_spaces = None;
+            self.forward_screen_parameters(screens, converter);
             self.finish_display_churn(expected_epoch);
             return;
         }

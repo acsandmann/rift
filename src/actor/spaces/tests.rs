@@ -423,6 +423,161 @@ fn topology_change_emits_space_remap_from_display_history() {
 }
 
 #[test]
+fn sleep_wake_display_reattach_flushes_latest_stable_spaces_only() {
+    let (mut actor, mut wm_rx, mut reactor_rx) = build_actor();
+    let left = SpaceId::new(201);
+    let right = SpaceId::new(202);
+
+    actor.handle_event(Event::ScreenParametersChanged(
+        vec![
+            make_screen_with(1, "display-left", 0.0, 1000.0, Some(left)),
+            make_screen_with(2, "display-right", 1000.0, 1000.0, Some(right)),
+        ],
+        CoordinateConverter::from_height(800.0),
+    ));
+    let _ = recv_wm(&mut wm_rx);
+
+    actor.handle_event(Event::SystemWillSleep);
+    actor.handle_event(Event::DisplayChurnBegin);
+    actor.handle_event(Event::ScreenParametersChanged(
+        vec![make_screen_with(1, "display-left", 0.0, 1000.0, Some(left))],
+        CoordinateConverter::from_height(800.0),
+    ));
+    actor.handle_event(Event::SpaceChanged(vec![Some(left)]));
+    actor.handle_event(Event::SystemDidWake);
+    actor.handle_event(Event::ScreenParametersChanged(
+        vec![
+            make_screen_with(1, "display-left", 0.0, 1000.0, Some(left)),
+            make_screen_with(2, "display-right", 1000.0, 1000.0, Some(right)),
+        ],
+        CoordinateConverter::from_height(800.0),
+    ));
+    actor.handle_event(Event::SpaceChanged(vec![Some(left), Some(right)]));
+    actor.handle_event(Event::DisplayChurnEnd);
+
+    assert!(matches!(
+        recv_reactor(&mut reactor_rx),
+        reactor::Event::DisplayChurnBegin
+    ));
+    assert!(matches!(
+        recv_reactor(&mut reactor_rx),
+        reactor::Event::DisplayChurnEnd
+    ));
+    match recv_wm(&mut wm_rx) {
+        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
+            assert_eq!(
+                state.screens.iter().map(|screen| screen.space).collect::<Vec<_>>(),
+                vec![Some(left), Some(right)]
+            );
+        }
+        other => panic!("unexpected wm event: {other:?}"),
+    }
+}
+
+#[test]
+fn topology_window_delta_is_emitted_when_windows_leave_space_during_churn_without_space_change() {
+    let (mut actor, mut wm_rx, _reactor_rx) = build_actor();
+    let space = SpaceId::new(301);
+    let wsid = WindowServerId::new(77);
+
+    actor.state.visible_window_spaces.insert(wsid, space);
+    actor.state.pre_churn_visible_window_spaces.insert(wsid, space);
+    actor.state.display_churn_flags = crate::sys::skylight::DisplayReconfigFlags::MOVED;
+
+    actor.forward_screen_parameters(
+        vec![make_screen(Some(space))],
+        CoordinateConverter::from_height(800.0),
+    );
+    let _ = recv_wm(&mut wm_rx);
+
+    actor.state.visible_window_spaces.clear();
+    actor.synthesize_topology_window_delta(9, actor.state.display_churn_flags, &[make_screen(Some(space))]);
+    actor.forward_screen_parameters(
+        vec![make_screen(Some(space))],
+        CoordinateConverter::from_height(800.0),
+    );
+
+    match recv_wm(&mut wm_rx) {
+        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
+            let delta = state
+                .topology_window_delta
+                .expect("expected topology window delta");
+            assert_eq!(delta.epoch, 9);
+            assert!(delta.appeared.is_empty());
+            assert_eq!(delta.disappeared, vec![(wsid, space)]);
+        }
+        other => panic!("unexpected wm event: {other:?}"),
+    }
+}
+
+#[test]
+fn display_order_change_is_topology_change_without_display_set_change() {
+    let (mut actor, mut wm_rx, _reactor_rx) = build_actor();
+    let left_space = SpaceId::new(401);
+    let right_space = SpaceId::new(402);
+
+    actor.handle_event(Event::ScreenParametersChanged(
+        vec![
+            make_screen_with(1, "display-left", 0.0, 1000.0, Some(left_space)),
+            make_screen_with(2, "display-right", 1000.0, 1000.0, Some(right_space)),
+        ],
+        CoordinateConverter::from_height(800.0),
+    ));
+    let _ = recv_wm(&mut wm_rx);
+
+    actor.handle_event(Event::ScreenParametersChanged(
+        vec![
+            make_screen_with(2, "display-right", 1000.0, 1000.0, Some(right_space)),
+            make_screen_with(1, "display-left", 0.0, 1000.0, Some(left_space)),
+        ],
+        CoordinateConverter::from_height(800.0),
+    ));
+
+    match recv_wm(&mut wm_rx) {
+        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
+            assert!(!state.display_set_changed);
+            assert!(state.topology_changed);
+            assert!(state.should_force_refresh_layout);
+            assert!(state.space_remaps.is_empty());
+        }
+        other => panic!("unexpected wm event: {other:?}"),
+    }
+}
+
+#[test]
+fn duplicate_space_transient_during_wake_is_not_forwarded_when_stable_snapshot_recovers() {
+    let (mut actor, mut wm_rx, mut reactor_rx) = build_actor();
+    let left = SpaceId::new(501);
+    let right = SpaceId::new(502);
+
+    actor.handle_event(Event::ScreenParametersChanged(
+        vec![
+            make_screen_with(1, "display-left", 0.0, 1000.0, Some(left)),
+            make_screen_with(2, "display-right", 1000.0, 1000.0, Some(right)),
+        ],
+        CoordinateConverter::from_height(800.0),
+    ));
+    let _ = recv_wm(&mut wm_rx);
+
+    actor.handle_event(Event::SystemWillSleep);
+    actor.handle_event(Event::DisplayChurnBegin);
+    actor.handle_event(Event::SpaceChanged(vec![Some(left), Some(left)]));
+    actor.handle_event(Event::SystemDidWake);
+    actor.handle_event(Event::SpaceChanged(vec![Some(left), Some(right)]));
+    actor.handle_event(Event::DisplayChurnEnd);
+
+    assert!(matches!(
+        recv_reactor(&mut reactor_rx),
+        reactor::Event::DisplayChurnBegin
+    ));
+    assert!(matches!(
+        recv_reactor(&mut reactor_rx),
+        reactor::Event::DisplayChurnEnd
+    ));
+    assert_no_wm_event(&mut wm_rx);
+}
+
+#[test]
 fn fullscreen_transition_tracks_display_identity_across_reordered_screens() {
     let (mut actor, mut wm_rx, _reactor_rx) = build_actor();
     let left_space_2 = SpaceId::new(12);

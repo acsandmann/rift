@@ -197,6 +197,7 @@ fn forwarded_active_spaces_are_authoritative_for_workspace_context() {
         allow_space_remap: false,
         should_force_refresh_layout: false,
         resized_spaces: Vec::new(),
+        topology_window_delta: None,
     }));
 
     assert_eq!(reactor.workspace_command_space(), Some(new_space));
@@ -230,6 +231,7 @@ fn forwarded_space_state_updates_fullscreen_tracks() {
         allow_space_remap: false,
         should_force_refresh_layout: false,
         resized_spaces: Vec::new(),
+        topology_window_delta: None,
     }));
 
     let track = reactor
@@ -275,6 +277,7 @@ fn queries_prefer_authoritative_active_space_over_stale_command_space() {
         allow_space_remap: false,
         should_force_refresh_layout: false,
         resized_spaces: Vec::new(),
+        topology_window_delta: None,
     }));
 
     assert_eq!(
@@ -336,6 +339,7 @@ fn workspace_queries_are_isolated_per_macos_space() {
         allow_space_remap: false,
         should_force_refresh_layout: false,
         resized_spaces: Vec::new(),
+        topology_window_delta: None,
     }));
 
     let default_workspaces = reactor.query_workspaces(None);
@@ -1483,7 +1487,7 @@ fn display_index_selector_uses_physical_left_to_right_order() {
 }
 
 #[test]
-fn display_churn_capture_is_committed_on_next_forwarded_space_state() {
+fn topology_window_delta_is_applied_on_forwarded_space_state() {
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(
         &crate::common::config::VirtualWorkspaceSettings::default(),
         &crate::common::config::LayoutSettings::default(),
@@ -1492,22 +1496,35 @@ fn display_churn_capture_is_committed_on_next_forwarded_space_state() {
     let frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
     let space = SpaceId::new(1);
     reactor.handle_event(space_state_event(vec![frame], vec![Some(space)], vec![]));
+    let wsid = WindowServerId::new(123);
 
-    reactor.pending_display_topology_commit = Some(PendingDisplayTopologyCommit {
-        epoch: 2,
-        started_at: std::time::Instant::now(),
-        flags: crate::sys::skylight::DisplayReconfigFlags::ADD,
-        pre_known_wsids: crate::common::collections::HashSet::default(),
-    });
-    assert!(reactor.pending_display_topology_commit.is_some());
+    reactor.handle_event(Event::SpaceStateChanged(ForwardedSpaceState {
+        screens: make_screen_snapshots(vec![frame], vec![Some(space)]),
+        fullscreen_by_space: Default::default(),
+        has_seen_display_set: true,
+        active_spaces: [space].into_iter().collect(),
+        command_space: Some(space),
+        display_space_ids: Default::default(),
+        last_user_space_by_display: Default::default(),
+        space_remaps: Vec::new(),
+        display_set_changed: false,
+        topology_changed: false,
+        allow_space_remap: false,
+        should_force_refresh_layout: false,
+        resized_spaces: Vec::new(),
+        topology_window_delta: Some(crate::actor::spaces::TopologyWindowDelta {
+            epoch: 2,
+            flags: crate::sys::skylight::DisplayReconfigFlags::ADD,
+            appeared: vec![(wsid, space)],
+            disappeared: Vec::new(),
+        }),
+    }));
 
-    reactor.handle_event(space_state_event(vec![frame], vec![Some(space)], vec![]));
-
-    assert!(reactor.pending_display_topology_commit.is_none());
+    assert!(reactor.window_manager.is_window_server_observed(wsid));
 }
 
 #[test]
-fn display_churn_commit_removes_missing_window_from_active_layout() {
+fn topology_window_delta_removes_missing_window_from_active_layout() {
     let mut apps = Apps::new();
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(
         &crate::common::config::VirtualWorkspaceSettings::default(),
@@ -1528,22 +1545,27 @@ fn display_churn_commit_removes_missing_window_from_active_layout() {
     reactor.window_manager.set_window_server_space(wsid, Some(space));
     reactor.window_manager.mark_window_visible(wsid);
 
-    let mut pre_known_wsids = crate::common::collections::HashSet::default();
-    pre_known_wsids.insert(wsid);
-    let snapshot = crate::actor::reactor::display_topology::DisplaySnapshot {
-        ordered_screens: reactor.space_state.screens.clone(),
-        active_spaces: reactor.active_spaces.clone(),
-        inactive_spaces: crate::common::collections::HashSet::default(),
-        windows: crate::common::collections::HashMap::default(),
-    };
-
-    reactor.reconcile_windows_after_topology_commit(
-        1,
-        std::time::Instant::now(),
-        crate::sys::skylight::DisplayReconfigFlags::REMOVE,
-        pre_known_wsids,
-        snapshot,
-    );
+    reactor.handle_event(Event::SpaceStateChanged(ForwardedSpaceState {
+        screens: make_screen_snapshots(vec![frame], vec![Some(space)]),
+        fullscreen_by_space: Default::default(),
+        has_seen_display_set: true,
+        active_spaces: [space].into_iter().collect(),
+        command_space: Some(space),
+        display_space_ids: Default::default(),
+        last_user_space_by_display: Default::default(),
+        space_remaps: Vec::new(),
+        display_set_changed: false,
+        topology_changed: false,
+        allow_space_remap: false,
+        should_force_refresh_layout: false,
+        resized_spaces: Vec::new(),
+        topology_window_delta: Some(crate::actor::spaces::TopologyWindowDelta {
+            epoch: 1,
+            flags: crate::sys::skylight::DisplayReconfigFlags::REMOVE,
+            appeared: Vec::new(),
+            disappeared: vec![(wsid, space)],
+        }),
+    }));
 
     assert!(
         !has_window_in_layout(&mut reactor, space, frame, wid),

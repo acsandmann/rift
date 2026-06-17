@@ -71,6 +71,7 @@ pub fn space_state_event_from_screens(screens: Vec<ScreenInfo>) -> Event {
         allow_space_remap: false,
         should_force_refresh_layout: false,
         resized_spaces: Vec::new(),
+        topology_window_delta: None,
     })
 }
 

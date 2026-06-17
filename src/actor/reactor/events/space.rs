@@ -8,7 +8,7 @@ use crate::actor::reactor::{
     FullscreenSpaceTrack, FullscreenWindowTrack, LayoutEvent, Reactor, SpaceEventKind,
     StaleCleanupState,
 };
-use crate::actor::spaces::ForwardedSpaceState;
+use crate::actor::spaces::{ForwardedSpaceState, TopologyWindowDelta};
 use crate::actor::wm_controller::WmEvent;
 use crate::sys::app::AppInfo;
 use crate::sys::screen::SpaceId;
@@ -36,6 +36,7 @@ impl SpaceEventHandler {
             allow_space_remap: _,
             should_force_refresh_layout,
             resized_spaces,
+            topology_window_delta,
         } = space_state;
 
         reactor.space_state.has_seen_display_set = has_seen_display_set;
@@ -58,7 +59,6 @@ impl SpaceEventHandler {
             reactor.recompute_and_set_active_spaces(&[]);
             reactor.update_complete_window_server_info(Vec::new());
             reactor.try_apply_pending_space_change();
-            reactor.maybe_commit_display_topology_snapshot();
             return;
         }
 
@@ -106,10 +106,33 @@ impl SpaceEventHandler {
             reactor.send_layout_event(LayoutEvent::SpaceExposed(space, size));
         }
 
+        if let Some(TopologyWindowDelta {
+            appeared,
+            disappeared,
+            ..
+        }) = topology_window_delta
+        {
+            for (wsid, sid) in disappeared {
+                SpaceEventHandler::handle_window_server_destroyed(
+                    reactor,
+                    wsid,
+                    sid,
+                    SpaceEventKind::User,
+                );
+            }
+            for (wsid, sid) in appeared {
+                SpaceEventHandler::handle_window_server_appeared(
+                    reactor,
+                    wsid,
+                    sid,
+                    SpaceEventKind::User,
+                );
+            }
+        }
+
         let ws_info = reactor.authoritative_window_snapshot_for_active_spaces();
         reactor.finalize_space_change(&spaces, ws_info);
         reactor.try_apply_pending_space_change();
-        reactor.maybe_commit_display_topology_snapshot();
 
         if should_force_refresh_layout {
             reactor.force_refresh_all_windows();
