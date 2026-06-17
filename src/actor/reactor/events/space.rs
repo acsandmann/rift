@@ -21,7 +21,7 @@ impl SpaceEventHandler {
         let pending_space_state = space_state.clone();
         let ForwardedSpaceState {
             screens,
-            fullscreen_by_space,
+            fullscreen_spaces,
             has_seen_display_set,
             active_spaces,
             command_space,
@@ -40,9 +40,7 @@ impl SpaceEventHandler {
         } = space_state;
 
         reactor.space_state.has_seen_display_set = has_seen_display_set;
-        if !fullscreen_by_space.is_empty() {
-            reactor.space_state.fullscreen_by_space = fullscreen_by_space;
-        }
+        reactor.space_state.fullscreen_spaces = fullscreen_spaces;
         let spaces: Vec<Option<SpaceId>> = screens.iter().map(|screen| screen.space).collect();
 
         if display_set_changed {
@@ -155,6 +153,7 @@ impl SpaceEventHandler {
         kind: SpaceEventKind,
     ) {
         if matches!(kind, SpaceEventKind::Fullscreen) {
+            let mut layout_changed = false;
             let (pid, window_id) = if let Some(wid) = reactor.window_manager.tracked_window_id(wsid)
             {
                 (wid.pid, Some(wid))
@@ -167,6 +166,15 @@ impl SpaceEventHandler {
 
             let last_known_user_space = resolve_last_known_user_space(reactor, window_id);
             record_fullscreen_window(reactor, sid, pid, window_id, last_known_user_space);
+            if let (Some(wid), Some(user_space)) = (window_id, last_known_user_space)
+                && reactor.assigned_space_for_window_id(wid) == Some(user_space)
+            {
+                reactor.send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
+                layout_changed = reactor.is_space_active(user_space);
+            }
+            if layout_changed && !reactor.is_mission_control_active() {
+                let _ = reactor.update_layout_or_warn(false, false);
+            }
 
             if let Some(wid) = window_id
                 && let Some(app_state) = reactor.app_manager.apps.get(&wid.pid)
@@ -217,13 +225,46 @@ impl SpaceEventHandler {
         if reactor.window_manager.knows_window_server_id(wsid)
             || reactor.window_manager.is_window_server_observed(wsid)
         {
-            if matches!(kind, SpaceEventKind::User)
-                && !reactor.is_mission_control_active()
-                && let Some(wid) = reactor.window_manager.tracked_window_id(wsid)
-            {
-                let layout_changed = reactor.reassign_window_to_authoritative_space(wid, sid);
-                if layout_changed {
-                    let _ = reactor.update_layout_or_warn(false, false);
+            if !reactor.is_mission_control_active() {
+                match kind {
+                    SpaceEventKind::User => {
+                        if let Some(wid) = reactor.window_manager.tracked_window_id(wsid) {
+                            let layout_changed = restore_fullscreen_window_to_user_space(
+                                reactor, wsid, sid, wid,
+                            )
+                            .unwrap_or_else(|| {
+                                reactor.reassign_window_to_authoritative_space(wid, sid)
+                            });
+                            if layout_changed {
+                                let _ = reactor.update_layout_or_warn(false, false);
+                            }
+                        }
+                    }
+                    SpaceEventKind::Fullscreen => {
+                        let mut layout_changed = false;
+                        if let Some(wid) = reactor.window_manager.tracked_window_id(wsid) {
+                            let last_known_user_space =
+                                resolve_last_known_user_space(reactor, Some(wid));
+                            record_fullscreen_window(
+                                reactor,
+                                sid,
+                                wid.pid,
+                                Some(wid),
+                                last_known_user_space,
+                            );
+                            if let Some(user_space) = last_known_user_space
+                                && reactor.assigned_space_for_window_id(wid) == Some(user_space)
+                            {
+                                reactor.send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(
+                                    wid,
+                                ));
+                                layout_changed = reactor.is_space_active(user_space);
+                            }
+                        }
+                        if layout_changed {
+                            let _ = reactor.update_layout_or_warn(false, false);
+                        }
+                    }
                 }
             }
             debug!(
@@ -339,7 +380,7 @@ fn record_fullscreen_window(
     window_id: Option<crate::actor::app::WindowId>,
     last_known_user_space: Option<SpaceId>,
 ) {
-    let entry = match reactor.space_state.fullscreen_by_space.entry(sid.get()) {
+    let entry = match reactor.native_fullscreen_tracks.entry(sid.get()) {
         Entry::Occupied(o) => o.into_mut(),
         Entry::Vacant(v) => v.insert(FullscreenSpaceTrack::default()),
     };
@@ -350,6 +391,51 @@ fn record_fullscreen_window(
         last_known_user_space,
         _last_seen_fullscreen_space: sid,
     });
+}
+
+fn restore_fullscreen_window_to_user_space(
+    reactor: &mut Reactor,
+    wsid: WindowServerId,
+    sid: SpaceId,
+    wid: crate::actor::app::WindowId,
+) -> Option<bool> {
+    let mut restored = false;
+    let tracked_pid = reactor
+        .window_manager
+        .get_window_server_info(wsid)
+        .map(|info| info.pid)
+        .unwrap_or(wid.pid);
+    let keys: Vec<u64> = reactor.native_fullscreen_tracks.keys().copied().collect();
+    for key in keys {
+        let Some(track) = reactor.native_fullscreen_tracks.get_mut(&key) else {
+            continue;
+        };
+        let before = track.windows.len();
+        track.windows.retain(|window| {
+            !(window.window_id == Some(wid) || window.pid == tracked_pid)
+        });
+        restored |= track.windows.len() != before;
+    }
+    reactor
+        .native_fullscreen_tracks
+        .retain(|_, track| !track.windows.is_empty());
+
+    if !restored {
+        return None;
+    }
+
+    request_visible_windows(reactor, tracked_pid, "refresh after fullscreen exit");
+
+    Some(if reactor.assigned_space_for_window_id(wid) == Some(sid) {
+        if reactor.is_space_active(sid) && reactor.window_manager.is_window_visible(wsid) {
+            reactor.send_layout_event(LayoutEvent::WindowAdded(sid, wid));
+            true
+        } else {
+            false
+        }
+    } else {
+        reactor.reassign_window_to_authoritative_space(wid, sid)
+    })
 }
 
 fn request_visible_windows(reactor: &Reactor, pid: i32, context: &str) {

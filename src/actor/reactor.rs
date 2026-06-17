@@ -232,6 +232,7 @@ pub struct Reactor {
     layout_manager: managers::LayoutManager,
     window_manager: managers::WindowManager,
     space_state: ForwardedSpaceState,
+    native_fullscreen_tracks: HashMap<u64, FullscreenSpaceTrack>,
     space_activation_policy: SpaceActivationPolicy,
     main_window_tracker: MainWindowTracker,
     drag_manager: managers::DragManager,
@@ -309,6 +310,7 @@ impl Reactor {
             layout_manager: managers::LayoutManager { layout_engine },
             window_manager: Box::default(),
             space_state: ForwardedSpaceState::default(),
+            native_fullscreen_tracks: HashMap::default(),
             space_activation_policy: SpaceActivationPolicy::new(),
             main_window_tracker: MainWindowTracker::default(),
             drag_manager: managers::DragManager {
@@ -1040,13 +1042,12 @@ impl Reactor {
 
         for space in refresh_spaces {
             let mut tracks = Vec::new();
-            if let Some(track) = self.space_state.fullscreen_by_space.remove(&space.get()) {
+            if let Some(track) = self.native_fullscreen_tracks.remove(&space.get()) {
                 tracks.push(track);
             }
 
             let keys_to_remove: Vec<u64> = self
-                .space_state
-                .fullscreen_by_space
+                .native_fullscreen_tracks
                 .iter()
                 .filter(|(_, track)| {
                     track.windows.iter().any(|w| w.last_known_user_space == Some(space))
@@ -1055,7 +1056,7 @@ impl Reactor {
                 .collect();
 
             for key in keys_to_remove {
-                if let Some(track) = self.space_state.fullscreen_by_space.remove(&key) {
+                if let Some(track) = self.native_fullscreen_tracks.remove(&key) {
                     tracks.push(track);
                 }
             }
@@ -1113,7 +1114,7 @@ impl Reactor {
     }
 
     fn is_fullscreen_space(&self, space: SpaceId) -> bool {
-        self.space_state.fullscreen_by_space.contains_key(&space.get())
+        self.space_state.fullscreen_spaces.contains(&space)
     }
 
     fn set_screen_spaces(&mut self, spaces: &[Option<SpaceId>]) {
@@ -1512,7 +1513,7 @@ impl Reactor {
         let tracked_window = self.window_manager.tracked_window_id(wsid);
         let tracked_pid = self.window_manager.get_window_server_info(wsid).map(|info| info.pid);
 
-        self.space_state.fullscreen_by_space.values().any(|track| {
+        self.native_fullscreen_tracks.values().any(|track| {
             track.windows.iter().any(|window| {
                 tracked_window.is_some_and(|wid| window.window_id == Some(wid))
                     || tracked_pid.is_some_and(|pid| window.pid == pid)

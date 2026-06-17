@@ -59,7 +59,7 @@ pub fn space_state_event_from_screens(screens: Vec<ScreenInfo>) -> Event {
     let active_spaces = screens.iter().filter_map(|screen| screen.space).collect();
     Event::SpaceStateChanged(ForwardedSpaceState {
         screens,
-        fullscreen_by_space: Default::default(),
+        fullscreen_spaces: Default::default(),
         has_seen_display_set: false,
         active_spaces,
         command_space,

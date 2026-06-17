@@ -185,7 +185,7 @@ fn forwarded_active_spaces_are_authoritative_for_workspace_context() {
 
     reactor.handle_event(Event::SpaceStateChanged(ForwardedSpaceState {
         screens: make_screen_snapshots(vec![screen], vec![Some(new_space)]),
-        fullscreen_by_space: Default::default(),
+        fullscreen_spaces: Default::default(),
         has_seen_display_set: false,
         active_spaces: [new_space].into_iter().collect(),
         command_space: Some(new_space),
@@ -204,7 +204,7 @@ fn forwarded_active_spaces_are_authoritative_for_workspace_context() {
 }
 
 #[test]
-fn forwarded_space_state_updates_fullscreen_tracks() {
+fn forwarded_space_state_updates_fullscreen_spaces() {
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(
         &crate::common::config::VirtualWorkspaceSettings::default(),
         &crate::common::config::LayoutSettings::default(),
@@ -214,12 +214,9 @@ fn forwarded_space_state_updates_fullscreen_tracks() {
     let user_space = SpaceId::new(1);
     let fullscreen_space = SpaceId::new(0x400000000 + user_space.get());
 
-    let mut fullscreen_by_space = HashMap::default();
-    fullscreen_by_space.insert(fullscreen_space.get(), FullscreenSpaceTrack::default());
-
     reactor.handle_event(Event::SpaceStateChanged(ForwardedSpaceState {
         screens: make_screen_snapshots(vec![screen], vec![Some(user_space)]),
-        fullscreen_by_space: fullscreen_by_space.clone(),
+        fullscreen_spaces: [fullscreen_space].into_iter().collect(),
         has_seen_display_set: false,
         active_spaces: [user_space].into_iter().collect(),
         command_space: Some(user_space),
@@ -234,12 +231,7 @@ fn forwarded_space_state_updates_fullscreen_tracks() {
         topology_window_delta: None,
     }));
 
-    let track = reactor
-        .space_state
-        .fullscreen_by_space
-        .get(&fullscreen_space.get())
-        .expect("forwarded fullscreen track should be retained");
-    assert!(track.windows.is_empty());
+    assert!(reactor.space_state.fullscreen_spaces.contains(&fullscreen_space));
 }
 
 #[test]
@@ -265,7 +257,7 @@ fn queries_prefer_authoritative_active_space_over_stale_command_space() {
 
     reactor.handle_event(Event::SpaceStateChanged(ForwardedSpaceState {
         screens: make_screen_snapshots(vec![screen], vec![Some(space2)]),
-        fullscreen_by_space: Default::default(),
+        fullscreen_spaces: Default::default(),
         has_seen_display_set: false,
         active_spaces: [space2].into_iter().collect(),
         command_space: Some(space1),
@@ -327,7 +319,7 @@ fn workspace_queries_are_isolated_per_macos_space() {
 
     reactor.handle_event(Event::SpaceStateChanged(ForwardedSpaceState {
         screens: make_screen_snapshots(vec![left], vec![Some(space2)]),
-        fullscreen_by_space: Default::default(),
+        fullscreen_spaces: Default::default(),
         has_seen_display_set: false,
         active_spaces: [space2].into_iter().collect(),
         command_space: Some(space2),
@@ -471,6 +463,98 @@ fn known_window_server_appearance_updates_authoritative_space() {
     );
 
     assert_eq!(reactor.window_manager.window_server_space(wsid), Some(space2));
+}
+
+#[test]
+fn known_fullscreen_window_appearance_removes_window_from_layout() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+
+    let frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let user_space = SpaceId::new(1);
+    let fullscreen_space = SpaceId::new(0x400000000 + user_space.get());
+    let wid = WindowId::new(1, 1);
+
+    reactor.handle_event(space_state_event(vec![frame], vec![Some(user_space)], vec![]));
+    reactor.handle_events(apps.make_app_with_opts(
+        1,
+        make_windows(1),
+        Some(wid),
+        true,
+        true,
+    ));
+    reactor.handle_event(Event::ApplicationGloballyActivated(1));
+    apps.simulate_until_quiet(&mut reactor);
+
+    assert!(has_window_in_layout(&mut reactor, user_space, frame, wid));
+    let wsid = reactor.window_manager.window(wid).unwrap().info.sys_id.unwrap();
+
+    SpaceEventHandler::handle_window_server_appeared(
+        &mut reactor,
+        wsid,
+        fullscreen_space,
+        SpaceEventKind::Fullscreen,
+    );
+
+    assert!(
+        !has_window_in_layout(&mut reactor, user_space, frame, wid),
+        "managed window should be removed from layout when it enters native fullscreen"
+    );
+    assert!(
+        reactor.native_fullscreen_tracks.contains_key(&fullscreen_space.get()),
+        "fullscreen transition should record suspended window state"
+    );
+}
+
+#[test]
+fn known_window_server_appearance_restores_same_workspace_after_fullscreen() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+
+    let frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let user_space = SpaceId::new(1);
+    let fullscreen_space = SpaceId::new(0x400000000 + user_space.get());
+    let wid = WindowId::new(1, 1);
+
+    reactor.handle_event(space_state_event(vec![frame], vec![Some(user_space)], vec![]));
+    reactor.handle_events(apps.make_app_with_opts(
+        1,
+        make_windows(1),
+        Some(wid),
+        true,
+        true,
+    ));
+    reactor.handle_event(Event::ApplicationGloballyActivated(1));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let wsid = reactor.window_manager.window(wid).unwrap().info.sys_id.unwrap();
+    SpaceEventHandler::handle_window_server_appeared(
+        &mut reactor,
+        wsid,
+        fullscreen_space,
+        SpaceEventKind::Fullscreen,
+    );
+    assert!(!has_window_in_layout(&mut reactor, user_space, frame, wid));
+
+    SpaceEventHandler::handle_window_server_appeared(
+        &mut reactor,
+        wsid,
+        user_space,
+        SpaceEventKind::User,
+    );
+
+    assert!(
+        has_window_in_layout(&mut reactor, user_space, frame, wid),
+        "managed window should return to layout when native fullscreen exits back to the same space"
+    );
 }
 
 #[test]
@@ -1500,7 +1584,7 @@ fn topology_window_delta_is_applied_on_forwarded_space_state() {
 
     reactor.handle_event(Event::SpaceStateChanged(ForwardedSpaceState {
         screens: make_screen_snapshots(vec![frame], vec![Some(space)]),
-        fullscreen_by_space: Default::default(),
+        fullscreen_spaces: Default::default(),
         has_seen_display_set: true,
         active_spaces: [space].into_iter().collect(),
         command_space: Some(space),
@@ -1547,7 +1631,7 @@ fn topology_window_delta_removes_missing_window_from_active_layout() {
 
     reactor.handle_event(Event::SpaceStateChanged(ForwardedSpaceState {
         screens: make_screen_snapshots(vec![frame], vec![Some(space)]),
-        fullscreen_by_space: Default::default(),
+        fullscreen_spaces: Default::default(),
         has_seen_display_set: true,
         active_spaces: [space].into_iter().collect(),
         command_space: Some(space),
@@ -1590,7 +1674,7 @@ fn forwarded_space_state_does_not_clear_existing_fullscreen_tracks_when_snapshot
     let fullscreen_space = SpaceId::new(0x400000001);
     let window_id = WindowId::new(42, 1);
 
-    reactor.space_state.fullscreen_by_space.insert(
+    reactor.native_fullscreen_tracks.insert(
         fullscreen_space.get(),
         FullscreenSpaceTrack {
             windows: vec![FullscreenWindowTrack {
@@ -1604,7 +1688,7 @@ fn forwarded_space_state_does_not_clear_existing_fullscreen_tracks_when_snapshot
 
     reactor.handle_event(Event::SpaceStateChanged(ForwardedSpaceState {
         screens: make_screen_snapshots(vec![frame], vec![Some(current_space)]),
-        fullscreen_by_space: Default::default(),
+        fullscreen_spaces: Default::default(),
         has_seen_display_set: true,
         active_spaces: [current_space].into_iter().collect(),
         command_space: Some(current_space),
@@ -1621,8 +1705,7 @@ fn forwarded_space_state_does_not_clear_existing_fullscreen_tracks_when_snapshot
 
     assert!(
         reactor
-            .space_state
-            .fullscreen_by_space
+            .native_fullscreen_tracks
             .contains_key(&fullscreen_space.get()),
         "empty forwarded fullscreen state must not clear existing fullscreen exit tracking"
     );
@@ -1712,8 +1795,8 @@ fn fullscreen_space_in_screen_params_does_not_trigger_topology_relayout() {
 
     reactor
         .space_state
-        .fullscreen_by_space
-        .insert(fullscreen_space.get(), FullscreenSpaceTrack::default());
+        .fullscreen_spaces
+        .insert(fullscreen_space);
     reactor.handle_event(space_state_event_from_screens(screens_for(user_space).into_iter().map(|mut screen| {
         screen.space = None;
         screen
@@ -1752,8 +1835,8 @@ fn fullscreen_screen_params_preserves_other_display_space() {
     ));
     reactor
         .space_state
-        .fullscreen_by_space
-        .insert(right_fullscreen.get(), FullscreenSpaceTrack::default());
+        .fullscreen_spaces
+        .insert(right_fullscreen);
 
     reactor.handle_event(space_state_event(
         vec![left, right],
@@ -1789,8 +1872,8 @@ fn fullscreen_space_changed_preserves_other_display_space() {
     ));
     reactor
         .space_state
-        .fullscreen_by_space
-        .insert(right_fullscreen.get(), FullscreenSpaceTrack::default());
+        .fullscreen_spaces
+        .insert(right_fullscreen);
 
     reactor.handle_event(space_state_event(
         vec![left, right],
@@ -1827,8 +1910,8 @@ fn user_space_switch_is_allowed_while_other_display_already_fullscreen() {
     ));
     reactor
         .space_state
-        .fullscreen_by_space
-        .insert(right_fullscreen.get(), FullscreenSpaceTrack::default());
+        .fullscreen_spaces
+        .insert(right_fullscreen);
     reactor.handle_event(space_state_event(
         vec![left, right],
         vec![Some(left_space_2), None],
@@ -1897,8 +1980,8 @@ fn fullscreen_screen_params_preserves_window_layout() {
     // with the fullscreen space id.
     reactor
         .space_state
-        .fullscreen_by_space
-        .insert(fullscreen_space.get(), FullscreenSpaceTrack::default());
+        .fullscreen_spaces
+        .insert(fullscreen_space);
     reactor.handle_event(space_state_event_from_screens(vec![ScreenInfo {
         id: crate::sys::screen::ScreenId::new(0),
         frame: full_screen,
@@ -2432,8 +2515,7 @@ fn unfullscreen_restores_window_tracking() {
     // Record the window as fullscreened.
     let window_id = WindowId::new(1, 1);
     reactor
-        .space_state
-        .fullscreen_by_space
+        .native_fullscreen_tracks
         .insert(fullscreen_space.get(), FullscreenSpaceTrack {
             windows: vec![FullscreenWindowTrack {
                 pid: 1,
@@ -2472,7 +2554,7 @@ fn unfullscreen_restores_window_tracking() {
 
     // The fullscreen track should be removed.
     assert!(
-        !reactor.space_state.fullscreen_by_space.contains_key(&fullscreen_space.get()),
+        !reactor.native_fullscreen_tracks.contains_key(&fullscreen_space.get()),
         "Fullscreen track should be removed from space manager"
     );
 }

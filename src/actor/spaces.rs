@@ -5,7 +5,6 @@ use objc2_core_foundation::CGSize;
 use crate::actor;
 use crate::actor::{reactor, wm_controller};
 use crate::common::collections::{HashMap, HashSet};
-use crate::model::reactor::FullscreenSpaceTrack;
 use crate::sys::dispatch::DispatchExt;
 #[cfg(not(test))]
 use crate::sys::geometry::CGRectExt;
@@ -85,7 +84,7 @@ struct DisplayTopologyState {
 #[derive(Debug, Default, Clone)]
 pub struct ForwardedSpaceState {
     pub screens: Vec<ScreenInfo>,
-    pub(crate) fullscreen_by_space: HashMap<u64, FullscreenSpaceTrack>,
+    pub fullscreen_spaces: HashSet<SpaceId>,
     pub has_seen_display_set: bool,
     pub active_spaces: HashSet<SpaceId>,
     pub command_space: Option<SpaceId>,
@@ -469,6 +468,11 @@ impl SpacesActor {
 
     fn build_forwarded_state(&mut self, screens: Vec<ScreenInfo>) -> ForwardedSpaceState {
         let previous_screens = self.state.screens.clone();
+        let fullscreen_spaces: HashSet<SpaceId> = screens
+            .iter()
+            .filter_map(|screen| screen.space)
+            .filter(|space| Self::is_fullscreen_space(*space))
+            .collect();
         let mut screens = screens;
         self.preserve_user_spaces_during_fullscreen_transition(&previous_screens, &mut screens);
         self.null_fullscreen_spaces(&mut screens);
@@ -559,7 +563,7 @@ impl SpacesActor {
 
         ForwardedSpaceState {
             screens,
-            fullscreen_by_space: HashMap::default(),
+            fullscreen_spaces,
             has_seen_display_set: self.state.has_seen_display_set,
             active_spaces: self.state.screens.iter().filter_map(|screen| screen.space).collect(),
             command_space,
