@@ -233,7 +233,19 @@ impl SpaceEventHandler {
                                 reactor, wsid, sid, wid,
                             )
                             .unwrap_or_else(|| {
-                                reactor.reassign_window_to_authoritative_space(wid, sid)
+                                // `SpaceWindowCreated` (this event) also fires as a side
+                                // effect of our own SetWindowFrame dragging a window across
+                                // a display seam. If a Rift frame transaction is still in
+                                // flight for this window, this appearance is our own echo —
+                                // chasing it reassigns the window back and forth, which makes
+                                // frame-resisting apps (e.g. Zen, Outlook) oscillate between
+                                // displays. The authoritative space record is still updated
+                                // above; only the layout reassignment is suppressed here.
+                                if reactor.transaction_manager.get_target_frame(wsid).is_some() {
+                                    false
+                                } else {
+                                    reactor.reassign_window_to_authoritative_space(wid, sid)
+                                }
                             });
                             if layout_changed {
                                 let _ = reactor.update_layout_or_warn(false, false);
