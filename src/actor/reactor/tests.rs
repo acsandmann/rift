@@ -465,6 +465,126 @@ fn known_window_server_appearance_updates_authoritative_space() {
     assert_eq!(reactor.window_manager.window_server_space(wsid), Some(space2));
 }
 
+/// Builds a reactor with `space1` active on a screen and a single tiled window
+/// (`wid`/`wsid`) assigned to `space1`. `space2` exists with workspaces so it can
+/// be a reassignment target. Returns the pieces the `appeared` tests need.
+fn reactor_with_window_on_space1() -> (Reactor, WindowId, WindowServerId, SpaceId, SpaceId, CGRect) {
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let pid = 1;
+    let frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1440., 900.));
+    let space1 = SpaceId::new(1);
+    let space2 = SpaceId::new(2);
+    let wid = WindowId::new(pid, 1);
+    let wsid = WindowServerId::new(101);
+
+    reactor.handle_event(space_state_event(vec![frame], vec![Some(space1)], vec![]));
+
+    let (app_tx, _app_rx) = crate::actor::channel();
+    reactor.app_manager.apps.insert(pid, AppState {
+        info: AppInfo {
+            bundle_id: Some("com.test.app".to_string()),
+            localized_name: Some("Test App".to_string()),
+        },
+        handle: AppThreadHandle::new_for_test(app_tx),
+    });
+
+    let space1_workspace = reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .list_workspaces(space1)
+        .first()
+        .map(|(id, _)| *id)
+        .expect("space1 workspace");
+    // Ensure space2 has workspaces so a reassignment can resolve a target.
+    reactor.layout_manager.layout_engine.virtual_workspace_manager_mut().list_workspaces(space2);
+
+    reactor.window_manager.track_window_server_id(wsid, wid);
+    reactor.window_manager.track_window_server_info(crate::sys::window_server::WindowServerInfo {
+        id: wsid,
+        pid,
+        layer: 0,
+        frame,
+        min_frame: frame.size,
+        max_frame: frame.size,
+    });
+    reactor.window_manager.set_window_server_space(wsid, Some(space1));
+    reactor.window_manager.mark_window_visible(wsid);
+    reactor.window_manager.insert_window(wid, WindowState {
+        info: WindowInfo {
+            is_standard: true,
+            is_root: true,
+            is_minimized: false,
+            is_resizable: true,
+            min_size: None,
+            max_size: None,
+            title: "Window".to_string(),
+            frame,
+            sys_id: Some(wsid),
+            bundle_id: None,
+            path: None,
+            ax_role: None,
+            ax_subrole: None,
+        },
+        frame_monotonic: frame,
+        is_manageable: true,
+        ignore_app_rule: false,
+    });
+
+    assert!(reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .assign_window_to_workspace(space1, wid, space1_workspace));
+    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space1));
+
+    (reactor, wid, wsid, space1, space2, frame)
+}
+
+#[test]
+fn appeared_does_not_reassign_window_while_rift_move_is_in_flight() {
+    let (mut reactor, wid, wsid, space1, space2, frame) = reactor_with_window_on_space1();
+
+    // Simulate Rift having just sent a frame move for this window: a pending target
+    // is registered in the transaction store, exactly like the tiling/apply path does.
+    // The `appeared` event below is the echo of that move dragging the window across a
+    // display seam, not a genuine external space change.
+    reactor.transaction_manager.store_txid(
+        wsid,
+        crate::actor::reactor::transaction_manager::TransactionId::default(),
+        frame,
+    );
+
+    SpaceEventHandler::handle_window_server_appeared(&mut reactor, wsid, space2, SpaceEventKind::User);
+
+    assert_eq!(
+        reactor.assigned_space_for_window_id(wid),
+        Some(space1),
+        "window with an in-flight Rift move must not be reassigned by its own appearance echo"
+    );
+}
+
+#[test]
+fn appeared_reassigns_window_without_pending_rift_move() {
+    let (mut reactor, wid, wsid, space1, space2, _frame) = reactor_with_window_on_space1();
+
+    // No pending transaction: this is a genuine external space change, so Rift should
+    // follow it and reassign the window to the reported space.
+    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space1));
+
+    SpaceEventHandler::handle_window_server_appeared(&mut reactor, wsid, space2, SpaceEventKind::User);
+
+    assert_eq!(
+        reactor.assigned_space_for_window_id(wid),
+        Some(space2),
+        "window without an in-flight Rift move must follow a genuine external space change"
+    );
+}
+
 #[test]
 fn known_fullscreen_window_appearance_removes_window_from_layout() {
     let mut apps = Apps::new();
