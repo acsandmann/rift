@@ -171,16 +171,9 @@ impl LayoutManager {
         reactor: &mut Reactor,
         is_resize: bool,
         is_workspace_switch: bool,
-        skip_frame_dedupe: bool,
     ) -> Result<bool, crate::model::reactor::ReactorError> {
         let layout_result = Self::calculate_layout(reactor);
-        Self::apply_layout(
-            reactor,
-            layout_result,
-            is_resize,
-            is_workspace_switch,
-            skip_frame_dedupe,
-        )
+        Self::apply_layout(reactor, layout_result, is_resize, is_workspace_switch)
     }
 
     fn calculate_layout(reactor: &mut Reactor) -> LayoutResult {
@@ -253,7 +246,6 @@ impl LayoutManager {
         layout_result: LayoutResult,
         is_resize: bool,
         is_workspace_switch: bool,
-        skip_frame_dedupe: bool,
     ) -> Result<bool, crate::model::reactor::ReactorError> {
         let main_window = reactor.main_window();
         trace!(?main_window);
@@ -358,22 +350,11 @@ impl LayoutManager {
             let suppress_animation = is_workspace_switch
                 || reactor.workspace_switch_manager.active_workspace_switch.is_some();
             if suppress_animation {
-                any_frame_changed |= AnimationManager::instant_layout(
-                    reactor,
-                    space,
-                    &layout,
-                    skip_wid,
-                    skip_frame_dedupe,
-                );
+                any_frame_changed |=
+                    AnimationManager::instant_layout(reactor, space, &layout, skip_wid);
             } else {
-                any_frame_changed |= AnimationManager::animate_layout(
-                    reactor,
-                    space,
-                    &layout,
-                    is_resize,
-                    skip_wid,
-                    skip_frame_dedupe,
-                );
+                any_frame_changed |=
+                    AnimationManager::animate_layout(reactor, space, &layout, is_resize, skip_wid);
             }
         }
 

@@ -135,10 +135,12 @@ impl SpaceEventHandler {
         reactor.try_apply_pending_space_change();
 
         if should_force_refresh_layout {
-            // The topology snapshot is authoritative here, but per-window frame
-            // events may have been dropped during wake/reattach churn.
             reactor.force_refresh_all_windows();
-            let _ = reactor.update_layout_after_topology_change();
+            let _ = reactor.update_layout_or_warn_with(
+                false,
+                false,
+                "Layout update failed after topology change",
+            );
         }
     }
 

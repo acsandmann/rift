@@ -7,7 +7,6 @@ use crate::actor::reactor::events::window_discovery::WindowDiscoveryHandler;
 use crate::actor::app::{AppThreadHandle, Request, pid_t};
 use crate::layout_engine::{Direction, LayoutCommand, LayoutEngine, LayoutEvent};
 use crate::sys::app::{AppInfo, WindowInfo};
-use crate::sys::geometry::SameAs;
 use crate::sys::window_server::WindowServerId;
 
 #[test]
@@ -80,62 +79,6 @@ fn it_sends_writes_when_stale_read_state_looks_same_as_written_state() {
         assert!(state_3.contains_key(&wid), "{wid:?} not in {state_3:#?}");
         assert_eq!(state.frame, state_3[&wid].frame);
     }
-}
-
-#[test]
-fn topology_refresh_reapplies_frames_when_real_windows_moved_offscreen() {
-    let mut apps = Apps::new();
-    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
-        &crate::common::config::VirtualWorkspaceSettings::default(),
-        &crate::common::config::LayoutSettings::default(),
-        None,
-    ));
-    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
-    let space = SpaceId::new(1);
-    let wid = WindowId::new(1, 1);
-
-    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)], vec![]));
-    reactor.handle_events(apps.make_app(1, make_windows(1)));
-    apps.simulate_until_quiet(&mut reactor);
-    let _ = apps.requests();
-
-    apps.windows
-        .get_mut(&wid)
-        .expect("window missing from test app state")
-        .frame = CGRect::new(CGPoint::new(-4000., -4000.), CGSize::new(50., 50.));
-
-    reactor.handle_event(Event::SpaceStateChanged(ForwardedSpaceState {
-        screens: make_screen_snapshots(vec![screen], vec![Some(space)]),
-        fullscreen_spaces: Default::default(),
-        has_seen_display_set: true,
-        active_spaces: [space].into_iter().collect(),
-        command_space: Some(space),
-        display_space_ids: Default::default(),
-        last_user_space_by_display: Default::default(),
-        space_remaps: Vec::new(),
-        display_set_changed: true,
-        topology_changed: true,
-        allow_space_remap: true,
-        should_force_refresh_layout: true,
-        resized_spaces: Vec::new(),
-        topology_window_delta: None,
-    }));
-
-    let requests = apps.requests();
-    assert!(
-        requests.iter().any(|request| matches!(
-            request,
-            Request::SetWindowFrame(request_wid, frame, _, _)
-                if *request_wid == wid && frame.same_as(screen)
-        ) || matches!(
-            request,
-            Request::SetBatchWindowFrame(frames, _, _)
-                if frames
-                    .iter()
-                    .any(|(request_wid, frame)| *request_wid == wid && frame.same_as(screen))
-        )),
-        "expected topology refresh to force a corrective frame write: {requests:?}"
-    );
 }
 
 #[test]
@@ -1713,7 +1656,6 @@ fn animated_layout_handles_windows_without_server_ids() {
         &[(WindowId::new(1, 1), target)],
         true,
         None,
-        false,
     ));
 
     let requests = apps.requests();
