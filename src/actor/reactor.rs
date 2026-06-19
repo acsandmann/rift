@@ -57,9 +57,11 @@ use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt};
 pub use crate::sys::screen::ScreenInfo;
 use crate::sys::screen::{SpaceId, order_visible_spaces_by_position};
-use crate::sys::window_server::{self, WindowServerId, WindowServerInfo, window_level, window_sub_level};
 #[cfg(not(test))]
 use crate::sys::window_server::wait_for_native_fullscreen_transition;
+use crate::sys::window_server::{
+    self, WindowServerId, WindowServerInfo, window_level, window_sub_level,
+};
 
 pub type Sender = actor::Sender<Event>;
 type Receiver = actor::Receiver<Event>;
@@ -154,9 +156,17 @@ pub enum Event {
     ),
     WindowDestroyed(WindowId),
     #[serde(skip)]
-    WindowServerDestroyed(crate::sys::window_server::WindowServerId, SpaceId, SpaceEventKind),
+    WindowServerDestroyed(
+        crate::sys::window_server::WindowServerId,
+        SpaceId,
+        SpaceEventKind,
+    ),
     #[serde(skip)]
-    WindowServerAppeared(crate::sys::window_server::WindowServerId, SpaceId, SpaceEventKind),
+    WindowServerAppeared(
+        crate::sys::window_server::WindowServerId,
+        SpaceId,
+        SpaceEventKind,
+    ),
     #[serde(skip)]
     SpaceCreated(SpaceId),
     #[serde(skip)]
@@ -514,8 +524,27 @@ impl Reactor {
     }
 
     fn authoritative_window_snapshot_for_active_spaces(&self) -> Vec<WindowServerInfo> {
-        let ws_info = window_server::get_visible_windows_with_layer(None);
-        self.filter_ws_info_to_active_spaces(ws_info)
+        let active_space_ids: Vec<u64> = self.active_space_ids().into_iter().collect();
+        if active_space_ids.is_empty() {
+            return Vec::new();
+        }
+
+        let active_wsids: HashSet<u32> =
+            crate::sys::window_server::space_window_list_for_connection(
+                &active_space_ids,
+                0,
+                false,
+            )
+            .into_iter()
+            .collect();
+        if active_wsids.is_empty() {
+            return Vec::new();
+        }
+
+        window_server::get_visible_windows_with_layer(None)
+            .into_iter()
+            .filter(|window| active_wsids.contains(&window.id.as_u32()))
+            .collect()
     }
 
     fn filter_ws_info_to_active_spaces(
@@ -1429,7 +1458,8 @@ impl Reactor {
 
         let target_active = self.is_space_active(authoritative_space);
         if target_active
-            && let Some(wsid) = self.window_manager.window(wid).and_then(|window| window.info.sys_id)
+            && let Some(wsid) =
+                self.window_manager.window(wid).and_then(|window| window.info.sys_id)
             && self.window_manager.is_window_visible(wsid)
         {
             self.send_layout_event(LayoutEvent::WindowAdded(authoritative_space, wid));
@@ -2266,9 +2296,7 @@ impl Reactor {
             .collect();
         let focus_window = focus_window.filter(|wid| self.is_window_on_active_space(*wid));
         if let Some(space) = workspace_switch_space {
-            self.layout_manager
-                .layout_engine
-                .commit_workspace_focus(space, focus_window);
+            self.layout_manager.layout_engine.commit_workspace_focus(space, focus_window);
         }
         if focus_window.is_some() {
             self.above_window = None;
@@ -2523,17 +2551,16 @@ impl Reactor {
             };
             self.window_manager.is_window_visible(wsid)
                 && self.best_space_for_window_id(wid) == Some(space)
-                && self
-                    .layout_manager
-                    .layout_engine
-                    .is_window_in_active_workspace(space, wid)
+                && self.layout_manager.layout_engine.is_window_in_active_workspace(space, wid)
         };
 
         if let Some(wid) = preferred.filter(|wid| is_visible_in_space(*wid)) {
             return Some(wid);
         }
 
-        if let Some(wid) = self.last_focused_window_in_space(space).filter(|wid| is_visible_in_space(*wid)) {
+        if let Some(wid) =
+            self.last_focused_window_in_space(space).filter(|wid| is_visible_in_space(*wid))
+        {
             return Some(wid);
         }
 
@@ -2695,7 +2722,8 @@ impl Reactor {
         &mut self,
         ws_info: Vec<WindowServerInfo>,
     ) {
-        let previously_visible_wsids: Vec<_> = self.window_manager.iter_visible_window_server_ids().collect();
+        let previously_visible_wsids: Vec<_> =
+            self.window_manager.iter_visible_window_server_ids().collect();
 
         // Mission Control can move windows between native spaces without emitting a
         // matching destroy/appear pair for the origin space. Treat the post-exit
@@ -2728,8 +2756,7 @@ impl Reactor {
     fn force_refresh_all_windows(&mut self) { self.request_visible_windows_for_apps(true); }
 
     fn has_user_space_context(&self) -> bool {
-        self.raw_command_space()
-            .is_some_and(|space| !self.is_fullscreen_space(space))
+        self.raw_command_space().is_some_and(|space| !self.is_fullscreen_space(space))
     }
 
     fn request_close_window(&mut self, wid: WindowId) {

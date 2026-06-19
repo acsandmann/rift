@@ -387,7 +387,7 @@ fn fullscreen_transition_is_normalized_before_forwarding() {
         wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
             let spaces: Vec<Option<SpaceId>> =
                 state.screens.iter().map(|screen| screen.space).collect();
-            assert_eq!(spaces, vec![Some(left_space_2), None]);
+            assert_eq!(spaces, vec![Some(left_space_1), None]);
         }
         other => panic!("unexpected wm event: {other:?}"),
     }
@@ -657,10 +657,89 @@ fn fullscreen_transition_tracks_display_identity_across_reordered_screens() {
             assert_eq!(state.screens[0].display_uuid, "display-right");
             assert_eq!(state.screens[0].space, None);
             assert_eq!(state.screens[1].display_uuid, "display-left");
-            assert_eq!(state.screens[1].space, Some(left_space_2));
+            assert_eq!(state.screens[1].space, Some(left_space_1));
         }
         other => panic!("unexpected wm event: {other:?}"),
     }
+}
+
+#[test]
+fn fullscreen_transition_rewrites_cross_display_space_contamination_only() {
+    let (mut actor, mut wm_rx, _reactor_rx) = build_actor();
+    let left_space = SpaceId::new(212);
+    let right_space = SpaceId::new(221);
+    let right_fullscreen = fullscreen_space_for(right_space);
+
+    actor.handle_event(Event::ScreenParametersChanged(
+        vec![
+            make_screen_with(1, "display-left", 0.0, 1000.0, Some(left_space)),
+            make_screen_with(2, "display-right", 1000.0, 1000.0, Some(right_space)),
+        ],
+        CoordinateConverter::from_height(1000.0),
+    ));
+    let _ = recv_wm(&mut wm_rx);
+
+    actor.handle_event(Event::ScreenParametersChanged(
+        vec![
+            make_screen_with(1, "display-left", 0.0, 1000.0, Some(right_space)),
+            make_screen_with(2, "display-right", 1000.0, 1000.0, Some(right_fullscreen)),
+        ],
+        CoordinateConverter::from_height(1000.0),
+    ));
+
+    match recv_wm(&mut wm_rx) {
+        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
+            let spaces: Vec<Option<SpaceId>> =
+                state.screens.iter().map(|screen| screen.space).collect();
+            assert_eq!(spaces, vec![Some(left_space), None]);
+        }
+        other => panic!("unexpected wm event: {other:?}"),
+    }
+}
+
+#[test]
+fn display_churn_stabilization_rejects_duplicate_space_snapshot_until_valid() {
+    let (mut actor, mut wm_rx, mut reactor_rx) = build_actor();
+    let left = SpaceId::new(601);
+    let right = SpaceId::new(602);
+
+    actor.handle_event(Event::DisplayChurnBegin);
+    assert!(matches!(
+        recv_reactor(&mut reactor_rx),
+        reactor::Event::DisplayChurnBegin
+    ));
+
+    let epoch = actor.state.display_churn_epoch;
+    actor.state.screens = vec![
+        make_screen_with(1, "display-left", 0.0, 1000.0, Some(left)),
+        make_screen_with(2, "display-right", 1000.0, 1000.0, Some(left)),
+    ];
+
+    actor.attempt_finish_display_churn(epoch, 0);
+    actor.attempt_finish_display_churn(epoch, 1);
+    assert_no_wm_event(&mut wm_rx);
+
+    actor.state.screens = vec![
+        make_screen_with(1, "display-left", 0.0, 1000.0, Some(left)),
+        make_screen_with(2, "display-right", 1000.0, 1000.0, Some(right)),
+    ];
+
+    actor.attempt_finish_display_churn(epoch, 2);
+    actor.attempt_finish_display_churn(epoch, 3);
+
+    match recv_wm(&mut wm_rx) {
+        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
+            assert_eq!(
+                state.screens.iter().map(|screen| screen.space).collect::<Vec<_>>(),
+                vec![Some(left), Some(right)]
+            );
+        }
+        other => panic!("unexpected wm event: {other:?}"),
+    }
+    assert!(matches!(
+        recv_reactor(&mut reactor_rx),
+        reactor::Event::DisplayChurnEnd
+    ));
 }
 
 #[test]

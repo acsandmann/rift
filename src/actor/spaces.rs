@@ -71,7 +71,7 @@ pub struct QuarantineStats {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct DisplayTopologyFingerprint(Vec<(String, u64, u64, u64, u64)>);
+struct DisplayTopologyFingerprint(Vec<(String, u64, u64, u64, u64, Option<u64>)>);
 
 #[derive(Debug, Clone)]
 struct DisplayTopologyState {
@@ -603,6 +603,15 @@ impl SpacesActor {
             return;
         }
 
+        let previous_space_owner: HashMap<SpaceId, &str> = previous_screens
+            .iter()
+            .filter_map(|screen| {
+                let display_uuid = screen.display_uuid_opt()?;
+                let space = screen.space?;
+                (!Self::is_fullscreen_space(space)).then_some((space, display_uuid))
+            })
+            .collect();
+
         for next in screens.iter_mut() {
             let Some(display_uuid) = next.display_uuid_opt() else {
                 continue;
@@ -620,6 +629,12 @@ impl SpacesActor {
                 continue;
             };
             if previous_space == new_space || Self::is_fullscreen_space(previous_space) {
+                continue;
+            }
+            let should_rewrite = previous_space_owner
+                .get(&new_space)
+                .is_some_and(|owner| *owner != display_uuid);
+            if !should_rewrite {
                 continue;
             }
 
@@ -834,6 +849,14 @@ impl SpacesActor {
         }
     }
 
+    fn screen_snapshot_is_valid_for_commit(screens: &[ScreenInfo]) -> bool {
+        let mut seen_user_spaces: HashSet<SpaceId> = HashSet::default();
+        screens.iter().all(|screen| match screen.space {
+            Some(space) if !Self::is_fullscreen_space(space) => seen_user_spaces.insert(space),
+            _ => true,
+        })
+    }
+
     fn process_screen_refresh(&mut self, attempt: u8, allow_retry: bool) {
         if self.state.display_churn_active {
             self.state.refresh_deferred_until_stable = true;
@@ -1031,6 +1054,7 @@ impl SpacesActor {
                         d.frame.origin.y.to_bits(),
                         d.frame.size.width.to_bits(),
                         d.frame.size.height.to_bits(),
+                        d.space.map(|space| space.get()),
                     )
                 })
                 .collect(),
@@ -1052,6 +1076,13 @@ impl SpacesActor {
         };
 
         if hits >= DISPLAY_STABLE_REQUIRED_HITS {
+            if !Self::screen_snapshot_is_valid_for_commit(&screens) {
+                self.state.display_topology_state = None;
+                if !self.retry_display_stabilization(expected_epoch, attempt) {
+                    self.finish_display_churn(expected_epoch, true);
+                }
+                return;
+            }
             if !window_server::windowserver_quiet_for_us(window_server::WINDOWSERVER_QUIET_US) {
                 if !self.retry_display_stabilization(expected_epoch, attempt) {
                     self.finish_display_churn(expected_epoch, true);
