@@ -32,8 +32,8 @@ use tracing::{debug, error, trace, warn};
 
 use super::reactor::{self, Event};
 use super::stack_line;
-use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor;
+use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::wm_controller::{self, WmCommand, WmEvent};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{Config, LayoutMode};

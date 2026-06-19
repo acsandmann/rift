@@ -17,8 +17,8 @@ use objc2_core_graphics::{
 use tracing::{trace, warn};
 
 use crate::actor;
-use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::reactor;
+use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::wm_controller::{self, WmCommand, WmEvent};
 use crate::common::collections::HashMap;
 use crate::common::config::{Config, HapticPattern, LayoutMode};

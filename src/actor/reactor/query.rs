@@ -415,8 +415,7 @@ impl Reactor {
     }
 
     fn handle_windows_query(&self, space_id: Option<SpaceId>) -> Vec<WindowData> {
-        let target_space = space_id
-            .or_else(|| self.default_query_space());
+        let target_space = space_id.or_else(|| self.default_query_space());
 
         if let Some(space) = target_space {
             let active_windows =

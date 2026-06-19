@@ -101,10 +101,7 @@ define_class! {
 
 impl NotificationCenterInner {
     fn new(events_tx: wm_controller::Sender, spaces_tx: spaces::Sender) -> Retained<Self> {
-        let instance = Instance {
-            events_tx,
-            spaces_tx,
-        };
+        let instance = Instance { events_tx, spaces_tx };
         let handler: Retained<Self> = unsafe { msg_send![Self::alloc(), initWith: instance] };
         unsafe {
             CGDisplayRegisterReconfigurationCallback(

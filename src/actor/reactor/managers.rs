@@ -8,8 +8,8 @@ use crate::actor::app::{WindowId, pid_t};
 use crate::actor::broadcast::{BroadcastEvent, BroadcastSender, StackInfo};
 use crate::actor::drag_swap::DragManager as DragSwapManager;
 use crate::actor::reactor::Reactor;
-use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::reactor::animation::AnimationManager;
+use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::{
     event_tap, gesture_tap, menu_bar, raise_manager, stack_line, window_notify, wm_controller,
 };

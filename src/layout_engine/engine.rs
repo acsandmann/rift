@@ -572,8 +572,11 @@ impl LayoutEngine {
         self.broadcast_windows_changed(space);
 
         EventResponse {
-            focus_window: self
-                .preferred_focus_for_workspace(space, workspace_id, preferred_focus_window),
+            focus_window: self.preferred_focus_for_workspace(
+                space,
+                workspace_id,
+                preferred_focus_window,
+            ),
             raise_windows: vec![],
             boundary_hit: None,
         }
@@ -3243,13 +3246,11 @@ mod tests {
         let workspaces = engine.virtual_workspace_manager_mut().list_workspaces(space).to_vec();
         let workspace_two = workspaces[1].0;
 
-        let _ = engine.handle_virtual_workspace_command(
-            space,
-            &LayoutCommand::MoveWindowToWorkspace {
+        let _ =
+            engine.handle_virtual_workspace_command(space, &LayoutCommand::MoveWindowToWorkspace {
                 workspace: 1,
                 window_id: Some(wid2.idx.get()),
-            },
-        );
+            });
 
         let response =
             engine.handle_virtual_workspace_command(space, &LayoutCommand::SwitchToWorkspace(1));
@@ -3262,9 +3263,7 @@ mod tests {
 
         assert_eq!(engine.focused_window, Some(wid2));
         assert_eq!(
-            engine
-                .virtual_workspace_manager()
-                .last_focused_window(space, workspace_two),
+            engine.virtual_workspace_manager().last_focused_window(space, workspace_two),
             Some(wid2)
         );
     }

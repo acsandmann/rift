@@ -218,10 +218,7 @@ impl WindowDiscoveryHandler {
                 let ordered_in = window_server::window_is_ordered_in(ws_id);
                 let visible_in_snapshot = reactor.window_manager.is_window_visible(ws_id);
 
-                if unsuitable
-                    || invalid_layer
-                    || too_small
-                    || (!ordered_in && !visible_in_snapshot)
+                if unsuitable || invalid_layer || too_small || (!ordered_in && !visible_in_snapshot)
                 {
                     Some(wid)
                 } else {

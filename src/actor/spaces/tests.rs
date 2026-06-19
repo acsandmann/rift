@@ -132,10 +132,10 @@ fn quarantines_window_space_events_during_sleep_before_churn_begins() {
         SpaceId::new(4),
     ));
 
-    assert_eq!(
-        actor.state.quarantine_stats,
-        QuarantineStats { appeared_dropped: 1, destroyed_dropped: 1 }
-    );
+    assert_eq!(actor.state.quarantine_stats, QuarantineStats {
+        appeared_dropped: 1,
+        destroyed_dropped: 1
+    });
     assert_no_wm_event(&mut wm_rx);
     assert_no_reactor_event(&mut reactor_rx);
 }
@@ -328,7 +328,13 @@ fn topology_delta_uses_last_forwarded_screens_as_diff_base() {
     let (mut actor, mut wm_rx, mut reactor_rx) = build_actor();
 
     actor.handle_event(Event::ScreenParametersChanged(
-        vec![make_screen_with(1, "display-1", 0.0, 1000.0, Some(SpaceId::new(1)))],
+        vec![make_screen_with(
+            1,
+            "display-1",
+            0.0,
+            1000.0,
+            Some(SpaceId::new(1)),
+        )],
         CoordinateConverter::from_height(800.0),
     ));
     let _ = recv_wm(&mut wm_rx);
@@ -433,7 +439,13 @@ fn topology_change_emits_space_remap_from_display_history() {
     let remapped_space = SpaceId::new(41);
 
     actor.handle_event(Event::ScreenParametersChanged(
-        vec![make_screen_with(1, "display-1", 0.0, 1000.0, Some(original_space))],
+        vec![make_screen_with(
+            1,
+            "display-1",
+            0.0,
+            1000.0,
+            Some(original_space),
+        )],
         CoordinateConverter::from_height(800.0),
     ));
     let _ = recv_wm(&mut wm_rx);
@@ -524,7 +536,9 @@ fn topology_window_delta_is_emitted_when_windows_leave_space_during_churn_withou
     let _ = recv_wm(&mut wm_rx);
 
     actor.state.visible_window_spaces.clear();
-    actor.synthesize_topology_window_delta(9, actor.state.display_churn_flags, &[make_screen(Some(space))]);
+    actor.synthesize_topology_window_delta(9, actor.state.display_churn_flags, &[make_screen(
+        Some(space),
+    )]);
     actor.forward_screen_parameters(
         vec![make_screen(Some(space))],
         CoordinateConverter::from_height(800.0),
@@ -532,9 +546,7 @@ fn topology_window_delta_is_emitted_when_windows_leave_space_during_churn_withou
 
     match recv_wm(&mut wm_rx) {
         wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
-            let delta = state
-                .topology_window_delta
-                .expect("expected topology window delta");
+            let delta = state.topology_window_delta.expect("expected topology window delta");
             assert_eq!(delta.epoch, 9);
             assert!(delta.appeared.is_empty());
             assert_eq!(delta.disappeared, vec![(wsid, space)]);
@@ -565,14 +577,10 @@ fn topology_window_delta_treats_same_window_space_move_as_remove_then_add() {
 
     actor.state.visible_window_spaces.clear();
     actor.state.visible_window_spaces.insert(wsid, new_space);
-    actor.synthesize_topology_window_delta(
-        10,
-        actor.state.display_churn_flags,
-        &[
-            make_screen_with(1, "display-left", 0.0, 1000.0, Some(old_space)),
-            make_screen_with(2, "display-right", 1000.0, 1000.0, Some(new_space)),
-        ],
-    );
+    actor.synthesize_topology_window_delta(10, actor.state.display_churn_flags, &[
+        make_screen_with(1, "display-left", 0.0, 1000.0, Some(old_space)),
+        make_screen_with(2, "display-right", 1000.0, 1000.0, Some(new_space)),
+    ]);
     actor.forward_screen_parameters(
         vec![
             make_screen_with(1, "display-left", 0.0, 1000.0, Some(old_space)),
@@ -583,9 +591,7 @@ fn topology_window_delta_treats_same_window_space_move_as_remove_then_add() {
 
     match recv_wm(&mut wm_rx) {
         wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
-            let delta = state
-                .topology_window_delta
-                .expect("expected topology window delta");
+            let delta = state.topology_window_delta.expect("expected topology window delta");
             assert_eq!(delta.disappeared, vec![(wsid, old_space)]);
             assert_eq!(delta.appeared, vec![(wsid, new_space)]);
         }
@@ -806,7 +812,13 @@ fn duplicate_visible_spaces_disable_remaps_and_layout_forcing() {
     let (mut actor, mut wm_rx, _reactor_rx) = build_actor();
 
     actor.handle_event(Event::ScreenParametersChanged(
-        vec![make_screen_with(1, "display-1", 0.0, 1000.0, Some(SpaceId::new(91)))],
+        vec![make_screen_with(
+            1,
+            "display-1",
+            0.0,
+            1000.0,
+            Some(SpaceId::new(91)),
+        )],
         CoordinateConverter::from_height(800.0),
     ));
     let _ = recv_wm(&mut wm_rx);

@@ -1,6 +1,7 @@
 use dispatchr::queue;
 use dispatchr::time::Time;
 use objc2_core_foundation::CGSize;
+use objc2_foundation::MainThreadMarker;
 
 use crate::actor;
 use crate::actor::{reactor, wm_controller};
@@ -8,15 +9,14 @@ use crate::common::collections::{HashMap, HashSet};
 use crate::sys::dispatch::DispatchExt;
 #[cfg(not(test))]
 use crate::sys::geometry::CGRectExt;
-use crate::sys::screen::{CoordinateConverter, ScreenCache, ScreenInfo, SpaceId};
 #[cfg(not(test))]
 use crate::sys::screen::managed_display_space_ids;
+use crate::sys::screen::{CoordinateConverter, ScreenCache, ScreenInfo, SpaceId};
 use crate::sys::skylight::DisplayReconfigFlags;
 use crate::sys::window_server::WindowServerId;
 #[cfg(not(test))]
 use crate::sys::window_server::WindowServerInfo;
 use crate::sys::{display_churn, window_server};
-use objc2_foundation::MainThreadMarker;
 
 const REFRESH_DEFAULT_DELAY_NS: i64 = 100_000_000;
 const REFRESH_SPACE_SWITCH_DELAY_NS: i64 = 50_000_000;
@@ -206,10 +206,7 @@ pub struct SpacesActor {
 }
 
 impl SpacesActor {
-    pub fn new(
-        reactor_tx: reactor::Sender,
-        wm_tx: wm_controller::Sender,
-    ) -> (Self, Sender) {
+    pub fn new(reactor_tx: reactor::Sender, wm_tx: wm_controller::Sender) -> (Self, Sender) {
         Self::new_with_state(reactor_tx, wm_tx, AuthorityState::runtime())
     }
 
@@ -327,8 +324,7 @@ impl SpacesActor {
                 if self.should_quarantine_window_space_event() {
                     self.state.quarantine_stats.appeared_dropped += 1;
                 } else if let Some(kind) = self.classify_space(sid) {
-                    self.reactor_tx
-                        .send(reactor::Event::WindowServerAppeared(wsid, sid, kind));
+                    self.reactor_tx.send(reactor::Event::WindowServerAppeared(wsid, sid, kind));
                 }
             }
             Event::WindowServerDestroyed(wsid, sid) => {
@@ -342,17 +338,13 @@ impl SpacesActor {
                     {
                         return;
                     }
-                    self.reactor_tx
-                        .send(reactor::Event::WindowServerDestroyed(wsid, sid, kind));
+                    self.reactor_tx.send(reactor::Event::WindowServerDestroyed(wsid, sid, kind));
                 }
             }
             Event::ProcessScreenRefresh { attempt } => {
                 self.process_screen_refresh(attempt, true);
             }
-            Event::CheckDisplayStabilization {
-                expected_epoch,
-                attempt,
-            } => {
+            Event::CheckDisplayStabilization { expected_epoch, attempt } => {
                 self.attempt_finish_display_churn(expected_epoch, attempt);
             }
         }
@@ -429,11 +421,10 @@ impl SpacesActor {
         let forwarded = self.build_forwarded_state(screens);
         self.state.last_sent_spaces = Some(Self::screen_spaces(&forwarded.screens));
         self.state.awaiting_space_switch_confirmation = false;
-        self.wm_tx
-            .send(wm_controller::WmEvent::SpaceStateUpdated(
-                forwarded,
-                self.state.last_converter,
-            ));
+        self.wm_tx.send(wm_controller::WmEvent::SpaceStateUpdated(
+            forwarded,
+            self.state.last_converter,
+        ));
     }
 
     fn forward_space_snapshot(&mut self, spaces: Vec<Option<SpaceId>>) {
@@ -453,11 +444,10 @@ impl SpacesActor {
         self.state.last_sent_spaces = Some(spaces.clone());
         let forwarded = self.build_forwarded_state(screens);
         self.state.awaiting_space_switch_confirmation = false;
-        self.wm_tx
-            .send(wm_controller::WmEvent::SpaceStateUpdated(
-                forwarded,
-                self.state.last_converter,
-            ));
+        self.wm_tx.send(wm_controller::WmEvent::SpaceStateUpdated(
+            forwarded,
+            self.state.last_converter,
+        ));
     }
 
     fn build_forwarded_state(&mut self, screens: Vec<ScreenInfo>) -> ForwardedSpaceState {
@@ -494,10 +484,8 @@ impl SpacesActor {
         let should_force_refresh_layout =
             topology_changed && (self.state.has_seen_display_set || !previous_displays.is_empty());
 
-        let previous_sizes: HashMap<_, _> = previous_screens
-            .iter()
-            .map(|screen| (screen.id, screen.frame.size))
-            .collect();
+        let previous_sizes: HashMap<_, _> =
+            previous_screens.iter().map(|screen| (screen.id, screen.frame.size)).collect();
         let resized_spaces = screens
             .iter()
             .filter_map(|screen| {
@@ -536,10 +524,7 @@ impl SpacesActor {
             let mut display_space_ids: HashMap<String, Vec<SpaceId>> = HashMap::default();
             for screen in &screens {
                 if let Some(space) = screen.space {
-                    display_space_ids
-                        .entry(screen.display_uuid.clone())
-                        .or_default()
-                        .push(space);
+                    display_space_ids.entry(screen.display_uuid.clone()).or_default().push(space);
                 }
             }
             self.state.display_space_ids = display_space_ids;
@@ -631,9 +616,8 @@ impl SpacesActor {
             if previous_space == new_space || Self::is_fullscreen_space(previous_space) {
                 continue;
             }
-            let should_rewrite = previous_space_owner
-                .get(&new_space)
-                .is_some_and(|owner| *owner != display_uuid);
+            let should_rewrite =
+                previous_space_owner.get(&new_space).is_some_and(|owner| *owner != display_uuid);
             if !should_rewrite {
                 continue;
             }
@@ -670,19 +654,14 @@ impl SpacesActor {
             }
 
             if allow_space_remap
-                && let Some(previous_space) = self
-                    .state
-                    .last_user_space_by_display
-                    .get(display_uuid)
-                    .copied()
+                && let Some(previous_space) =
+                    self.state.last_user_space_by_display.get(display_uuid).copied()
                 && previous_space != space
             {
                 remaps.push((previous_space, space));
             }
 
-            self.state
-                .last_user_space_by_display
-                .insert(display_uuid.to_string(), space);
+            self.state.last_user_space_by_display.insert(display_uuid.to_string(), space);
         }
 
         remaps
@@ -757,13 +736,17 @@ impl SpacesActor {
                 .visible_window_spaces
                 .iter()
                 .filter_map(|(&wsid, &space)| {
-                    screens.iter().any(|screen| screen.space == Some(space)).then_some((wsid, space))
+                    screens
+                        .iter()
+                        .any(|screen| screen.space == Some(space))
+                        .then_some((wsid, space))
                 })
                 .collect()
         }
         #[cfg(not(test))]
         {
-            let active_spaces: HashSet<SpaceId> = screens.iter().filter_map(|screen| screen.space).collect();
+            let active_spaces: HashSet<SpaceId> =
+                screens.iter().filter_map(|screen| screen.space).collect();
             window_server::get_visible_windows_with_layer(None)
                 .into_iter()
                 .filter_map(|info| {
@@ -1028,10 +1011,7 @@ impl SpacesActor {
             Time::new_after(Time::NOW, delay_ns),
             (sender, expected_epoch, attempt),
             |(sender, expected_epoch, attempt)| {
-                sender.send(Event::CheckDisplayStabilization {
-                    expected_epoch,
-                    attempt,
-                })
+                sender.send(Event::CheckDisplayStabilization { expected_epoch, attempt })
             },
         );
     }
@@ -1085,10 +1065,8 @@ impl SpacesActor {
                 existing.hits
             }
             _ => {
-                self.state.display_topology_state = Some(DisplayTopologyState {
-                    fingerprint,
-                    hits: 1,
-                });
+                self.state.display_topology_state =
+                    Some(DisplayTopologyState { fingerprint, hits: 1 });
                 self.schedule_display_stabilization_retry(expected_epoch, attempt + 1);
                 return;
             }

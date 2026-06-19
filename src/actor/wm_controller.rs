@@ -24,8 +24,8 @@ type Receiver = actor::Receiver<WmEvent>;
 
 use self::WmCmd::*;
 use crate::actor::app::AppInfo;
-use crate::actor::{self, event_tap, mission_control, reactor};
 use crate::actor::spaces::ForwardedSpaceState;
+use crate::actor::{self, event_tap, mission_control, reactor};
 use crate::model::tx_store::WindowTxStore;
 use crate::sys::dispatch::DispatchExt;
 use crate::sys::screen::CoordinateConverter;
@@ -194,14 +194,15 @@ impl WmController {
             SystemWoke => self.events_tx.send(Event::SystemWoke),
             DisplayChurnBegin | DisplayChurnEnd => {}
             SpaceStateUpdated(space_state, converter) => {
-                self.events_tx
-                    .send(Event::SpaceStateChanged(space_state.clone()));
+                self.events_tx.send(Event::SpaceStateChanged(space_state.clone()));
                 _ = self.event_tap_tx.send(event_tap::Request::SpaceStateUpdated(
                     space_state.clone(),
                     converter,
                 ));
                 if let Some(tx) = &self.gesture_tap_tx {
-                    tx.send(gesture_tap::GestureRequest::SpaceStateUpdated(space_state.clone()));
+                    tx.send(gesture_tap::GestureRequest::SpaceStateUpdated(
+                        space_state.clone(),
+                    ));
                 }
                 if let Some(tx) = &self.stack_line_tx {
                     _ = tx.try_send(crate::actor::stack_line::Event::SpaceStateUpdated(

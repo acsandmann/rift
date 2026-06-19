@@ -79,7 +79,8 @@ impl SpaceEventHandler {
         reactor.apply_authoritative_active_spaces(active_spaces);
         reactor.restore_windows_after_fullscreen_exit(&spaces);
         for screen in &reactor.space_state.screens {
-            let (Some(space), Some(display_uuid)) = (screen.space, screen.display_uuid_opt()) else {
+            let (Some(space), Some(display_uuid)) = (screen.space, screen.display_uuid_opt())
+            else {
                 continue;
             };
             reactor
@@ -88,10 +89,7 @@ impl SpaceEventHandler {
                 .update_space_display(space, Some(display_uuid.to_string()));
         }
         for (previous_space, space) in space_remaps {
-            reactor
-                .layout_manager
-                .layout_engine
-                .remap_space(previous_space, space);
+            reactor.layout_manager.layout_engine.remap_space(previous_space, space);
         }
 
         for (space, size) in resized_spaces {
@@ -106,12 +104,7 @@ impl SpaceEventHandler {
             reactor.send_layout_event(LayoutEvent::SpaceExposed(space, size));
         }
 
-        if let Some(TopologyWindowDelta {
-            appeared,
-            disappeared,
-            ..
-        }) = topology_window_delta
-        {
+        if let Some(TopologyWindowDelta { appeared, disappeared, .. }) = topology_window_delta {
             for (wsid, sid) in disappeared {
                 SpaceEventHandler::handle_window_server_destroyed(
                     reactor,
@@ -229,24 +222,27 @@ impl SpaceEventHandler {
                 match kind {
                     SpaceEventKind::User => {
                         if let Some(wid) = reactor.window_manager.tracked_window_id(wsid) {
-                            let layout_changed = restore_fullscreen_window_to_user_space(
-                                reactor, wsid, sid, wid,
-                            )
-                            .unwrap_or_else(|| {
-                                // `SpaceWindowCreated` (this event) also fires as a side
-                                // effect of our own SetWindowFrame dragging a window across
-                                // a display seam. If a Rift frame transaction is still in
-                                // flight for this window, this appearance is our own echo —
-                                // chasing it reassigns the window back and forth, which makes
-                                // frame-resisting apps (e.g. Zen, Outlook) oscillate between
-                                // displays. The authoritative space record is still updated
-                                // above; only the layout reassignment is suppressed here.
-                                if reactor.transaction_manager.get_target_frame(wsid).is_some() {
-                                    false
-                                } else {
-                                    reactor.reassign_window_to_authoritative_space(wid, sid)
-                                }
-                            });
+                            let layout_changed =
+                                restore_fullscreen_window_to_user_space(reactor, wsid, sid, wid)
+                                    .unwrap_or_else(|| {
+                                        // `SpaceWindowCreated` (this event) also fires as a side
+                                        // effect of our own SetWindowFrame dragging a window across
+                                        // a display seam. If a Rift frame transaction is still in
+                                        // flight for this window, this appearance is our own echo —
+                                        // chasing it reassigns the window back and forth, which makes
+                                        // frame-resisting apps (e.g. Zen, Outlook) oscillate between
+                                        // displays. The authoritative space record is still updated
+                                        // above; only the layout reassignment is suppressed here.
+                                        if reactor
+                                            .transaction_manager
+                                            .get_target_frame(wsid)
+                                            .is_some()
+                                        {
+                                            false
+                                        } else {
+                                            reactor.reassign_window_to_authoritative_space(wid, sid)
+                                        }
+                                    });
                             if layout_changed {
                                 let _ = reactor.update_layout_or_warn(false, false);
                             }
@@ -267,9 +263,9 @@ impl SpaceEventHandler {
                             if let Some(user_space) = last_known_user_space
                                 && reactor.assigned_space_for_window_id(wid) == Some(user_space)
                             {
-                                reactor.send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(
-                                    wid,
-                                ));
+                                reactor.send_layout_event(
+                                    LayoutEvent::WindowRemovedPreserveFloating(wid),
+                                );
                                 layout_changed = reactor.is_space_active(user_space);
                             }
                         }
@@ -423,14 +419,12 @@ fn restore_fullscreen_window_to_user_space(
             continue;
         };
         let before = track.windows.len();
-        track.windows.retain(|window| {
-            !(window.window_id == Some(wid) || window.pid == tracked_pid)
-        });
+        track
+            .windows
+            .retain(|window| !(window.window_id == Some(wid) || window.pid == tracked_pid));
         restored |= track.windows.len() != before;
     }
-    reactor
-        .native_fullscreen_tracks
-        .retain(|_, track| !track.windows.is_empty());
+    reactor.native_fullscreen_tracks.retain(|_, track| !track.windows.is_empty());
 
     if !restored {
         return None;
