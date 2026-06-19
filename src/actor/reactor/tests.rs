@@ -2678,3 +2678,134 @@ fn unfullscreen_restores_window_tracking() {
         "Fullscreen track should be removed from space manager"
     );
 }
+
+#[test]
+fn display_churn_end_triggers_visible_window_refresh() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(SpaceId::new(1))], vec![]));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+
+    reactor.handle_event(Event::DisplayChurnEnd);
+
+    assert!(
+        apps.requests()
+            .into_iter()
+            .any(|request| matches!(request, Request::GetVisibleWindows)),
+        "display churn recovery should re-request visible windows"
+    );
+}
+
+#[test]
+fn display_churn_end_refresh_is_idempotent_without_topology_change() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+
+    assert!(has_window_in_layout(&mut reactor, space, screen, wid));
+
+    reactor.handle_event(Event::DisplayChurnEnd);
+    apps.simulate_until_quiet(&mut reactor);
+
+    assert!(
+        has_window_in_layout(&mut reactor, space, screen, wid),
+        "recovery refresh should preserve existing workspace membership when topology is unchanged"
+    );
+    assert!(
+        apps.requests().is_empty(),
+        "idempotent churn-end refresh should not trigger follow-up frame writes when nothing moved"
+    );
+}
+
+#[test]
+fn display_churn_end_refresh_preserves_non_default_workspace_without_app_rules() {
+    let mut apps = Apps::new();
+    let workspace_cfg = crate::common::config::VirtualWorkspaceSettings {
+        default_workspace_count: 2,
+        ..crate::common::config::VirtualWorkspaceSettings::default()
+    };
+    let mut reactor =
+        Reactor::new_for_test(LayoutEngine::new(&workspace_cfg, &crate::common::config::LayoutSettings::default(), None));
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let workspaces = reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .list_workspaces(space)
+        .to_vec();
+    let default_workspace = workspaces[0].0;
+    let secondary_workspace = workspaces[1].0;
+
+    assert!(reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .assign_window_to_workspace(space, wid, secondary_workspace));
+    assert!(reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .set_active_workspace(space, secondary_workspace));
+    reactor.handle_event(Event::WindowsDiscovered {
+        pid: 1,
+        new: vec![],
+        known_visible: vec![wid],
+    });
+
+    assert_eq!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager()
+            .workspace_for_window(space, wid),
+        Some(secondary_workspace)
+    );
+    assert_ne!(secondary_workspace, default_workspace);
+    assert!(has_window_in_layout(&mut reactor, space, screen, wid));
+
+    reactor.handle_event(Event::DisplayChurnEnd);
+    apps.simulate_until_quiet(&mut reactor);
+
+    assert_eq!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager()
+            .workspace_for_window(space, wid),
+        Some(secondary_workspace),
+        "visibility refresh must preserve an existing non-default assignment when no app rule matches"
+    );
+    assert_eq!(
+        reactor.layout_manager.layout_engine.active_workspace(space),
+        Some(secondary_workspace),
+        "refresh must not switch the active workspace back to default"
+    );
+    assert!(
+        has_window_in_layout(&mut reactor, space, screen, wid),
+        "window should remain in the visible layout of its non-default workspace after refresh"
+    );
+}

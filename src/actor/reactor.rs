@@ -755,6 +755,15 @@ impl Reactor {
         match event {
             Event::DisplayChurnBegin => return,
             Event::DisplayChurnEnd => {
+                // Display churn quarantines frame/discovery events while macOS is
+                // reattaching displays or rebuilding spaces. When the churn ends
+                // without a meaningful topology diff, the reactor would otherwise
+                // have no follow-up signal to rediscover already-tracked windows
+                // that apps left offscreen. Re-requesting visible windows here is
+                // intentionally idempotent: discovery marks the refresh as pending,
+                // suppresses stale cleanup for that pass, and only re-emits the
+                // existing workspace/window mapping when nothing actually changed.
+                self.force_refresh_all_windows();
                 return;
             }
             _ => {}
@@ -2753,6 +2762,9 @@ impl Reactor {
         self.maybe_send_menu_update();
     }
 
+    // Uses the same "pending refresh" path as Mission Control recovery so a bulk
+    // visibility rediscovery can reconcile tracked windows without treating a
+    // transient empty AX window list as authoritative removal.
     fn force_refresh_all_windows(&mut self) { self.request_visible_windows_for_apps(true); }
 
     fn has_user_space_context(&self) -> bool {

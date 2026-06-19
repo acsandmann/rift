@@ -1211,6 +1211,10 @@ impl VirtualWorkspaceManager {
             }
         }
 
+        // No matching app rule: preserve the current workspace assignment if one
+        // already exists. Discovery/refresh passes must not silently fall back to
+        // the default workspace, or windows on non-default workspaces will appear
+        // to "reset" after sleep/display churn.
         if let Some(existing_ws) = existing_assignment {
             self.window_registry.get_mut().clear_rule_floating(window_id);
             return Ok(AppRuleResult::Managed(AppRuleAssignment {
