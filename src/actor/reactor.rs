@@ -2928,9 +2928,32 @@ impl Reactor {
         is_workspace_switch: bool,
         context: &'static str,
     ) -> bool {
-        LayoutManager::update_layout(self, is_resize, is_workspace_switch).unwrap_or_else(|e| {
-            warn!(error = ?e, "{}", context);
-            false
-        })
+        self.update_layout_or_warn_internal(is_resize, is_workspace_switch, false, context)
+    }
+
+    // During topology recovery, macOS can relocate windows without a reliable
+    // frame event. Run one corrective layout pass without frame-equality dedupe
+    // so windows that drifted offscreen are explicitly reapplied.
+    pub(crate) fn update_layout_after_topology_change(&mut self) -> bool {
+        self.update_layout_or_warn_internal(
+            false,
+            false,
+            true,
+            "Layout update failed after topology change",
+        )
+    }
+
+    fn update_layout_or_warn_internal(
+        &mut self,
+        is_resize: bool,
+        is_workspace_switch: bool,
+        skip_frame_dedupe: bool,
+        context: &'static str,
+    ) -> bool {
+        LayoutManager::update_layout(self, is_resize, is_workspace_switch, skip_frame_dedupe)
+            .unwrap_or_else(|e| {
+                warn!(error = ?e, "{}", context);
+                false
+            })
     }
 }

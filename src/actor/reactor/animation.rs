@@ -144,6 +144,8 @@ impl AnimationManager {
         layout: &[(WindowId, CGRect)],
         is_resize: bool,
         skip_wid: Option<WindowId>,
+        // Used only for the first corrective pass after display/space topology recovery.
+        skip_frame_dedupe: bool,
     ) -> bool {
         let Some(active_ws) = reactor.layout_manager.layout_engine.active_workspace(space) else {
             return false;
@@ -168,11 +170,11 @@ impl AnimationManager {
                 match registry.window_mut(wid) {
                     Some(window) => {
                         let current_frame = window.frame_monotonic;
-                        if target_frame.same_as(current_frame) {
+                        if !skip_frame_dedupe && target_frame.same_as(current_frame) {
                             continue;
                         }
                         let wsid = window.info.sys_id;
-                        if let Some(wsid) = wsid {
+                        if !skip_frame_dedupe && let Some(wsid) = wsid {
                             if reactor
                                 .transaction_manager
                                 .get_target_frame(wsid)
@@ -272,6 +274,8 @@ impl AnimationManager {
         space: SpaceId,
         layout: &[(WindowId, CGRect)],
         skip_wid: Option<WindowId>,
+        // Used only for the first corrective pass after display/space topology recovery.
+        skip_frame_dedupe: bool,
     ) -> bool {
         let mut per_app: HashMap<pid_t, Vec<(WindowId, CGRect)>> = HashMap::default();
         let mut any_frame_changed = false;
@@ -289,10 +293,10 @@ impl AnimationManager {
             };
             let target_frame = target_frame.round();
             let current_frame = window.frame_monotonic;
-            if target_frame.same_as(current_frame) {
+            if !skip_frame_dedupe && target_frame.same_as(current_frame) {
                 continue;
             }
-            if let Some(wsid) = window.info.sys_id {
+            if !skip_frame_dedupe && let Some(wsid) = window.info.sys_id {
                 if reactor
                     .transaction_manager
                     .get_target_frame(wsid)
