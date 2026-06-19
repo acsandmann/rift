@@ -291,6 +291,39 @@ fn forwards_space_lifecycle_events_through_actor_even_during_churn() {
 }
 
 #[test]
+fn benign_display_reconfig_does_not_start_churn() {
+    let (mut actor, mut wm_rx, mut reactor_rx) = build_actor();
+
+    actor.handle_event(Event::DisplayReconfigured {
+        display_id: 1,
+        flags: crate::sys::skylight::DisplayReconfigFlags::BEGIN_CONFIGURATION
+            | crate::sys::skylight::DisplayReconfigFlags::SET_MAIN
+            | crate::sys::skylight::DisplayReconfigFlags::DESKTOP_SHAPE_CHANGED,
+    });
+
+    assert!(!actor.state.display_churn_active);
+    assert_no_wm_event(&mut wm_rx);
+    assert_no_reactor_event(&mut reactor_rx);
+}
+
+#[test]
+fn physical_display_reconfig_starts_churn() {
+    let (mut actor, mut wm_rx, mut reactor_rx) = build_actor();
+
+    actor.handle_event(Event::DisplayReconfigured {
+        display_id: 1,
+        flags: crate::sys::skylight::DisplayReconfigFlags::MOVED,
+    });
+
+    assert!(actor.state.display_churn_active);
+    assert!(matches!(
+        recv_reactor(&mut reactor_rx),
+        reactor::Event::DisplayChurnBegin
+    ));
+    assert_no_wm_event(&mut wm_rx);
+}
+
+#[test]
 fn topology_delta_uses_last_forwarded_screens_as_diff_base() {
     let (mut actor, mut wm_rx, mut reactor_rx) = build_actor();
 

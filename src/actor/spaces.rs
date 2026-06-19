@@ -965,11 +965,30 @@ impl SpacesActor {
     }
 
     fn handle_display_reconfig_event(&mut self, _display_id: u32, flags: DisplayReconfigFlags) {
+        if !Self::should_begin_display_churn(flags) {
+            return;
+        }
         let expected_epoch = self.begin_display_churn(flags);
         if let Some(screen_cache) = self.state.screen_cache.as_mut() {
             screen_cache.mark_dirty();
         }
         self.schedule_display_stabilization_check(expected_epoch);
+    }
+
+    fn should_begin_display_churn(flags: DisplayReconfigFlags) -> bool {
+        // Native macOS space switches can still emit CGDisplay reconfig callbacks on a
+        // single physical display. Churn quarantine is only for unstable physical display
+        // topology, not ordinary current-space changes which are handled separately.
+        flags.intersects(
+            DisplayReconfigFlags::ADD
+                | DisplayReconfigFlags::REMOVE
+                | DisplayReconfigFlags::MOVED
+                | DisplayReconfigFlags::SET_MODE
+                | DisplayReconfigFlags::ENABLED
+                | DisplayReconfigFlags::DISABLED
+                | DisplayReconfigFlags::MIRROR
+                | DisplayReconfigFlags::UNMIRROR,
+        )
     }
 
     fn begin_display_churn(&mut self, flags: DisplayReconfigFlags) -> u64 {

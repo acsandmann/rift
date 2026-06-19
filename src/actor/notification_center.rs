@@ -124,6 +124,8 @@ impl NotificationCenterInner {
             self.send_space_event(spaces::Event::ActiveDisplayChanged);
         } else if unsafe { NSWorkspaceActiveSpaceDidChangeNotification } == name {
             self.send_space_event(spaces::Event::ActiveSpaceChanged);
+        } else if unsafe { NSApplicationDidChangeScreenParametersNotification } == name {
+            self.send_space_event(spaces::Event::ScreenRefreshRequested);
         } else {
             warn!("Unexpected screen changed event: {notif:?}");
         }
@@ -249,6 +251,12 @@ impl NotificationCenter {
                 NSWorkspaceActiveSpaceDidChangeNotification,
                 workspace_center,
                 workspace,
+            );
+            default_center.addObserver_selector_name_object(
+                &handler,
+                sel!(recvScreenChangedEvent:),
+                Some(NSApplicationDidChangeScreenParametersNotification),
+                None,
             );
             register_unsafe(
                 sel!(recvWakeEvent:),
