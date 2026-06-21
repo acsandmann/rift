@@ -991,11 +991,23 @@ impl Reactor {
                     self.reconcile_spaces_with_display_history(&raw_spaces, false);
 
                     self.force_refresh_all_windows();
-                } else if self.space_activation_policy.login_window_active {
-                    // macOS sometimes activates loginwindow during wake without sending a
-                    // corresponding deactivation. Any subsequent non-login activation
-                    // indicates the user is back, so clear suppression.
-                    self.set_login_window_active(false);
+                } else {
+                    if self.space_activation_policy.login_window_active {
+                        // macOS sometimes activates loginwindow during wake without sending a
+                        // corresponding deactivation. Any subsequent non-login activation
+                        // indicates the user is back, so clear suppression.
+                        self.set_login_window_active(false);
+                    }
+                    if let Some(app) = self.app_manager.apps.get(&pid) {
+                        if let Err(e) =
+                            app.handle.send(crate::actor::app::Request::GetVisibleWindows)
+                        {
+                            warn!(
+                                "Failed to send GetVisibleWindows on global activation for app {}: {}",
+                                pid, e
+                            );
+                        }
+                    }
                 }
             }
             Event::RegisterWmSender(sender) => {
@@ -1049,6 +1061,11 @@ impl Reactor {
             }
             Event::MouseUp => {
                 DragEventHandler::handle_mouse_up(self);
+                if let Some(wid) = self.window_id_under_cursor() {
+                    if let Some(space) = self.best_space_for_window_id(wid) {
+                        self.send_layout_event(LayoutEvent::WindowFocused(space, wid));
+                    }
+                }
             }
             Event::MenuOpened(pid) => SystemEventHandler::handle_menu_opened(self, pid),
             Event::MenuClosed(pid) => SystemEventHandler::handle_menu_closed(self, pid),
@@ -1902,12 +1919,16 @@ impl Reactor {
 
     // Returns true if the window should be raised on mouse over considering
     // active workspace membership and potential occlusion of floating windows above it.
-    fn should_raise_on_mouse_over(&self, wid: WindowId) -> bool {
+    pub(crate) fn should_raise_on_mouse_over(
+        &self,
+        wid: WindowId,
+        ignore_already_main: bool,
+    ) -> bool {
         let Some(window) = self.window_manager.window(wid) else {
             return false;
         };
 
-        if self.main_window() == Some(wid) {
+        if !ignore_already_main && self.main_window() == Some(wid) {
             return false;
         }
 
@@ -2644,7 +2665,7 @@ impl Reactor {
         // wait for mouse::up before doing *anything*
     }
 
-    fn window_id_under_cursor(&self) -> Option<WindowId> {
+    pub(crate) fn window_id_under_cursor(&self) -> Option<WindowId> {
         self.tracked_window_under_cursor().map(|(_, wid)| wid)
     }
 
@@ -2866,7 +2887,7 @@ impl Reactor {
         }
     }
 
-    fn main_window(&self) -> Option<WindowId> { self.main_window_tracker.main_window() }
+    pub(crate) fn main_window(&self) -> Option<WindowId> { self.main_window_tracker.main_window() }
 
     fn main_window_space(&self) -> Option<SpaceId> {
         // TODO: Optimize this with a cache or something.

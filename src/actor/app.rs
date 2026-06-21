@@ -459,6 +459,7 @@ impl State {
             new,
             known_visible,
         });
+        self.on_main_window_changed(None, true);
         Ok(())
     }
 

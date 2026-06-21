@@ -162,6 +162,8 @@ pub struct LayoutEngine {
 }
 
 impl LayoutEngine {
+    pub fn focused_window(&self) -> Option<WindowId> { self.focused_window }
+
     /// Get the active workspace ID for a space, ensuring initialization.
     fn active_workspace_id(&self, space: SpaceId) -> Option<VirtualWorkspaceId> {
         self.virtual_workspace_manager.active_workspace(space)
