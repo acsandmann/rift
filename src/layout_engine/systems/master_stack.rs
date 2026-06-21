@@ -931,18 +931,18 @@ mod tests {
         system.add_window_after_selection(layout, w(2));
         system.add_window_after_selection(layout, w(3));
         // layout state: master=[w3], stack=[w2, w1]
-        
+
         // Select w2 (which is in stack)
         assert!(system.select_window(layout, w(2)));
-        
+
         // Move towards master (Left) -> promotes w2 to master, pushes w3 to stack
         assert!(system.move_selection(layout, Direction::Left));
         let windows = system.windows_in_layout_by_container(layout);
         assert_eq!(windows, vec![w(2), w(3), w(1)]);
-        
+
         // Select w2 (which is in master)
         assert!(system.select_window(layout, w(2)));
-        
+
         // Move towards stack (Right) -> demotes w2 to stack, top stack window (w3) becomes master
         assert!(system.move_selection(layout, Direction::Right));
         let windows = system.windows_in_layout_by_container(layout);
@@ -957,15 +957,15 @@ mod tests {
         system.add_window_after_selection(layout, w(2));
         system.add_window_after_selection(layout, w(3));
         // layout state: master=[w3], stack=[w2, w1]
-        
+
         // Select w2 (which is at index 1, i.e., index 0 in stack)
         assert!(system.select_window(layout, w(2)));
-        
+
         // Move down (within stack) -> swaps w2 and w1
         assert!(system.move_selection(layout, Direction::Down));
         let windows = system.windows_in_layout_by_container(layout);
         assert_eq!(windows, vec![w(3), w(1), w(2)]);
-        
+
         // Move up (within stack) -> swaps w1 and w2 back
         assert!(system.select_window(layout, w(2)));
         assert!(system.move_selection(layout, Direction::Up));
@@ -979,7 +979,7 @@ mod tests {
         settings.master_count = 2;
         settings.master_arrangement = Some(Orientation::Horizontal);
         settings.stack_arrangement = Some(Orientation::Horizontal);
-        
+
         let mut system = MasterStackLayoutSystem::new(settings);
         let layout = system.create_layout();
         system.add_window_after_selection(layout, w(1));
@@ -1025,14 +1025,14 @@ mod tests {
         settings.master_count = 2;
         settings.master_arrangement = Some(Orientation::Horizontal);
         settings.stack_arrangement = Some(Orientation::Horizontal);
-        
+
         let mut system = MasterStackLayoutSystem::new(settings);
         let layout = system.create_layout();
         system.add_window_after_selection(layout, w(1));
         system.add_window_after_selection(layout, w(2));
         system.add_window_after_selection(layout, w(3));
         system.add_window_after_selection(layout, w(4));
-        
+
         // Logical flat list: [M0, M1, S0, S1] -> [w4, w3, w1, w2] (since overflows append to stack)
         // Physical layout: w1 (leftmost stack) - w2 (rightmost stack) | w4 (leftmost master) - w3 (rightmost master)
         let windows = system.windows_in_layout_by_container(layout);
