@@ -1920,18 +1920,10 @@ impl Reactor {
 
     // Returns true if the window should be raised on mouse over considering
     // active workspace membership and potential occlusion of floating windows above it.
-    pub(crate) fn should_raise_on_mouse_over(
-        &self,
-        wid: WindowId,
-        ignore_already_main: bool,
-    ) -> bool {
+    pub(crate) fn should_raise_on_mouse_over(&self, wid: WindowId) -> bool {
         let Some(window) = self.window_manager.window(wid) else {
             return false;
         };
-
-        if !ignore_already_main && self.main_window() == Some(wid) {
-            return false;
-        }
 
         if !window.matches_filter(WindowFilter::EffectivelyManageable)
             && !self.layout_manager.layout_engine.is_window_floating(wid)

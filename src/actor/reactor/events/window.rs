@@ -439,15 +439,15 @@ impl WindowEventHandler {
         let Some(wid) = reactor.window_manager.tracked_window_id(wsid) else {
             return;
         };
-        let should_raise = reactor.should_raise_on_mouse_over(wid, false);
-        let should_sync = reactor.should_raise_on_mouse_over(wid, true);
+        let should_sync = reactor.should_raise_on_mouse_over(wid);
+        let is_main = reactor.main_window() == Some(wid);
         let needs_sync = reactor.layout_manager.layout_engine.focused_window() != Some(wid);
 
-        if !should_raise && (!should_sync || !needs_sync) {
+        if !should_sync || (is_main && !needs_sync) {
             return;
         }
 
-        if should_raise {
+        if !is_main {
             reactor.raise_window(wid, Quiet::No, None);
         }
 
