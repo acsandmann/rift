@@ -1008,6 +1008,7 @@ impl Reactor {
                             );
                         }
                     }
+                    self.handle_app_activation_workspace_switch(pid);
                 }
             }
             Event::RegisterWmSender(sender) => {
