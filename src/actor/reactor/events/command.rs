@@ -98,6 +98,16 @@ impl CommandEventHandler {
                     EventResponse::default()
                 }
             }
+            LayoutCommand::BringWindowToWorkspace { .. } => {
+                if let Some(space) = command_space {
+                    reactor
+                        .layout_manager
+                        .layout_engine
+                        .handle_virtual_workspace_command(space, &cmd)
+                } else {
+                    EventResponse::default()
+                }
+            }
             _ => {
                 let (visible_spaces, visible_space_centers) =
                     reactor.visible_spaces_for_layout(false);
