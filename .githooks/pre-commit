@@ -1,0 +1,5 @@
+#!/bin/sh
+# Run the Rust formatter on all files
+cargo +nightly fmt --all
+# Re-stage files that were modified by the formatter
+git add -u

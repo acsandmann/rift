@@ -1,0 +1,3 @@
+#!/bin/sh
+# Run tests before pushing. If tests fail, the push is aborted.
+cargo test
