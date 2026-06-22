@@ -351,6 +351,18 @@ enum DisplayCommands {
         #[arg(long)]
         window_id: Option<u32>,
     },
+    /// Move all windows of the current workspace to a display by direction, index, or UUID
+    MoveEverything {
+        /// Direction relative to the window's current display (left, right, up, down).
+        #[arg(long)]
+        direction: Option<String>,
+        /// Display index (0-based).
+        #[arg(long)]
+        index: Option<usize>,
+        /// Display UUID.
+        #[arg(long)]
+        uuid: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -835,6 +847,11 @@ fn map_display_command(cmd: DisplayCommands) -> Result<RiftCommand, String> {
                 window_id,
             },
         ))),
+        DisplayCommands::MoveEverything { direction, index, uuid } => Ok(RiftCommand::Reactor(
+            reactor::Command::Reactor(reactor::ReactorCommand::MoveEverythingToDisplay {
+                selector: build_display_selector(direction, index, uuid)?,
+            }),
+        )),
     }
 }
 
