@@ -448,6 +448,240 @@ fn auto_workspace_switch_focuses_activated_window_not_stale_workspace_focus() {
     }
 }
 
+fn active_workspace_index(reactor: &mut Reactor, space: SpaceId) -> usize {
+    let active = reactor
+        .layout_manager
+        .layout_engine
+        .active_workspace(space)
+        .expect("space must have an active workspace");
+    let workspaces = reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .list_workspaces(space);
+    workspaces
+        .iter()
+        .position(|(ws_id, _)| *ws_id == active)
+        .expect("active workspace id must appear in list_workspaces")
+}
+
+fn vws_settings_with_app_rules(
+    rules: Vec<crate::common::config::AppWorkspaceRule>,
+) -> crate::common::config::VirtualWorkspaceSettings {
+    let mut settings = crate::common::config::VirtualWorkspaceSettings::default();
+    settings.app_rules = rules;
+    settings
+}
+
+fn rule_pinning_to(app_id: &str, workspace: usize) -> crate::common::config::AppWorkspaceRule {
+    crate::common::config::AppWorkspaceRule {
+        app_id: Some(app_id.into()),
+        workspace: Some(crate::common::config::WorkspaceSelector::Index(workspace)),
+        floating: false,
+        manage: true,
+        app_name: None,
+        title_regex: None,
+        title_substring: None,
+        ax_role: None,
+        ax_subrole: None,
+    }
+}
+
+#[test]
+fn globally_activated_app_on_other_workspace_switches_to_apps_workspace() {
+    let settings = vws_settings_with_app_rules(vec![rule_pinning_to("com.testapp2", 1)]);
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &settings,
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    reactor.handle_event(screen_params_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    reactor.handle_events(apps.make_app(2, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+
+    assert_eq!(
+        active_workspace_index(&mut reactor, space),
+        0,
+        "initial active workspace must be index 0"
+    );
+
+    reactor.handle_event(Event::ApplicationGloballyActivated(2));
+    apps.simulate_until_quiet(&mut reactor);
+
+    assert_eq!(
+        active_workspace_index(&mut reactor, space),
+        1,
+        "activating an app pinned to workspace 1 must switch the active workspace to 1"
+    );
+}
+
+#[test]
+fn globally_activated_app_on_visible_workspace_does_not_switch() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    reactor.handle_event(screen_params_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+
+    assert_eq!(
+        active_workspace_index(&mut reactor, space),
+        0,
+        "initial active workspace must be index 0"
+    );
+
+    reactor.handle_event(Event::ApplicationGloballyActivated(1));
+    apps.simulate_until_quiet(&mut reactor);
+
+    assert_eq!(
+        active_workspace_index(&mut reactor, space),
+        0,
+        "activating an app already on the visible workspace must leave the active workspace at index 0"
+    );
+}
+
+#[test]
+fn globally_activated_blacklisted_app_does_not_switch_workspace() {
+    let settings = vws_settings_with_app_rules(vec![rule_pinning_to("com.testapp2", 1)]);
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &settings,
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    reactor.config.settings.auto_focus_blacklist = vec!["com.testapp2".into()];
+
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    reactor.handle_event(screen_params_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    reactor.handle_events(apps.make_app(2, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+
+    assert_eq!(
+        active_workspace_index(&mut reactor, space),
+        0,
+        "initial active workspace must be index 0"
+    );
+
+    reactor.handle_event(Event::ApplicationGloballyActivated(2));
+    apps.simulate_until_quiet(&mut reactor);
+
+    assert_eq!(
+        active_workspace_index(&mut reactor, space),
+        0,
+        "activating a blacklisted app must not change the active workspace"
+    );
+}
+
+#[test]
+fn globally_activated_login_window_does_not_drive_auto_switch() {
+    let settings = vws_settings_with_app_rules(vec![rule_pinning_to("com.testapp2", 1)]);
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &settings,
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    reactor.handle_event(screen_params_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    reactor.handle_events(apps.make_app(2, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+
+    // Match the bundle id `is_login_window_pid` looks for.
+    reactor.app_manager.apps.get_mut(&1).unwrap().info.bundle_id =
+        Some("com.apple.loginwindow".to_string());
+
+    assert_eq!(
+        active_workspace_index(&mut reactor, space),
+        0,
+        "initial active workspace must be index 0"
+    );
+
+    reactor.handle_event(Event::ApplicationGloballyActivated(1));
+    apps.simulate_until_quiet(&mut reactor);
+
+    assert_eq!(
+        active_workspace_index(&mut reactor, space),
+        0,
+        "login-window activation must not change the active workspace"
+    );
+}
+
+#[test]
+fn globally_activated_app_without_bundle_id_does_not_switch() {
+    let settings = vws_settings_with_app_rules(vec![rule_pinning_to("com.testapp2", 1)]);
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &settings,
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    reactor.handle_event(screen_params_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    reactor.handle_events(apps.make_app(2, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+
+    // Drop pid 2's bundle id to simulate a raw binary with no Info.plist.
+    reactor.app_manager.apps.get_mut(&2).unwrap().info.bundle_id = None;
+
+    assert_eq!(active_workspace_index(&mut reactor, space), 0);
+
+    reactor.handle_event(Event::ApplicationGloballyActivated(2));
+    apps.simulate_until_quiet(&mut reactor);
+
+    assert_eq!(
+        active_workspace_index(&mut reactor, space),
+        0,
+        "activation of an app without a CFBundleIdentifier must not change the active workspace"
+    );
+}
+
+#[test]
+fn globally_activated_untracked_pid_does_not_switch() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    reactor.handle_event(screen_params_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+
+    assert_eq!(active_workspace_index(&mut reactor, space), 0);
+
+    // pid 999 is not registered with app_manager.
+    reactor.handle_event(Event::ApplicationGloballyActivated(999));
+    apps.simulate_until_quiet(&mut reactor);
+
+    assert_eq!(
+        active_workspace_index(&mut reactor, space),
+        0,
+        "activation of a pid rift does not track must not change the active workspace"
+    );
+}
+
 #[test]
 fn windows_discovered_does_not_reintroduce_inactive_workspace_window() {
     let mut apps = Apps::new();

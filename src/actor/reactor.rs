@@ -991,11 +991,14 @@ impl Reactor {
                     self.reconcile_spaces_with_display_history(&raw_spaces, false);
 
                     self.force_refresh_all_windows();
-                } else if self.space_activation_policy.login_window_active {
-                    // macOS sometimes activates loginwindow during wake without sending a
-                    // corresponding deactivation. Any subsequent non-login activation
-                    // indicates the user is back, so clear suppression.
-                    self.set_login_window_active(false);
+                } else {
+                    if self.space_activation_policy.login_window_active {
+                        // macOS sometimes activates loginwindow during wake without sending a
+                        // corresponding deactivation. Any subsequent non-login activation
+                        // indicates the user is back, so clear suppression.
+                        self.set_login_window_active(false);
+                    }
+                    AppEventHandler::handle_application_activated(self, pid, Quiet::No);
                 }
             }
             Event::RegisterWmSender(sender) => {
@@ -2137,10 +2140,6 @@ impl Reactor {
     }
 
     fn handle_app_activation_workspace_switch(&mut self, pid: pid_t) {
-        use objc2_app_kit::NSRunningApplication;
-
-        use crate::sys::app::NSRunningApplicationExt;
-
         if self.workspace_switch_manager.active_workspace_switch.is_some() {
             trace!(
                 "Skipping auto workspace switch for pid {} because a workspace switch is in progress",
@@ -2205,13 +2204,12 @@ impl Reactor {
             return;
         }
 
-        let Some(app) = NSRunningApplication::with_process_id(pid) else {
+        let Some(app_state) = self.app_manager.apps.get(&pid) else {
             return;
         };
-        let Some(bundle_id) = app.bundle_id() else {
+        let Some(bundle_id_str) = app_state.info.bundle_id.clone() else {
             return;
         };
-        let bundle_id_str = bundle_id.to_string();
 
         if self.config.settings.auto_focus_blacklist.contains(&bundle_id_str) {
             debug!(
