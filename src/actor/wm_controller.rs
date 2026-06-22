@@ -460,21 +460,39 @@ impl WmController {
     }
 
     fn exec_cmd(&self, cmd_args: ExecCmd) {
+        let cmd_args = cmd_args.as_array().into_owned();
+        if cmd_args.is_empty() {
+            error!("Empty argument list passed to exec");
+            return;
+        }
+
+        self.events_tx.send(reactor::Event::Command(reactor::Command::Reactor(
+            reactor::ReactorCommand::FocusNextWindow,
+        )));
+
+        let events_tx = self.events_tx.clone();
         std::thread::spawn(move || {
-            let cmd_args = cmd_args.as_array();
             let [cmd, args @ ..] = &*cmd_args else {
-                error!("Empty argument list passed to exec");
+                events_tx.send(reactor::Event::Command(reactor::Command::Reactor(
+                    reactor::ReactorCommand::CancelFocusNextWindow,
+                )));
                 return;
             };
             let output = std::process::Command::new(cmd).args(args).output();
             let output = match output {
                 Ok(o) => o,
                 Err(e) => {
+                    events_tx.send(reactor::Event::Command(reactor::Command::Reactor(
+                        reactor::ReactorCommand::CancelFocusNextWindow,
+                    )));
                     error!("Failed to execute command {cmd:?}: {e:?}");
                     return;
                 }
             };
             if !output.status.success() {
+                events_tx.send(reactor::Event::Command(reactor::Command::Reactor(
+                    reactor::ReactorCommand::CancelFocusNextWindow,
+                )));
                 error!(
                     "Exec command exited with status {}: {cmd:?} {args:?}",
                     output.status

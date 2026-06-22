@@ -66,6 +66,7 @@ impl WindowEventHandler {
                     reactor.process_windows_for_app_rules(wid.pid, vec![wid], app_info);
                 }
                 maybe_dispatch_window_added_in_space(reactor, wid, space);
+                reactor.consume_focus_next_window_for(wid);
             }
         }
         // TODO: drag state is maybe managed by ensure_active_drag

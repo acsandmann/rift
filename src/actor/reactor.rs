@@ -21,7 +21,7 @@ mod testing;
 mod tests;
 
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use animation::Sender as AnimationSender;
 use events::app::AppEventHandler;
@@ -64,6 +64,8 @@ use crate::sys::window_server::{
 pub type Sender = actor::Sender<Event>;
 type Receiver = actor::Receiver<Event>;
 pub use query::ReactorQueryHandle;
+
+const FOCUS_NEXT_WINDOW_TIMEOUT: Duration = Duration::from_secs(8);
 
 pub(crate) use crate::model::reactor::{
     AppState, FullscreenSpaceTrack, FullscreenWindowTrack, PendingSpaceChange, WindowFilter,
@@ -365,6 +367,7 @@ impl Reactor {
             refocus_manager: managers::RefocusManager {
                 stale_cleanup_state: StaleCleanupState::Enabled,
                 refocus_state: RefocusState::None,
+                focus_next_window_deadline: None,
             },
             pending_space_change_manager: managers::PendingSpaceChangeManager {
                 pending_space_change: None,
@@ -2754,6 +2757,64 @@ impl Reactor {
                 app_handles,
                 focus_quiet: quiet,
             }));
+    }
+
+    pub(crate) fn request_focus_next_window(&mut self) {
+        self.refocus_manager.focus_next_window_deadline =
+            Some(Instant::now() + FOCUS_NEXT_WINDOW_TIMEOUT);
+    }
+
+    pub(crate) fn cancel_focus_next_window(&mut self) {
+        self.refocus_manager.focus_next_window_deadline = None;
+    }
+
+    fn consume_focus_next_window_for(&mut self, wid: WindowId) -> bool {
+        let Some(deadline) = self.refocus_manager.focus_next_window_deadline else {
+            return false;
+        };
+
+        if Instant::now() > deadline {
+            self.cancel_focus_next_window();
+            return false;
+        }
+
+        let Some(window) = self.window_manager.windows.get(&wid) else {
+            return false;
+        };
+        if !window.matches_filter(WindowFilter::EffectivelyManageable) {
+            return false;
+        }
+
+        let Some(space) = self.best_space_for_window_state(window) else {
+            return false;
+        };
+        if !self.is_space_active(space)
+            || !self.layout_manager.layout_engine.is_window_in_active_workspace(space, wid)
+        {
+            return false;
+        }
+
+        self.cancel_focus_next_window();
+        let warp = if self.config.settings.mouse_follows_focus {
+            self.window_center_on_known_screen(wid)
+        } else {
+            None
+        };
+        self.raise_window(wid, Quiet::No, warp);
+        self.send_layout_event(LayoutEvent::WindowFocused(space, wid));
+        true
+    }
+
+    fn consume_focus_next_window_from<I>(&mut self, windows: I) -> bool
+    where
+        I: IntoIterator<Item = WindowId>,
+    {
+        for wid in windows {
+            if self.consume_focus_next_window_for(wid) {
+                return true;
+            }
+        }
+        false
     }
 
     fn clear_menu_state_for_pid(&mut self, pid: pid_t) {

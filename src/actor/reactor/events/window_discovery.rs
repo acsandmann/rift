@@ -103,9 +103,12 @@ impl WindowDiscoveryHandler {
             Self::identify_stale_windows(reactor, pid, &known_visible);
         Self::cleanup_stale_windows(reactor, pid, stale_windows, pending_refresh);
         let new_windows = Self::process_window_list(reactor, new, &app_info);
+        let discovered_new_windows: Vec<WindowId> =
+            new_windows.iter().map(|(wid, _)| *wid).collect();
         Self::update_window_states(reactor, new_windows, &app_info);
 
         Self::emit_layout_events(reactor, pid, &known_visible, &app_info);
+        reactor.consume_focus_next_window_from(discovered_new_windows);
     }
 
     fn sync_window_server_id_mapping(
