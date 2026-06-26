@@ -712,8 +712,9 @@ impl LayoutSystem for MasterStackLayoutSystem {
         let Some(focused_idx) = windows.iter().position(|&w| w == focused_wid) else {
             return false;
         };
+        let master_len = self.settings.master_count.min(windows.len());
 
-        let in_master = focused_idx < self.settings.master_count;
+        let in_master = focused_idx < master_len;
         let container_axis = if in_master {
             self.master_orientation()
         } else {
@@ -735,14 +736,14 @@ impl LayoutSystem for MasterStackLayoutSystem {
 
         if towards_master && !in_master {
             let border_idx = if is_master_first {
-                self.settings.master_count
+                master_len
             } else {
                 windows.len() - 1
             };
             let at_border = !is_parallel || (focused_idx == border_idx);
             if at_border {
                 let target_border_idx = if is_master_first {
-                    self.settings.master_count - 1
+                    master_len - 1
                 } else {
                     0
                 };
@@ -754,18 +755,18 @@ impl LayoutSystem for MasterStackLayoutSystem {
 
         if towards_stack && in_master {
             let border_idx = if is_master_first {
-                self.settings.master_count - 1
+                master_len - 1
             } else {
                 0
             };
             let at_border = !is_parallel || (focused_idx == border_idx);
             if at_border {
-                let has_stack_windows = windows.len() > self.settings.master_count;
+                let has_stack_windows = windows.len() > master_len;
                 if !has_stack_windows {
                     return false;
                 }
                 let target_border_idx = if is_master_first {
-                    self.settings.master_count
+                    master_len
                 } else {
                     windows.len() - 1
                 };
@@ -789,7 +790,7 @@ impl LayoutSystem for MasterStackLayoutSystem {
                         None
                     }
                 } else {
-                    if focused_idx > self.settings.master_count {
+                    if focused_idx > master_len {
                         Some(focused_idx - 1)
                     } else {
                         None
@@ -798,7 +799,7 @@ impl LayoutSystem for MasterStackLayoutSystem {
             }
             Direction::Right | Direction::Down => {
                 if in_master {
-                    if focused_idx + 1 < self.settings.master_count {
+                    if focused_idx + 1 < master_len {
                         Some(focused_idx + 1)
                     } else {
                         None
@@ -1060,6 +1061,22 @@ mod tests {
     fn test_move_towards_stack_without_stack_windows_returns_false() {
         let mut settings = MasterStackSettings::default();
         settings.master_count = 2;
+
+        let mut system = MasterStackLayoutSystem::new(settings);
+        let layout = system.create_layout();
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+        assert_eq!(system.windows_in_layout_by_container(layout), vec![w(2), w(1)]);
+
+        assert!(system.select_window(layout, w(1)));
+        assert!(!system.move_selection(layout, Direction::Right));
+        assert_eq!(system.windows_in_layout_by_container(layout), vec![w(2), w(1)]);
+    }
+
+    #[test]
+    fn test_move_with_master_capacity_larger_than_window_count_does_not_panic() {
+        let mut settings = MasterStackSettings::default();
+        settings.master_count = 3;
 
         let mut system = MasterStackLayoutSystem::new(settings);
         let layout = system.create_layout();
