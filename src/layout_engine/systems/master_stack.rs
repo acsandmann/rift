@@ -235,23 +235,43 @@ impl MasterStackLayoutSystem {
         let mut stack_windows = self.windows_in_container(stack);
         let selected = self.inner.selected_window(layout);
         let desired = self.settings.master_count;
+        let is_master_first = self.master_first();
 
         if master_windows.is_empty() && !stack_windows.is_empty() {
-            if let Some(wid) = stack_windows.get(0).copied() {
-                if let Some(node) = self.move_window_to_container(layout, wid, master) {
+            let wid = if is_master_first {
+                stack_windows.get(0).copied()
+            } else {
+                stack_windows.last().copied()
+            };
+            if let Some(wid) = wid {
+                let node = if is_master_first {
+                    self.move_window_to_container(layout, wid, master)
+                } else {
+                    self.move_window_to_container_front(layout, wid, master)
+                };
+                if let Some(node) = node {
                     if Some(wid) == selected {
                         self.inner.select(node);
                     }
                 }
                 master_windows.push(wid);
-                stack_windows.remove(0);
+                if is_master_first {
+                    stack_windows.remove(0);
+                } else {
+                    stack_windows.pop();
+                }
             }
         }
 
         if master_windows.len() > desired {
             let overflow = master_windows.split_off(desired);
             for wid in overflow.into_iter().rev() {
-                if let Some(node) = self.move_window_to_container_front(layout, wid, stack) {
+                let node = if is_master_first {
+                    self.move_window_to_container_front(layout, wid, stack)
+                } else {
+                    self.move_window_to_container(layout, wid, stack)
+                };
+                if let Some(node) = node {
                     if Some(wid) == selected {
                         self.inner.select(node);
                     }
@@ -259,9 +279,20 @@ impl MasterStackLayoutSystem {
             }
         } else if master_windows.len() < desired {
             let needed = desired - master_windows.len();
-            let to_move: Vec<_> = stack_windows.drain(..needed.min(stack_windows.len())).collect();
+            let to_move: Vec<_> = if is_master_first {
+                stack_windows.drain(..needed.min(stack_windows.len())).collect()
+            } else {
+                let len = stack_windows.len();
+                let start = len.saturating_sub(needed);
+                stack_windows.drain(start..).rev().collect()
+            };
             for wid in to_move {
-                if let Some(node) = self.move_window_to_container(layout, wid, master) {
+                let node = if is_master_first {
+                    self.move_window_to_container(layout, wid, master)
+                } else {
+                    self.move_window_to_container_front(layout, wid, master)
+                };
+                if let Some(node) = node {
                     if Some(wid) == selected {
                         self.inner.select(node);
                     }
@@ -320,13 +351,10 @@ impl MasterStackLayoutSystem {
         if !self.inner.map().contains(node) {
             return None;
         }
-        if node.parent(self.inner.map()) == Some(container) {
+        let first_child = container.children(self.inner.map()).next();
+        if first_child == Some(node) {
             return Some(node);
         }
-        let first_child = {
-            let mut children_iter = container.children(self.inner.map());
-            children_iter.next()
-        };
         if let Some(first_child) = first_child {
             Some(node.detach(&mut self.inner.tree).insert_before(first_child).finish())
         } else {
@@ -365,18 +393,21 @@ impl MasterStackLayoutSystem {
     }
 
     pub fn promote_to_master(&mut self, layout: LayoutId) {
-        let (_root, master, stack) = self.ensure_structure(layout);
-        let Some(wid) = self.inner.selected_window(layout) else {
+        let (_root, _master, _stack) = self.ensure_structure(layout);
+        let Some(focused_wid) = self.inner.selected_window(layout) else {
             return;
         };
-        let master_windows = self.windows_in_container(master);
-        if master_windows.first().copied() == Some(wid) {
+        let windows = self.windows_in_layout_by_container(layout);
+        let Some(focused_idx) = windows.iter().position(|&w| w == focused_wid) else {
+            return;
+        };
+        if focused_idx == 0 {
             return;
         }
-        if let Some(node) = self.move_window_to_container_front(layout, wid, master) {
-            self.inner.select(node);
-        }
-        self.enforce_master_count(layout, master, stack);
+        let mut new_windows = windows;
+        new_windows.remove(focused_idx);
+        new_windows.insert(0, focused_wid);
+        self.rebuild_layout_with_windows(layout, &new_windows);
     }
 
     pub fn swap_master_stack(&mut self, layout: LayoutId) {
@@ -387,11 +418,16 @@ impl MasterStackLayoutSystem {
         ) else {
             return;
         };
-        let selected = self.inner.selected_window(layout);
-        let _ = self.inner.swap_windows(layout, master_wid, stack_wid);
-        if let Some(wid) = selected {
-            let _ = self.inner.select_window(layout, wid);
-        }
+        let windows = self.windows_in_layout_by_container(layout);
+        let Some(master_idx) = windows.iter().position(|&w| w == master_wid) else {
+            return;
+        };
+        let Some(stack_idx) = windows.iter().position(|&w| w == stack_wid) else {
+            return;
+        };
+        let mut new_windows = windows;
+        new_windows.swap(master_idx, stack_idx);
+        self.rebuild_layout_with_windows(layout, &new_windows);
     }
 
     pub(crate) fn collect_group_containers_in_selection_path(
@@ -668,15 +704,23 @@ impl LayoutSystem for MasterStackLayoutSystem {
     }
 
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool {
-        let (_root, master, stack) = self.ensure_structure(layout);
-        let Some(container) = self.focused_container(layout, master, stack) else {
+        let (_root, _master, _stack) = self.ensure_structure(layout);
+        let Some(focused_wid) = self.inner.selected_window(layout) else {
             return false;
         };
-        let container_axis = if container == master {
+        let windows = self.windows_in_layout_by_container(layout);
+        let Some(focused_idx) = windows.iter().position(|&w| w == focused_wid) else {
+            return false;
+        };
+        let master_len = self.settings.master_count.min(windows.len());
+
+        let in_master = focused_idx < master_len;
+        let container_axis = if in_master {
             self.master_orientation()
         } else {
             self.stack_orientation()
         };
+
         let (towards_master, towards_stack) = match self.settings.master_side {
             MasterStackSide::Left => (direction == Direction::Left, direction == Direction::Right),
             MasterStackSide::Right => (direction == Direction::Right, direction == Direction::Left),
@@ -684,30 +728,99 @@ impl LayoutSystem for MasterStackLayoutSystem {
             MasterStackSide::Bottom => (direction == Direction::Down, direction == Direction::Up),
         };
 
-        if towards_master && container == stack {
-            self.promote_to_master(layout);
-            self.normalize_layout(layout);
-            return true;
-        }
-        if towards_stack && container == master {
-            if self.focused_window_in_container(master).is_some()
-                && self.focused_window_in_container(stack).is_some()
-            {
-                self.swap_master_stack(layout);
-                self.normalize_layout(layout);
+        let is_master_first = self.master_first();
+        let mut new_windows = windows.clone();
+
+        // Check if movement direction is parallel to container's axis
+        let is_parallel = direction.orientation() == container_axis;
+
+        if towards_master && !in_master {
+            let border_idx = if is_master_first {
+                master_len
+            } else {
+                windows.len() - 1
+            };
+            let at_border = !is_parallel || (focused_idx == border_idx);
+            if at_border {
+                let target_border_idx = if is_master_first {
+                    master_len - 1
+                } else {
+                    0
+                };
+                new_windows.swap(focused_idx, target_border_idx);
+                self.rebuild_layout_with_windows(layout, &new_windows);
                 return true;
             }
-            return false;
         }
+
+        if towards_stack && in_master {
+            let border_idx = if is_master_first {
+                master_len - 1
+            } else {
+                0
+            };
+            let at_border = !is_parallel || (focused_idx == border_idx);
+            if at_border {
+                let has_stack_windows = windows.len() > master_len;
+                if !has_stack_windows {
+                    return false;
+                }
+                let target_border_idx = if is_master_first {
+                    master_len
+                } else {
+                    windows.len() - 1
+                };
+                new_windows.swap(focused_idx, target_border_idx);
+                self.rebuild_layout_with_windows(layout, &new_windows);
+                return true;
+            }
+        }
+
         if direction.orientation() != container_axis {
             return false;
         }
 
-        let moved = self.inner.move_selection(layout, direction);
-        if moved {
-            self.normalize_layout(layout);
+        // Reordering within the same container
+        let neighbor_idx = match direction {
+            Direction::Left | Direction::Up => {
+                if in_master {
+                    if focused_idx > 0 {
+                        Some(focused_idx - 1)
+                    } else {
+                        None
+                    }
+                } else {
+                    if focused_idx > master_len {
+                        Some(focused_idx - 1)
+                    } else {
+                        None
+                    }
+                }
+            }
+            Direction::Right | Direction::Down => {
+                if in_master {
+                    if focused_idx + 1 < master_len {
+                        Some(focused_idx + 1)
+                    } else {
+                        None
+                    }
+                } else {
+                    if focused_idx + 1 < windows.len() {
+                        Some(focused_idx + 1)
+                    } else {
+                        None
+                    }
+                }
+            }
+        };
+
+        if let Some(target) = neighbor_idx {
+            new_windows.swap(focused_idx, target);
+            self.rebuild_layout_with_windows(layout, &new_windows);
+            true
+        } else {
+            false
         }
-        moved
     }
 
     fn move_selection_to_layout_after_selection(
@@ -776,4 +889,203 @@ impl LayoutSystem for MasterStackLayoutSystem {
     fn rebalance(&mut self, layout: LayoutId) { self.normalize_layout(layout); }
 
     fn toggle_tile_orientation(&mut self, layout: LayoutId) { self.normalize_layout(layout); }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
+
+    #[test]
+    fn test_create_layout() {
+        let mut system = MasterStackLayoutSystem::default();
+        let layout = system.create_layout();
+        let windows = system.windows_in_layout_by_container(layout);
+        assert!(windows.is_empty());
+    }
+
+    #[test]
+    fn test_add_windows() {
+        let mut system = MasterStackLayoutSystem::default();
+        let layout = system.create_layout();
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+        system.add_window_after_selection(layout, w(3));
+
+        let windows = system.windows_in_layout_by_container(layout);
+        // By default master_count = 1, new_window_placement = Master
+        // When w1 is added: master=[w1]
+        // When w2 is added: master=[w2], stack=[w1]
+        // When w3 is added: master=[w3], stack=[w2, w1] (since w2 was at index 0 and got pushed to stack, w1 was pushed next)
+        assert_eq!(windows, vec![w(3), w(2), w(1)]);
+    }
+
+    #[test]
+    fn test_move_selection_towards_master_and_stack() {
+        let mut system = MasterStackLayoutSystem::default();
+        let layout = system.create_layout();
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+        system.add_window_after_selection(layout, w(3));
+        // layout state: master=[w3], stack=[w2, w1]
+
+        // Select w2 (which is in stack)
+        assert!(system.select_window(layout, w(2)));
+
+        // Move towards master (Left) -> promotes w2 to master, pushes w3 to stack
+        assert!(system.move_selection(layout, Direction::Left));
+        let windows = system.windows_in_layout_by_container(layout);
+        assert_eq!(windows, vec![w(2), w(3), w(1)]);
+
+        // Select w2 (which is in master)
+        assert!(system.select_window(layout, w(2)));
+
+        // Move towards stack (Right) -> demotes w2 to stack, top stack window (w3) becomes master
+        assert!(system.move_selection(layout, Direction::Right));
+        let windows = system.windows_in_layout_by_container(layout);
+        assert_eq!(windows, vec![w(3), w(2), w(1)]);
+    }
+
+    #[test]
+    fn test_move_selection_within_container() {
+        let mut system = MasterStackLayoutSystem::default();
+        let layout = system.create_layout();
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+        system.add_window_after_selection(layout, w(3));
+        // layout state: master=[w3], stack=[w2, w1]
+
+        // Select w2 (which is at index 1, i.e., index 0 in stack)
+        assert!(system.select_window(layout, w(2)));
+
+        // Move down (within stack) -> swaps w2 and w1
+        assert!(system.move_selection(layout, Direction::Down));
+        let windows = system.windows_in_layout_by_container(layout);
+        assert_eq!(windows, vec![w(3), w(1), w(2)]);
+
+        // Move up (within stack) -> swaps w1 and w2 back
+        assert!(system.select_window(layout, w(2)));
+        assert!(system.move_selection(layout, Direction::Up));
+        let windows = system.windows_in_layout_by_container(layout);
+        assert_eq!(windows, vec![w(3), w(2), w(1)]);
+    }
+
+    #[test]
+    fn test_parallel_horizontal_layout_reordering() {
+        let mut settings = MasterStackSettings::default();
+        settings.master_count = 2;
+        settings.master_arrangement = Some(Orientation::Horizontal);
+        settings.stack_arrangement = Some(Orientation::Horizontal);
+
+        let mut system = MasterStackLayoutSystem::new(settings);
+        let layout = system.create_layout();
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+        system.add_window_after_selection(layout, w(3));
+        system.add_window_after_selection(layout, w(4));
+        // State: master=[w4, w3], stack=[w2, w1] (all horizontal)
+        let windows = system.windows_in_layout_by_container(layout);
+        assert_eq!(windows, vec![w(4), w(3), w(2), w(1)]);
+
+        // 1. Focus w4 (index 0 in master) and move Right.
+        // It is NOT at the border (which is w3 at index 1), so it should swap w4 and w3 within master.
+        assert!(system.select_window(layout, w(4)));
+        assert!(system.move_selection(layout, Direction::Right));
+        let windows = system.windows_in_layout_by_container(layout);
+        assert_eq!(windows, vec![w(3), w(4), w(2), w(1)]);
+
+        // 2. Focus w4 (now at index 1 in master, which is the border) and move Right.
+        // It IS at the border, so it should cross to stack, demoting w4 and swapping with w2 (index 2).
+        assert!(system.move_selection(layout, Direction::Right));
+        let windows = system.windows_in_layout_by_container(layout);
+        assert_eq!(windows, vec![w(3), w(2), w(4), w(1)]);
+
+        // 3. Focus w4 (now at index 2 in stack, which is the border of stack facing master) and move Left.
+        // It IS at the border of stack (index == master_count), so it should promote back to master, swapping with w2 (index 1).
+        assert!(system.select_window(layout, w(4)));
+        assert!(system.move_selection(layout, Direction::Left));
+        let windows = system.windows_in_layout_by_container(layout);
+        assert_eq!(windows, vec![w(3), w(4), w(2), w(1)]);
+
+        // 4. Focus w1 (at index 3, the rightmost stack window) and move Left.
+        // It is NOT at the border of stack facing master (border is w2 at index 2), so it should swap w1 and w2 within stack.
+        assert!(system.select_window(layout, w(1)));
+        assert!(system.move_selection(layout, Direction::Left));
+        let windows = system.windows_in_layout_by_container(layout);
+        assert_eq!(windows, vec![w(3), w(4), w(1), w(2)]);
+    }
+
+    #[test]
+    fn test_parallel_horizontal_layout_reordering_stack_left() {
+        let mut settings = MasterStackSettings::default();
+        settings.master_side = MasterStackSide::Right; // Stack is on Left, Master is on Right
+        settings.master_count = 2;
+        settings.master_arrangement = Some(Orientation::Horizontal);
+        settings.stack_arrangement = Some(Orientation::Horizontal);
+
+        let mut system = MasterStackLayoutSystem::new(settings);
+        let layout = system.create_layout();
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+        system.add_window_after_selection(layout, w(3));
+        system.add_window_after_selection(layout, w(4));
+
+        // Logical flat list: [M0, M1, S0, S1] -> [w4, w3, w1, w2] (since overflows append to stack)
+        // Physical layout: w1 (leftmost stack) - w2 (rightmost stack) | w4 (leftmost master) - w3 (rightmost master)
+        let windows = system.windows_in_layout_by_container(layout);
+        assert_eq!(windows, vec![w(4), w(3), w(1), w(2)]);
+
+        // 1. Focus w3 (at index 1, the right-most Master window) and move Left.
+        // It is NOT at the border facing stack (which is w4 at index 0), so it should swap w3 and w4 within Master.
+        assert!(system.select_window(layout, w(3)));
+        assert!(system.move_selection(layout, Direction::Left));
+        let windows = system.windows_in_layout_by_container(layout);
+        assert_eq!(windows, vec![w(3), w(4), w(1), w(2)]);
+
+        // 2. Focus w3 (now at index 0, which is the border facing stack) and move Left.
+        // It IS at the border, so it should cross to stack, swapping with the right-most stack window w2 (index 3).
+        assert!(system.move_selection(layout, Direction::Left));
+        let windows = system.windows_in_layout_by_container(layout);
+        assert_eq!(windows, vec![w(2), w(4), w(1), w(3)]);
+
+        // 3. Focus w3 (now at index 3, the border of Stack facing Master) and move Right.
+        // It IS at the border of Stack facing Master, so it should cross to Master, swapping with w2 (index 0).
+        assert!(system.select_window(layout, w(3)));
+        assert!(system.move_selection(layout, Direction::Right));
+        let windows = system.windows_in_layout_by_container(layout);
+        assert_eq!(windows, vec![w(3), w(4), w(1), w(2)]);
+    }
+
+    #[test]
+    fn test_move_towards_stack_without_stack_windows_returns_false() {
+        let mut settings = MasterStackSettings::default();
+        settings.master_count = 2;
+
+        let mut system = MasterStackLayoutSystem::new(settings);
+        let layout = system.create_layout();
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+        assert_eq!(system.windows_in_layout_by_container(layout), vec![w(2), w(1)]);
+
+        assert!(system.select_window(layout, w(1)));
+        assert!(!system.move_selection(layout, Direction::Right));
+        assert_eq!(system.windows_in_layout_by_container(layout), vec![w(2), w(1)]);
+    }
+
+    #[test]
+    fn test_move_with_master_capacity_larger_than_window_count_does_not_panic() {
+        let mut settings = MasterStackSettings::default();
+        settings.master_count = 3;
+
+        let mut system = MasterStackLayoutSystem::new(settings);
+        let layout = system.create_layout();
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+        assert_eq!(system.windows_in_layout_by_container(layout), vec![w(2), w(1)]);
+
+        assert!(system.select_window(layout, w(1)));
+        assert!(!system.move_selection(layout, Direction::Right));
+        assert_eq!(system.windows_in_layout_by_container(layout), vec![w(2), w(1)]);
+    }
 }

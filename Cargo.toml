@@ -8,10 +8,6 @@ build = "build.rs"
 name = "rift"
 test = false
 
-# [[bin]]
-# name = "dev"
-# test = false
-
 [profile.dev]
 opt-level = 0
 debug = 1

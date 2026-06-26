@@ -438,11 +438,17 @@ impl WindowEventHandler {
         let Some(wid) = reactor.window_manager.tracked_window_id(wsid) else {
             return;
         };
-        if !reactor.should_raise_on_mouse_over(wid) {
+        let should_sync = reactor.should_raise_on_mouse_over(wid);
+        let is_main = reactor.main_window() == Some(wid);
+        let needs_sync = reactor.layout_manager.layout_engine.focused_window() != Some(wid);
+
+        if !should_sync || (is_main && !needs_sync) {
             return;
         }
 
-        reactor.raise_window(wid, Quiet::No, None);
+        if !is_main {
+            reactor.raise_window(wid, Quiet::No, None);
+        }
 
         if let Some(window) = reactor.window_manager.window(wid) {
             if let Some(space) =

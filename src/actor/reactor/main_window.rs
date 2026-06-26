@@ -45,12 +45,18 @@ impl MainWindowTracker {
             }
             &Event::ApplicationGloballyActivated(pid) => {
                 self.global_frontmost = Some(pid);
-                let Some(app) = self.apps.get(&pid) else { return None };
+                let Some(app) = self.apps.get_mut(&pid) else {
+                    return None;
+                };
+                app.is_frontmost = true;
                 (pid, app.frontmost_is_quiet)
             }
             &Event::ApplicationGloballyDeactivated(pid) => {
                 if self.global_frontmost == Some(pid) {
                     self.global_frontmost = None;
+                }
+                if let Some(app) = self.apps.get_mut(&pid) {
+                    app.is_frontmost = false;
                 }
                 return None;
             }
