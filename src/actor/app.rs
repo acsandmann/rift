@@ -619,9 +619,16 @@ impl State {
             sleep_dur = Duration::min(sleep_dur * 2, Duration::from_secs(1));
             true
         };
-        for &(_kind, notif) in APP_NOTIFICATIONS {
+        for &(kind, notif) in APP_NOTIFICATIONS {
+            // App-level notifications are not tied to a specific window, but the
+            // observer callback still recovers the notification kind by decoding
+            // the refcon hint (see `decode_notification_data`). Registering with the
+            // plain `add_notification` would attach a zero hint, which decodes to an
+            // invalid tag and causes the notification to be silently dropped - so
+            // encode the kind here just like the per-window registrations do.
+            let data = encode_notification_data(kind, None);
             loop {
-                match self.observer.add_notification(&self.app, notif) {
+                match self.observer.add_notification_with_data(&self.app, notif, data) {
                     Ok(()) => break,
                     #[allow(non_upper_case_globals)]
                     Err(AxError::Ax(AXError::NotificationAlreadyRegistered)) => {

@@ -4,14 +4,15 @@ use std::sync::Arc;
 use tracing::{debug, trace};
 
 use super::reactor::{self, Event};
+use super::spaces;
 use crate::actor::app::WindowId;
 use crate::actor::reactor::Requested;
 use crate::common::collections::{HashMap, HashSet};
 use crate::model::tx_store::WindowTxStore;
 use crate::sys::screen::SpaceId;
-use crate::sys::skylight::{CGSEventType, KnownCGSEvent, SLSMainConnectionID, SLSSpaceGetType};
+use crate::sys::skylight::{CGSEventType, KnownCGSEvent};
 use crate::sys::window_server::{WindowQuery, WindowServerId};
-use crate::sys::{display_churn, event, window_notify};
+use crate::sys::{event, window_notify};
 
 #[derive(Default)]
 pub struct Ignored {
@@ -78,6 +79,7 @@ pub type Receiver = crate::actor::Receiver<Request>;
 
 pub struct WindowNotify {
     events_tx: reactor::Sender,
+    spaces_tx: spaces::Sender,
     requests_rx: Option<Receiver>,
     subscribed: HashSet<CGSEventType>,
     initial_events: Vec<CGSEventType>,
@@ -87,12 +89,14 @@ pub struct WindowNotify {
 impl WindowNotify {
     pub fn new(
         events_tx: reactor::Sender,
+        spaces_tx: spaces::Sender,
         requests_rx: Receiver,
         initial_events: &[CGSEventType],
         tx_store: Option<WindowTxStore>,
     ) -> Self {
         Self {
             events_tx,
+            spaces_tx,
             requests_rx: Some(requests_rx),
             subscribed: HashSet::default(),
             initial_events: initial_events.iter().copied().collect(),
@@ -107,7 +111,12 @@ impl WindowNotify {
         };
 
         for event in self.initial_events.drain(..) {
-            match Self::subscribe(event, self.events_tx.clone(), self.tx_store.clone()) {
+            match Self::subscribe(
+                event,
+                self.events_tx.clone(),
+                self.spaces_tx.clone(),
+                self.tx_store.clone(),
+            ) {
                 Ok(()) => {
                     self.subscribed.insert(event);
                     debug!("initial subscription succeeded for event {}", event);
@@ -137,7 +146,12 @@ impl WindowNotify {
                     debug!("already subscribed to event {}", event);
                     return;
                 }
-                match Self::subscribe(event, self.events_tx.clone(), self.tx_store.clone()) {
+                match Self::subscribe(
+                    event,
+                    self.events_tx.clone(),
+                    self.spaces_tx.clone(),
+                    self.tx_store.clone(),
+                ) {
                     Ok(()) => {
                         self.subscribed.insert(event);
                         debug!("subscribed to event {}", event);
@@ -158,6 +172,7 @@ impl WindowNotify {
     fn subscribe(
         event: CGSEventType,
         events_tx: reactor::Sender,
+        spaces_tx: spaces::Sender,
         tx_store: Option<WindowTxStore>,
     ) -> Result<(), i32> {
         let res = window_notify::init(event);
@@ -174,63 +189,43 @@ impl WindowNotify {
                 match event {
                     CGSEventType::Known(KnownCGSEvent::SpaceDestroyed) => {
                         if let Some(space_id) = evt.space_id {
-                            let space_type =
-                                unsafe { SLSSpaceGetType(SLSMainConnectionID(), space_id) };
-                            if space_type == 0 || space_type == 4 {
-                                events_tx.send(Event::SpaceDestroyed(SpaceId::new(space_id)));
-                            }
+                            spaces_tx.send(spaces::Event::SpaceDestroyed(SpaceId::new(space_id)));
                         }
                     }
                     CGSEventType::Known(KnownCGSEvent::SpaceCreated) => {
                         if let Some(space_id) = evt.space_id {
-                            let space_type =
-                                unsafe { SLSSpaceGetType(SLSMainConnectionID(), space_id) };
-                            if space_type == 0 || space_type == 4 {
-                                events_tx.send(Event::SpaceCreated(SpaceId::new(space_id)));
-                            }
+                            spaces_tx.send(spaces::Event::SpaceCreated(SpaceId::new(space_id)));
                         }
                     }
+                    CGSEventType::Known(KnownCGSEvent::SpaceCurrentChanged)
+                    | CGSEventType::Known(KnownCGSEvent::PackagesStatusBarSpaceChanged) => {
+                        spaces_tx.send(spaces::Event::ActiveSpaceChanged);
+                    }
+                    CGSEventType::Known(KnownCGSEvent::ManagedSpaceMembershipUpdated)
+                    | CGSEventType::Known(
+                        KnownCGSEvent::SpaceWindowManagementCapabilitiesChanged,
+                    ) => {
+                        spaces_tx.send(spaces::Event::SpaceInventoryChanged);
+                    }
                     CGSEventType::Known(KnownCGSEvent::SpaceWindowDestroyed) => {
-                        if display_churn::is_active() {
-                            continue;
-                        }
                         let (Some(window_id), Some(space_id)) = (evt.window_id, evt.space_id)
                         else {
                             continue;
                         };
-                        events_tx.send(Event::WindowServerDestroyed(
+                        spaces_tx.send(spaces::Event::WindowServerDestroyed(
                             WindowServerId::new(window_id),
                             SpaceId::new(space_id),
                         ))
                     }
                     CGSEventType::Known(KnownCGSEvent::SpaceWindowCreated) => {
-                        if display_churn::is_active() {
-                            continue;
-                        }
                         let (Some(window_id), Some(space_id)) = (evt.window_id, evt.space_id)
                         else {
                             continue;
                         };
-                        events_tx.send(Event::WindowServerAppeared(
+                        spaces_tx.send(spaces::Event::WindowServerAppeared(
                             WindowServerId::new(window_id),
                             SpaceId::new(space_id),
                         ))
-                    }
-                    CGSEventType::Known(KnownCGSEvent::WorkspaceWindowIsViewable)
-                    | CGSEventType::Known(KnownCGSEvent::WorkspaceWindowIsNotViewable)
-                    | CGSEventType::Known(
-                        KnownCGSEvent::WorkspacesWindowDidOrderInOnNonCurrentManagedSpacesOnly,
-                    )
-                    | CGSEventType::Known(
-                        KnownCGSEvent::WorkspacesWindowDidOrderOutOnNonCurrentManagedSpaces,
-                    ) => {
-                        if display_churn::is_active() {
-                            continue;
-                        }
-                        let Some(window_id) = evt.window_id else {
-                            continue;
-                        };
-                        events_tx.send(Event::ResyncAppForWindow(WindowServerId::new(window_id)));
                     }
                     CGSEventType::Known(KnownCGSEvent::WindowMoved)
                     | CGSEventType::Known(KnownCGSEvent::WindowResized) => {

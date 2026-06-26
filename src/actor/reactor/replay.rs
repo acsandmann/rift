@@ -60,7 +60,9 @@ impl Record {
 
     pub(super) fn on_event(&mut self, event: &Event) {
         let Some(file) = self.file() else { return };
-        let line = ron::ser::to_string(&event).unwrap();
+        let Ok(line) = ron::ser::to_string(&event) else {
+            return;
+        };
         write!(file, "{line}\n").unwrap();
     }
 }

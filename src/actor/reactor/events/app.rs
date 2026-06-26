@@ -4,7 +4,7 @@ use crate::actor::app::{AppInfo, AppThreadHandle, Quiet, WindowId};
 use crate::actor::reactor::{AppState, Reactor};
 use crate::layout_engine::LayoutEvent;
 use crate::sys::app::WindowInfo;
-use crate::sys::window_server::{self as window_server, WindowServerId, WindowServerInfo};
+use crate::sys::window_server::WindowServerInfo;
 
 pub struct AppEventHandler;
 
@@ -37,18 +37,6 @@ impl AppEventHandler {
         reactor.send_layout_event(LayoutEvent::AppClosed(pid));
     }
 
-    pub fn handle_resync_app_for_window(reactor: &mut Reactor, wsid: WindowServerId) {
-        if let Some(wid) = reactor.window_manager.tracked_window_id(wsid) {
-            request_visible_windows(reactor, wid.pid);
-        } else if let Some(info) = reactor
-            .window_manager
-            .get_window_server_info(wsid)
-            .or_else(|| window_server::get_window(wsid))
-        {
-            request_visible_windows(reactor, info.pid);
-        }
-    }
-
     pub fn handle_application_activated(reactor: &mut Reactor, pid: i32, quiet: Quiet) {
         if quiet == Quiet::Yes {
             debug!(
@@ -68,13 +56,5 @@ impl AppEventHandler {
         known_visible: Vec<WindowId>,
     ) {
         reactor.on_windows_discovered_with_app_info(pid, new, known_visible, None);
-    }
-}
-
-fn request_visible_windows(reactor: &Reactor, pid: i32) {
-    if let Some(app_state) = reactor.app_manager.apps.get(&pid) {
-        if let Err(e) = app_state.handle.send(crate::actor::app::Request::GetVisibleWindows) {
-            warn!("Failed to send GetVisibleWindows to app {}: {}", pid, e);
-        }
     }
 }

@@ -95,7 +95,7 @@ mod tests {
     use objc2_core_foundation::{CGPoint, CGRect, CGSize};
     use test_log::test;
 
-    use super::super::testing::{Apps, make_windows, screen_params_event};
+    use super::super::testing::{Apps, make_windows, space_state_event};
     use super::super::{Event, Quiet, Reactor, SpaceId, WindowId};
     use crate::layout_engine::LayoutEngine;
 
@@ -110,11 +110,7 @@ mod tests {
         ));
         let space = SpaceId::new(1);
         let screen_frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1920., 1080.));
-        reactor.handle_event(screen_params_event(
-            vec![screen_frame],
-            vec![Some(space)],
-            vec![],
-        ));
+        reactor.handle_event(space_state_event(vec![screen_frame], vec![Some(space)], vec![]));
         assert_eq!(None, reactor.main_window());
 
         reactor.handle_event(ApplicationGloballyActivated(1));
@@ -186,11 +182,7 @@ mod tests {
         ));
         let space = SpaceId::new(1);
         let screen_frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1920., 1080.));
-        reactor.handle_event(screen_params_event(
-            vec![screen_frame],
-            vec![Some(space)],
-            vec![],
-        ));
+        reactor.handle_event(space_state_event(vec![screen_frame], vec![Some(space)], vec![]));
 
         reactor.handle_event(ApplicationGloballyActivated(1));
         reactor.handle_events(apps.make_app_with_opts(
@@ -273,11 +265,7 @@ mod tests {
         let windows = make_windows(2);
         let space = SpaceId::new(1);
         let screen_frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1920., 1080.));
-        reactor.handle_event(screen_params_event(
-            vec![screen_frame],
-            vec![Some(space)],
-            vec![],
-        ));
+        reactor.handle_event(space_state_event(vec![screen_frame], vec![Some(space)], vec![]));
 
         reactor.handle_events(apps.make_app_with_opts(
             pid,
@@ -287,7 +275,7 @@ mod tests {
             true,
         ));
 
-        reactor.handle_event(SpaceChanged(vec![None]));
+        reactor.handle_event(space_state_event(vec![screen_frame], vec![None], vec![]));
         reactor.handle_event(ApplicationActivated(3, Quiet::No));
         reactor.handle_event(ApplicationGloballyActivated(3));
         reactor.handle_event(WindowsDiscovered {
@@ -297,7 +285,7 @@ mod tests {
         });
         assert_eq!(Some(WindowId::new(3, 1)), reactor.main_window());
 
-        reactor.handle_event(SpaceChanged(vec![Some(space)]));
+        reactor.handle_event(space_state_event(vec![screen_frame], vec![Some(space)], vec![]));
         assert_eq!(
             reactor.layout_manager.layout_engine.selected_window(space),
             Some(WindowId::new(3, 1))

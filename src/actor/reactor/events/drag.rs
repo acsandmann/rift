@@ -41,7 +41,7 @@ impl DragEventHandler {
                             .origin_frame()
                             .and_then(|f| reactor.best_space_for_frame(&f))
                     })
-                    .or_else(|| reactor.space_manager.screens.iter().find_map(|s| s.space));
+                    .or_else(|| reactor.space_state.screens.iter().find_map(|s| s.space));
                 let response = reactor.layout_manager.layout_engine.handle_command(
                     swap_space,
                     &visible_spaces,
