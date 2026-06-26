@@ -742,11 +742,7 @@ impl LayoutSystem for MasterStackLayoutSystem {
             };
             let at_border = !is_parallel || (focused_idx == border_idx);
             if at_border {
-                let target_border_idx = if is_master_first {
-                    master_len - 1
-                } else {
-                    0
-                };
+                let target_border_idx = if is_master_first { master_len - 1 } else { 0 };
                 new_windows.swap(focused_idx, target_border_idx);
                 self.rebuild_layout_with_windows(layout, &new_windows);
                 return true;
@@ -754,11 +750,7 @@ impl LayoutSystem for MasterStackLayoutSystem {
         }
 
         if towards_stack && in_master {
-            let border_idx = if is_master_first {
-                master_len - 1
-            } else {
-                0
-            };
+            let border_idx = if is_master_first { master_len - 1 } else { 0 };
             let at_border = !is_parallel || (focused_idx == border_idx);
             if at_border {
                 let has_stack_windows = windows.len() > master_len;
