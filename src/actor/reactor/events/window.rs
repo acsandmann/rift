@@ -83,8 +83,8 @@ impl WindowEventHandler {
         // Suppress false-positive destructions when on a fullscreen space or during MC.
         // kAXMainWindowChangedNotification triggers remove_stale_windows in app.rs, which
         // calls kAXWindowsAttribute (space-filtered), omitting Desktop windows and emitting
-        // WindowDestroyed for them. get_window() uses CGWindowListCopyWindowInfo
-        // (not space-filtered), so Some here means the window still exists.
+        // WindowDestroyed for them. `get_window()` is a direct Skylight window query
+        // rather than an AX space-filtered view, so Some here means the window still exists.
         if !reactor.has_user_space_context() || reactor.is_mission_control_active() {
             if let Some(ws_id) = window_server_id {
                 if crate::sys::window_server::get_window(ws_id)
@@ -296,8 +296,11 @@ impl WindowEventHandler {
                 return false;
             }
 
-            let old_space = reactor.geometry_space_for_window(&old_frame, server_id);
-            let new_space = reactor.geometry_space_for_window(&new_frame, server_id);
+            let old_space_geometry = reactor.geometry_space_for_window(&old_frame, server_id);
+            let new_space_geometry = reactor.geometry_space_for_window(&new_frame, server_id);
+            let dragging = effective_mouse_state == Some(MouseState::Down) || reactor.is_in_drag();
+            let old_space = old_space_geometry;
+            let new_space = new_space_geometry;
             let old_active = old_space.is_some_and(|space| reactor.is_space_active(space));
             let new_active = new_space.is_some_and(|space| reactor.is_space_active(space));
 
@@ -314,8 +317,6 @@ impl WindowEventHandler {
                 }
                 window.frame_monotonic = new_frame;
             }
-
-            let dragging = effective_mouse_state == Some(MouseState::Down) || reactor.is_in_drag();
 
             if !dragging {
                 reactor.drag_manager.skip_layout_for_window = Some(wid);

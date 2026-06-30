@@ -137,6 +137,10 @@ fn quarantines_window_space_events_during_sleep_before_churn_begins() {
         destroyed_dropped: 1
     });
     assert_no_wm_event(&mut wm_rx);
+    assert!(matches!(
+        recv_reactor(&mut reactor_rx),
+        reactor::Event::SystemWillSleep
+    ));
     assert_no_reactor_event(&mut reactor_rx);
 }
 
@@ -176,6 +180,7 @@ fn buffers_screen_and_space_updates_until_display_churn_ends() {
 fn wake_does_not_flush_pending_updates_while_churn_is_still_active() {
     let (mut actor, mut wm_rx, mut reactor_rx) = build_actor();
     let space = SpaceId::new(31);
+    let recovered = SpaceId::new(32);
 
     actor.handle_event(Event::SystemWillSleep);
     actor.handle_event(Event::DisplayChurnBegin);
@@ -184,10 +189,23 @@ fn wake_does_not_flush_pending_updates_while_churn_is_still_active() {
         CoordinateConverter::default(),
     ));
     actor.handle_event(Event::SystemDidWake);
+    actor.handle_event(Event::ScreenParametersChanged(
+        vec![make_screen(Some(recovered))],
+        CoordinateConverter::default(),
+    ));
+    actor.handle_event(Event::SpaceChanged(vec![Some(recovered)]));
 
     assert!(matches!(
         recv_reactor(&mut reactor_rx),
+        reactor::Event::SystemWillSleep
+    ));
+    assert!(matches!(
+        recv_reactor(&mut reactor_rx),
         reactor::Event::DisplayChurnBegin
+    ));
+    assert!(matches!(
+        recv_reactor(&mut reactor_rx),
+        reactor::Event::SystemWoke
     ));
     assert_no_wm_event(&mut wm_rx);
 
@@ -197,12 +215,117 @@ fn wake_does_not_flush_pending_updates_while_churn_is_still_active() {
         recv_reactor(&mut reactor_rx),
         reactor::Event::DisplayChurnEnd
     ));
-    assert!(matches!(
-        recv_wm(&mut wm_rx),
-        wm_controller::WmEvent::SpaceStateUpdated(..)
-    ));
+    match recv_wm(&mut wm_rx) {
+        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
+            assert_eq!(
+                state.screens.iter().map(|screen| screen.space).collect::<Vec<_>>(),
+                vec![Some(recovered)]
+            );
+            assert!(
+                state.releases_lifecycle_refresh_quarantine,
+                "the first post-wake forwarded snapshot should release the reactor quarantine"
+            );
+        }
+        other => panic!("unexpected wm event: {other:?}"),
+    }
     assert_no_wm_event(&mut wm_rx);
     assert_no_reactor_event(&mut reactor_rx);
+}
+
+#[test]
+fn session_lock_buffers_space_updates_until_unlock_rescan() {
+    let (mut actor, mut wm_rx, mut reactor_rx) = build_actor();
+    let unlocked = SpaceId::new(35);
+    let locked = SpaceId::new(99);
+
+    actor.handle_event(Event::ScreenParametersChanged(
+        vec![make_screen(Some(unlocked))],
+        CoordinateConverter::default(),
+    ));
+    let _ = recv_wm(&mut wm_rx);
+
+    actor.handle_event(Event::SessionDidResignActive);
+    actor.handle_event(Event::ScreenParametersChanged(
+        vec![make_screen(Some(locked))],
+        CoordinateConverter::default(),
+    ));
+    actor.handle_event(Event::SpaceChanged(vec![Some(locked)]));
+
+    assert!(matches!(
+        recv_reactor(&mut reactor_rx),
+        reactor::Event::SessionDidResignActive
+    ));
+    assert_no_wm_event(&mut wm_rx);
+
+    actor.handle_event(Event::SessionDidBecomeActive);
+    actor.handle_event(Event::ScreenParametersChanged(
+        vec![make_screen(Some(unlocked))],
+        CoordinateConverter::default(),
+    ));
+
+    match recv_wm(&mut wm_rx) {
+        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
+            assert_eq!(
+                state.screens.iter().map(|screen| screen.space).collect::<Vec<_>>(),
+                vec![Some(unlocked)]
+            );
+            assert!(
+                state.releases_lifecycle_refresh_quarantine,
+                "the first post-unlock forwarded snapshot should release the reactor quarantine"
+            );
+        }
+        other => panic!("unexpected wm event: {other:?}"),
+    }
+    assert_no_wm_event(&mut wm_rx);
+    assert!(matches!(
+        recv_reactor(&mut reactor_rx),
+        reactor::Event::SessionDidBecomeActive
+    ));
+    assert_no_reactor_event(&mut reactor_rx);
+}
+
+#[test]
+fn timed_refresh_does_not_forward_while_session_is_inactive() {
+    let (mut actor, mut wm_rx, mut reactor_rx) = build_actor();
+    let unlocked = SpaceId::new(41);
+    let locked = SpaceId::new(141);
+
+    actor.handle_event(Event::ScreenParametersChanged(
+        vec![make_screen(Some(unlocked))],
+        CoordinateConverter::default(),
+    ));
+    let _ = recv_wm(&mut wm_rx);
+
+    actor.handle_event(Event::SessionDidResignActive);
+    actor.state.screens = vec![make_screen(Some(locked))];
+    actor.handle_event(Event::ProcessScreenRefresh { attempt: 0 });
+
+    assert!(actor.state.refresh_deferred_until_stable);
+    assert!(matches!(
+        recv_reactor(&mut reactor_rx),
+        reactor::Event::SessionDidResignActive
+    ));
+    assert_no_wm_event(&mut wm_rx);
+
+    actor.handle_event(Event::SessionDidBecomeActive);
+    actor.handle_event(Event::ScreenParametersChanged(
+        vec![make_screen(Some(unlocked))],
+        CoordinateConverter::default(),
+    ));
+
+    match recv_wm(&mut wm_rx) {
+        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
+            assert_eq!(
+                state.screens.iter().map(|screen| screen.space).collect::<Vec<_>>(),
+                vec![Some(unlocked)]
+            );
+        }
+        other => panic!("unexpected wm event: {other:?}"),
+    }
+    assert!(matches!(
+        recv_reactor(&mut reactor_rx),
+        reactor::Event::SessionDidBecomeActive
+    ));
 }
 
 #[test]
@@ -502,7 +625,15 @@ fn sleep_wake_display_reattach_flushes_latest_stable_spaces_only() {
 
     assert!(matches!(
         recv_reactor(&mut reactor_rx),
+        reactor::Event::SystemWillSleep
+    ));
+    assert!(matches!(
+        recv_reactor(&mut reactor_rx),
         reactor::Event::DisplayChurnBegin
+    ));
+    assert!(matches!(
+        recv_reactor(&mut reactor_rx),
+        reactor::Event::SystemWoke
     ));
     assert!(matches!(
         recv_reactor(&mut reactor_rx),
@@ -600,6 +731,64 @@ fn topology_window_delta_treats_same_window_space_move_as_remove_then_add() {
 }
 
 #[test]
+fn duplicate_visible_window_keeps_previous_active_space_when_lookup_races() {
+    let wsid = WindowServerId::new(91);
+    let old_space = SpaceId::new(501);
+    let other_space = SpaceId::new(502);
+    let mut visible = HashMap::default();
+    let previous_visible = HashMap::from_iter([(wsid, old_space)]);
+    let active_spaces = HashSet::from_iter([old_space, other_space]);
+
+    SpacesActor::record_visible_window_space(
+        &mut visible,
+        &previous_visible,
+        &active_spaces,
+        wsid,
+        other_space,
+        None,
+    );
+    SpacesActor::record_visible_window_space(
+        &mut visible,
+        &previous_visible,
+        &active_spaces,
+        wsid,
+        old_space,
+        None,
+    );
+
+    assert_eq!(visible.get(&wsid).copied(), Some(old_space));
+}
+
+#[test]
+fn duplicate_visible_window_uses_authoritative_space_when_available() {
+    let wsid = WindowServerId::new(92);
+    let left_space = SpaceId::new(511);
+    let right_space = SpaceId::new(512);
+    let mut visible = HashMap::default();
+    let previous_visible = HashMap::default();
+    let active_spaces = HashSet::from_iter([left_space, right_space]);
+
+    SpacesActor::record_visible_window_space(
+        &mut visible,
+        &previous_visible,
+        &active_spaces,
+        wsid,
+        left_space,
+        None,
+    );
+    SpacesActor::record_visible_window_space(
+        &mut visible,
+        &previous_visible,
+        &active_spaces,
+        wsid,
+        right_space,
+        Some(right_space),
+    );
+
+    assert_eq!(visible.get(&wsid).copied(), Some(right_space));
+}
+
+#[test]
 fn display_order_change_is_topology_change_without_display_set_change() {
     let (mut actor, mut wm_rx, _reactor_rx) = build_actor();
     let left_space = SpaceId::new(401);
@@ -657,7 +846,15 @@ fn duplicate_space_transient_during_wake_is_not_forwarded_when_stable_snapshot_r
 
     assert!(matches!(
         recv_reactor(&mut reactor_rx),
+        reactor::Event::SystemWillSleep
+    ));
+    assert!(matches!(
+        recv_reactor(&mut reactor_rx),
         reactor::Event::DisplayChurnBegin
+    ));
+    assert!(matches!(
+        recv_reactor(&mut reactor_rx),
+        reactor::Event::SystemWoke
     ));
     assert!(matches!(
         recv_reactor(&mut reactor_rx),

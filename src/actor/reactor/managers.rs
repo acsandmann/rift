@@ -105,6 +105,40 @@ pub struct RefocusManager {
     pub refocus_state: super::RefocusState,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshQuarantineState {
+    Ready,
+    Sleeping,
+    SessionInactive,
+    DisplayChurn,
+}
+
+pub struct RefreshQuarantineManager {
+    pub sleeping: bool,
+    pub session_inactive: bool,
+    pub display_churn_active: bool,
+    pub awaiting_post_wake_snapshot: bool,
+    pub awaiting_post_session_snapshot: bool,
+    pub pending_visible_refresh: bool,
+    pub deferred_refresh_tracks_mission_control: bool,
+}
+
+impl RefreshQuarantineManager {
+    pub fn state(&self) -> RefreshQuarantineState {
+        if self.sleeping {
+            RefreshQuarantineState::Sleeping
+        } else if self.session_inactive {
+            RefreshQuarantineState::SessionInactive
+        } else if self.display_churn_active {
+            RefreshQuarantineState::DisplayChurn
+        } else {
+            RefreshQuarantineState::Ready
+        }
+    }
+
+    pub fn blocks_refreshes(&self) -> bool { self.state() != RefreshQuarantineState::Ready }
+}
+
 /// Manages communication channels to other actors
 pub struct CommunicationManager {
     pub event_tap_tx: Option<event_tap::Sender>,

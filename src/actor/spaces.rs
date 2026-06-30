@@ -1,3 +1,25 @@
+//! Authoritative native display/space state for Rift.
+//!
+//! This actor is the only place that should translate macOS display, space, and
+//! session lifecycle signals into the snapshot consumed by the reactor. The
+//! reactor owns Rift's virtual workspace model, but it must only do so on top of
+//! a stable native-space picture. The rules here are therefore intentionally
+//! conservative:
+//!
+//! - Sleep, display churn, and lock/login transitions buffer snapshots instead of
+//!   forwarding them immediately.
+//! - Only user spaces are allowed to become the reactor's workspace/display
+//!   context. Fullscreen and system/login spaces are treated as transient native
+//!   state and nulled out before they can rewrite workspace mappings.
+//! - When the system finally stabilizes, this actor forwards a single coherent
+//!   snapshot plus any synthesized window enter/leave deltas needed to reconcile
+//!   the reactor with the post-churn WindowServer state.
+//!
+//! The core failure mode this prevents is treating unstable lock/wake/login
+//! snapshots as authoritative user-space state. That can cause Rift to
+//! initialize fresh default workspaces for transient spaces and later remap them
+//! onto the real desktop, which looks like "all windows reset to workspace 1".
+
 use dispatchr::queue;
 use dispatchr::time::Time;
 use objc2_core_foundation::CGSize;
@@ -14,8 +36,6 @@ use crate::sys::screen::managed_display_space_ids;
 use crate::sys::screen::{CoordinateConverter, ScreenCache, ScreenInfo, SpaceId};
 use crate::sys::skylight::DisplayReconfigFlags;
 use crate::sys::window_server::WindowServerId;
-#[cfg(not(test))]
-use crate::sys::window_server::WindowServerInfo;
 use crate::sys::{display_churn, window_server};
 
 const REFRESH_DEFAULT_DELAY_NS: i64 = 100_000_000;
@@ -36,6 +56,8 @@ const DISPLAY_STABLE_REQUIRED_HITS: u8 = 2;
 pub enum Event {
     SystemWillSleep,
     SystemDidWake,
+    SessionDidResignActive,
+    SessionDidBecomeActive,
     ActiveDisplayChanged,
     ActiveSpaceChanged,
     ScreenRefreshRequested,
@@ -94,6 +116,7 @@ pub struct ForwardedSpaceState {
     pub topology_changed: bool,
     pub allow_space_remap: bool,
     pub should_force_refresh_layout: bool,
+    pub releases_lifecycle_refresh_quarantine: bool,
     pub resized_spaces: Vec<(SpaceId, CGSize)>,
     pub topology_window_delta: Option<TopologyWindowDelta>,
 }
@@ -137,6 +160,7 @@ impl Default for TopologyWindowDelta {
 
 pub struct AuthorityState {
     pub sleeping: bool,
+    pub session_inactive: bool,
     pub display_churn_active: bool,
     pub screens: Vec<ScreenInfo>,
     pub has_seen_display_set: bool,
@@ -152,6 +176,7 @@ pub struct AuthorityState {
     display_space_ids: HashMap<String, Vec<SpaceId>>,
     awaiting_space_switch_confirmation: bool,
     refresh_deferred_until_stable: bool,
+    release_reactor_quarantine_on_next_forward: bool,
     pending_screen_parameters: Option<PendingScreenParameters>,
     pending_spaces: Option<Vec<Option<SpaceId>>>,
     visible_window_spaces: HashMap<WindowServerId, SpaceId>,
@@ -164,6 +189,7 @@ impl Default for AuthorityState {
     fn default() -> Self {
         Self {
             sleeping: false,
+            session_inactive: false,
             display_churn_active: false,
             screens: Vec::new(),
             has_seen_display_set: false,
@@ -179,6 +205,7 @@ impl Default for AuthorityState {
             display_space_ids: HashMap::default(),
             awaiting_space_switch_confirmation: false,
             refresh_deferred_until_stable: false,
+            release_reactor_quarantine_on_next_forward: false,
             pending_screen_parameters: None,
             pending_spaces: None,
             visible_window_spaces: HashMap::default(),
@@ -249,22 +276,53 @@ impl SpacesActor {
         match event {
             Event::SystemWillSleep => {
                 self.state.sleeping = true;
+                self.state.release_reactor_quarantine_on_next_forward = false;
+                self.reactor_tx.send(reactor::Event::SystemWillSleep);
                 if let Some(screen_cache) = self.state.screen_cache.as_mut() {
                     screen_cache.mark_sleeping(true);
                 }
             }
             Event::SystemDidWake => {
                 self.state.sleeping = false;
+                self.reactor_tx.send(reactor::Event::SystemWoke);
                 if let Some(screen_cache) = self.state.screen_cache.as_mut() {
                     screen_cache.mark_sleeping(false);
+                    screen_cache.mark_dirty();
                 }
+                self.state.pending_screen_parameters = None;
+                self.state.pending_spaces = None;
                 if self.state.display_churn_active {
                     let expected_epoch = self.state.display_churn_epoch;
                     self.schedule_display_stabilization_check(expected_epoch);
                 }
-                // Wake is inherently unstable; prefer the delayed refresh path.
+                // Wake is inherently unstable; discard anything buffered while the
+                // machine was asleep and wait for a fresh authoritative rescan.
+                self.state.release_reactor_quarantine_on_next_forward = true;
                 self.schedule_screen_refresh();
-                self.flush_pending_if_stable();
+            }
+            Event::SessionDidResignActive => {
+                self.state.session_inactive = true;
+                self.state.release_reactor_quarantine_on_next_forward = false;
+                self.reactor_tx.send(reactor::Event::SessionDidResignActive);
+            }
+            Event::SessionDidBecomeActive => {
+                self.state.session_inactive = false;
+                self.reactor_tx.send(reactor::Event::SessionDidBecomeActive);
+                if let Some(screen_cache) = self.state.screen_cache.as_mut() {
+                    screen_cache.mark_dirty();
+                }
+                self.state.pending_screen_parameters = None;
+                self.state.pending_spaces = None;
+                if self.state.display_churn_active {
+                    let expected_epoch = self.state.display_churn_epoch;
+                    self.schedule_display_stabilization_check(expected_epoch);
+                }
+                // The login window can transiently replace every display's current
+                // space. Do not replay buffered lock-screen snapshots into Rift's
+                // workspace model; always resample after the user session becomes
+                // active again.
+                self.state.release_reactor_quarantine_on_next_forward = true;
+                self.schedule_screen_refresh();
             }
             Event::ActiveDisplayChanged => {
                 self.handle_active_display_changed();
@@ -388,11 +446,11 @@ impl SpacesActor {
     }
 
     fn should_buffer_topology_updates(&self) -> bool {
-        self.state.sleeping || self.state.display_churn_active
+        self.state.sleeping || self.state.session_inactive || self.state.display_churn_active
     }
 
     fn should_quarantine_window_space_event(&self) -> bool {
-        self.state.sleeping || self.state.display_churn_active
+        self.state.sleeping || self.state.session_inactive || self.state.display_churn_active
     }
 
     fn collect_state(&mut self) -> Option<(Vec<ScreenInfo>, CoordinateConverter)> {
@@ -460,6 +518,7 @@ impl SpacesActor {
         let mut screens = screens;
         self.preserve_user_spaces_during_fullscreen_transition(&previous_screens, &mut screens);
         self.null_fullscreen_spaces(&mut screens);
+        self.null_non_user_spaces(&mut screens);
 
         let previous_displays: HashSet<String> =
             previous_screens.iter().map(|screen| screen.display_uuid.clone()).collect();
@@ -539,6 +598,8 @@ impl SpacesActor {
         }
         self.state.visible_window_spaces = self.visible_window_spaces_for_screens(&screens);
         self.state.screens = screens.clone();
+        let releases_lifecycle_refresh_quarantine =
+            std::mem::take(&mut self.state.release_reactor_quarantine_on_next_forward);
 
         ForwardedSpaceState {
             screens,
@@ -553,6 +614,7 @@ impl SpacesActor {
             topology_changed,
             allow_space_remap,
             should_force_refresh_layout,
+            releases_lifecycle_refresh_quarantine,
             resized_spaces,
             topology_window_delta: self.state.pending_topology_window_delta.take(),
         }
@@ -634,6 +696,16 @@ impl SpacesActor {
         }
     }
 
+    fn null_non_user_spaces(&self, screens: &mut [ScreenInfo]) {
+        for screen in screens {
+            if screen.space.is_some_and(|space| {
+                !Self::is_fullscreen_space(space) && !Self::is_user_space(space)
+            }) {
+                screen.space = None;
+            }
+        }
+    }
+
     fn compute_space_remaps(
         &mut self,
         screens: &[ScreenInfo],
@@ -707,22 +779,23 @@ impl SpacesActor {
         }
     }
 
+    fn is_user_space(space: SpaceId) -> bool {
+        #[cfg(test)]
+        {
+            let _ = space;
+            true
+        }
+        #[cfg(not(test))]
+        {
+            window_server::space_is_user(space.get())
+        }
+    }
+
     fn classify_space(&self, space: SpaceId) -> Option<reactor::SpaceEventKind> {
         if Self::is_fullscreen_space(space) {
             Some(reactor::SpaceEventKind::Fullscreen)
         } else {
-            #[cfg(test)]
-            {
-                Some(reactor::SpaceEventKind::User)
-            }
-            #[cfg(not(test))]
-            {
-                if window_server::space_is_user(space.get()) {
-                    Some(reactor::SpaceEventKind::User)
-                } else {
-                    None
-                }
-            }
+            Self::is_user_space(space).then_some(reactor::SpaceEventKind::User)
         }
     }
 
@@ -745,39 +818,86 @@ impl SpacesActor {
         }
         #[cfg(not(test))]
         {
-            let active_spaces: HashSet<SpaceId> =
-                screens.iter().filter_map(|screen| screen.space).collect();
-            window_server::get_visible_windows_with_layer(None)
-                .into_iter()
-                .filter_map(|info| {
-                    let space = self.resolve_space_for_window_info(screens, &info)?;
-                    active_spaces.contains(&space).then_some((info.id, space))
-                })
-                .collect()
+            let mut active_spaces = Vec::new();
+            let mut active_space_set = HashSet::default();
+            for space in screens.iter().filter_map(|screen| screen.space) {
+                if active_space_set.insert(space) {
+                    active_spaces.push(space);
+                }
+            }
+
+            if active_spaces.is_empty() {
+                return HashMap::default();
+            }
+
+            if active_spaces.len() == 1 {
+                let space = active_spaces[0];
+                return window_server::space_window_list_for_connection(&[space.get()], 0, false)
+                    .into_iter()
+                    .map(WindowServerId::new)
+                    .map(|wsid| (wsid, space))
+                    .collect();
+            }
+
+            let mut visible = HashMap::default();
+            for &space in &active_spaces {
+                for wsid in
+                    window_server::space_window_list_for_connection(&[space.get()], 0, false)
+                        .into_iter()
+                        .map(WindowServerId::new)
+                {
+                    Self::record_visible_window_space(
+                        &mut visible,
+                        &self.state.visible_window_spaces,
+                        &active_space_set,
+                        wsid,
+                        space,
+                        window_server::window_space(wsid),
+                    );
+                }
+            }
+
+            visible
         }
     }
 
-    #[cfg(not(test))]
-    fn resolve_space_for_window_info(
-        &self,
-        screens: &[ScreenInfo],
-        info: &WindowServerInfo,
-    ) -> Option<SpaceId> {
-        if let Some(space) = window_server::window_space(info.id)
-            && screens.iter().any(|screen| screen.space == Some(space))
-        {
-            return Some(space);
-        }
+    fn record_visible_window_space(
+        visible: &mut HashMap<WindowServerId, SpaceId>,
+        previous_visible: &HashMap<WindowServerId, SpaceId>,
+        active_spaces: &HashSet<SpaceId>,
+        wsid: WindowServerId,
+        candidate_space: SpaceId,
+        authoritative_space: Option<SpaceId>,
+    ) {
+        match visible.entry(wsid) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(candidate_space);
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                if *entry.get() == candidate_space {
+                    return;
+                }
 
-        let frame = info.frame;
-        let center = objc2_core_foundation::CGPoint::new(
-            frame.origin.x + frame.size.width / 2.0,
-            frame.origin.y + frame.size.height / 2.0,
-        );
-        screens
-            .iter()
-            .find(|screen| screen.frame.contains(center))
-            .and_then(|screen| screen.space)
+                // `space_window_list_for_connection([space])` is the authoritative
+                // source for "window X is visible in active space Y". The extra
+                // `window_space(wsid)` lookup is only used to disambiguate the rare
+                // case where the same WSID appears in more than one active-space
+                // query (for example during native transitions). If that secondary
+                // lookup races and returns `None`, preserve the last known active
+                // assignment instead of synthesizing a disappearance.
+                let resolved = authoritative_space
+                    .filter(|space| active_spaces.contains(space))
+                    .or_else(|| {
+                        previous_visible
+                            .get(&wsid)
+                            .copied()
+                            .filter(|space| active_spaces.contains(space))
+                    })
+                    .unwrap_or(*entry.get());
+
+                entry.insert(resolved);
+            }
+        }
     }
 
     fn synthesize_topology_window_delta(
@@ -841,7 +961,7 @@ impl SpacesActor {
     }
 
     fn process_screen_refresh(&mut self, attempt: u8, allow_retry: bool) {
-        if self.state.display_churn_active {
+        if self.should_buffer_topology_updates() {
             self.state.refresh_deferred_until_stable = true;
             self.state.refresh_pending = false;
             return;

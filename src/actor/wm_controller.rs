@@ -39,10 +39,7 @@ pub enum WmEvent {
     AppGloballyActivated(pid_t),
     AppGloballyDeactivated(pid_t),
     AppTerminated(pid_t),
-    DisplayChurnBegin,
-    DisplayChurnEnd,
     SpaceStateUpdated(ForwardedSpaceState, CoordinateConverter),
-    SystemWoke,
     PowerStateChanged(bool),
     KeyboardLayoutChanged,
     ConfigUpdated(crate::common::config::Config),
@@ -191,8 +188,6 @@ impl WmController {
         }
 
         match event {
-            SystemWoke => self.events_tx.send(Event::SystemWoke),
-            DisplayChurnBegin | DisplayChurnEnd => {}
             SpaceStateUpdated(space_state, converter) => {
                 self.events_tx.send(Event::SpaceStateChanged(space_state.clone()));
                 _ = self.event_tap_tx.send(event_tap::Request::SpaceStateUpdated(

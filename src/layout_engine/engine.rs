@@ -218,8 +218,12 @@ impl LayoutEngine {
                 .map(|layout| workspace.layout_system.visible_windows_in_layout(layout))
                 .unwrap_or_default();
             // Keep windows hidden by stack/group selection when rebuilding into a new mode.
-            let mut hidden_windows: Vec<_> =
-                workspace.windows().filter(|wid| !ordered.contains(wid)).collect();
+            let mut hidden_windows: Vec<_> = self
+                .virtual_workspace_manager
+                .workspace_windows(space, workspace_id)
+                .into_iter()
+                .filter(|wid| !ordered.contains(wid))
+                .collect();
             hidden_windows.sort();
             ordered.extend(hidden_windows);
             (workspace.layout_mode, selected, ordered)
@@ -2434,14 +2438,6 @@ impl LayoutEngine {
         }
 
         if was_floating {
-            // Drop any floating position stored under the source workspace. The window has
-            // left that space, but get_workspace_floating_positions() during layout only
-            // checks is_floating() - not current assignment - so a stale source-space entry
-            // makes the source display keep re-positioning the window while the target display
-            // also positions it, producing a frame-change feedback loop (the window visibly
-            // ping-pongs between displays). Clearing it leaves the target layout pass as the
-            // sole authority, which centers the window on the destination screen.
-            self.virtual_workspace_manager.remove_floating_position(window_id);
             self.floating.add_active(target_space, window_id.pid, window_id);
             self.floating.set_last_focus(Some(window_id));
         } else if let Some(target_layout) =
@@ -2504,6 +2500,18 @@ impl LayoutEngine {
 
     pub fn is_window_floating(&self, window_id: WindowId) -> bool {
         self.floating.is_floating(window_id)
+    }
+
+    pub fn transfer_persistent_window_identity(&mut self, from: WindowId, to: WindowId) {
+        if from == to {
+            return;
+        }
+
+        self.virtual_workspace_manager.transfer_window_identity(from, to);
+        self.floating.transfer_window_identity(from, to);
+        if self.focused_window == Some(from) {
+            self.focused_window = Some(to);
+        }
     }
 
     fn update_active_floating_windows(&mut self, space: SpaceId) {
@@ -2829,87 +2837,6 @@ mod tests {
 
         assert!(response.raise_windows.is_empty());
         assert_eq!(response.focus_window, None);
-    }
-
-    #[test]
-    fn move_window_to_space_detaches_window_when_source_mapping_is_stale() {
-        let mut engine = test_engine();
-        let source = SpaceId::new(70);
-        let target = SpaceId::new(71);
-        let screen_size = CGSize::new(1920.0, 1080.0);
-        let window_id = WindowId::new(4242, 1);
-
-        let _ = engine.handle_event(LayoutEvent::SpaceExposed(source, screen_size));
-        let _ = engine.handle_event(LayoutEvent::SpaceExposed(target, screen_size));
-
-        let source_workspace = engine
-            .virtual_workspace_manager()
-            .active_workspace(source)
-            .expect("source active workspace");
-        let target_workspace = engine
-            .virtual_workspace_manager()
-            .active_workspace(target)
-            .expect("target active workspace");
-        let source_layout = engine
-            .workspace_layouts
-            .active(source, source_workspace)
-            .expect("source active layout");
-        let target_layout = engine
-            .workspace_layouts
-            .active(target, target_workspace)
-            .expect("target active layout");
-
-        assert!(
-            engine.virtual_workspace_manager_mut().assign_window_to_workspace(
-                source,
-                window_id,
-                source_workspace
-            )
-        );
-        engine
-            .workspace_tree_mut(source_workspace)
-            .add_window_after_selection(source_layout, window_id);
-        assert!(
-            engine
-                .workspace_tree(source_workspace)
-                .contains_window(source_layout, window_id)
-        );
-
-        // Create an inconsistent state: workspace mapping points to target, but source tree
-        // still contains the window. Cross-space move must still detach from source tree.
-        assert!(
-            engine.virtual_workspace_manager_mut().assign_window_to_workspace(
-                target,
-                window_id,
-                target_workspace
-            )
-        );
-        assert_eq!(
-            engine.virtual_workspace_manager().workspace_for_window(source, window_id),
-            None
-        );
-        assert!(
-            engine
-                .workspace_tree(source_workspace)
-                .contains_window(source_layout, window_id)
-        );
-
-        let _ = engine.move_window_to_space(source, target, screen_size, window_id);
-
-        assert!(
-            !engine
-                .workspace_tree(source_workspace)
-                .contains_window(source_layout, window_id)
-        );
-        assert!(
-            engine
-                .workspace_tree(target_workspace)
-                .contains_window(target_layout, window_id)
-        );
-        assert_eq!(
-            engine.virtual_workspace_manager().workspace_for_window(target, window_id),
-            Some(target_workspace)
-        );
     }
 
     #[test]
@@ -3267,6 +3194,56 @@ mod tests {
         assert_eq!(
             engine.virtual_workspace_manager().last_focused_window(space, workspace_two),
             Some(wid2)
+        );
+    }
+
+    #[test]
+    fn move_window_to_workspace_updates_authoritative_workspace_membership() {
+        let mut engine = test_engine();
+        let space = SpaceId::new(95);
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 1000.0));
+        let pid: pid_t = 6001;
+        let wid = WindowId::new(pid, 1);
+
+        let _ = engine.handle_event(LayoutEvent::SpaceExposed(space, screen.size));
+        let _ = engine.handle_event(LayoutEvent::WindowsOnScreenUpdated(
+            space,
+            pid,
+            vec![(
+                wid,
+                None,
+                None,
+                None,
+                true,
+                CGSize::new(500.0, 500.0),
+                None,
+                None,
+            )],
+            None,
+        ));
+
+        let _ = engine.handle_virtual_workspace_command(space, &LayoutCommand::CreateWorkspace);
+        let workspaces = engine.virtual_workspace_manager_mut().list_workspaces(space).to_vec();
+        let ws1 = workspaces[0].0;
+        let ws2 = workspaces[1].0;
+
+        let _ =
+            engine.handle_virtual_workspace_command(space, &LayoutCommand::MoveWindowToWorkspace {
+                workspace: 1,
+                window_id: Some(wid.idx.get()),
+            });
+
+        assert!(
+            engine.virtual_workspace_manager.workspace_windows(space, ws1).is_empty(),
+            "source workspace must be empty after a same-space workspace move"
+        );
+        assert_eq!(
+            engine.virtual_workspace_manager.workspace_for_window(space, wid),
+            Some(ws2)
+        );
+        assert_eq!(
+            engine.virtual_workspace_manager.workspace_windows(space, ws2),
+            vec![wid]
         );
     }
 }

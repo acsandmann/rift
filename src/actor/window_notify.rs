@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tracing::{debug, trace};
 
 use super::reactor::{self, Event};
-use super::spaces;
+use super::{mission_control_observer, spaces};
 use crate::actor::app::WindowId;
 use crate::actor::reactor::Requested;
 use crate::common::collections::{HashMap, HashSet};
@@ -80,6 +80,7 @@ pub type Receiver = crate::actor::Receiver<Request>;
 pub struct WindowNotify {
     events_tx: reactor::Sender,
     spaces_tx: spaces::Sender,
+    mission_control_tx: Option<mission_control_observer::Sender>,
     requests_rx: Option<Receiver>,
     subscribed: HashSet<CGSEventType>,
     initial_events: Vec<CGSEventType>,
@@ -90,6 +91,7 @@ impl WindowNotify {
     pub fn new(
         events_tx: reactor::Sender,
         spaces_tx: spaces::Sender,
+        mission_control_tx: Option<mission_control_observer::Sender>,
         requests_rx: Receiver,
         initial_events: &[CGSEventType],
         tx_store: Option<WindowTxStore>,
@@ -97,6 +99,7 @@ impl WindowNotify {
         Self {
             events_tx,
             spaces_tx,
+            mission_control_tx,
             requests_rx: Some(requests_rx),
             subscribed: HashSet::default(),
             initial_events: initial_events.iter().copied().collect(),
@@ -115,6 +118,7 @@ impl WindowNotify {
                 event,
                 self.events_tx.clone(),
                 self.spaces_tx.clone(),
+                self.mission_control_tx.clone(),
                 self.tx_store.clone(),
             ) {
                 Ok(()) => {
@@ -150,6 +154,7 @@ impl WindowNotify {
                     event,
                     self.events_tx.clone(),
                     self.spaces_tx.clone(),
+                    self.mission_control_tx.clone(),
                     self.tx_store.clone(),
                 ) {
                     Ok(()) => {
@@ -173,6 +178,7 @@ impl WindowNotify {
         event: CGSEventType,
         events_tx: reactor::Sender,
         spaces_tx: spaces::Sender,
+        mission_control_tx: Option<mission_control_observer::Sender>,
         tx_store: Option<WindowTxStore>,
     ) -> Result<(), i32> {
         let res = window_notify::init(event);
@@ -187,6 +193,11 @@ impl WindowNotify {
                 trace!(?event, ?evt, "got event");
 
                 match event {
+                    CGSEventType::Known(KnownCGSEvent::MissionControlEntered) => {
+                        if let Some(tx) = mission_control_tx.as_ref() {
+                            tx.send(mission_control_observer::Request::WindowServerEnter);
+                        }
+                    }
                     CGSEventType::Known(KnownCGSEvent::SpaceDestroyed) => {
                         if let Some(space_id) = evt.space_id {
                             spaces_tx.send(spaces::Event::SpaceDestroyed(SpaceId::new(space_id)));

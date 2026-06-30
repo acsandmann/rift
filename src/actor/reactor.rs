@@ -65,6 +65,7 @@ use crate::sys::window_server::{
 
 pub type Sender = actor::Sender<Event>;
 type Receiver = actor::Receiver<Event>;
+use managers::RefreshQuarantineState;
 pub use query::ReactorQueryHandle;
 
 pub(crate) use crate::model::reactor::{
@@ -196,8 +197,19 @@ pub enum Event {
     /// The mouse cursor moved over a new window. Only sent if focus-follows-
     /// mouse is enabled.
     MouseMoved(#[serde(with = "crate::sys::geometry::CGPointDef")] CGPoint),
-    /// System woke from sleep; used to re-subscribe SLS notifications.
+    /// Forwarded by the spaces actor after wake has been observed.
+    ///
+    /// The spaces actor is the authority for sleep/lock/display lifecycle.
+    /// The reactor uses this only to reopen refresh gating and resubscribe
+    /// WindowServer notifications once the topology authority says wake
+    /// processing has advanced.
     SystemWoke,
+    #[serde(skip)]
+    SystemWillSleep,
+    #[serde(skip)]
+    SessionDidResignActive,
+    #[serde(skip)]
+    SessionDidBecomeActive,
 
     #[serde(skip)]
     DisplayChurnBegin,
@@ -253,6 +265,7 @@ pub struct Reactor {
     menu_manager: managers::MenuManager,
     mission_control_manager: managers::MissionControlManager,
     refocus_manager: managers::RefocusManager,
+    refresh_quarantine_manager: managers::RefreshQuarantineManager,
     pending_space_change_manager: managers::PendingSpaceChangeManager,
     active_spaces: HashSet<SpaceId>,
     pub above_window: Option<WindowServerId>,
@@ -363,6 +376,15 @@ impl Reactor {
             refocus_manager: managers::RefocusManager {
                 stale_cleanup_state: StaleCleanupState::Enabled,
                 refocus_state: RefocusState::None,
+            },
+            refresh_quarantine_manager: managers::RefreshQuarantineManager {
+                sleeping: false,
+                session_inactive: false,
+                display_churn_active: false,
+                awaiting_post_wake_snapshot: false,
+                awaiting_post_session_snapshot: false,
+                pending_visible_refresh: false,
+                deferred_refresh_tracks_mission_control: false,
             },
             pending_space_change_manager: managers::PendingSpaceChangeManager {
                 pending_space_change: None,
@@ -519,52 +541,90 @@ impl Reactor {
     }
 
     fn refresh_window_server_snapshot_for_active_spaces(&mut self) {
-        let ws_info = self.authoritative_window_snapshot_for_active_spaces();
-        self.update_complete_window_server_info(ws_info);
+        let active_windows = self.authoritative_active_space_windows();
+        self.refresh_active_space_window_membership(active_windows);
     }
 
-    fn authoritative_window_snapshot_for_active_spaces(&self) -> Vec<WindowServerInfo> {
+    fn authoritative_active_space_windows(&self) -> Vec<(WindowServerId, Option<SpaceId>)> {
         let active_space_ids: Vec<u64> = self.active_space_ids().into_iter().collect();
         if active_space_ids.is_empty() {
             return Vec::new();
         }
 
-        let active_wsids: HashSet<u32> =
-            crate::sys::window_server::space_window_list_for_connection(
-                &active_space_ids,
-                0,
-                false,
-            )
-            .into_iter()
-            .collect();
-        if active_wsids.is_empty() {
-            return Vec::new();
-        }
+        // Native-space membership after wake/space-switch must come from the
+        // active spaces' own window list. Intersecting that with the global
+        // "on-screen" list or treating it as a complete visibility resnapshot
+        // reintroduces the exact sleep/wake race we are trying to avoid:
+        // WindowServer can report the new active space before the global visible
+        // list catches up, which makes an occupied space look empty and clears the
+        // reactor's visibility basis until a later AX refresh.
+        //
+        // The contract here is intentionally narrower:
+        // - `space_window_list_for_connection` tells us which WS ids belong to the
+        //   currently active native spaces.
+        // - We reconcile only active-space visibility/membership from that list.
+        // - We do *not* pretend this is a complete WindowServer snapshot for every
+        //   space, so we do not globally clear visibility here.
+        let active_spaces: HashSet<SpaceId> =
+            active_space_ids.iter().copied().map(SpaceId::new).collect();
+        let single_active_space =
+            (active_space_ids.len() == 1).then(|| SpaceId::new(active_space_ids[0]));
 
-        window_server::get_visible_windows_with_layer(None)
+        crate::sys::window_server::space_window_list_for_connection(&active_space_ids, 0, false)
             .into_iter()
-            .filter(|window| active_wsids.contains(&window.id.as_u32()))
+            .map(WindowServerId::new)
+            .map(|wsid| {
+                let space = window_server::window_space(wsid)
+                    .filter(|space| active_spaces.contains(space))
+                    .or_else(|| {
+                        self.window_manager
+                            .window_server_space(wsid)
+                            .filter(|space| active_spaces.contains(space))
+                    })
+                    .or(single_active_space);
+                (wsid, space)
+            })
             .collect()
     }
 
-    fn filter_ws_info_to_active_spaces(
-        &self,
-        ws_info: Vec<WindowServerInfo>,
-    ) -> Vec<WindowServerInfo> {
-        let active_space_ids = self.active_space_ids();
-        if active_space_ids.is_empty() {
-            return Vec::new();
+    fn has_known_windows_for_active_spaces(&self) -> bool {
+        self.window_manager.iter_windows().any(|(wid, _)| {
+            self.authoritative_space_for_window_id(wid)
+                .is_some_and(|space| self.is_space_active(space))
+        })
+    }
+
+    fn refresh_active_space_window_membership(
+        &mut self,
+        active_windows: Vec<(WindowServerId, Option<SpaceId>)>,
+    ) {
+        let active_wsids: HashSet<WindowServerId> =
+            active_windows.iter().map(|(wsid, _)| *wsid).collect();
+
+        // An empty active-space list is valid, but an empty WS-id result while we
+        // already know about windows assigned to the active space is typically the
+        // transient post-wake race on same-display space switches. Preserve the
+        // existing visibility basis in that case and let the follow-up AX refresh
+        // reconcile instead of blanking the workspace immediately.
+        if active_wsids.is_empty() && self.has_known_windows_for_active_spaces() {
+            return;
         }
 
-        ws_info
-            .into_iter()
-            .filter(|window| {
-                self.window_manager
-                    .window_server_space(window.id)
-                    .or_else(|| self.best_space_for_frame(&window.frame))
-                    .is_some_and(|space| active_space_ids.contains(&space.get()))
-            })
-            .collect()
+        let previously_visible_wsids: Vec<_> =
+            self.window_manager.iter_visible_window_server_ids().collect();
+        for wsid in previously_visible_wsids {
+            if !active_wsids.contains(&wsid) {
+                self.window_manager.mark_window_hidden(wsid);
+            }
+        }
+
+        for (wsid, space) in active_windows {
+            if let Some(space) = space {
+                self.window_manager.set_window_server_space(wsid, Some(space));
+            }
+            self.window_manager.mark_window_visible(wsid);
+            self.window_manager.clear_window_server_observed(wsid);
+        }
     }
 
     fn is_login_window_pid(&self, pid: pid_t) -> bool {
@@ -733,9 +793,55 @@ impl Reactor {
         )
     }
 
-    fn set_login_window_active(&mut self, active: bool) {
-        self.space_activation_policy.set_login_window_active(active);
-        self.recompute_and_set_active_spaces_from_current_screens();
+    fn refresh_quarantine_state(&self) -> RefreshQuarantineState {
+        self.refresh_quarantine_manager.state()
+    }
+
+    fn refreshes_blocked(&self) -> bool { self.refresh_quarantine_manager.blocks_refreshes() }
+
+    fn defer_visible_refresh(&mut self, track_mission_control_refresh: bool) {
+        self.refresh_quarantine_manager.pending_visible_refresh = true;
+        self.refresh_quarantine_manager.deferred_refresh_tracks_mission_control |=
+            track_mission_control_refresh;
+    }
+
+    fn flush_deferred_visible_refresh(&mut self) {
+        if self.refreshes_blocked() || !self.refresh_quarantine_manager.pending_visible_refresh {
+            return;
+        }
+
+        let track_mission_control_refresh =
+            self.refresh_quarantine_manager.deferred_refresh_tracks_mission_control;
+        self.refresh_quarantine_manager.pending_visible_refresh = false;
+        self.refresh_quarantine_manager.deferred_refresh_tracks_mission_control = false;
+        self.request_visible_windows_for_apps(track_mission_control_refresh);
+    }
+
+    // All lifecycle churn is upstreamed through the spaces actor. The reactor
+    // only remembers that one visibility refresh is owed, then flushes it once
+    // every upstream gate is open again.
+    fn request_refresh_when_spaces_actor_stabilizes(&mut self) {
+        self.defer_visible_refresh(true);
+        self.flush_deferred_visible_refresh();
+    }
+
+    fn release_post_instability_quarantine_after_authoritative_snapshot(&mut self) {
+        let released_wake = self.refresh_quarantine_manager.awaiting_post_wake_snapshot;
+        let released_session = self.refresh_quarantine_manager.awaiting_post_session_snapshot;
+
+        if !released_wake && !released_session {
+            return;
+        }
+
+        self.refresh_quarantine_manager.awaiting_post_wake_snapshot = false;
+        self.refresh_quarantine_manager.awaiting_post_session_snapshot = false;
+        if released_wake {
+            self.refresh_quarantine_manager.sleeping = false;
+        }
+        if released_session {
+            self.refresh_quarantine_manager.session_inactive = false;
+        }
+        self.flush_deferred_visible_refresh();
     }
 
     fn handle_space_lifecycle(&mut self, space: SpaceId, created: bool) {
@@ -753,17 +859,36 @@ impl Reactor {
         self.recording_manager.record.on_event(&event);
 
         match event {
-            Event::DisplayChurnBegin => return,
+            Event::SystemWillSleep => {
+                self.refresh_quarantine_manager.sleeping = true;
+                self.refresh_quarantine_manager.awaiting_post_wake_snapshot = false;
+                return;
+            }
+            Event::SystemWoke => {
+                self.refresh_quarantine_manager.sleeping = true;
+                self.refresh_quarantine_manager.awaiting_post_wake_snapshot = true;
+                SystemEventHandler::handle_system_woke(self);
+                self.defer_visible_refresh(true);
+                return;
+            }
+            Event::SessionDidResignActive => {
+                self.refresh_quarantine_manager.session_inactive = true;
+                self.refresh_quarantine_manager.awaiting_post_session_snapshot = false;
+                return;
+            }
+            Event::SessionDidBecomeActive => {
+                self.refresh_quarantine_manager.session_inactive = true;
+                self.refresh_quarantine_manager.awaiting_post_session_snapshot = true;
+                self.defer_visible_refresh(true);
+                return;
+            }
+            Event::DisplayChurnBegin => {
+                self.refresh_quarantine_manager.display_churn_active = true;
+                return;
+            }
             Event::DisplayChurnEnd => {
-                // Display churn quarantines frame/discovery events while macOS is
-                // reattaching displays or rebuilding spaces. When the churn ends
-                // without a meaningful topology diff, the reactor would otherwise
-                // have no follow-up signal to rediscover already-tracked windows
-                // that apps left offscreen. Re-requesting visible windows here is
-                // intentionally idempotent: discovery marks the refresh as pending,
-                // suppresses stale cleanup for that pass, and only re-emits the
-                // existing workspace/window mapping when nothing actually changed.
-                self.force_refresh_all_windows();
+                self.refresh_quarantine_manager.display_churn_active = false;
+                self.request_refresh_when_spaces_actor_stabilizes();
                 return;
             }
             _ => {}
@@ -812,32 +937,11 @@ impl Reactor {
             }
             Event::ApplicationGloballyDeactivated(pid) => {
                 self.clear_menu_state_for_pid(pid);
-                if self.is_login_window_pid(pid) {
-                    self.set_login_window_active(false);
-                }
             }
             Event::ApplicationGloballyActivated(pid) => {
                 self.clear_menu_state_for_non_owner(pid);
-                if self.is_login_window_pid(pid) {
-                    self.set_login_window_active(true);
-                    self.force_refresh_all_windows();
-                } else {
-                    if self.space_activation_policy.login_window_active {
-                        // macOS sometimes activates loginwindow during wake without sending a
-                        // corresponding deactivation. Any subsequent non-login activation
-                        // indicates the user is back, so clear suppression.
-                        self.set_login_window_active(false);
-                    }
-                    if let Some(app) = self.app_manager.apps.get(&pid) {
-                        if let Err(e) =
-                            app.handle.send(crate::actor::app::Request::GetVisibleWindows)
-                        {
-                            warn!(
-                                "Failed to send GetVisibleWindows on global activation for app {}: {}",
-                                pid, e
-                            );
-                        }
-                    }
+                if !self.is_login_window_pid(pid) {
+                    self.request_visible_windows_for_pid(pid, false);
                     self.handle_app_activation_workspace_switch(pid);
                 }
             }
@@ -845,6 +949,15 @@ impl Reactor {
                 SystemEventHandler::handle_register_wm_sender(self, sender)
             }
             Event::WindowsDiscovered { pid, new, known_visible } => {
+                if self.refreshes_blocked() {
+                    debug!(
+                        pid,
+                        state = ?self.refresh_quarantine_state(),
+                        "Ignoring windows discovery while refresh quarantine is active"
+                    );
+                    self.defer_visible_refresh(true);
+                    return;
+                }
                 AppEventHandler::handle_windows_discovered(self, pid, new, known_visible);
             }
             Event::WindowCreated(wid, window, ws_info, mouse_state) => {
@@ -885,7 +998,12 @@ impl Reactor {
                 WindowEventHandler::handle_window_title_changed(self, wid, new_title);
             }
             Event::SpaceStateChanged(space_state) => {
+                let releases_lifecycle_refresh_quarantine =
+                    space_state.releases_lifecycle_refresh_quarantine;
                 SpaceEventHandler::handle_space_state_changed(self, space_state);
+                if releases_lifecycle_refresh_quarantine {
+                    self.release_post_instability_quarantine_after_authoritative_snapshot();
+                }
             }
             Event::MouseUp => {
                 DragEventHandler::handle_mouse_up(self);
@@ -908,7 +1026,6 @@ impl Reactor {
                     self.above_window = None;
                 }
             }
-            Event::SystemWoke => SystemEventHandler::handle_system_woke(self),
             Event::MissionControlNativeEntered => {
                 SpaceEventHandler::handle_mission_control_native_entered(self);
             }
@@ -1033,7 +1150,7 @@ impl Reactor {
             self.window_manager.track_window_server_info(*info);
 
             if let Some(wid) = self.window_manager.tracked_window_id(info.id) {
-                let (server_id, is_minimized, is_ax_standard, is_ax_root) =
+                let (server_id, is_minimized, is_ax_standard, is_ax_root, was_manageable) =
                     if let Some(window) = self.window_manager.window_mut(wid) {
                         if info.layer == 0 {
                             window.frame_monotonic = info.frame;
@@ -1043,6 +1160,7 @@ impl Reactor {
                             window.info.is_minimized,
                             window.info.is_standard,
                             window.info.is_root,
+                            window.matches_filter(WindowFilter::EffectivelyManageable),
                         )
                     } else {
                         continue;
@@ -1057,17 +1175,51 @@ impl Reactor {
                 if let Some(window) = self.window_manager.window_mut(wid) {
                     window.is_manageable = manageable;
                 }
+                self.remove_window_if_manageability_lost(wid, was_manageable, manageable);
             }
         }
     }
 
+    fn remove_window_if_manageability_lost(
+        &mut self,
+        wid: WindowId,
+        was_effectively_manageable: bool,
+        is_manageable: bool,
+    ) {
+        if was_effectively_manageable && !is_manageable {
+            self.send_layout_event(LayoutEvent::WindowRemoved(wid));
+        }
+    }
+
     fn check_for_new_windows(&mut self) {
-        // TODO: Do this correctly/more optimally using CGWindowListCopyWindowInfo
-        // (see notes for on_windows_discovered below).
+        // AX discovery remains the source of truth for enumerating app windows.
+        // Native-space membership/visibility is supplied separately by the spaces
+        // actor; do not replace this with the global CG on-screen window list.
         self.request_visible_windows_for_apps(false);
     }
 
+    fn request_visible_windows_for_pid(&mut self, pid: pid_t, track_mission_control_refresh: bool) {
+        if self.refreshes_blocked() {
+            self.defer_visible_refresh(track_mission_control_refresh);
+            return;
+        }
+
+        let sent = self
+            .app_manager
+            .apps
+            .get(&pid)
+            .is_some_and(|app| app.handle.send(Request::GetVisibleWindows).is_ok());
+        if sent && track_mission_control_refresh {
+            self.mission_control_manager.pending_mission_control_refresh.insert(pid);
+        }
+    }
+
     fn request_visible_windows_for_apps(&mut self, track_mission_control_refresh: bool) {
+        if self.refreshes_blocked() {
+            self.defer_visible_refresh(track_mission_control_refresh);
+            return;
+        }
+
         let mut refreshed_pids = Vec::new();
         for (&pid, app) in &self.app_manager.apps {
             // Errors mean the app terminated (and a termination event is coming); ignore.
@@ -1177,7 +1329,7 @@ impl Reactor {
     fn finalize_space_change(
         &mut self,
         spaces: &[Option<SpaceId>],
-        ws_info: Vec<WindowServerInfo>,
+        active_windows: Vec<(WindowServerId, Option<SpaceId>)>,
     ) {
         self.refocus_manager.stale_cleanup_state = if spaces.iter().all(|space| space.is_none()) {
             StaleCleanupState::Suppressed
@@ -1190,8 +1342,7 @@ impl Reactor {
                 self.send_layout_event(LayoutEvent::WindowFocused(space, main_window));
             }
         }
-        let ws_info = self.filter_ws_info_to_active_spaces(ws_info);
-        self.update_complete_window_server_info(ws_info);
+        self.refresh_active_space_window_membership(active_windows);
         self.check_for_new_windows();
 
         if let Some(space) =
@@ -1496,6 +1647,11 @@ impl Reactor {
     }
 
     fn reconcile_windows_with_authoritative_spaces(&mut self) -> bool {
+        if self.refreshes_blocked() {
+            self.defer_visible_refresh(true);
+            return false;
+        }
+
         let windows: Vec<_> = self.window_manager.iter_windows().map(|(wid, _)| wid).collect();
         let mut layout_changed = false;
 
@@ -1533,7 +1689,6 @@ impl Reactor {
     fn discovery_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
         let window = self.window_manager.window(wid)?;
         let authoritative = self.authoritative_space_for_window_id(wid);
-
         if authoritative.is_some_and(|space| !self.is_space_active(space)) {
             return authoritative;
         }
@@ -1624,21 +1779,21 @@ impl Reactor {
                     .workspace_for_window(space, wid)
                     .or_else(|| self.layout_manager.layout_engine.active_workspace(space))
                 {
-                    // Drop any floating position stored under the source workspace before
-                    // recording the new one. Otherwise the origin display's layout pass keeps
-                    // re-positioning the window (get_workspace_floating_positions only checks
-                    // is_floating, not current assignment) while the destination positions it
-                    // too - the window ping-pongs between displays after a cross-display drag.
-                    self.layout_manager
-                        .layout_engine
-                        .virtual_workspace_manager_mut()
-                        .remove_floating_position(wid);
                     self.layout_manager
                         .layout_engine
                         .virtual_workspace_manager_mut()
                         .store_floating_position(space, ws_id, wid, session.last_frame);
                 }
             }
+        }
+
+        if session.origin_space != final_space
+            && let Some(target_space) = final_space
+            && let Some(wsid) =
+                self.window_manager.window(wid).and_then(|window| window.info.sys_id)
+        {
+            self.window_manager.set_window_server_space(wsid, Some(target_space));
+            self.window_manager.mark_window_visible(wsid);
         }
 
         needs_layout
@@ -2737,22 +2892,27 @@ impl Reactor {
         if !self.has_user_space_context() {
             return;
         }
-        let ws_info = window_server::get_visible_windows_with_layer(None);
-        self.refresh_windows_after_mission_control_with_ws_info(ws_info);
+        let active_windows = self.authoritative_active_space_windows();
+        self.refresh_windows_after_mission_control_with_active_windows(active_windows);
     }
 
-    fn refresh_windows_after_mission_control_with_ws_info(
+    fn refresh_windows_after_mission_control_with_active_windows(
         &mut self,
-        ws_info: Vec<WindowServerInfo>,
+        active_windows: Vec<(WindowServerId, Option<SpaceId>)>,
     ) {
+        if self.refreshes_blocked() {
+            self.defer_visible_refresh(true);
+            return;
+        }
+
         let previously_visible_wsids: Vec<_> =
             self.window_manager.iter_visible_window_server_ids().collect();
 
         // Mission Control can move windows between native spaces without emitting a
-        // matching destroy/appear pair for the origin space. Treat the post-exit
-        // WindowServer snapshot as authoritative for visibility so stale origin-space
-        // windows are not kept visible until the user later changes spaces.
-        self.update_complete_window_server_info(ws_info);
+        // matching destroy/appear pair for the origin space. Reconcile the active
+        // spaces from the same space-aware WS-id list used everywhere else so we do
+        // not depend on the global CG on-screen window list during recovery.
+        self.refresh_active_space_window_membership(active_windows);
         for wsid in previously_visible_wsids {
             if self.window_manager.is_window_visible(wsid) {
                 continue;

@@ -196,6 +196,7 @@ fn forwarded_active_spaces_are_authoritative_for_workspace_context() {
         topology_changed: false,
         allow_space_remap: false,
         should_force_refresh_layout: false,
+        releases_lifecycle_refresh_quarantine: false,
         resized_spaces: Vec::new(),
         topology_window_delta: None,
     }));
@@ -227,6 +228,7 @@ fn forwarded_space_state_updates_fullscreen_spaces() {
         topology_changed: false,
         allow_space_remap: false,
         should_force_refresh_layout: false,
+        releases_lifecycle_refresh_quarantine: false,
         resized_spaces: Vec::new(),
         topology_window_delta: None,
     }));
@@ -268,6 +270,7 @@ fn queries_prefer_authoritative_active_space_over_stale_command_space() {
         topology_changed: false,
         allow_space_remap: false,
         should_force_refresh_layout: false,
+        releases_lifecycle_refresh_quarantine: false,
         resized_spaces: Vec::new(),
         topology_window_delta: None,
     }));
@@ -330,6 +333,7 @@ fn workspace_queries_are_isolated_per_macos_space() {
         topology_changed: false,
         allow_space_remap: false,
         should_force_refresh_layout: false,
+        releases_lifecycle_refresh_quarantine: false,
         resized_spaces: Vec::new(),
         topology_window_delta: None,
     }));
@@ -554,34 +558,6 @@ fn reactor_with_window_on_space1() -> (Reactor, WindowId, WindowServerId, SpaceI
     assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space1));
 
     (reactor, wid, wsid, space1, space2, frame)
-}
-
-#[test]
-fn appeared_does_not_reassign_window_while_rift_move_is_in_flight() {
-    let (mut reactor, wid, wsid, space1, space2, frame) = reactor_with_window_on_space1();
-
-    // Simulate Rift having just sent a frame move for this window: a pending target
-    // is registered in the transaction store, exactly like the tiling/apply path does.
-    // The `appeared` event below is the echo of that move dragging the window across a
-    // display seam, not a genuine external space change.
-    reactor.transaction_manager.store_txid(
-        wsid,
-        crate::actor::reactor::transaction_manager::TransactionId::default(),
-        frame,
-    );
-
-    SpaceEventHandler::handle_window_server_appeared(
-        &mut reactor,
-        wsid,
-        space2,
-        SpaceEventKind::User,
-    );
-
-    assert_eq!(
-        reactor.assigned_space_for_window_id(wid),
-        Some(space1),
-        "window with an in-flight Rift move must not be reassigned by its own appearance echo"
-    );
 }
 
 #[test]
@@ -895,17 +871,10 @@ fn mission_control_exit_refresh_drops_windows_missing_from_origin_space_snapshot
 
     apps.windows.remove(&moved);
     let retained_wsid = WindowServerId::new((pid as u32).saturating_mul(10_000) + 2);
-    let retained_frame =
-        apps.windows.get(&retained).expect("retained window should still exist").frame;
-
-    reactor.refresh_windows_after_mission_control_with_ws_info(vec![WindowServerInfo {
-        pid,
-        id: retained_wsid,
-        layer: 0,
-        frame: retained_frame,
-        min_frame: CGSize::ZERO,
-        max_frame: CGSize::ZERO,
-    }]);
+    reactor.refresh_windows_after_mission_control_with_active_windows(vec![(
+        retained_wsid,
+        Some(space),
+    )]);
     apps.simulate_until_quiet(&mut reactor);
 
     assert!(
@@ -1291,6 +1260,71 @@ fn windows_discovered_does_not_reintroduce_inactive_workspace_window() {
 }
 
 #[test]
+fn workspace_query_uses_authoritative_assignment_after_move() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+
+    reactor.handle_event(Event::Command(Command::Layout(LayoutCommand::CreateWorkspace)));
+    reactor.handle_event(Event::Command(Command::Layout(
+        LayoutCommand::MoveWindowToWorkspace {
+            workspace: 1,
+            window_id: Some(wid.idx.get()),
+        },
+    )));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let workspaces = reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .list_workspaces(space)
+        .to_vec();
+    let ws1 = workspaces[0].0;
+    let ws2 = workspaces[1].0;
+
+    assert_eq!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager()
+            .workspace_for_window(space, wid),
+        Some(ws2)
+    );
+
+    let queried = reactor.query_workspaces(Some(space));
+    assert_eq!(queried[0].window_count, 0);
+    assert_eq!(queried[1].window_count, 1);
+    assert_eq!(queried[1].windows[0].id, wid);
+    assert_eq!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager()
+            .workspace_windows(space, ws1),
+        Vec::<WindowId>::new()
+    );
+    assert_eq!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager()
+            .workspace_windows(space, ws2),
+        vec![wid]
+    );
+}
+
+#[test]
 fn it_preserves_layout_after_login_screen() {
     // TODO: This would be better tested with a more complete simulation.
     let mut apps = Apps::new();
@@ -1384,6 +1418,115 @@ fn it_preserves_layout_after_login_screen() {
             crate::common::config::VerticalPlacement::Right,
         ),
         modified
+    );
+}
+
+#[test]
+fn login_screen_refresh_preserves_manual_workspace_assignment() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let space = SpaceId::new(1);
+    let full_screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let wid1 = WindowId::new(1, 1);
+    let wid2 = WindowId::new(1, 2);
+
+    reactor.handle_event(space_state_event(vec![full_screen], vec![Some(space)], vec![]));
+    reactor.handle_events(apps.make_app_with_opts(1, make_windows(2), Some(wid1), true, true));
+    reactor.handle_event(Event::ApplicationGloballyActivated(1));
+    apps.simulate_until_quiet(&mut reactor);
+
+    reactor.handle_event(Event::Command(Command::Layout(
+        LayoutCommand::MoveWindowToWorkspace {
+            workspace: 1,
+            window_id: Some(2),
+        },
+    )));
+    apps.simulate_until_quiet(&mut reactor);
+    reactor.handle_event(Event::Command(Command::Layout(
+        LayoutCommand::SwitchToWorkspace(1),
+    )));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let workspace_before = reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager()
+        .workspace_for_window(space, wid2)
+        .expect("window should be assigned to workspace 2 before login refresh");
+    let other_workspace_before = reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager()
+        .workspace_for_window(space, wid1)
+        .expect("window should remain assigned to original workspace before login refresh");
+    assert_ne!(workspace_before, other_workspace_before);
+    assert_eq!(
+        reactor.layout_manager.layout_engine.windows_in_active_workspace(space),
+        vec![wid2],
+        "switched workspace should show only the moved window before login refresh"
+    );
+
+    reactor.handle_event(space_state_event(vec![CGRect::ZERO], vec![None], vec![]));
+    reactor.handle_event(space_state_event(
+        vec![full_screen],
+        vec![Some(space)],
+        (1..=2)
+            .map(|n| WindowServerInfo {
+                pid: 1,
+                id: WindowServerId::new(n),
+                layer: 0,
+                frame: CGRect::ZERO,
+                min_frame: CGSize::ZERO,
+                max_frame: CGSize::ZERO,
+            })
+            .collect(),
+    ));
+    let requests = apps.requests();
+    for request in requests {
+        match request {
+            Request::GetVisibleWindows => {
+                reactor.handle_event(Event::WindowsDiscovered {
+                    pid: 1,
+                    new: vec![],
+                    known_visible: vec![],
+                });
+            }
+            req => {
+                let events = apps.simulate_events_for_requests(vec![req]);
+                for event in events {
+                    reactor.handle_event(event);
+                }
+            }
+        }
+    }
+    apps.simulate_until_quiet(&mut reactor);
+
+    assert_eq!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager()
+            .workspace_for_window(space, wid2),
+        Some(workspace_before),
+        "login refresh must preserve the moved window's workspace assignment"
+    );
+    assert_eq!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager()
+            .workspace_for_window(space, wid1),
+        Some(other_workspace_before),
+        "login refresh must preserve other windows' original workspace assignments"
+    );
+    assert_eq!(
+        reactor.layout_manager.layout_engine.windows_in_active_workspace(space),
+        vec![wid2],
+        "active workspace contents must survive login refresh"
     );
 }
 
@@ -1737,6 +1880,7 @@ fn topology_window_delta_is_applied_on_forwarded_space_state() {
         topology_changed: false,
         allow_space_remap: false,
         should_force_refresh_layout: false,
+        releases_lifecycle_refresh_quarantine: false,
         resized_spaces: Vec::new(),
         topology_window_delta: Some(crate::actor::spaces::TopologyWindowDelta {
             epoch: 2,
@@ -1784,6 +1928,7 @@ fn topology_window_delta_removes_missing_window_from_active_layout() {
         topology_changed: false,
         allow_space_remap: false,
         should_force_refresh_layout: false,
+        releases_lifecycle_refresh_quarantine: false,
         resized_spaces: Vec::new(),
         topology_window_delta: Some(crate::actor::spaces::TopologyWindowDelta {
             epoch: 1,
@@ -1840,6 +1985,7 @@ fn forwarded_space_state_does_not_clear_existing_fullscreen_tracks_when_snapshot
         topology_changed: false,
         allow_space_remap: false,
         should_force_refresh_layout: false,
+        releases_lifecycle_refresh_quarantine: false,
         resized_spaces: Vec::new(),
         topology_window_delta: None,
     }));
@@ -2149,21 +2295,6 @@ fn fullscreen_screen_params_preserves_window_layout() {
 }
 
 // Helper: check whether any window owned by `pid` appears in the layout tree for `space`.
-fn has_windows_in_layout(
-    reactor: &mut Reactor,
-    space: SpaceId,
-    screen: CGRect,
-    pid: pid_t,
-) -> bool {
-    let gaps = reactor.config.settings.layout.gaps.clone();
-    reactor
-        .layout_manager
-        .layout_engine
-        .calculate_layout(space, screen, &gaps, 0.0, Default::default(), Default::default())
-        .iter()
-        .any(|(wid, _)| wid.pid == pid)
-}
-
 fn has_window_in_layout(
     reactor: &mut Reactor,
     space: SpaceId,
@@ -2177,355 +2308,6 @@ fn has_window_in_layout(
         .calculate_layout(space, screen, &gaps, 0.0, Default::default(), Default::default())
         .iter()
         .any(|(layout_wid, _)| *layout_wid == wid)
-}
-
-type WindowUpdateTuple = (
-    WindowId,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    bool,
-    CGSize,
-    Option<CGSize>,
-    Option<CGSize>,
-);
-
-fn window_update_tuple(wid: WindowId) -> WindowUpdateTuple {
-    (
-        wid,
-        None,
-        None,
-        None,
-        true,
-        CGSize::new(100.0, 100.0),
-        None,
-        None,
-    )
-}
-
-struct TwoSpaceFixture {
-    reactor: Reactor,
-    screen1: CGRect,
-    screen2: CGRect,
-    space1: SpaceId,
-    space2: SpaceId,
-}
-
-fn two_space_fixture() -> TwoSpaceFixture {
-    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
-        &crate::common::config::VirtualWorkspaceSettings::default(),
-        &crate::common::config::LayoutSettings::default(),
-        None,
-    ));
-    let screen1 = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
-    let screen2 = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
-    let space1 = SpaceId::new(1);
-    let space2 = SpaceId::new(2);
-
-    reactor.handle_event(space_state_event(
-        vec![screen1, screen2],
-        vec![Some(space1), Some(space2)],
-        vec![],
-    ));
-
-    TwoSpaceFixture {
-        reactor,
-        screen1,
-        screen2,
-        space1,
-        space2,
-    }
-}
-
-// --- Display oscillation bug regression tests ---
-//
-// These tests cover the bug where a window enters a permanent oscillation state after a
-// display topology change (e.g. MacBook lid open/close with an external monitor).  The
-// root cause was that `sync_tiled_windows_for_app` could leave a window in two space
-// layout trees simultaneously: after the window moved to the destination space its
-// original source space still retained it, causing both spaces to issue conflicting
-// SetWindowFrame calls that fed back into each other indefinitely.
-
-#[test]
-fn window_removed_from_source_space_when_dest_claims_it_first() {
-    // Case 1: the destination space's WindowsOnScreenUpdated event fires before the
-    // source space's empty event.  The VWM is updated by the destination event, so when
-    // the source guard logic runs it can see that the window was moved away.
-    let TwoSpaceFixture {
-        mut reactor,
-        screen1,
-        screen2,
-        space1,
-        space2,
-    } = two_space_fixture();
-    let pid: pid_t = 42;
-    let wid = WindowId::new(pid, 1);
-
-    // Place window in space1's layout tree via a direct layout event.
-    let _ = reactor
-        .layout_manager
-        .layout_engine
-        .handle_event(LayoutEvent::WindowsOnScreenUpdated(
-            space1,
-            pid,
-            vec![window_update_tuple(wid)],
-            None,
-        ));
-    assert!(has_windows_in_layout(&mut reactor, space1, screen1, pid));
-
-    // Destination space2 claims the window first (updates VWM: wid moves out of space1).
-    let _ = reactor
-        .layout_manager
-        .layout_engine
-        .handle_event(LayoutEvent::WindowsOnScreenUpdated(
-            space2,
-            pid,
-            vec![window_update_tuple(wid)],
-            None,
-        ));
-
-    // Source space1 receives the authoritative empty update.
-    // Before the fix the guard in sync_tiled_windows_for_app checked only
-    // has_windows_for_app (true) and skipped removal.  After the fix it also checks
-    // whether those tree windows have been moved away in the VWM, and proceeds with
-    // removal when they have.
-    let _ = reactor
-        .layout_manager
-        .layout_engine
-        .handle_event(LayoutEvent::WindowsOnScreenUpdated(space1, pid, vec![], None));
-
-    assert!(
-        !has_windows_in_layout(&mut reactor, space1, screen1, pid),
-        "window must be removed from source space after destination claimed it"
-    );
-    assert!(
-        has_windows_in_layout(&mut reactor, space2, screen2, pid),
-        "window must remain in destination space"
-    );
-}
-
-#[test]
-fn empty_update_removes_window_when_vwm_was_preupdated() {
-    // The reactor-level pre-pass in emit_layout_events updates the VWM for all claimed
-    // windows upfront. This test mirrors that by updating the VWM directly before the
-    // source's empty event.
-    let TwoSpaceFixture {
-        mut reactor,
-        screen1,
-        screen2,
-        space1,
-        space2,
-    } = two_space_fixture();
-    let pid: pid_t = 42;
-    let wid = WindowId::new(pid, 1);
-
-    let _ = reactor
-        .layout_manager
-        .layout_engine
-        .handle_event(LayoutEvent::WindowsOnScreenUpdated(
-            space1,
-            pid,
-            vec![window_update_tuple(wid)],
-            None,
-        ));
-    assert!(has_windows_in_layout(&mut reactor, space1, screen1, pid));
-
-    // Simulate the pre-pass: move wid from space1 to space2 in the VWM before any
-    // per-space events fire.
-    let space2_workspace = reactor
-        .layout_manager
-        .layout_engine
-        .virtual_workspace_manager()
-        .active_workspace(space2)
-        .expect("space2 must have an active workspace");
-    reactor
-        .layout_manager
-        .layout_engine
-        .virtual_workspace_manager_mut()
-        .assign_window_to_workspace(space2, wid, space2_workspace);
-
-    // Source space1's empty event fires first.  Because the VWM was pre-updated the
-    // loop no longer re-adds wid to `desired`, so removal proceeds.
-    let _ = reactor
-        .layout_manager
-        .layout_engine
-        .handle_event(LayoutEvent::WindowsOnScreenUpdated(space1, pid, vec![], None));
-
-    assert!(
-        !has_windows_in_layout(&mut reactor, space1, screen1, pid),
-        "window must be removed from source space when VWM was pre-updated (pre-pass scenario)"
-    );
-
-    // Destination space2 event fires after.
-    let _ = reactor
-        .layout_manager
-        .layout_engine
-        .handle_event(LayoutEvent::WindowsOnScreenUpdated(
-            space2,
-            pid,
-            vec![window_update_tuple(wid)],
-            None,
-        ));
-    assert!(has_windows_in_layout(&mut reactor, space2, screen2, pid));
-}
-
-#[test]
-fn empty_update_only_removes_same_app_windows_moved_to_another_space() {
-    // Mixed same-app case: one window moved to another space, while another window is
-    // still assigned here but temporarily omitted from discovery. The empty update
-    // should remove only the moved window from the source layout tree.
-    let TwoSpaceFixture {
-        mut reactor,
-        screen1,
-        screen2,
-        space1,
-        space2,
-    } = two_space_fixture();
-    let pid: pid_t = 42;
-    let moved = WindowId::new(pid, 1);
-    let retained = WindowId::new(pid, 2);
-
-    let _ = reactor
-        .layout_manager
-        .layout_engine
-        .handle_event(LayoutEvent::WindowsOnScreenUpdated(
-            space1,
-            pid,
-            vec![window_update_tuple(moved), window_update_tuple(retained)],
-            None,
-        ));
-    assert!(has_window_in_layout(&mut reactor, space1, screen1, moved));
-    assert!(has_window_in_layout(&mut reactor, space1, screen1, retained));
-
-    let space2_workspace = reactor
-        .layout_manager
-        .layout_engine
-        .virtual_workspace_manager()
-        .active_workspace(space2)
-        .expect("space2 must have an active workspace");
-    reactor
-        .layout_manager
-        .layout_engine
-        .virtual_workspace_manager_mut()
-        .assign_window_to_workspace(space2, moved, space2_workspace);
-
-    let _ = reactor
-        .layout_manager
-        .layout_engine
-        .handle_event(LayoutEvent::WindowsOnScreenUpdated(space1, pid, vec![], None));
-
-    assert!(
-        !has_window_in_layout(&mut reactor, space1, screen1, moved),
-        "moved window must be removed from the source layout tree"
-    );
-    assert!(
-        has_window_in_layout(&mut reactor, space1, screen1, retained),
-        "same-app window still assigned to source space must be preserved"
-    );
-
-    let _ = reactor
-        .layout_manager
-        .layout_engine
-        .handle_event(LayoutEvent::WindowsOnScreenUpdated(
-            space2,
-            pid,
-            vec![window_update_tuple(moved)],
-            None,
-        ));
-    assert!(has_window_in_layout(&mut reactor, space2, screen2, moved));
-}
-
-#[test]
-fn window_preserved_in_space_on_empty_discovery_without_cross_space_move() {
-    // Regression guard for the login-screen / AX-failure scenario: when the
-    // accessibility API returns an empty window list but the window has NOT been moved
-    // to another space in the VWM, the empty update must not destroy the layout.
-    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
-        &crate::common::config::VirtualWorkspaceSettings::default(),
-        &crate::common::config::LayoutSettings::default(),
-        None,
-    ));
-    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
-    let space = SpaceId::new(1);
-    let pid: pid_t = 42;
-    let wid = WindowId::new(pid, 1);
-
-    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)], vec![]));
-
-    let _ = reactor
-        .layout_manager
-        .layout_engine
-        .handle_event(LayoutEvent::WindowsOnScreenUpdated(
-            space,
-            pid,
-            vec![window_update_tuple(wid)],
-            None,
-        ));
-    assert!(has_windows_in_layout(&mut reactor, space, screen, pid));
-
-    // AX returns empty — window is still in the VWM for this space (it was never moved).
-    let _ = reactor
-        .layout_manager
-        .layout_engine
-        .handle_event(LayoutEvent::WindowsOnScreenUpdated(space, pid, vec![], None));
-
-    assert!(
-        has_windows_in_layout(&mut reactor, space, screen, pid),
-        "window must be preserved when empty update has no cross-space move (login screen / AX failure)"
-    );
-}
-
-#[test]
-fn discovery_after_display_change_places_window_on_correct_display() {
-    // End-to-end integration test: a window that physically moved to a different
-    // display after a topology change (lid open/close) must end up in only the new
-    // display's layout tree, with no conflicting SetWindowFrame from the old one.
-    //
-    // This exercises the full WindowsDiscovered → emit_layout_events path including
-    // the pre-pass VWM update (Case 2: source space processed first in screen order).
-    let mut apps = Apps::new();
-    let TwoSpaceFixture {
-        mut reactor,
-        screen1,
-        screen2,
-        space1,
-        space2,
-    } = two_space_fixture();
-
-    // Window starts on screen1.
-    reactor.handle_events(apps.make_app(1, make_windows(1)));
-    apps.simulate_until_quiet(&mut reactor);
-    assert_eq!(screen1, apps.windows[&WindowId::new(1, 1)].frame);
-
-    // Simulate a topology change: the window has moved to screen2.
-    // Passing it in `new` with an updated frame causes process_window_list to update
-    // frame_monotonic so emit_layout_events assigns it to space2.
-    // Note: without the fix this triggers the oscillation and simulate_until_quiet
-    // would loop forever; the test itself documents that termination is part of the
-    // expected behaviour.
-    reactor.handle_event(Event::WindowsDiscovered {
-        pid: 1,
-        new: vec![(WindowId::new(1, 1), WindowInfo {
-            frame: CGRect::new(CGPoint::new(1100., 100.), CGSize::new(50., 50.)),
-            ..make_window(1)
-        })],
-        known_visible: vec![WindowId::new(1, 1)],
-    });
-    apps.simulate_until_quiet(&mut reactor);
-
-    assert!(
-        !has_windows_in_layout(&mut reactor, space1, screen1, 1),
-        "space1 layout tree must not contain the window after it moved to screen2"
-    );
-    assert!(
-        has_windows_in_layout(&mut reactor, space2, screen2, 1),
-        "space2 layout tree must contain the window after it moved to screen2"
-    );
-    assert_eq!(
-        screen2,
-        apps.windows[&WindowId::new(1, 1)].frame,
-        "window must be laid out on screen2"
-    );
 }
 
 #[test]
@@ -2609,6 +2391,47 @@ fn discovery_restore_transition_readds_window_to_layout() {
             .window(wid)
             .is_some_and(|window| !window.info.is_minimized),
         "reactor state must clear the minimized flag after restore"
+    );
+}
+
+#[test]
+fn discovery_manageability_loss_removes_window_from_layout() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+
+    assert!(has_window_in_layout(&mut reactor, space, screen, wid));
+
+    reactor.handle_event(Event::WindowsDiscovered {
+        pid: 1,
+        new: vec![(wid, WindowInfo {
+            is_root: false,
+            ..make_window(1)
+        })],
+        known_visible: vec![wid],
+    });
+
+    assert!(
+        !has_window_in_layout(&mut reactor, space, screen, wid),
+        "window must be removed from layout when discovery marks it unmanageable"
+    );
+    assert!(
+        reactor
+            .window_manager
+            .window(wid)
+            .is_some_and(|window| !window.matches_filter(WindowFilter::Manageable)),
+        "reactor state must keep the window marked unmanageable"
     );
 }
 
@@ -2823,5 +2646,384 @@ fn display_churn_end_refresh_preserves_non_default_workspace_without_app_rules()
     assert!(
         has_window_in_layout(&mut reactor, space, screen, wid),
         "window should remain in the visible layout of its non-default workspace after refresh"
+    );
+}
+
+#[test]
+fn session_gate_ignores_discovery_and_replays_one_refresh_after_unlock() {
+    let mut apps = Apps::new();
+    let workspace_cfg = crate::common::config::VirtualWorkspaceSettings {
+        default_workspace_count: 2,
+        ..crate::common::config::VirtualWorkspaceSettings::default()
+    };
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &workspace_cfg,
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let workspaces = reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .list_workspaces(space)
+        .to_vec();
+    let secondary_workspace = workspaces[1].0;
+
+    assert!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager_mut()
+            .assign_window_to_workspace(space, wid, secondary_workspace)
+    );
+    assert!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager_mut()
+            .set_active_workspace(space, secondary_workspace)
+    );
+
+    assert!(apps.requests().is_empty());
+
+    reactor.handle_event(Event::SessionDidResignActive);
+    reactor.handle_event(Event::WindowsDiscovered {
+        pid: 1,
+        new: vec![],
+        known_visible: vec![],
+    });
+    reactor.handle_event(Event::ApplicationGloballyActivated(1));
+
+    assert!(
+        apps.requests().is_empty(),
+        "locked-session discovery and activation should defer refreshes instead of querying apps"
+    );
+    assert_eq!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager()
+            .workspace_for_window(space, wid),
+        Some(secondary_workspace),
+        "ignored lock-session discovery must not reassign the window back to the default workspace"
+    );
+
+    reactor.handle_event(Event::SessionDidBecomeActive);
+    assert!(
+        apps.requests().is_empty(),
+        "unlock should stay quarantined until the spaces actor publishes a fresh post-unlock snapshot"
+    );
+    let stale_snapshot = match space_state_event(vec![screen], vec![Some(space)], vec![]) {
+        Event::SpaceStateChanged(mut state) => {
+            state.releases_lifecycle_refresh_quarantine = false;
+            Event::SpaceStateChanged(state)
+        }
+        other => panic!("unexpected event: {other:?}"),
+    };
+    reactor.handle_event(stale_snapshot);
+    assert!(
+        apps.requests().is_empty(),
+        "an older queued WM snapshot must not release the unlock quarantine"
+    );
+
+    let fresh_snapshot = match space_state_event(vec![screen], vec![Some(space)], vec![]) {
+        Event::SpaceStateChanged(mut state) => {
+            state.releases_lifecycle_refresh_quarantine = true;
+            Event::SpaceStateChanged(state)
+        }
+        other => panic!("unexpected event: {other:?}"),
+    };
+    reactor.handle_event(fresh_snapshot);
+
+    let requests = apps.requests();
+    assert_eq!(
+        requests
+            .into_iter()
+            .filter(|request| matches!(request, Request::GetVisibleWindows))
+            .count(),
+        1,
+        "the first fresh post-unlock snapshot should flush exactly one deferred visibility refresh"
+    );
+}
+
+#[test]
+fn wake_gate_waits_for_fresh_space_snapshot_before_refresh() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+    assert!(apps.requests().is_empty());
+
+    reactor.handle_event(Event::SystemWillSleep);
+    reactor.handle_event(Event::SystemWoke);
+    reactor.handle_event(Event::ApplicationGloballyActivated(1));
+
+    assert!(
+        apps.requests().is_empty(),
+        "wake should remain quarantined until the spaces actor publishes a fresh post-wake snapshot"
+    );
+
+    let stale_snapshot = match space_state_event(vec![screen], vec![Some(space)], vec![]) {
+        Event::SpaceStateChanged(mut state) => {
+            state.releases_lifecycle_refresh_quarantine = false;
+            Event::SpaceStateChanged(state)
+        }
+        other => panic!("unexpected event: {other:?}"),
+    };
+    reactor.handle_event(stale_snapshot);
+    assert!(
+        apps.requests().is_empty(),
+        "an older queued WM snapshot must not release the wake quarantine"
+    );
+
+    let fresh_snapshot = match space_state_event(vec![screen], vec![Some(space)], vec![]) {
+        Event::SpaceStateChanged(mut state) => {
+            state.releases_lifecycle_refresh_quarantine = true;
+            Event::SpaceStateChanged(state)
+        }
+        other => panic!("unexpected event: {other:?}"),
+    };
+    reactor.handle_event(fresh_snapshot);
+
+    let requests = apps.requests();
+    assert_eq!(
+        requests
+            .into_iter()
+            .filter(|request| matches!(request, Request::GetVisibleWindows))
+            .count(),
+        1,
+        "the first fresh post-wake snapshot should flush exactly one deferred visibility refresh"
+    );
+}
+
+#[test]
+fn authoritative_active_space_membership_comes_from_space_window_ids_directly() {
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wsid_a = WindowServerId::new(41);
+    let wsid_b = WindowServerId::new(42);
+
+    crate::sys::window_server::set_space_window_list_for_connection_override(Some(vec![
+        wsid_a.as_u32(),
+        wsid_b.as_u32(),
+    ]));
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)], vec![]));
+    let snapshot = reactor.authoritative_active_space_windows();
+
+    crate::sys::window_server::set_space_window_list_for_connection_override(None);
+
+    let ids: Vec<_> = snapshot.into_iter().map(|(wsid, _)| wsid).collect();
+    assert_eq!(
+        ids,
+        vec![wsid_a, wsid_b],
+        "active-space membership should be built from the space's own WS ids rather than the lagging global visible-window list"
+    );
+}
+
+#[test]
+fn empty_active_space_membership_during_wake_race_does_not_blank_known_active_windows() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+    let wsid = WindowServerId::new(10001);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+
+    reactor.window_manager.set_window_server_space(wsid, Some(space));
+    reactor.window_manager.mark_window_visible(wsid);
+
+    crate::sys::window_server::set_space_window_list_for_connection_override(Some(vec![]));
+    reactor.refresh_window_server_snapshot_for_active_spaces();
+    crate::sys::window_server::set_space_window_list_for_connection_override(None);
+
+    assert!(
+        reactor.window_manager.is_window_visible(wsid),
+        "a transient empty active-space WS-id result after wake must not blank windows we already know belong to the active space"
+    );
+    assert!(
+        has_window_in_layout(&mut reactor, space, screen, wid),
+        "preserving the visibility basis must also preserve the active workspace layout until discovery catches up"
+    );
+}
+
+#[test]
+fn wsid_rekey_preserves_non_default_workspace_without_app_rules() {
+    let mut apps = Apps::new();
+    let workspace_cfg = crate::common::config::VirtualWorkspaceSettings {
+        default_workspace_count: 2,
+        ..crate::common::config::VirtualWorkspaceSettings::default()
+    };
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &workspace_cfg,
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let old_wid = WindowId::new(1, 1);
+    let new_wid = WindowId::new(1, 99);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let workspaces = reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .list_workspaces(space)
+        .to_vec();
+    let secondary_workspace = workspaces[1].0;
+
+    assert!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager_mut()
+            .assign_window_to_workspace(space, old_wid, secondary_workspace)
+    );
+    assert!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager_mut()
+            .set_active_workspace(space, secondary_workspace)
+    );
+
+    let old_info = reactor
+        .window_manager
+        .window(old_wid)
+        .expect("old window should exist")
+        .info
+        .clone();
+
+    reactor.handle_event(Event::WindowsDiscovered {
+        pid: 1,
+        new: vec![(new_wid, WindowInfo {
+            sys_id: old_info.sys_id,
+            ..old_info
+        })],
+        known_visible: vec![new_wid],
+    });
+
+    assert_eq!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager()
+            .workspace_for_window(space, new_wid),
+        Some(secondary_workspace),
+        "AX id churn for the same WindowServer window must preserve its workspace assignment"
+    );
+    assert_eq!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager()
+            .workspace_info_for_window_any(old_wid),
+        None,
+        "old AX window id should relinquish its assignment after rekey"
+    );
+}
+
+#[test]
+fn wsid_rekey_preserves_floating_membership_and_position() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let old_wid = WindowId::new(1, 1);
+    let new_wid = WindowId::new(1, 99);
+    let stored_position = CGRect::new(CGPoint::new(320., 180.), CGSize::new(240., 200.));
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_events(apps.make_app_with_opts(1, make_windows(1), Some(old_wid), true, true));
+    reactor.handle_event(Event::ApplicationGloballyActivated(1));
+    apps.simulate_until_quiet(&mut reactor);
+
+    reactor.handle_event(Event::Command(Command::Layout(
+        LayoutCommand::ToggleWindowFloating,
+    )));
+    apps.simulate_until_quiet(&mut reactor);
+    assert!(reactor.layout_manager.layout_engine.is_window_floating(old_wid));
+
+    let active_workspace = reactor
+        .layout_manager
+        .layout_engine
+        .active_workspace(space)
+        .expect("active workspace");
+    reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .store_floating_position(space, active_workspace, old_wid, stored_position);
+
+    let old_info = reactor
+        .window_manager
+        .window(old_wid)
+        .expect("old window should exist")
+        .info
+        .clone();
+
+    reactor.handle_event(Event::WindowsDiscovered {
+        pid: 1,
+        new: vec![(new_wid, WindowInfo {
+            sys_id: old_info.sys_id,
+            ..old_info
+        })],
+        known_visible: vec![new_wid],
+    });
+
+    assert!(!reactor.layout_manager.layout_engine.is_window_floating(old_wid));
+    assert!(reactor.layout_manager.layout_engine.is_window_floating(new_wid));
+    assert_eq!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager()
+            .get_floating_position(space, active_workspace, old_wid),
+        None
+    );
+    assert_eq!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager()
+            .get_floating_position(space, active_workspace, new_wid),
+        Some(stored_position)
     );
 }

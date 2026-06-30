@@ -342,6 +342,7 @@ unsafe extern "C" {
         key: *mut CFString,
         value: *mut CFType,
     ) -> CGError;
+    // this does not work and we should not rely on it
     pub fn CGSGetActiveSpace(cid: c_int) -> u64;
     pub fn CGSCopySpaces(cid: c_int, mask: CGSSpaceMask) -> *mut CFArray<SpaceId>;
     pub fn CGSCopyManagedDisplays(cid: c_int) -> *mut CFArray;

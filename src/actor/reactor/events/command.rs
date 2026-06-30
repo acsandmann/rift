@@ -462,7 +462,7 @@ impl CommandEventHandler {
         if let Some(app) = reactor.app_manager.apps.get(&window_id.pid) {
             if let Some(wsid) = window_server_id {
                 let txid = reactor.transaction_manager.generate_next_txid(wsid);
-                reactor.transaction_manager.set_last_sent_txid(wsid, txid);
+                reactor.transaction_manager.store_txid(wsid, txid, target_frame);
                 let _ = app.handle.send(crate::actor::app::Request::SetWindowFrame(
                     window_id,
                     target_frame,
@@ -490,6 +490,13 @@ impl CommandEventHandler {
             target_screen.frame.size,
             window_id,
         );
+
+        if reactor.assigned_space_for_window_id(window_id) == Some(target_space)
+            && let Some(wsid) = window_server_id
+        {
+            reactor.window_manager.set_window_server_space(wsid, Some(target_space));
+            reactor.window_manager.mark_window_visible(wsid);
+        }
 
         reactor.handle_layout_response(response, None);
 

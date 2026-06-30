@@ -25,6 +25,10 @@ impl WindowDiscoveryHandler {
             .window_manager
             .window(wid)
             .is_some_and(|window| window.info.is_minimized);
+        let was_manageable = reactor
+            .window_manager
+            .window(wid)
+            .is_some_and(|window| window.matches_filter(WindowFilter::EffectivelyManageable));
 
         if let Some(existing) = reactor.window_manager.window_mut(wid) {
             existing.info.title = info.title.clone();
@@ -60,6 +64,7 @@ impl WindowDiscoveryHandler {
                     existing.info.is_minimized = info.is_minimized;
                     existing.is_manageable = manageable;
                 }
+                reactor.remove_window_if_manageability_lost(wid, was_manageable, manageable);
             }
         }
 
@@ -122,7 +127,17 @@ impl WindowDiscoveryHandler {
         }
 
         if let Some(new_wsid) = new_sys_id {
-            reactor.window_manager.track_window_server_id(new_wsid, wid);
+            if let Some(previous_wid) = reactor.window_manager.track_window_server_id(new_wsid, wid)
+                && previous_wid != wid
+            {
+                reactor.window_manager.transfer_persistent_window_metadata(previous_wid, wid);
+                reactor
+                    .layout_manager
+                    .layout_engine
+                    .transfer_persistent_window_identity(previous_wid, wid);
+                reactor.send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(previous_wid));
+                reactor.window_manager.remove_window(previous_wid);
+            }
         }
     }
 

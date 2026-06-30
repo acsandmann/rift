@@ -1,6 +1,7 @@
 //! This actor manages the global notification queue, which tells us when an
 //! application is launched or focused or the screen state changes.
 
+use std::cell::Cell;
 use std::ffi::c_void;
 use std::{future, mem};
 
@@ -26,6 +27,7 @@ use crate::sys::skylight::{CGDisplayRegisterReconfigurationCallback, DisplayReco
 struct Instance {
     events_tx: wm_controller::Sender,
     spaces_tx: spaces::Sender,
+    session_inactive_hint: Cell<bool>,
 }
 
 unsafe impl Encode for Instance {
@@ -64,13 +66,18 @@ define_class! {
         fn recv_wake_event(&self, notif: &NSNotification) {
             trace!("{notif:#?}");
             self.send_space_event(spaces::Event::SystemDidWake);
-            self.send_event(WmEvent::SystemWoke);
         }
 
         #[unsafe(method(recvSleepEvent:))]
         fn recv_sleep_event(&self, notif: &NSNotification) {
             trace!("{notif:#?}");
             self.send_space_event(spaces::Event::SystemWillSleep);
+        }
+
+        #[unsafe(method(recvSessionEvent:))]
+        fn recv_session_event(&self, notif: &NSNotification) {
+            trace!("{notif:#?}");
+            self.handle_session_event(notif);
         }
 
         #[unsafe(method(recvPowerEvent:))]
@@ -101,7 +108,11 @@ define_class! {
 
 impl NotificationCenterInner {
     fn new(events_tx: wm_controller::Sender, spaces_tx: spaces::Sender) -> Retained<Self> {
-        let instance = Instance { events_tx, spaces_tx };
+        let instance = Instance {
+            events_tx,
+            spaces_tx,
+            session_inactive_hint: Cell::new(false),
+        };
         let handler: Retained<Self> = unsafe { msg_send![Self::alloc(), initWith: instance] };
         unsafe {
             CGDisplayRegisterReconfigurationCallback(
@@ -110,6 +121,18 @@ impl NotificationCenterInner {
             );
         }
         handler
+    }
+
+    fn enter_session_inactive(&self) {
+        if !self.ivars().session_inactive_hint.replace(true) {
+            self.send_space_event(spaces::Event::SessionDidResignActive);
+        }
+    }
+
+    fn leave_session_inactive(&self) {
+        if self.ivars().session_inactive_hint.replace(false) {
+            self.send_space_event(spaces::Event::SessionDidBecomeActive);
+        }
     }
 
     fn handle_screen_changed_event(&self, notif: &NSNotification) {
@@ -125,6 +148,25 @@ impl NotificationCenterInner {
             self.send_space_event(spaces::Event::ScreenRefreshRequested);
         } else {
             warn!("Unexpected screen changed event: {notif:?}");
+        }
+    }
+
+    fn handle_session_event(&self, notif: &NSNotification) {
+        use objc2_app_kit::*;
+        let name = &*notif.name();
+        let span = info_span!("notification_center::handle_session_event", ?name);
+        let _guard = span.enter();
+
+        if unsafe { NSWorkspaceSessionDidResignActiveNotification } == name
+            || name.to_string() == "com.apple.screenIsLocked"
+        {
+            self.enter_session_inactive();
+        } else if unsafe { NSWorkspaceSessionDidBecomeActiveNotification } == name
+            || name.to_string() == "com.apple.screenIsUnlocked"
+        {
+            self.leave_session_inactive();
+        } else {
+            warn!("Unexpected session event: {notif:?}");
         }
     }
 
@@ -153,7 +195,48 @@ impl NotificationCenterInner {
         let _guard = span.enter();
         if unsafe { NSWorkspaceDidDeactivateApplicationNotification } == name {
             self.send_event(WmEvent::AppGloballyDeactivated(pid));
+        } else if unsafe { NSWorkspaceDidActivateApplicationNotification } == name {
+            // Do not forward AppGloballyActivated from NSWorkspace here.
+            //
+            // Rift intentionally treats workspace app-activation notifications as a
+            // lock/login hint channel only. The authoritative global activation
+            // stream comes from the Carbon process actor (`K_EVENT_APP_FRONT_SWITCHED`),
+            // which still drives the reactor's activation-time visible-window refresh
+            // and workspace-switch behavior. Re-emitting activation here would create
+            // duplicate front-app events; the only notification-center-specific job is
+            // to notice loginwindow transitions that Carbon does not model as a
+            // session-lock boundary.
+            let bundle_id = app.bundle_id().as_deref().map(ToString::to_string);
+            if bundle_id.as_deref() == Some("com.apple.loginwindow") {
+                // OmniWM found loginwindow activation to be a more reliable lock
+                // boundary than the distributed lock notification alone. Route it
+                // through the same session event stream so the spaces actor
+                // buffers topology while macOS swaps in the lock-screen spaces.
+                self.enter_session_inactive();
+            } else if self.should_leave_session_inactive_for_activation(pid, bundle_id.as_deref()) {
+                self.leave_session_inactive();
+            }
         }
+    }
+
+    fn should_leave_session_inactive_for_activation(
+        &self,
+        activated_pid: i32,
+        activated_bundle_id: Option<&str>,
+    ) -> bool {
+        let frontmost = NSWorkspace::sharedWorkspace().frontmostApplication();
+        let frontmost_pid = frontmost.as_ref().map(|app| app.pid());
+        let frontmost_bundle_id = frontmost
+            .as_ref()
+            .and_then(|app| app.bundle_id().as_deref().map(ToString::to_string));
+
+        should_leave_session_inactive_after_non_login_activation(
+            self.ivars().session_inactive_hint.get(),
+            activated_pid,
+            activated_bundle_id,
+            frontmost_pid,
+            frontmost_bundle_id.as_deref(),
+        )
     }
 
     fn send_event(&self, event: WmEvent) { _ = self.ivars().events_tx.send(event); }
@@ -208,6 +291,19 @@ impl NotificationCenterInner {
             },
         );
     }
+}
+
+fn should_leave_session_inactive_after_non_login_activation(
+    session_inactive_hint: bool,
+    activated_pid: i32,
+    activated_bundle_id: Option<&str>,
+    frontmost_pid: Option<i32>,
+    frontmost_bundle_id: Option<&str>,
+) -> bool {
+    session_inactive_hint
+        && activated_bundle_id != Some("com.apple.loginwindow")
+        && frontmost_bundle_id != Some("com.apple.loginwindow")
+        && frontmost_pid == Some(activated_pid)
 }
 
 pub struct NotificationCenter {
@@ -269,7 +365,25 @@ impl NotificationCenter {
             );
             register_unsafe(
                 sel!(recvAppEvent:),
+                NSWorkspaceDidActivateApplicationNotification,
+                workspace_center,
+                workspace,
+            );
+            register_unsafe(
+                sel!(recvAppEvent:),
                 NSWorkspaceDidDeactivateApplicationNotification,
+                workspace_center,
+                workspace,
+            );
+            register_unsafe(
+                sel!(recvSessionEvent:),
+                NSWorkspaceSessionDidResignActiveNotification,
+                workspace_center,
+                workspace,
+            );
+            register_unsafe(
+                sel!(recvSessionEvent:),
+                NSWorkspaceSessionDidBecomeActiveNotification,
                 workspace_center,
                 workspace,
             );
@@ -304,6 +418,20 @@ impl NotificationCenter {
                 None,
                 NSNotificationSuspensionBehavior::DeliverImmediately,
             );
+            distributed_center.addObserver_selector_name_object_suspensionBehavior(
+                &handler,
+                sel!(recvSessionEvent:),
+                Some(&NSString::from_str("com.apple.screenIsLocked")),
+                None,
+                NSNotificationSuspensionBehavior::DeliverImmediately,
+            );
+            distributed_center.addObserver_selector_name_object_suspensionBehavior(
+                &handler,
+                sel!(recvSessionEvent:),
+                Some(&NSString::from_str("com.apple.screenIsUnlocked")),
+                None,
+                NSNotificationSuspensionBehavior::DeliverImmediately,
+            );
         };
 
         init_power_state();
@@ -317,9 +445,66 @@ impl NotificationCenter {
         self.inner.send_space_event(spaces::Event::ScreenRefreshRequested);
         self.inner.send_event(WmEvent::AppEventsRegistered);
         if let Some(app) = workspace.frontmostApplication() {
+            if app.bundle_id().as_deref().map(ToString::to_string).as_deref()
+                == Some("com.apple.loginwindow")
+            {
+                self.inner.enter_session_inactive();
+            }
             self.inner.send_event(WmEvent::AppGloballyActivated(app.pid()));
         }
 
         future::pending().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_leave_session_inactive_after_non_login_activation;
+
+    #[test]
+    fn unlock_fallback_requires_session_to_be_marked_inactive() {
+        assert!(!should_leave_session_inactive_after_non_login_activation(
+            false,
+            42,
+            Some("com.example.app"),
+            Some(42),
+            Some("com.example.app"),
+        ));
+    }
+
+    #[test]
+    fn unlock_fallback_rejects_loginwindow_or_non_frontmost_activations() {
+        assert!(!should_leave_session_inactive_after_non_login_activation(
+            true,
+            42,
+            Some("com.example.app"),
+            Some(7),
+            Some("com.example.app"),
+        ));
+        assert!(!should_leave_session_inactive_after_non_login_activation(
+            true,
+            42,
+            Some("com.example.app"),
+            Some(42),
+            Some("com.apple.loginwindow"),
+        ));
+        assert!(!should_leave_session_inactive_after_non_login_activation(
+            true,
+            42,
+            Some("com.apple.loginwindow"),
+            Some(42),
+            Some("com.apple.loginwindow"),
+        ));
+    }
+
+    #[test]
+    fn unlock_fallback_accepts_matching_frontmost_non_login_activation() {
+        assert!(should_leave_session_inactive_after_non_login_activation(
+            true,
+            42,
+            Some("com.example.app"),
+            Some(42),
+            Some("com.example.app"),
+        ));
     }
 }

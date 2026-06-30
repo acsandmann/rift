@@ -237,16 +237,10 @@ impl Reactor {
 
             let workspace_windows_ids: Vec<crate::actor::app::WindowId> =
                 if let Some(space) = space_id {
-                    if is_active {
-                        self.layout_manager.layout_engine.windows_in_active_workspace(space)
-                    } else {
-                        self.layout_manager
-                            .layout_engine
-                            .virtual_workspace_manager()
-                            .workspace_info(space, *workspace_id)
-                            .map(|ws| ws.windows().collect())
-                            .unwrap_or_default()
-                    }
+                    self.layout_manager
+                        .layout_engine
+                        .virtual_workspace_manager()
+                        .workspace_windows(space, *workspace_id)
                 } else {
                     Vec::new()
                 };
@@ -546,11 +540,7 @@ impl Reactor {
                 let mut ws_entries = Vec::new();
                 for (workspace_id, workspace_name) in workspaces {
                     let window_ids: Vec<crate::actor::app::WindowId> =
-                        if let Some(ws) = vwm.workspace_info(space, workspace_id) {
-                            ws.windows().collect()
-                        } else {
-                            Vec::new()
-                        };
+                        vwm.workspace_windows(space, workspace_id);
 
                     let last_focused = vwm.last_focused_window(space, workspace_id);
 

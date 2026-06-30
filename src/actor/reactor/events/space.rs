@@ -35,6 +35,7 @@ impl SpaceEventHandler {
             topology_changed: _,
             allow_space_remap: _,
             should_force_refresh_layout,
+            releases_lifecycle_refresh_quarantine: _,
             resized_spaces,
             topology_window_delta,
         } = space_state;
@@ -123,8 +124,8 @@ impl SpaceEventHandler {
             }
         }
 
-        let ws_info = reactor.authoritative_window_snapshot_for_active_spaces();
-        reactor.finalize_space_change(&spaces, ws_info);
+        let active_windows = reactor.authoritative_active_space_windows();
+        reactor.finalize_space_change(&spaces, active_windows);
         reactor.try_apply_pending_space_change();
 
         if should_force_refresh_layout {
@@ -225,23 +226,7 @@ impl SpaceEventHandler {
                             let layout_changed =
                                 restore_fullscreen_window_to_user_space(reactor, wsid, sid, wid)
                                     .unwrap_or_else(|| {
-                                        // `SpaceWindowCreated` (this event) also fires as a side
-                                        // effect of our own SetWindowFrame dragging a window across
-                                        // a display seam. If a Rift frame transaction is still in
-                                        // flight for this window, this appearance is our own echo —
-                                        // chasing it reassigns the window back and forth, which makes
-                                        // frame-resisting apps (e.g. Zen, Outlook) oscillate between
-                                        // displays. The authoritative space record is still updated
-                                        // above; only the layout reassignment is suppressed here.
-                                        if reactor
-                                            .transaction_manager
-                                            .get_target_frame(wsid)
-                                            .is_some()
-                                        {
-                                            false
-                                        } else {
-                                            reactor.reassign_window_to_authoritative_space(wid, sid)
-                                        }
+                                        reactor.reassign_window_to_authoritative_space(wid, sid)
                                     });
                             if layout_changed {
                                 let _ = reactor.update_layout_or_warn(false, false);

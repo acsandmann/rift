@@ -23,7 +23,7 @@ use tracing::{Instrument, Span, debug, info, instrument, trace, warn};
 use crate::actor;
 use crate::actor::reactor::transaction_manager::TransactionId;
 use crate::actor::reactor::{self, Event, Requested};
-use crate::common::collections::{HashMap, HashSet};
+use crate::common::collections::HashMap;
 use crate::model::tx_store::WindowTxStore;
 use crate::sys::app::NSRunningApplicationExt;
 pub use crate::sys::app::{AppInfo, WindowInfo, pid_t};
@@ -972,9 +972,10 @@ impl State {
                 _ = self.on_activation_changed();
             }
             AxNotificationKind::MainWindowChanged => {
-                // NOTE(acsandmann):
-                // because of apps like firefox that send delayed(or dont send at all) axuielementdestroyed/windowserverdisappeared
-                // this is a fallback to ensure we handle windows being closed
+                // `AXWindows` is filtered to the current macOS space, so using it as
+                // a membership list here will incorrectly "destroy" windows that
+                // merely live on another space. This fallback therefore only prunes
+                // windows whose AX element has actually gone invalid.
                 self.remove_stale_windows();
                 self.on_main_window_changed(None, false);
             }
@@ -1562,33 +1563,18 @@ impl State {
     }
 
     fn remove_stale_windows(&mut self) {
-        let mut stale_wids: HashSet<WindowId> = self.windows.keys().copied().collect();
-        match self.app.windows() {
-            Ok(elems) => {
-                for elem in elems {
-                    if let Ok(wid) = self.id(&elem) {
-                        stale_wids.remove(&wid);
-                    }
-                }
-            }
-            Err(e) => {
-                trace!(?e, "Failed to get windows; checking each tracked window");
-                let mut to_remove = Vec::new();
-                for (&wid, window) in self.windows.iter() {
-                    // InvalidUIElement means the window is gone
-                    if matches!(window.elem.role(), Err(AxError::Ax(AXError::InvalidUIElement))) {
-                        to_remove.push(wid);
-                    }
-                }
-                for wid in to_remove {
-                    self.remove_tracked_window(wid, "Removed stale window (individual check)");
-                }
-                return;
+        let mut to_remove = Vec::new();
+        for (&wid, window) in self.windows.iter() {
+            // `kAXWindowsAttribute` is space-filtered and cannot be used to decide
+            // whether a tracked window still exists globally. Only drop state when
+            // the element itself has become invalid.
+            if matches!(window.elem.role(), Err(AxError::Ax(AXError::InvalidUIElement))) {
+                to_remove.push(wid);
             }
         }
 
-        for wid in stale_wids {
-            self.remove_tracked_window(wid, "Removed stale window (not in current list)");
+        for wid in to_remove {
+            self.remove_tracked_window(wid, "Removed stale window (invalid AX element)");
         }
     }
 
