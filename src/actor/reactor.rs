@@ -584,7 +584,8 @@ impl Reactor {
                             .window_server_space(wsid)
                             .filter(|space| active_spaces.contains(space))
                     });
-                let space = self.pending_target_space_for_window_server_id(wsid)
+                let space = self
+                    .pending_target_space_for_window_server_id(wsid)
                     .or(reported_space)
                     .or(Some(space));
                 (wsid, space)

@@ -223,6 +223,9 @@ impl WindowNotify {
                         else {
                             continue;
                         };
+                        // This is not just "window left the current active-space snapshot".
+                        // CGS emits SpaceWindowDestroyed when the window's connection drops
+                        // out of the WindowServer membership for that space.
                         spaces_tx.send(spaces::Event::WindowServerDestroyed(
                             WindowServerId::new(window_id),
                             SpaceId::new(space_id),

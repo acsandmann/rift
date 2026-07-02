@@ -212,9 +212,7 @@ impl AnimationManager {
                 anim.add_window(&app_state.handle, wid, current_frame, target_frame, false, txid);
                 animated_count += 1;
                 if let Some(wsid) = window_server_id {
-                    reactor
-                        .transaction_manager
-                        .update_txid_entries([(wsid, txid, target_frame)]);
+                    reactor.transaction_manager.update_txid_entries([(wsid, txid, target_frame)]);
                 }
             } else {
                 anim.mark_handled(wid);
@@ -225,9 +223,7 @@ impl AnimationManager {
                     "Direct positioning hidden window"
                 );
                 if let Some(wsid) = window_server_id {
-                    reactor
-                        .transaction_manager
-                        .update_txid_entries([(wsid, txid, target_frame)]);
+                    reactor.transaction_manager.update_txid_entries([(wsid, txid, target_frame)]);
                 }
                 if let Err(e) =
                     app_state.handle.send(Request::SetWindowFrame(wid, target_frame, txid, true))

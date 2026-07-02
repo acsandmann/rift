@@ -4,6 +4,7 @@ use objc2_app_kit::NSRunningApplication;
 use tracing::{debug, trace, warn};
 
 use crate::actor::app::Request;
+use crate::actor::reactor::events::window::WindowEventHandler;
 use crate::actor::reactor::{
     FullscreenSpaceTrack, FullscreenWindowTrack, LayoutEvent, Reactor, SpaceEventKind,
     StaleCleanupState,
@@ -154,6 +155,7 @@ impl SpaceEventHandler {
 
     // spacewindowappeared/destroyed happen a lot when a display is connected/disconnected
     // since they are literally when a window enters or leaves a space and each display has its own space(s)
+    // this is functionally a connection dropping to the window server
     pub fn handle_window_server_destroyed(
         reactor: &mut Reactor,
         wsid: WindowServerId,
@@ -231,9 +233,23 @@ impl SpaceEventHandler {
                 return;
             }
 
-            reactor.window_manager.set_window_server_space(wsid, Some(sid));
-            reactor.window_manager.mark_window_hidden(wsid);
             if let Some(wid) = reactor.window_manager.tracked_window_id(wsid) {
+                if !crate::sys::window_server::window_is_ordered_in(wsid) {
+                    // since the connection has dropped it wont be shown in space_windows_list
+                    // so ordered in can be authorative because it doesnt consider
+                    // ghost windows that sometimes remain
+                    debug!(
+                        ?wid,
+                        ?wsid,
+                        reported_space = ?sid,
+                        "Promoting WindowServer disappearance to immediate WindowDestroyed"
+                    );
+                    let _ = WindowEventHandler::handle_window_destroyed(reactor, wid);
+                    return;
+                }
+
+                reactor.window_manager.set_window_server_space(wsid, Some(sid));
+                reactor.window_manager.mark_window_hidden(wsid);
                 let layout_changed = reactor.assigned_space_for_window_id(wid) == Some(sid);
                 if layout_changed {
                     reactor.send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
@@ -247,6 +263,8 @@ impl SpaceEventHandler {
                     }
                 }
             } else {
+                reactor.window_manager.set_window_server_space(wsid, Some(sid));
+                reactor.window_manager.mark_window_hidden(wsid);
                 debug!(
                     ?wsid,
                     "Received WindowServerDestroyed for unknown window - ignoring"

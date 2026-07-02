@@ -38,9 +38,11 @@ thread_local! {
     static TEST_SPACE_WINDOW_LIST_OVERRIDE: RefCell<Option<Vec<u32>>> = const { RefCell::new(None) };
     static TEST_SPACE_WINDOW_LIST_BY_SPACE_OVERRIDE: RefCell<HashMap<u64, Vec<u32>>> = RefCell::new(HashMap::default());
     static TEST_WINDOW_SPACES_OVERRIDE: RefCell<HashMap<u32, Vec<u64>>> = RefCell::new(HashMap::default());
+    static TEST_WINDOW_ORDERED_IN_OVERRIDE: RefCell<HashMap<u32, bool>> = RefCell::new(HashMap::default());
 }
 
 pub const WINDOWSERVER_QUIET_US: u64 = 350_000;
+#[cfg_attr(test, allow(dead_code))]
 const EFFECTIVELY_INVISIBLE_WINDOW_ALPHA: f32 = 0.01;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Clone, Copy, Serialize, Deserialize)]
@@ -324,6 +326,13 @@ pub fn window_space(id: WindowServerId) -> Option<crate::sys::screen::SpaceId> {
 }
 
 pub fn window_is_ordered_in(id: WindowServerId) -> bool {
+    #[cfg(test)]
+    if let Some(ordered) = TEST_WINDOW_ORDERED_IN_OVERRIDE
+        .with(|override_ordered| override_ordered.borrow().get(&id.as_u32()).copied())
+    {
+        return ordered;
+    }
+
     let mut ordered: u8 = 0;
     if let Ok(_) = cg_ok(unsafe { SLSWindowIsOrderedIn(*G_CONNECTION, id.as_u32(), &mut ordered) })
     {
@@ -392,12 +401,20 @@ pub fn get_windows(ids: &[WindowServerId]) -> Vec<WindowServerInfo> {
 }
 
 pub fn get_window(id: WindowServerId) -> Option<WindowServerInfo> {
-    let cf_ids = cf_array_from_ids(&[id]);
-    let query = WindowQuery::new_from_cfarray(CFRetained::as_ptr(&cf_ids).as_ptr(), 1)?;
-    if query.count() != 1 || query.advance().is_none() {
-        return None;
+    #[cfg(test)]
+    {
+        return get_windows(&[id]).into_iter().next();
     }
-    window_info_from_query(&query)
+
+    #[cfg(not(test))]
+    {
+        let cf_ids = cf_array_from_ids(&[id]);
+        let query = WindowQuery::new_from_cfarray(CFRetained::as_ptr(&cf_ids).as_ptr(), 1)?;
+        if query.count() != 1 || query.advance().is_none() {
+            return None;
+        }
+        return window_info_from_query(&query);
+    }
 }
 
 fn get_num(dict: &CFDictionary<CFString, CFType>, key: &'static CFString) -> Option<i64> {
@@ -408,10 +425,12 @@ fn get_string(dict: &CFDictionary<CFString, CFType>, key: &'static CFString) -> 
     Some(dict.get(key)?.downcast::<CFString>().ok()?.to_string())
 }
 
+#[cfg_attr(test, allow(dead_code))]
 fn window_is_effectively_invisible(alpha: f32, layer: i32) -> bool {
     layer == 0 && alpha <= EFFECTIVELY_INVISIBLE_WINDOW_ALPHA
 }
 
+#[cfg_attr(test, allow(dead_code))]
 fn window_info_from_query(query: &WindowQuery) -> Option<WindowServerInfo> {
     let layer = query.level();
     if window_is_effectively_invisible(query.alpha(), layer) {
@@ -645,6 +664,18 @@ pub fn set_window_spaces_override(id: WindowServerId, spaces: Option<Vec<u64>>) 
             override_spaces.insert(id.as_u32(), spaces);
         } else {
             override_spaces.remove(&id.as_u32());
+        }
+    });
+}
+
+#[cfg(test)]
+pub fn set_window_ordered_in_override(id: WindowServerId, ordered: Option<bool>) {
+    TEST_WINDOW_ORDERED_IN_OVERRIDE.with(|override_ordered| {
+        let mut override_ordered = override_ordered.borrow_mut();
+        if let Some(ordered) = ordered {
+            override_ordered.insert(id.as_u32(), ordered);
+        } else {
+            override_ordered.remove(&id.as_u32());
         }
     });
 }
