@@ -918,8 +918,8 @@ impl LayoutEngine {
             self.floating.remove_floating(wid);
         }
 
-        self.virtual_workspace_manager.remove_window(wid);
         if !preserve_floating {
+            self.virtual_workspace_manager.remove_window(wid);
             self.virtual_workspace_manager.remove_floating_position(wid);
         }
 
@@ -1949,10 +1949,13 @@ impl LayoutEngine {
 
             let original_size =
                 original_frame.map(|f| f.size).unwrap_or_else(|| CGSize::new(500.0, 500.0));
+            let reference_frame = original_frame.unwrap_or_else(|| {
+                CGRect::new(CGPoint::new(screen.origin.x, screen.origin.y), original_size)
+            });
             let app_bundle_id = self.get_app_bundle_id_for_window(wid);
             let hidden_rect = self.virtual_workspace_manager.calculate_hidden_position_multi(
                 screen,
-                original_size,
+                reference_frame,
                 HideCorner::BottomRight,
                 app_bundle_id.as_deref(),
                 all_screens,
@@ -2378,7 +2381,7 @@ impl LayoutEngine {
         let source_workspace = self
             .virtual_workspace_manager
             .workspace_for_window(source_space, window_id)
-            .or_else(|| self.virtual_workspace_manager.workspace_for_window_any(window_id));
+            .or_else(|| self.virtual_workspace_manager.active_workspace(source_space));
 
         let Some(source_workspace_id) = source_workspace else {
             return EventResponse::default();
@@ -2758,6 +2761,45 @@ mod tests {
         assert_eq!(
             resized_layout, after_other_space_sync,
             "membership sync on one space must not rebalance saved layouts on another space"
+        );
+    }
+
+    #[test]
+    fn window_removed_preserve_floating_keeps_workspace_assignment() {
+        let mut engine = test_engine();
+        let space = SpaceId::new(303);
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
+        let pid: pid_t = 42;
+        let wid = WindowId::new(pid, 1);
+        let window_info = |wid| (wid, None, None, None, true, CGSize::new(0.0, 0.0), None, None);
+
+        let _ = engine.handle_event(LayoutEvent::SpaceExposed(space, screen.size));
+        let _ = engine.handle_event(LayoutEvent::WindowsOnScreenUpdated(
+            space,
+            pid,
+            vec![window_info(wid)],
+            None,
+        ));
+
+        let assigned_workspace = engine
+            .virtual_workspace_manager()
+            .workspace_for_window(space, wid)
+            .expect("window should have a workspace assignment");
+
+        let _ = engine.handle_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
+
+        assert_eq!(
+            engine.virtual_workspace_manager().workspace_for_window(space, wid),
+            Some(assigned_workspace),
+            "temporary layout removal must not clear workspace ownership"
+        );
+
+        let _ = engine.handle_event(LayoutEvent::WindowAdded(space, wid));
+
+        assert_eq!(
+            engine.virtual_workspace_manager().workspace_for_window(space, wid),
+            Some(assigned_workspace),
+            "window should reappear in the same workspace after a temporary hide"
         );
     }
 

@@ -51,7 +51,7 @@ impl CommandEventHandler {
                 | LayoutCommand::CreateWorkspace
                 | LayoutCommand::SwitchToLastWorkspace
         );
-        let command_space = reactor.workspace_command_space();
+        let command_space = reactor.command_context_space();
         let workspace_space = if requires_workspace_space {
             if let Some(space) = command_space {
                 reactor.store_current_floating_positions(space);

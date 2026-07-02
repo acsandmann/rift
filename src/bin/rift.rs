@@ -32,6 +32,7 @@ use rift_wm::sys::screen::{CoordinateConverter, displays_have_separate_spaces};
 use rift_wm::sys::service::{ServiceCommands, handle_service_command};
 use rift_wm::sys::skylight::{
     CGEnableEventStateCombining, CGSEventType, CGSetLocalEventsSuppressionInterval, KnownCGSEvent,
+    SLSWindowManagementBridgeSetDelegate,
 };
 use tokio::join;
 
@@ -123,6 +124,8 @@ fn main() {
         app.finishLaunching();
         NSApplication::load();
     }
+
+    unsafe { SLSWindowManagementBridgeSetDelegate(std::ptr::null_mut()) };
 
     ensure_accessibility_permission();
     init_window_sub_level_server_port();
@@ -237,8 +240,10 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         wnd_rx,
         &[
             CGSEventType::Known(KnownCGSEvent::MissionControlEntered),
-            CGSEventType::Known(KnownCGSEvent::SpaceCurrentChanged),
-            CGSEventType::Known(KnownCGSEvent::PackagesStatusBarSpaceChanged),
+            // this event seems bugged
+            //CGSEventType::Known(KnownCGSEvent::SpaceCurrentChanged),
+            // repl for aboce
+            CGSEventType::Known(KnownCGSEvent::WorkspaceDidChange),
             CGSEventType::Known(KnownCGSEvent::ManagedSpaceMembershipUpdated),
             CGSEventType::Known(KnownCGSEvent::SpaceWindowManagementCapabilitiesChanged),
             CGSEventType::Known(KnownCGSEvent::SpaceWindowDestroyed),

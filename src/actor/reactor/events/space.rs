@@ -10,6 +10,7 @@ use crate::actor::reactor::{
 };
 use crate::actor::spaces::{ForwardedSpaceState, TopologyWindowDelta};
 use crate::actor::wm_controller::WmEvent;
+use crate::common::collections::{HashMap, HashSet};
 use crate::sys::app::AppInfo;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::WindowServerId;
@@ -24,6 +25,7 @@ impl SpaceEventHandler {
             fullscreen_spaces,
             has_seen_display_set,
             active_spaces,
+            menu_bar_space,
             command_space,
             display_space_ids,
             last_user_space_by_display,
@@ -40,9 +42,31 @@ impl SpaceEventHandler {
             topology_window_delta,
         } = space_state;
 
+        let command_space_only_update = !display_set_changed
+            && !should_force_refresh_layout
+            && space_remaps.is_empty()
+            && resized_spaces.is_empty()
+            && topology_window_delta.is_none()
+            && reactor.space_state.screens == screens
+            && reactor.space_state.fullscreen_spaces == fullscreen_spaces
+            && reactor.active_spaces == active_spaces
+            && reactor.space_state.display_space_ids == display_space_ids
+            && reactor.space_state.last_user_space_by_display == last_user_space_by_display;
+
         reactor.space_state.has_seen_display_set = has_seen_display_set;
         reactor.space_state.fullscreen_spaces = fullscreen_spaces;
         let spaces: Vec<Option<SpaceId>> = screens.iter().map(|screen| screen.space).collect();
+        let topology_invalidates_pending_targets = display_set_changed
+            || should_force_refresh_layout
+            || !space_remaps.is_empty()
+            || !resized_spaces.is_empty()
+            || topology_window_delta.is_some();
+
+        if command_space_only_update {
+            reactor.space_state.menu_bar_space = menu_bar_space;
+            reactor.space_state.command_space = command_space;
+            return;
+        }
 
         if display_set_changed {
             let active_list: Vec<String> =
@@ -65,20 +89,23 @@ impl SpaceEventHandler {
 
         update_stale_cleanup_state(reactor, false);
         reactor.space_state.screens = screens;
+        reactor.space_state.menu_bar_space = menu_bar_space;
         reactor.space_state.command_space = command_space;
         reactor.space_state.display_space_ids = display_space_ids;
         reactor.space_state.last_user_space_by_display = last_user_space_by_display;
+
+        if topology_invalidates_pending_targets {
+            reactor.clear_pending_hidden_window_targets();
+        }
 
         if reactor.is_mission_control_active() {
             reactor.pending_space_change_manager.pending_space_change = Some(pending_space_state);
             return;
         }
 
-        let cfg = reactor.activation_cfg();
-        let current_screens = reactor.screens_for_current_spaces();
-        reactor.space_activation_policy.on_spaces_updated(cfg, &current_screens);
-        reactor.apply_authoritative_active_spaces(active_spaces);
-        reactor.restore_windows_after_fullscreen_exit(&spaces);
+        for (previous_space, space) in space_remaps {
+            reactor.layout_manager.layout_engine.remap_space(previous_space, space);
+        }
         for screen in &reactor.space_state.screens {
             let (Some(space), Some(display_uuid)) = (screen.space, screen.display_uuid_opt())
             else {
@@ -89,9 +116,11 @@ impl SpaceEventHandler {
                 .layout_engine
                 .update_space_display(space, Some(display_uuid.to_string()));
         }
-        for (previous_space, space) in space_remaps {
-            reactor.layout_manager.layout_engine.remap_space(previous_space, space);
-        }
+        let cfg = reactor.activation_cfg();
+        let current_screens = reactor.screens_for_current_spaces();
+        reactor.space_activation_policy.on_spaces_updated(cfg, &current_screens);
+        reactor.apply_authoritative_active_spaces(active_spaces);
+        reactor.restore_windows_after_fullscreen_exit(&spaces);
 
         for (space, size) in resized_spaces {
             if !reactor.is_space_active(space) {
@@ -105,23 +134,8 @@ impl SpaceEventHandler {
             reactor.send_layout_event(LayoutEvent::SpaceExposed(space, size));
         }
 
-        if let Some(TopologyWindowDelta { appeared, disappeared, .. }) = topology_window_delta {
-            for (wsid, sid) in disappeared {
-                SpaceEventHandler::handle_window_server_destroyed(
-                    reactor,
-                    wsid,
-                    sid,
-                    SpaceEventKind::User,
-                );
-            }
-            for (wsid, sid) in appeared {
-                SpaceEventHandler::handle_window_server_appeared(
-                    reactor,
-                    wsid,
-                    sid,
-                    SpaceEventKind::User,
-                );
-            }
+        if let Some(topology_window_delta) = topology_window_delta {
+            apply_topology_window_delta(reactor, topology_window_delta);
         }
 
         let active_windows = reactor.authoritative_active_space_windows();
@@ -180,6 +194,43 @@ impl SpaceEventHandler {
 
             return;
         } else if matches!(kind, SpaceEventKind::User) {
+            if let Some(current_space) = crate::sys::window_server::window_space(wsid)
+                && current_space != sid
+            {
+                debug!(?wsid, reported_space = ?sid, ?current_space, "Ignoring stale user-space disappearance due to authoritative current space");
+                return;
+            }
+            if reactor.iter_active_spaces().nth(1).is_some()
+                && reactor.window_manager.is_window_visible(wsid)
+                && let Some(wid) = reactor.window_manager.tracked_window_id(wsid)
+                && reactor.hidden_assigned_space_for_window_id(wid).is_none()
+                && reactor
+                    .assigned_space_for_window_id(wid)
+                    .is_some_and(|assigned| assigned != sid)
+            {
+                debug!(
+                    ?wid,
+                    ?wsid,
+                    reported_space = ?sid,
+                    assigned_space = ?reactor.assigned_space_for_window_id(wid),
+                    "Ignoring user-space disappearance that conflicts with visible multi-display assignment"
+                );
+                return;
+            }
+            if let Some(wid) = reactor.window_manager.tracked_window_id(wsid)
+                && reactor.should_ignore_conflicting_user_space_event(wid, sid)
+            {
+                debug!(
+                    ?wid,
+                    ?wsid,
+                    reported_space = ?sid,
+                    assigned_space = ?reactor.assigned_space_for_window_id(wid),
+                    authoritative_space = ?reactor.authoritative_space_for_window_id(wid),
+                    "Ignoring stale user-space disappearance for moved window"
+                );
+                return;
+            }
+
             reactor.window_manager.set_window_server_space(wsid, Some(sid));
             reactor.window_manager.mark_window_hidden(wsid);
             if let Some(wid) = reactor.window_manager.tracked_window_id(wsid) {
@@ -211,9 +262,51 @@ impl SpaceEventHandler {
         sid: SpaceId,
         kind: SpaceEventKind,
     ) {
+        if matches!(kind, SpaceEventKind::User)
+            && let Some(current_space) = crate::sys::window_server::window_space(wsid)
+            && current_space != sid
+        {
+            debug!(?wsid, reported_space = ?sid, ?current_space, "Ignoring stale user-space appearance due to authoritative current space");
+            return;
+        }
+        if matches!(kind, SpaceEventKind::User)
+            && reactor.iter_active_spaces().nth(1).is_some()
+            && reactor.window_manager.is_window_visible(wsid)
+            && let Some(wid) = reactor.window_manager.tracked_window_id(wsid)
+            && reactor.hidden_assigned_space_for_window_id(wid).is_none()
+            && reactor
+                .assigned_space_for_window_id(wid)
+                .is_some_and(|assigned| assigned != sid)
+        {
+            debug!(
+                ?wid,
+                ?wsid,
+                reported_space = ?sid,
+                assigned_space = ?reactor.assigned_space_for_window_id(wid),
+                "Ignoring user-space appearance that conflicts with visible multi-display assignment"
+            );
+            return;
+        }
+
+        if matches!(kind, SpaceEventKind::User)
+            && let Some(wid) = reactor.window_manager.tracked_window_id(wsid)
+            && reactor.should_ignore_conflicting_user_space_event(wid, sid)
+        {
+            debug!(
+                ?wid,
+                ?wsid,
+                reported_space = ?sid,
+                assigned_space = ?reactor.assigned_space_for_window_id(wid),
+                authoritative_space = ?reactor.authoritative_space_for_window_id(wid),
+                "Ignoring stale user-space appearance for moved window"
+            );
+            return;
+        }
+
         if matches!(kind, SpaceEventKind::User) {
             reactor.window_manager.set_window_server_space(wsid, Some(sid));
             reactor.window_manager.mark_window_visible(wsid);
+            reactor.clear_pending_target_if_confirmed_space(wsid, sid);
         }
 
         if reactor.window_manager.knows_window_server_id(wsid)
@@ -384,6 +477,49 @@ fn record_fullscreen_window(
         last_known_user_space,
         _last_seen_fullscreen_space: sid,
     });
+}
+
+fn apply_topology_window_delta(reactor: &mut Reactor, delta: TopologyWindowDelta) {
+    let appeared_by_wsid: HashMap<WindowServerId, SpaceId> = delta.appeared.into_iter().collect();
+    let disappeared_by_wsid: HashMap<WindowServerId, SpaceId> =
+        delta.disappeared.into_iter().collect();
+    let wsids: HashSet<WindowServerId> =
+        appeared_by_wsid.keys().chain(disappeared_by_wsid.keys()).copied().collect();
+
+    for wsid in wsids {
+        let appeared_space = appeared_by_wsid.get(&wsid).copied();
+        let disappeared_space = disappeared_by_wsid.get(&wsid).copied();
+        let authoritative_space =
+            appeared_space.or_else(|| crate::sys::window_server::window_space(wsid));
+
+        if let Some(target_space) = authoritative_space {
+            reactor.window_manager.set_window_server_space(wsid, Some(target_space));
+            if reactor.is_space_active(target_space) {
+                reactor.window_manager.mark_window_visible(wsid);
+            } else {
+                reactor.window_manager.mark_window_hidden(wsid);
+            }
+
+            if let Some(wid) = reactor.window_manager.tracked_window_id(wsid) {
+                let _ = restore_fullscreen_window_to_user_space(reactor, wsid, target_space, wid)
+                    .unwrap_or_else(|| {
+                        reactor.reassign_window_to_authoritative_space(wid, target_space)
+                    });
+            }
+            continue;
+        }
+
+        if let Some(previous_space) = disappeared_space {
+            reactor.window_manager.set_window_server_space(wsid, Some(previous_space));
+            reactor.window_manager.mark_window_hidden(wsid);
+            if let Some(wid) = reactor.window_manager.tracked_window_id(wsid)
+                && reactor.assigned_space_for_window_id(wid) == Some(previous_space)
+                && reactor.is_space_active(previous_space)
+            {
+                reactor.send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
+            }
+        }
+    }
 }
 
 fn restore_fullscreen_window_to_user_space(

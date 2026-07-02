@@ -4,9 +4,11 @@ use test_log::test;
 use super::testing::*;
 use super::*;
 use crate::actor::app::{AppThreadHandle, Request, pid_t};
+use crate::actor::reactor::events::command::CommandEventHandler;
 use crate::actor::reactor::events::window_discovery::WindowDiscoveryHandler;
 use crate::layout_engine::{Direction, LayoutCommand, LayoutEngine, LayoutEvent};
 use crate::sys::app::{AppInfo, WindowInfo};
+use crate::sys::geometry::SameAs;
 use crate::sys::window_server::WindowServerId;
 
 #[test]
@@ -19,8 +21,7 @@ fn it_ignores_stale_resize_events() {
     ));
     reactor.handle_event(space_state_event(
         vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
-        vec![Some(SpaceId::new(1))],
-        vec![],
+        vec![Some(SpaceId::new(1))]
     ));
 
     reactor.handle_events(apps.make_app(1, make_windows(2)));
@@ -51,8 +52,7 @@ fn it_sends_writes_when_stale_read_state_looks_same_as_written_state() {
     ));
     reactor.handle_event(space_state_event(
         vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
-        vec![Some(SpaceId::new(1))],
-        vec![],
+        vec![Some(SpaceId::new(1))]
     ));
 
     reactor.handle_events(apps.make_app(1, make_windows(2)));
@@ -92,8 +92,7 @@ fn it_manages_windows_on_enabled_spaces() {
     let full_screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
     reactor.handle_event(space_state_event(
         vec![full_screen],
-        vec![Some(SpaceId::new(1))],
-        vec![],
+        vec![Some(SpaceId::new(1))]
     ));
 
     reactor.handle_events(apps.make_app(1, make_windows(1)));
@@ -116,21 +115,19 @@ fn it_clears_screen_state_when_no_displays_are_reported() {
 
     reactor.handle_event(space_state_event(
         vec![screen],
-        vec![Some(SpaceId::new(1))],
-        vec![],
+        vec![Some(SpaceId::new(1))]
     ));
     assert_eq!(1, reactor.space_state.screens.len());
 
-    reactor.handle_event(space_state_event(vec![], vec![], vec![]));
+    reactor.handle_event(space_state_event(vec![], vec![]));
     assert!(reactor.space_state.screens.is_empty());
 
-    reactor.handle_event(space_state_event(vec![], vec![], vec![]));
+    reactor.handle_event(space_state_event(vec![], vec![]));
     assert!(reactor.space_state.screens.is_empty());
 
     reactor.handle_event(space_state_event(
         vec![screen],
-        vec![Some(SpaceId::new(1))],
-        vec![],
+        vec![Some(SpaceId::new(1))]
     ));
     assert_eq!(1, reactor.space_state.screens.len());
 }
@@ -147,7 +144,7 @@ fn workspace_command_space_follows_forwarded_space_snapshot() {
     let old_space = SpaceId::new(1);
     let new_space = SpaceId::new(2);
 
-    reactor.handle_event(space_state_event(vec![screen], vec![Some(old_space)], vec![]));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(old_space)]));
     reactor.handle_events(apps.make_app_with_opts(
         1,
         make_windows(1),
@@ -160,7 +157,7 @@ fn workspace_command_space_follows_forwarded_space_snapshot() {
 
     assert_eq!(reactor.workspace_command_space(), Some(old_space));
 
-    reactor.handle_event(space_state_event(vec![screen], vec![Some(new_space)], vec![]));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(new_space)]));
 
     assert_eq!(
         reactor.workspace_command_space(),
@@ -180,7 +177,7 @@ fn forwarded_active_spaces_are_authoritative_for_workspace_context() {
     let old_space = SpaceId::new(1);
     let new_space = SpaceId::new(2);
 
-    reactor.handle_event(space_state_event(vec![screen], vec![Some(old_space)], vec![]));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(old_space)]));
     assert_eq!(reactor.workspace_command_space(), Some(old_space));
 
     reactor.handle_event(Event::SpaceStateChanged(ForwardedSpaceState {
@@ -188,6 +185,7 @@ fn forwarded_active_spaces_are_authoritative_for_workspace_context() {
         fullscreen_spaces: Default::default(),
         has_seen_display_set: false,
         active_spaces: [new_space].into_iter().collect(),
+        menu_bar_space: Some(new_space),
         command_space: Some(new_space),
         display_space_ids: Default::default(),
         last_user_space_by_display: Default::default(),
@@ -202,6 +200,313 @@ fn forwarded_active_spaces_are_authoritative_for_workspace_context() {
     }));
 
     assert_eq!(reactor.workspace_command_space(), Some(new_space));
+}
+
+#[test]
+fn layout_commands_follow_focused_window_space_across_active_displays() {
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let left = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1440., 900.));
+    let right = CGRect::new(CGPoint::new(1440., 0.), CGSize::new(1440., 900.));
+    let left_space = SpaceId::new(1);
+    let right_space = SpaceId::new(2);
+    let source = WindowId::new(1, 1);
+    let target_a = WindowId::new(1, 2);
+    let target_b = WindowId::new(1, 3);
+    let windows = [
+        (source, WindowServerId::new(101), left_space, left),
+        (target_a, WindowServerId::new(102), right_space, right),
+        (target_b, WindowServerId::new(103), right_space, right),
+    ];
+
+    reactor.handle_event(space_state_event(
+        vec![left, right],
+        vec![Some(left_space), Some(right_space)]
+    ));
+
+    let (app_tx, _app_rx) = crate::actor::channel();
+    reactor.app_manager.apps.insert(1, AppState {
+        info: AppInfo {
+            bundle_id: Some("com.test.app".to_string()),
+            localized_name: Some("Test App".to_string()),
+        },
+        handle: AppThreadHandle::new_for_test(app_tx),
+    });
+
+    reactor.send_layout_event(LayoutEvent::SpaceExposed(left_space, left.size));
+    reactor.send_layout_event(LayoutEvent::SpaceExposed(right_space, right.size));
+
+    let left_workspace = reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .list_workspaces(left_space)
+        .first()
+        .map(|(id, _)| *id)
+        .expect("left workspace");
+    let right_workspace = reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .list_workspaces(right_space)
+        .first()
+        .map(|(id, _)| *id)
+        .expect("right workspace");
+
+    for (wid, wsid, space, frame) in windows {
+        reactor.window_manager.track_window_server_id(wsid, wid);
+        reactor.window_manager.track_window_server_info(
+            crate::sys::window_server::WindowServerInfo {
+                id: wsid,
+                pid: wid.pid,
+                layer: 0,
+                frame,
+                min_frame: frame.size,
+                max_frame: frame.size,
+            },
+        );
+        reactor.window_manager.set_window_server_space(wsid, Some(space));
+        reactor.window_manager.mark_window_visible(wsid);
+        reactor.window_manager.insert_window(wid, WindowState {
+            info: WindowInfo {
+                is_standard: true,
+                is_root: true,
+                is_minimized: false,
+                is_resizable: true,
+                min_size: None,
+                max_size: None,
+                title: format!("Window {:?}", wid),
+                frame,
+                sys_id: Some(wsid),
+                bundle_id: None,
+                path: None,
+                ax_role: None,
+                ax_subrole: None,
+            },
+            frame_monotonic: frame,
+            is_manageable: true,
+            ignore_app_rule: false,
+        });
+        let workspace = if space == left_space {
+            left_workspace
+        } else {
+            right_workspace
+        };
+        assert!(
+            reactor
+                .layout_manager
+                .layout_engine
+                .virtual_workspace_manager_mut()
+                .assign_window_to_workspace(space, wid, workspace)
+        );
+        reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+    }
+
+    reactor.send_layout_event(LayoutEvent::WindowFocused(right_space, target_a));
+
+    assert_eq!(reactor.workspace_command_space(), Some(left_space));
+    assert_eq!(reactor.command_context_space(), Some(right_space));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        Some(target_a)
+    );
+
+    CommandEventHandler::handle_command_layout(&mut reactor, LayoutCommand::NextWindow);
+
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        Some(target_b),
+        "non-workspace layout commands should follow the focused window's active display space"
+    );
+}
+
+#[test]
+fn workspace_commands_follow_focused_window_space_across_active_displays() {
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let left = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1440., 900.));
+    let right = CGRect::new(CGPoint::new(1440., 0.), CGSize::new(1440., 900.));
+    let left_space = SpaceId::new(1);
+    let right_space = SpaceId::new(2);
+    let source = WindowId::new(1, 1);
+    let target = WindowId::new(1, 2);
+    let windows = [
+        (source, WindowServerId::new(201), left_space, left),
+        (target, WindowServerId::new(202), right_space, right),
+    ];
+
+    reactor.handle_event(space_state_event(
+        vec![left, right],
+        vec![Some(left_space), Some(right_space)]
+    ));
+
+    let (app_tx, _app_rx) = crate::actor::channel();
+    reactor.app_manager.apps.insert(1, AppState {
+        info: AppInfo {
+            bundle_id: Some("com.test.app".to_string()),
+            localized_name: Some("Test App".to_string()),
+        },
+        handle: AppThreadHandle::new_for_test(app_tx),
+    });
+
+    reactor.send_layout_event(LayoutEvent::SpaceExposed(left_space, left.size));
+    reactor.send_layout_event(LayoutEvent::SpaceExposed(right_space, right.size));
+
+    let left_workspaces = reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .list_workspaces(left_space)
+        .to_vec();
+    let right_workspaces = reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .list_workspaces(right_space)
+        .to_vec();
+    let left_workspace = left_workspaces.first().map(|(id, _)| *id).expect("left workspace");
+    let right_workspace = right_workspaces.first().map(|(id, _)| *id).expect("right workspace");
+    let next_right_workspace =
+        right_workspaces.get(1).map(|(id, _)| *id).expect("right next workspace");
+
+    for (wid, wsid, space, frame) in windows {
+        reactor.window_manager.track_window_server_id(wsid, wid);
+        reactor.window_manager.track_window_server_info(
+            crate::sys::window_server::WindowServerInfo {
+                id: wsid,
+                pid: wid.pid,
+                layer: 0,
+                frame,
+                min_frame: frame.size,
+                max_frame: frame.size,
+            },
+        );
+        reactor.window_manager.set_window_server_space(wsid, Some(space));
+        reactor.window_manager.mark_window_visible(wsid);
+        reactor.window_manager.insert_window(wid, WindowState {
+            info: WindowInfo {
+                is_standard: true,
+                is_root: true,
+                is_minimized: false,
+                is_resizable: true,
+                min_size: None,
+                max_size: None,
+                title: format!("Window {:?}", wid),
+                frame,
+                sys_id: Some(wsid),
+                bundle_id: None,
+                path: None,
+                ax_role: None,
+                ax_subrole: None,
+            },
+            frame_monotonic: frame,
+            is_manageable: true,
+            ignore_app_rule: false,
+        });
+        let workspace = if space == left_space {
+            left_workspace
+        } else {
+            right_workspace
+        };
+        assert!(
+            reactor
+                .layout_manager
+                .layout_engine
+                .virtual_workspace_manager_mut()
+                .assign_window_to_workspace(space, wid, workspace)
+        );
+        reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
+    }
+
+    reactor.send_layout_event(LayoutEvent::WindowFocused(right_space, target));
+
+    assert_eq!(reactor.workspace_command_space(), Some(left_space));
+    assert_eq!(reactor.command_context_space(), Some(right_space));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.active_workspace(right_space),
+        Some(right_workspace)
+    );
+
+    CommandEventHandler::handle_command_layout(&mut reactor, LayoutCommand::NextWorkspace(None));
+
+    assert_eq!(
+        reactor.layout_manager.layout_engine.active_workspace(left_space),
+        Some(left_workspace),
+        "workspace commands should not switch the stale command-space display"
+    );
+    assert_eq!(
+        reactor.layout_manager.layout_engine.active_workspace(right_space),
+        Some(next_right_workspace),
+        "workspace commands should follow the focused window's active display space"
+    );
+}
+
+#[test]
+fn command_space_only_snapshot_does_not_trigger_full_space_reconcile() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let left = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let right = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
+    let space1 = SpaceId::new(1);
+    let space2 = SpaceId::new(2);
+
+    reactor.handle_event(Event::SpaceStateChanged(ForwardedSpaceState {
+        screens: make_screen_snapshots(vec![left, right], vec![Some(space1), Some(space2)]),
+        fullscreen_spaces: Default::default(),
+        has_seen_display_set: true,
+        active_spaces: [space1, space2].into_iter().collect(),
+        menu_bar_space: Some(space1),
+        command_space: Some(space1),
+        display_space_ids: Default::default(),
+        last_user_space_by_display: Default::default(),
+        space_remaps: Vec::new(),
+        display_set_changed: false,
+        topology_changed: false,
+        allow_space_remap: false,
+        should_force_refresh_layout: false,
+        releases_lifecycle_refresh_quarantine: false,
+        resized_spaces: Vec::new(),
+        topology_window_delta: None,
+    }));
+
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+    assert!(apps.requests().is_empty());
+
+    reactor.handle_event(Event::SpaceStateChanged(ForwardedSpaceState {
+        screens: make_screen_snapshots(vec![left, right], vec![Some(space1), Some(space2)]),
+        fullscreen_spaces: Default::default(),
+        has_seen_display_set: true,
+        active_spaces: [space1, space2].into_iter().collect(),
+        menu_bar_space: Some(space2),
+        command_space: Some(space2),
+        display_space_ids: Default::default(),
+        last_user_space_by_display: Default::default(),
+        space_remaps: Vec::new(),
+        display_set_changed: false,
+        topology_changed: false,
+        allow_space_remap: false,
+        should_force_refresh_layout: false,
+        releases_lifecycle_refresh_quarantine: false,
+        resized_spaces: Vec::new(),
+        topology_window_delta: None,
+    }));
+
+    assert_eq!(reactor.workspace_command_space(), Some(space2));
+    assert!(
+        apps.requests().is_empty(),
+        "changing only command_space should not trigger visible-window refresh or space reconciliation"
+    );
 }
 
 #[test]
@@ -220,6 +525,7 @@ fn forwarded_space_state_updates_fullscreen_spaces() {
         fullscreen_spaces: [fullscreen_space].into_iter().collect(),
         has_seen_display_set: false,
         active_spaces: [user_space].into_iter().collect(),
+        menu_bar_space: Some(user_space),
         command_space: Some(user_space),
         display_space_ids: Default::default(),
         last_user_space_by_display: Default::default(),
@@ -247,7 +553,7 @@ fn queries_prefer_authoritative_active_space_over_stale_command_space() {
     let space1 = SpaceId::new(1);
     let space2 = SpaceId::new(2);
 
-    reactor.handle_event(space_state_event(vec![screen], vec![Some(space1)], vec![]));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space1)]));
     let _ = reactor
         .layout_manager
         .layout_engine
@@ -262,6 +568,7 @@ fn queries_prefer_authoritative_active_space_over_stale_command_space() {
         fullscreen_spaces: Default::default(),
         has_seen_display_set: false,
         active_spaces: [space2].into_iter().collect(),
+        menu_bar_space: Some(space2),
         command_space: Some(space1),
         display_space_ids: Default::default(),
         last_user_space_by_display: Default::default(),
@@ -283,6 +590,54 @@ fn queries_prefer_authoritative_active_space_over_stale_command_space() {
 }
 
 #[test]
+fn menu_bar_space_prefers_active_menu_bar_display_space() {
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let left = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let right = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
+    let space1 = SpaceId::new(1);
+    let space2 = SpaceId::new(2);
+
+    reactor.handle_event(space_state_event(
+        vec![left, right],
+        vec![Some(space1), Some(space2)]
+    ));
+
+    assert_eq!(reactor.test_default_query_space(), Some(space1));
+    assert_eq!(
+        reactor.test_resolve_menu_bar_space_with_preferred(Some(space2)),
+        Some(space2),
+        "menubar updates should follow the display currently hosting the menu bar"
+    );
+}
+
+#[test]
+fn menu_bar_space_falls_back_when_preferred_space_is_not_visible() {
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let visible_space = SpaceId::new(1);
+    let hidden_space = SpaceId::new(2);
+
+    reactor.handle_event(space_state_event(
+        vec![screen],
+        vec![Some(visible_space)]
+    ));
+
+    assert_eq!(
+        reactor.test_resolve_menu_bar_space_with_preferred(Some(hidden_space)),
+        Some(visible_space),
+        "menubar updates should fall back to the normal active context if the preferred menubar space is unavailable"
+    );
+}
+
+#[test]
 fn workspace_queries_are_isolated_per_macos_space() {
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(
         &crate::common::config::VirtualWorkspaceSettings::default(),
@@ -296,8 +651,7 @@ fn workspace_queries_are_isolated_per_macos_space() {
 
     reactor.handle_event(space_state_event(
         vec![left, right],
-        vec![Some(space1), Some(space2)],
-        vec![],
+        vec![Some(space1), Some(space2)]
     ));
 
     let _ = reactor
@@ -325,6 +679,7 @@ fn workspace_queries_are_isolated_per_macos_space() {
         fullscreen_spaces: Default::default(),
         has_seen_display_set: false,
         active_spaces: [space2].into_iter().collect(),
+        menu_bar_space: Some(space2),
         command_space: Some(space2),
         display_space_ids: Default::default(),
         last_user_space_by_display: Default::default(),
@@ -359,7 +714,7 @@ fn best_space_prefers_authoritative_window_server_space_over_geometry() {
     let wid = WindowId::new(1, 1);
     let wsid = WindowServerId::new(11);
 
-    reactor.handle_event(space_state_event(vec![frame], vec![Some(space2)], vec![]));
+    reactor.handle_event(space_state_event(vec![frame], vec![Some(space2)]));
     reactor.window_manager.track_window_server_id(wsid, wid);
     reactor.window_manager.set_window_server_space(wsid, Some(space1));
     reactor.window_manager.insert_window(wid, WindowState {
@@ -398,7 +753,7 @@ fn user_space_window_server_events_preserve_hidden_window_state() {
     let wid = WindowId::new(1, 1);
     let wsid = WindowServerId::new(21);
 
-    reactor.handle_event(space_state_event(vec![frame], vec![Some(space1)], vec![]));
+    reactor.handle_event(space_state_event(vec![frame], vec![Some(space1)]));
     reactor.window_manager.track_window_server_id(wsid, wid);
     reactor.window_manager.set_window_server_space(wsid, Some(space1));
     reactor.window_manager.insert_window(wid, WindowState {
@@ -434,43 +789,6 @@ fn user_space_window_server_events_preserve_hidden_window_state() {
     assert!(!reactor.window_manager.is_window_visible(wsid));
 }
 
-#[test]
-fn known_window_server_appearance_updates_authoritative_space() {
-    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
-        &crate::common::config::VirtualWorkspaceSettings::default(),
-        &crate::common::config::LayoutSettings::default(),
-        None,
-    ));
-    let frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
-    let space1 = SpaceId::new(1);
-    let space2 = SpaceId::new(2);
-    let wid = WindowId::new(1, 1);
-    let wsid = WindowServerId::new(31);
-
-    reactor.handle_event(space_state_event(vec![frame], vec![Some(space1)], vec![]));
-    reactor.window_manager.track_window_server_id(wsid, wid);
-    reactor
-        .window_manager
-        .track_window_server_info(crate::sys::window_server::WindowServerInfo {
-            id: wsid,
-            pid: wid.pid,
-            layer: 0,
-            frame,
-            min_frame: frame.size,
-            max_frame: frame.size,
-        });
-    reactor.window_manager.set_window_server_space(wsid, Some(space1));
-
-    SpaceEventHandler::handle_window_server_appeared(
-        &mut reactor,
-        wsid,
-        space2,
-        SpaceEventKind::User,
-    );
-
-    assert_eq!(reactor.window_manager.window_server_space(wsid), Some(space2));
-}
-
 /// Builds a reactor with `space1` active on a screen and a single tiled window
 /// (`wid`/`wsid`) assigned to `space1`. `space2` exists with workspaces so it can
 /// be a reassignment target. Returns the pieces the `appeared` tests need.
@@ -488,7 +806,7 @@ fn reactor_with_window_on_space1() -> (Reactor, WindowId, WindowServerId, SpaceI
     let wid = WindowId::new(pid, 1);
     let wsid = WindowServerId::new(101);
 
-    reactor.handle_event(space_state_event(vec![frame], vec![Some(space1)], vec![]));
+    reactor.handle_event(space_state_event(vec![frame], vec![Some(space1)]));
 
     let (app_tx, _app_rx) = crate::actor::channel();
     reactor.app_manager.apps.insert(pid, AppState {
@@ -507,7 +825,6 @@ fn reactor_with_window_on_space1() -> (Reactor, WindowId, WindowServerId, SpaceI
         .first()
         .map(|(id, _)| *id)
         .expect("space1 workspace");
-    // Ensure space2 has workspaces so a reassignment can resolve a target.
     reactor
         .layout_manager
         .layout_engine
@@ -560,6 +877,204 @@ fn reactor_with_window_on_space1() -> (Reactor, WindowId, WindowServerId, SpaceI
     (reactor, wid, wsid, space1, space2, frame)
 }
 
+fn reactor_with_window_moved_to_space2()
+-> (Reactor, WindowId, WindowServerId, SpaceId, SpaceId, CGRect) {
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let pid = 1;
+    let screen1 = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1440., 900.));
+    let screen2 = CGRect::new(CGPoint::new(1440., 0.), CGSize::new(1440., 900.));
+    let moved_frame = CGRect::new(CGPoint::new(1600., 100.), CGSize::new(800., 600.));
+    let space1 = SpaceId::new(1);
+    let space2 = SpaceId::new(2);
+    let wid = WindowId::new(pid, 1);
+    let wsid = WindowServerId::new(111);
+
+    reactor.handle_event(space_state_event(
+        vec![screen1, screen2],
+        vec![Some(space1), Some(space2)]
+    ));
+
+    let (app_tx, _app_rx) = crate::actor::channel();
+    reactor.app_manager.apps.insert(pid, AppState {
+        info: AppInfo {
+            bundle_id: Some("com.test.app".to_string()),
+            localized_name: Some("Test App".to_string()),
+        },
+        handle: AppThreadHandle::new_for_test(app_tx),
+    });
+
+    let space1_workspace = reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .list_workspaces(space1)
+        .first()
+        .map(|(id, _)| *id)
+        .expect("space1 workspace");
+    let space2_workspace = reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .list_workspaces(space2)
+        .first()
+        .map(|(id, _)| *id)
+        .expect("space2 workspace");
+
+    reactor.window_manager.track_window_server_id(wsid, wid);
+    reactor
+        .window_manager
+        .track_window_server_info(crate::sys::window_server::WindowServerInfo {
+            id: wsid,
+            pid,
+            layer: 0,
+            frame: moved_frame,
+            min_frame: moved_frame.size,
+            max_frame: moved_frame.size,
+        });
+    reactor.window_manager.set_window_server_space(wsid, Some(space2));
+    reactor.window_manager.mark_window_visible(wsid);
+    reactor.window_manager.insert_window(wid, WindowState {
+        info: WindowInfo {
+            is_standard: true,
+            is_root: true,
+            is_minimized: false,
+            is_resizable: true,
+            min_size: None,
+            max_size: None,
+            title: "Window".to_string(),
+            frame: moved_frame,
+            sys_id: Some(wsid),
+            bundle_id: None,
+            path: None,
+            ax_role: None,
+            ax_subrole: None,
+        },
+        frame_monotonic: moved_frame,
+        is_manageable: true,
+        ignore_app_rule: false,
+    });
+
+    assert!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager_mut()
+            .assign_window_to_workspace(space1, wid, space1_workspace)
+    );
+    assert!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager_mut()
+            .assign_window_to_workspace(space2, wid, space2_workspace)
+    );
+    let txid = reactor.transaction_manager.generate_next_txid(wsid);
+    reactor.transaction_manager.store_txid(wsid, txid, moved_frame);
+    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
+
+    (reactor, wid, wsid, space1, space2, moved_frame)
+}
+
+fn reactor_with_window_on_space1_two_displays() -> (
+    Reactor,
+    WindowId,
+    WindowServerId,
+    SpaceId,
+    SpaceId,
+    CGRect,
+    CGRect,
+) {
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let pid = 1;
+    let screen1 = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1440., 900.));
+    let screen2 = CGRect::new(CGPoint::new(1440., 0.), CGSize::new(1440., 900.));
+    let initial_frame = CGRect::new(CGPoint::new(100., 100.), CGSize::new(800., 600.));
+    let space1 = SpaceId::new(1);
+    let space2 = SpaceId::new(2);
+    let wid = WindowId::new(pid, 1);
+    let wsid = WindowServerId::new(121);
+
+    reactor.handle_event(space_state_event(
+        vec![screen1, screen2],
+        vec![Some(space1), Some(space2)]
+    ));
+
+    let (app_tx, _app_rx) = crate::actor::channel();
+    reactor.app_manager.apps.insert(pid, AppState {
+        info: AppInfo {
+            bundle_id: Some("com.test.app".to_string()),
+            localized_name: Some("Test App".to_string()),
+        },
+        handle: AppThreadHandle::new_for_test(app_tx),
+    });
+
+    let space1_workspace = reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .list_workspaces(space1)
+        .first()
+        .map(|(id, _)| *id)
+        .expect("space1 workspace");
+    reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .list_workspaces(space2);
+
+    reactor.window_manager.track_window_server_id(wsid, wid);
+    reactor
+        .window_manager
+        .track_window_server_info(crate::sys::window_server::WindowServerInfo {
+            id: wsid,
+            pid,
+            layer: 0,
+            frame: initial_frame,
+            min_frame: initial_frame.size,
+            max_frame: initial_frame.size,
+        });
+    reactor.window_manager.set_window_server_space(wsid, Some(space1));
+    reactor.window_manager.mark_window_visible(wsid);
+    reactor.window_manager.insert_window(wid, WindowState {
+        info: WindowInfo {
+            is_standard: true,
+            is_root: true,
+            is_minimized: false,
+            is_resizable: true,
+            min_size: None,
+            max_size: None,
+            title: "Window".to_string(),
+            frame: initial_frame,
+            sys_id: Some(wsid),
+            bundle_id: None,
+            path: None,
+            ax_role: None,
+            ax_subrole: None,
+        },
+        frame_monotonic: initial_frame,
+        is_manageable: true,
+        ignore_app_rule: false,
+    });
+
+    assert!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager_mut()
+            .assign_window_to_workspace(space1, wid, space1_workspace)
+    );
+
+    (reactor, wid, wsid, space1, space2, initial_frame, screen2)
+}
+
 #[test]
 fn appeared_reassigns_window_without_pending_rift_move() {
     let (mut reactor, wid, wsid, space1, space2, _frame) = reactor_with_window_on_space1();
@@ -583,6 +1098,367 @@ fn appeared_reassigns_window_without_pending_rift_move() {
 }
 
 #[test]
+fn geometry_cross_display_frame_change_updates_authoritative_space() {
+    let (mut reactor, wid, wsid, _space1, space2, _initial_frame, screen2) =
+        reactor_with_window_on_space1_two_displays();
+    let moved_frame = CGRect::new(
+        CGPoint::new(screen2.origin.x + 100., 100.),
+        CGSize::new(800., 600.),
+    );
+
+    reactor.handle_event(Event::WindowFrameChanged(
+        wid,
+        moved_frame,
+        None,
+        Requested(false),
+        Some(MouseState::Up),
+    ));
+
+    assert_eq!(
+        reactor.assigned_space_for_window_id(wid),
+        Some(space2),
+        "geometry-only cross-display move should update workspace ownership"
+    );
+    assert_eq!(
+        reactor.window_manager.window_server_space(wsid),
+        Some(space2),
+        "geometry-only cross-display move should update authoritative server space"
+    );
+}
+
+#[test]
+fn stale_user_space_disappearance_does_not_restore_old_display_assignment() {
+    let (mut reactor, wid, wsid, space1, space2, _) = reactor_with_window_moved_to_space2();
+
+    SpaceEventHandler::handle_window_server_destroyed(
+        &mut reactor,
+        wsid,
+        space1,
+        SpaceEventKind::User,
+    );
+
+    assert_eq!(reactor.window_manager.window_server_space(wsid), Some(space2));
+    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
+    assert!(reactor.window_manager.is_window_visible(wsid));
+
+    let _ = reactor.reconcile_windows_with_authoritative_spaces();
+
+    assert_eq!(
+        reactor.assigned_space_for_window_id(wid),
+        Some(space2),
+        "late disappearance from the old display must not drag a moved window back"
+    );
+}
+
+#[test]
+fn stale_user_space_appearance_does_not_restore_old_display_assignment() {
+    let (mut reactor, wid, wsid, space1, space2, _) = reactor_with_window_moved_to_space2();
+
+    SpaceEventHandler::handle_window_server_appeared(
+        &mut reactor,
+        wsid,
+        space1,
+        SpaceEventKind::User,
+    );
+
+    assert_eq!(reactor.window_manager.window_server_space(wsid), Some(space2));
+    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
+
+    let _ = reactor.reconcile_windows_with_authoritative_spaces();
+
+    assert_eq!(
+        reactor.assigned_space_for_window_id(wid),
+        Some(space2),
+        "late appearance on the old display must not overwrite the newer target assignment"
+    );
+}
+
+#[test]
+fn stale_user_space_appearance_is_ignored_when_server_state_already_matches_pending_target() {
+    let (mut reactor, wid, wsid, space1, space2, _frame) = reactor_with_window_moved_to_space2();
+    let space1_workspace = reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .list_workspaces(space1)
+        .first()
+        .map(|(id, _)| *id)
+        .expect("space1 workspace");
+
+    assert!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager_mut()
+            .assign_window_to_workspace(space1, wid, space1_workspace)
+    );
+    reactor.window_manager.set_window_server_space(wsid, Some(space1));
+    let txid = reactor.transaction_manager.generate_next_txid(wsid);
+    let target_frame = CGRect::new(CGPoint::new(100., 100.), CGSize::new(800., 600.));
+    reactor.transaction_manager.store_txid(wsid, txid, target_frame);
+
+    SpaceEventHandler::handle_window_server_appeared(
+        &mut reactor,
+        wsid,
+        space2,
+        SpaceEventKind::User,
+    );
+
+    assert_eq!(reactor.window_manager.window_server_space(wsid), Some(space1));
+    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space1));
+    assert_eq!(
+        reactor.authoritative_space_for_window_id(wid),
+        Some(space1),
+        "late appearance from the old display should be ignored once Rift has already committed the new server-space target"
+    );
+}
+
+#[test]
+fn stale_user_space_appearance_is_ignored_when_authoritative_window_space_differs() {
+    let (mut reactor, wid, wsid, space1, space2, _frame) = reactor_with_window_moved_to_space2();
+    crate::sys::window_server::set_window_spaces_override(wsid, Some(vec![space2.get()]));
+
+    SpaceEventHandler::handle_window_server_appeared(
+        &mut reactor,
+        wsid,
+        space1,
+        SpaceEventKind::User,
+    );
+
+    crate::sys::window_server::set_window_spaces_override(wsid, None);
+
+    assert_eq!(reactor.window_manager.window_server_space(wsid), Some(space2));
+    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
+    assert_eq!(reactor.authoritative_space_for_window_id(wid), Some(space2));
+}
+
+#[test]
+fn multi_active_visible_window_appearance_keeps_display_assignment_and_visibility() {
+    let (mut reactor, wid, wsid, space1, space2, _frame) = reactor_with_window_moved_to_space2();
+
+    SpaceEventHandler::handle_window_server_appeared(
+        &mut reactor,
+        wsid,
+        space1,
+        SpaceEventKind::User,
+    );
+
+    assert_eq!(reactor.window_manager.window_server_space(wsid), Some(space2));
+    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
+    assert_eq!(reactor.authoritative_space_for_window_id(wid), Some(space2));
+    assert!(reactor.window_manager.is_window_visible(wsid));
+}
+
+#[test]
+fn multi_active_visible_window_disappearance_does_not_reassign_between_display_spaces() {
+    let (mut reactor, wid, wsid, space1, space2, _frame) = reactor_with_window_moved_to_space2();
+
+    SpaceEventHandler::handle_window_server_destroyed(
+        &mut reactor,
+        wsid,
+        space1,
+        SpaceEventKind::User,
+    );
+
+    assert_eq!(reactor.window_manager.window_server_space(wsid), Some(space2));
+    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
+    assert!(reactor.window_manager.is_window_visible(wsid));
+}
+
+#[test]
+fn hidden_window_can_move_to_another_native_space_without_staying_pinned_to_old_display() {
+    let workspace_cfg = crate::common::config::VirtualWorkspaceSettings {
+        default_workspace_count: 2,
+        ..crate::common::config::VirtualWorkspaceSettings::default()
+    };
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &workspace_cfg,
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let pid = 1;
+    let left = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1440., 900.));
+    let right = CGRect::new(CGPoint::new(1440., 0.), CGSize::new(1440., 900.));
+    let frame = CGRect::new(CGPoint::new(100., 100.), CGSize::new(800., 600.));
+    let space1 = SpaceId::new(1);
+    let space2 = SpaceId::new(2);
+    let wid = WindowId::new(pid, 1);
+    let wsid = WindowServerId::new(121);
+
+    reactor.handle_event(space_state_event(
+        vec![left, right],
+        vec![Some(space1), Some(space2)]
+    ));
+
+    let (app_tx, _app_rx) = crate::actor::channel();
+    reactor.app_manager.apps.insert(pid, AppState {
+        info: AppInfo {
+            bundle_id: Some("com.test.app".to_string()),
+            localized_name: Some("Test App".to_string()),
+        },
+        handle: AppThreadHandle::new_for_test(app_tx),
+    });
+
+    let workspaces = reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .list_workspaces(space1)
+        .to_vec();
+    let hidden_workspace = workspaces[0].0;
+    let visible_workspace = workspaces[1].0;
+    reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .list_workspaces(space2);
+
+    reactor.window_manager.track_window_server_id(wsid, wid);
+    reactor
+        .window_manager
+        .track_window_server_info(crate::sys::window_server::WindowServerInfo {
+            id: wsid,
+            pid,
+            layer: 0,
+            frame,
+            min_frame: frame.size,
+            max_frame: frame.size,
+        });
+    reactor.window_manager.set_window_server_space(wsid, Some(space1));
+    reactor.window_manager.mark_window_visible(wsid);
+    reactor.window_manager.insert_window(wid, WindowState {
+        info: WindowInfo {
+            is_standard: true,
+            is_root: true,
+            is_minimized: false,
+            is_resizable: true,
+            min_size: None,
+            max_size: None,
+            title: "Window".to_string(),
+            frame,
+            sys_id: Some(wsid),
+            bundle_id: None,
+            path: None,
+            ax_role: None,
+            ax_subrole: None,
+        },
+        frame_monotonic: frame,
+        ignore_app_rule: false,
+        is_manageable: true,
+    });
+
+    assert!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager_mut()
+            .set_active_workspace(space1, visible_workspace)
+    );
+    assert!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager_mut()
+            .assign_window_to_workspace(space1, wid, hidden_workspace)
+    );
+    assert_eq!(reactor.hidden_assigned_space_for_window_id(wid), Some(space1));
+
+    crate::sys::window_server::set_window_spaces_override(wsid, Some(vec![space2.get()]));
+    SpaceEventHandler::handle_window_server_appeared(
+        &mut reactor,
+        wsid,
+        space2,
+        SpaceEventKind::User,
+    );
+    crate::sys::window_server::set_window_spaces_override(wsid, None);
+
+    assert_eq!(reactor.window_manager.window_server_space(wsid), Some(space2));
+    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
+    assert_eq!(reactor.authoritative_space_for_window_id(wid), Some(space2));
+}
+
+#[test]
+fn discovery_prefers_authoritative_space_over_geometry_when_displays_overlap_workspaces() {
+    let (mut reactor, wid, wsid, space1, space2, _moved_frame) =
+        reactor_with_window_moved_to_space2();
+    let conflicting_frame = CGRect::new(CGPoint::new(100., 100.), CGSize::new(800., 600.));
+
+    reactor
+        .window_manager
+        .window_mut(wid)
+        .expect("window should exist")
+        .frame_monotonic = conflicting_frame;
+    reactor
+        .window_manager
+        .track_window_server_info(crate::sys::window_server::WindowServerInfo {
+            id: wsid,
+            pid: wid.pid,
+            layer: 0,
+            frame: conflicting_frame,
+            min_frame: conflicting_frame.size,
+            max_frame: conflicting_frame.size,
+        });
+
+    assert_eq!(
+        reactor.discovery_space_for_window_id(wid),
+        Some(space2),
+        "discovery should stay in the authoritative native space instead of hopping to another display's geometry"
+    );
+    assert_ne!(
+        reactor.discovery_space_for_window_id(wid),
+        Some(space1),
+        "same-index workspaces on other displays must stay isolated"
+    );
+}
+
+#[test]
+fn recent_cross_display_move_ignores_conflicting_geometry_space_change() {
+    let (mut reactor, wid, wsid, _space1, space2, _) = reactor_with_window_moved_to_space2();
+    let conflicting_frame = CGRect::new(CGPoint::new(100., 100.), CGSize::new(800., 600.));
+
+    reactor.handle_event(Event::WindowFrameChanged(
+        wid,
+        conflicting_frame,
+        None,
+        Requested(false),
+        Some(MouseState::Up),
+    ));
+
+    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
+    assert_eq!(reactor.window_manager.window_server_space(wsid), Some(space2));
+}
+
+#[test]
+fn central_space_resolution_prefers_recent_move_target_over_stale_server_space() {
+    let (mut reactor, wid, wsid, space1, space2, moved_frame) =
+        reactor_with_window_moved_to_space2();
+
+    reactor.window_manager.set_window_server_space(wsid, Some(space1));
+
+    assert_eq!(reactor.authoritative_space_for_window_id(wid), Some(space2));
+    assert_eq!(
+        reactor.best_space_for_window(&moved_frame, Some(wsid)),
+        Some(space2),
+        "core space resolution should prefer the recent move target when geometry and assignment agree"
+    );
+}
+
+#[test]
+fn active_space_membership_refresh_does_not_overwrite_recent_move_target() {
+    let (mut reactor, wid, wsid, space1, space2, _) = reactor_with_window_moved_to_space2();
+
+    reactor.refresh_active_space_window_membership(vec![(wsid, Some(space1))]);
+
+    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
+    assert_eq!(
+        reactor.window_manager.window_server_space(wsid),
+        Some(space2),
+        "active-space reconciliation must not overwrite a recent cross-display move with stale membership"
+    );
+    assert!(reactor.window_manager.is_window_visible(wsid));
+}
+
+#[test]
 fn known_fullscreen_window_appearance_removes_window_from_layout() {
     let mut apps = Apps::new();
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(
@@ -596,7 +1472,7 @@ fn known_fullscreen_window_appearance_removes_window_from_layout() {
     let fullscreen_space = SpaceId::new(0x400000000 + user_space.get());
     let wid = WindowId::new(1, 1);
 
-    reactor.handle_event(space_state_event(vec![frame], vec![Some(user_space)], vec![]));
+    reactor.handle_event(space_state_event(vec![frame], vec![Some(user_space)]));
     reactor.handle_events(apps.make_app_with_opts(1, make_windows(1), Some(wid), true, true));
     reactor.handle_event(Event::ApplicationGloballyActivated(1));
     apps.simulate_until_quiet(&mut reactor);
@@ -635,7 +1511,7 @@ fn known_window_server_appearance_restores_same_workspace_after_fullscreen() {
     let fullscreen_space = SpaceId::new(0x400000000 + user_space.get());
     let wid = WindowId::new(1, 1);
 
-    reactor.handle_event(space_state_event(vec![frame], vec![Some(user_space)], vec![]));
+    reactor.handle_event(space_state_event(vec![frame], vec![Some(user_space)]));
     reactor.handle_events(apps.make_app_with_opts(1, make_windows(1), Some(wid), true, true));
     reactor.handle_event(Event::ApplicationGloballyActivated(1));
     apps.simulate_until_quiet(&mut reactor);
@@ -663,6 +1539,34 @@ fn known_window_server_appearance_restores_same_workspace_after_fullscreen() {
 }
 
 #[test]
+fn known_window_server_appearance_restores_layout_membership_without_reassignment() {
+    let (mut reactor, wid, wsid, user_space, _other_space, frame) = reactor_with_window_on_space1();
+
+    reactor.send_layout_event(LayoutEvent::WindowAdded(user_space, wid));
+    assert!(has_window_in_layout(&mut reactor, user_space, frame, wid));
+
+    reactor.send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
+
+    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(user_space));
+    assert!(
+        !has_window_in_layout(&mut reactor, user_space, frame, wid),
+        "temporary removal should clear active layout membership before the appearance event"
+    );
+
+    SpaceEventHandler::handle_window_server_appeared(
+        &mut reactor,
+        wsid,
+        user_space,
+        SpaceEventKind::User,
+    );
+
+    assert!(
+        has_window_in_layout(&mut reactor, user_space, frame, wid),
+        "same-space appearance should heal active layout membership even when workspace assignment already matches"
+    );
+}
+
+#[test]
 fn discovery_preserves_hidden_windows_on_their_original_same_display_space() {
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(
         &crate::common::config::VirtualWorkspaceSettings::default(),
@@ -674,7 +1578,7 @@ fn discovery_preserves_hidden_windows_on_their_original_same_display_space() {
     let space1 = SpaceId::new(1);
     let space2 = SpaceId::new(2);
 
-    reactor.handle_event(space_state_event(vec![frame], vec![Some(space1)], vec![]));
+    reactor.handle_event(space_state_event(vec![frame], vec![Some(space1)]));
     let (app_tx, _app_rx) = crate::actor::channel();
     reactor.app_manager.apps.insert(pid, AppState {
         info: AppInfo {
@@ -754,7 +1658,7 @@ fn discovery_preserves_hidden_windows_on_their_original_same_display_space() {
             .assign_window_to_workspace(space2, WindowId::new(pid, 3), space2_workspace)
     );
 
-    reactor.handle_event(space_state_event(vec![frame], vec![Some(space2)], vec![]));
+    reactor.handle_event(space_state_event(vec![frame], vec![Some(space2)]));
     reactor.window_manager.clear_visible_windows();
     reactor.window_manager.mark_window_visible(WindowServerId::new(103));
     reactor.mission_control_manager.pending_mission_control_refresh.insert(pid);
@@ -763,11 +1667,7 @@ fn discovery_preserves_hidden_windows_on_their_original_same_display_space() {
         &mut reactor,
         pid,
         vec![],
-        vec![
-            WindowId::new(pid, 1),
-            WindowId::new(pid, 2),
-            WindowId::new(pid, 3),
-        ],
+        vec![WindowId::new(pid, 3)],
         None,
     );
 
@@ -829,9 +1729,9 @@ fn forwarded_space_state_is_queued_during_mission_control_and_applied_on_exit() 
     let old_space = SpaceId::new(1);
     let new_space = SpaceId::new(2);
 
-    reactor.handle_event(space_state_event(vec![screen], vec![Some(old_space)], vec![]));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(old_space)]));
     reactor.handle_event(Event::MissionControlNativeEntered);
-    reactor.handle_event(space_state_event(vec![screen], vec![Some(new_space)], vec![]));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(new_space)]));
 
     assert_eq!(
         reactor
@@ -862,7 +1762,7 @@ fn mission_control_exit_refresh_drops_windows_missing_from_origin_space_snapshot
     let moved = WindowId::new(pid, 1);
     let retained = WindowId::new(pid, 2);
 
-    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
     reactor.handle_events(apps.make_app(pid, make_windows(2)));
     apps.simulate_until_quiet(&mut reactor);
 
@@ -896,7 +1796,7 @@ fn mission_control_enter_clears_active_drag_state() {
     let wid = WindowId::new(1, 1);
     let frame = CGRect::new(CGPoint::new(50., 50.), CGSize::new(100., 100.));
 
-    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
     reactor.window_manager.insert_window(wid, WindowState {
         info: WindowInfo {
             is_standard: true,
@@ -939,7 +1839,7 @@ fn it_ignores_windows_on_disabled_spaces() {
         None,
     ));
     let full_screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
-    reactor.handle_event(space_state_event(vec![full_screen], vec![None], vec![]));
+    reactor.handle_event(space_state_event(vec![full_screen], vec![None]));
 
     reactor.handle_events(apps.make_app(1, make_windows(1)));
 
@@ -970,8 +1870,7 @@ fn it_keeps_discovered_windows_on_their_initial_screen() {
     let screen2 = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
     reactor.handle_event(space_state_event(
         vec![screen1, screen2],
-        vec![Some(SpaceId::new(1)), Some(SpaceId::new(2))],
-        vec![],
+        vec![Some(SpaceId::new(1)), Some(SpaceId::new(2))]
     ));
 
     let mut windows = make_windows(2);
@@ -998,18 +1897,7 @@ fn it_ignores_windows_on_nonzero_layers() {
         None,
     ));
     let full_screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
-    reactor.handle_event(space_state_event(
-        vec![full_screen],
-        vec![Some(SpaceId::new(1))],
-        vec![WindowServerInfo {
-            id: WindowServerId::new(1),
-            pid: 1,
-            layer: 10,
-            frame: CGRect::ZERO,
-            min_frame: CGSize::ZERO,
-            max_frame: CGSize::ZERO,
-        }],
-    ));
+    reactor.handle_event(space_state_event(vec![full_screen], vec![Some(SpaceId::new(1))]));
 
     reactor.handle_events(apps.make_app_with_opts(1, make_windows(1), None, true, false));
 
@@ -1042,8 +1930,7 @@ fn handle_layout_response_groups_windows_by_app_and_screen() {
     let screen2 = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
     reactor.handle_event(space_state_event(
         vec![screen1, screen2],
-        vec![Some(SpaceId::new(1)), Some(SpaceId::new(2))],
-        vec![],
+        vec![Some(SpaceId::new(1)), Some(SpaceId::new(2))]
     ));
 
     reactor.handle_events(apps.make_app(1, make_windows(2)));
@@ -1133,7 +2020,7 @@ fn workspace_switch_batches_all_windows_with_eui_enabled() {
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
     let space = SpaceId::new(1);
 
-    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
     reactor.handle_events(apps.make_app(1, make_windows(2)));
     apps.simulate_until_quiet(&mut reactor);
     let _ = apps.requests();
@@ -1166,6 +2053,123 @@ fn workspace_switch_batches_all_windows_with_eui_enabled() {
 }
 
 #[test]
+fn topology_change_clears_stale_pending_hide_target_before_next_workspace_layout() {
+    let mut apps = Apps::new();
+    let workspace_cfg = crate::common::config::VirtualWorkspaceSettings {
+        default_workspace_count: 2,
+        ..crate::common::config::VirtualWorkspaceSettings::default()
+    };
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &workspace_cfg,
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+    let _ = apps.requests();
+
+    let wsid = reactor
+        .window_manager
+        .window(wid)
+        .and_then(|window| window.info.sys_id)
+        .expect("tracked window should have a window server id");
+    let workspaces = reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .list_workspaces(space)
+        .to_vec();
+    let hidden_workspace = workspaces[0].0;
+    let active_workspace = workspaces[1].0;
+
+    assert!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager_mut()
+            .set_active_workspace(space, active_workspace)
+    );
+    assert!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager_mut()
+            .assign_window_to_workspace(space, wid, hidden_workspace)
+    );
+
+    if let Some(window) = reactor.window_manager.window_mut(wid) {
+        window.frame_monotonic = CGRect::new(CGPoint::new(200.0, 200.0), CGSize::new(400.0, 400.0));
+    }
+
+    let gaps = reactor.config.settings.layout.gaps.clone();
+    let hidden_target = reactor
+        .layout_manager
+        .layout_engine
+        .calculate_layout_with_virtual_workspaces(
+            space,
+            screen,
+            &gaps,
+            0.0,
+            Default::default(),
+            Default::default(),
+            |query_wid| {
+                reactor.window_manager.window(query_wid).map(|window| window.frame_monotonic)
+            },
+            &[screen],
+        )
+        .into_iter()
+        .find(|(layout_wid, _)| *layout_wid == wid)
+        .map(|(_, frame)| frame)
+        .expect("inactive-workspace window should still be laid out to a hidden position");
+
+    let txid = reactor.transaction_manager.generate_next_txid(wsid);
+    reactor.transaction_manager.store_txid(wsid, txid, hidden_target);
+
+    assert!(!reactor.update_layout_or_warn(false, true));
+    assert!(
+        apps.requests().is_empty(),
+        "a stale pending target suppresses the hide write before topology invalidation"
+    );
+
+    reactor.handle_event(Event::SpaceStateChanged(ForwardedSpaceState {
+        screens: make_screen_snapshots(vec![screen], vec![Some(space)]),
+        fullscreen_spaces: Default::default(),
+        has_seen_display_set: true,
+        active_spaces: [space].into_iter().collect(),
+        menu_bar_space: Some(space),
+        command_space: Some(space),
+        display_space_ids: Default::default(),
+        last_user_space_by_display: Default::default(),
+        space_remaps: Vec::new(),
+        display_set_changed: true,
+        topology_changed: true,
+        allow_space_remap: false,
+        should_force_refresh_layout: false,
+        releases_lifecycle_refresh_quarantine: false,
+        resized_spaces: Vec::new(),
+        topology_window_delta: None,
+    }));
+    let requests = apps.requests();
+    assert!(
+        requests.iter().any(|req| {
+            matches!(req,
+                Request::SetWindowFrame(req_wid, frame, _, true)
+                    if *req_wid == wid && frame.same_as(hidden_target)
+            ) || matches!(req,
+                Request::SetBatchWindowFrame(frames, _, true)
+                    if frames.iter().any(|(req_wid, frame)| *req_wid == wid && frame.same_as(hidden_target))
+            )
+        }),
+        "topology invalidation must resend the hidden-window frame write instead of treating the stale target as still pending: {requests:?}"
+    );
+}
+
+#[test]
 fn auto_workspace_switch_focuses_activated_window_not_stale_workspace_focus() {
     let mut apps = Apps::new();
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(
@@ -1181,7 +2185,7 @@ fn auto_workspace_switch_focuses_activated_window_not_stale_workspace_focus() {
     let stale_focus = WindowId::new(1, 1);
     let activated = WindowId::new(2, 1);
 
-    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
     reactor.handle_events(apps.make_app(1, make_windows(1)));
     reactor.handle_events(apps.make_app(2, make_windows(1)));
     apps.simulate_until_quiet(&mut reactor);
@@ -1230,7 +2234,7 @@ fn windows_discovered_does_not_reintroduce_inactive_workspace_window() {
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
     let space = SpaceId::new(1);
 
-    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
     reactor.handle_events(apps.make_app(1, make_windows(2)));
     apps.simulate_until_quiet(&mut reactor);
 
@@ -1271,7 +2275,7 @@ fn workspace_query_uses_authoritative_assignment_after_move() {
     let space = SpaceId::new(1);
     let wid = WindowId::new(1, 1);
 
-    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
     reactor.handle_events(apps.make_app(1, make_windows(1)));
     apps.simulate_until_quiet(&mut reactor);
 
@@ -1335,7 +2339,7 @@ fn it_preserves_layout_after_login_screen() {
     ));
     let space = SpaceId::new(1);
     let full_screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
-    reactor.handle_event(space_state_event(vec![full_screen], vec![Some(space)], vec![]));
+    reactor.handle_event(space_state_event(vec![full_screen], vec![Some(space)]));
 
     reactor.handle_events(apps.make_app_with_opts(
         1,
@@ -1370,20 +2374,10 @@ fn it_preserves_layout_after_login_screen() {
     );
     assert_ne!(default, modified);
 
-    reactor.handle_event(space_state_event(vec![CGRect::ZERO], vec![None], vec![]));
+    reactor.handle_event(space_state_event(vec![CGRect::ZERO], vec![None]));
     reactor.handle_event(space_state_event(
         vec![full_screen],
         vec![Some(space)],
-        (1..=3)
-            .map(|n| WindowServerInfo {
-                pid: 1,
-                id: WindowServerId::new(n),
-                layer: 0,
-                frame: CGRect::ZERO,
-                min_frame: CGSize::ZERO,
-                max_frame: CGSize::ZERO,
-            })
-            .collect(),
     ));
     let requests = apps.requests();
     for request in requests {
@@ -1434,7 +2428,7 @@ fn login_screen_refresh_preserves_manual_workspace_assignment() {
     let wid1 = WindowId::new(1, 1);
     let wid2 = WindowId::new(1, 2);
 
-    reactor.handle_event(space_state_event(vec![full_screen], vec![Some(space)], vec![]));
+    reactor.handle_event(space_state_event(vec![full_screen], vec![Some(space)]));
     reactor.handle_events(apps.make_app_with_opts(1, make_windows(2), Some(wid1), true, true));
     reactor.handle_event(Event::ApplicationGloballyActivated(1));
     apps.simulate_until_quiet(&mut reactor);
@@ -1470,20 +2464,10 @@ fn login_screen_refresh_preserves_manual_workspace_assignment() {
         "switched workspace should show only the moved window before login refresh"
     );
 
-    reactor.handle_event(space_state_event(vec![CGRect::ZERO], vec![None], vec![]));
+    reactor.handle_event(space_state_event(vec![CGRect::ZERO], vec![None]));
     reactor.handle_event(space_state_event(
         vec![full_screen],
         vec![Some(space)],
-        (1..=2)
-            .map(|n| WindowServerInfo {
-                pid: 1,
-                id: WindowServerId::new(n),
-                layer: 0,
-                frame: CGRect::ZERO,
-                min_frame: CGSize::ZERO,
-                max_frame: CGSize::ZERO,
-            })
-            .collect(),
     ));
     let requests = apps.requests();
     for request in requests {
@@ -1542,7 +2526,7 @@ fn title_change_reapply_does_not_rebalance_unchanged_layout() {
 
     let space = SpaceId::new(1);
     let full_screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
-    reactor.handle_event(space_state_event(vec![full_screen], vec![Some(space)], vec![]));
+    reactor.handle_event(space_state_event(vec![full_screen], vec![Some(space)]));
 
     reactor.handle_events(apps.make_app_with_opts(
         1,
@@ -1599,7 +2583,7 @@ fn title_change_reapply_does_not_rebalance_when_window_stays_floating() {
 
     let space = SpaceId::new(1);
     let full_screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
-    reactor.handle_event(space_state_event(vec![full_screen], vec![Some(space)], vec![]));
+    reactor.handle_event(space_state_event(vec![full_screen], vec![Some(space)]));
 
     reactor.handle_events(apps.make_app_with_opts(
         1,
@@ -1717,7 +2701,7 @@ fn it_retains_windows_without_server_ids_after_login_visibility_failure() {
     ));
     let space = SpaceId::new(1);
     let full_screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
-    reactor.handle_event(space_state_event(vec![full_screen], vec![Some(space)], vec![]));
+    reactor.handle_event(space_state_event(vec![full_screen], vec![Some(space)]));
 
     let window = WindowInfo {
         is_standard: true,
@@ -1744,18 +2728,17 @@ fn it_retains_windows_without_server_ids_after_login_visibility_failure() {
     ));
     apps.simulate_until_quiet(&mut reactor);
 
-    reactor.handle_event(space_state_event(vec![full_screen], vec![None], vec![]));
+    reactor.handle_event(space_state_event(vec![full_screen], vec![None]));
 
     // Simulate a native fullscreen transition: space temporarily becomes a fullscreen
     // space id (reactor suppresses it to None), then returns to the original space.
     let fullscreen_space = SpaceId::new(0x400000000 + space.get());
     reactor.handle_event(space_state_event(
         vec![full_screen],
-        vec![Some(fullscreen_space)],
-        vec![],
+        vec![Some(fullscreen_space)]
     ));
 
-    reactor.handle_event(space_state_event(vec![full_screen], vec![Some(space)], vec![]));
+    reactor.handle_event(space_state_event(vec![full_screen], vec![Some(space)]));
 
     loop {
         let requests = apps.requests();
@@ -1797,8 +2780,7 @@ fn animated_layout_handles_windows_without_server_ids() {
     let space = SpaceId::new(1);
     reactor.handle_event(space_state_event(
         vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
-        vec![Some(space)],
-        vec![],
+        vec![Some(space)]
     ));
 
     let mut window = make_window(1);
@@ -1844,8 +2826,7 @@ fn display_index_selector_uses_physical_left_to_right_order() {
     let left = CGRect::new(CGPoint::new(100000., 0.), CGSize::new(1000., 1000.));
     reactor.handle_event(space_state_event(
         vec![right, left],
-        vec![Some(SpaceId::new(1)), Some(SpaceId::new(2))],
-        vec![],
+        vec![Some(SpaceId::new(1)), Some(SpaceId::new(2))]
     ));
 
     let selected = reactor
@@ -1856,45 +2837,29 @@ fn display_index_selector_uses_physical_left_to_right_order() {
 }
 
 #[test]
-fn topology_window_delta_is_applied_on_forwarded_space_state() {
-    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
-        &crate::common::config::VirtualWorkspaceSettings::default(),
-        &crate::common::config::LayoutSettings::default(),
-        None,
-    ));
-    let frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
-    let space = SpaceId::new(1);
-    reactor.handle_event(space_state_event(vec![frame], vec![Some(space)], vec![]));
-    let wsid = WindowServerId::new(123);
+fn authoritative_active_window_snapshot_reassigns_window_across_active_displays() {
+    let (mut reactor, wid, wsid, space1, space2, _initial_frame, _screen2) =
+        reactor_with_window_on_space1_two_displays();
 
-    reactor.handle_event(Event::SpaceStateChanged(ForwardedSpaceState {
-        screens: make_screen_snapshots(vec![frame], vec![Some(space)]),
-        fullscreen_spaces: Default::default(),
-        has_seen_display_set: true,
-        active_spaces: [space].into_iter().collect(),
-        command_space: Some(space),
-        display_space_ids: Default::default(),
-        last_user_space_by_display: Default::default(),
-        space_remaps: Vec::new(),
-        display_set_changed: false,
-        topology_changed: false,
-        allow_space_remap: false,
-        should_force_refresh_layout: false,
-        releases_lifecycle_refresh_quarantine: false,
-        resized_spaces: Vec::new(),
-        topology_window_delta: Some(crate::actor::spaces::TopologyWindowDelta {
-            epoch: 2,
-            flags: crate::sys::skylight::DisplayReconfigFlags::ADD,
-            appeared: vec![(wsid, space)],
-            disappeared: Vec::new(),
-        }),
-    }));
+    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space1));
+    assert_eq!(reactor.window_manager.window_server_space(wsid), Some(space1));
 
-    assert!(reactor.window_manager.is_window_server_observed(wsid));
+    reactor.reconcile_authoritative_active_window_snapshot(vec![(wsid, Some(space2))]);
+
+    assert_eq!(
+        reactor.window_manager.window_server_space(wsid),
+        Some(space2),
+        "authoritative active-space membership should update the tracked native space"
+    );
+    assert_eq!(
+        reactor.assigned_space_for_window_id(wid),
+        Some(space2),
+        "authoritative active-space membership should reassign the window to the new display"
+    );
 }
 
 #[test]
-fn topology_window_delta_removes_missing_window_from_active_layout() {
+fn authoritative_active_window_snapshot_removes_missing_window_from_active_layout() {
     let mut apps = Apps::new();
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(
         &crate::common::config::VirtualWorkspaceSettings::default(),
@@ -1904,23 +2869,149 @@ fn topology_window_delta_removes_missing_window_from_active_layout() {
     let frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
     let space = SpaceId::new(1);
     let pid: pid_t = 42;
-    let wid = WindowId::new(pid, 1);
-    let wsid = WindowServerId::new((pid as u32).saturating_mul(10_000) + 1);
+    let moved = WindowId::new(pid, 1);
+    let retained = WindowId::new(pid, 2);
+    let moved_wsid = WindowServerId::new((pid as u32).saturating_mul(10_000) + 1);
+    let retained_wsid = WindowServerId::new((pid as u32).saturating_mul(10_000) + 2);
 
-    reactor.handle_event(space_state_event(vec![frame], vec![Some(space)], vec![]));
-    reactor.handle_events(apps.make_app(pid, make_windows(1)));
+    reactor.handle_event(space_state_event(vec![frame], vec![Some(space)]));
+    reactor.handle_events(apps.make_app(pid, make_windows(2)));
     apps.simulate_until_quiet(&mut reactor);
 
-    assert!(has_window_in_layout(&mut reactor, space, frame, wid));
-    reactor.window_manager.set_window_server_space(wsid, Some(space));
-    reactor.window_manager.mark_window_visible(wsid);
+    assert!(has_window_in_layout(&mut reactor, space, frame, moved));
+    assert!(has_window_in_layout(&mut reactor, space, frame, retained));
+    reactor.window_manager.set_window_server_space(moved_wsid, Some(space));
+    reactor.window_manager.mark_window_visible(moved_wsid);
+    reactor.window_manager.set_window_server_space(retained_wsid, Some(space));
+    reactor.window_manager.mark_window_visible(retained_wsid);
+    reactor.reconcile_authoritative_active_window_snapshot(vec![(retained_wsid, Some(space))]);
+
+    assert!(
+        !has_window_in_layout(&mut reactor, space, frame, moved),
+        "active-space window missing from the authoritative snapshot must be removed immediately"
+    );
+    assert!(
+        !reactor.window_manager.is_window_visible(moved_wsid),
+        "authoritative snapshot reconcile should clear visible state for missing windows"
+    );
+    assert!(has_window_in_layout(&mut reactor, space, frame, retained));
+}
+
+#[test]
+fn authoritative_active_window_snapshot_reassigns_missing_window_to_inactive_space() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let active_space = SpaceId::new(1);
+    let inactive_space = SpaceId::new(2);
+    let pid: pid_t = 43;
+    let moved = WindowId::new(pid, 1);
+    let retained = WindowId::new(pid, 2);
+    let moved_wsid = WindowServerId::new((pid as u32).saturating_mul(10_000) + 1);
+    let retained_wsid = WindowServerId::new((pid as u32).saturating_mul(10_000) + 2);
+
+    reactor.handle_event(space_state_event(vec![frame], vec![Some(active_space)]));
+    reactor.handle_events(apps.make_app(pid, make_windows(2)));
+    apps.simulate_until_quiet(&mut reactor);
+
+    reactor.window_manager.set_window_server_space(moved_wsid, Some(active_space));
+    reactor.window_manager.mark_window_visible(moved_wsid);
+    reactor
+        .window_manager
+        .set_window_server_space(retained_wsid, Some(active_space));
+    reactor.window_manager.mark_window_visible(retained_wsid);
+    crate::sys::window_server::set_window_spaces_override(
+        moved_wsid,
+        Some(vec![inactive_space.get()]),
+    );
+
+    reactor
+        .reconcile_authoritative_active_window_snapshot(vec![(retained_wsid, Some(active_space))]);
+
+    crate::sys::window_server::set_window_spaces_override(moved_wsid, None);
+
+    assert_eq!(
+        reactor.assigned_space_for_window_id(moved),
+        Some(inactive_space),
+        "missing active-space windows should migrate to their actual inactive native space"
+    );
+    assert!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager()
+            .workspace_for_window(active_space, moved)
+            .is_none(),
+        "window should no longer belong to the old active native space"
+    );
+    assert!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager()
+            .workspace_for_window(inactive_space, moved)
+            .is_some(),
+        "window should now belong to the inactive native space that WindowServer reports"
+    );
+    assert!(
+        !has_window_in_layout(&mut reactor, active_space, frame, moved),
+        "window moved onto an inactive native space must be removed from the active layout"
+    );
+    assert!(has_window_in_layout(&mut reactor, active_space, frame, retained));
+    assert_eq!(
+        reactor.assigned_space_for_window_id(retained),
+        Some(active_space),
+        "other visible windows on the active space must remain untouched"
+    );
+}
+
+#[test]
+fn topology_window_delta_reassigns_missing_window_to_inactive_space() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let active_space = SpaceId::new(1);
+    let inactive_space = SpaceId::new(2);
+    let pid: pid_t = 44;
+    let moved = WindowId::new(pid, 1);
+    let retained = WindowId::new(pid, 2);
+    let moved_wsid = WindowServerId::new((pid as u32).saturating_mul(10_000) + 1);
+    let retained_wsid = WindowServerId::new((pid as u32).saturating_mul(10_000) + 2);
+
+    reactor.handle_event(space_state_event(vec![frame], vec![Some(active_space)]));
+    reactor.handle_events(apps.make_app(pid, make_windows(2)));
+    apps.simulate_until_quiet(&mut reactor);
+
+    reactor.window_manager.set_window_server_space(moved_wsid, Some(active_space));
+    reactor.window_manager.mark_window_visible(moved_wsid);
+    reactor
+        .window_manager
+        .set_window_server_space(retained_wsid, Some(active_space));
+    reactor.window_manager.mark_window_visible(retained_wsid);
+    crate::sys::window_server::set_window_spaces_override(
+        moved_wsid,
+        Some(vec![inactive_space.get()]),
+    );
+    crate::sys::window_server::set_space_window_list_for_space_override(
+        active_space.get(),
+        Some(vec![retained_wsid.as_u32()]),
+    );
 
     reactor.handle_event(Event::SpaceStateChanged(ForwardedSpaceState {
-        screens: make_screen_snapshots(vec![frame], vec![Some(space)]),
+        screens: make_screen_snapshots(vec![frame], vec![Some(active_space)]),
         fullscreen_spaces: Default::default(),
         has_seen_display_set: true,
-        active_spaces: [space].into_iter().collect(),
-        command_space: Some(space),
+        active_spaces: [active_space].into_iter().collect(),
+        menu_bar_space: Some(active_space),
+        command_space: Some(active_space),
         display_space_ids: Default::default(),
         last_user_space_by_display: Default::default(),
         space_remaps: Vec::new(),
@@ -1931,21 +3022,84 @@ fn topology_window_delta_removes_missing_window_from_active_layout() {
         releases_lifecycle_refresh_quarantine: false,
         resized_spaces: Vec::new(),
         topology_window_delta: Some(crate::actor::spaces::TopologyWindowDelta {
-            epoch: 1,
-            flags: crate::sys::skylight::DisplayReconfigFlags::REMOVE,
+            epoch: 11,
+            flags: crate::sys::skylight::DisplayReconfigFlags::MOVED,
             appeared: Vec::new(),
-            disappeared: vec![(wsid, space)],
+            disappeared: vec![(moved_wsid, active_space)],
         }),
     }));
 
+    crate::sys::window_server::set_window_spaces_override(moved_wsid, None);
+    crate::sys::window_server::set_space_window_list_for_space_override(active_space.get(), None);
+
+    assert_eq!(reactor.assigned_space_for_window_id(moved), Some(inactive_space));
     assert!(
-        !has_window_in_layout(&mut reactor, space, frame, wid),
-        "active-space window missing from the authoritative post-churn snapshot must be removed immediately"
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager()
+            .workspace_for_window(active_space, moved)
+            .is_none()
     );
     assert!(
-        !reactor.window_manager.is_window_visible(wsid),
-        "synthetic destroy during topology commit should clear visible state"
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager()
+            .workspace_for_window(inactive_space, moved)
+            .is_some()
     );
+    assert!(!has_window_in_layout(&mut reactor, active_space, frame, moved));
+    assert!(has_window_in_layout(&mut reactor, active_space, frame, retained));
+}
+
+#[test]
+fn topology_window_delta_is_not_ignored_by_command_space_only_short_circuit() {
+    let (mut reactor, wid, wsid, space1, space2, _initial_frame, screen2) =
+        reactor_with_window_on_space1_two_displays();
+    let screen1 = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1440., 900.));
+
+    crate::sys::window_server::set_window_spaces_override(wsid, Some(vec![space2.get()]));
+    crate::sys::window_server::set_space_window_list_for_space_override(space1.get(), Some(vec![]));
+    crate::sys::window_server::set_space_window_list_for_space_override(
+        space2.get(),
+        Some(vec![wsid.as_u32()]),
+    );
+
+    reactor.handle_event(Event::SpaceStateChanged(ForwardedSpaceState {
+        screens: make_screen_snapshots(vec![screen1, screen2], vec![Some(space1), Some(space2)]),
+        fullscreen_spaces: Default::default(),
+        has_seen_display_set: true,
+        active_spaces: [space1, space2].into_iter().collect(),
+        menu_bar_space: Some(space1),
+        command_space: Some(space1),
+        display_space_ids: Default::default(),
+        last_user_space_by_display: Default::default(),
+        space_remaps: Vec::new(),
+        display_set_changed: false,
+        topology_changed: false,
+        allow_space_remap: false,
+        should_force_refresh_layout: false,
+        releases_lifecycle_refresh_quarantine: false,
+        resized_spaces: Vec::new(),
+        topology_window_delta: Some(crate::actor::spaces::TopologyWindowDelta {
+            epoch: 12,
+            flags: crate::sys::skylight::DisplayReconfigFlags::MOVED,
+            appeared: vec![(wsid, space2)],
+            disappeared: vec![(wsid, space1)],
+        }),
+    }));
+
+    crate::sys::window_server::set_window_spaces_override(wsid, None);
+    crate::sys::window_server::set_space_window_list_for_space_override(space1.get(), None);
+    crate::sys::window_server::set_space_window_list_for_space_override(space2.get(), None);
+
+    assert_eq!(
+        reactor.assigned_space_for_window_id(wid),
+        Some(space2),
+        "topology delta should still be processed even when the forwarded screens snapshot is unchanged"
+    );
+    assert_eq!(reactor.window_manager.window_server_space(wsid), Some(space2));
 }
 
 #[test]
@@ -1977,6 +3131,7 @@ fn forwarded_space_state_does_not_clear_existing_fullscreen_tracks_when_snapshot
         fullscreen_spaces: Default::default(),
         has_seen_display_set: true,
         active_spaces: [current_space].into_iter().collect(),
+        menu_bar_space: Some(current_space),
         command_space: Some(current_space),
         display_space_ids: Default::default(),
         last_user_space_by_display: Default::default(),
@@ -1997,26 +3152,113 @@ fn forwarded_space_state_does_not_clear_existing_fullscreen_tracks_when_snapshot
 }
 
 #[test]
-fn display_churn_quarantines_window_frame_changed_events() {
+fn non_active_workspace_windows_remain_hidden_even_if_frame_no_longer_matches_corner_geometry() {
+    let mut apps = Apps::new();
+    let workspace_cfg = crate::common::config::VirtualWorkspaceSettings {
+        default_workspace_count: 2,
+        ..crate::common::config::VirtualWorkspaceSettings::default()
+    };
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &workspace_cfg,
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let wsid = reactor
+        .window_manager
+        .window(wid)
+        .and_then(|window| window.info.sys_id)
+        .expect("tracked window should have a window server id");
+    let workspaces = reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .list_workspaces(space);
+    let inactive_workspace = workspaces[0].0;
+    let active_workspace = workspaces[1].0;
+
+    assert!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager_mut()
+            .set_active_workspace(space, active_workspace)
+    );
+    assert!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager_mut()
+            .assign_window_to_workspace(space, wid, inactive_workspace)
+    );
+
+    if let Some(window) = reactor.window_manager.window_mut(wid) {
+        window.frame_monotonic = CGRect::new(CGPoint::new(200.0, 200.0), CGSize::new(400.0, 400.0));
+    }
+
+    assert_eq!(
+        reactor.hidden_assigned_space_for_window_id(wid),
+        Some(space),
+        "workspace-hidden status should follow Rift's workspace assignment, not stale corner geometry"
+    );
+    assert_eq!(
+        reactor.geometry_space_for_window(
+            &CGRect::new(CGPoint::new(200.0, 200.0), CGSize::new(400.0, 400.0)),
+            Some(wsid),
+        ),
+        Some(space),
+        "topology changes can leave hidden windows at stale coordinates; they must still resolve to their assigned space"
+    );
+}
+
+#[test]
+fn display_churn_quarantines_window_frame_and_membership_events() {
     let reactor = Reactor::new_for_test(LayoutEngine::new(
         &crate::common::config::VirtualWorkspaceSettings::default(),
         &crate::common::config::LayoutSettings::default(),
         None,
     ));
+    let space = SpaceId::new(7);
+    let wsid = WindowServerId::new(77);
     let _ = crate::sys::display_churn::begin(crate::sys::skylight::DisplayReconfigFlags::ADD);
 
-    let quarantined = reactor.should_quarantine_during_display_churn(&Event::WindowFrameChanged(
+    let frame_changed = reactor.should_quarantine_during_display_churn(&Event::WindowFrameChanged(
         WindowId::new(99, 1),
         CGRect::new(CGPoint::new(10., 10.), CGSize::new(500., 400.)),
         None,
         Requested(false),
         Some(MouseState::Up),
     ));
+    let appeared = reactor.should_quarantine_during_display_churn(&Event::WindowServerAppeared(
+        wsid,
+        space,
+        SpaceEventKind::User,
+    ));
+    let destroyed = reactor.should_quarantine_during_display_churn(&Event::WindowServerDestroyed(
+        wsid,
+        space,
+        SpaceEventKind::User,
+    ));
 
     let _ = crate::sys::display_churn::end();
     assert!(
-        quarantined,
+        frame_changed,
         "WindowFrameChanged should be quarantined during churn"
+    );
+    assert!(
+        appeared,
+        "WindowServerAppeared should be quarantined during churn"
+    );
+    assert!(
+        destroyed,
+        "WindowServerDestroyed should be quarantined during churn"
     );
 }
 
@@ -2033,13 +3275,11 @@ fn normal_macos_space_switch_does_not_arm_topology_relayout() {
 
     reactor.handle_event(space_state_event(
         vec![left, right],
-        vec![Some(SpaceId::new(11)), Some(SpaceId::new(22))],
-        vec![],
+        vec![Some(SpaceId::new(11)), Some(SpaceId::new(22))]
     ));
     reactor.handle_event(space_state_event(
         vec![left, right],
-        vec![Some(SpaceId::new(111)), Some(SpaceId::new(222))],
-        vec![],
+        vec![Some(SpaceId::new(111)), Some(SpaceId::new(222))]
     ));
     assert_eq!(
         reactor.raw_spaces_for_current_screens(),
@@ -2102,7 +3342,7 @@ fn fullscreen_space_in_screen_params_does_not_trigger_topology_relayout() {
 }
 
 #[test]
-fn fullscreen_screen_params_preserves_other_display_space() {
+fn fullscreen_transition_preserves_other_display_space() {
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(
         &crate::common::config::VirtualWorkspaceSettings::default(),
         &crate::common::config::LayoutSettings::default(),
@@ -2117,55 +3357,19 @@ fn fullscreen_screen_params_preserves_other_display_space() {
 
     reactor.handle_event(space_state_event(
         vec![left, right],
-        vec![Some(left_space_2), Some(right_space_1)],
-        vec![],
+        vec![Some(left_space_2), Some(right_space_1)]
     ));
     reactor.space_state.fullscreen_spaces.insert(right_fullscreen);
 
     reactor.handle_event(space_state_event(
         vec![left, right],
-        vec![Some(left_space_2), None],
-        vec![],
+        vec![Some(left_space_2), None]
     ));
 
     assert_eq!(
         reactor.raw_spaces_for_current_screens(),
         vec![Some(left_space_2), None],
-        "Entering fullscreen on one display must not accept a transient user-space change on another display"
-    );
-}
-
-#[test]
-fn fullscreen_space_changed_preserves_other_display_space() {
-    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
-        &crate::common::config::VirtualWorkspaceSettings::default(),
-        &crate::common::config::LayoutSettings::default(),
-        None,
-    ));
-
-    let left = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
-    let right = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
-    let left_space_2 = SpaceId::new(12);
-    let right_space_1 = SpaceId::new(21);
-    let right_fullscreen = SpaceId::new(0x400000000 + right_space_1.get());
-
-    reactor.handle_event(space_state_event(
-        vec![left, right],
-        vec![Some(left_space_2), Some(right_space_1)],
-        vec![],
-    ));
-    reactor.space_state.fullscreen_spaces.insert(right_fullscreen);
-
-    reactor.handle_event(space_state_event(
-        vec![left, right],
-        vec![Some(left_space_2), None],
-        vec![],
-    ));
-
-    assert_eq!(
-        reactor.raw_spaces_for_current_screens(),
-        vec![Some(left_space_2), None],
-        "Fullscreen SpaceChanged snapshots must preserve unrelated displays' previous user spaces"
+        "fullscreen transitions on one display must not accept a transient user-space change on another display"
     );
 }
 
@@ -2186,20 +3390,17 @@ fn user_space_switch_is_allowed_while_other_display_already_fullscreen() {
 
     reactor.handle_event(space_state_event(
         vec![left, right],
-        vec![Some(left_space_2), Some(right_space_1)],
-        vec![],
+        vec![Some(left_space_2), Some(right_space_1)]
     ));
     reactor.space_state.fullscreen_spaces.insert(right_fullscreen);
     reactor.handle_event(space_state_event(
         vec![left, right],
-        vec![Some(left_space_2), None],
-        vec![],
+        vec![Some(left_space_2), None]
     ));
 
     reactor.handle_event(space_state_event(
         vec![left, right],
-        vec![Some(left_space_1), None],
-        vec![],
+        vec![Some(left_space_1), None]
     ));
 
     assert_eq!(
@@ -2227,8 +3428,7 @@ fn fullscreen_screen_params_preserves_window_layout() {
     // Set up a display with a user space and some windows.
     reactor.handle_event(space_state_event(
         vec![full_screen],
-        vec![Some(user_space)],
-        vec![],
+        vec![Some(user_space)]
     ));
     reactor.handle_events(apps.make_app_with_opts(
         1,
@@ -2275,8 +3475,7 @@ fn fullscreen_screen_params_preserves_window_layout() {
     // Return to user space (simulates exiting fullscreen).
     reactor.handle_event(space_state_event(
         vec![full_screen],
-        vec![Some(user_space)],
-        vec![],
+        vec![Some(user_space)]
     ));
     apps.simulate_until_quiet(&mut reactor);
 
@@ -2318,12 +3517,11 @@ fn discovery_minimize_transition_removes_window_from_layout() {
         &crate::common::config::LayoutSettings::default(),
         None,
     ));
-
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
     let space = SpaceId::new(1);
     let wid = WindowId::new(1, 1);
 
-    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
     reactor.handle_events(apps.make_app(1, make_windows(1)));
     apps.simulate_until_quiet(&mut reactor);
 
@@ -2359,14 +3557,13 @@ fn discovery_restore_transition_readds_window_to_layout() {
         &crate::common::config::LayoutSettings::default(),
         None,
     ));
-
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
     let space = SpaceId::new(1);
     let wid = WindowId::new(1, 1);
     let mut windows = make_windows(1);
     windows[0].is_minimized = true;
 
-    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
     reactor.handle_events(apps.make_app(1, windows));
     apps.simulate_until_quiet(&mut reactor);
 
@@ -2402,12 +3599,11 @@ fn discovery_manageability_loss_removes_window_from_layout() {
         &crate::common::config::LayoutSettings::default(),
         None,
     ));
-
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
     let space = SpaceId::new(1);
     let wid = WindowId::new(1, 1);
 
-    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
     reactor.handle_events(apps.make_app(1, make_windows(1)));
     apps.simulate_until_quiet(&mut reactor);
 
@@ -2451,8 +3647,7 @@ fn unfullscreen_restores_window_tracking() {
     // Set up a display with a user space and some windows.
     reactor.handle_event(space_state_event(
         vec![full_screen],
-        vec![Some(user_space)],
-        vec![],
+        vec![Some(user_space)]
     ));
     reactor.handle_events(apps.make_app_with_opts(
         1,
@@ -2478,14 +3673,13 @@ fn unfullscreen_restores_window_tracking() {
         });
 
     // Transition to fullscreen space.
-    reactor.handle_event(space_state_event(vec![full_screen], vec![None], vec![]));
+    reactor.handle_event(space_state_event(vec![full_screen], vec![None]));
     apps.simulate_until_quiet(&mut reactor);
 
     // Exit fullscreen (return to user space).
     reactor.handle_event(space_state_event(
         vec![full_screen],
-        vec![Some(user_space)],
-        vec![],
+        vec![Some(user_space)]
     ));
 
     // The reactor should trigger a GetVisibleWindows request.
@@ -2509,18 +3703,17 @@ fn unfullscreen_restores_window_tracking() {
 
 #[test]
 fn display_churn_end_triggers_visible_window_refresh() {
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
     let mut apps = Apps::new();
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(
         &crate::common::config::VirtualWorkspaceSettings::default(),
         &crate::common::config::LayoutSettings::default(),
         None,
     ));
-    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
 
     reactor.handle_event(space_state_event(
         vec![screen],
-        vec![Some(SpaceId::new(1))],
-        vec![],
+        vec![Some(SpaceId::new(1))]
     ));
     reactor.handle_events(apps.make_app(1, make_windows(1)));
     apps.simulate_until_quiet(&mut reactor);
@@ -2547,7 +3740,7 @@ fn display_churn_end_refresh_is_idempotent_without_topology_change() {
     let space = SpaceId::new(1);
     let wid = WindowId::new(1, 1);
 
-    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
     reactor.handle_events(apps.make_app(1, make_windows(1)));
     apps.simulate_until_quiet(&mut reactor);
 
@@ -2582,7 +3775,7 @@ fn display_churn_end_refresh_preserves_non_default_workspace_without_app_rules()
     let space = SpaceId::new(1);
     let wid = WindowId::new(1, 1);
 
-    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
     reactor.handle_events(apps.make_app(1, make_windows(1)));
     apps.simulate_until_quiet(&mut reactor);
 
@@ -2665,7 +3858,7 @@ fn session_gate_ignores_discovery_and_replays_one_refresh_after_unlock() {
     let space = SpaceId::new(1);
     let wid = WindowId::new(1, 1);
 
-    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
     reactor.handle_events(apps.make_app(1, make_windows(1)));
     apps.simulate_until_quiet(&mut reactor);
 
@@ -2721,7 +3914,7 @@ fn session_gate_ignores_discovery_and_replays_one_refresh_after_unlock() {
         apps.requests().is_empty(),
         "unlock should stay quarantined until the spaces actor publishes a fresh post-unlock snapshot"
     );
-    let stale_snapshot = match space_state_event(vec![screen], vec![Some(space)], vec![]) {
+    let stale_snapshot = match space_state_event(vec![screen], vec![Some(space)]) {
         Event::SpaceStateChanged(mut state) => {
             state.releases_lifecycle_refresh_quarantine = false;
             Event::SpaceStateChanged(state)
@@ -2734,7 +3927,7 @@ fn session_gate_ignores_discovery_and_replays_one_refresh_after_unlock() {
         "an older queued WM snapshot must not release the unlock quarantine"
     );
 
-    let fresh_snapshot = match space_state_event(vec![screen], vec![Some(space)], vec![]) {
+    let fresh_snapshot = match space_state_event(vec![screen], vec![Some(space)]) {
         Event::SpaceStateChanged(mut state) => {
             state.releases_lifecycle_refresh_quarantine = true;
             Event::SpaceStateChanged(state)
@@ -2765,7 +3958,7 @@ fn wake_gate_waits_for_fresh_space_snapshot_before_refresh() {
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
     let space = SpaceId::new(1);
 
-    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
     reactor.handle_events(apps.make_app(1, make_windows(1)));
     apps.simulate_until_quiet(&mut reactor);
     assert!(apps.requests().is_empty());
@@ -2779,7 +3972,7 @@ fn wake_gate_waits_for_fresh_space_snapshot_before_refresh() {
         "wake should remain quarantined until the spaces actor publishes a fresh post-wake snapshot"
     );
 
-    let stale_snapshot = match space_state_event(vec![screen], vec![Some(space)], vec![]) {
+    let stale_snapshot = match space_state_event(vec![screen], vec![Some(space)]) {
         Event::SpaceStateChanged(mut state) => {
             state.releases_lifecycle_refresh_quarantine = false;
             Event::SpaceStateChanged(state)
@@ -2792,7 +3985,7 @@ fn wake_gate_waits_for_fresh_space_snapshot_before_refresh() {
         "an older queued WM snapshot must not release the wake quarantine"
     );
 
-    let fresh_snapshot = match space_state_event(vec![screen], vec![Some(space)], vec![]) {
+    let fresh_snapshot = match space_state_event(vec![screen], vec![Some(space)]) {
         Event::SpaceStateChanged(mut state) => {
             state.releases_lifecycle_refresh_quarantine = true;
             Event::SpaceStateChanged(state)
@@ -2829,7 +4022,7 @@ fn authoritative_active_space_membership_comes_from_space_window_ids_directly() 
         wsid_b.as_u32(),
     ]));
 
-    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
     let snapshot = reactor.authoritative_active_space_windows();
 
     crate::sys::window_server::set_space_window_list_for_connection_override(None);
@@ -2839,6 +4032,50 @@ fn authoritative_active_space_membership_comes_from_space_window_ids_directly() 
         ids,
         vec![wsid_a, wsid_b],
         "active-space membership should be built from the space's own WS ids rather than the lagging global visible-window list"
+    );
+}
+
+#[test]
+fn authoritative_active_space_membership_queries_each_active_space_independently() {
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let left = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let right = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
+    let space1 = SpaceId::new(1);
+    let space2 = SpaceId::new(2);
+    let wsid_left = WindowServerId::new(41);
+    let wsid_right = WindowServerId::new(42);
+
+    crate::sys::window_server::set_space_window_list_for_space_override(
+        space1.get(),
+        Some(vec![wsid_left.as_u32()]),
+    );
+    crate::sys::window_server::set_space_window_list_for_space_override(
+        space2.get(),
+        Some(vec![wsid_right.as_u32()]),
+    );
+    crate::sys::window_server::set_window_spaces_override(wsid_left, Some(vec![space1.get()]));
+    crate::sys::window_server::set_window_spaces_override(wsid_right, Some(vec![space2.get()]));
+
+    reactor.handle_event(space_state_event(
+        vec![left, right],
+        vec![Some(space1), Some(space2)]
+    ));
+    let mut snapshot = reactor.authoritative_active_space_windows();
+
+    crate::sys::window_server::set_space_window_list_for_space_override(space1.get(), None);
+    crate::sys::window_server::set_space_window_list_for_space_override(space2.get(), None);
+    crate::sys::window_server::set_window_spaces_override(wsid_left, None);
+    crate::sys::window_server::set_window_spaces_override(wsid_right, None);
+
+    snapshot.sort_unstable_by_key(|(wsid, _)| wsid.as_u32());
+    assert_eq!(
+        snapshot,
+        vec![(wsid_left, Some(space1)), (wsid_right, Some(space2))],
+        "multi-display active-space membership should be collected per active space so stale union snapshots do not keep windows visible after topology changes"
     );
 }
 
@@ -2855,7 +4092,7 @@ fn empty_active_space_membership_during_wake_race_does_not_blank_known_active_wi
     let wid = WindowId::new(1, 1);
     let wsid = WindowServerId::new(10001);
 
-    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
     reactor.handle_events(apps.make_app(1, make_windows(1)));
     apps.simulate_until_quiet(&mut reactor);
 
@@ -2893,7 +4130,7 @@ fn wsid_rekey_preserves_non_default_workspace_without_app_rules() {
     let old_wid = WindowId::new(1, 1);
     let new_wid = WindowId::new(1, 99);
 
-    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
     reactor.handle_events(apps.make_app(1, make_windows(1)));
     apps.simulate_until_quiet(&mut reactor);
 
@@ -2970,7 +4207,7 @@ fn wsid_rekey_preserves_floating_membership_and_position() {
     let new_wid = WindowId::new(1, 99);
     let stored_position = CGRect::new(CGPoint::new(320., 180.), CGSize::new(240., 200.));
 
-    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)], vec![]));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
     reactor.handle_events(apps.make_app_with_opts(1, make_windows(1), Some(old_wid), true, true));
     reactor.handle_event(Event::ApplicationGloballyActivated(1));
     apps.simulate_until_quiet(&mut reactor);

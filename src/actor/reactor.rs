@@ -20,8 +20,6 @@ mod testing;
 mod tests;
 
 use std::thread;
-#[cfg(not(test))]
-use std::time::Duration;
 
 use animation::Sender as AnimationSender;
 use events::app::AppEventHandler;
@@ -542,7 +540,7 @@ impl Reactor {
 
     fn refresh_window_server_snapshot_for_active_spaces(&mut self) {
         let active_windows = self.authoritative_active_space_windows();
-        self.refresh_active_space_window_membership(active_windows);
+        self.reconcile_authoritative_active_window_snapshot(active_windows);
     }
 
     fn authoritative_active_space_windows(&self) -> Vec<(WindowServerId, Option<SpaceId>)> {
@@ -570,21 +568,87 @@ impl Reactor {
         let single_active_space =
             (active_space_ids.len() == 1).then(|| SpaceId::new(active_space_ids[0]));
 
-        crate::sys::window_server::space_window_list_for_connection(&active_space_ids, 0, false)
+        if let Some(space) = single_active_space {
+            return crate::sys::window_server::space_window_list_for_connection(
+                &active_space_ids,
+                0,
+                false,
+            )
             .into_iter()
             .map(WindowServerId::new)
             .map(|wsid| {
-                let space = window_server::window_space(wsid)
+                let reported_space = window_server::window_space(wsid)
+                    .filter(|space| active_spaces.contains(space))
+                    .or_else(|| {
+                        self.window_manager
+                            .window_server_space(wsid)
+                            .filter(|space| active_spaces.contains(space))
+                    });
+                let space = self.pending_target_space_for_window_server_id(wsid)
+                    .or(reported_space)
+                    .or(Some(space));
+                (wsid, space)
+            })
+            .collect();
+        }
+
+        let mut visible: HashMap<WindowServerId, SpaceId> = HashMap::default();
+        for &space_id in &active_space_ids {
+            let candidate_space = SpaceId::new(space_id);
+            for wsid in
+                crate::sys::window_server::space_window_list_for_connection(&[space_id], 0, false)
+                    .into_iter()
+                    .map(WindowServerId::new)
+            {
+                self.record_authoritative_active_window_space(
+                    &mut visible,
+                    &active_spaces,
+                    wsid,
+                    candidate_space,
+                );
+            }
+        }
+
+        visible
+            .into_iter()
+            .map(|(wsid, space)| {
+                let reported_space = Some(space);
+                (
+                    wsid,
+                    self.pending_target_space_for_window_server_id(wsid).or(reported_space),
+                )
+            })
+            .collect()
+    }
+
+    fn record_authoritative_active_window_space(
+        &self,
+        visible: &mut HashMap<WindowServerId, SpaceId>,
+        active_spaces: &HashSet<SpaceId>,
+        wsid: WindowServerId,
+        candidate_space: SpaceId,
+    ) {
+        match visible.entry(wsid) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(candidate_space);
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                if *entry.get() == candidate_space {
+                    return;
+                }
+
+                let resolved = window_server::window_space(wsid)
                     .filter(|space| active_spaces.contains(space))
                     .or_else(|| {
                         self.window_manager
                             .window_server_space(wsid)
                             .filter(|space| active_spaces.contains(space))
                     })
-                    .or(single_active_space);
-                (wsid, space)
-            })
-            .collect()
+                    .unwrap_or(*entry.get());
+
+                entry.insert(resolved);
+            }
+        }
     }
 
     fn has_known_windows_for_active_spaces(&self) -> bool {
@@ -619,12 +683,73 @@ impl Reactor {
         }
 
         for (wsid, space) in active_windows {
+            let space = self.pending_target_space_for_window_server_id(wsid).or(space);
             if let Some(space) = space {
                 self.window_manager.set_window_server_space(wsid, Some(space));
+                self.clear_pending_target_if_confirmed_space(wsid, space);
             }
             self.window_manager.mark_window_visible(wsid);
             self.window_manager.clear_window_server_observed(wsid);
         }
+    }
+
+    fn remove_windows_missing_from_active_space_snapshot(
+        &mut self,
+        previously_visible_wsids: Vec<WindowServerId>,
+    ) {
+        for wsid in previously_visible_wsids {
+            if self.window_manager.is_window_visible(wsid) {
+                continue;
+            }
+            let Some(wid) = self.window_manager.tracked_window_id(wsid) else {
+                continue;
+            };
+            let Some(space) = self.assigned_space_for_window_id(wid) else {
+                continue;
+            };
+            if !self.is_space_active(space) {
+                continue;
+            }
+
+            let inactive_target = window_server::window_space(wsid)
+                .filter(|current_space| *current_space != space)
+                .filter(|current_space| {
+                    #[cfg(test)]
+                    {
+                        let _ = current_space;
+                        true
+                    }
+                    #[cfg(not(test))]
+                    {
+                        window_server::space_is_user(current_space.get())
+                    }
+                })
+                .filter(|current_space| !self.is_space_active(*current_space));
+            if let Some(current_space) = inactive_target {
+                self.window_manager.set_window_server_space(wsid, Some(current_space));
+                let _ = self.reassign_window_to_authoritative_space(wid, current_space);
+                continue;
+            }
+
+            // If the authoritative active-space snapshot no longer includes a
+            // previously visible window and WindowServer cannot confirm a new
+            // native space for it, drop the stale origin-space ownership. Keeping
+            // the old assignment lets later discovery/MC refresh rebuild the
+            // origin layout from stale workspace state.
+            self.window_manager.set_window_server_space(wsid, None);
+            self.send_layout_event(LayoutEvent::WindowRemoved(wid));
+        }
+    }
+
+    fn reconcile_authoritative_active_window_snapshot(
+        &mut self,
+        active_windows: Vec<(WindowServerId, Option<SpaceId>)>,
+    ) {
+        let previously_visible_wsids: Vec<_> =
+            self.window_manager.iter_visible_window_server_ids().collect();
+        self.refresh_active_space_window_membership(active_windows);
+        self.remove_windows_missing_from_active_space_snapshot(previously_visible_wsids);
+        self.reconcile_windows_with_authoritative_spaces();
     }
 
     fn is_login_window_pid(&self, pid: pid_t) -> bool {
@@ -646,6 +771,27 @@ impl Reactor {
     // fn remove_txid_for_window(&self, wsid: Option<WindowServerId>) {
     //     self.transaction_manager.remove_for_window(wsid);
     // }
+
+    fn clear_pending_hidden_window_targets(&self) {
+        for (wid, window) in self.window_manager.iter_windows() {
+            if self.hidden_assigned_space_for_window_id(wid).is_none() {
+                continue;
+            }
+            if let Some(wsid) = window.info.sys_id {
+                self.transaction_manager.clear_target_for_window(wsid);
+            }
+        }
+    }
+
+    fn clear_pending_target_if_confirmed_space(
+        &self,
+        wsid: WindowServerId,
+        confirmed_space: SpaceId,
+    ) {
+        if self.pending_target_space_for_window_server_id(wsid) == Some(confirmed_space) {
+            self.transaction_manager.clear_target_for_window(wsid);
+        }
+    }
 
     fn is_in_drag(&self) -> bool {
         matches!(
@@ -785,6 +931,8 @@ impl Reactor {
             event,
             Event::WindowCreated(..)
                 | Event::WindowDestroyed(..)
+                | Event::WindowServerDestroyed(..)
+                | Event::WindowServerAppeared(..)
                 | Event::WindowFrameChanged(..)
                 | Event::WindowMinimized(..)
                 | Event::WindowDeminiaturized(..)
@@ -1312,7 +1460,7 @@ impl Reactor {
         #[cfg(not(test))]
         {
             wait_for_native_fullscreen_transition();
-            thread::sleep(Duration::from_millis(50));
+            thread::sleep(std::time::Duration::from_millis(50));
         }
     }
 
@@ -1342,7 +1490,7 @@ impl Reactor {
                 self.send_layout_event(LayoutEvent::WindowFocused(space, main_window));
             }
         }
-        self.refresh_active_space_window_membership(active_windows);
+        self.reconcile_authoritative_active_window_snapshot(active_windows);
         self.check_for_new_windows();
 
         if let Some(space) =
@@ -1503,10 +1651,19 @@ impl Reactor {
             return None;
         }
 
-        if let Some(wsid) = window_server_id
-            && let Some(space) = self.window_manager.window_server_space(wsid)
-        {
+        if let Some(space) = self.hidden_assigned_space_for_frame(window_server_id, frame) {
             return Some(space);
+        }
+
+        if let Some(wsid) = window_server_id {
+            let reported_space = self.window_manager.window_server_space(wsid);
+            if let Some(space) = self
+                .pending_target_space_for_window_server_id(wsid)
+                .or_else(|| self.assigned_space_matching_frame_for_window_server_id(wsid, frame))
+                .or(reported_space)
+            {
+                return Some(space);
+            }
         }
 
         self.best_space_for_frame(frame)
@@ -1589,12 +1746,138 @@ impl Reactor {
         self.best_space_for_window(&window.frame_monotonic, window.info.sys_id)
     }
 
+    fn hidden_assigned_space_for_frame(
+        &self,
+        window_server_id: Option<WindowServerId>,
+        _frame: &CGRect,
+    ) -> Option<SpaceId> {
+        let wsid = window_server_id?;
+        let wid = self.window_manager.tracked_window_id(wsid)?;
+        let assigned_space = self.assigned_space_for_window_id(wid)?;
+        if !self.is_space_active(assigned_space)
+            || !self.window_in_non_active_workspace(assigned_space, wid)
+        {
+            return None;
+        }
+
+        Some(assigned_space)
+    }
+
+    fn hidden_assigned_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
+        let window = self.window_manager.window(wid)?;
+        self.hidden_assigned_space_for_frame(window.info.sys_id, &window.frame_monotonic)
+    }
+
     fn assigned_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
         self.layout_manager
             .layout_engine
             .virtual_workspace_manager()
             .workspace_info_for_window_any(wid)
             .map(|info| info.space)
+    }
+
+    fn assigned_space_matching_frame_for_window_server_id(
+        &self,
+        wsid: WindowServerId,
+        frame: &CGRect,
+    ) -> Option<SpaceId> {
+        let wid = self.window_manager.tracked_window_id(wsid)?;
+        let assigned_space = self.assigned_space_for_window_id(wid)?;
+        (self.best_space_for_frame(frame) == Some(assigned_space)).then_some(assigned_space)
+    }
+
+    fn visible_assigned_space_for_window_server_id(&self, wsid: WindowServerId) -> Option<SpaceId> {
+        let wid = self.window_manager.tracked_window_id(wsid)?;
+        if self.hidden_assigned_space_for_window_id(wid).is_some()
+            || !self.window_manager.is_window_visible(wsid)
+        {
+            return None;
+        }
+        let frame = self.window_manager.window(wid)?.frame_monotonic;
+        self.assigned_space_matching_frame_for_window_server_id(wsid, &frame)
+    }
+
+    fn pending_target_space_for_window_server_id(&self, wsid: WindowServerId) -> Option<SpaceId> {
+        let wid = self.window_manager.tracked_window_id(wsid)?;
+        let target_frame = self.transaction_manager.get_target_frame(wsid)?;
+        let assigned_space = self.assigned_space_for_window_id(wid)?;
+        let target_space = self
+            .hidden_assigned_space_for_frame(Some(wsid), &target_frame)
+            .or_else(|| self.best_space_for_frame(&target_frame))?;
+        (target_space == assigned_space).then_some(target_space)
+    }
+
+    fn should_ignore_conflicting_user_space_event(
+        &self,
+        wid: WindowId,
+        reported_space: SpaceId,
+    ) -> bool {
+        let current_server_space = self.current_reported_space_for_window_id(wid);
+        let hidden_assigned_space = self.hidden_assigned_space_for_window_id(wid);
+        if let Some(hidden_assigned_space) = hidden_assigned_space
+            && hidden_assigned_space != reported_space
+            && current_server_space
+                .is_none_or(|current_space| current_space == hidden_assigned_space)
+        {
+            return true;
+        }
+        let is_visible = self
+            .window_manager
+            .window(wid)
+            .and_then(|window| window.info.sys_id)
+            .is_some_and(|wsid| self.window_manager.is_window_visible(wsid));
+
+        if self.active_spaces.len() > 1
+            && is_visible
+            && current_server_space
+                .is_some_and(|current| self.is_space_active(current) && current != reported_space)
+        {
+            return true;
+        }
+
+        let Some(assigned_space) = self.assigned_space_for_window_id(wid) else {
+            return false;
+        };
+        if assigned_space == reported_space {
+            return false;
+        }
+
+        if self.active_spaces.len() > 1
+            && hidden_assigned_space.is_none()
+            && let Some(window) = self.window_manager.window(wid)
+            && let Some(geometry_space) =
+                self.geometry_space_for_window(&window.frame_monotonic, window.info.sys_id)
+            && self.is_space_active(geometry_space)
+            && geometry_space != reported_space
+            && (assigned_space == geometry_space || current_server_space == Some(geometry_space))
+        {
+            return true;
+        }
+
+        let Some(target_space) = self
+            .window_manager
+            .window(wid)
+            .and_then(|window| window.info.sys_id)
+            .and_then(|wsid| self.pending_target_space_for_window_server_id(wsid))
+        else {
+            return false;
+        };
+        if target_space != assigned_space || reported_space == target_space {
+            return false;
+        }
+
+        if current_server_space == Some(assigned_space) {
+            return true;
+        }
+
+        let Some(window) = self.window_manager.window(wid) else {
+            return false;
+        };
+
+        matches!(
+            self.geometry_space_for_window(&window.frame_monotonic, window.info.sys_id),
+            Some(geometry_space) if geometry_space == assigned_space
+        )
     }
 
     fn reassign_window_to_authoritative_space(
@@ -1604,7 +1887,7 @@ impl Reactor {
     ) -> bool {
         let assigned_space = self.assigned_space_for_window_id(wid);
         if assigned_space == Some(authoritative_space) {
-            return false;
+            return self.restore_window_to_active_layout_if_visible(wid, authoritative_space);
         }
 
         self.send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
@@ -1635,15 +1918,31 @@ impl Reactor {
         }
 
         let target_active = self.is_space_active(authoritative_space);
-        if target_active
-            && let Some(wsid) =
-                self.window_manager.window(wid).and_then(|window| window.info.sys_id)
-            && self.window_manager.is_window_visible(wsid)
-        {
-            self.send_layout_event(LayoutEvent::WindowAdded(authoritative_space, wid));
-        }
+        let _ = self.restore_window_to_active_layout_if_visible(wid, authoritative_space);
 
         assigned_space.is_some_and(|space| self.is_space_active(space)) || target_active
+    }
+
+    fn restore_window_to_active_layout_if_visible(
+        &mut self,
+        wid: WindowId,
+        authoritative_space: SpaceId,
+    ) -> bool {
+        if !self.is_space_active(authoritative_space) {
+            return false;
+        }
+
+        let Some(wsid) = self.window_manager.window(wid).and_then(|window| window.info.sys_id)
+        else {
+            return false;
+        };
+        if !self.window_manager.is_window_visible(wsid) {
+            return false;
+        }
+
+        let was_on_active_space = self.is_window_on_active_space(wid);
+        self.send_layout_event(LayoutEvent::WindowAdded(authoritative_space, wid));
+        !was_on_active_space && self.is_window_on_active_space(wid)
     }
 
     fn reconcile_windows_with_authoritative_spaces(&mut self) -> bool {
@@ -1665,12 +1964,29 @@ impl Reactor {
         layout_changed
     }
 
-    fn authoritative_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
+    fn current_reported_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
         self.window_manager
             .window(wid)
             .and_then(|window| window.info.sys_id)
-            .and_then(|wsid| self.window_manager.window_server_space(wsid))
-            .or_else(|| self.assigned_space_for_window_id(wid))
+            .and_then(|wsid| {
+                let reported_space = window_server::window_space(wsid)
+                    .or_else(|| self.window_manager.window_server_space(wsid));
+                self.pending_target_space_for_window_server_id(wsid)
+                    .or(reported_space)
+                    .or_else(|| self.visible_assigned_space_for_window_server_id(wsid))
+            })
+    }
+
+    fn authoritative_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
+        let reported_space = self.current_reported_space_for_window_id(wid);
+        if let Some(hidden_assigned_space) = self.hidden_assigned_space_for_window_id(wid) {
+            return match reported_space {
+                Some(space) if space != hidden_assigned_space => Some(space),
+                _ => Some(hidden_assigned_space),
+            };
+        }
+
+        reported_space.or_else(|| self.assigned_space_for_window_id(wid))
     }
 
     fn best_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
@@ -1689,8 +2005,8 @@ impl Reactor {
     fn discovery_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
         let window = self.window_manager.window(wid)?;
         let authoritative = self.authoritative_space_for_window_id(wid);
-        if authoritative.is_some_and(|space| !self.is_space_active(space)) {
-            return authoritative;
+        if let Some(space) = authoritative {
+            return Some(space);
         }
 
         if let Some(space) = self.best_space_for_frame(&window.frame_monotonic)
@@ -1699,7 +2015,7 @@ impl Reactor {
             return Some(space);
         }
 
-        authoritative.or_else(|| self.best_space_for_window_id(wid))
+        self.best_space_for_window_id(wid)
     }
 
     pub(crate) fn geometry_space_for_window(
@@ -1711,6 +2027,10 @@ impl Reactor {
             && self.is_known_fullscreen_window(wsid)
         {
             return None;
+        }
+
+        if let Some(space) = self.hidden_assigned_space_for_frame(window_server_id, frame) {
+            return Some(space);
         }
 
         self.best_space_for_frame(frame)
@@ -1749,6 +2069,12 @@ impl Reactor {
                 self.send_layout_event(LayoutEvent::WindowRemoved(wid));
             }
             if let Some(space) = final_space {
+                if let Some(wsid) =
+                    self.window_manager.window(wid).and_then(|window| window.info.sys_id)
+                {
+                    self.window_manager.set_window_server_space(wsid, Some(space));
+                    self.window_manager.mark_window_visible(wsid);
+                }
                 if let Some(active_ws) = self.layout_manager.layout_engine.active_workspace(space) {
                     let assigned = self
                         .layout_manager
@@ -2351,7 +2677,7 @@ impl Reactor {
                 }
             };
             if let Some(cmd) = cmd {
-                let space = workspace_switch_space.or_else(|| self.workspace_command_space());
+                let space = workspace_switch_space.or_else(|| self.command_context_space());
                 if let Some(space) = space {
                     let resp = self
                         .layout_manager
@@ -2400,7 +2726,7 @@ impl Reactor {
                     let warp_space = if skip_center_warp {
                         None
                     } else {
-                        workspace_switch_space.or_else(|| self.workspace_command_space())
+                        workspace_switch_space.or_else(|| self.command_context_space())
                     };
                     self.try_focus_or_warp_without_raise(warp_space, &mut focus_window)
                 }
@@ -2905,31 +3231,12 @@ impl Reactor {
             return;
         }
 
-        let previously_visible_wsids: Vec<_> =
-            self.window_manager.iter_visible_window_server_ids().collect();
-
         // Mission Control can move windows between native spaces without emitting a
         // matching destroy/appear pair for the origin space. Reconcile the active
         // spaces from the same space-aware WS-id list used everywhere else so we do
         // not depend on the global CG on-screen window list during recovery.
-        self.refresh_active_space_window_membership(active_windows);
-        for wsid in previously_visible_wsids {
-            if self.window_manager.is_window_visible(wsid) {
-                continue;
-            }
-            let Some(wid) = self.window_manager.tracked_window_id(wsid) else {
-                continue;
-            };
-            let Some(space) = self.assigned_space_for_window_id(wid) else {
-                continue;
-            };
-            if !self.is_space_active(space) || self.is_window_on_known_inactive_space(wid) {
-                continue;
-            }
-            self.send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
-        }
+        self.reconcile_authoritative_active_window_snapshot(active_windows);
         self.mission_control_manager.pending_mission_control_refresh.clear();
-        self.reconcile_windows_with_authoritative_spaces();
         self.force_refresh_all_windows();
         self.check_for_new_windows();
         self.update_layout_or_warn(false, false);
@@ -2965,6 +3272,19 @@ impl Reactor {
 
     fn workspace_command_space(&self) -> Option<SpaceId> {
         self.raw_command_space().filter(|space| self.is_space_active(*space))
+    }
+
+    fn command_context_space(&self) -> Option<SpaceId> {
+        self.layout_manager
+            .layout_engine
+            .focused_window()
+            .and_then(|wid| {
+                self.assigned_space_for_window_id(wid)
+                    .or_else(|| self.best_space_for_window_id(wid))
+            })
+            .filter(|space| self.is_space_active(*space))
+            .or_else(|| self.main_window_space().filter(|space| self.is_space_active(*space)))
+            .or_else(|| self.workspace_command_space())
     }
 
     fn screen_for_point(&self, point: CGPoint) -> Option<&ScreenInfo> {

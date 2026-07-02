@@ -1,4 +1,4 @@
-use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_core_foundation::{CGPoint, CGRect};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use slotmap::{SlotMap, new_key_type};
@@ -726,43 +726,27 @@ impl VirtualWorkspaceManager {
 
     fn hidden_rect_for_corner(
         screen_frame: CGRect,
-        original_size: CGSize,
+        original_frame: CGRect,
         corner: HideCorner,
         app_bundle_id: Option<&str>,
     ) -> CGRect {
-        let one_pixel_offset = if let Some(bundle_id) = app_bundle_id {
-            match bundle_id {
-                "us.zoom.xos" => CGPoint::new(0.0, 0.0),
-                _ => match corner {
-                    HideCorner::BottomLeft => CGPoint::new(1.0, -1.0),
-                    HideCorner::BottomRight => CGPoint::new(1.0, 1.0),
-                },
-            }
+        let reveal = if matches!(app_bundle_id, Some("us.zoom.xos")) {
+            0.0
         } else {
-            match corner {
-                HideCorner::BottomLeft => CGPoint::new(1.0, -1.0),
-                HideCorner::BottomRight => CGPoint::new(1.0, 1.0),
-            }
+            1.0
         };
 
         let hidden_point = match corner {
-            HideCorner::BottomLeft => {
-                let bottom_left = CGPoint::new(screen_frame.origin.x, screen_frame.max().y);
-                CGPoint::new(
-                    bottom_left.x + one_pixel_offset.x - original_size.width + 1.0,
-                    bottom_left.y + one_pixel_offset.y,
-                )
-            }
+            HideCorner::BottomLeft => CGPoint::new(
+                screen_frame.origin.x - original_frame.size.width + reveal,
+                screen_frame.max().y - reveal,
+            ),
             HideCorner::BottomRight => {
-                let bottom_right = CGPoint::new(screen_frame.max().x, screen_frame.max().y);
-                CGPoint::new(
-                    bottom_right.x - one_pixel_offset.x - 1.0,
-                    bottom_right.y - one_pixel_offset.y,
-                )
+                CGPoint::new(screen_frame.max().x - reveal, screen_frame.max().y - reveal)
             }
         };
 
-        CGRect::new(hidden_point, original_size)
+        CGRect::new(hidden_point, original_frame.size)
     }
 
     fn intersection_area(a: CGRect, b: CGRect) -> f64 {
@@ -774,73 +758,48 @@ impl VirtualWorkspaceManager {
     fn choose_hidden_position(
         &self,
         screen_frame: CGRect,
-        original_size: CGSize,
+        original_frame: CGRect,
         corner: HideCorner,
         app_bundle_id: Option<&str>,
         other_screens: &[CGRect],
     ) -> CGRect {
-        const MIN_ANCHOR_AREA: f64 = 1.0;
         let primary =
-            Self::hidden_rect_for_corner(screen_frame, original_size, corner, app_bundle_id);
+            Self::hidden_rect_for_corner(screen_frame, original_frame, corner, app_bundle_id);
         let fallback = Self::hidden_rect_for_corner(
             screen_frame,
-            original_size,
+            original_frame,
             corner.opposite(),
             app_bundle_id,
         );
 
-        let primary_anchor = Self::intersection_area(screen_frame, primary);
-        let fallback_anchor = Self::intersection_area(screen_frame, fallback);
-        let primary_anchored = primary_anchor >= MIN_ANCHOR_AREA;
-        let fallback_anchored = fallback_anchor >= MIN_ANCHOR_AREA;
-
-        let mut primary_other_max: f64 = 0.0;
-        let mut fallback_other_max: f64 = 0.0;
+        let mut primary_other_overlap: f64 = 0.0;
+        let mut fallback_other_overlap: f64 = 0.0;
         for screen in other_screens {
-            primary_other_max = primary_other_max.max(Self::intersection_area(*screen, primary));
-            fallback_other_max = fallback_other_max.max(Self::intersection_area(*screen, fallback));
+            primary_other_overlap += Self::intersection_area(*screen, primary);
+            fallback_other_overlap += Self::intersection_area(*screen, fallback);
         }
 
-        match (primary_anchored, fallback_anchored) {
-            (true, false) => primary,
-            (false, true) => fallback,
-            (true, true) => {
-                if (primary_other_max - fallback_other_max).abs() > f64::EPSILON {
-                    if primary_other_max < fallback_other_max {
-                        primary
-                    } else {
-                        fallback
-                    }
-                } else if primary_anchor <= fallback_anchor {
-                    primary
-                } else {
-                    fallback
-                }
-            }
-            (false, false) => {
-                if primary_other_max <= fallback_other_max {
-                    primary
-                } else {
-                    fallback
-                }
-            }
+        if primary_other_overlap == 0.0 || primary_other_overlap <= fallback_other_overlap {
+            primary
+        } else {
+            fallback
         }
     }
 
     pub fn calculate_hidden_position(
         &self,
         screen_frame: CGRect,
-        original_size: CGSize,
+        original_frame: CGRect,
         corner: HideCorner,
         app_bundle_id: Option<&str>,
     ) -> CGRect {
-        self.choose_hidden_position(screen_frame, original_size, corner, app_bundle_id, &[])
+        self.choose_hidden_position(screen_frame, original_frame, corner, app_bundle_id, &[])
     }
 
     pub fn calculate_hidden_position_multi(
         &self,
         screen_frame: CGRect,
-        original_size: CGSize,
+        original_frame: CGRect,
         corner: HideCorner,
         app_bundle_id: Option<&str>,
         all_screens: &[CGRect],
@@ -849,7 +808,7 @@ impl VirtualWorkspaceManager {
             all_screens.iter().copied().filter(|screen| *screen != screen_frame).collect();
         self.choose_hidden_position(
             screen_frame,
-            original_size,
+            original_frame,
             corner,
             app_bundle_id,
             &other_screens,
@@ -865,7 +824,7 @@ impl VirtualWorkspaceManager {
         const VISIBLE_THRESHOLD_PX: f64 = 3.0;
         let hidden_rect = self.choose_hidden_position(
             *screen_frame,
-            rect.size,
+            *rect,
             HideCorner::BottomRight,
             app_bundle_id,
             &[],
@@ -895,7 +854,7 @@ impl VirtualWorkspaceManager {
             all_screens.iter().copied().filter(|screen| *screen != *screen_frame).collect();
         let hidden_rect = self.choose_hidden_position(
             *screen_frame,
-            rect.size,
+            *rect,
             HideCorner::BottomRight,
             app_bundle_id,
             &other_screens,
@@ -1505,6 +1464,8 @@ pub struct WorkspaceStats {
 
 #[cfg(test)]
 mod tests {
+    use objc2_core_foundation::CGSize;
+
     use super::*;
     use crate::actor::app::WindowId;
     use crate::sys::screen::SpaceId;
@@ -2073,5 +2034,42 @@ mod tests {
                 || bw2_updated_assignment.workspace_id == expected_updated
         );
         assert!(bw2_updated_assignment.floating);
+    }
+
+    #[test]
+    fn hidden_position_uses_corner_anchor_while_hiding_offscreen() {
+        let manager = VirtualWorkspaceManager::new();
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(100.0, 100.0));
+        let frame = CGRect::new(CGPoint::new(20.0, 37.0), CGSize::new(30.0, 20.0));
+
+        let hidden = manager.calculate_hidden_position_multi(
+            screen,
+            frame,
+            HideCorner::BottomRight,
+            None,
+            &[screen],
+        );
+
+        assert_eq!(hidden.origin.y, screen.max().y - 1.0);
+        assert_eq!(hidden.origin.x, screen.max().x - 1.0);
+    }
+
+    #[test]
+    fn hidden_position_flips_sides_to_avoid_neighboring_monitor_overlap() {
+        let manager = VirtualWorkspaceManager::new();
+        let primary = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(100.0, 100.0));
+        let right_neighbor = CGRect::new(CGPoint::new(100.0, 0.0), CGSize::new(100.0, 100.0));
+        let frame = CGRect::new(CGPoint::new(20.0, 25.0), CGSize::new(30.0, 20.0));
+
+        let hidden = manager.calculate_hidden_position_multi(
+            primary,
+            frame,
+            HideCorner::BottomRight,
+            None,
+            &[primary, right_neighbor],
+        );
+
+        assert_eq!(hidden.origin.y, primary.max().y - 1.0);
+        assert_eq!(hidden.origin.x, primary.origin.x - frame.size.width + 1.0);
     }
 }

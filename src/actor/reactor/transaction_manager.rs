@@ -23,7 +23,12 @@ impl TransactionManager {
     pub fn new(store: WindowTxStore) -> Self { Self { store } }
 
     /// Stores a transaction ID for a window with its target frame.
-    pub fn store_txid(&self, wsid: WindowServerId, txid: TransactionId, target: CGRect) {
+    pub fn store_txid(
+        &self,
+        wsid: WindowServerId,
+        txid: TransactionId,
+        target: CGRect,
+    ) {
         self.store.insert(wsid, txid, target);
     }
 

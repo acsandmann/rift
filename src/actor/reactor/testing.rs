@@ -46,11 +46,7 @@ pub fn make_screen_snapshots(frames: Vec<CGRect>, spaces: Vec<Option<SpaceId>>) 
         .collect()
 }
 
-pub fn space_state_event(
-    frames: Vec<CGRect>,
-    spaces: Vec<Option<SpaceId>>,
-    _ws_info: Vec<WindowServerInfo>,
-) -> Event {
+pub fn space_state_event(frames: Vec<CGRect>, spaces: Vec<Option<SpaceId>>) -> Event {
     space_state_event_from_screens(make_screen_snapshots(frames, spaces))
 }
 
@@ -62,6 +58,7 @@ pub fn space_state_event_from_screens(screens: Vec<ScreenInfo>) -> Event {
         fullscreen_spaces: Default::default(),
         has_seen_display_set: false,
         active_spaces,
+        menu_bar_space: command_space,
         command_space,
         display_space_ids: Default::default(),
         last_user_space_by_display: Default::default(),

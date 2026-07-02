@@ -209,7 +209,7 @@ impl WindowNotify {
                         }
                     }
                     CGSEventType::Known(KnownCGSEvent::SpaceCurrentChanged)
-                    | CGSEventType::Known(KnownCGSEvent::PackagesStatusBarSpaceChanged) => {
+                    | CGSEventType::Known(KnownCGSEvent::WorkspaceDidChange) => {
                         spaces_tx.send(spaces::Event::ActiveSpaceChanged);
                     }
                     CGSEventType::Known(KnownCGSEvent::ManagedSpaceMembershipUpdated)

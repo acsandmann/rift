@@ -108,6 +108,7 @@ pub struct ForwardedSpaceState {
     pub fullscreen_spaces: HashSet<SpaceId>,
     pub has_seen_display_set: bool,
     pub active_spaces: HashSet<SpaceId>,
+    pub menu_bar_space: Option<SpaceId>,
     pub command_space: Option<SpaceId>,
     pub display_space_ids: HashMap<String, Vec<SpaceId>>,
     pub last_user_space_by_display: HashMap<String, SpaceId>,
@@ -577,6 +578,7 @@ impl SpacesActor {
             && !has_duplicate_spaces
             && screens.iter().all(|screen| screen.space.is_some());
         let space_remaps = self.compute_space_remaps(&screens, allow_space_remap);
+        let menu_bar_space = self.resolve_menu_bar_space(&screens);
         let command_space = self.resolve_command_space(&screens);
         #[cfg(test)]
         {
@@ -606,6 +608,7 @@ impl SpacesActor {
             fullscreen_spaces,
             has_seen_display_set: self.state.has_seen_display_set,
             active_spaces: self.state.screens.iter().filter_map(|screen| screen.space).collect(),
+            menu_bar_space,
             command_space,
             display_space_ids: self.state.display_space_ids.clone(),
             last_user_space_by_display: self.state.last_user_space_by_display.clone(),
@@ -758,6 +761,26 @@ impl SpacesActor {
                 return Some(space);
             }
 
+            if let Some(active_space) = crate::sys::screen::get_active_space_number()
+                && screens.iter().any(|screen| screen.space == Some(active_space))
+            {
+                return Some(active_space);
+            }
+
+            screens.iter().find_map(|screen| screen.space)
+        }
+    }
+
+    fn resolve_menu_bar_space(&self, screens: &[ScreenInfo]) -> Option<SpaceId> {
+        #[cfg(test)]
+        {
+            screens
+                .iter()
+                .find_map(|screen| screen.space)
+                .or_else(|| self.state.screens.iter().find_map(|screen| screen.space))
+        }
+        #[cfg(not(test))]
+        {
             if let Some(active_space) = crate::sys::screen::get_active_space_number()
                 && screens.iter().any(|screen| screen.space == Some(active_space))
             {

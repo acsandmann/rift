@@ -370,6 +370,7 @@ unsafe extern "C" {
 
     pub fn SLSMainConnectionID() -> cid_t;
     pub fn SLSServerPort(zero: *mut c_void) -> u32;
+    pub fn SLSWindowManagementBridgeSetDelegate(delegate: *mut c_void) -> CGError;
     pub safe fn SLSDisableUpdate(cid: cid_t) -> i32;
     pub safe fn SLSReenableUpdate(cid: cid_t) -> i32;
     pub fn _SLPSSetFrontProcessWithOptions(

@@ -22,6 +22,8 @@ use serde::{Deserialize, Serialize};
 
 use super::geometry::{CGRectDef, CGSizeDef};
 use crate::actor::app::WindowId;
+#[cfg(test)]
+use crate::common::collections::HashMap;
 use crate::sys::app::pid_t;
 use crate::sys::axuielement::{AXUIElement, Error as AxError};
 use crate::sys::cg_ok;
@@ -34,6 +36,8 @@ static LAST_WINDOWSERVER_ACTIVITY_US: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 thread_local! {
     static TEST_SPACE_WINDOW_LIST_OVERRIDE: RefCell<Option<Vec<u32>>> = const { RefCell::new(None) };
+    static TEST_SPACE_WINDOW_LIST_BY_SPACE_OVERRIDE: RefCell<HashMap<u64, Vec<u32>>> = RefCell::new(HashMap::default());
+    static TEST_WINDOW_SPACES_OVERRIDE: RefCell<HashMap<u32, Vec<u64>>> = RefCell::new(HashMap::default());
 }
 
 pub const WINDOWSERVER_QUIET_US: u64 = 350_000;
@@ -282,6 +286,13 @@ pub fn window_is_sticky(id: WindowServerId) -> bool {
 }
 
 pub fn window_spaces(id: WindowServerId) -> Vec<crate::sys::screen::SpaceId> {
+    #[cfg(test)]
+    if let Some(override_spaces) =
+        TEST_WINDOW_SPACES_OVERRIDE.with(|spaces| spaces.borrow().get(&id.as_u32()).cloned())
+    {
+        return override_spaces.into_iter().map(crate::sys::screen::SpaceId::new).collect();
+    }
+
     let cf_windows = cf_array_from_ids(&[id]);
     let space_list_ref = unsafe {
         SLSCopySpacesForWindows(*G_CONNECTION, 0x7, CFRetained::as_ptr(&cf_windows).as_ptr())
@@ -538,6 +549,15 @@ pub fn space_window_list_for_connection(
     include_minimized: bool,
 ) -> Vec<u32> {
     #[cfg(test)]
+    if spaces.len() == 1
+        && let Some(override_ids) = TEST_SPACE_WINDOW_LIST_BY_SPACE_OVERRIDE
+            .with(|ids| ids.borrow().get(&spaces[0]).cloned())
+    {
+        let _ = (owner, include_minimized);
+        return override_ids;
+    }
+
+    #[cfg(test)]
     if let Some(override_ids) = TEST_SPACE_WINDOW_LIST_OVERRIDE.with(|ids| ids.borrow().clone()) {
         let _ = (spaces, owner, include_minimized);
         return override_ids;
@@ -603,6 +623,30 @@ pub fn space_window_list_for_connection(
 #[cfg(test)]
 pub fn set_space_window_list_for_connection_override(ids: Option<Vec<u32>>) {
     TEST_SPACE_WINDOW_LIST_OVERRIDE.with(|override_ids| *override_ids.borrow_mut() = ids);
+}
+
+#[cfg(test)]
+pub fn set_space_window_list_for_space_override(space: u64, ids: Option<Vec<u32>>) {
+    TEST_SPACE_WINDOW_LIST_BY_SPACE_OVERRIDE.with(|override_ids| {
+        let mut override_ids = override_ids.borrow_mut();
+        if let Some(ids) = ids {
+            override_ids.insert(space, ids);
+        } else {
+            override_ids.remove(&space);
+        }
+    });
+}
+
+#[cfg(test)]
+pub fn set_window_spaces_override(id: WindowServerId, spaces: Option<Vec<u64>>) {
+    TEST_WINDOW_SPACES_OVERRIDE.with(|override_spaces| {
+        let mut override_spaces = override_spaces.borrow_mut();
+        if let Some(spaces) = spaces {
+            override_spaces.insert(id.as_u32(), spaces);
+        } else {
+            override_spaces.remove(&id.as_u32());
+        }
+    });
 }
 
 pub fn app_window_suitable(id: WindowServerId) -> bool {

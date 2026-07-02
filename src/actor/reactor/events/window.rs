@@ -249,13 +249,12 @@ impl WindowEventHandler {
                     return false;
                 };
 
-                if let Some((wsid, target)) = pending_target {
+                if let Some((_wsid, target)) = pending_target {
                     if new_frame.same_as(target) {
                         if !window.frame_monotonic.same_as(new_frame) {
                             debug!(?wid, ?new_frame, "Final frame matches Rift request");
                             window.frame_monotonic = new_frame;
                         }
-                        reactor.transaction_manager.clear_target_for_window(wsid);
                     } else {
                         trace!(
                             ?wid,
@@ -349,6 +348,21 @@ impl WindowEventHandler {
                 }
             } else {
                 if old_space != new_space {
+                    if let Some(target_space) = server_id
+                        .and_then(|wsid| reactor.pending_target_space_for_window_server_id(wsid))
+                        && reactor.assigned_space_for_window_id(wid) == Some(target_space)
+                        && new_space != Some(target_space)
+                    {
+                        debug!(
+                            ?wid,
+                            ?old_space,
+                            ?new_space,
+                            ?target_space,
+                            "Ignoring conflicting geometry-only space change after recent cross-display move"
+                        );
+                        return false;
+                    }
+
                     let keep_assigned_for_scrolling = old_space.is_some_and(|space| {
                         reactor.layout_manager.layout_engine.active_layout_mode_at(space)
                             == LayoutMode::Scrolling
@@ -372,6 +386,10 @@ impl WindowEventHandler {
 
                     reactor.send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
                     if let Some(space) = new_space {
+                        if let Some(wsid) = server_id {
+                            reactor.window_manager.set_window_server_space(wsid, Some(space));
+                            reactor.window_manager.mark_window_visible(wsid);
+                        }
                         if reactor.is_space_active(space) {
                             if let Some(active_ws) =
                                 reactor.layout_manager.layout_engine.active_workspace(space)
@@ -390,6 +408,8 @@ impl WindowEventHandler {
                             }
                             reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
                         }
+                    } else if let Some(wsid) = server_id {
+                        reactor.window_manager.set_window_server_space(wsid, None);
                     }
                     let _ = reactor.update_layout_or_warn(false, false);
                 } else if !old_frame.size.same_as(new_frame.size) {
