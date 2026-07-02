@@ -469,12 +469,6 @@ impl Reactor {
         self.handle_active_space_change(previous_active);
     }
 
-    fn apply_authoritative_active_spaces(&mut self, spaces: impl IntoIterator<Item = SpaceId>) {
-        let previous_active = self.active_spaces.clone();
-        self.active_spaces = spaces.into_iter().collect();
-        self.handle_active_space_change(previous_active);
-    }
-
     fn recompute_and_set_active_spaces_from_current_screens(&mut self) {
         let raw_spaces = self.raw_spaces_for_current_screens();
         self.recompute_and_set_active_spaces(&raw_spaces);

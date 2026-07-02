@@ -194,6 +194,76 @@ fn forwarded_active_spaces_are_authoritative_for_workspace_context() {
 }
 
 #[test]
+fn forwarded_space_snapshot_respects_default_disable_policy() {
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    reactor.config.settings.default_disable = true;
+
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+
+    assert!(
+        !reactor.is_space_active(space),
+        "forwarded raw active spaces must still be filtered by default_disable policy"
+    );
+}
+
+#[test]
+fn forwarded_space_snapshot_respects_one_space_policy() {
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    reactor.one_space = true;
+
+    let left = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let right = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
+    let space1 = SpaceId::new(1);
+    let space2 = SpaceId::new(2);
+
+    reactor.handle_event(space_state_event(vec![left, right], vec![
+        Some(space1),
+        Some(space2),
+    ]));
+
+    assert!(reactor.is_space_active(space1));
+    assert!(
+        !reactor.is_space_active(space2),
+        "forwarded raw active spaces must not bypass one_space filtering"
+    );
+}
+
+#[test]
+fn forwarded_space_snapshot_respects_toggled_space_activation_policy() {
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    assert!(reactor.is_space_active(space));
+
+    CommandEventHandler::handle_command_reactor_toggle_space_activated(&mut reactor);
+    assert!(!reactor.is_space_active(space));
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+
+    assert!(
+        !reactor.is_space_active(space),
+        "forwarded raw active spaces must not re-enable a space disabled by ToggleSpaceActivated"
+    );
+}
+
+#[test]
 fn layout_commands_follow_focused_window_space_across_active_displays() {
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(
         &crate::common::config::VirtualWorkspaceSettings::default(),
