@@ -1888,7 +1888,10 @@ impl LayoutEngine {
                 .virtual_workspace_manager
                 .get_workspace_floating_positions(space, active_workspace_id);
             for (window_id, stored_position) in floating_positions {
-                if self.floating.is_floating(window_id) {
+                if self.floating.is_floating(window_id)
+                    && self.virtual_workspace_manager.workspace_for_window(space, window_id)
+                        == Some(active_workspace_id)
+                {
                     ensure_visible_floating(
                         self,
                         &mut positions,
@@ -2045,7 +2048,10 @@ impl LayoutEngine {
             .virtual_workspace_manager
             .get_workspace_floating_positions(space, workspace_id);
         for (window_id, stored_position) in floating_positions {
-            if self.floating.is_floating(window_id) {
+            if self.floating.is_floating(window_id)
+                && self.virtual_workspace_manager.workspace_for_window(space, window_id)
+                    == Some(workspace_id)
+            {
                 positions.insert(window_id, stored_position);
             }
         }
@@ -2427,6 +2433,10 @@ impl LayoutEngine {
             return EventResponse::default();
         }
 
+        if was_floating {
+            self.virtual_workspace_manager.remove_floating_position(window_id);
+        }
+
         {
             let workspace_ids = self.virtual_workspace_manager.list_workspaces(target_space);
             for (id, _) in workspace_ids {
@@ -2800,6 +2810,80 @@ mod tests {
             engine.virtual_workspace_manager().workspace_for_window(space, wid),
             Some(assigned_workspace),
             "window should reappear in the same workspace after a temporary hide"
+        );
+    }
+
+    #[test]
+    fn moving_floating_window_to_space_clears_source_floating_state() {
+        let mut engine = test_engine();
+        let source_space = SpaceId::new(304);
+        let target_space = SpaceId::new(305);
+        let source_screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
+        let target_screen = CGRect::new(CGPoint::new(1000.0, 0.0), CGSize::new(1000.0, 800.0));
+        let pid: pid_t = 43;
+        let wid = WindowId::new(pid, 1);
+        let source_position = CGRect::new(CGPoint::new(120.0, 140.0), CGSize::new(260.0, 220.0));
+        let window_info = |wid| (wid, None, None, None, true, CGSize::new(0.0, 0.0), None, None);
+
+        let _ = engine.handle_event(LayoutEvent::SpaceExposed(source_space, source_screen.size));
+        let _ = engine.handle_event(LayoutEvent::SpaceExposed(target_space, target_screen.size));
+        let _ = engine.handle_event(LayoutEvent::WindowsOnScreenUpdated(
+            source_space,
+            pid,
+            vec![window_info(wid)],
+            None,
+        ));
+
+        let source_workspace = engine
+            .virtual_workspace_manager()
+            .active_workspace(source_space)
+            .expect("source workspace");
+        let target_workspace = engine
+            .virtual_workspace_manager()
+            .active_workspace(target_space)
+            .expect("target workspace");
+
+        engine.remove_window_from_all_tiling_trees(wid);
+        engine.floating.add_floating(wid);
+        engine.floating.add_active(source_space, pid, wid);
+        engine.virtual_workspace_manager_mut().store_floating_position(
+            source_space,
+            source_workspace,
+            wid,
+            source_position,
+        );
+
+        let response =
+            engine.move_window_to_space(source_space, target_space, target_screen.size, wid);
+
+        assert_eq!(response.focus_window, Some(wid));
+        assert_eq!(
+            engine.virtual_workspace_manager().workspace_for_window(target_space, wid),
+            Some(target_workspace)
+        );
+        assert_eq!(
+            engine.virtual_workspace_manager().get_floating_position(
+                source_space,
+                source_workspace,
+                wid
+            ),
+            None,
+            "cross-space moves must clear the source workspace's saved floating frame"
+        );
+        assert!(
+            !engine
+                .calculate_layout_for_workspace(
+                    source_space,
+                    source_workspace,
+                    source_screen,
+                    &LayoutSettings::default().gaps,
+                    0.0,
+                    Default::default(),
+                    Default::default(),
+                )
+                .into_iter()
+                .any(|(window_id, _)| window_id == wid),
+            "source workspace layout must not keep emitting the moved floating window"
         );
     }
 

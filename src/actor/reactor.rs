@@ -2099,6 +2099,12 @@ impl Reactor {
 
         if let Some(space) = final_space {
             if self.layout_manager.layout_engine.is_window_floating(wid) {
+                if session.origin_space != final_space {
+                    self.layout_manager
+                        .layout_engine
+                        .virtual_workspace_manager_mut()
+                        .remove_floating_position(wid);
+                }
                 if let Some(ws_id) = self
                     .layout_manager
                     .layout_engine

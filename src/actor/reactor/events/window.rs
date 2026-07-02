@@ -249,8 +249,9 @@ impl WindowEventHandler {
                     return false;
                 };
 
-                if let Some((_wsid, target)) = pending_target {
+                if let Some((wsid, target)) = pending_target {
                     if new_frame.same_as(target) {
+                        reactor.transaction_manager.clear_target_for_window(wsid);
                         if !window.frame_monotonic.same_as(new_frame) {
                             debug!(?wid, ?new_frame, "Final frame matches Rift request");
                             window.frame_monotonic = new_frame;

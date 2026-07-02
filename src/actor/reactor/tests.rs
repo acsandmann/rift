@@ -1168,6 +1168,105 @@ fn geometry_cross_display_frame_change_updates_authoritative_space() {
 }
 
 #[test]
+fn matching_rift_frame_clears_pending_target() {
+    let (mut reactor, wid, wsid, _space1, _space2, frame) = reactor_with_window_on_space1();
+    let target_frame = CGRect::new(
+        CGPoint::new(frame.origin.x + 40.0, frame.origin.y + 25.0),
+        frame.size,
+    );
+    let txid = reactor.transaction_manager.generate_next_txid(wsid);
+    reactor.transaction_manager.store_txid(wsid, txid, target_frame);
+
+    reactor.handle_event(Event::WindowFrameChanged(
+        wid,
+        target_frame,
+        Some(txid),
+        Requested(true),
+        Some(MouseState::Up),
+    ));
+
+    assert_eq!(
+        reactor.transaction_manager.get_target_frame(wsid),
+        None,
+        "a confirmed Rift frame must clear the pending target"
+    );
+    assert!(
+        reactor
+            .window_manager
+            .window(wid)
+            .expect("window should still exist")
+            .frame_monotonic
+            .same_as(target_frame)
+    );
+}
+
+#[test]
+fn cross_display_drag_clears_source_floating_position() {
+    let (mut reactor, wid, _wsid, space1, space2, initial_frame, screen2) =
+        reactor_with_window_on_space1_two_displays();
+    let source_workspace = reactor
+        .layout_manager
+        .layout_engine
+        .active_workspace(space1)
+        .expect("source workspace");
+    let target_workspace = reactor
+        .layout_manager
+        .layout_engine
+        .active_workspace(space2)
+        .expect("target workspace");
+
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space1, wid));
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space1, wid));
+    reactor.handle_event(Event::Command(Command::Layout(
+        LayoutCommand::ToggleWindowFloating,
+    )));
+    assert!(reactor.layout_manager.layout_engine.is_window_floating(wid));
+    reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .store_floating_position(space1, source_workspace, wid, initial_frame);
+
+    let moved_frame = CGRect::new(
+        CGPoint::new(screen2.origin.x + 120.0, initial_frame.origin.y),
+        initial_frame.size,
+    );
+    reactor.drag_manager.drag_state = DragState::Active {
+        session: DragSession {
+            window: wid,
+            last_frame: moved_frame,
+            origin_space: None,
+            settled_space: Some(space2),
+            layout_dirty: true,
+        },
+    };
+
+    assert!(
+        reactor.finalize_active_drag(),
+        "cross-display drop should request a layout refresh"
+    );
+
+    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
+    assert_eq!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager()
+            .get_floating_position(space1, source_workspace, wid),
+        None,
+        "cross-display drags must clear the source workspace's floating position"
+    );
+    assert_eq!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager()
+            .get_floating_position(space2, target_workspace, wid),
+        Some(moved_frame)
+    );
+}
+
+#[test]
 fn stale_user_space_disappearance_does_not_restore_old_display_assignment() {
     let (mut reactor, wid, wsid, space1, space2, _) = reactor_with_window_moved_to_space2();
 
