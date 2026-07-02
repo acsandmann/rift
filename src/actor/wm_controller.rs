@@ -8,7 +8,6 @@ use std::path::PathBuf;
 use dispatchr::queue;
 use dispatchr::time::Time;
 use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication};
-use objc2_core_foundation::CGRect;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -25,10 +24,11 @@ type Receiver = actor::Receiver<WmEvent>;
 
 use self::WmCmd::*;
 use crate::actor::app::AppInfo;
+use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::{self, event_tap, mission_control, reactor};
 use crate::model::tx_store::WindowTxStore;
 use crate::sys::dispatch::DispatchExt;
-use crate::sys::screen::{CoordinateConverter, ScreenInfo, SpaceId};
+use crate::sys::screen::CoordinateConverter;
 use crate::{layout_engine as layout, sys};
 
 #[derive(Debug)]
@@ -39,11 +39,7 @@ pub enum WmEvent {
     AppGloballyActivated(pid_t),
     AppGloballyDeactivated(pid_t),
     AppTerminated(pid_t),
-    DisplayChurnBegin,
-    DisplayChurnEnd,
-    SpaceChanged(Vec<Option<SpaceId>>),
-    ScreenParametersChanged(Vec<ScreenInfo>, CoordinateConverter),
-    SystemWoke,
+    SpaceStateUpdated(ForwardedSpaceState, CoordinateConverter),
     PowerStateChanged(bool),
     KeyboardLayoutChanged,
     ConfigUpdated(crate::common::config::Config),
@@ -185,16 +181,31 @@ impl WmController {
                 | Command(Wm(crate::actor::wm_controller::WmCmd::PrevWorkspace))
                 | Command(Wm(crate::actor::wm_controller::WmCmd::SwitchToWorkspace(_)))
                 | Command(Wm(crate::actor::wm_controller::WmCmd::SwitchToLastWorkspace))
-                | SpaceChanged(_)
+                | SpaceStateUpdated(..)
         ) && let Some(tx) = &self.mission_control_tx
         {
             tx.send(mission_control::Event::RefreshCurrentWorkspace);
         }
 
         match event {
-            SystemWoke => self.events_tx.send(Event::SystemWoke),
-            DisplayChurnBegin => self.events_tx.send(Event::DisplayChurnBegin),
-            DisplayChurnEnd => self.events_tx.send(Event::DisplayChurnEnd),
+            SpaceStateUpdated(space_state, converter) => {
+                self.events_tx.send(Event::SpaceStateChanged(space_state.clone()));
+                _ = self.event_tap_tx.send(event_tap::Request::SpaceStateUpdated(
+                    space_state.clone(),
+                    converter,
+                ));
+                if let Some(tx) = &self.gesture_tap_tx {
+                    tx.send(gesture_tap::GestureRequest::SpaceStateUpdated(
+                        space_state.clone(),
+                    ));
+                }
+                if let Some(tx) = &self.stack_line_tx {
+                    _ = tx.try_send(crate::actor::stack_line::Event::SpaceStateUpdated(
+                        converter,
+                        space_state,
+                    ));
+                }
+            }
             AppEventsRegistered => {
                 _ = self.event_tap_tx.send(event_tap::Request::SetEventProcessing(false));
 
@@ -271,34 +282,6 @@ impl WmController {
                 } else {
                     debug!("could not compare hotkey bindings; reloading hotkeys");
                     self.register_hotkeys();
-                }
-            }
-            ScreenParametersChanged(screens, converter) => {
-                let frames_with_spaces: Vec<(CGRect, Option<SpaceId>)> =
-                    screens.iter().map(|s| (s.frame, s.space)).collect();
-
-                self.events_tx.send(Event::ScreenParametersChanged(screens));
-
-                _ = self.event_tap_tx.send(event_tap::Request::ScreenParametersChanged(
-                    frames_with_spaces.clone(),
-                    converter,
-                ));
-                if let Some(tx) = &self.gesture_tap_tx {
-                    tx.send(gesture_tap::GestureRequest::ScreenParametersChanged(
-                        frames_with_spaces,
-                    ));
-                }
-                if let Some(tx) = &self.stack_line_tx {
-                    _ = tx.try_send(crate::actor::stack_line::Event::ScreenParametersChanged(
-                        converter,
-                    ));
-                }
-            }
-            SpaceChanged(spaces) => {
-                self.events_tx.send(reactor::Event::SpaceChanged(spaces.clone()));
-                _ = self.event_tap_tx.send(event_tap::Request::SpaceChanged(spaces.clone()));
-                if let Some(tx) = &self.gesture_tap_tx {
-                    tx.send(gesture_tap::GestureRequest::SpaceChanged(spaces));
                 }
             }
             PowerStateChanged(is_low_power_mode) => {

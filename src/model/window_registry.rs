@@ -4,7 +4,7 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
 use crate::actor::app::WindowId;
-use crate::common::collections::HashMap;
+use crate::common::collections::{HashMap, HashSet};
 use crate::model::VirtualWorkspaceId;
 use crate::model::reactor::WindowState;
 use crate::sys::screen::SpaceId;
@@ -23,23 +23,56 @@ struct WindowServerRecord {
     window_id: Option<WindowId>,
     visible: bool,
     observed: bool,
+    space: Option<SpaceId>,
     info: Option<WindowServerInfo>,
     recent_at: Option<Instant>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WindowWorkspaceInfo {
     pub space: SpaceId,
     pub workspace_id: VirtualWorkspaceId,
 }
 
+/// Authoritative per-window metadata tracked by Rift.
+///
+/// Workspace membership lives here, not inside `VirtualWorkspace`. Layout trees
+/// are only a materialized projection for arranging visible windows. Keeping the
+/// assignment index here avoids the old class of bugs where a window could be
+/// present in multiple workspace-owned sets after sleep/wake or same-space
+/// workspace moves, which then leaked into queries and layout recovery.
 #[derive(Debug, Default)]
 pub struct WindowRegistry {
     windows: HashMap<WindowId, WindowRecord>,
     window_servers: HashMap<WindowServerId, WindowServerRecord>,
+    workspace_windows: HashMap<WindowWorkspaceInfo, HashSet<WindowId>>,
 }
 
 impl WindowRegistry {
+    fn remove_window_from_workspace_index(
+        &mut self,
+        window_id: WindowId,
+        assignment: WindowWorkspaceInfo,
+    ) {
+        let should_prune = if let Some(windows) = self.workspace_windows.get_mut(&assignment) {
+            windows.remove(&window_id);
+            windows.is_empty()
+        } else {
+            false
+        };
+        if should_prune {
+            self.workspace_windows.remove(&assignment);
+        }
+    }
+
+    fn add_window_to_workspace_index(
+        &mut self,
+        window_id: WindowId,
+        assignment: WindowWorkspaceInfo,
+    ) {
+        self.workspace_windows.entry(assignment).or_default().insert(window_id);
+    }
+
     pub(crate) fn window(&self, window_id: WindowId) -> Option<&WindowState> {
         self.windows.get(&window_id).and_then(|record| record.state.as_ref())
     }
@@ -115,6 +148,7 @@ impl WindowRegistry {
             record.window_id.is_none()
                 && !record.visible
                 && !record.observed
+                && record.space.is_none()
                 && record.info.is_none()
                 && record.recent_at.is_none()
         });
@@ -210,12 +244,23 @@ impl WindowRegistry {
         self.window_servers.get(&wsid).is_some_and(|record| record.observed)
     }
 
+    pub fn set_window_server_space(&mut self, wsid: WindowServerId, space: Option<SpaceId>) {
+        let record = self.server_record_mut(wsid);
+        record.space = space;
+        self.prune_window_server_record(wsid);
+    }
+
+    pub fn window_server_space(&self, wsid: WindowServerId) -> Option<SpaceId> {
+        self.window_servers.get(&wsid).and_then(|record| record.space)
+    }
+
     pub fn remove_window_server_state(&mut self, wsid: WindowServerId) -> Option<WindowId> {
         let wid = self.tracked_window_id(wsid);
         if let Some(record) = self.window_servers.get_mut(&wsid) {
             record.window_id = None;
             record.visible = false;
             record.observed = false;
+            record.space = None;
             record.info = None;
             record.recent_at = None;
         }
@@ -228,9 +273,12 @@ impl WindowRegistry {
         window_id: WindowId,
         assignment: WindowWorkspaceInfo,
     ) -> Option<WindowWorkspaceInfo> {
-        let record = self.windows.entry(window_id).or_default();
-        let old = record.workspace;
-        record.workspace = Some(assignment);
+        let old = self.windows.get(&window_id).and_then(|record| record.workspace);
+        if let Some(old_assignment) = old {
+            self.remove_window_from_workspace_index(window_id, old_assignment);
+        }
+        self.windows.entry(window_id).or_default().workspace = Some(assignment);
+        self.add_window_to_workspace_index(window_id, assignment);
         old
     }
 
@@ -254,10 +302,77 @@ impl WindowRegistry {
             .unwrap_or_default()
     }
 
+    pub fn workspace_windows(
+        &self,
+        space: SpaceId,
+        workspace_id: VirtualWorkspaceId,
+    ) -> Vec<WindowId> {
+        let assignment = WindowWorkspaceInfo { space, workspace_id };
+        let mut windows: Vec<_> = self
+            .workspace_windows
+            .get(&assignment)
+            .into_iter()
+            .flat_map(|windows| windows.iter().copied())
+            .collect();
+        windows.sort_unstable_by_key(|wid| (wid.pid, wid.idx.get()));
+        windows
+    }
+
+    pub fn workspace_window_count(
+        &self,
+        space: SpaceId,
+        workspace_id: VirtualWorkspaceId,
+    ) -> usize {
+        let assignment = WindowWorkspaceInfo { space, workspace_id };
+        self.workspace_windows.get(&assignment).map_or(0, HashSet::len)
+    }
+
     pub fn remove_window_assignment(&mut self, window_id: WindowId) -> Option<WindowWorkspaceInfo> {
         let old = self.windows.get_mut(&window_id).and_then(|record| record.workspace.take());
+        if let Some(old_assignment) = old {
+            self.remove_window_from_workspace_index(window_id, old_assignment);
+        }
         self.prune_window_record(window_id);
         old
+    }
+
+    /// Move workspace/rule metadata from an old AX window id to a new one when
+    /// macOS rekeys the same WindowServer window across sleep/wake or similar
+    /// churn. The caller remains responsible for replacing any layout/window
+    /// state that still references `from`.
+    pub fn transfer_persistent_window_metadata(&mut self, from: WindowId, to: WindowId) {
+        if from == to {
+            return;
+        }
+
+        let (workspace, rule_floating, last_rule_decision) = match self.windows.get(&from) {
+            Some(record) => (record.workspace, record.rule_floating, record.last_rule_decision),
+            None => return,
+        };
+
+        let target_workspace = self.windows.get(&to).and_then(|record| record.workspace);
+
+        if let Some(assignment) = workspace {
+            self.remove_window_from_workspace_index(from, assignment);
+            if let Some(target_assignment) = target_workspace {
+                self.remove_window_from_workspace_index(to, target_assignment);
+            }
+            self.add_window_to_workspace_index(to, assignment);
+        }
+
+        let target = self.windows.entry(to).or_default();
+        if workspace.is_some() {
+            target.workspace = workspace;
+        }
+        target.rule_floating |= rule_floating;
+        target.last_rule_decision |= last_rule_decision;
+
+        if let Some(source) = self.windows.get_mut(&from) {
+            source.workspace = None;
+            source.rule_floating = false;
+            source.last_rule_decision = false;
+        }
+        self.prune_window_record(from);
     }
 
     pub fn set_rule_floating(&mut self, window_id: WindowId, value: bool) {
@@ -293,7 +408,11 @@ impl WindowRegistry {
     }
 
     pub fn remove_window(&mut self, window_id: WindowId) {
-        self.windows.remove(&window_id);
+        if let Some(record) = self.windows.remove(&window_id)
+            && let Some(assignment) = record.workspace
+        {
+            self.remove_window_from_workspace_index(window_id, assignment);
+        }
         let server_ids: Vec<_> = self
             .window_servers
             .iter()
@@ -327,6 +446,24 @@ impl WindowRegistry {
     pub fn remap_space(&mut self, old_space: SpaceId, new_space: SpaceId) {
         if old_space == new_space {
             return;
+        }
+
+        let moved_assignments: Vec<_> = self
+            .workspace_windows
+            .keys()
+            .copied()
+            .filter(|assignment| assignment.space == old_space)
+            .collect();
+        for old_assignment in moved_assignments {
+            if let Some(windows) = self.workspace_windows.remove(&old_assignment) {
+                self.workspace_windows.insert(
+                    WindowWorkspaceInfo {
+                        space: new_space,
+                        workspace_id: old_assignment.workspace_id,
+                    },
+                    windows,
+                );
+            }
         }
 
         for record in self.windows.values_mut() {
@@ -391,5 +528,71 @@ impl WindowRegistryHandle {
 
     pub fn get_mut(&mut self) -> &mut WindowRegistry {
         unsafe { self.0.expect("window registry was not attached").as_mut() }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::virtual_workspace::VirtualWorkspaceManager;
+
+    #[test]
+    fn authoritative_space_only_record_is_not_pruned() {
+        let mut registry = WindowRegistry::default();
+        let wsid = WindowServerId::new(77);
+        let space = SpaceId::new(9);
+
+        registry.set_window_server_space(wsid, Some(space));
+
+        assert_eq!(registry.window_server_space(wsid), Some(space));
+        assert_eq!(registry.iter_window_server_ids().collect::<Vec<_>>(), vec![wsid]);
+    }
+
+    #[test]
+    fn authoritative_space_record_is_pruned_when_space_is_cleared() {
+        let mut registry = WindowRegistry::default();
+        let wsid = WindowServerId::new(78);
+
+        registry.set_window_server_space(wsid, Some(SpaceId::new(10)));
+        registry.set_window_server_space(wsid, None);
+
+        assert_eq!(registry.window_server_space(wsid), None);
+        assert!(registry.iter_window_server_ids().next().is_none());
+    }
+
+    #[test]
+    fn transfer_persistent_metadata_replaces_existing_target_workspace_assignment() {
+        let mut registry = WindowRegistry::default();
+        let space = SpaceId::new(10);
+        let mut workspaces = VirtualWorkspaceManager::new();
+        let source_workspace = workspaces
+            .create_workspace(space, Some("Source".to_string()))
+            .expect("source workspace");
+        let target_workspace = workspaces
+            .create_workspace(space, Some("Target".to_string()))
+            .expect("target workspace");
+        let from = WindowId::new(1, 1);
+        let to = WindowId::new(1, 2);
+
+        registry.assign_window_to_workspace(from, WindowWorkspaceInfo {
+            space,
+            workspace_id: source_workspace,
+        });
+        registry.assign_window_to_workspace(to, WindowWorkspaceInfo {
+            space,
+            workspace_id: target_workspace,
+        });
+
+        registry.transfer_persistent_window_metadata(from, to);
+
+        assert_eq!(
+            registry.workspace_info_for_window(to),
+            Some(WindowWorkspaceInfo {
+                space,
+                workspace_id: source_workspace,
+            })
+        );
+        assert!(registry.workspace_windows(space, target_workspace).is_empty());
+        assert_eq!(registry.workspace_windows(space, source_workspace), vec![to]);
     }
 }

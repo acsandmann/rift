@@ -23,7 +23,7 @@ use tracing::{Instrument, Span, debug, info, instrument, trace, warn};
 use crate::actor;
 use crate::actor::reactor::transaction_manager::TransactionId;
 use crate::actor::reactor::{self, Event, Requested};
-use crate::common::collections::{HashMap, HashSet};
+use crate::common::collections::HashMap;
 use crate::model::tx_store::WindowTxStore;
 use crate::sys::app::NSRunningApplicationExt;
 pub use crate::sys::app::{AppInfo, WindowInfo, pid_t};
@@ -459,6 +459,7 @@ impl State {
             new,
             known_visible,
         });
+        self.on_main_window_changed(None, true);
         Ok(())
     }
 
@@ -618,9 +619,16 @@ impl State {
             sleep_dur = Duration::min(sleep_dur * 2, Duration::from_secs(1));
             true
         };
-        for &(_kind, notif) in APP_NOTIFICATIONS {
+        for &(kind, notif) in APP_NOTIFICATIONS {
+            // App-level notifications are not tied to a specific window, but the
+            // observer callback still recovers the notification kind by decoding
+            // the refcon hint (see `decode_notification_data`). Registering with the
+            // plain `add_notification` would attach a zero hint, which decodes to an
+            // invalid tag and causes the notification to be silently dropped - so
+            // encode the kind here just like the per-window registrations do.
+            let data = encode_notification_data(kind, None);
             loop {
-                match self.observer.add_notification(&self.app, notif) {
+                match self.observer.add_notification_with_data(&self.app, notif, data) {
                     Ok(()) => break,
                     #[allow(non_upper_case_globals)]
                     Err(AxError::Ax(AXError::NotificationAlreadyRegistered)) => {
@@ -964,9 +972,10 @@ impl State {
                 _ = self.on_activation_changed();
             }
             AxNotificationKind::MainWindowChanged => {
-                // NOTE(acsandmann):
-                // because of apps like firefox that send delayed(or dont send at all) axuielementdestroyed/windowserverdisappeared
-                // this is a fallback to ensure we handle windows being closed
+                // `AXWindows` is filtered to the current macOS space, so using it as
+                // a membership list here will incorrectly "destroy" windows that
+                // merely live on another space. This fallback therefore only prunes
+                // windows whose AX element has actually gone invalid.
                 self.remove_stale_windows();
                 self.on_main_window_changed(None, false);
             }
@@ -1554,33 +1563,18 @@ impl State {
     }
 
     fn remove_stale_windows(&mut self) {
-        let mut stale_wids: HashSet<WindowId> = self.windows.keys().copied().collect();
-        match self.app.windows() {
-            Ok(elems) => {
-                for elem in elems {
-                    if let Ok(wid) = self.id(&elem) {
-                        stale_wids.remove(&wid);
-                    }
-                }
-            }
-            Err(e) => {
-                trace!(?e, "Failed to get windows; checking each tracked window");
-                let mut to_remove = Vec::new();
-                for (&wid, window) in self.windows.iter() {
-                    // InvalidUIElement means the window is gone
-                    if matches!(window.elem.role(), Err(AxError::Ax(AXError::InvalidUIElement))) {
-                        to_remove.push(wid);
-                    }
-                }
-                for wid in to_remove {
-                    self.remove_tracked_window(wid, "Removed stale window (individual check)");
-                }
-                return;
+        let mut to_remove = Vec::new();
+        for (&wid, window) in self.windows.iter() {
+            // `kAXWindowsAttribute` is space-filtered and cannot be used to decide
+            // whether a tracked window still exists globally. Only drop state when
+            // the element itself has become invalid.
+            if matches!(window.elem.role(), Err(AxError::Ax(AXError::InvalidUIElement))) {
+                to_remove.push(wid);
             }
         }
 
-        for wid in stale_wids {
-            self.remove_tracked_window(wid, "Removed stale window (not in current list)");
+        for wid in to_remove {
+            self.remove_tracked_window(wid, "Removed stale window (invalid AX element)");
         }
     }
 

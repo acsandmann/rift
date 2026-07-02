@@ -1,11 +1,11 @@
-use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_core_foundation::{CGPoint, CGRect};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use slotmap::{SlotMap, new_key_type};
 use tracing::{error, warn};
 
 use crate::actor::app::WindowId;
-use crate::common::collections::{HashMap, HashSet};
+use crate::common::collections::HashMap;
 use crate::common::config::{
     AppWorkspaceRule, LayoutMode, LayoutSettings, VirtualWorkspaceSettings, WorkspaceSelector,
 };
@@ -57,11 +57,16 @@ pub enum AppRuleResult {
     Unmanaged,
 }
 
+/// Workspace-local configuration and layout state.
+///
+/// This intentionally does not own the set of member windows. Window-to-
+/// workspace assignment is authoritative in `WindowRegistry`; the layout system
+/// here is only the arrangement for the windows currently projected into this
+/// workspace.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VirtualWorkspace {
     pub name: String,
     pub space: SpaceId,
-    windows: HashSet<WindowId>,
     last_focused: Option<WindowId>,
     #[serde(default = "default_layout_system_kind")]
     pub layout_system: LayoutSystemKind,
@@ -79,7 +84,6 @@ impl VirtualWorkspace {
         Self {
             name,
             space,
-            windows: HashSet::default(),
             last_focused: None,
             layout_system,
             layout_mode: mode,
@@ -116,26 +120,11 @@ impl VirtualWorkspace {
         }
     }
 
-    pub fn contains_window(&self, window_id: WindowId) -> bool { self.windows.contains(&window_id) }
-
-    pub fn windows(&self) -> impl Iterator<Item = WindowId> + '_ { self.windows.iter().copied() }
-
-    pub fn add_window(&mut self, window_id: WindowId) { self.windows.insert(window_id); }
-
-    pub fn remove_window(&mut self, window_id: WindowId) -> bool {
-        if self.last_focused == Some(window_id) {
-            self.last_focused = None;
-        }
-        self.windows.remove(&window_id)
-    }
-
     pub fn set_last_focused(&mut self, window_id: Option<WindowId>) {
         self.last_focused = window_id;
     }
 
     pub fn last_focused(&self) -> Option<WindowId> { self.last_focused }
-
-    pub fn window_count(&self) -> usize { self.windows.len() }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -154,6 +143,13 @@ impl HideCorner {
     }
 }
 
+/// Owns the virtual workspace topology for each native macOS space.
+///
+/// Membership is single-source-of-truth in `window_registry`. Any code that
+/// needs to answer "which workspace owns this window?" or "which windows belong
+/// to this workspace?" must go through the registry-backed helpers on this
+/// manager. Keeping the mapping out of `VirtualWorkspace` prevents stale
+/// duplicated membership from surviving topology churn or discovery refreshes.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VirtualWorkspaceManager {
     pub(crate) workspaces: SlotMap<VirtualWorkspaceId, VirtualWorkspace>,
@@ -182,7 +178,8 @@ pub struct VirtualWorkspaceManager {
     pub default_layout_mode: LayoutMode,
     #[serde(skip)]
     pub layout_settings: LayoutSettings,
-    // skipping serializiation but proper layout restores will need window registry to be saved
+    // Workspace membership authority lives in the registry. We currently skip
+    // serializing it, so persisted layout restore still needs dedicated support.
     #[serde(skip, default = "WindowRegistryHandle::new")]
     window_registry: WindowRegistryHandle,
     #[serde(skip, default)]
@@ -363,16 +360,34 @@ impl VirtualWorkspaceManager {
 
         // Remove any auto-created state for the target space; the migrated state
         // should be authoritative.
+        let mut deleted_target_workspace_ids = Vec::new();
         if let Some(existing) = self.workspaces_by_space.remove(&new_space) {
             for ws_id in existing {
                 if let Some(ws) = self.workspaces.get(ws_id) {
                     if ws.space == new_space {
                         self.workspaces.remove(ws_id);
+                        deleted_target_workspace_ids.push(ws_id);
                     }
                 }
             }
         }
         self.active_workspace_per_space.remove(&new_space);
+
+        if !deleted_target_workspace_ids.is_empty() {
+            let stale_windows: Vec<_> = self
+                .window_registry
+                .get()
+                .iter_workspace_assignments()
+                .filter_map(|(window_id, assignment)| {
+                    deleted_target_workspace_ids
+                        .contains(&assignment.workspace_id)
+                        .then_some(window_id)
+                })
+                .collect();
+            for window_id in stale_windows {
+                let _ = self.window_registry.get_mut().remove_window_assignment(window_id);
+            }
+        }
 
         let ids = self.workspaces_by_space.remove(&old_space).unwrap_or_default();
         for ws_id in &ids {
@@ -499,8 +514,8 @@ impl VirtualWorkspaceManager {
         ids.iter()
             .copied()
             .filter(|id| {
-                if let Some(ws) = self.workspaces.get(*id) {
-                    !(require_non_empty && ws.windows.is_empty())
+                if self.workspaces.contains_key(*id) {
+                    !(require_non_empty && self.workspace_windows(space, *id).is_empty())
                 } else {
                     false
                 }
@@ -544,7 +559,7 @@ impl VirtualWorkspaceManager {
 
         for _ in 0..fallback_ids.len() {
             let id = fallback_ids[i];
-            if self.workspaces.get(id).map_or(false, |ws| !ws.windows.is_empty()) {
+            if !self.workspace_windows(space, id).is_empty() {
                 return Some(id);
             }
             i = dir.step(i, fallback_ids.len());
@@ -587,38 +602,21 @@ impl VirtualWorkspaceManager {
                 return false;
             }
 
-            let existing_mapping = self.window_registry.get().workspace_info_for_window(window_id);
-
-            if let Some(WindowWorkspaceInfo {
-                space: existing_space,
-                workspace_id: old_workspace_id,
-            }) = existing_mapping
+            let previous_assignment =
+                self.window_registry.get().workspace_info_for_window(window_id);
+            self.window_registry
+                .get_mut()
+                .assign_window_to_workspace(window_id, WindowWorkspaceInfo { space, workspace_id });
+            if let Some(previous_assignment) = previous_assignment
+                && previous_assignment.workspace_id != workspace_id
+                && let Some(previous_workspace) =
+                    self.workspaces.get_mut(previous_assignment.workspace_id)
+                && previous_workspace.space == previous_assignment.space
+                && previous_workspace.last_focused() == Some(window_id)
             {
-                if existing_space != space {
-                    if let Some(old_workspace) = self.workspaces.get_mut(old_workspace_id) {
-                        old_workspace.remove_window(window_id);
-                    }
-                } else {
-                    if let Some(old_workspace) = self.workspaces.get_mut(old_workspace_id) {
-                        old_workspace.remove_window(window_id);
-                    }
-                }
+                previous_workspace.set_last_focused(None);
             }
-
-            if let Some(workspace) = self.workspaces.get_mut(workspace_id) {
-                workspace.add_window(window_id);
-                self.window_registry.get_mut().assign_window_to_workspace(
-                    window_id,
-                    WindowWorkspaceInfo { space, workspace_id },
-                );
-                true
-            } else {
-                error!(
-                    "Failed to get workspace {:?} for window assignment",
-                    workspace_id
-                );
-                false
-            }
+            true
         })
     }
 
@@ -637,6 +635,13 @@ impl VirtualWorkspaceManager {
             .map(|info| info.workspace_id)
     }
 
+    pub fn workspace_info_for_window_any(
+        &self,
+        window_id: WindowId,
+    ) -> Option<WindowWorkspaceInfo> {
+        self.window_registry.get().workspace_info_for_window(window_id)
+    }
+
     pub fn workspaces_for_window(&self, window_id: WindowId) -> Vec<VirtualWorkspaceId> {
         self.window_registry.get().workspaces_for_window(window_id)
     }
@@ -647,12 +652,7 @@ impl VirtualWorkspaceManager {
     }
 
     pub fn remove_window(&mut self, window_id: WindowId) {
-        if let Some(assignment) = self.window_registry.get_mut().remove_window_assignment(window_id)
-        {
-            if let Some(workspace) = self.workspaces.get_mut(assignment.workspace_id) {
-                workspace.remove_window(window_id);
-            }
-        }
+        let _ = self.window_registry.get_mut().remove_window_assignment(window_id);
         self.window_registry.get_mut().clear_rule_metadata(window_id);
     }
 
@@ -666,12 +666,7 @@ impl VirtualWorkspaceManager {
             .collect();
 
         for window_id in windows_to_remove {
-            let assignment = self.window_registry.get_mut().remove_window_assignment(window_id);
-            if let Some(info) = assignment {
-                if let Some(workspace) = self.workspaces.get_mut(info.workspace_id) {
-                    workspace.remove_window(window_id);
-                }
-            }
+            let _ = self.window_registry.get_mut().remove_window_assignment(window_id);
             self.window_registry.get_mut().clear_rule_metadata(window_id);
         }
     }
@@ -679,9 +674,7 @@ impl VirtualWorkspaceManager {
     /// Gets all windows in the active virtual workspace for a given native space.
     pub fn windows_in_active_workspace(&self, space: SpaceId) -> Vec<WindowId> {
         if let Some(workspace_id) = self.active_workspace(space) {
-            if let Some(workspace) = self.workspaces.get(workspace_id) {
-                return workspace.windows().collect();
-            }
+            return self.workspace_windows(space, workspace_id);
         }
         Vec::new()
     }
@@ -703,7 +696,7 @@ impl VirtualWorkspaceManager {
         self.workspaces
             .iter()
             .filter(|(id, workspace)| workspace.space == space && Some(*id) != active_workspace_id)
-            .flat_map(|(_, workspace)| workspace.windows())
+            .flat_map(|(id, _)| self.workspace_windows(space, id))
             .collect()
     }
 
@@ -724,50 +717,36 @@ impl VirtualWorkspaceManager {
             return None;
         }
 
-        self.workspaces
-            .get(workspace_id)
-            .and_then(|ws| ws.windows().find(|wid| wid.idx.get() == idx))
+        self.workspaces.get(workspace_id).and_then(|_| {
+            self.workspace_windows(space, workspace_id)
+                .into_iter()
+                .find(|wid| wid.idx.get() == idx)
+        })
     }
 
     fn hidden_rect_for_corner(
         screen_frame: CGRect,
-        original_size: CGSize,
+        original_frame: CGRect,
         corner: HideCorner,
         app_bundle_id: Option<&str>,
     ) -> CGRect {
-        let one_pixel_offset = if let Some(bundle_id) = app_bundle_id {
-            match bundle_id {
-                "us.zoom.xos" => CGPoint::new(0.0, 0.0),
-                _ => match corner {
-                    HideCorner::BottomLeft => CGPoint::new(1.0, -1.0),
-                    HideCorner::BottomRight => CGPoint::new(1.0, 1.0),
-                },
-            }
+        let reveal = if matches!(app_bundle_id, Some("us.zoom.xos")) {
+            0.0
         } else {
-            match corner {
-                HideCorner::BottomLeft => CGPoint::new(1.0, -1.0),
-                HideCorner::BottomRight => CGPoint::new(1.0, 1.0),
-            }
+            1.0
         };
 
         let hidden_point = match corner {
-            HideCorner::BottomLeft => {
-                let bottom_left = CGPoint::new(screen_frame.origin.x, screen_frame.max().y);
-                CGPoint::new(
-                    bottom_left.x + one_pixel_offset.x - original_size.width + 1.0,
-                    bottom_left.y + one_pixel_offset.y,
-                )
-            }
+            HideCorner::BottomLeft => CGPoint::new(
+                screen_frame.origin.x - original_frame.size.width + reveal,
+                screen_frame.max().y - reveal,
+            ),
             HideCorner::BottomRight => {
-                let bottom_right = CGPoint::new(screen_frame.max().x, screen_frame.max().y);
-                CGPoint::new(
-                    bottom_right.x - one_pixel_offset.x - 1.0,
-                    bottom_right.y - one_pixel_offset.y,
-                )
+                CGPoint::new(screen_frame.max().x - reveal, screen_frame.max().y - reveal)
             }
         };
 
-        CGRect::new(hidden_point, original_size)
+        CGRect::new(hidden_point, original_frame.size)
     }
 
     fn intersection_area(a: CGRect, b: CGRect) -> f64 {
@@ -779,73 +758,48 @@ impl VirtualWorkspaceManager {
     fn choose_hidden_position(
         &self,
         screen_frame: CGRect,
-        original_size: CGSize,
+        original_frame: CGRect,
         corner: HideCorner,
         app_bundle_id: Option<&str>,
         other_screens: &[CGRect],
     ) -> CGRect {
-        const MIN_ANCHOR_AREA: f64 = 1.0;
         let primary =
-            Self::hidden_rect_for_corner(screen_frame, original_size, corner, app_bundle_id);
+            Self::hidden_rect_for_corner(screen_frame, original_frame, corner, app_bundle_id);
         let fallback = Self::hidden_rect_for_corner(
             screen_frame,
-            original_size,
+            original_frame,
             corner.opposite(),
             app_bundle_id,
         );
 
-        let primary_anchor = Self::intersection_area(screen_frame, primary);
-        let fallback_anchor = Self::intersection_area(screen_frame, fallback);
-        let primary_anchored = primary_anchor >= MIN_ANCHOR_AREA;
-        let fallback_anchored = fallback_anchor >= MIN_ANCHOR_AREA;
-
-        let mut primary_other_max: f64 = 0.0;
-        let mut fallback_other_max: f64 = 0.0;
+        let mut primary_other_overlap: f64 = 0.0;
+        let mut fallback_other_overlap: f64 = 0.0;
         for screen in other_screens {
-            primary_other_max = primary_other_max.max(Self::intersection_area(*screen, primary));
-            fallback_other_max = fallback_other_max.max(Self::intersection_area(*screen, fallback));
+            primary_other_overlap += Self::intersection_area(*screen, primary);
+            fallback_other_overlap += Self::intersection_area(*screen, fallback);
         }
 
-        match (primary_anchored, fallback_anchored) {
-            (true, false) => primary,
-            (false, true) => fallback,
-            (true, true) => {
-                if (primary_other_max - fallback_other_max).abs() > f64::EPSILON {
-                    if primary_other_max < fallback_other_max {
-                        primary
-                    } else {
-                        fallback
-                    }
-                } else if primary_anchor <= fallback_anchor {
-                    primary
-                } else {
-                    fallback
-                }
-            }
-            (false, false) => {
-                if primary_other_max <= fallback_other_max {
-                    primary
-                } else {
-                    fallback
-                }
-            }
+        if primary_other_overlap == 0.0 || primary_other_overlap <= fallback_other_overlap {
+            primary
+        } else {
+            fallback
         }
     }
 
     pub fn calculate_hidden_position(
         &self,
         screen_frame: CGRect,
-        original_size: CGSize,
+        original_frame: CGRect,
         corner: HideCorner,
         app_bundle_id: Option<&str>,
     ) -> CGRect {
-        self.choose_hidden_position(screen_frame, original_size, corner, app_bundle_id, &[])
+        self.choose_hidden_position(screen_frame, original_frame, corner, app_bundle_id, &[])
     }
 
     pub fn calculate_hidden_position_multi(
         &self,
         screen_frame: CGRect,
-        original_size: CGSize,
+        original_frame: CGRect,
         corner: HideCorner,
         app_bundle_id: Option<&str>,
         all_screens: &[CGRect],
@@ -854,7 +808,7 @@ impl VirtualWorkspaceManager {
             all_screens.iter().copied().filter(|screen| *screen != screen_frame).collect();
         self.choose_hidden_position(
             screen_frame,
-            original_size,
+            original_frame,
             corner,
             app_bundle_id,
             &other_screens,
@@ -870,7 +824,7 @@ impl VirtualWorkspaceManager {
         const VISIBLE_THRESHOLD_PX: f64 = 3.0;
         let hidden_rect = self.choose_hidden_position(
             *screen_frame,
-            rect.size,
+            *rect,
             HideCorner::BottomRight,
             app_bundle_id,
             &[],
@@ -900,7 +854,7 @@ impl VirtualWorkspaceManager {
             all_screens.iter().copied().filter(|screen| *screen != *screen_frame).collect();
         let hidden_rect = self.choose_hidden_position(
             *screen_frame,
-            rect.size,
+            *rect,
             HideCorner::BottomRight,
             app_bundle_id,
             &other_screens,
@@ -1032,6 +986,25 @@ impl VirtualWorkspaceManager {
         }
     }
 
+    pub fn transfer_window_identity(&mut self, from: WindowId, to: WindowId) {
+        if from == to {
+            return;
+        }
+
+        for workspace in self.workspaces.values_mut() {
+            if workspace.last_focused() == Some(from) {
+                workspace.set_last_focused(Some(to));
+            }
+        }
+
+        for positions in self.floating_positions.values_mut() {
+            if let Some(position) = positions.remove_position(from) {
+                positions.remove_position(to);
+                positions.store_position(to, position);
+            }
+        }
+    }
+
     pub fn remove_app_floating_positions(&mut self, pid: pid_t) {
         for positions in self.floating_positions.values_mut() {
             positions.remove_app_windows(pid);
@@ -1072,12 +1045,8 @@ impl VirtualWorkspaceManager {
         space: SpaceId,
         workspace_id: VirtualWorkspaceId,
     ) -> Vec<WindowId> {
-        if let Some(workspace) = self.workspaces.get(workspace_id) {
-            if workspace.space == space {
-                let mut windows: Vec<WindowId> = workspace.windows().collect();
-                windows.sort_unstable_by_key(|wid| wid.idx.get());
-                return windows;
-            }
+        if self.workspaces.get(workspace_id).map(|workspace| workspace.space) == Some(space) {
+            return self.window_registry.get().workspace_windows(space, workspace_id);
         }
         Vec::new()
     }
@@ -1207,6 +1176,10 @@ impl VirtualWorkspaceManager {
             }
         }
 
+        // No matching app rule: preserve the current workspace assignment if one
+        // already exists. Discovery/refresh passes must not silently fall back to
+        // the default workspace, or windows on non-default workspaces will appear
+        // to "reset" after sleep/display churn.
         if let Some(existing_ws) = existing_assignment {
             self.window_registry.get_mut().clear_rule_floating(window_id);
             return Ok(AppRuleResult::Managed(AppRuleAssignment {
@@ -1440,7 +1413,10 @@ impl VirtualWorkspaceManager {
         };
 
         for (workspace_id, workspace) in &self.workspaces {
-            stats.workspace_window_counts.insert(workspace_id, workspace.window_count());
+            stats.workspace_window_counts.insert(
+                workspace_id,
+                self.window_registry.get().workspace_window_count(workspace.space, workspace_id),
+            );
         }
 
         stats
@@ -1488,6 +1464,8 @@ pub struct WorkspaceStats {
 
 #[cfg(test)]
 mod tests {
+    use objc2_core_foundation::CGSize;
+
     use super::*;
     use crate::actor::app::WindowId;
     use crate::sys::screen::SpaceId;
@@ -1561,13 +1539,71 @@ mod tests {
         assert_eq!(manager.workspace_for_window(space, window1), Some(ws1_id));
         assert_eq!(manager.workspace_for_window(space, window2), Some(ws2_id));
 
-        let ws1 = manager.workspace_info(space, ws1_id).unwrap();
-        let ws2 = manager.workspace_info(space, ws2_id).unwrap();
+        assert_eq!(manager.workspace_windows(space, ws1_id), vec![window1]);
+        assert_eq!(manager.workspace_windows(space, ws2_id), vec![window2]);
+    }
 
-        assert!(ws1.contains_window(window1));
-        assert!(!ws1.contains_window(window2));
-        assert!(ws2.contains_window(window2));
-        assert!(!ws2.contains_window(window1));
+    #[test]
+    fn reassignment_updates_authoritative_workspace_index() {
+        let mut manager = VirtualWorkspaceManager::new();
+        let space = SpaceId::new(1);
+        let ws1_id = manager.create_workspace(space, Some("WS1".to_string())).unwrap();
+        let ws2_id = manager.create_workspace(space, Some("WS2".to_string())).unwrap();
+        let window = WindowId::new(9, 1);
+
+        assert!(manager.assign_window_to_workspace(space, window, ws1_id));
+        assert_eq!(manager.workspace_for_window(space, window), Some(ws1_id));
+        assert_eq!(manager.workspace_windows(space, ws1_id), vec![window]);
+
+        assert!(manager.assign_window_to_workspace(space, window, ws2_id));
+        assert_eq!(manager.workspace_for_window(space, window), Some(ws2_id));
+        assert!(manager.workspace_windows(space, ws1_id).is_empty());
+        assert_eq!(manager.workspace_windows(space, ws2_id), vec![window]);
+    }
+
+    #[test]
+    fn reassignment_clears_stale_last_focused_on_source_workspace() {
+        let mut manager = VirtualWorkspaceManager::new();
+        let space = SpaceId::new(1);
+        let ws1_id = manager.create_workspace(space, Some("WS1".to_string())).unwrap();
+        let ws2_id = manager.create_workspace(space, Some("WS2".to_string())).unwrap();
+        let window = WindowId::new(9, 1);
+
+        assert!(manager.assign_window_to_workspace(space, window, ws1_id));
+        manager.set_last_focused_window(space, ws1_id, Some(window));
+
+        assert!(manager.assign_window_to_workspace(space, window, ws2_id));
+
+        assert_eq!(manager.last_focused_window(space, ws1_id), None);
+        assert_eq!(manager.workspace_for_window(space, window), Some(ws2_id));
+    }
+
+    #[test]
+    fn remap_space_drops_assignments_to_deleted_target_workspaces() {
+        let mut manager = VirtualWorkspaceManager::new();
+        let old_space = SpaceId::new(1);
+        let new_space = SpaceId::new(2);
+        let migrated_ws = manager.create_workspace(old_space, Some("Old".to_string())).unwrap();
+        let transient_ws =
+            manager.create_workspace(new_space, Some("Transient".to_string())).unwrap();
+        let migrated_window = WindowId::new(10, 1);
+        let transient_window = WindowId::new(11, 1);
+
+        assert!(manager.assign_window_to_workspace(old_space, migrated_window, migrated_ws));
+        assert!(manager.assign_window_to_workspace(new_space, transient_window, transient_ws));
+
+        manager.remap_space(old_space, new_space);
+
+        assert_eq!(
+            manager.workspace_for_window(new_space, migrated_window),
+            Some(migrated_ws)
+        );
+        assert_eq!(manager.workspace_windows(new_space, migrated_ws), vec![
+            migrated_window
+        ]);
+        assert_eq!(manager.workspace_info_for_window_any(transient_window), None);
+        assert!(manager.workspace_windows(new_space, transient_ws).is_empty());
+        assert!(manager.workspace_info(new_space, transient_ws).is_none());
     }
 
     #[test]
@@ -1998,5 +2034,42 @@ mod tests {
                 || bw2_updated_assignment.workspace_id == expected_updated
         );
         assert!(bw2_updated_assignment.floating);
+    }
+
+    #[test]
+    fn hidden_position_uses_corner_anchor_while_hiding_offscreen() {
+        let manager = VirtualWorkspaceManager::new();
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(100.0, 100.0));
+        let frame = CGRect::new(CGPoint::new(20.0, 37.0), CGSize::new(30.0, 20.0));
+
+        let hidden = manager.calculate_hidden_position_multi(
+            screen,
+            frame,
+            HideCorner::BottomRight,
+            None,
+            &[screen],
+        );
+
+        assert_eq!(hidden.origin.y, screen.max().y - 1.0);
+        assert_eq!(hidden.origin.x, screen.max().x - 1.0);
+    }
+
+    #[test]
+    fn hidden_position_flips_sides_to_avoid_neighboring_monitor_overlap() {
+        let manager = VirtualWorkspaceManager::new();
+        let primary = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(100.0, 100.0));
+        let right_neighbor = CGRect::new(CGPoint::new(100.0, 0.0), CGSize::new(100.0, 100.0));
+        let frame = CGRect::new(CGPoint::new(20.0, 25.0), CGSize::new(30.0, 20.0));
+
+        let hidden = manager.calculate_hidden_position_multi(
+            primary,
+            frame,
+            HideCorner::BottomRight,
+            None,
+            &[primary, right_neighbor],
+        );
+
+        assert_eq!(hidden.origin.y, primary.max().y - 1.0);
+        assert_eq!(hidden.origin.x, primary.origin.x - frame.size.width + 1.0);
     }
 }

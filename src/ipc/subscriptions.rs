@@ -10,8 +10,8 @@ use parking_lot::{Mutex, RwLock};
 use serde_json::Value;
 use tracing::{debug, error, info, warn};
 
-use crate::actor::broadcast::BroadcastEvent;
 use crate::common::collections::{HashMap, HashSet};
+use crate::model::broadcast::BroadcastEvent;
 use crate::sys::mach::{mach_release_send_right, mach_retain_send_right, mach_try_send_message};
 
 pub type ClientPort = u32;

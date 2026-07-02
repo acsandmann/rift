@@ -1,7 +1,7 @@
 //! This actor manages the global notification queue, which tells us when an
 //! application is launched or focused or the screen state changes.
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::ffi::c_void;
 use std::{future, mem};
 
@@ -11,49 +11,23 @@ use objc2::rc::{Allocated, Retained};
 use objc2::{AnyThread, ClassType, DeclaredClass, Encode, Encoding, define_class, msg_send, sel};
 use objc2_app_kit::{self, NSRunningApplication, NSWorkspace, NSWorkspaceApplicationKey};
 use objc2_foundation::{
-    MainThreadMarker, NSDistributedNotificationCenter, NSNotification, NSNotificationCenter,
+    NSDistributedNotificationCenter, NSNotification, NSNotificationCenter,
     NSNotificationSuspensionBehavior, NSObject, NSProcessInfo, NSString,
 };
 use tracing::{debug, info_span, trace, warn};
 
+use super::spaces;
 use super::wm_controller::{self, WmEvent};
 use crate::sys::app::NSRunningApplicationExt;
 use crate::sys::dispatch::DispatchExt;
 use crate::sys::power::{init_power_state, set_low_power_mode_state};
-use crate::sys::screen::{CoordinateConverter, ScreenCache, ScreenInfo, SpaceId};
 use crate::sys::skylight::{CGDisplayRegisterReconfigurationCallback, DisplayReconfigFlags};
-use crate::sys::{display_churn, window_server};
-
-const REFRESH_DEFAULT_DELAY_NS: i64 = 150_000_000;
-const REFRESH_RETRY_DELAY_NS: i64 = 150_000_000;
-const REFRESH_MAX_RETRIES: u8 = 10;
-
-const DISPLAY_CHURN_QUIET_NS: i64 = 3_000_000_000;
-const DISPLAY_STABILIZE_RETRY_NS: i64 = 200_000_000;
-const DISPLAY_STABILIZE_MAX_ATTEMPTS: u8 = 25;
-const DISPLAY_STABLE_REQUIRED_HITS: u8 = 2;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct DisplayTopologyFingerprint(Vec<(String, u64, u64, u64, u64)>);
-
-#[derive(Debug, Clone)]
-struct DisplayTopologyState {
-    fingerprint: DisplayTopologyFingerprint,
-    hits: u8,
-}
 
 #[repr(C)]
 struct Instance {
-    screen_cache: RefCell<ScreenCache>,
     events_tx: wm_controller::Sender,
-    refresh_pending: Cell<bool>,
-
-    display_churn_active: Cell<bool>,
-    display_churn_epoch: Cell<u64>,
-    display_churn_flags: Cell<DisplayReconfigFlags>,
-    display_topology_state: RefCell<Option<DisplayTopologyState>>,
-    refresh_deferred_until_stable: Cell<bool>,
-    last_sent_spaces: RefCell<Option<Vec<Option<SpaceId>>>>,
+    spaces_tx: spaces::Sender,
+    session_inactive_hint: Cell<bool>,
 }
 
 unsafe impl Encode for Instance {
@@ -91,22 +65,19 @@ define_class! {
         #[unsafe(method(recvWakeEvent:))]
         fn recv_wake_event(&self, notif: &NSNotification) {
             trace!("{notif:#?}");
-            {
-                let mut cache = self.ivars().screen_cache.borrow_mut();
-                cache.mark_sleeping(false);
-            }
-            // After sleep/wake, macOS can change display modes/desktop shape without emitting
-            // an ActiveDisplay/ActiveSpace notification. Ensure we always refresh screen
-            // parameters so the reactor/layout engine sees updated bounds.
-            self.schedule_screen_refresh();
-            self.send_event(WmEvent::SystemWoke);
+            self.send_space_event(spaces::Event::SystemDidWake);
         }
 
         #[unsafe(method(recvSleepEvent:))]
         fn recv_sleep_event(&self, notif: &NSNotification) {
             trace!("{notif:#?}");
-            let mut cache = self.ivars().screen_cache.borrow_mut();
-            cache.mark_sleeping(true);
+            self.send_space_event(spaces::Event::SystemWillSleep);
+        }
+
+        #[unsafe(method(recvSessionEvent:))]
+        fn recv_session_event(&self, notif: &NSNotification) {
+            trace!("{notif:#?}");
+            self.handle_session_event(notif);
         }
 
         #[unsafe(method(recvPowerEvent:))]
@@ -136,18 +107,11 @@ define_class! {
 }
 
 impl NotificationCenterInner {
-    fn new(events_tx: wm_controller::Sender) -> Retained<Self> {
+    fn new(events_tx: wm_controller::Sender, spaces_tx: spaces::Sender) -> Retained<Self> {
         let instance = Instance {
-            screen_cache: RefCell::new(ScreenCache::new(MainThreadMarker::new().unwrap())),
             events_tx,
-            refresh_pending: Cell::new(false),
-
-            display_churn_active: Cell::new(false),
-            display_churn_epoch: Cell::new(0),
-            display_churn_flags: Cell::new(DisplayReconfigFlags::empty()),
-            display_topology_state: RefCell::new(None),
-            refresh_deferred_until_stable: Cell::new(false),
-            last_sent_spaces: RefCell::new(None),
+            spaces_tx,
+            session_inactive_hint: Cell::new(false),
         };
         let handler: Retained<Self> = unsafe { msg_send![Self::alloc(), initWith: instance] };
         unsafe {
@@ -159,21 +123,50 @@ impl NotificationCenterInner {
         handler
     }
 
+    fn enter_session_inactive(&self) {
+        if !self.ivars().session_inactive_hint.replace(true) {
+            self.send_space_event(spaces::Event::SessionDidResignActive);
+        }
+    }
+
+    fn leave_session_inactive(&self) {
+        if self.ivars().session_inactive_hint.replace(false) {
+            self.send_space_event(spaces::Event::SessionDidBecomeActive);
+        }
+    }
+
     fn handle_screen_changed_event(&self, notif: &NSNotification) {
         use objc2_app_kit::*;
         let name = &*notif.name();
         let span = info_span!("notification_center::handle_screen_changed_event", ?name);
         let _s = span.enter();
         if name.to_string() == "NSWorkspaceActiveDisplayDidChangeNotification" {
-            // Active display changes can happen without a space switch. Trigger a
-            // screen refresh so display UUID/geometry changes still flow through
-            // ScreenParametersChanged (needed for per-display gaps and mappings).
-            self.schedule_screen_refresh();
-            self.send_current_space();
+            self.send_space_event(spaces::Event::ActiveDisplayChanged);
         } else if unsafe { NSWorkspaceActiveSpaceDidChangeNotification } == name {
-            self.send_current_space();
+            self.send_space_event(spaces::Event::ActiveSpaceChanged);
+        } else if unsafe { NSApplicationDidChangeScreenParametersNotification } == name {
+            self.send_space_event(spaces::Event::ScreenRefreshRequested);
         } else {
             warn!("Unexpected screen changed event: {notif:?}");
+        }
+    }
+
+    fn handle_session_event(&self, notif: &NSNotification) {
+        use objc2_app_kit::*;
+        let name = &*notif.name();
+        let span = info_span!("notification_center::handle_session_event", ?name);
+        let _guard = span.enter();
+
+        if unsafe { NSWorkspaceSessionDidResignActiveNotification } == name
+            || name.to_string() == "com.apple.screenIsLocked"
+        {
+            self.enter_session_inactive();
+        } else if unsafe { NSWorkspaceSessionDidBecomeActiveNotification } == name
+            || name.to_string() == "com.apple.screenIsUnlocked"
+        {
+            self.leave_session_inactive();
+        } else {
+            warn!("Unexpected session event: {notif:?}");
         }
     }
 
@@ -191,98 +184,6 @@ impl NotificationCenterInner {
         }
     }
 
-    fn collect_state(&self) -> Option<(Vec<ScreenInfo>, CoordinateConverter)> {
-        let mut screen_cache = self.ivars().screen_cache.borrow_mut();
-        screen_cache.refresh().or_else(|| {
-            warn!("Unable to refresh screen configuration; skipping update");
-            None
-        })
-    }
-
-    fn send_screen_parameters(&self) {
-        let span = info_span!("notification_center::send_screen_parameters");
-        let _s = span.enter();
-        self.process_screen_refresh(0, true);
-    }
-
-    fn process_screen_refresh(&self, attempt: u8, allow_retry: bool) {
-        let span = info_span!("notification_center::process_screen_refresh", attempt);
-        let _s = span.enter();
-        let ivars = self.ivars();
-
-        if ivars.display_churn_active.get() {
-            trace!("Deferring screen refresh until display churn ends");
-            ivars.refresh_deferred_until_stable.set(true);
-            ivars.refresh_pending.set(false);
-            return;
-        }
-
-        let Some((screens, converter)) = self.collect_state() else {
-            if allow_retry && attempt < REFRESH_MAX_RETRIES {
-                trace!(attempt, "Screen state not ready; retrying refresh");
-                self.schedule_screen_refresh_after(REFRESH_RETRY_DELAY_NS, attempt + 1);
-                return;
-            }
-            warn!("Unable to refresh screen configuration; skipping update");
-            ivars.refresh_pending.set(false);
-            return;
-        };
-
-        if screens.is_empty() {
-            if allow_retry && attempt < REFRESH_MAX_RETRIES {
-                trace!(attempt, "No displays yet; retrying refresh");
-                self.schedule_screen_refresh_after(REFRESH_RETRY_DELAY_NS, attempt + 1);
-                return;
-            }
-            trace!("Skipping screen parameter update: no active displays reported");
-            ivars.refresh_pending.set(false);
-            return;
-        }
-
-        if screens.iter().any(|screen| screen.space.is_none()) {
-            if allow_retry && attempt < REFRESH_MAX_RETRIES {
-                trace!(attempt, "Spaces not yet available; retrying refresh");
-                self.schedule_screen_refresh_after(REFRESH_RETRY_DELAY_NS, attempt + 1);
-                return;
-            }
-            warn!(
-                attempt,
-                "Spaces missing after retries; proceeding with partial info"
-            );
-        }
-
-        self.send_event(WmEvent::ScreenParametersChanged(screens, converter));
-        ivars.refresh_pending.set(false);
-    }
-
-    fn send_current_space(&self) {
-        let span = info_span!("notification_center::send_current_space");
-        let _s = span.enter();
-        // Avoid emitting space changes while a display reconfiguration is in-flight or a
-        // screen refresh is pending; these can interleave and cause window thrash between
-        // displays/spaces. The refresh will emit a consistent SpaceChanged afterward.
-        let ivars = self.ivars();
-        if ivars.refresh_pending.get() || ivars.display_churn_active.get() {
-            trace!("Skipping current space update during display reconfig/refresh");
-            return;
-        }
-
-        if let Some((screens, _)) = self.collect_state() {
-            let spaces: Vec<Option<SpaceId>> = screens.iter().map(|s| s.space).collect();
-            if !spaces.is_empty() {
-                {
-                    let mut last_sent = ivars.last_sent_spaces.borrow_mut();
-                    if last_sent.as_ref() == Some(&spaces) {
-                        trace!(?spaces, "Skipping duplicate current space snapshot");
-                        return;
-                    }
-                    *last_sent = Some(spaces.clone());
-                }
-                self.send_event(WmEvent::SpaceChanged(spaces));
-            }
-        }
-    }
-
     fn handle_app_event(&self, notif: &NSNotification) {
         use objc2_app_kit::*;
         let Some(app) = self.running_application(notif) else {
@@ -294,10 +195,53 @@ impl NotificationCenterInner {
         let _guard = span.enter();
         if unsafe { NSWorkspaceDidDeactivateApplicationNotification } == name {
             self.send_event(WmEvent::AppGloballyDeactivated(pid));
+        } else if unsafe { NSWorkspaceDidActivateApplicationNotification } == name {
+            // Do not forward AppGloballyActivated from NSWorkspace here.
+            //
+            // Rift intentionally treats workspace app-activation notifications as a
+            // lock/login hint channel only. The authoritative global activation
+            // stream comes from the Carbon process actor (`K_EVENT_APP_FRONT_SWITCHED`),
+            // which still drives the reactor's activation-time visible-window refresh
+            // and workspace-switch behavior. Re-emitting activation here would create
+            // duplicate front-app events; the only notification-center-specific job is
+            // to notice loginwindow transitions that Carbon does not model as a
+            // session-lock boundary.
+            let bundle_id = app.bundle_id().as_deref().map(ToString::to_string);
+            if bundle_id.as_deref() == Some("com.apple.loginwindow") {
+                // OmniWM found loginwindow activation to be a more reliable lock
+                // boundary than the distributed lock notification alone. Route it
+                // through the same session event stream so the spaces actor
+                // buffers topology while macOS swaps in the lock-screen spaces.
+                self.enter_session_inactive();
+            } else if self.should_leave_session_inactive_for_activation(pid, bundle_id.as_deref()) {
+                self.leave_session_inactive();
+            }
         }
     }
 
+    fn should_leave_session_inactive_for_activation(
+        &self,
+        activated_pid: i32,
+        activated_bundle_id: Option<&str>,
+    ) -> bool {
+        let frontmost = NSWorkspace::sharedWorkspace().frontmostApplication();
+        let frontmost_pid = frontmost.as_ref().map(|app| app.pid());
+        let frontmost_bundle_id = frontmost
+            .as_ref()
+            .and_then(|app| app.bundle_id().as_deref().map(ToString::to_string));
+
+        should_leave_session_inactive_after_non_login_activation(
+            self.ivars().session_inactive_hint.get(),
+            activated_pid,
+            activated_bundle_id,
+            frontmost_pid,
+            frontmost_bundle_id.as_deref(),
+        )
+    }
+
     fn send_event(&self, event: WmEvent) { _ = self.ivars().events_tx.send(event); }
+
+    fn send_space_event(&self, event: spaces::Event) { self.ivars().spaces_tx.send(event); }
 
     fn running_application(
         &self,
@@ -318,214 +262,14 @@ impl NotificationCenterInner {
         Some(app)
     }
 
-    fn handle_display_reconfig_event(&self, display_id: u32, flags: DisplayReconfigFlags) {
-        let ivars = self.ivars();
-
-        let was_active = ivars.display_churn_active.replace(true);
-        ivars.display_churn_flags.set(ivars.display_churn_flags.get() | flags);
-        ivars.display_churn_epoch.set(ivars.display_churn_epoch.get().wrapping_add(1));
-        ivars.display_topology_state.borrow_mut().take();
-        ivars.last_sent_spaces.borrow_mut().take();
-        if !was_active {
-            let epoch = display_churn::begin(flags);
-            trace!(epoch, "Global display churn activated");
-            self.send_event(WmEvent::DisplayChurnBegin);
-        } else {
-            let _ = display_churn::begin(flags);
-        }
-
-        {
-            let mut cache = ivars.screen_cache.borrow_mut();
-            cache.mark_dirty();
-        }
-
-        let expected_epoch = ivars.display_churn_epoch.get();
-        trace!(
-            display_id,
-            ?flags,
-            expected_epoch,
-            "Display reconfig event; debouncing"
-        );
-
-        self.schedule_display_stabilization_check(expected_epoch);
-    }
-
-    fn schedule_display_stabilization_check(&self, expected_epoch: u64) {
-        self.schedule_display_stabilization(expected_epoch, 0, DISPLAY_CHURN_QUIET_NS);
-    }
-
-    fn attempt_finish_display_churn(&self, expected_epoch: u64, attempt: u8) {
-        let ivars = self.ivars();
-        if expected_epoch != ivars.display_churn_epoch.get() || !ivars.display_churn_active.get() {
-            return;
-        }
-
-        let Some((screens, _)) = self.collect_state() else {
-            self.retry_or_finish_display_churn(
-                expected_epoch,
-                attempt,
-                "Unable to refresh displays after retries; forcing refresh",
-            );
-            return;
-        };
-
-        if screens.is_empty() {
-            self.retry_or_finish_display_churn(
-                expected_epoch,
-                attempt,
-                "No active displays reported after retries; forcing refresh",
-            );
-            return;
-        }
-
-        let fingerprint = Self::fingerprint_displays(&screens);
-        let mut state = ivars.display_topology_state.borrow_mut();
-        let hits = match state.as_mut() {
-            Some(existing) if existing.fingerprint == fingerprint => {
-                existing.hits = existing.hits.saturating_add(1);
-                existing.hits
-            }
-            _ => {
-                trace!(
-                    "fingerprint_changed expected_epoch={} attempt={}",
-                    expected_epoch, attempt
-                );
-                *state = Some(DisplayTopologyState { fingerprint, hits: 1 });
-                drop(state);
-                self.schedule_display_stabilization_retry(expected_epoch, attempt + 1);
-                return;
-            }
-        };
-        drop(state);
-
-        if hits >= DISPLAY_STABLE_REQUIRED_HITS {
-            if !window_server::windowserver_quiet_for_us(window_server::WINDOWSERVER_QUIET_US) {
-                trace!(
-                    hits,
-                    expected_epoch, "WindowServer still churning; waiting before finalizing"
-                );
-                if !self.retry_display_stabilization(expected_epoch, attempt) {
-                    warn!("WindowServer churn did not settle; forcing refresh");
-                    self.finish_display_churn(expected_epoch);
-                }
-                return;
-            }
-
-            trace!(hits, expected_epoch, "Display churn settled; refreshing");
-            self.finish_display_churn(expected_epoch);
-            return;
-        }
-
-        if !self.retry_display_stabilization(expected_epoch, attempt) {
-            warn!("Unable to confirm stable display topology; forcing refresh");
-            self.finish_display_churn(expected_epoch);
-        }
-    }
-
-    fn schedule_display_stabilization_retry(&self, expected_epoch: u64, attempt: u8) {
-        self.schedule_display_stabilization(expected_epoch, attempt, DISPLAY_STABILIZE_RETRY_NS);
-    }
-
-    fn schedule_display_stabilization(&self, expected_epoch: u64, attempt: u8, delay_ns: i64) {
-        let handler_ptr = self as *const _ as *mut Self;
-        queue::main().after_f_s(
-            Time::new_after(Time::NOW, delay_ns),
-            (handler_ptr, expected_epoch, attempt),
-            |(handler_ptr, expected_epoch, attempt)| unsafe {
-                let handler = &*handler_ptr;
-                handler.attempt_finish_display_churn(expected_epoch, attempt);
-            },
-        );
-    }
-
-    fn retry_display_stabilization(&self, expected_epoch: u64, attempt: u8) -> bool {
-        if attempt < DISPLAY_STABILIZE_MAX_ATTEMPTS {
-            self.schedule_display_stabilization_retry(expected_epoch, attempt + 1);
-            return true;
-        }
-        false
-    }
-
-    fn retry_or_finish_display_churn(
-        &self,
-        expected_epoch: u64,
-        attempt: u8,
-        warn_msg: &'static str,
-    ) {
-        if !self.retry_display_stabilization(expected_epoch, attempt) {
-            warn!("{}", warn_msg);
-            self.finish_display_churn(expected_epoch);
-        }
-    }
-
-    fn finish_display_churn(&self, expected_epoch: u64) {
-        let ivars = self.ivars();
-        if expected_epoch != ivars.display_churn_epoch.get() {
-            return;
-        }
-        if !ivars.display_churn_active.get() {
-            return;
-        }
-
-        trace!(
-            expected_epoch,
-            churn_flags = ?ivars.display_churn_flags.get(),
-            "Finalizing display churn"
-        );
-
-        ivars.display_churn_active.set(false);
-        ivars.display_churn_epoch.set(ivars.display_churn_epoch.get().wrapping_add(1));
-        ivars.display_churn_flags.set(DisplayReconfigFlags::empty());
-        ivars.display_topology_state.borrow_mut().take();
-        let epoch = display_churn::end();
-        trace!(epoch, "Global display churn cleared");
-        self.send_event(WmEvent::DisplayChurnEnd);
-
-        if ivars.refresh_deferred_until_stable.replace(false) {
-            trace!("Running deferred refresh after display churn");
-        }
-        self.schedule_screen_refresh_after(0, 0);
-    }
-
     fn handle_dock_pref_changed(&self) {
         trace!("Dock preferences changed; scheduling refresh");
-        self.schedule_screen_refresh();
+        self.send_space_event(spaces::Event::ScreenRefreshRequested);
     }
 
     fn handle_menu_bar_pref_changed(&self) {
         trace!("Menu bar autohide changed; scheduling refresh");
-        self.schedule_screen_refresh();
-    }
-
-    fn schedule_screen_refresh(&self) {
-        self.schedule_screen_refresh_after(REFRESH_DEFAULT_DELAY_NS, 0);
-    }
-
-    fn schedule_screen_refresh_after(&self, delay_ns: i64, attempt: u8) {
-        let ivars = self.ivars();
-        if attempt == 0 && ivars.display_churn_active.get() {
-            trace!("Deferring refresh until display churn ends");
-            ivars.refresh_deferred_until_stable.set(true);
-            return;
-        }
-
-        if attempt == 0 {
-            if ivars.refresh_pending.replace(true) {
-                return;
-            }
-        } else if !ivars.refresh_pending.get() {
-            ivars.refresh_pending.set(true);
-        }
-
-        let handler_ptr = self as *const _ as *mut Self;
-        queue::main().after_f_s(
-            Time::new_after(Time::NOW, delay_ns),
-            (handler_ptr, attempt),
-            |(handler_ptr, attempt)| unsafe {
-                let handler = &*handler_ptr;
-                handler.process_screen_refresh(attempt, true);
-            },
-        );
+        self.send_space_event(spaces::Event::ScreenRefreshRequested);
     }
 
     unsafe extern "C" fn display_reconfig_callback(
@@ -543,27 +287,23 @@ impl NotificationCenterInner {
             (handler_ptr, display_id, parsed),
             |(handler_ptr, display_id, flags)| unsafe {
                 let handler = &*handler_ptr;
-                handler.handle_display_reconfig_event(display_id, flags);
+                handler.send_space_event(spaces::Event::DisplayReconfigured { display_id, flags });
             },
         );
     }
+}
 
-    fn fingerprint_displays(screens: &[ScreenInfo]) -> DisplayTopologyFingerprint {
-        DisplayTopologyFingerprint(
-            screens
-                .iter()
-                .map(|d| {
-                    (
-                        d.display_uuid.clone(),
-                        d.frame.origin.x.to_bits(),
-                        d.frame.origin.y.to_bits(),
-                        d.frame.size.width.to_bits(),
-                        d.frame.size.height.to_bits(),
-                    )
-                })
-                .collect(),
-        )
-    }
+fn should_leave_session_inactive_after_non_login_activation(
+    session_inactive_hint: bool,
+    activated_pid: i32,
+    activated_bundle_id: Option<&str>,
+    frontmost_pid: Option<i32>,
+    frontmost_bundle_id: Option<&str>,
+) -> bool {
+    session_inactive_hint
+        && activated_bundle_id != Some("com.apple.loginwindow")
+        && frontmost_bundle_id != Some("com.apple.loginwindow")
+        && frontmost_pid == Some(activated_pid)
 }
 
 pub struct NotificationCenter {
@@ -571,8 +311,8 @@ pub struct NotificationCenter {
 }
 
 impl NotificationCenter {
-    pub fn new(events_tx: wm_controller::Sender) -> Self {
-        let handler = NotificationCenterInner::new(events_tx.clone());
+    pub fn new(events_tx: wm_controller::Sender, spaces_tx: spaces::Sender) -> Self {
+        let handler = NotificationCenterInner::new(events_tx.clone(), spaces_tx);
 
         // SAFETY: Selector must have signature fn(&self, &NSNotification)
         let register_unsafe =
@@ -605,6 +345,12 @@ impl NotificationCenter {
                 workspace_center,
                 workspace,
             );
+            default_center.addObserver_selector_name_object(
+                &handler,
+                sel!(recvScreenChangedEvent:),
+                Some(NSApplicationDidChangeScreenParametersNotification),
+                None,
+            );
             register_unsafe(
                 sel!(recvWakeEvent:),
                 NSWorkspaceDidWakeNotification,
@@ -619,7 +365,25 @@ impl NotificationCenter {
             );
             register_unsafe(
                 sel!(recvAppEvent:),
+                NSWorkspaceDidActivateApplicationNotification,
+                workspace_center,
+                workspace,
+            );
+            register_unsafe(
+                sel!(recvAppEvent:),
                 NSWorkspaceDidDeactivateApplicationNotification,
+                workspace_center,
+                workspace,
+            );
+            register_unsafe(
+                sel!(recvSessionEvent:),
+                NSWorkspaceSessionDidResignActiveNotification,
+                workspace_center,
+                workspace,
+            );
+            register_unsafe(
+                sel!(recvSessionEvent:),
+                NSWorkspaceSessionDidBecomeActiveNotification,
                 workspace_center,
                 workspace,
             );
@@ -654,6 +418,20 @@ impl NotificationCenter {
                 None,
                 NSNotificationSuspensionBehavior::DeliverImmediately,
             );
+            distributed_center.addObserver_selector_name_object_suspensionBehavior(
+                &handler,
+                sel!(recvSessionEvent:),
+                Some(&NSString::from_str("com.apple.screenIsLocked")),
+                None,
+                NSNotificationSuspensionBehavior::DeliverImmediately,
+            );
+            distributed_center.addObserver_selector_name_object_suspensionBehavior(
+                &handler,
+                sel!(recvSessionEvent:),
+                Some(&NSString::from_str("com.apple.screenIsUnlocked")),
+                None,
+                NSNotificationSuspensionBehavior::DeliverImmediately,
+            );
         };
 
         init_power_state();
@@ -664,12 +442,69 @@ impl NotificationCenter {
     pub async fn watch_for_notifications(self) {
         let workspace = &NSWorkspace::sharedWorkspace();
 
-        self.inner.send_screen_parameters();
+        self.inner.send_space_event(spaces::Event::ScreenRefreshRequested);
         self.inner.send_event(WmEvent::AppEventsRegistered);
         if let Some(app) = workspace.frontmostApplication() {
+            if app.bundle_id().as_deref().map(ToString::to_string).as_deref()
+                == Some("com.apple.loginwindow")
+            {
+                self.inner.enter_session_inactive();
+            }
             self.inner.send_event(WmEvent::AppGloballyActivated(app.pid()));
         }
 
         future::pending().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_leave_session_inactive_after_non_login_activation;
+
+    #[test]
+    fn unlock_fallback_requires_session_to_be_marked_inactive() {
+        assert!(!should_leave_session_inactive_after_non_login_activation(
+            false,
+            42,
+            Some("com.example.app"),
+            Some(42),
+            Some("com.example.app"),
+        ));
+    }
+
+    #[test]
+    fn unlock_fallback_rejects_loginwindow_or_non_frontmost_activations() {
+        assert!(!should_leave_session_inactive_after_non_login_activation(
+            true,
+            42,
+            Some("com.example.app"),
+            Some(7),
+            Some("com.example.app"),
+        ));
+        assert!(!should_leave_session_inactive_after_non_login_activation(
+            true,
+            42,
+            Some("com.example.app"),
+            Some(42),
+            Some("com.apple.loginwindow"),
+        ));
+        assert!(!should_leave_session_inactive_after_non_login_activation(
+            true,
+            42,
+            Some("com.apple.loginwindow"),
+            Some(42),
+            Some("com.apple.loginwindow"),
+        ));
+    }
+
+    #[test]
+    fn unlock_fallback_accepts_matching_frontmost_non_login_activation() {
+        assert!(should_leave_session_inactive_after_non_login_activation(
+            true,
+            42,
+            Some("com.example.app"),
+            Some(42),
+            Some("com.example.app"),
+        ));
     }
 }

@@ -83,10 +83,9 @@ impl WindowEventHandler {
         // Suppress false-positive destructions when on a fullscreen space or during MC.
         // kAXMainWindowChangedNotification triggers remove_stale_windows in app.rs, which
         // calls kAXWindowsAttribute (space-filtered), omitting Desktop windows and emitting
-        // WindowDestroyed for them. get_window() uses CGWindowListCopyWindowInfo
-        // (not space-filtered), so Some here means the window still exists.
-        if !crate::sys::window_server::active_space_is_user() || reactor.is_mission_control_active()
-        {
+        // WindowDestroyed for them. `get_window()` is a direct Skylight window query
+        // rather than an AX space-filtered view, so Some here means the window still exists.
+        if !reactor.has_user_space_context() || reactor.is_mission_control_active() {
             if let Some(ws_id) = window_server_id {
                 if crate::sys::window_server::get_window(ws_id)
                     .is_some_and(|ws_info| ws_info.pid == wid.pid)
@@ -252,11 +251,11 @@ impl WindowEventHandler {
 
                 if let Some((wsid, target)) = pending_target {
                     if new_frame.same_as(target) {
+                        reactor.transaction_manager.clear_target_for_window(wsid);
                         if !window.frame_monotonic.same_as(new_frame) {
                             debug!(?wid, ?new_frame, "Final frame matches Rift request");
                             window.frame_monotonic = new_frame;
                         }
-                        reactor.transaction_manager.clear_target_for_window(wsid);
                     } else {
                         trace!(
                             ?wid,
@@ -297,8 +296,11 @@ impl WindowEventHandler {
                 return false;
             }
 
-            let old_space = reactor.best_space_for_window(&old_frame, server_id);
-            let new_space = reactor.best_space_for_window(&new_frame, server_id);
+            let old_space_geometry = reactor.geometry_space_for_window(&old_frame, server_id);
+            let new_space_geometry = reactor.geometry_space_for_window(&new_frame, server_id);
+            let dragging = effective_mouse_state == Some(MouseState::Down) || reactor.is_in_drag();
+            let old_space = old_space_geometry;
+            let new_space = new_space_geometry;
             let old_active = old_space.is_some_and(|space| reactor.is_space_active(space));
             let new_active = new_space.is_some_and(|space| reactor.is_space_active(space));
 
@@ -316,8 +318,6 @@ impl WindowEventHandler {
                 window.frame_monotonic = new_frame;
             }
 
-            let dragging = effective_mouse_state == Some(MouseState::Down) || reactor.is_in_drag();
-
             if !dragging {
                 reactor.drag_manager.skip_layout_for_window = Some(wid);
             }
@@ -329,7 +329,7 @@ impl WindowEventHandler {
                 if is_resize {
                     if active_space_for_window(reactor, &new_frame, server_id).is_some() {
                         let screens = reactor
-                            .space_manager
+                            .space_state
                             .screens
                             .iter()
                             .filter_map(|screen| {
@@ -349,6 +349,21 @@ impl WindowEventHandler {
                 }
             } else {
                 if old_space != new_space {
+                    if let Some(target_space) = server_id
+                        .and_then(|wsid| reactor.pending_target_space_for_window_server_id(wsid))
+                        && reactor.assigned_space_for_window_id(wid) == Some(target_space)
+                        && new_space != Some(target_space)
+                    {
+                        debug!(
+                            ?wid,
+                            ?old_space,
+                            ?new_space,
+                            ?target_space,
+                            "Ignoring conflicting geometry-only space change after recent cross-display move"
+                        );
+                        return false;
+                    }
+
                     let keep_assigned_for_scrolling = old_space.is_some_and(|space| {
                         reactor.layout_manager.layout_engine.active_layout_mode_at(space)
                             == LayoutMode::Scrolling
@@ -372,6 +387,10 @@ impl WindowEventHandler {
 
                     reactor.send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
                     if let Some(space) = new_space {
+                        if let Some(wsid) = server_id {
+                            reactor.window_manager.set_window_server_space(wsid, Some(space));
+                            reactor.window_manager.mark_window_visible(wsid);
+                        }
                         if reactor.is_space_active(space) {
                             if let Some(active_ws) =
                                 reactor.layout_manager.layout_engine.active_workspace(space)
@@ -390,13 +409,15 @@ impl WindowEventHandler {
                             }
                             reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
                         }
+                    } else if let Some(wsid) = server_id {
+                        reactor.window_manager.set_window_server_space(wsid, None);
                     }
                     let _ = reactor.update_layout_or_warn(false, false);
                 } else if !old_frame.size.same_as(new_frame.size) {
                     if let Some(space) = old_space {
                         if reactor.is_space_active(space) {
                             let screens = reactor
-                                .space_manager
+                                .space_state
                                 .screens
                                 .iter()
                                 .filter_map(|screen| {
@@ -439,11 +460,17 @@ impl WindowEventHandler {
         let Some(wid) = reactor.window_manager.tracked_window_id(wsid) else {
             return;
         };
-        if !reactor.should_raise_on_mouse_over(wid) {
+        let should_sync = reactor.should_raise_on_mouse_over(wid);
+        let is_main = reactor.main_window() == Some(wid);
+        let needs_sync = reactor.layout_manager.layout_engine.focused_window() != Some(wid);
+
+        if !should_sync || (is_main && !needs_sync) {
             return;
         }
 
-        reactor.raise_window(wid, Quiet::No, None);
+        if !is_main {
+            reactor.raise_window(wid, Quiet::No, None);
+        }
 
         if let Some(window) = reactor.window_manager.window(wid) {
             if let Some(space) =
@@ -486,6 +513,13 @@ fn maybe_dispatch_window_added_in_space(reactor: &mut Reactor, wid: WindowId, sp
 }
 
 fn handle_mouse_up_if_needed(reactor: &mut Reactor, mouse_state: Option<MouseState>) {
+    if reactor.is_mission_control_active() {
+        reactor.drag_manager.reset();
+        reactor.drag_manager.drag_state = DragState::Inactive;
+        reactor.drag_manager.skip_layout_for_window = None;
+        return;
+    }
+
     if mouse_state == Some(MouseState::Up)
         && (matches!(
             reactor.drag_manager.drag_state,

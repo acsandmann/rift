@@ -22,11 +22,7 @@ impl CommandEventHandler {
         reactor: &Reactor,
         window_id: WindowId,
     ) -> Option<crate::sys::screen::SpaceId> {
-        let vwm = reactor.layout_manager.layout_engine.virtual_workspace_manager();
-        reactor
-            .space_manager
-            .iter_known_spaces()
-            .find(|space| vwm.workspace_for_window(*space, window_id).is_some())
+        reactor.assigned_space_for_window_id(window_id)
     }
 
     pub fn handle_command(reactor: &mut Reactor, cmd: Command) {
@@ -55,7 +51,7 @@ impl CommandEventHandler {
                 | LayoutCommand::CreateWorkspace
                 | LayoutCommand::SwitchToLastWorkspace
         );
-        let command_space = reactor.workspace_command_space();
+        let command_space = reactor.command_context_space();
         let workspace_space = if requires_workspace_space {
             if let Some(space) = command_space {
                 reactor.store_current_floating_positions(space);
@@ -162,7 +158,7 @@ impl CommandEventHandler {
     }
 
     pub fn handle_command_reactor_debug(reactor: &mut Reactor) {
-        for screen in &reactor.space_manager.screens {
+        for screen in &reactor.space_state.screens {
             if let Some(space) = screen.space {
                 reactor.layout_manager.layout_engine.debug_tree_desc(space, "", true);
             }
@@ -235,16 +231,14 @@ impl CommandEventHandler {
     pub fn handle_command_reactor_toggle_space_activated(reactor: &mut Reactor) {
         let cfg = reactor.activation_cfg();
 
-        let focused_space = reactor
-            .space_for_cursor_screen()
-            .or_else(|| reactor.space_manager.first_known_space());
+        let focused_space = reactor.raw_command_space();
 
         let Some(space) = focused_space else {
             return;
         };
 
         let display_uuid = reactor
-            .space_manager
+            .space_state
             .screen_by_space(space)
             .and_then(|screen| screen.display_uuid_owned());
 
@@ -262,9 +256,9 @@ impl CommandEventHandler {
         window_server_id: Option<WindowServerId>,
     ) {
         if let Some(window) = reactor.window_manager.window(window_id) {
-            let Some(space) =
+            let Some(space) = reactor.best_space_for_window_id(window_id).or_else(|| {
                 reactor.best_space_for_window(&window.frame_monotonic, window.info.sys_id)
-            else {
+            }) else {
                 warn!(?window_id, "Focus window ignored: space unknown");
                 return;
             };
@@ -402,6 +396,7 @@ impl CommandEventHandler {
         };
 
         let Some(source_space) = Self::assigned_space_for_window(reactor, window_id)
+            .or_else(|| reactor.best_space_for_window_id(window_id))
             .or_else(|| reactor.best_space_for_window(&window_frame, window_server_id))
         else {
             warn!(
@@ -419,7 +414,7 @@ impl CommandEventHandler {
             return;
         }
 
-        let origin_screen = reactor.space_manager.screen_by_space(source_space);
+        let origin_screen = reactor.space_state.screen_by_space(source_space);
 
         let origin_point =
             origin_screen.map(|s| s.frame.mid()).or_else(|| reactor.current_screen_center());
@@ -467,7 +462,7 @@ impl CommandEventHandler {
         if let Some(app) = reactor.app_manager.apps.get(&window_id.pid) {
             if let Some(wsid) = window_server_id {
                 let txid = reactor.transaction_manager.generate_next_txid(wsid);
-                reactor.transaction_manager.set_last_sent_txid(wsid, txid);
+                reactor.transaction_manager.store_txid(wsid, txid, target_frame);
                 let _ = app.handle.send(crate::actor::app::Request::SetWindowFrame(
                     window_id,
                     target_frame,
@@ -495,6 +490,13 @@ impl CommandEventHandler {
             target_screen.frame.size,
             window_id,
         );
+
+        if reactor.assigned_space_for_window_id(window_id) == Some(target_space)
+            && let Some(wsid) = window_server_id
+        {
+            reactor.window_manager.set_window_server_space(wsid, Some(target_space));
+            reactor.window_manager.mark_window_visible(wsid);
+        }
 
         reactor.handle_layout_response(response, None);
 

@@ -61,6 +61,28 @@ impl FloatingManager {
         self.remove_active_entries(window_id);
     }
 
+    pub(crate) fn transfer_window_identity(&mut self, from: WindowId, to: WindowId) {
+        if from == to {
+            return;
+        }
+
+        if self.floating_windows.remove(&from) {
+            self.floating_windows.insert(to);
+        }
+
+        for space_map in self.active_floating_windows.values_mut() {
+            if let Some(app_set) = space_map.get_mut(&from.pid)
+                && app_set.remove(&from)
+            {
+                app_set.insert(to);
+            }
+        }
+
+        if self.last_floating_focus == Some(from) {
+            self.last_floating_focus = Some(to);
+        }
+    }
+
     pub(crate) fn active_flat(&self, space: SpaceId) -> Vec<WindowId> {
         self.active_floating_windows
             .get(&space)

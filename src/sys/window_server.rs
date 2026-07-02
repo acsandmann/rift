@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::cell::RefCell;
 use std::ffi::{c_int, c_void};
 use std::num::NonZeroU32;
 use std::ptr::NonNull;
@@ -12,14 +14,16 @@ use objc2_core_foundation::{
 };
 use objc2_core_graphics::{
     CGBitmapInfo, CGColorSpace, CGContext, CGError, CGImage, CGInterpolationQuality, CGWindowID,
-    CGWindowListCopyWindowInfo, CGWindowListOption, kCGNullWindowID, kCGWindowAlpha,
-    kCGWindowBounds, kCGWindowLayer, kCGWindowNumber, kCGWindowOwnerPID,
+    CGWindowListCopyWindowInfo, CGWindowListOption, kCGNullWindowID, kCGWindowLayer, kCGWindowName,
+    kCGWindowOwnerName,
 };
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 
 use super::geometry::{CGRectDef, CGSizeDef};
 use crate::actor::app::WindowId;
+#[cfg(test)]
+use crate::common::collections::HashMap;
 use crate::sys::app::pid_t;
 use crate::sys::axuielement::{AXUIElement, Error as AxError};
 use crate::sys::cg_ok;
@@ -29,8 +33,16 @@ use crate::sys::skylight::*;
 
 static G_CONNECTION: Lazy<i32> = Lazy::new(|| unsafe { SLSMainConnectionID() });
 static LAST_WINDOWSERVER_ACTIVITY_US: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+thread_local! {
+    static TEST_SPACE_WINDOW_LIST_OVERRIDE: RefCell<Option<Vec<u32>>> = const { RefCell::new(None) };
+    static TEST_SPACE_WINDOW_LIST_BY_SPACE_OVERRIDE: RefCell<HashMap<u64, Vec<u32>>> = RefCell::new(HashMap::default());
+    static TEST_WINDOW_SPACES_OVERRIDE: RefCell<HashMap<u32, Vec<u64>>> = RefCell::new(HashMap::default());
+    static TEST_WINDOW_ORDERED_IN_OVERRIDE: RefCell<HashMap<u32, bool>> = RefCell::new(HashMap::default());
+}
 
 pub const WINDOWSERVER_QUIET_US: u64 = 350_000;
+#[cfg_attr(test, allow(dead_code))]
 const EFFECTIVELY_INVISIBLE_WINDOW_ALPHA: f32 = 0.01;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Clone, Copy, Serialize, Deserialize)]
@@ -213,18 +225,43 @@ pub struct WindowServerInfo {
     pub max_frame: CGSize,
 }
 
-pub fn get_visible_windows_with_layer(layer: Option<i32>) -> Vec<WindowServerInfo> {
-    get_visible_windows_raw()
-        .iter()
-        .filter_map(|win| make_info(win, layer))
-        .collect()
-}
+/// Global CG on-screen window snapshot.
+///
+/// This is intentionally *not* space-aware and should not be used for ordinary
+/// reactor/spaces reconciliation. Native-space truth comes from the spaces actor
+/// via `space_window_list_for_connection(...)`.
+/// Returns whether Mission Control's Dock-owned layer-18 overlay is still
+/// visible in the global on-screen window list.
+///
+/// This intentionally uses the global CG on-screen snapshot because the signal
+/// we want is the presence of the Dock's Mission Control UI itself, not
+/// ordinary native-space membership.
+pub fn mission_control_dock_overlay_visible() -> bool {
+    #[cfg(test)]
+    if let Some(override_value) =
+        TEST_MISSION_CONTROL_DOCK_OVERLAY_VISIBLE.with(|value| *value.borrow())
+    {
+        return override_value;
+    }
 
-pub fn connection_id_for_pid(pid: pid_t) -> Option<i32> {
-    let psn = ProcessSerialNumber::for_pid(pid).ok()?;
-    let mut connection_id: c_int = 0;
-    let result = unsafe { SLSGetConnectionIDForPSN(*G_CONNECTION, &psn, &mut connection_id) };
-    (result == 0).then_some(connection_id)
+    const MISSION_CONTROL_DOCK_LAYER: i64 = 18;
+
+    get_visible_windows_raw::<CFDictionary<CFString, CFType>>()
+        .iter()
+        .any(|window| {
+            if window.get(unsafe { kCGWindowName }).is_some() {
+                return false;
+            }
+
+            let Some(owner_name) = get_string(&window, unsafe { kCGWindowOwnerName }) else {
+                return false;
+            };
+            if owner_name != "Dock" {
+                return false;
+            }
+
+            get_num(&window, unsafe { kCGWindowLayer }) == Some(MISSION_CONTROL_DOCK_LAYER)
+        })
 }
 
 pub fn window_parent(id: WindowServerId) -> Option<WindowServerId> {
@@ -236,20 +273,6 @@ pub fn window_parent(id: WindowServerId) -> Option<WindowServerId> {
     } else {
         None
     }
-}
-
-pub fn associated_windows(id: WindowServerId) -> Vec<WindowServerId> {
-    let assoc = unsafe { SLSCopyAssociatedWindows(*G_CONNECTION, id.as_u32()) };
-    let Some(assoc) = NonNull::new(assoc) else {
-        return Vec::new();
-    };
-
-    let assoc_cf: CFRetained<CFArray<CFNumber>> = unsafe { CFRetained::from_raw(assoc) };
-    assoc_cf
-        .iter()
-        .filter_map(|num| num.as_i64())
-        .map(|wid| WindowServerId::new(wid as u32))
-        .collect()
 }
 
 pub fn window_is_sticky(id: WindowServerId) -> bool {
@@ -265,6 +288,13 @@ pub fn window_is_sticky(id: WindowServerId) -> bool {
 }
 
 pub fn window_spaces(id: WindowServerId) -> Vec<crate::sys::screen::SpaceId> {
+    #[cfg(test)]
+    if let Some(override_spaces) =
+        TEST_WINDOW_SPACES_OVERRIDE.with(|spaces| spaces.borrow().get(&id.as_u32()).cloned())
+    {
+        return override_spaces.into_iter().map(crate::sys::screen::SpaceId::new).collect();
+    }
+
     let cf_windows = cf_array_from_ids(&[id]);
     let space_list_ref = unsafe {
         SLSCopySpacesForWindows(*G_CONNECTION, 0x7, CFRetained::as_ptr(&cf_windows).as_ptr())
@@ -296,6 +326,13 @@ pub fn window_space(id: WindowServerId) -> Option<crate::sys::screen::SpaceId> {
 }
 
 pub fn window_is_ordered_in(id: WindowServerId) -> bool {
+    #[cfg(test)]
+    if let Some(ordered) = TEST_WINDOW_ORDERED_IN_OVERRIDE
+        .with(|override_ordered| override_ordered.borrow().get(&id.as_u32()).copied())
+    {
+        return ordered;
+    }
+
     let mut ordered: u8 = 0;
     if let Ok(_) = cg_ok(unsafe { SLSWindowIsOrderedIn(*G_CONNECTION, id.as_u32(), &mut ordered) })
     {
@@ -325,42 +362,6 @@ fn get_visible_windows_raw<T: Type>() -> CFRetained<CFArray<T>> {
         CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements,
         kCGNullWindowID,
     )
-}
-
-fn make_info(
-    win: CFRetained<CFDictionary<CFString, CFType>>,
-    layer_filter: Option<i32>,
-) -> Option<WindowServerInfo> {
-    let layer = get_num(&win, unsafe { kCGWindowLayer })?.try_into().ok()?;
-    if layer_filter.is_some() && layer_filter != Some(layer) {
-        return None;
-    }
-    if window_dict_is_effectively_invisible(&win, layer) {
-        return None;
-    }
-
-    let id = get_num(&win, unsafe { kCGWindowNumber })?;
-    let pid = get_num(&win, unsafe { kCGWindowOwnerPID })?;
-    if let Ok(dict) = win.get(unsafe { kCGWindowBounds })?.downcast::<CFDictionary>() {
-        let mut cg_frame = CGRect::default();
-        unsafe {
-            CGRectMakeWithDictionaryRepresentation(
-                CFRetained::<CFDictionary<_, _>>::as_ptr(&dict).as_ptr(),
-                &mut cg_frame,
-            )
-        };
-
-        return Some(WindowServerInfo {
-            id: WindowServerId(id.try_into().ok()?),
-            pid: pid.try_into().ok()?,
-            layer,
-            frame: cg_frame,
-            min_frame: CGSize::ZERO,
-            max_frame: CGSize::ZERO,
-        });
-    }
-
-    None
 }
 
 #[cfg(test)]
@@ -400,31 +401,36 @@ pub fn get_windows(ids: &[WindowServerId]) -> Vec<WindowServerInfo> {
 }
 
 pub fn get_window(id: WindowServerId) -> Option<WindowServerInfo> {
-    let cf_ids = cf_array_from_ids(&[id]);
-    let query = WindowQuery::new_from_cfarray(CFRetained::as_ptr(&cf_ids).as_ptr(), 1)?;
-    if query.count() != 1 || query.advance().is_none() {
-        return None;
+    #[cfg(test)]
+    {
+        return get_windows(&[id]).into_iter().next();
     }
-    window_info_from_query(&query)
+
+    #[cfg(not(test))]
+    {
+        let cf_ids = cf_array_from_ids(&[id]);
+        let query = WindowQuery::new_from_cfarray(CFRetained::as_ptr(&cf_ids).as_ptr(), 1)?;
+        if query.count() != 1 || query.advance().is_none() {
+            return None;
+        }
+        return window_info_from_query(&query);
+    }
 }
 
 fn get_num(dict: &CFDictionary<CFString, CFType>, key: &'static CFString) -> Option<i64> {
     dict.get(key)?.downcast::<CFNumber>().ok()?.as_i64()
 }
 
-fn get_f64(dict: &CFDictionary<CFString, CFType>, key: &'static CFString) -> Option<f64> {
-    dict.get(key)?.downcast::<CFNumber>().ok()?.as_f64()
+fn get_string(dict: &CFDictionary<CFString, CFType>, key: &'static CFString) -> Option<String> {
+    Some(dict.get(key)?.downcast::<CFString>().ok()?.to_string())
 }
 
-fn window_dict_is_effectively_invisible(win: &CFDictionary<CFString, CFType>, layer: i32) -> bool {
-    get_f64(win, unsafe { kCGWindowAlpha })
-        .is_some_and(|alpha| window_is_effectively_invisible(alpha as f32, layer))
-}
-
+#[cfg_attr(test, allow(dead_code))]
 fn window_is_effectively_invisible(alpha: f32, layer: i32) -> bool {
     layer == 0 && alpha <= EFFECTIVELY_INVISIBLE_WINDOW_ALPHA
 }
 
+#[cfg_attr(test, allow(dead_code))]
 fn window_info_from_query(query: &WindowQuery) -> Option<WindowServerInfo> {
     let layer = query.level();
     if window_is_effectively_invisible(query.alpha(), layer) {
@@ -439,6 +445,11 @@ fn window_info_from_query(query: &WindowQuery) -> Option<WindowServerInfo> {
         min_frame,
         max_frame,
     })
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_MISSION_CONTROL_DOCK_OVERLAY_VISIBLE: RefCell<Option<bool>> = const { RefCell::new(None) };
 }
 
 /// Find the topmost window at `point`, or the next window below
@@ -556,6 +567,21 @@ pub fn space_window_list_for_connection(
     owner: u32,
     include_minimized: bool,
 ) -> Vec<u32> {
+    #[cfg(test)]
+    if spaces.len() == 1
+        && let Some(override_ids) = TEST_SPACE_WINDOW_LIST_BY_SPACE_OVERRIDE
+            .with(|ids| ids.borrow().get(&spaces[0]).cloned())
+    {
+        let _ = (owner, include_minimized);
+        return override_ids;
+    }
+
+    #[cfg(test)]
+    if let Some(override_ids) = TEST_SPACE_WINDOW_LIST_OVERRIDE.with(|ids| ids.borrow().clone()) {
+        let _ = (spaces, owner, include_minimized);
+        return override_ids;
+    }
+
     let cf_numbers: Vec<CFRetained<CFNumber>> =
         spaces.iter().map(|&sid| CFNumber::new_i64(sid as i64)).collect();
     let cf_space_array = CFArray::from_retained_objects(&cf_numbers);
@@ -613,6 +639,47 @@ pub fn space_window_list_for_connection(
     windows
 }
 
+#[cfg(test)]
+pub fn set_space_window_list_for_connection_override(ids: Option<Vec<u32>>) {
+    TEST_SPACE_WINDOW_LIST_OVERRIDE.with(|override_ids| *override_ids.borrow_mut() = ids);
+}
+
+#[cfg(test)]
+pub fn set_space_window_list_for_space_override(space: u64, ids: Option<Vec<u32>>) {
+    TEST_SPACE_WINDOW_LIST_BY_SPACE_OVERRIDE.with(|override_ids| {
+        let mut override_ids = override_ids.borrow_mut();
+        if let Some(ids) = ids {
+            override_ids.insert(space, ids);
+        } else {
+            override_ids.remove(&space);
+        }
+    });
+}
+
+#[cfg(test)]
+pub fn set_window_spaces_override(id: WindowServerId, spaces: Option<Vec<u64>>) {
+    TEST_WINDOW_SPACES_OVERRIDE.with(|override_spaces| {
+        let mut override_spaces = override_spaces.borrow_mut();
+        if let Some(spaces) = spaces {
+            override_spaces.insert(id.as_u32(), spaces);
+        } else {
+            override_spaces.remove(&id.as_u32());
+        }
+    });
+}
+
+#[cfg(test)]
+pub fn set_window_ordered_in_override(id: WindowServerId, ordered: Option<bool>) {
+    TEST_WINDOW_ORDERED_IN_OVERRIDE.with(|override_ordered| {
+        let mut override_ordered = override_ordered.borrow_mut();
+        if let Some(ordered) = ordered {
+            override_ordered.insert(id.as_u32(), ordered);
+        } else {
+            override_ordered.remove(&id.as_u32());
+        }
+    });
+}
+
 pub fn app_window_suitable(id: WindowServerId) -> bool {
     let cf = cf_array_from_ids(&[id]);
 
@@ -630,110 +697,8 @@ pub fn app_window_suitable(id: WindowServerId) -> bool {
     }
 }
 
-pub fn get_front_window(cid: i32) -> u32 {
-    let mut wid: u32 = 0;
-
-    let active_sid: u64 = unsafe { CGSGetActiveSpace(cid) };
-
-    let mut psn = ProcessSerialNumber::default();
-    unsafe { _SLPSGetFrontProcess(&mut psn) };
-
-    let mut target_cid: i32 = 0;
-    unsafe {
-        SLSGetConnectionIDForPSN(cid, &psn, &mut target_cid);
-    }
-
-    let cf_numbers: Vec<CFRetained<CFNumber>> =
-        [active_sid].iter().map(|&sid| CFNumber::new_i64(sid as i64)).collect();
-    let cf_space_array = CFArray::from_retained_objects(&cf_numbers);
-
-    let mut set_tags: u64 = 1;
-    let mut clear_tags: u64 = 0;
-    let window_list_ref = unsafe {
-        SLSCopyWindowsWithOptionsAndTags(
-            cid,
-            target_cid as u32,
-            CFRetained::as_ptr(&cf_space_array).as_ptr(),
-            0x2,
-            &mut set_tags,
-            &mut clear_tags,
-        )
-    };
-
-    if window_list_ref.is_null() {
-        return 0;
-    }
-
-    let count = unsafe { (&*window_list_ref).len() as i32 };
-    if count > 0 {
-        let query = unsafe { SLSWindowQueryWindows(cid, window_list_ref, 0x0) };
-        if !query.is_null() {
-            let iterator = unsafe { SLSWindowQueryResultCopyWindows(query) };
-            if !iterator.is_null() && unsafe { SLSWindowIteratorGetCount(iterator) } > 0 {
-                while unsafe { SLSWindowIteratorAdvance(iterator) } {
-                    if iterator_window_suitable(iterator) {
-                        wid = unsafe { SLSWindowIteratorGetWindowID(iterator) };
-                        break;
-                    }
-                }
-            }
-            unsafe {
-                if !iterator.is_null() {
-                    CFRelease(iterator);
-                }
-                CFRelease(query);
-            }
-        }
-    }
-
-    unsafe { CFRelease(window_list_ref as *mut CFType) };
-
-    wid
-}
-
-pub fn window_space_id(cid: i32, wid: u32) -> u64 {
-    let mut sid: u64 = 0;
-
-    let cf_windows = CFArray::from_retained_objects(&[CFNumber::new_i64(wid as i64)]);
-
-    let space_list_ref =
-        unsafe { SLSCopySpacesForWindows(cid, 0x7, CFRetained::as_ptr(&cf_windows).as_ptr()) };
-
-    if !space_list_ref.is_null() {
-        let spaces_cf: CFRetained<CFArray<CFNumber>> =
-            unsafe { CFRetained::from_raw(NonNull::new_unchecked(space_list_ref)) };
-        if spaces_cf.len() > 0 {
-            if let Some(id_ref) = spaces_cf.get(0) {
-                let n: &CFNumber = id_ref.as_ref();
-                if let Some(v) = n.as_i64() {
-                    sid = v as u64;
-                }
-            }
-        }
-    }
-
-    if sid != 0 {
-        return sid;
-    }
-
-    let mut frame = CGRect::default();
-    unsafe {
-        CGSGetWindowBounds(cid, wid, &mut frame);
-    }
-    let uuid = unsafe { CGSCopyBestManagedDisplayForRect(cid, frame) };
-    if !uuid.is_null() {
-        let s = unsafe { SLSManagedDisplayGetCurrentSpace(cid, uuid) };
-        unsafe { CFRelease(uuid as *mut CFType) };
-        return s;
-    }
-
-    0
-}
-
 pub fn space_is_user(sid: u64) -> bool { unsafe { SLSSpaceGetType(*G_CONNECTION, sid) == 0 } }
 pub fn space_is_fullscreen(sid: u64) -> bool { unsafe { SLSSpaceGetType(*G_CONNECTION, sid) == 4 } }
-pub fn space_is_system(sid: u64) -> bool { unsafe { SLSSpaceGetType(*G_CONNECTION, sid) == 2 } }
-pub fn active_space_is_user() -> bool { unsafe { space_is_user(CGSGetActiveSpace(*G_CONNECTION)) } }
 pub fn wait_for_native_fullscreen_transition() {
     while !space_is_user(unsafe { CGSGetActiveSpace(*G_CONNECTION) }) {
         std::thread::sleep(Duration::from_millis(100));
