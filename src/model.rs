@@ -8,5 +8,6 @@ pub use virtual_workspace::{
     HideCorner, VirtualWorkspace, VirtualWorkspaceId, VirtualWorkspaceManager,
 };
 pub use window_registry::{WindowRegistry, WindowRegistryHandle, WindowWorkspaceInfo};
+pub mod broadcast;
 pub mod reactor;
 pub mod space_activation;

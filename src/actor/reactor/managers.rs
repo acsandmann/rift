@@ -5,7 +5,6 @@ use super::replay::Record;
 use super::{AppState, Event, WorkspaceSwitchOrigin, WorkspaceSwitchState};
 use crate::actor;
 use crate::actor::app::{WindowId, pid_t};
-use crate::actor::broadcast::{BroadcastEvent, BroadcastSender, StackInfo};
 use crate::actor::drag_swap::DragManager as DragSwapManager;
 use crate::actor::reactor::Reactor;
 use crate::actor::reactor::animation::AnimationManager;
@@ -17,6 +16,7 @@ use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{LayoutMode, WindowSnappingSettings};
 use crate::layout_engine::LayoutEngine;
 use crate::model::WindowRegistry;
+use crate::model::broadcast::{BroadcastEvent, BroadcastSender, StackInfo};
 use crate::sys::screen::SpaceId;
 
 /// Manages window state and lifecycle

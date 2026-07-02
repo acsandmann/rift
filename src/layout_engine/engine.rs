@@ -7,12 +7,12 @@ use tracing::{debug, info, warn};
 
 use super::{Direction, FloatingManager, LayoutId, LayoutSystemKind, WorkspaceLayouts};
 use crate::actor::app::{AppInfo, WindowId, pid_t};
-use crate::actor::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{LayoutMode, LayoutSettings, VirtualWorkspaceSettings};
 use crate::layout_engine::LayoutSystem;
 use crate::layout_engine::systems::WindowLayoutConstraints;
 use crate::model::WindowRegistryHandle;
+use crate::model::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::model::virtual_workspace::{
     AppRuleAssignment, AppRuleResult, VirtualWorkspace, VirtualWorkspaceId, VirtualWorkspaceManager,
 };

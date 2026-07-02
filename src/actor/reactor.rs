@@ -39,7 +39,6 @@ use transaction_manager::TransactionId;
 
 use super::{event_tap, gesture_tap};
 use crate::actor::app::{AppInfo, AppThreadHandle, Quiet, Request, WindowId, WindowInfo, pid_t};
-use crate::actor::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::actor::raise_manager::{self, RaiseManager, RaiseRequest};
 use crate::actor::reactor::events::window_discovery::WindowDiscoveryHandler;
 use crate::actor::spaces::ForwardedSpaceState;
@@ -47,6 +46,7 @@ use crate::actor::{self, menu_bar, stack_line};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
 use crate::common::config::Config;
 use crate::layout_engine::{self as layout, Direction, LayoutEngine, LayoutEvent};
+use crate::model::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy};
 use crate::model::tx_store::WindowTxStore;
 use crate::model::virtual_workspace::AppRuleResult;
