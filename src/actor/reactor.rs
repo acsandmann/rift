@@ -1417,8 +1417,15 @@ impl Reactor {
                         }
                     }
 
+                    let live_window_id = window
+                        .window_server_id
+                        .and_then(|wsid| self.window_manager.tracked_window_id(wsid))
+                        .or(window
+                            .window_id
+                            .filter(|wid| self.window_manager.contains_window(*wid)));
+
                     if let (Some(window_id), Some(target_space)) =
-                        (window.window_id, window.last_known_user_space)
+                        (live_window_id, window.last_known_user_space)
                     {
                         if let Some(source_space) = self
                             .best_space_for_window_id(window_id)
@@ -1880,6 +1887,22 @@ impl Reactor {
         wid: WindowId,
         authoritative_space: SpaceId,
     ) -> bool {
+        // Native WindowServer visibility is not enough to participate in Rift's
+        // layout. Fullscreen exit can surface transient AppKit/Electron windows
+        // that are visible and space-owned but are filtered out of query output.
+        // Treat this as the single gate for authoritative-space reconciliation:
+        // if a window is not query-manageable, remove any stale layout/workspace
+        // membership instead of re-assigning it from the WindowServer snapshot.
+        if !self
+            .window_manager
+            .window(wid)
+            .is_some_and(|window| window.matches_filter(WindowFilter::EffectivelyManageable))
+        {
+            let changed_space = self.assigned_space_for_window_id(wid);
+            self.send_layout_event(LayoutEvent::WindowRemoved(wid));
+            return changed_space.is_some_and(|space| self.is_space_active(space));
+        }
+
         let assigned_space = self.assigned_space_for_window_id(wid);
         if assigned_space == Some(authoritative_space) {
             return self.restore_window_to_active_layout_if_visible(wid, authoritative_space);
@@ -1927,8 +1950,18 @@ impl Reactor {
             return false;
         }
 
-        let Some(wsid) = self.window_manager.window(wid).and_then(|window| window.info.sys_id)
-        else {
+        let Some(window) = self.window_manager.window(wid) else {
+            return false;
+        };
+        // Same invariant as `reassign_window_to_authoritative_space`: a visible
+        // WindowServer id may be a transient fullscreen projection. Do not let
+        // visibility alone add it back to the active layout.
+        if !window.matches_filter(WindowFilter::EffectivelyManageable) {
+            self.send_layout_event(LayoutEvent::WindowRemoved(wid));
+            return false;
+        }
+
+        let Some(wsid) = window.info.sys_id else {
             return false;
         };
         if !self.window_manager.is_window_visible(wsid) {
@@ -2033,12 +2066,11 @@ impl Reactor {
 
     fn is_known_fullscreen_window(&self, wsid: WindowServerId) -> bool {
         let tracked_window = self.window_manager.tracked_window_id(wsid);
-        let tracked_pid = self.window_manager.get_window_server_info(wsid).map(|info| info.pid);
 
         self.native_fullscreen_tracks.values().any(|track| {
             track.windows.iter().any(|window| {
-                tracked_window.is_some_and(|wid| window.window_id == Some(wid))
-                    || tracked_pid.is_some_and(|pid| window.pid == pid)
+                window.window_server_id == Some(wsid)
+                    || tracked_window.is_some_and(|wid| window.window_id == Some(wid))
             })
         })
     }
