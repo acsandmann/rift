@@ -30,8 +30,6 @@ use crate::actor::{reactor, wm_controller};
 use crate::common::collections::{HashMap, HashSet};
 use crate::sys::dispatch::DispatchExt;
 #[cfg(not(test))]
-use crate::sys::geometry::CGRectExt;
-#[cfg(not(test))]
 use crate::sys::screen::managed_display_space_ids;
 use crate::sys::screen::{CoordinateConverter, ScreenCache, ScreenInfo, SpaceId};
 use crate::sys::skylight::DisplayReconfigFlags;
@@ -745,30 +743,42 @@ impl SpacesActor {
     fn resolve_command_space(&self, screens: &[ScreenInfo]) -> Option<SpaceId> {
         #[cfg(test)]
         {
-            screens
-                .iter()
-                .find_map(|screen| screen.space)
+            Self::resolve_active_display_space(screens, None, None)
                 .or_else(|| self.state.screens.iter().find_map(|screen| screen.space))
         }
         #[cfg(not(test))]
         {
-            if let Ok(point) = window_server::current_cursor_location()
-                && let Some(space) = screens
-                    .iter()
-                    .find(|screen| screen.frame.contains(point))
-                    .and_then(|screen| screen.space)
-            {
+            let active_display_uuid = crate::sys::screen::active_menu_bar_display_uuid();
+            let active_space = crate::sys::screen::get_active_space_number();
+            if let Some(space) = Self::resolve_active_display_space(
+                screens,
+                active_display_uuid.as_deref(),
+                active_space,
+            ) {
                 return Some(space);
-            }
-
-            if let Some(active_space) = crate::sys::screen::get_active_space_number()
-                && screens.iter().any(|screen| screen.space == Some(active_space))
-            {
-                return Some(active_space);
             }
 
             screens.iter().find_map(|screen| screen.space)
         }
+    }
+
+    fn resolve_active_display_space(
+        screens: &[ScreenInfo],
+        active_display_uuid: Option<&str>,
+        active_space: Option<SpaceId>,
+    ) -> Option<SpaceId> {
+        active_display_uuid
+            .and_then(|uuid| {
+                screens
+                    .iter()
+                    .find(|screen| screen.display_uuid == uuid)
+                    .and_then(|screen| screen.space)
+            })
+            .or_else(|| {
+                active_space
+                    .filter(|space| screens.iter().any(|screen| screen.space == Some(*space)))
+            })
+            .or_else(|| screens.iter().find_map(|screen| screen.space))
     }
 
     fn resolve_menu_bar_space(&self, screens: &[ScreenInfo]) -> Option<SpaceId> {

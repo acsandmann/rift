@@ -148,7 +148,7 @@ impl Reactor {
 
     fn default_query_space(&self) -> Option<SpaceId> {
         self.workspace_command_space()
-            .or_else(|| self.iter_active_spaces().next())
+            .or_else(|| self.active_display_space())
             .or_else(|| self.raw_command_space())
     }
 
@@ -391,7 +391,7 @@ impl Reactor {
     }
 
     fn handle_displays_query(&self) -> Vec<DisplayData> {
-        let active_context_space = self.workspace_command_space();
+        let active_context_space = self.active_display_space();
         let active_space_ids = self.active_space_ids();
         let active_space_set: HashSet<u64> = active_space_ids.iter().copied().collect();
         self.space_state

@@ -231,7 +231,7 @@ impl CommandEventHandler {
     pub fn handle_command_reactor_toggle_space_activated(reactor: &mut Reactor) {
         let cfg = reactor.activation_cfg();
 
-        let focused_space = reactor.raw_command_space();
+        let focused_space = reactor.active_display_space();
 
         let Some(space) = focused_space else {
             return;

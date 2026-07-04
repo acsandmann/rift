@@ -1560,7 +1560,19 @@ impl LayoutEngine {
                     self.apply_focus_response(space, workspace_id, layout, &response);
                     return response;
                 } else {
-                    EventResponse::default()
+                    let focus_window = self
+                        .workspace_tree(workspace_id)
+                        .selected_window(layout)
+                        .filter(|wid| windows.contains(wid))
+                        .or_else(|| windows.first().copied());
+                    let raise_windows = focus_window.into_iter().collect();
+                    let response = EventResponse {
+                        focus_window,
+                        raise_windows,
+                        boundary_hit: None,
+                    };
+                    self.apply_focus_response(space, workspace_id, layout, &response);
+                    return response;
                 }
             }
             LayoutCommand::MoveFocus(direction) => {

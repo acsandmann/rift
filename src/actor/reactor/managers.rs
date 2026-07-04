@@ -290,7 +290,7 @@ impl LayoutManager {
             .or(reactor.drag_manager.drag_swap_manager.dragged());
         let mut any_frame_changed = false;
 
-        let active_space = reactor.main_window_space();
+        let active_space = reactor.workspace_command_space();
         for (space, layout) in layout_result {
             if let Some(screen) = reactor.space_state.screen_by_space(space) {
                 let screen_frame = screen.frame;

@@ -194,6 +194,49 @@ fn forwarded_active_spaces_are_authoritative_for_workspace_context() {
 }
 
 #[test]
+fn forwarded_active_spaces_filter_active_workspace_context() {
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let left = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let right = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
+    let inactive_space = SpaceId::new(1);
+    let active_space = SpaceId::new(2);
+
+    reactor.handle_event(Event::SpaceStateChanged(ForwardedSpaceState {
+        screens: make_screen_snapshots(vec![left, right], vec![
+            Some(inactive_space),
+            Some(active_space),
+        ]),
+        fullscreen_spaces: Default::default(),
+        has_seen_display_set: false,
+        active_spaces: [active_space].into_iter().collect(),
+        menu_bar_space: Some(active_space),
+        command_space: Some(active_space),
+        display_space_ids: Default::default(),
+        last_user_space_by_display: Default::default(),
+        space_remaps: Vec::new(),
+        display_set_changed: false,
+        topology_changed: false,
+        allow_space_remap: false,
+        should_force_refresh_layout: false,
+        releases_lifecycle_refresh_quarantine: false,
+        resized_spaces: Vec::new(),
+        topology_window_delta: None,
+    }));
+
+    assert!(!reactor.is_space_active(inactive_space));
+    assert!(reactor.is_space_active(active_space));
+    assert_eq!(
+        reactor.space_state.active_spaces,
+        [active_space].into_iter().collect(),
+        "the stored forwarded state should reflect the authority's active-space set",
+    );
+}
+
+#[test]
 fn forwarded_space_snapshot_respects_default_disable_policy() {
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(
         &crate::common::config::VirtualWorkspaceSettings::default(),
@@ -264,7 +307,7 @@ fn forwarded_space_snapshot_respects_toggled_space_activation_policy() {
 }
 
 #[test]
-fn layout_commands_follow_focused_window_space_across_active_displays() {
+fn layout_commands_follow_active_display_space_across_active_displays() {
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(
         &crate::common::config::VirtualWorkspaceSettings::default(),
         &crate::common::config::LayoutSettings::default(),
@@ -369,7 +412,7 @@ fn layout_commands_follow_focused_window_space_across_active_displays() {
     reactor.send_layout_event(LayoutEvent::WindowFocused(right_space, target_a));
 
     assert_eq!(reactor.workspace_command_space(), Some(left_space));
-    assert_eq!(reactor.command_context_space(), Some(right_space));
+    assert_eq!(reactor.command_context_space(), Some(left_space));
     assert_eq!(
         reactor.layout_manager.layout_engine.focused_window(),
         Some(target_a)
@@ -379,13 +422,13 @@ fn layout_commands_follow_focused_window_space_across_active_displays() {
 
     assert_eq!(
         reactor.layout_manager.layout_engine.focused_window(),
-        Some(target_b),
-        "non-workspace layout commands should follow the focused window's active display space"
+        Some(source),
+        "non-workspace layout commands should follow the active display space"
     );
 }
 
 #[test]
-fn workspace_commands_follow_focused_window_space_across_active_displays() {
+fn workspace_commands_follow_active_display_space_across_active_displays() {
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(
         &crate::common::config::VirtualWorkspaceSettings::default(),
         &crate::common::config::LayoutSettings::default(),
@@ -432,9 +475,9 @@ fn workspace_commands_follow_focused_window_space_across_active_displays() {
         .list_workspaces(right_space)
         .to_vec();
     let left_workspace = left_workspaces.first().map(|(id, _)| *id).expect("left workspace");
+    let next_left_workspace =
+        left_workspaces.get(1).map(|(id, _)| *id).expect("left next workspace");
     let right_workspace = right_workspaces.first().map(|(id, _)| *id).expect("right workspace");
-    let next_right_workspace =
-        right_workspaces.get(1).map(|(id, _)| *id).expect("right next workspace");
 
     for (wid, wsid, space, frame) in windows {
         reactor.window_manager.track_window_server_id(wsid, wid);
@@ -488,7 +531,7 @@ fn workspace_commands_follow_focused_window_space_across_active_displays() {
     reactor.send_layout_event(LayoutEvent::WindowFocused(right_space, target));
 
     assert_eq!(reactor.workspace_command_space(), Some(left_space));
-    assert_eq!(reactor.command_context_space(), Some(right_space));
+    assert_eq!(reactor.command_context_space(), Some(left_space));
     assert_eq!(
         reactor.layout_manager.layout_engine.active_workspace(right_space),
         Some(right_workspace)
@@ -498,13 +541,13 @@ fn workspace_commands_follow_focused_window_space_across_active_displays() {
 
     assert_eq!(
         reactor.layout_manager.layout_engine.active_workspace(left_space),
-        Some(left_workspace),
-        "workspace commands should not switch the stale command-space display"
+        Some(next_left_workspace),
+        "workspace commands should follow the active display space"
     );
     assert_eq!(
         reactor.layout_manager.layout_engine.active_workspace(right_space),
-        Some(next_right_workspace),
-        "workspace commands should follow the focused window's active display space"
+        Some(right_workspace),
+        "workspace commands should not switch the focused window's display when it is not active"
     );
 }
 

@@ -25,7 +25,7 @@ impl SpaceEventHandler {
             screens,
             fullscreen_spaces,
             has_seen_display_set,
-            active_spaces: _,
+            active_spaces,
             menu_bar_space,
             command_space,
             display_space_ids,
@@ -46,9 +46,13 @@ impl SpaceEventHandler {
         let spaces: Vec<Option<SpaceId>> = screens.iter().map(|screen| screen.space).collect();
         let display_uuids: Vec<Option<String>> =
             screens.iter().map(|screen| screen.display_uuid_owned()).collect();
+        let authoritative_spaces: Vec<Option<SpaceId>> = screens
+            .iter()
+            .map(|screen| screen.space.filter(|space| active_spaces.contains(space)))
+            .collect();
         let effective_active_spaces: HashSet<SpaceId> = reactor
             .space_activation_policy
-            .compute_active_spaces(cfg, &spaces, &display_uuids)
+            .compute_active_spaces(cfg, &authoritative_spaces, &display_uuids)
             .into_iter()
             .flatten()
             .collect();
@@ -66,6 +70,7 @@ impl SpaceEventHandler {
 
         reactor.space_state.has_seen_display_set = has_seen_display_set;
         reactor.space_state.fullscreen_spaces = fullscreen_spaces;
+        reactor.space_state.active_spaces = active_spaces.clone();
         let topology_invalidates_pending_targets = display_set_changed
             || should_force_refresh_layout
             || !space_remaps.is_empty()
@@ -128,7 +133,7 @@ impl SpaceEventHandler {
         }
         let current_screens = reactor.screens_for_current_spaces();
         reactor.space_activation_policy.on_spaces_updated(cfg, &current_screens);
-        reactor.recompute_and_set_active_spaces(&spaces);
+        reactor.recompute_and_set_active_spaces(&authoritative_spaces);
         reactor.restore_windows_after_fullscreen_exit(&spaces);
 
         for (space, size) in resized_spaces {

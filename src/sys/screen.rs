@@ -564,8 +564,12 @@ impl NSScreenExt for NSScreen {
 }
 
 pub fn get_active_space_number() -> Option<SpaceId> {
-    current_space_for_display_uuid(
-        &unsafe {
+    active_menu_bar_display_uuid().and_then(|uuid| current_space_for_display_uuid(&uuid))
+}
+
+pub fn active_menu_bar_display_uuid() -> Option<String> {
+    Some(
+        unsafe {
             CFRetained::<CFString>::from_raw(NonNull::new(SLSCopyActiveMenuBarDisplayIdentifier(
                 SLSMainConnectionID(),
             ))?)

@@ -50,6 +50,45 @@ fn assert_no_reactor_event(rx: &mut actor::Receiver<reactor::Event>) {
     assert!(rx.try_recv().is_err(), "expected no reactor event");
 }
 
+#[test]
+fn active_display_space_prefers_matching_display_uuid() {
+    let left_space = SpaceId::new(1);
+    let right_space = SpaceId::new(2);
+    let screens = vec![
+        make_screen_with(1, "display-left", 0.0, 1000.0, Some(left_space)),
+        make_screen_with(2, "display-right", 1000.0, 1000.0, Some(right_space)),
+    ];
+
+    assert_eq!(
+        SpacesActor::resolve_active_display_space(
+            &screens,
+            Some("display-right"),
+            Some(left_space),
+        ),
+        Some(right_space),
+        "active display UUID should be authoritative over stale active-space fallback",
+    );
+}
+
+#[test]
+fn active_display_space_falls_back_to_active_space_then_screen_order() {
+    let left_space = SpaceId::new(1);
+    let right_space = SpaceId::new(2);
+    let screens = vec![
+        make_screen_with(1, "display-left", 0.0, 1000.0, Some(left_space)),
+        make_screen_with(2, "display-right", 1000.0, 1000.0, Some(right_space)),
+    ];
+
+    assert_eq!(
+        SpacesActor::resolve_active_display_space(&screens, Some("missing"), Some(right_space)),
+        Some(right_space),
+    );
+    assert_eq!(
+        SpacesActor::resolve_active_display_space(&screens, Some("missing"), None),
+        Some(left_space),
+    );
+}
+
 fn build_actor() -> (
     SpacesActor,
     actor::Receiver<wm_controller::WmEvent>,

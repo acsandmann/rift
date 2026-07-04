@@ -438,6 +438,7 @@ impl Reactor {
             .collect()
     }
 
+    #[cfg(test)]
     fn raw_spaces_for_current_screens(&self) -> Vec<Option<SpaceId>> {
         self.space_state.screens.iter().map(|s| s.space).collect()
     }
@@ -470,8 +471,18 @@ impl Reactor {
     }
 
     fn recompute_and_set_active_spaces_from_current_screens(&mut self) {
-        let raw_spaces = self.raw_spaces_for_current_screens();
+        let raw_spaces = self.authoritative_spaces_for_current_screens();
         self.recompute_and_set_active_spaces(&raw_spaces);
+    }
+
+    fn authoritative_spaces_for_current_screens(&self) -> Vec<Option<SpaceId>> {
+        self.space_state
+            .screens
+            .iter()
+            .map(|screen| {
+                screen.space.filter(|space| self.space_state.active_spaces.contains(space))
+            })
+            .collect()
     }
 
     fn handle_active_space_change(&mut self, previous_active: HashSet<SpaceId>) {
@@ -1495,8 +1506,9 @@ impl Reactor {
         self.reconcile_authoritative_active_window_snapshot(active_windows);
         self.check_for_new_windows();
 
-        if let Some(space) =
-            spaces.iter().copied().flatten().find(|space| self.is_space_active(*space))
+        if let Some(space) = self
+            .workspace_command_space()
+            .or_else(|| spaces.iter().copied().flatten().find(|space| self.is_space_active(*space)))
         {
             if let Some((workspace_id, workspace_name)) =
                 self.layout_manager.layout_engine.ensure_active_workspace_info(space)
@@ -1628,6 +1640,7 @@ impl Reactor {
 
         if spaces.iter().any(|s| s.is_some()) && spaces.len() == self.space_state.screens.len() {
             self.set_screen_spaces(&spaces);
+            self.space_state.active_spaces = spaces.iter().copied().flatten().collect();
             self.recompute_and_set_active_spaces(&spaces);
         }
     }
@@ -3303,21 +3316,37 @@ impl Reactor {
 
     fn raw_command_space(&self) -> Option<SpaceId> { self.space_state.command_space }
 
+    fn active_display_space(&self) -> Option<SpaceId> {
+        self.raw_command_space()
+            .filter(|space| {
+                self.space_state.active_spaces.contains(space)
+                    && self.space_state.screens.iter().any(|screen| screen.space == Some(*space))
+            })
+            .or_else(|| {
+                self.space_state
+                    .screens
+                    .iter()
+                    .filter_map(|screen| screen.space)
+                    .find(|space| self.space_state.active_spaces.contains(space))
+            })
+    }
+
     fn workspace_command_space(&self) -> Option<SpaceId> {
-        self.raw_command_space().filter(|space| self.is_space_active(*space))
+        self.active_display_space().filter(|space| self.is_space_active(*space))
     }
 
     fn command_context_space(&self) -> Option<SpaceId> {
-        self.layout_manager
-            .layout_engine
-            .focused_window()
-            .and_then(|wid| {
-                self.assigned_space_for_window_id(wid)
-                    .or_else(|| self.best_space_for_window_id(wid))
-            })
-            .filter(|space| self.is_space_active(*space))
-            .or_else(|| self.main_window_space().filter(|space| self.is_space_active(*space)))
-            .or_else(|| self.workspace_command_space())
+        self.workspace_command_space().or_else(|| {
+            self.layout_manager
+                .layout_engine
+                .focused_window()
+                .and_then(|wid| {
+                    self.assigned_space_for_window_id(wid)
+                        .or_else(|| self.best_space_for_window_id(wid))
+                })
+                .filter(|space| self.is_space_active(*space))
+                .or_else(|| self.main_window_space().filter(|space| self.is_space_active(*space)))
+        })
     }
 
     fn screen_for_point(&self, point: CGPoint) -> Option<&ScreenInfo> {
