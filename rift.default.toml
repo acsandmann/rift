@@ -120,6 +120,9 @@ invert_horizontal = false
 # Number of fingers required for gesture
 fingers = 3
 # If true, scrolling past the end of the strip will trigger a workspace switch
+#
+# This enables a seemingly endless scroll experience through each workspace's
+# strip of windows
 propagate_to_workspace_swipe = false
 
 [settings.layout.stack]
