@@ -17,6 +17,9 @@
     <a href="https://github.com/acsandmann/rift/stargazers">
       <img src="https://img.shields.io/github/stars/acsandmann/rift?style=flat-square" alt="GitHub stars" />
     </a>
+    <a href="https://matrix.to/#/%23rift:matrix.org">
+      <img src="https://img.shields.io/matrix/rift%3Amatrix.org?style=flat-square" alt="Matrix" />
+    </a>
   </p>
 </div>
 
