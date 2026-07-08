@@ -1065,6 +1065,38 @@ impl VirtualWorkspaceManager {
         }
     }
 
+    fn preserved_workspace_assignment(
+        &mut self,
+        window_id: WindowId,
+        space: SpaceId,
+    ) -> Option<VirtualWorkspaceId> {
+        let existing_assignment = self.window_registry.get().workspace_info_for_window(window_id)?;
+        if existing_assignment.space == space {
+            return Some(existing_assignment.workspace_id);
+        }
+
+        // Treat an empty, newly initialized target space as a transient native-space-id churn
+        // candidate and preserve workspace ownership by ordinal. Once the target space already
+        // has assignments, prefer the normal resolution path so real cross-space moves still
+        // follow the destination space.
+        if self.window_registry.get().has_workspace_assignments_in_space(space) {
+            return None;
+        }
+
+        let source_index = self
+            .workspaces_by_space
+            .get(&existing_assignment.space)?
+            .iter()
+            .position(|&workspace_id| workspace_id == existing_assignment.workspace_id)?;
+        let target_workspace_id = *self.workspaces_by_space.get(&space)?.get(source_index)?;
+
+        if self.assign_window_to_workspace(space, window_id, target_workspace_id) {
+            Some(target_workspace_id)
+        } else {
+            None
+        }
+    }
+
     pub fn assign_window_with_app_info(
         &mut self,
         window_id: WindowId,
@@ -1091,7 +1123,7 @@ impl VirtualWorkspaceManager {
             .find_matching_app_rule(app_bundle_id, app_name, window_title, ax_role, ax_subrole)
             .cloned();
 
-        let existing_assignment = self.window_registry.get().workspace_for_window(space, window_id);
+        let existing_assignment = self.preserved_workspace_assignment(window_id, space);
 
         if let Some(rule) = rule_match {
             if !rule.manage {
@@ -1604,6 +1636,64 @@ mod tests {
         assert_eq!(manager.workspace_info_for_window_any(transient_window), None);
         assert!(manager.workspace_windows(new_space, transient_ws).is_empty());
         assert!(manager.workspace_info(new_space, transient_ws).is_none());
+    }
+
+    #[test]
+    fn preserves_workspace_ordinal_across_transient_space_id_churn() {
+        let mut settings = VirtualWorkspaceSettings::default();
+        settings.default_workspace_count = 3;
+        let mut manager =
+            VirtualWorkspaceManager::new_with_config(&settings, &LayoutSettings::default());
+        let old_space = SpaceId::new(1);
+        let new_space = SpaceId::new(2);
+        let window = WindowId::new(12, 1);
+
+        let old_workspaces = manager.list_workspaces(old_space);
+        let new_workspaces = manager.list_workspaces(new_space);
+        let preserved_workspace = old_workspaces[2].0;
+        let expected_target_workspace = new_workspaces[2].0;
+
+        assert!(manager.assign_window_to_workspace(old_space, window, preserved_workspace));
+
+        let assignment = assign(&mut manager, window, new_space, None, None, None, None, None);
+
+        assert_eq!(assignment.workspace_id, expected_target_workspace);
+        assert_eq!(
+            manager.workspace_info_for_window_any(window),
+            Some(WindowWorkspaceInfo {
+                space: new_space,
+                workspace_id: expected_target_workspace,
+            })
+        );
+    }
+
+    #[test]
+    fn does_not_preserve_workspace_ordinal_when_target_space_already_has_assignments() {
+        let mut settings = VirtualWorkspaceSettings::default();
+        settings.default_workspace_count = 3;
+        let mut manager =
+            VirtualWorkspaceManager::new_with_config(&settings, &LayoutSettings::default());
+        let old_space = SpaceId::new(1);
+        let new_space = SpaceId::new(2);
+        let moved_window = WindowId::new(13, 1);
+        let existing_window = WindowId::new(14, 1);
+
+        let old_workspaces = manager.list_workspaces(old_space);
+        let new_workspaces = manager.list_workspaces(new_space);
+
+        assert!(manager.assign_window_to_workspace(old_space, moved_window, old_workspaces[2].0));
+        assert!(manager.assign_window_to_workspace(new_space, existing_window, new_workspaces[1].0));
+
+        let assignment = assign(&mut manager, moved_window, new_space, None, None, None, None, None);
+
+        assert_eq!(assignment.workspace_id, new_workspaces[0].0);
+        assert_eq!(
+            manager.workspace_info_for_window_any(moved_window),
+            Some(WindowWorkspaceInfo {
+                space: new_space,
+                workspace_id: new_workspaces[0].0,
+            })
+        );
     }
 
     #[test]

@@ -1115,15 +1115,20 @@ impl SpacesActor {
         // Native macOS space switches can still emit CGDisplay reconfig callbacks on a
         // single physical display. Churn quarantine is only for unstable physical display
         // topology, not ordinary current-space changes which are handled separately.
+        // External display setting changes like main-display promotion and desktop shape
+        // updates can temporarily destabilize active-space mappings, so they must be
+        // buffered like other topology-affecting display reconfigurations.
         flags.intersects(
             DisplayReconfigFlags::ADD
                 | DisplayReconfigFlags::REMOVE
                 | DisplayReconfigFlags::MOVED
+                | DisplayReconfigFlags::SET_MAIN
                 | DisplayReconfigFlags::SET_MODE
                 | DisplayReconfigFlags::ENABLED
                 | DisplayReconfigFlags::DISABLED
                 | DisplayReconfigFlags::MIRROR
-                | DisplayReconfigFlags::UNMIRROR,
+                | DisplayReconfigFlags::UNMIRROR
+                | DisplayReconfigFlags::DESKTOP_SHAPE_CHANGED,
         )
     }
 

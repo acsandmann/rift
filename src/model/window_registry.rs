@@ -327,6 +327,10 @@ impl WindowRegistry {
         self.workspace_windows.get(&assignment).map_or(0, HashSet::len)
     }
 
+    pub fn has_workspace_assignments_in_space(&self, space: SpaceId) -> bool {
+        self.workspace_windows.keys().any(|assignment| assignment.space == space)
+    }
+
     pub fn remove_window_assignment(&mut self, window_id: WindowId) -> Option<WindowWorkspaceInfo> {
         let old = self.windows.get_mut(&window_id).and_then(|record| record.workspace.take());
         if let Some(old_assignment) = old {
