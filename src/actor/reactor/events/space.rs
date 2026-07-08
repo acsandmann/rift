@@ -1,17 +1,13 @@
-use std::collections::hash_map::Entry;
-
 use objc2_app_kit::NSRunningApplication;
 use tracing::{debug, trace, warn};
 
 use crate::actor::app::{Request, WindowId};
 use crate::actor::reactor::events::window::WindowEventHandler;
-use crate::actor::reactor::{
-    FullscreenSpaceTrack, FullscreenWindowTrack, LayoutEvent, Reactor, SpaceEventKind,
-    StaleCleanupState,
-};
+use crate::actor::reactor::{LayoutEvent, Reactor, SpaceEventKind, StaleCleanupState};
 use crate::actor::spaces::{ForwardedSpaceState, TopologyWindowDelta};
 use crate::actor::wm_controller::WmEvent;
 use crate::common::collections::{HashMap, HashSet};
+use crate::model::window_registry::NativeFullscreenTransition;
 use crate::sys::app::AppInfo;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::WindowServerId;
@@ -177,21 +173,21 @@ impl SpaceEventHandler {
     ) {
         if matches!(kind, SpaceEventKind::Fullscreen) {
             let mut layout_changed = false;
-            let (pid, window_id) = if let Some(wid) = reactor.window_manager.tracked_window_id(wsid)
-            {
-                (wid.pid, Some(wid))
-            } else if let Some(info) = reactor.window_manager.get_window_server_info(wsid) {
-                (info.pid, None)
-            } else {
-                // We don't know who owned this fullscreen window.
-                return;
-            };
+            let (_pid, window_id) =
+                if let Some(wid) = reactor.window_manager.tracked_window_id(wsid) {
+                    (wid.pid, Some(wid))
+                } else if let Some(info) = reactor.window_manager.get_window_server_info(wsid) {
+                    (info.pid, None)
+                } else {
+                    // We don't know who owned this fullscreen window.
+                    return;
+                };
 
             let last_known_user_space = resolve_last_known_user_space(reactor, window_id);
             record_fullscreen_window(
                 reactor,
                 sid,
-                pid,
+                Some(_pid),
                 window_id,
                 Some(wsid),
                 last_known_user_space,
@@ -362,21 +358,43 @@ impl SpaceEventHandler {
                             if layout_changed {
                                 let _ = reactor.update_layout_or_warn(false, false);
                             }
+                        } else if let Some(pid) = reactor
+                            .window_manager
+                            .pending_native_fullscreen_pid_for_window_server_id(wsid)
+                        {
+                            request_visible_windows(
+                                reactor,
+                                pid,
+                                "refresh after fullscreen exit without AX tracking",
+                            );
                         }
                     }
                     SpaceEventKind::Fullscreen => {
                         let mut layout_changed = false;
-                        if let Some(wid) = reactor.window_manager.tracked_window_id(wsid) {
-                            let last_known_user_space =
-                                resolve_last_known_user_space(reactor, Some(wid));
-                            record_fullscreen_window(
+                        let tracked_window_id = reactor.window_manager.tracked_window_id(wsid);
+                        let owner_pid = tracked_window_id.map(|wid| wid.pid).or_else(|| {
+                            reactor.window_manager.get_window_server_info(wsid).map(|info| info.pid)
+                        });
+                        let last_known_user_space =
+                            resolve_last_known_user_space(reactor, tracked_window_id);
+                        record_fullscreen_window(
+                            reactor,
+                            sid,
+                            owner_pid,
+                            tracked_window_id,
+                            Some(wsid),
+                            last_known_user_space,
+                        );
+                        if tracked_window_id.is_none()
+                            && let Some(pid) = owner_pid
+                        {
+                            request_visible_windows(
                                 reactor,
-                                sid,
-                                wid.pid,
-                                Some(wid),
-                                Some(wsid),
-                                last_known_user_space,
+                                pid,
+                                "refresh after fullscreen appearance without AX tracking",
                             );
+                        }
+                        if let Some(wid) = tracked_window_id {
                             if let Some(user_space) = last_known_user_space
                                 && reactor.assigned_space_for_window_id(wid) == Some(user_space)
                             {
@@ -429,14 +447,13 @@ impl SpaceEventHandler {
 
             if matches!(kind, SpaceEventKind::Fullscreen) {
                 let window_id = reactor.window_manager.tracked_window_id(wsid);
-                let last_known_user_space = resolve_last_known_user_space(reactor, window_id);
                 record_fullscreen_window(
                     reactor,
                     sid,
-                    window_server_info.pid,
+                    Some(window_server_info.pid),
                     window_id,
                     Some(wsid),
-                    last_known_user_space,
+                    resolve_last_known_user_space(reactor, window_id),
                 );
                 request_visible_windows(
                     reactor,
@@ -502,40 +519,31 @@ fn resolve_last_known_user_space(
 fn record_fullscreen_window(
     reactor: &mut Reactor,
     sid: SpaceId,
-    pid: i32,
+    pid: Option<i32>,
     window_id: Option<WindowId>,
     window_server_id: Option<WindowServerId>,
     last_known_user_space: Option<SpaceId>,
 ) {
-    let entry = match reactor.native_fullscreen_tracks.entry(sid.get()) {
-        Entry::Occupied(o) => o.into_mut(),
-        Entry::Vacant(v) => v.insert(FullscreenSpaceTrack::default()),
-    };
-
-    if let Some(existing) = entry.windows.iter_mut().find(|window| {
-        window_server_id.is_some() && window.window_server_id == window_server_id
-            || window_id.is_some() && window.window_id == window_id
-    }) {
-        if existing.window_id.is_none() {
-            existing.window_id = window_id;
-        }
-        if existing.window_server_id.is_none() {
-            existing.window_server_id = window_server_id;
-        }
-        if existing.last_known_user_space.is_none() {
-            existing.last_known_user_space = last_known_user_space;
-        }
-        existing._last_seen_fullscreen_space = sid;
-        return;
-    }
-
-    entry.windows.push(FullscreenWindowTrack {
-        pid,
-        window_id,
-        window_server_id,
-        last_known_user_space,
-        _last_seen_fullscreen_space: sid,
+    let resolved_window_id = window_id.or_else(|| {
+        window_server_id.and_then(|wsid| reactor.window_manager.tracked_window_id(wsid))
     });
+    if let Some(window_id) = resolved_window_id {
+        let _ = reactor.window_manager.suspend_window_to_native_fullscreen(
+            window_id,
+            window_server_id,
+            last_known_user_space,
+            sid,
+            NativeFullscreenTransition::Suspended,
+        );
+    } else if let (Some(pid), Some(wsid)) = (pid, window_server_id) {
+        let _ = reactor.window_manager.suspend_window_server_to_native_fullscreen(
+            pid,
+            wsid,
+            last_known_user_space,
+            sid,
+            NativeFullscreenTransition::Suspended,
+        );
+    }
 }
 
 fn apply_topology_window_delta(reactor: &mut Reactor, delta: TopologyWindowDelta) {
@@ -587,37 +595,15 @@ fn restore_fullscreen_window_to_user_space(
     sid: SpaceId,
     wid: WindowId,
 ) -> Option<bool> {
-    // Restore only an exact fullscreen track. A pid can own several real
-    // windows, and Electron can create multiple AX ids for one lifecycle, so a
-    // pid-level match can revive the wrong same-app window into the original
-    // workspace as a layout-only ghost.
-    let exact_match = reactor.native_fullscreen_tracks.iter().find_map(|(&key, track)| {
-        track
-            .windows
-            .iter()
-            .find(|window| window.window_server_id == Some(wsid) || window.window_id == Some(wid))
-            .cloned()
-            .map(|window| (key, window))
-    });
-    let (matched_key, restored_window) = exact_match?;
-    for (&key, track) in &mut reactor.native_fullscreen_tracks {
-        track.windows.retain(|window| {
-            let same_window_server_id = restored_window.window_server_id.is_some()
-                && window.window_server_id == restored_window.window_server_id;
-            let same_window_id = restored_window.window_id.is_some()
-                && window.window_id == restored_window.window_id;
-            if key == matched_key {
-                return !(same_window_server_id || same_window_id);
-            }
+    let restored_window = reactor
+        .window_manager
+        .restore_window_from_native_fullscreen_by_window_server_id(wsid)
+        .or_else(|| reactor.window_manager.restore_window_from_native_fullscreen(wid))?;
 
-            !(same_window_server_id || same_window_id)
-        });
-    }
-    reactor.native_fullscreen_tracks.retain(|_, track| !track.windows.is_empty());
-
-    let owner_window = restored_window
-        .window_id
-        .filter(|candidate| reactor.window_manager.contains_window(*candidate))
+    let owner_window = reactor
+        .window_manager
+        .contains_window(restored_window.current_window_id)
+        .then_some(restored_window.current_window_id)
         .or_else(|| {
             restored_window
                 .window_server_id
@@ -630,7 +616,7 @@ fn restore_fullscreen_window_to_user_space(
         reactor.send_layout_event(LayoutEvent::WindowRemoved(wid));
     }
 
-    request_visible_windows(reactor, restored_window.pid, "refresh after fullscreen exit");
+    request_visible_windows(reactor, owner_window.pid, "refresh after fullscreen exit");
 
     Some(
         if reactor.assigned_space_for_window_id(owner_window) == Some(sid) {

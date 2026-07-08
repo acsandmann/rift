@@ -138,6 +138,30 @@ impl WindowDiscoveryHandler {
                 reactor.send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(previous_wid));
                 reactor.window_manager.remove_window(previous_wid);
             }
+            Self::retire_native_fullscreen_record_if_window_is_back_on_user_space(
+                reactor, wid, new_wsid,
+            );
+        }
+    }
+
+    fn retire_native_fullscreen_record_if_window_is_back_on_user_space(
+        reactor: &mut Reactor,
+        wid: WindowId,
+        wsid: WindowServerId,
+    ) {
+        let Some(record) = reactor.window_manager.native_fullscreen_record_for_window(wid) else {
+            return;
+        };
+        let Some(current_space) = reactor.window_manager.window_server_space(wsid) else {
+            return;
+        };
+        let target_user_space = record
+            .workspace
+            .map(|workspace| workspace.space)
+            .or(record.last_known_user_space);
+
+        if current_space != record.fullscreen_space && Some(current_space) == target_user_space {
+            let _ = reactor.window_manager.restore_window_from_native_fullscreen(wid);
         }
     }
 
@@ -410,6 +434,11 @@ impl WindowDiscoveryHandler {
 
         let mut app_windows: BTreeMap<SpaceId, Vec<WindowId>> = BTreeMap::new();
         let mut included: HashSet<WindowId> = HashSet::default();
+        let has_visible_window_server_windows = reactor
+            .window_manager
+            .iter_visible_window_server_ids()
+            .filter_map(|wsid| reactor.window_manager.tracked_window_id(wsid))
+            .any(|wid| wid.pid == pid && reactor.window_is_standard(wid));
 
         // Collect windows from visible window server IDs
         for wid in reactor
@@ -435,6 +464,16 @@ impl WindowDiscoveryHandler {
             if included.contains(&wid) || !reactor.window_is_standard(wid) {
                 continue;
             }
+            if has_visible_window_server_windows
+                && reactor
+                    .authoritative_space_for_window_id(wid)
+                    .is_none_or(|space| !reactor.is_space_active(space))
+            {
+                // Once the active-space snapshot already contains some windows for
+                // this app, do not let AX-only fallback resurrect other windows on
+                // the current desktop via geometry inference alone.
+                continue;
+            }
             let Some(_state) = reactor.window_manager.window(wid) else {
                 continue;
             };
@@ -456,9 +495,6 @@ impl WindowDiscoveryHandler {
         // correctly identify cross-space moves regardless of event ordering.
         let mut assignment_results = BTreeMap::new();
         for (&space, windows_for_space) in &app_windows {
-            if !reactor.is_space_active(space) {
-                continue;
-            }
             for &wid in windows_for_space {
                 assignment_results.insert(
                     (space, wid),

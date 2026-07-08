@@ -66,9 +66,7 @@ type Receiver = actor::Receiver<Event>;
 use managers::RefreshQuarantineState;
 pub use query::ReactorQueryHandle;
 
-pub(crate) use crate::model::reactor::{
-    AppState, FullscreenSpaceTrack, FullscreenWindowTrack, WindowFilter, WindowState,
-};
+pub(crate) use crate::model::reactor::{AppState, WindowFilter, WindowState};
 pub use crate::model::reactor::{
     Command, DisplaySelector, DragSession, DragState, MenuState, MissionControlState,
     ReactorCommand, RefocusState, Requested, StaleCleanupState, WorkspaceSwitchOrigin,
@@ -251,7 +249,6 @@ pub struct Reactor {
     layout_manager: managers::LayoutManager,
     window_manager: managers::WindowManager,
     space_state: ForwardedSpaceState,
-    native_fullscreen_tracks: HashMap<u64, FullscreenSpaceTrack>,
     space_activation_policy: SpaceActivationPolicy,
     main_window_tracker: MainWindowTracker,
     drag_manager: managers::DragManager,
@@ -330,7 +327,6 @@ impl Reactor {
             layout_manager: managers::LayoutManager { layout_engine },
             window_manager: Box::default(),
             space_state: ForwardedSpaceState::default(),
-            native_fullscreen_tracks: HashMap::default(),
             space_activation_policy: SpaceActivationPolicy::new(),
             main_window_tracker: MainWindowTracker::default(),
             drag_manager: managers::DragManager {
@@ -1398,74 +1394,73 @@ impl Reactor {
             .collect();
 
         for space in refresh_spaces {
-            let mut tracks = Vec::new();
-            if let Some(track) = self.native_fullscreen_tracks.remove(&space.get()) {
-                tracks.push(track);
-            }
-
-            let keys_to_remove: Vec<u64> = self
-                .native_fullscreen_tracks
-                .iter()
-                .filter(|(_, track)| {
-                    track.windows.iter().any(|w| w.last_known_user_space == Some(space))
+            let records: Vec<_> = self
+                .window_manager
+                .iter_native_fullscreen_records()
+                .filter(|record| {
+                    record.last_known_user_space == Some(space)
+                        || record.workspace.is_some_and(|workspace| workspace.space == space)
                 })
-                .map(|(&key, _)| key)
                 .collect();
 
-            for key in keys_to_remove {
-                if let Some(track) = self.native_fullscreen_tracks.remove(&key) {
-                    tracks.push(track);
-                }
+            if records.is_empty() {
+                continue;
             }
 
-            for track in tracks {
-                Self::wait_for_native_fullscreen_exit();
+            Self::wait_for_native_fullscreen_exit();
 
-                for window in track.windows {
-                    if let Some(app) = self.app_manager.apps.get(&window.pid) {
-                        if let Err(e) = app.handle.send(Request::GetVisibleWindows) {
-                            warn!("Failed to send GetVisibleWindows to app {}: {}", window.pid, e);
-                        }
-                    }
+            for record in records {
+                let _ = self
+                    .window_manager
+                    .restore_window_from_native_fullscreen(record.current_window_id);
 
-                    let live_window_id = window
-                        .window_server_id
-                        .and_then(|wsid| self.window_manager.tracked_window_id(wsid))
-                        .or(window
-                            .window_id
-                            .filter(|wid| self.window_manager.contains_window(*wid)));
-
-                    if let (Some(window_id), Some(target_space)) =
-                        (live_window_id, window.last_known_user_space)
-                    {
-                        if let Some(source_space) = self
-                            .best_space_for_window_id(window_id)
-                            .or(window.last_known_user_space)
-                        {
-                            if source_space != target_space {
-                                let target_screen_size = self
-                                    .space_state
-                                    .screen_by_space(target_space)
-                                    .map(|screen| screen.frame.size)
-                                    .unwrap_or_else(|| CGSize::new(0.0, 0.0));
-
-                                let response =
-                                    self.layout_manager.layout_engine.move_window_to_space(
-                                        source_space,
-                                        target_space,
-                                        target_screen_size,
-                                        window_id,
-                                    );
-                                self.handle_layout_response(response, None);
-                            }
-                        }
+                if let Some(app) = self.app_manager.apps.get(&record.current_window_id.pid) {
+                    if let Err(e) = app.handle.send(Request::GetVisibleWindows) {
+                        warn!(
+                            "Failed to send GetVisibleWindows to app {}: {}",
+                            record.current_window_id.pid, e
+                        );
                     }
                 }
 
-                self.refocus_manager.refocus_state = RefocusState::Pending(space);
-                self.update_layout_or_warn(false, false);
-                self.update_focus_follows_mouse_state();
+                let live_window_id = record
+                    .window_server_id
+                    .and_then(|wsid| self.window_manager.tracked_window_id(wsid))
+                    .or_else(|| {
+                        self.window_manager
+                            .contains_window(record.current_window_id)
+                            .then_some(record.current_window_id)
+                    });
+
+                let target_space = record
+                    .workspace
+                    .map(|workspace| workspace.space)
+                    .or(record.last_known_user_space);
+
+                if let (Some(window_id), Some(target_space)) = (live_window_id, target_space)
+                    && let Some(source_space) =
+                        self.best_space_for_window_id(window_id).or(Some(target_space))
+                    && source_space != target_space
+                {
+                    let target_screen_size = self
+                        .space_state
+                        .screen_by_space(target_space)
+                        .map(|screen| screen.frame.size)
+                        .unwrap_or_else(|| CGSize::new(0.0, 0.0));
+
+                    let response = self.layout_manager.layout_engine.move_window_to_space(
+                        source_space,
+                        target_space,
+                        target_screen_size,
+                        window_id,
+                    );
+                    self.handle_layout_response(response, None);
+                }
             }
+
+            self.refocus_manager.refocus_state = RefocusState::Pending(space);
+            self.update_layout_or_warn(false, false);
+            self.update_focus_follows_mouse_state();
         }
     }
 
@@ -2078,14 +2073,7 @@ impl Reactor {
     }
 
     fn is_known_fullscreen_window(&self, wsid: WindowServerId) -> bool {
-        let tracked_window = self.window_manager.tracked_window_id(wsid);
-
-        self.native_fullscreen_tracks.values().any(|track| {
-            track.windows.iter().any(|window| {
-                window.window_server_id == Some(wsid)
-                    || tracked_window.is_some_and(|wid| window.window_id == Some(wid))
-            })
-        })
+        self.window_manager.is_window_server_id_native_fullscreen_suspended(wsid)
     }
 
     fn finalize_active_drag(&mut self) -> bool {

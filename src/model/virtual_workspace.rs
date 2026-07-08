@@ -1070,7 +1070,8 @@ impl VirtualWorkspaceManager {
         window_id: WindowId,
         space: SpaceId,
     ) -> Option<VirtualWorkspaceId> {
-        let existing_assignment = self.window_registry.get().workspace_info_for_window(window_id)?;
+        let existing_assignment =
+            self.window_registry.get().workspace_info_for_window(window_id)?;
         if existing_assignment.space == space {
             return Some(existing_assignment.workspace_id);
         }
@@ -1682,9 +1683,22 @@ mod tests {
         let new_workspaces = manager.list_workspaces(new_space);
 
         assert!(manager.assign_window_to_workspace(old_space, moved_window, old_workspaces[2].0));
-        assert!(manager.assign_window_to_workspace(new_space, existing_window, new_workspaces[1].0));
+        assert!(manager.assign_window_to_workspace(
+            new_space,
+            existing_window,
+            new_workspaces[1].0
+        ));
 
-        let assignment = assign(&mut manager, moved_window, new_space, None, None, None, None, None);
+        let assignment = assign(
+            &mut manager,
+            moved_window,
+            new_space,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
 
         assert_eq!(assignment.workspace_id, new_workspaces[0].0);
         assert_eq!(

@@ -54,31 +54,6 @@ pub enum ReactorCommand {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct FullscreenWindowTrack {
-    /// Process owner used only for targeted visible-window refreshes. It is not
-    /// unique enough to identify a fullscreen lifecycle.
-    pub(crate) pid: pid_t,
-    /// AX window id seen before or during native fullscreen. Its `idx` is the
-    /// current managed identity when the AX layer has not rekeyed yet.
-    pub(crate) window_id: Option<WindowId>,
-    /// Stable native identity for matching fullscreen enter/exit across AX
-    /// rekeys without falling back to pid-level ownership.
-    pub(crate) window_server_id: Option<WindowServerId>,
-    /// User space that should regain the window when native fullscreen exits.
-    pub(crate) last_known_user_space: Option<SpaceId>,
-    pub(crate) _last_seen_fullscreen_space: SpaceId,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct FullscreenSpaceTrack {
-    pub(crate) windows: Vec<FullscreenWindowTrack>,
-}
-
-impl Default for FullscreenSpaceTrack {
-    fn default() -> Self { FullscreenSpaceTrack { windows: Vec::new() } }
-}
-
-#[derive(Debug, Clone)]
 pub struct DragSession {
     pub(crate) window: WindowId,
     pub(crate) last_frame: CGRect,

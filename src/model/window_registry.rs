@@ -18,6 +18,41 @@ struct WindowRecord {
     last_rule_decision: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeFullscreenTransition {
+    EnterRequested,
+    Suspended,
+    ExitRequested,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeFullscreenRecord {
+    pub original_window_id: WindowId,
+    pub current_window_id: WindowId,
+    pub window_server_id: Option<WindowServerId>,
+    pub workspace: Option<WindowWorkspaceInfo>,
+    pub last_known_user_space: Option<SpaceId>,
+    pub fullscreen_space: SpaceId,
+    pub transition: NativeFullscreenTransition,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingNativeFullscreenRecord {
+    pub pid: i32,
+    pub window_server_id: WindowServerId,
+    pub last_known_user_space: Option<SpaceId>,
+    pub fullscreen_space: SpaceId,
+    pub transition: NativeFullscreenTransition,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingNativeFullscreenState {
+    pid: i32,
+    last_known_user_space: Option<SpaceId>,
+    fullscreen_space: SpaceId,
+    transition: NativeFullscreenTransition,
+}
+
 #[derive(Debug, Default)]
 struct WindowServerRecord {
     window_id: Option<WindowId>,
@@ -26,6 +61,7 @@ struct WindowServerRecord {
     space: Option<SpaceId>,
     info: Option<WindowServerInfo>,
     recent_at: Option<Instant>,
+    pending_native_fullscreen: Option<PendingNativeFullscreenState>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -46,9 +82,61 @@ pub struct WindowRegistry {
     windows: HashMap<WindowId, WindowRecord>,
     window_servers: HashMap<WindowServerId, WindowServerRecord>,
     workspace_windows: HashMap<WindowWorkspaceInfo, HashSet<WindowId>>,
+    native_fullscreen_records_by_original_window: HashMap<WindowId, NativeFullscreenRecord>,
+    native_fullscreen_original_window_by_current_window: HashMap<WindowId, WindowId>,
+    native_fullscreen_original_window_by_window_server: HashMap<WindowServerId, WindowId>,
 }
 
 impl WindowRegistry {
+    fn native_fullscreen_original_window(&self, window_id: WindowId) -> Option<WindowId> {
+        if self.native_fullscreen_records_by_original_window.contains_key(&window_id) {
+            Some(window_id)
+        } else {
+            self.native_fullscreen_original_window_by_current_window
+                .get(&window_id)
+                .copied()
+        }
+    }
+
+    fn upsert_native_fullscreen_record(
+        &mut self,
+        record: NativeFullscreenRecord,
+    ) -> NativeFullscreenRecord {
+        if let Some(previous) = self
+            .native_fullscreen_records_by_original_window
+            .insert(record.original_window_id, record)
+        {
+            self.native_fullscreen_original_window_by_current_window
+                .remove(&previous.current_window_id);
+            if let Some(previous_wsid) = previous.window_server_id {
+                self.native_fullscreen_original_window_by_window_server.remove(&previous_wsid);
+            }
+        }
+
+        self.native_fullscreen_original_window_by_current_window
+            .insert(record.current_window_id, record.original_window_id);
+        if let Some(wsid) = record.window_server_id {
+            self.native_fullscreen_original_window_by_window_server
+                .insert(wsid, record.original_window_id);
+        }
+
+        record
+    }
+
+    fn remove_native_fullscreen_record_by_original_window(
+        &mut self,
+        original_window_id: WindowId,
+    ) -> Option<NativeFullscreenRecord> {
+        let record =
+            self.native_fullscreen_records_by_original_window.remove(&original_window_id)?;
+        self.native_fullscreen_original_window_by_current_window
+            .remove(&record.current_window_id);
+        if let Some(wsid) = record.window_server_id {
+            self.native_fullscreen_original_window_by_window_server.remove(&wsid);
+        }
+        Some(record)
+    }
+
     fn remove_window_from_workspace_index(
         &mut self,
         window_id: WindowId,
@@ -151,6 +239,7 @@ impl WindowRegistry {
                 && record.space.is_none()
                 && record.info.is_none()
                 && record.recent_at.is_none()
+                && record.pending_native_fullscreen.is_none()
         });
         if should_remove {
             self.window_servers.remove(&wsid);
@@ -166,9 +255,29 @@ impl WindowRegistry {
         wsid: WindowServerId,
         window_id: WindowId,
     ) -> Option<WindowId> {
-        let record = self.server_record_mut(wsid);
-        let old = record.window_id;
-        record.window_id = Some(window_id);
+        let (old, pending_record) = {
+            let record = self.server_record_mut(wsid);
+            let old = record.window_id;
+            record.window_id = Some(window_id);
+            let pending = record.pending_native_fullscreen.take();
+            (old, pending)
+        };
+        if let Some(pending_record) = pending_record {
+            let _ = self.suspend_window_to_native_fullscreen(
+                window_id,
+                Some(wsid),
+                pending_record.last_known_user_space,
+                pending_record.fullscreen_space,
+                pending_record.transition,
+            );
+        } else if let Some(original_window_id) = self.native_fullscreen_original_window(window_id)
+            && let Some(mut native_record) =
+                self.remove_native_fullscreen_record_by_original_window(original_window_id)
+        {
+            native_record.window_server_id = Some(wsid);
+            self.upsert_native_fullscreen_record(native_record);
+        }
+        self.prune_window_server_record(wsid);
         old
     }
 
@@ -268,6 +377,146 @@ impl WindowRegistry {
         wid
     }
 
+    pub fn suspend_window_to_native_fullscreen(
+        &mut self,
+        window_id: WindowId,
+        window_server_id: Option<WindowServerId>,
+        fallback_last_known_user_space: Option<SpaceId>,
+        fullscreen_space: SpaceId,
+        transition: NativeFullscreenTransition,
+    ) -> NativeFullscreenRecord {
+        let original_window_id =
+            self.native_fullscreen_original_window(window_id).unwrap_or(window_id);
+        let existing = self
+            .native_fullscreen_records_by_original_window
+            .get(&original_window_id)
+            .copied();
+        let workspace = self.workspace_info_for_window(window_id);
+        let record = NativeFullscreenRecord {
+            original_window_id,
+            current_window_id: window_id,
+            window_server_id: window_server_id
+                .or_else(|| existing.and_then(|record| record.window_server_id)),
+            workspace: workspace.or_else(|| existing.and_then(|record| record.workspace)),
+            last_known_user_space: workspace
+                .map(|assignment| assignment.space)
+                .or(fallback_last_known_user_space)
+                .or_else(|| existing.and_then(|record| record.last_known_user_space)),
+            fullscreen_space,
+            transition,
+        };
+        self.upsert_native_fullscreen_record(record)
+    }
+
+    pub fn suspend_window_server_to_native_fullscreen(
+        &mut self,
+        pid: i32,
+        window_server_id: WindowServerId,
+        fallback_last_known_user_space: Option<SpaceId>,
+        fullscreen_space: SpaceId,
+        transition: NativeFullscreenTransition,
+    ) -> PendingNativeFullscreenRecord {
+        let state = {
+            let existing = self
+                .window_servers
+                .get(&window_server_id)
+                .and_then(|record| record.pending_native_fullscreen);
+            PendingNativeFullscreenState {
+                pid,
+                last_known_user_space: fallback_last_known_user_space
+                    .or_else(|| existing.and_then(|record| record.last_known_user_space)),
+                fullscreen_space,
+                transition,
+            }
+        };
+        self.server_record_mut(window_server_id).pending_native_fullscreen = Some(state);
+        PendingNativeFullscreenRecord {
+            pid: state.pid,
+            window_server_id,
+            last_known_user_space: state.last_known_user_space,
+            fullscreen_space: state.fullscreen_space,
+            transition: state.transition,
+        }
+    }
+
+    pub fn native_fullscreen_record_for_window(
+        &self,
+        window_id: WindowId,
+    ) -> Option<NativeFullscreenRecord> {
+        let original_window_id = self.native_fullscreen_original_window(window_id)?;
+        self.native_fullscreen_records_by_original_window
+            .get(&original_window_id)
+            .copied()
+    }
+
+    pub fn native_fullscreen_record_for_window_server_id(
+        &self,
+        wsid: WindowServerId,
+    ) -> Option<NativeFullscreenRecord> {
+        let original_window_id =
+            self.native_fullscreen_original_window_by_window_server.get(&wsid).copied()?;
+        self.native_fullscreen_records_by_original_window
+            .get(&original_window_id)
+            .copied()
+    }
+
+    pub fn pending_native_fullscreen_record_for_window_server_id(
+        &self,
+        wsid: WindowServerId,
+    ) -> Option<PendingNativeFullscreenRecord> {
+        self.window_servers
+            .get(&wsid)
+            .and_then(|record| record.pending_native_fullscreen)
+            .map(|record| PendingNativeFullscreenRecord {
+                pid: record.pid,
+                window_server_id: wsid,
+                last_known_user_space: record.last_known_user_space,
+                fullscreen_space: record.fullscreen_space,
+                transition: record.transition,
+            })
+    }
+
+    pub fn iter_native_fullscreen_records(
+        &self,
+    ) -> impl Iterator<Item = NativeFullscreenRecord> + '_ {
+        self.native_fullscreen_records_by_original_window.values().copied()
+    }
+
+    pub fn restore_window_from_native_fullscreen(
+        &mut self,
+        window_id: WindowId,
+    ) -> Option<NativeFullscreenRecord> {
+        let original_window_id = self.native_fullscreen_original_window(window_id)?;
+        self.remove_native_fullscreen_record_by_original_window(original_window_id)
+    }
+
+    pub fn restore_window_from_native_fullscreen_by_window_server_id(
+        &mut self,
+        wsid: WindowServerId,
+    ) -> Option<NativeFullscreenRecord> {
+        let original_window_id =
+            self.native_fullscreen_original_window_by_window_server.get(&wsid).copied()?;
+        self.remove_native_fullscreen_record_by_original_window(original_window_id)
+    }
+
+    pub fn is_window_native_fullscreen_suspended(&self, window_id: WindowId) -> bool {
+        self.native_fullscreen_record_for_window(window_id)
+            .is_some_and(|record| record.transition == NativeFullscreenTransition::Suspended)
+    }
+
+    pub fn is_window_server_id_native_fullscreen_suspended(&self, wsid: WindowServerId) -> bool {
+        self.native_fullscreen_record_for_window_server_id(wsid)
+            .is_some_and(|record| record.transition == NativeFullscreenTransition::Suspended)
+    }
+
+    pub fn pending_native_fullscreen_pid_for_window_server_id(
+        &self,
+        wsid: WindowServerId,
+    ) -> Option<i32> {
+        self.pending_native_fullscreen_record_for_window_server_id(wsid)
+            .map(|record| record.pid)
+    }
+
     pub fn assign_window_to_workspace(
         &mut self,
         window_id: WindowId,
@@ -279,6 +528,14 @@ impl WindowRegistry {
         }
         self.windows.entry(window_id).or_default().workspace = Some(assignment);
         self.add_window_to_workspace_index(window_id, assignment);
+        if let Some(original_window_id) = self.native_fullscreen_original_window(window_id)
+            && let Some(mut record) =
+                self.remove_native_fullscreen_record_by_original_window(original_window_id)
+        {
+            record.workspace = Some(assignment);
+            record.last_known_user_space = Some(assignment.space);
+            self.upsert_native_fullscreen_record(record);
+        }
         old
     }
 
@@ -376,6 +633,23 @@ impl WindowRegistry {
             source.rule_floating = false;
             source.last_rule_decision = false;
         }
+
+        if let Some(original_window_id) = self.native_fullscreen_original_window(from)
+            && let Some(mut record) =
+                self.remove_native_fullscreen_record_by_original_window(original_window_id)
+        {
+            if record.current_window_id == from {
+                record.current_window_id = to;
+            }
+            if record.workspace.is_none() {
+                record.workspace = workspace;
+            }
+            if record.last_known_user_space.is_none() {
+                record.last_known_user_space = workspace.map(|assignment| assignment.space);
+            }
+            self.upsert_native_fullscreen_record(record);
+        }
+
         self.prune_window_record(from);
     }
 
@@ -432,6 +706,26 @@ impl WindowRegistry {
             self.windows.keys().copied().filter(|window_id| window_id.pid == pid).collect();
         for window_id in window_ids {
             self.remove_window(window_id);
+        }
+
+        let fullscreen_keys: Vec<_> = self
+            .native_fullscreen_records_by_original_window
+            .keys()
+            .copied()
+            .filter(|window_id| window_id.pid == pid)
+            .collect();
+        for original_window_id in fullscreen_keys {
+            let _ = self.remove_native_fullscreen_record_by_original_window(original_window_id);
+        }
+
+        let wsids: Vec<_> = self.window_servers.keys().copied().collect();
+        for wsid in wsids {
+            if let Some(record) = self.window_servers.get_mut(&wsid)
+                && record.pending_native_fullscreen.is_some_and(|pending| pending.pid == pid)
+            {
+                record.pending_native_fullscreen = None;
+            }
+            self.prune_window_server_record(wsid);
         }
     }
 
@@ -507,6 +801,18 @@ impl WindowRegistry {
             }
             self.prune_window_server_record(wsid);
         }
+    }
+
+    pub fn current_window_server_space_for_window(&self, window_id: WindowId) -> Option<SpaceId> {
+        let wsid = self
+            .native_fullscreen_record_for_window(window_id)
+            .and_then(|record| record.window_server_id)
+            .or_else(|| {
+                self.window_servers.iter().find_map(|(&wsid, record)| {
+                    (record.window_id == Some(window_id)).then_some(wsid)
+                })
+            })?;
+        self.window_server_space(wsid)
     }
 }
 
@@ -598,5 +904,158 @@ mod tests {
         );
         assert!(registry.workspace_windows(space, target_workspace).is_empty());
         assert_eq!(registry.workspace_windows(space, source_workspace), vec![to]);
+    }
+
+    #[test]
+    fn transfer_persistent_metadata_rekeys_native_fullscreen_record() {
+        let mut registry = WindowRegistry::default();
+        let space = SpaceId::new(10);
+        let fullscreen_space = SpaceId::new(0x400000000 + space.get());
+        let mut workspaces = VirtualWorkspaceManager::new();
+        let workspace_id =
+            workspaces.create_workspace(space, Some("Main".to_string())).expect("workspace");
+        let from = WindowId::new(1, 1);
+        let to = WindowId::new(1, 2);
+        let wsid = WindowServerId::new(77);
+
+        registry.assign_window_to_workspace(from, WindowWorkspaceInfo { space, workspace_id });
+        let _ = registry.suspend_window_to_native_fullscreen(
+            from,
+            Some(wsid),
+            Some(space),
+            fullscreen_space,
+            NativeFullscreenTransition::Suspended,
+        );
+
+        registry.transfer_persistent_window_metadata(from, to);
+
+        let record = registry
+            .native_fullscreen_record_for_window(to)
+            .expect("fullscreen record should follow rekey");
+        assert_eq!(record.current_window_id, to);
+        assert_eq!(record.window_server_id, Some(wsid));
+        assert_eq!(
+            record.workspace,
+            Some(WindowWorkspaceInfo { space, workspace_id })
+        );
+        assert_eq!(
+            registry
+                .native_fullscreen_record_for_window(from)
+                .expect("original key should still resolve the lifecycle")
+                .current_window_id,
+            to
+        );
+    }
+
+    #[test]
+    fn native_fullscreen_record_preserves_explicit_fallback_user_space_without_assignment() {
+        let mut registry = WindowRegistry::default();
+        let wid = WindowId::new(1, 1);
+        let wsid = WindowServerId::new(91);
+        let user_space = SpaceId::new(11);
+        let fullscreen_space = SpaceId::new(0x400000000 + user_space.get());
+
+        let record = registry.suspend_window_to_native_fullscreen(
+            wid,
+            Some(wsid),
+            Some(user_space),
+            fullscreen_space,
+            NativeFullscreenTransition::Suspended,
+        );
+
+        assert_eq!(record.workspace, None);
+        assert_eq!(record.last_known_user_space, Some(user_space));
+        assert_eq!(
+            registry
+                .native_fullscreen_record_for_window_server_id(wsid)
+                .expect("record should be discoverable by wsid")
+                .last_known_user_space,
+            Some(user_space)
+        );
+    }
+
+    #[test]
+    fn remove_window_preserves_native_fullscreen_record_until_app_cleanup() {
+        let mut registry = WindowRegistry::default();
+        let wid = WindowId::new(7, 1);
+        let wsid = WindowServerId::new(92);
+        let user_space = SpaceId::new(12);
+        let fullscreen_space = SpaceId::new(0x400000000 + user_space.get());
+
+        let frame = objc2_core_foundation::CGRect::new(
+            objc2_core_foundation::CGPoint::new(0.0, 0.0),
+            objc2_core_foundation::CGSize::new(100.0, 100.0),
+        );
+        registry.insert_window(
+            wid,
+            WindowState::from(crate::sys::app::WindowInfo {
+                is_standard: true,
+                is_root: true,
+                is_minimized: false,
+                is_resizable: true,
+                min_size: None,
+                max_size: None,
+                title: "Window".to_string(),
+                frame,
+                sys_id: Some(wsid),
+                bundle_id: None,
+                path: None,
+                ax_role: None,
+                ax_subrole: None,
+            }),
+        );
+        let _ = registry.suspend_window_to_native_fullscreen(
+            wid,
+            Some(wsid),
+            Some(user_space),
+            fullscreen_space,
+            NativeFullscreenTransition::Suspended,
+        );
+
+        registry.remove_window(wid);
+
+        assert!(
+            registry.native_fullscreen_record_for_window(wid).is_some(),
+            "transient AX removal should not drop the fullscreen lifecycle record"
+        );
+
+        registry.remove_windows_for_app(wid.pid);
+
+        assert!(
+            registry.native_fullscreen_record_for_window(wid).is_none(),
+            "app cleanup should retire the fullscreen lifecycle record"
+        );
+    }
+
+    #[test]
+    fn track_window_server_id_binds_pending_native_fullscreen_record() {
+        let mut registry = WindowRegistry::default();
+        let wid = WindowId::new(8, 1);
+        let wsid = WindowServerId::new(93);
+        let user_space = SpaceId::new(13);
+        let fullscreen_space = SpaceId::new(0x400000000 + user_space.get());
+
+        let pending = registry.suspend_window_server_to_native_fullscreen(
+            wid.pid,
+            wsid,
+            Some(user_space),
+            fullscreen_space,
+            NativeFullscreenTransition::Suspended,
+        );
+        assert_eq!(pending.pid, wid.pid);
+
+        registry.track_window_server_id(wsid, wid);
+
+        assert!(
+            registry.pending_native_fullscreen_record_for_window_server_id(wsid).is_none(),
+            "binding AX identity should consume the pending fullscreen record"
+        );
+        assert_eq!(
+            registry
+                .native_fullscreen_record_for_window_server_id(wsid)
+                .expect("resolved record should be indexed by wsid")
+                .current_window_id,
+            wid
+        );
     }
 }

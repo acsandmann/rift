@@ -1050,11 +1050,17 @@ impl LayoutEngine {
         for (ws_id, layout) in self.workspace_layouts.active_layouts_for_space(space) {
             let mut desired = tiled_by_workspace.get(&ws_id).cloned().unwrap_or_default();
             for wid in self.virtual_workspace_manager.workspace_windows(space, ws_id) {
+                let authoritative_native_space = self
+                    .virtual_workspace_manager
+                    .window_registry()
+                    .get()
+                    .current_window_server_space_for_window(wid);
                 // Skip re-adding if the VWM no longer assigns this window to this space
                 // (it was moved to another space during this discovery cycle).
                 if wid.pid != pid
                     || self.floating.is_floating(wid)
                     || desired.contains(&wid)
+                    || authoritative_native_space.is_some_and(|native_space| native_space != space)
                     || self.window_no_longer_assigned_to_space(space, wid)
                 {
                     continue;
