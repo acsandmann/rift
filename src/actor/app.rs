@@ -1035,9 +1035,23 @@ impl State {
                         return;
                     }
                 };
-                let frame = match self.handle_ax_result(wid, elem.frame()) {
-                    Ok(Some(frame)) => frame,
-                    Ok(None) => return,
+                let frame = match elem.frame() {
+                    Ok(frame) => frame,
+                    // During display teardown, macOS can send AXWindowMoved after
+                    // the old AX element has been invalidated. This is not a
+                    // destruction notification. Only AXUIElementDestroyed is
+                    // authoritative for removing the app's window record; treating
+                    // this transient read failure as a destroy drops manual
+                    // workspace ownership before the window is rediscovered.
+                    Err(AxError::Ax(AXError::InvalidUIElement)) => {
+                        trace!(
+                            ?wid,
+                            ?notif,
+                            "Ignoring invalid AX element from move/resize notification"
+                        );
+                        return;
+                    }
+                    Err(AxError::Ax(AXError::CannotComplete)) => return,
                     Err(err) => {
                         debug!(?wid, ?err, "Failed to read frame for window");
                         return;
