@@ -392,6 +392,7 @@ struct AppWindowState {
     last_seen_txid: TransactionId,
     hidden_by_app: bool,
     window_server_id: Option<WindowServerId>,
+    title: String,
     is_animating: bool,
     last_animation_frame: Option<CGRect>,
 }
@@ -1073,7 +1074,16 @@ impl State {
                     return;
                 };
                 match elem.title() {
-                    Ok(title) => self.send_event(Event::WindowTitleChanged(wid, title)),
+                    Ok(title) => {
+                        let Ok(window) = self.window_mut(wid) else {
+                            return;
+                        };
+                        if window.title == title {
+                            return;
+                        }
+                        window.title = title.clone();
+                        self.send_event(Event::WindowTitleChanged(wid, title));
+                    }
                     Err(err) => debug!(
                         ?wid,
                         ?err,
@@ -1469,6 +1479,7 @@ impl State {
             last_seen_txid,
             hidden_by_app,
             window_server_id,
+            title: info.title.clone(),
             is_animating: false,
             last_animation_frame: None,
         });
