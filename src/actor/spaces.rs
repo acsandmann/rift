@@ -993,6 +993,15 @@ impl SpacesActor {
         })
     }
 
+    fn screen_snapshot_is_ready_for_authoritative_commit(
+        screens: &[ScreenInfo],
+        require_complete_spaces: bool,
+    ) -> bool {
+        !screens.is_empty()
+            && (!require_complete_spaces || screens.iter().all(|screen| screen.space.is_some()))
+            && Self::screen_snapshot_is_valid_for_commit(screens)
+    }
+
     fn process_screen_refresh(&mut self, attempt: u8, allow_retry: bool) {
         if self.should_buffer_topology_updates() {
             self.state.refresh_deferred_until_stable = true;
@@ -1009,20 +1018,12 @@ impl SpacesActor {
             return;
         };
 
-        if screens.is_empty() {
+        if !Self::screen_snapshot_is_ready_for_authoritative_commit(&screens, true) {
             if allow_retry && attempt < REFRESH_MAX_RETRIES {
                 self.schedule_screen_refresh_after(REFRESH_RETRY_DELAY_NS, attempt + 1);
                 return;
             }
             self.state.refresh_pending = false;
-            return;
-        }
-
-        if screens.iter().any(|screen| screen.space.is_none())
-            && allow_retry
-            && attempt < REFRESH_MAX_RETRIES
-        {
-            self.schedule_screen_refresh_after(REFRESH_RETRY_DELAY_NS, attempt + 1);
             return;
         }
 
@@ -1053,10 +1054,10 @@ impl SpacesActor {
         let Some((screens, converter)) = self.collect_state() else {
             return false;
         };
-        if screens.is_empty() {
-            return false;
-        }
-        if require_complete_spaces && screens.iter().any(|screen| screen.space.is_none()) {
+        if !Self::screen_snapshot_is_ready_for_authoritative_commit(
+            &screens,
+            require_complete_spaces,
+        ) {
             return false;
         }
 

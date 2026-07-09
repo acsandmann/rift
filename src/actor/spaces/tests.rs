@@ -920,6 +920,64 @@ fn duplicate_space_transient_during_wake_is_not_forwarded_when_stable_snapshot_r
 }
 
 #[test]
+fn normal_refresh_retries_duplicate_user_space_snapshot_until_valid() {
+    let (mut actor, mut wm_rx, _reactor_rx) = build_actor();
+    let left = SpaceId::new(521);
+    let right = SpaceId::new(522);
+
+    actor.state.screens = vec![
+        make_screen_with(1, "display-left", 0.0, 1000.0, Some(left)),
+        make_screen_with(2, "display-right", 1000.0, 1000.0, Some(left)),
+    ];
+    actor.state.refresh_pending = true;
+
+    actor.process_screen_refresh(0, true);
+    assert_no_wm_event(&mut wm_rx);
+    assert!(
+        actor.state.refresh_pending,
+        "an invalid duplicate-space snapshot should stay pending so the refresh can retry"
+    );
+
+    actor.state.screens = vec![
+        make_screen_with(1, "display-left", 0.0, 1000.0, Some(left)),
+        make_screen_with(2, "display-right", 1000.0, 1000.0, Some(right)),
+    ];
+
+    actor.process_screen_refresh(1, true);
+
+    match recv_wm(&mut wm_rx) {
+        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
+            assert_eq!(
+                state.screens.iter().map(|screen| screen.space).collect::<Vec<_>>(),
+                vec![Some(left), Some(right)]
+            );
+        }
+        other => panic!("unexpected wm event: {other:?}"),
+    }
+    assert!(
+        !actor.state.refresh_pending,
+        "refresh should complete once the authoritative snapshot becomes valid"
+    );
+}
+
+#[test]
+fn authoritative_snapshot_rejects_duplicate_user_space_snapshot() {
+    let (mut actor, mut wm_rx, _reactor_rx) = build_actor();
+    let left = SpaceId::new(531);
+
+    actor.state.screens = vec![
+        make_screen_with(1, "display-left", 0.0, 1000.0, Some(left)),
+        make_screen_with(2, "display-right", 1000.0, 1000.0, Some(left)),
+    ];
+
+    assert!(
+        !actor.try_forward_authoritative_snapshot(true, true),
+        "authoritative refresh path must reject duplicate user-space snapshots"
+    );
+    assert_no_wm_event(&mut wm_rx);
+}
+
+#[test]
 fn fullscreen_transition_tracks_display_identity_across_reordered_screens() {
     let (mut actor, mut wm_rx, _reactor_rx) = build_actor();
     let left_space_2 = SpaceId::new(12);

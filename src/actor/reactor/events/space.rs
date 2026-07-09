@@ -85,6 +85,11 @@ impl SpaceEventHandler {
             reactor.layout_manager.layout_engine.prune_display_state(&active_list);
         }
 
+        reactor.space_state.menu_bar_space = menu_bar_space;
+        reactor.space_state.command_space = command_space;
+        reactor.space_state.display_space_ids = display_space_ids;
+        reactor.space_state.last_user_space_by_display = last_user_space_by_display;
+
         if screens.is_empty() {
             update_stale_cleanup_state(reactor, true);
             if !reactor.space_state.screens.is_empty() {
@@ -100,10 +105,6 @@ impl SpaceEventHandler {
 
         update_stale_cleanup_state(reactor, false);
         reactor.space_state.screens = screens;
-        reactor.space_state.menu_bar_space = menu_bar_space;
-        reactor.space_state.command_space = command_space;
-        reactor.space_state.display_space_ids = display_space_ids;
-        reactor.space_state.last_user_space_by_display = last_user_space_by_display;
 
         if topology_invalidates_pending_targets {
             reactor.clear_pending_hidden_window_targets();

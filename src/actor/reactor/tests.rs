@@ -116,9 +116,13 @@ fn it_clears_screen_state_when_no_displays_are_reported() {
 
     reactor.handle_event(space_state_event(vec![], vec![]));
     assert!(reactor.space_state.screens.is_empty());
+    assert_eq!(reactor.raw_command_space(), None);
+    assert_eq!(reactor.space_state.menu_bar_space, None);
+    assert!(reactor.space_state.display_space_ids.is_empty());
 
     reactor.handle_event(space_state_event(vec![], vec![]));
     assert!(reactor.space_state.screens.is_empty());
+    assert_eq!(reactor.raw_command_space(), None);
 
     reactor.handle_event(space_state_event(vec![screen], vec![Some(SpaceId::new(1))]));
     assert_eq!(1, reactor.space_state.screens.len());
