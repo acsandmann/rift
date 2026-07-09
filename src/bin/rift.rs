@@ -218,7 +218,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         config: config.clone(),
     };
     let (mc_tx, mc_rx) = rift_wm::actor::channel();
-    let (mc_native_tx, mc_native_rx) = rift_wm::actor::channel();
+    let (_mc_native_tx, mc_native_rx) = rift_wm::actor::channel();
     let (wm_controller, wm_controller_sender) = WmController::new(
         wm_config,
         events_tx.clone(),
@@ -236,7 +236,6 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
     let wn_actor = window_notify_actor::WindowNotify::new(
         events_tx.clone(),
         spaces_tx.clone(),
-        Some(mc_native_tx.clone()),
         wnd_rx,
         &[
             CGSEventType::Known(KnownCGSEvent::MissionControlEntered),
