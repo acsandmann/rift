@@ -1066,14 +1066,14 @@ impl VirtualWorkspaceManager {
     }
 
     fn preserved_workspace_assignment(
-        &mut self,
+        &self,
         window_id: WindowId,
         space: SpaceId,
-    ) -> Option<VirtualWorkspaceId> {
+    ) -> Option<WindowWorkspaceInfo> {
         let existing_assignment =
             self.window_registry.get().workspace_info_for_window(window_id)?;
         if existing_assignment.space == space {
-            return Some(existing_assignment.workspace_id);
+            return Some(existing_assignment);
         }
 
         // Treat an empty, newly initialized target space as a transient native-space-id churn
@@ -1090,11 +1090,21 @@ impl VirtualWorkspaceManager {
             .iter()
             .position(|&workspace_id| workspace_id == existing_assignment.workspace_id)?;
         let target_workspace_id = *self.workspaces_by_space.get(&space)?.get(source_index)?;
+        Some(WindowWorkspaceInfo {
+            space,
+            workspace_id: target_workspace_id,
+        })
+    }
 
-        if self.assign_window_to_workspace(space, window_id, target_workspace_id) {
-            Some(target_workspace_id)
+    fn ensure_window_assignment(
+        &mut self,
+        window_id: WindowId,
+        assignment: WindowWorkspaceInfo,
+    ) -> bool {
+        if self.window_registry.get().workspace_info_for_window(window_id) == Some(assignment) {
+            true
         } else {
-            None
+            self.assign_window_to_workspace(assignment.space, window_id, assignment.workspace_id)
         }
     }
 
@@ -1175,23 +1185,27 @@ impl VirtualWorkspaceManager {
                             self.get_default_workspace(space)?
                         }
                     }
-                } else if let Some(existing_ws) = existing_assignment {
-                    existing_ws
+                } else if let Some(existing_assignment) = existing_assignment {
+                    existing_assignment.workspace_id
                 } else {
                     self.get_default_workspace(space)?
                 }
             } else {
-                if let Some(existing_ws) = existing_assignment {
-                    existing_ws
+                if let Some(existing_assignment) = existing_assignment {
+                    existing_assignment.workspace_id
                 } else {
                     self.get_default_workspace(space)?
                 }
             };
 
-            if let Some(existing_ws) = existing_assignment {
+            if let Some(existing_assignment) = existing_assignment {
+                if !self.ensure_window_assignment(window_id, existing_assignment) {
+                    error!("Failed to preserve window workspace assignment from app rule");
+                    return Err(WorkspaceError::AssignmentFailed);
+                }
                 self.window_registry.get_mut().set_rule_floating(window_id, rule.floating);
                 return Ok(AppRuleResult::Managed(AppRuleAssignment {
-                    workspace_id: existing_ws,
+                    workspace_id: existing_assignment.workspace_id,
                     floating: rule.floating,
                     prev_rule_decision,
                 }));
@@ -1213,10 +1227,14 @@ impl VirtualWorkspaceManager {
         // already exists. Discovery/refresh passes must not silently fall back to
         // the default workspace, or windows on non-default workspaces will appear
         // to "reset" after sleep/display churn.
-        if let Some(existing_ws) = existing_assignment {
+        if let Some(existing_assignment) = existing_assignment {
+            if !self.ensure_window_assignment(window_id, existing_assignment) {
+                error!("Failed to preserve existing window workspace assignment");
+                return Err(WorkspaceError::AssignmentFailed);
+            }
             self.window_registry.get_mut().clear_rule_floating(window_id);
             return Ok(AppRuleResult::Managed(AppRuleAssignment {
-                workspace_id: existing_ws,
+                workspace_id: existing_assignment.workspace_id,
                 floating: false,
                 prev_rule_decision,
             }));
@@ -1707,6 +1725,52 @@ mod tests {
                 space: new_space,
                 workspace_id: new_workspaces[0].0,
             })
+        );
+    }
+
+    #[test]
+    fn unmanaged_rule_does_not_reassign_window_during_transient_space_id_churn() {
+        let mut settings = VirtualWorkspaceSettings::default();
+        settings.default_workspace_count = 3;
+        settings.app_rules = vec![AppWorkspaceRule {
+            app_id: Some("com.example.unmanaged".into()),
+            workspace: None,
+            floating: false,
+            manage: false,
+            app_name: None,
+            title_regex: None,
+            title_substring: None,
+            ax_role: None,
+            ax_subrole: None,
+        }];
+        let mut manager =
+            VirtualWorkspaceManager::new_with_config(&settings, &LayoutSettings::default());
+        let old_space = SpaceId::new(1);
+        let new_space = SpaceId::new(2);
+        let window = WindowId::new(15, 1);
+
+        let old_workspaces = manager.list_workspaces(old_space);
+        let old_assignment = WindowWorkspaceInfo {
+            space: old_space,
+            workspace_id: old_workspaces[2].0,
+        };
+        assert!(manager.assign_window_to_workspace(old_space, window, old_assignment.workspace_id));
+
+        let result = manager.assign_window_with_app_info(
+            window,
+            new_space,
+            Some("com.example.unmanaged"),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert!(matches!(result, Ok(AppRuleResult::Unmanaged)));
+        assert_eq!(manager.workspace_for_window(new_space, window), None);
+        assert_eq!(
+            manager.workspace_info_for_window_any(window),
+            Some(old_assignment)
         );
     }
 

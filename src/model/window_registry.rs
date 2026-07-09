@@ -263,6 +263,10 @@ impl WindowRegistry {
             (old, pending)
         };
         if let Some(pending_record) = pending_record {
+            if pending_record.pid != window_id.pid {
+                self.prune_window_server_record(wsid);
+                return old;
+            }
             let _ = self.suspend_window_to_native_fullscreen(
                 window_id,
                 Some(wsid),
@@ -1056,6 +1060,36 @@ mod tests {
                 .expect("resolved record should be indexed by wsid")
                 .current_window_id,
             wid
+        );
+    }
+
+    #[test]
+    fn track_window_server_id_discards_stale_pending_native_fullscreen_record_on_pid_mismatch() {
+        let mut registry = WindowRegistry::default();
+        let pending_wid = WindowId::new(8, 1);
+        let rebound_wid = WindowId::new(9, 1);
+        let wsid = WindowServerId::new(94);
+        let user_space = SpaceId::new(14);
+        let fullscreen_space = SpaceId::new(0x400000000 + user_space.get());
+
+        let pending = registry.suspend_window_server_to_native_fullscreen(
+            pending_wid.pid,
+            wsid,
+            Some(user_space),
+            fullscreen_space,
+            NativeFullscreenTransition::Suspended,
+        );
+        assert_eq!(pending.pid, pending_wid.pid);
+
+        registry.track_window_server_id(wsid, rebound_wid);
+
+        assert!(
+            registry.pending_native_fullscreen_record_for_window_server_id(wsid).is_none(),
+            "binding a different app to the wsid should discard stale pending fullscreen state"
+        );
+        assert!(
+            registry.native_fullscreen_record_for_window_server_id(wsid).is_none(),
+            "stale pending fullscreen state must not be rebound onto a different app"
         );
     }
 }
