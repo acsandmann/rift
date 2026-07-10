@@ -40,10 +40,6 @@ pub enum WmEvent {
     AppGloballyDeactivated(pid_t),
     AppTerminated(pid_t),
     SpaceStateUpdated(ForwardedSpaceState, CoordinateConverter),
-    /// Completes display stabilization after the preceding space snapshot has
-    /// been relayed to the reactor. Keeping this on the controller queue makes
-    /// the reactor observe the snapshot before it is allowed to refresh.
-    DisplayChurnEnd,
     PowerStateChanged(bool),
     KeyboardLayoutChanged,
     ConfigUpdated(crate::common::config::Config),
@@ -209,9 +205,6 @@ impl WmController {
                         space_state,
                     ));
                 }
-            }
-            DisplayChurnEnd => {
-                self.events_tx.send(Event::DisplayChurnEnd);
             }
             AppEventsRegistered => {
                 _ = self.event_tap_tx.send(event_tap::Request::SetEventProcessing(false));
