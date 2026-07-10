@@ -238,7 +238,6 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         spaces_tx.clone(),
         wnd_rx,
         &[
-            CGSEventType::Known(KnownCGSEvent::MissionControlEntered),
             // this event seems bugged
             //CGSEventType::Known(KnownCGSEvent::SpaceCurrentChanged),
             // repl for aboce
