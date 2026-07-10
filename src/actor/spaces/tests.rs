@@ -122,6 +122,32 @@ fn forwards_stable_screen_and_space_updates_immediately() {
 }
 
 #[test]
+fn confirmed_window_move_forwards_membership_without_space_switch() {
+    let (mut actor, mut wm_rx, mut reactor_rx) = build_actor();
+    let origin = SpaceId::new(11);
+    let destination = SpaceId::new(12);
+    let wsid = WindowServerId::new(77);
+
+    actor.state.screens = vec![make_screen(Some(origin))];
+    actor.state.last_sent_spaces = Some(vec![Some(origin)]);
+    actor.state.visible_window_spaces.insert(wsid, origin);
+    crate::sys::window_server::set_window_spaces_override(wsid, Some(vec![destination.get()]));
+
+    actor.handle_event(Event::WindowServerDestroyed(wsid, origin));
+
+    crate::sys::window_server::set_window_spaces_override(wsid, None);
+
+    match recv_wm(&mut wm_rx) {
+        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
+            assert!(state.active_window_spaces.is_empty());
+            assert_eq!(state.screens[0].space, Some(origin));
+        }
+        other => panic!("unexpected wm event: {other:?}"),
+    }
+    assert_no_reactor_event(&mut reactor_rx);
+}
+
+#[test]
 fn active_space_changed_waits_for_confirmed_refresh() {
     let (mut actor, mut wm_rx, mut reactor_rx) = build_actor();
     actor.state.last_sent_spaces = Some(vec![Some(SpaceId::new(11))]);

@@ -35,6 +35,7 @@ type NotificationKey = (NonNull<RawAXUIElement>, &'static str);
 struct SubscriptionContext {
     callback: *mut c_void,
     data: Cell<usize>,
+    notification: &'static str,
 }
 
 impl Observer {
@@ -59,12 +60,44 @@ impl Observer {
         };
         Ok(ObserverBuilder(observer, PhantomData))
     }
+
+    /// Creates an observer whose callback receives the notification name.
+    ///
+    /// This is useful for APIs such as Dock's expose notifications where the
+    /// notification itself is the event payload rather than an opaque callback
+    /// value supplied at registration time.
+    pub fn new_with_notification<F: Fn(AXUIElement, &'static str) + 'static>(
+        pid: pid_t,
+    ) -> Result<ObserverBuilder<F>, AxError> {
+        let mut observer_ptr: *mut AXObserver = ptr::null_mut();
+        let status = unsafe {
+            AXObserver::create(
+                pid,
+                Some(internal_callback_with_notification::<F>),
+                NonNull::new(&mut observer_ptr as *mut *mut AXObserver).expect("nonnull pointer"),
+            )
+        };
+        make_result(status)?;
+        let observer = unsafe {
+            CFRetained::from_raw(NonNull::new(observer_ptr).expect("observer must be non-null"))
+        };
+        Ok(ObserverBuilder(observer, PhantomData))
+    }
 }
 
 impl<F: Fn(AXUIElement, usize) + 'static> ObserverBuilder<F> {
     /// Installs the observer with the supplied callback into the current
     /// thread's run loop.
-    pub fn install(self, callback: F) -> Observer {
+    pub fn install(self, callback: F) -> Observer { self.install_inner(callback) }
+}
+
+impl<F: Fn(AXUIElement, &'static str) + 'static> ObserverBuilder<F> {
+    /// Installs a callback that receives the registered notification name.
+    pub fn install_with_notification(self, callback: F) -> Observer { self.install_inner(callback) }
+}
+
+impl<F> ObserverBuilder<F> {
+    fn install_inner(self, callback: F) -> Observer {
         let run_loop_source = unsafe { self.0.run_loop_source() };
         if let Some(run_loop) = CFRunLoop::current() {
             let mode: &CFRunLoopMode =
@@ -182,6 +215,7 @@ impl Observer {
             Arc::new(SubscriptionContext {
                 callback: self.callback as *mut c_void,
                 data: Cell::new(data),
+                notification,
             })
         });
         ctx.data.set(data);
@@ -215,6 +249,20 @@ unsafe extern "C-unwind" fn internal_callback<F: Fn(AXUIElement, usize) + 'stati
     let callback = unsafe { &*(ctx.callback as *const F) };
     let elem = unsafe { AXUIElement::from_get_rule(elem.as_ptr()) };
     callback(elem, ctx.data.get());
+}
+
+unsafe extern "C-unwind" fn internal_callback_with_notification<
+    F: Fn(AXUIElement, &'static str) + 'static,
+>(
+    _observer: NonNull<AXObserver>,
+    elem: NonNull<RawAXUIElement>,
+    _notif: NonNull<CFString>,
+    data: *mut c_void,
+) {
+    let ctx = unsafe { &*(data as *const SubscriptionContext) };
+    let callback = unsafe { &*(ctx.callback as *const F) };
+    let elem = unsafe { AXUIElement::from_get_rule(elem.as_ptr()) };
+    callback(elem, ctx.notification);
 }
 
 fn make_result(err: AXError) -> Result<(), AxError> {

@@ -390,13 +390,18 @@ impl SpacesActor {
             }
             Event::WindowServerDestroyed(wsid, sid) => {
                 self.state.visible_window_spaces.remove(&wsid);
+                let current_space = window_server::window_space(wsid);
                 if self.should_quarantine_window_space_event() {
                     self.state.quarantine_stats.destroyed_dropped += 1;
                 } else if let Some(kind) = self.classify_space(sid) {
                     if matches!(kind, reactor::SpaceEventKind::User)
-                        && let Some(current_space) = window_server::window_space(wsid)
+                        && let Some(current_space) = current_space
                         && current_space != sid
                     {
+                        // WindowServer reports a confirmed move out of the origin
+                        // space as a destroy. The selected Space may remain the
+                        // same, so explicitly forward the refreshed membership.
+                        self.handle_space_inventory_changed();
                         return;
                     }
                     self.reactor_tx.send(reactor::Event::WindowServerDestroyed(wsid, sid, kind));

@@ -40,6 +40,8 @@ impl SpaceEventHandler {
             active_window_spaces,
             ..
         } = space_state;
+        let active_window_membership_changed =
+            reactor.space_state.active_window_spaces != active_window_spaces;
         reactor.space_state.active_window_spaces = active_window_spaces;
         let cfg = reactor.activation_cfg();
         let spaces: Vec<Option<SpaceId>> = screens.iter().map(|screen| screen.space).collect();
@@ -65,7 +67,8 @@ impl SpaceEventHandler {
             && reactor.space_state.fullscreen_spaces == fullscreen_spaces
             && reactor.active_spaces == effective_active_spaces
             && reactor.space_state.display_space_ids == display_space_ids
-            && reactor.space_state.last_user_space_by_display == last_user_space_by_display;
+            && reactor.space_state.last_user_space_by_display == last_user_space_by_display
+            && !active_window_membership_changed;
 
         reactor.space_state.has_seen_display_set = has_seen_display_set;
         reactor.space_state.fullscreen_spaces = fullscreen_spaces;
