@@ -216,6 +216,34 @@ fn buffers_screen_and_space_updates_until_display_churn_ends() {
 }
 
 #[test]
+fn flushes_pending_screen_and_space_updates_as_one_coherent_snapshot() {
+    let (mut actor, mut wm_rx, mut reactor_rx) = build_actor();
+    let stale_space = SpaceId::new(21);
+    let current_space = SpaceId::new(22);
+
+    actor.handle_event(Event::DisplayChurnBegin);
+    actor.handle_event(Event::ScreenParametersChanged(
+        vec![make_screen(Some(stale_space))],
+        CoordinateConverter::default(),
+    ));
+    actor.handle_event(Event::SpaceChanged(vec![Some(current_space)]));
+    actor.handle_event(Event::DisplayChurnEnd);
+
+    assert!(matches!(
+        recv_reactor(&mut reactor_rx),
+        reactor::Event::DisplayChurnBegin
+    ));
+    match recv_wm(&mut wm_rx) {
+        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
+            assert_eq!(state.screens[0].space, Some(current_space));
+            assert!(state.releases_display_churn_refresh_quarantine);
+        }
+        other => panic!("unexpected wm event: {other:?}"),
+    }
+    assert_no_wm_event(&mut wm_rx);
+}
+
+#[test]
 fn wake_does_not_flush_pending_updates_while_churn_is_still_active() {
     let (mut actor, mut wm_rx, mut reactor_rx) = build_actor();
     let space = SpaceId::new(31);

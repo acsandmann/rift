@@ -982,12 +982,35 @@ impl SpacesActor {
             return;
         }
 
-        if let Some(pending) = self.state.pending_screen_parameters.take() {
-            self.forward_screen_parameters(pending.screens, pending.converter);
-        }
+        let pending_screen_parameters = self.state.pending_screen_parameters.take();
+        let pending_spaces = self.state.pending_spaces.take();
 
-        if let Some(pending) = self.state.pending_spaces.take() {
-            self.forward_space_snapshot(pending);
+        match (pending_screen_parameters, pending_spaces) {
+            (Some(pending), Some(spaces)) if pending.screens.len() == spaces.len() => {
+                // These two callbacks describe one native snapshot. Merge them before
+                // forwarding so the reactor's churn gate cannot observe the topology
+                // with stale space IDs and release between two WM events.
+                let mut screens = pending.screens;
+                for (screen, space) in screens.iter_mut().zip(spaces) {
+                    screen.space = space;
+                }
+                self.forward_screen_parameters(screens, pending.converter);
+            }
+            (Some(_), Some(_)) => {
+                // A topology/space count mismatch is not coherent enough to commit.
+                // Resample once the native state is ready instead of forwarding either
+                // half of the buffered snapshot.
+                if !self.try_forward_authoritative_snapshot(true, true) {
+                    self.schedule_screen_refresh_after(0, 0);
+                }
+            }
+            (Some(pending), None) => {
+                self.forward_screen_parameters(pending.screens, pending.converter);
+            }
+            (None, Some(spaces)) => {
+                self.forward_space_snapshot(spaces);
+            }
+            (None, None) => {}
         }
     }
 
