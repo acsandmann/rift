@@ -1087,9 +1087,30 @@ fn display_churn_stabilization_rejects_duplicate_space_snapshot_until_valid() {
         other => panic!("unexpected wm event: {other:?}"),
     }
     assert!(matches!(
-        recv_reactor(&mut reactor_rx),
-        reactor::Event::DisplayChurnEnd
+        recv_wm(&mut wm_rx),
+        wm_controller::WmEvent::DisplayChurnEnd
     ));
+    assert_no_reactor_event(&mut reactor_rx);
+}
+
+#[test]
+fn display_churn_retry_exhaustion_keeps_reactor_quarantined() {
+    let (mut actor, mut wm_rx, mut reactor_rx) = build_actor();
+
+    actor.handle_event(Event::DisplayChurnBegin);
+    assert!(matches!(
+        recv_reactor(&mut reactor_rx),
+        reactor::Event::DisplayChurnBegin
+    ));
+
+    let epoch = actor.state.display_churn_epoch;
+    actor.state.screens.clear();
+    actor.attempt_finish_display_churn(epoch, DISPLAY_STABILIZE_MAX_ATTEMPTS);
+
+    assert!(actor.state.display_churn_active);
+    assert_eq!(actor.state.display_churn_epoch, epoch);
+    assert_no_wm_event(&mut wm_rx);
+    assert_no_reactor_event(&mut reactor_rx);
 }
 
 #[test]

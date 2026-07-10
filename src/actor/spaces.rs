@@ -1190,14 +1190,14 @@ impl SpacesActor {
 
         let Some((screens, converter)) = self.collect_state() else {
             if !self.retry_display_stabilization(expected_epoch, attempt) {
-                self.finish_display_churn(expected_epoch, true);
+                self.restart_display_stabilization(expected_epoch);
             }
             return;
         };
 
         if screens.is_empty() {
             if !self.retry_display_stabilization(expected_epoch, attempt) {
-                self.finish_display_churn(expected_epoch, true);
+                self.restart_display_stabilization(expected_epoch);
             }
             return;
         }
@@ -1235,13 +1235,13 @@ impl SpacesActor {
             if !Self::screen_snapshot_is_valid_for_commit(&screens) {
                 self.state.display_topology_state = None;
                 if !self.retry_display_stabilization(expected_epoch, attempt) {
-                    self.finish_display_churn(expected_epoch, true);
+                    self.restart_display_stabilization(expected_epoch);
                 }
                 return;
             }
             if !window_server::windowserver_quiet_for_us(window_server::WINDOWSERVER_QUIET_US) {
                 if !self.retry_display_stabilization(expected_epoch, attempt) {
-                    self.finish_display_churn(expected_epoch, true);
+                    self.restart_display_stabilization(expected_epoch);
                 }
                 return;
             }
@@ -1250,16 +1250,27 @@ impl SpacesActor {
             self.state.pending_screen_parameters = None;
             self.state.pending_spaces = None;
             self.forward_screen_parameters(screens, converter);
-            self.finish_display_churn(expected_epoch, false);
+            self.finish_display_churn(expected_epoch);
             return;
         }
 
         if !self.retry_display_stabilization(expected_epoch, attempt) {
-            self.finish_display_churn(expected_epoch, true);
+            self.restart_display_stabilization(expected_epoch);
         }
     }
 
-    fn finish_display_churn(&mut self, expected_epoch: u64, schedule_refresh: bool) {
+    /// Retry stabilization in a fresh bounded round without dropping the
+    /// reactor quarantine. A retry limit prevents a single round from spinning,
+    /// but does not make an unverified native-space state safe to consume.
+    fn restart_display_stabilization(&mut self, expected_epoch: u64) {
+        if expected_epoch != self.state.display_churn_epoch || !self.state.display_churn_active {
+            return;
+        }
+        self.state.display_topology_state = None;
+        self.schedule_display_stabilization_retry(expected_epoch, 0);
+    }
+
+    fn finish_display_churn(&mut self, expected_epoch: u64) {
         if expected_epoch != self.state.display_churn_epoch || !self.state.display_churn_active {
             return;
         }
@@ -1268,13 +1279,13 @@ impl SpacesActor {
         self.state.display_churn_flags = DisplayReconfigFlags::empty();
         self.state.display_topology_state = None;
         let _ = display_churn::end();
-        self.reactor_tx.send(reactor::Event::DisplayChurnEnd);
+        // The controller relays SpaceStateUpdated and this end marker to the
+        // reactor in FIFO order. Do not send the marker directly: that would
+        // permit a refresh against the old state while the snapshot is queued.
+        self.wm_tx.send(wm_controller::WmEvent::DisplayChurnEnd);
 
         if self.state.refresh_deferred_until_stable {
             self.state.refresh_deferred_until_stable = false;
-        }
-        if schedule_refresh {
-            self.schedule_screen_refresh_after(0, 0);
         }
     }
 }
