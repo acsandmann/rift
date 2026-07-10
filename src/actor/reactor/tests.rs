@@ -3584,8 +3584,10 @@ fn authoritative_active_window_snapshot_reassigns_missing_window_to_inactive_spa
 #[test]
 fn topology_window_delta_reassigns_missing_window_to_inactive_space() {
     let mut apps = Apps::new();
+    let mut workspace_settings = crate::common::config::VirtualWorkspaceSettings::default();
+    workspace_settings.default_workspace_count = 3;
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(
-        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &workspace_settings,
         &crate::common::config::LayoutSettings::default(),
         None,
     ));
@@ -3601,6 +3603,36 @@ fn topology_window_delta_reassigns_missing_window_to_inactive_space() {
     reactor.handle_event(space_state_event(vec![frame], vec![Some(active_space)]));
     reactor.handle_events(apps.make_app(pid, make_windows(2)));
     apps.simulate_until_quiet(&mut reactor);
+
+    let preserved_workspace = reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .list_workspaces(active_space)[2]
+        .0;
+    let expected_destination_workspace = reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .list_workspaces(inactive_space)[2]
+        .0;
+    reactor.send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(moved));
+    assert!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager_mut()
+            .assign_window_to_workspace(active_space, moved, preserved_workspace)
+    );
+    let _ = reactor
+        .layout_manager
+        .layout_engine
+        .handle_virtual_workspace_command(active_space, &LayoutCommand::SwitchToWorkspace(2));
+    reactor.send_layout_event(LayoutEvent::WindowAdded(active_space, moved));
+    let _ = reactor
+        .layout_manager
+        .layout_engine
+        .handle_virtual_workspace_command(active_space, &LayoutCommand::SwitchToWorkspace(0));
 
     reactor.window_manager.set_window_server_space(moved_wsid, Some(active_space));
     reactor.window_manager.mark_window_visible(moved_wsid);
@@ -3659,7 +3691,7 @@ fn topology_window_delta_reassigns_missing_window_to_inactive_space() {
             .layout_engine
             .virtual_workspace_manager()
             .workspace_for_window(inactive_space, moved)
-            .is_some()
+            .is_some_and(|workspace| workspace == expected_destination_workspace)
     );
     assert!(!has_window_in_layout(&mut reactor, active_space, frame, moved));
     assert!(has_window_in_layout(&mut reactor, active_space, frame, retained));

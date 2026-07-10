@@ -571,7 +571,10 @@ fn apply_topology_window_delta(reactor: &mut Reactor, delta: TopologyWindowDelta
             if let Some(wid) = reactor.window_manager.tracked_window_id(wsid) {
                 let _ = restore_fullscreen_window_to_user_space(reactor, wsid, target_space, wid)
                     .unwrap_or_else(|| {
-                        reactor.reassign_window_to_authoritative_space(wid, target_space)
+                        reactor.reassign_window_to_authoritative_space_preserving_workspace_ordinal(
+                            wid,
+                            target_space,
+                        )
                     });
             }
             continue;

@@ -620,6 +620,34 @@ impl VirtualWorkspaceManager {
         })
     }
 
+    /// Moves a window to `space` while retaining the ordinal of its current
+    /// virtual workspace. This is used for native-space identity churn, where
+    /// WindowServer can briefly report a different space without a user moving
+    /// the window to the destination's active workspace.
+    pub fn assign_window_to_workspace_preserving_ordinal(
+        &mut self,
+        space: SpaceId,
+        window_id: WindowId,
+    ) -> Option<VirtualWorkspaceId> {
+        self.ensure_space_initialized(space);
+
+        let existing_assignment =
+            self.window_registry.get().workspace_info_for_window(window_id)?;
+        if existing_assignment.space == space {
+            return Some(existing_assignment.workspace_id);
+        }
+
+        let source_index = self
+            .workspaces_by_space
+            .get(&existing_assignment.space)?
+            .iter()
+            .position(|&workspace_id| workspace_id == existing_assignment.workspace_id)?;
+        let target_workspace_id = *self.workspaces_by_space.get(&space)?.get(source_index)?;
+
+        self.assign_window_to_workspace(space, window_id, target_workspace_id)
+            .then_some(target_workspace_id)
+    }
+
     pub fn workspace_for_window(
         &self,
         space: SpaceId,
@@ -1724,6 +1752,43 @@ mod tests {
             Some(WindowWorkspaceInfo {
                 space: new_space,
                 workspace_id: new_workspaces[0].0,
+            })
+        );
+    }
+
+    #[test]
+    fn topology_reassignment_preserves_workspace_ordinal_with_destination_assignments() {
+        let mut settings = VirtualWorkspaceSettings::default();
+        settings.default_workspace_count = 3;
+        let mut manager =
+            VirtualWorkspaceManager::new_with_config(&settings, &LayoutSettings::default());
+        let source_space = SpaceId::new(1);
+        let destination_space = SpaceId::new(2);
+        let moved_window = WindowId::new(15, 1);
+        let destination_window = WindowId::new(16, 1);
+
+        let source_workspaces = manager.list_workspaces(source_space);
+        let destination_workspaces = manager.list_workspaces(destination_space);
+        assert!(manager.assign_window_to_workspace(
+            source_space,
+            moved_window,
+            source_workspaces[2].0
+        ));
+        assert!(manager.assign_window_to_workspace(
+            destination_space,
+            destination_window,
+            destination_workspaces[0].0
+        ));
+
+        assert_eq!(
+            manager.assign_window_to_workspace_preserving_ordinal(destination_space, moved_window),
+            Some(destination_workspaces[2].0)
+        );
+        assert_eq!(
+            manager.workspace_info_for_window_any(moved_window),
+            Some(WindowWorkspaceInfo {
+                space: destination_space,
+                workspace_id: destination_workspaces[2].0,
             })
         );
     }

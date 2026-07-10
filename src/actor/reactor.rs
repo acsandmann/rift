@@ -1883,6 +1883,31 @@ impl Reactor {
         wid: WindowId,
         authoritative_space: SpaceId,
     ) -> bool {
+        self.reassign_window_to_authoritative_space_with_workspace_preservation(
+            wid,
+            authoritative_space,
+            false,
+        )
+    }
+
+    pub(crate) fn reassign_window_to_authoritative_space_preserving_workspace_ordinal(
+        &mut self,
+        wid: WindowId,
+        authoritative_space: SpaceId,
+    ) -> bool {
+        self.reassign_window_to_authoritative_space_with_workspace_preservation(
+            wid,
+            authoritative_space,
+            true,
+        )
+    }
+
+    fn reassign_window_to_authoritative_space_with_workspace_preservation(
+        &mut self,
+        wid: WindowId,
+        authoritative_space: SpaceId,
+        preserve_workspace_ordinal: bool,
+    ) -> bool {
         // Native WindowServer visibility is not enough to participate in Rift's
         // layout. Fullscreen exit can surface transient AppKit/Electron windows
         // that are visible and space-owned but are filtered out of query output.
@@ -1912,21 +1937,30 @@ impl Reactor {
             .virtual_workspace_manager_mut()
             .list_workspaces(authoritative_space);
 
-        let Some(target_workspace) = self
-            .layout_manager
-            .layout_engine
-            .ensure_active_workspace_info(authoritative_space)
-            .map(|(workspace_id, _)| workspace_id)
-            .or_else(|| self.layout_manager.layout_engine.active_workspace(authoritative_space))
-        else {
-            return assigned_space.is_some_and(|space| self.is_space_active(space));
-        };
+        let assigned = if preserve_workspace_ordinal {
+            self.layout_manager
+                .layout_engine
+                .virtual_workspace_manager_mut()
+                .assign_window_to_workspace_preserving_ordinal(authoritative_space, wid)
+                .is_some()
+        } else {
+            let Some(target_workspace) = self
+                .layout_manager
+                .layout_engine
+                .ensure_active_workspace_info(authoritative_space)
+                .map(|(workspace_id, _)| workspace_id)
+                .or_else(|| {
+                    self.layout_manager.layout_engine.active_workspace(authoritative_space)
+                })
+            else {
+                return assigned_space.is_some_and(|space| self.is_space_active(space));
+            };
 
-        let assigned = self
-            .layout_manager
-            .layout_engine
-            .virtual_workspace_manager_mut()
-            .assign_window_to_workspace(authoritative_space, wid, target_workspace);
+            self.layout_manager
+                .layout_engine
+                .virtual_workspace_manager_mut()
+                .assign_window_to_workspace(authoritative_space, wid, target_workspace)
+        };
         if !assigned {
             return assigned_space.is_some_and(|space| self.is_space_active(space));
         }
