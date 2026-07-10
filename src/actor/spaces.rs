@@ -121,6 +121,7 @@ pub struct ForwardedSpaceState {
     pub releases_display_churn_refresh_quarantine: bool,
     pub resized_spaces: Vec<(SpaceId, CGSize)>,
     pub topology_window_delta: Option<TopologyWindowDelta>,
+    pub active_window_spaces: HashMap<WindowServerId, SpaceId>,
 }
 
 impl ForwardedSpaceState {
@@ -624,6 +625,7 @@ impl SpacesActor {
             releases_display_churn_refresh_quarantine: true,
             resized_spaces,
             topology_window_delta: self.state.pending_topology_window_delta.take(),
+            active_window_spaces: self.state.visible_window_spaces.clone(),
         }
     }
 

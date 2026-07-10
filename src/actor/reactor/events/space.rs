@@ -37,8 +37,10 @@ impl SpaceEventHandler {
             releases_lifecycle_refresh_quarantine: _,
             resized_spaces,
             topology_window_delta,
+            active_window_spaces,
             ..
         } = space_state;
+        reactor.space_state.active_window_spaces = active_window_spaces;
         let cfg = reactor.activation_cfg();
         let spaces: Vec<Option<SpaceId>> = screens.iter().map(|screen| screen.space).collect();
         let display_uuids: Vec<Option<String>> =
@@ -214,7 +216,7 @@ impl SpaceEventHandler {
 
             return;
         } else if matches!(kind, SpaceEventKind::User) {
-            if let Some(current_space) = crate::sys::window_server::window_space(wsid)
+            if let Some(current_space) = reactor.window_manager.window_server_space(wsid)
                 && current_space != sid
             {
                 debug!(?wsid, reported_space = ?sid, ?current_space, "Ignoring stale user-space disappearance due to authoritative current space");
@@ -299,7 +301,7 @@ impl SpaceEventHandler {
         kind: SpaceEventKind,
     ) {
         if matches!(kind, SpaceEventKind::User)
-            && let Some(current_space) = crate::sys::window_server::window_space(wsid)
+            && let Some(current_space) = reactor.window_manager.window_server_space(wsid)
             && current_space != sid
         {
             debug!(?wsid, reported_space = ?sid, ?current_space, "Ignoring stale user-space appearance due to authoritative current space");
@@ -559,7 +561,7 @@ fn apply_topology_window_delta(reactor: &mut Reactor, delta: TopologyWindowDelta
         let appeared_space = appeared_by_wsid.get(&wsid).copied();
         let disappeared_space = disappeared_by_wsid.get(&wsid).copied();
         let authoritative_space =
-            appeared_space.or_else(|| crate::sys::window_server::window_space(wsid));
+            appeared_space.or_else(|| reactor.window_manager.window_server_space(wsid));
 
         if let Some(target_space) = authoritative_space {
             reactor.window_manager.set_window_server_space(wsid, Some(target_space));

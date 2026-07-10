@@ -543,112 +543,16 @@ impl Reactor {
     }
 
     fn authoritative_active_space_windows(&self) -> Vec<(WindowServerId, Option<SpaceId>)> {
-        let active_space_ids: Vec<u64> = self.active_space_ids().into_iter().collect();
-        if active_space_ids.is_empty() {
-            return Vec::new();
-        }
-
-        // Native-space membership after wake/space-switch must come from the
-        // active spaces' own window list. Intersecting that with the global
-        // "on-screen" list or treating it as a complete visibility resnapshot
-        // reintroduces the exact sleep/wake race we are trying to avoid:
-        // WindowServer can report the new active space before the global visible
-        // list catches up, which makes an occupied space look empty and clears the
-        // reactor's visibility basis until a later AX refresh.
-        //
-        // The contract here is intentionally narrower:
-        // - `space_window_list_for_connection` tells us which WS ids belong to the
-        //   currently active native spaces.
-        // - We reconcile only active-space visibility/membership from that list.
-        // - We do *not* pretend this is a complete WindowServer snapshot for every
-        //   space, so we do not globally clear visibility here.
-        let active_spaces: HashSet<SpaceId> =
-            active_space_ids.iter().copied().map(SpaceId::new).collect();
-        let single_active_space =
-            (active_space_ids.len() == 1).then(|| SpaceId::new(active_space_ids[0]));
-
-        if let Some(space) = single_active_space {
-            return crate::sys::window_server::space_window_list_for_connection(
-                &active_space_ids,
-                0,
-                false,
-            )
-            .into_iter()
-            .map(WindowServerId::new)
-            .map(|wsid| {
-                let reported_space = window_server::window_space(wsid)
-                    .filter(|space| active_spaces.contains(space))
-                    .or_else(|| {
-                        self.window_manager
-                            .window_server_space(wsid)
-                            .filter(|space| active_spaces.contains(space))
-                    });
-                let space = self
-                    .pending_target_space_for_window_server_id(wsid)
-                    .or(reported_space)
-                    .or(Some(space));
-                (wsid, space)
-            })
-            .collect();
-        }
-
-        let mut visible: HashMap<WindowServerId, SpaceId> = HashMap::default();
-        for &space_id in &active_space_ids {
-            let candidate_space = SpaceId::new(space_id);
-            for wsid in
-                crate::sys::window_server::space_window_list_for_connection(&[space_id], 0, false)
-                    .into_iter()
-                    .map(WindowServerId::new)
-            {
-                self.record_authoritative_active_window_space(
-                    &mut visible,
-                    &active_spaces,
-                    wsid,
-                    candidate_space,
-                );
-            }
-        }
-
-        visible
-            .into_iter()
-            .map(|(wsid, space)| {
-                let reported_space = Some(space);
+        self.space_state
+            .active_window_spaces
+            .iter()
+            .map(|(&wsid, &space)| {
                 (
                     wsid,
-                    self.pending_target_space_for_window_server_id(wsid).or(reported_space),
+                    self.pending_target_space_for_window_server_id(wsid).or(Some(space)),
                 )
             })
             .collect()
-    }
-
-    fn record_authoritative_active_window_space(
-        &self,
-        visible: &mut HashMap<WindowServerId, SpaceId>,
-        active_spaces: &HashSet<SpaceId>,
-        wsid: WindowServerId,
-        candidate_space: SpaceId,
-    ) {
-        match visible.entry(wsid) {
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(candidate_space);
-            }
-            std::collections::hash_map::Entry::Occupied(mut entry) => {
-                if *entry.get() == candidate_space {
-                    return;
-                }
-
-                let resolved = window_server::window_space(wsid)
-                    .filter(|space| active_spaces.contains(space))
-                    .or_else(|| {
-                        self.window_manager
-                            .window_server_space(wsid)
-                            .filter(|space| active_spaces.contains(space))
-                    })
-                    .unwrap_or(*entry.get());
-
-                entry.insert(resolved);
-            }
-        }
     }
 
     fn has_known_windows_for_active_spaces(&self) -> bool {
@@ -711,7 +615,9 @@ impl Reactor {
                 continue;
             }
 
-            let inactive_target = window_server::window_space(wsid)
+            let inactive_target = self
+                .window_manager
+                .window_server_space(wsid)
                 .filter(|current_space| *current_space != space)
                 .filter(|current_space| {
                     #[cfg(test)]
@@ -2044,10 +1950,8 @@ impl Reactor {
             .window(wid)
             .and_then(|window| window.info.sys_id)
             .and_then(|wsid| {
-                let reported_space = window_server::window_space(wsid)
-                    .or_else(|| self.window_manager.window_server_space(wsid));
                 self.pending_target_space_for_window_server_id(wsid)
-                    .or(reported_space)
+                    .or_else(|| self.window_manager.window_server_space(wsid))
                     .or_else(|| self.visible_assigned_space_for_window_server_id(wsid))
             })
     }

@@ -194,6 +194,7 @@ fn forwarded_active_spaces_are_authoritative_for_workspace_context() {
         releases_display_churn_refresh_quarantine: false,
         resized_spaces: Vec::new(),
         topology_window_delta: None,
+        active_window_spaces: Default::default(),
     }));
 
     assert_eq!(reactor.workspace_command_space(), Some(new_space));
@@ -232,6 +233,7 @@ fn forwarded_active_spaces_filter_active_workspace_context() {
         releases_display_churn_refresh_quarantine: false,
         resized_spaces: Vec::new(),
         topology_window_delta: None,
+        active_window_spaces: Default::default(),
     }));
 
     assert!(!reactor.is_space_active(inactive_space));
@@ -589,6 +591,7 @@ fn command_space_only_snapshot_does_not_trigger_full_space_reconcile() {
         releases_display_churn_refresh_quarantine: false,
         resized_spaces: Vec::new(),
         topology_window_delta: None,
+        active_window_spaces: Default::default(),
     }));
 
     reactor.handle_events(apps.make_app(1, make_windows(1)));
@@ -613,6 +616,7 @@ fn command_space_only_snapshot_does_not_trigger_full_space_reconcile() {
         releases_display_churn_refresh_quarantine: false,
         resized_spaces: Vec::new(),
         topology_window_delta: None,
+        active_window_spaces: Default::default(),
     }));
 
     assert_eq!(reactor.workspace_command_space(), Some(space2));
@@ -651,6 +655,7 @@ fn forwarded_space_state_updates_fullscreen_spaces() {
         releases_display_churn_refresh_quarantine: false,
         resized_spaces: Vec::new(),
         topology_window_delta: None,
+        active_window_spaces: Default::default(),
     }));
 
     assert!(reactor.space_state.fullscreen_spaces.contains(&fullscreen_space));
@@ -695,6 +700,7 @@ fn queries_prefer_authoritative_active_space_over_stale_command_space() {
         releases_display_churn_refresh_quarantine: false,
         resized_spaces: Vec::new(),
         topology_window_delta: None,
+        active_window_spaces: Default::default(),
     }));
 
     assert_eq!(
@@ -804,6 +810,7 @@ fn workspace_queries_are_isolated_per_macos_space() {
         releases_display_churn_refresh_quarantine: false,
         resized_spaces: Vec::new(),
         topology_window_delta: None,
+        active_window_spaces: Default::default(),
     }));
 
     let default_workspaces = reactor.query_workspaces(None);
@@ -2780,6 +2787,7 @@ fn topology_change_clears_stale_pending_hide_target_before_next_workspace_layout
         releases_display_churn_refresh_quarantine: false,
         resized_spaces: Vec::new(),
         topology_window_delta: None,
+        active_window_spaces: Default::default(),
     }));
     let requests = apps.requests();
     assert!(
@@ -3680,6 +3688,7 @@ fn topology_window_delta_reassigns_missing_window_to_inactive_space() {
             appeared: Vec::new(),
             disappeared: vec![(moved_wsid, active_space)],
         }),
+        active_window_spaces: Default::default(),
     }));
 
     crate::sys::window_server::set_window_spaces_override(moved_wsid, None);
@@ -3742,6 +3751,7 @@ fn topology_window_delta_is_not_ignored_by_command_space_only_short_circuit() {
             appeared: vec![(wsid, space2)],
             disappeared: vec![(wsid, space1)],
         }),
+        active_window_spaces: Default::default(),
     }));
 
     crate::sys::window_server::set_window_spaces_override(wsid, None);
@@ -3810,6 +3820,7 @@ fn forwarded_space_state_does_not_clear_existing_fullscreen_tracks_when_snapshot
         releases_display_churn_refresh_quarantine: false,
         resized_spaces: Vec::new(),
         topology_window_delta: None,
+        active_window_spaces: Default::default(),
     }));
 
     assert!(
@@ -4237,6 +4248,7 @@ fn fullscreen_startup_applies_app_rules_to_hidden_user_space_windows() {
         releases_display_churn_refresh_quarantine: false,
         resized_spaces: Vec::new(),
         topology_window_delta: None,
+        active_window_spaces: Default::default(),
     }));
 
     let (app_tx, _app_rx) = crate::actor::channel();
@@ -4344,6 +4356,7 @@ fn fullscreen_startup_discovery_preserves_existing_hidden_assignment_without_app
         releases_display_churn_refresh_quarantine: false,
         resized_spaces: Vec::new(),
         topology_window_delta: None,
+        active_window_spaces: Default::default(),
     }));
 
     let (app_tx, _app_rx) = crate::actor::channel();

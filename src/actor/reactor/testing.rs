@@ -71,6 +71,7 @@ pub fn space_state_event_from_screens(screens: Vec<ScreenInfo>) -> Event {
         releases_display_churn_refresh_quarantine: false,
         resized_spaces: Vec::new(),
         topology_window_delta: None,
+        active_window_spaces: Default::default(),
     })
 }
 
