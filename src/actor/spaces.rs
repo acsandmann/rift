@@ -1020,7 +1020,7 @@ impl SpacesActor {
                 self.schedule_screen_refresh_after(REFRESH_RETRY_DELAY_NS, attempt + 1);
                 return;
             }
-            self.state.refresh_pending = false;
+            self.finish_screen_refresh_attempts();
             return;
         };
 
@@ -1029,7 +1029,7 @@ impl SpacesActor {
                 self.schedule_screen_refresh_after(REFRESH_RETRY_DELAY_NS, attempt + 1);
                 return;
             }
-            self.state.refresh_pending = false;
+            self.finish_screen_refresh_attempts();
             return;
         }
 
@@ -1046,6 +1046,19 @@ impl SpacesActor {
         self.forward_screen_parameters(screens, converter);
         self.state.awaiting_space_switch_confirmation = false;
         self.state.refresh_pending = false;
+    }
+
+    fn finish_screen_refresh_attempts(&mut self) {
+        self.state.refresh_pending = false;
+
+        // Wake and unlock set this flag before the refresh starts, and it is
+        // consumed only by build_forwarded_state after a coherent snapshot is
+        // forwarded. Keep trying when the bounded retry sequence expires; if
+        // we stop here, the reactor's lifecycle quarantine can never be
+        // released because no later snapshot is guaranteed to arrive.
+        if self.state.release_reactor_quarantine_on_next_forward {
+            self.schedule_screen_refresh_after(REFRESH_RETRY_DELAY_NS, 0);
+        }
     }
 
     fn try_forward_authoritative_snapshot(
