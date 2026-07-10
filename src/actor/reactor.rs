@@ -1148,9 +1148,15 @@ impl Reactor {
             Event::SpaceStateChanged(space_state) => {
                 let releases_lifecycle_refresh_quarantine =
                     space_state.releases_lifecycle_refresh_quarantine;
+                let releases_display_churn_refresh_quarantine =
+                    space_state.releases_display_churn_refresh_quarantine;
                 SpaceEventHandler::handle_space_state_changed(self, space_state);
                 if releases_lifecycle_refresh_quarantine {
                     self.release_post_instability_quarantine_after_authoritative_snapshot();
+                }
+                if releases_display_churn_refresh_quarantine {
+                    self.refresh_quarantine_manager.display_churn_active = false;
+                    self.request_refresh_when_spaces_actor_stabilizes();
                 }
             }
             Event::MouseUp => {

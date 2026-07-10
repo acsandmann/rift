@@ -204,12 +204,10 @@ fn buffers_screen_and_space_updates_until_display_churn_ends() {
     actor.handle_event(Event::DisplayChurnEnd);
 
     assert!(matches!(
-        recv_reactor(&mut reactor_rx),
-        reactor::Event::DisplayChurnEnd
-    ));
-    assert!(matches!(
         recv_wm(&mut wm_rx),
-        wm_controller::WmEvent::SpaceStateUpdated(state, _) if state.screens.iter().map(|s| s.space).collect::<Vec<_>>() == vec![Some(space)]
+        wm_controller::WmEvent::SpaceStateUpdated(state, _)
+            if state.screens.iter().map(|s| s.space).collect::<Vec<_>>() == vec![Some(space)]
+                && state.releases_display_churn_refresh_quarantine
     ));
     assert_no_wm_event(&mut wm_rx);
     assert_no_reactor_event(&mut reactor_rx);
@@ -250,10 +248,6 @@ fn wake_does_not_flush_pending_updates_while_churn_is_still_active() {
 
     actor.handle_event(Event::DisplayChurnEnd);
 
-    assert!(matches!(
-        recv_reactor(&mut reactor_rx),
-        reactor::Event::DisplayChurnEnd
-    ));
     match recv_wm(&mut wm_rx) {
         wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
             assert_eq!(
@@ -264,6 +258,7 @@ fn wake_does_not_flush_pending_updates_while_churn_is_still_active() {
                 state.releases_lifecycle_refresh_quarantine,
                 "the first post-wake forwarded snapshot should release the reactor quarantine"
             );
+            assert!(state.releases_display_churn_refresh_quarantine);
         }
         other => panic!("unexpected wm event: {other:?}"),
     }
@@ -388,10 +383,6 @@ fn drops_duplicate_space_snapshots_after_flush() {
         recv_reactor(&mut reactor_rx),
         reactor::Event::DisplayChurnBegin
     ));
-    assert!(matches!(
-        recv_reactor(&mut reactor_rx),
-        reactor::Event::DisplayChurnEnd
-    ));
     assert_no_wm_event(&mut wm_rx);
     assert_no_reactor_event(&mut reactor_rx);
 }
@@ -415,15 +406,12 @@ fn retains_only_latest_pending_screen_snapshot_during_churn() {
         recv_reactor(&mut reactor_rx),
         reactor::Event::DisplayChurnBegin
     ));
-    assert!(matches!(
-        recv_reactor(&mut reactor_rx),
-        reactor::Event::DisplayChurnEnd
-    ));
     let forwarded = recv_wm(&mut wm_rx);
     match forwarded {
         wm_controller::WmEvent::SpaceStateUpdated(state, converter) => {
             assert_eq!(state.screens[0].space, Some(SpaceId::new(52)));
             assert_eq!(converter.screen_height(), Some(20.0));
+            assert!(state.releases_display_churn_refresh_quarantine);
         }
         other => panic!("unexpected wm event: {other:?}"),
     }
@@ -691,16 +679,13 @@ fn sleep_wake_display_reattach_flushes_latest_stable_spaces_only() {
         recv_reactor(&mut reactor_rx),
         reactor::Event::SystemWoke
     ));
-    assert!(matches!(
-        recv_reactor(&mut reactor_rx),
-        reactor::Event::DisplayChurnEnd
-    ));
     match recv_wm(&mut wm_rx) {
         wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
             assert_eq!(
                 state.screens.iter().map(|screen| screen.space).collect::<Vec<_>>(),
                 vec![Some(left), Some(right)]
             );
+            assert!(state.releases_display_churn_refresh_quarantine);
         }
         other => panic!("unexpected wm event: {other:?}"),
     }
@@ -912,10 +897,6 @@ fn duplicate_space_transient_during_wake_is_not_forwarded_when_stable_snapshot_r
         recv_reactor(&mut reactor_rx),
         reactor::Event::SystemWoke
     ));
-    assert!(matches!(
-        recv_reactor(&mut reactor_rx),
-        reactor::Event::DisplayChurnEnd
-    ));
     assert_no_wm_event(&mut wm_rx);
 }
 
@@ -951,6 +932,7 @@ fn normal_refresh_retries_duplicate_user_space_snapshot_until_valid() {
                 state.screens.iter().map(|screen| screen.space).collect::<Vec<_>>(),
                 vec![Some(left), Some(right)]
             );
+            assert!(state.releases_display_churn_refresh_quarantine);
         }
         other => panic!("unexpected wm event: {other:?}"),
     }
@@ -1083,13 +1065,11 @@ fn display_churn_stabilization_rejects_duplicate_space_snapshot_until_valid() {
                 state.screens.iter().map(|screen| screen.space).collect::<Vec<_>>(),
                 vec![Some(left), Some(right)]
             );
+            assert!(state.releases_display_churn_refresh_quarantine);
         }
         other => panic!("unexpected wm event: {other:?}"),
     }
-    assert!(matches!(
-        recv_reactor(&mut reactor_rx),
-        reactor::Event::DisplayChurnEnd
-    ));
+    assert_no_reactor_event(&mut reactor_rx);
 }
 
 #[test]

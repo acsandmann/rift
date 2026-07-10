@@ -37,6 +37,7 @@ impl SpaceEventHandler {
             releases_lifecycle_refresh_quarantine: _,
             resized_spaces,
             topology_window_delta,
+            ..
         } = space_state;
         let cfg = reactor.activation_cfg();
         let spaces: Vec<Option<SpaceId>> = screens.iter().map(|screen| screen.space).collect();

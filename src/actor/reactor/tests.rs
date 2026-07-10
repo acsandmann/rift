@@ -191,6 +191,7 @@ fn forwarded_active_spaces_are_authoritative_for_workspace_context() {
         allow_space_remap: false,
         should_force_refresh_layout: false,
         releases_lifecycle_refresh_quarantine: false,
+        releases_display_churn_refresh_quarantine: false,
         resized_spaces: Vec::new(),
         topology_window_delta: None,
     }));
@@ -228,6 +229,7 @@ fn forwarded_active_spaces_filter_active_workspace_context() {
         allow_space_remap: false,
         should_force_refresh_layout: false,
         releases_lifecycle_refresh_quarantine: false,
+        releases_display_churn_refresh_quarantine: false,
         resized_spaces: Vec::new(),
         topology_window_delta: None,
     }));
@@ -584,6 +586,7 @@ fn command_space_only_snapshot_does_not_trigger_full_space_reconcile() {
         allow_space_remap: false,
         should_force_refresh_layout: false,
         releases_lifecycle_refresh_quarantine: false,
+        releases_display_churn_refresh_quarantine: false,
         resized_spaces: Vec::new(),
         topology_window_delta: None,
     }));
@@ -607,6 +610,7 @@ fn command_space_only_snapshot_does_not_trigger_full_space_reconcile() {
         allow_space_remap: false,
         should_force_refresh_layout: false,
         releases_lifecycle_refresh_quarantine: false,
+        releases_display_churn_refresh_quarantine: false,
         resized_spaces: Vec::new(),
         topology_window_delta: None,
     }));
@@ -644,6 +648,7 @@ fn forwarded_space_state_updates_fullscreen_spaces() {
         allow_space_remap: false,
         should_force_refresh_layout: false,
         releases_lifecycle_refresh_quarantine: false,
+        releases_display_churn_refresh_quarantine: false,
         resized_spaces: Vec::new(),
         topology_window_delta: None,
     }));
@@ -687,6 +692,7 @@ fn queries_prefer_authoritative_active_space_over_stale_command_space() {
         allow_space_remap: false,
         should_force_refresh_layout: false,
         releases_lifecycle_refresh_quarantine: false,
+        releases_display_churn_refresh_quarantine: false,
         resized_spaces: Vec::new(),
         topology_window_delta: None,
     }));
@@ -795,6 +801,7 @@ fn workspace_queries_are_isolated_per_macos_space() {
         allow_space_remap: false,
         should_force_refresh_layout: false,
         releases_lifecycle_refresh_quarantine: false,
+        releases_display_churn_refresh_quarantine: false,
         resized_spaces: Vec::new(),
         topology_window_delta: None,
     }));
@@ -2770,6 +2777,7 @@ fn topology_change_clears_stale_pending_hide_target_before_next_workspace_layout
         allow_space_remap: false,
         should_force_refresh_layout: false,
         releases_lifecycle_refresh_quarantine: false,
+        releases_display_churn_refresh_quarantine: false,
         resized_spaces: Vec::new(),
         topology_window_delta: None,
     }));
@@ -3664,6 +3672,7 @@ fn topology_window_delta_reassigns_missing_window_to_inactive_space() {
         allow_space_remap: false,
         should_force_refresh_layout: false,
         releases_lifecycle_refresh_quarantine: false,
+        releases_display_churn_refresh_quarantine: false,
         resized_spaces: Vec::new(),
         topology_window_delta: Some(crate::actor::spaces::TopologyWindowDelta {
             epoch: 11,
@@ -3725,6 +3734,7 @@ fn topology_window_delta_is_not_ignored_by_command_space_only_short_circuit() {
         allow_space_remap: false,
         should_force_refresh_layout: false,
         releases_lifecycle_refresh_quarantine: false,
+        releases_display_churn_refresh_quarantine: false,
         resized_spaces: Vec::new(),
         topology_window_delta: Some(crate::actor::spaces::TopologyWindowDelta {
             epoch: 12,
@@ -3797,6 +3807,7 @@ fn forwarded_space_state_does_not_clear_existing_fullscreen_tracks_when_snapshot
         allow_space_remap: false,
         should_force_refresh_layout: false,
         releases_lifecycle_refresh_quarantine: false,
+        releases_display_churn_refresh_quarantine: false,
         resized_spaces: Vec::new(),
         topology_window_delta: None,
     }));
@@ -4198,6 +4209,7 @@ fn fullscreen_startup_applies_app_rules_to_hidden_user_space_windows() {
         allow_space_remap: false,
         should_force_refresh_layout: false,
         releases_lifecycle_refresh_quarantine: false,
+        releases_display_churn_refresh_quarantine: false,
         resized_spaces: Vec::new(),
         topology_window_delta: None,
     }));
@@ -4304,6 +4316,7 @@ fn fullscreen_startup_discovery_preserves_existing_hidden_assignment_without_app
         allow_space_remap: false,
         should_force_refresh_layout: false,
         releases_lifecycle_refresh_quarantine: false,
+        releases_display_churn_refresh_quarantine: false,
         resized_spaces: Vec::new(),
         topology_window_delta: None,
     }));
@@ -4629,7 +4642,7 @@ fn fullscreen_exit_space_restore_does_not_revive_stale_pre_rekey_window() {
 }
 
 #[test]
-fn display_churn_end_triggers_visible_window_refresh() {
+fn display_churn_snapshot_ack_triggers_visible_window_refresh() {
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
     let mut apps = Apps::new();
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(
@@ -4642,13 +4655,20 @@ fn display_churn_end_triggers_visible_window_refresh() {
     reactor.handle_events(apps.make_app(1, make_windows(1)));
     apps.simulate_until_quiet(&mut reactor);
 
-    reactor.handle_event(Event::DisplayChurnEnd);
+    reactor.handle_event(Event::DisplayChurnBegin);
+    let Event::SpaceStateChanged(mut snapshot) =
+        space_state_event(vec![screen], vec![Some(SpaceId::new(1))])
+    else {
+        unreachable!("space_state_event must produce a space-state event");
+    };
+    snapshot.releases_display_churn_refresh_quarantine = true;
+    reactor.handle_event(Event::SpaceStateChanged(snapshot));
 
     assert!(
         apps.requests()
             .into_iter()
             .any(|request| matches!(request, Request::GetVisibleWindows)),
-        "display churn recovery should re-request visible windows"
+        "the snapshot acknowledgement should release churn and request visible windows"
     );
 }
 

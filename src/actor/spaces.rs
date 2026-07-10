@@ -116,6 +116,9 @@ pub struct ForwardedSpaceState {
     pub allow_space_remap: bool,
     pub should_force_refresh_layout: bool,
     pub releases_lifecycle_refresh_quarantine: bool,
+    /// Releases the reactor's display-churn gate only after this authoritative
+    /// snapshot has been incorporated into its workspace model.
+    pub releases_display_churn_refresh_quarantine: bool,
     pub resized_spaces: Vec<(SpaceId, CGSize)>,
     pub topology_window_delta: Option<TopologyWindowDelta>,
 }
@@ -176,6 +179,7 @@ pub struct AuthorityState {
     awaiting_space_switch_confirmation: bool,
     refresh_deferred_until_stable: bool,
     release_reactor_quarantine_on_next_forward: bool,
+    release_display_churn_quarantine_on_next_forward: bool,
     pending_screen_parameters: Option<PendingScreenParameters>,
     pending_spaces: Option<Vec<Option<SpaceId>>>,
     visible_window_spaces: HashMap<WindowServerId, SpaceId>,
@@ -205,6 +209,7 @@ impl Default for AuthorityState {
             awaiting_space_switch_confirmation: false,
             refresh_deferred_until_stable: false,
             release_reactor_quarantine_on_next_forward: false,
+            release_display_churn_quarantine_on_next_forward: false,
             pending_screen_parameters: None,
             pending_spaces: None,
             visible_window_spaces: HashMap::default(),
@@ -343,8 +348,9 @@ impl SpacesActor {
             }
             Event::DisplayChurnEnd => {
                 self.state.display_churn_active = false;
-                self.reactor_tx.send(reactor::Event::DisplayChurnEnd);
+                self.state.release_display_churn_quarantine_on_next_forward = true;
                 self.flush_pending_if_stable();
+                self.schedule_screen_refresh();
             }
             Event::ScreenParametersChanged(screens, converter) => {
                 if self.should_buffer_topology_updates() {
@@ -600,6 +606,8 @@ impl SpacesActor {
         self.state.screens = screens.clone();
         let releases_lifecycle_refresh_quarantine =
             std::mem::take(&mut self.state.release_reactor_quarantine_on_next_forward);
+        let releases_display_churn_refresh_quarantine =
+            std::mem::take(&mut self.state.release_display_churn_quarantine_on_next_forward);
 
         ForwardedSpaceState {
             screens,
@@ -616,6 +624,7 @@ impl SpacesActor {
             allow_space_remap,
             should_force_refresh_layout,
             releases_lifecycle_refresh_quarantine,
+            releases_display_churn_refresh_quarantine,
             resized_spaces,
             topology_window_delta: self.state.pending_topology_window_delta.take(),
         }
@@ -1190,14 +1199,14 @@ impl SpacesActor {
 
         let Some((screens, converter)) = self.collect_state() else {
             if !self.retry_display_stabilization(expected_epoch, attempt) {
-                self.finish_display_churn(expected_epoch, true);
+                self.finish_display_churn(expected_epoch, true, false);
             }
             return;
         };
 
         if screens.is_empty() {
             if !self.retry_display_stabilization(expected_epoch, attempt) {
-                self.finish_display_churn(expected_epoch, true);
+                self.finish_display_churn(expected_epoch, true, false);
             }
             return;
         }
@@ -1235,13 +1244,13 @@ impl SpacesActor {
             if !Self::screen_snapshot_is_valid_for_commit(&screens) {
                 self.state.display_topology_state = None;
                 if !self.retry_display_stabilization(expected_epoch, attempt) {
-                    self.finish_display_churn(expected_epoch, true);
+                    self.finish_display_churn(expected_epoch, true, false);
                 }
                 return;
             }
             if !window_server::windowserver_quiet_for_us(window_server::WINDOWSERVER_QUIET_US) {
                 if !self.retry_display_stabilization(expected_epoch, attempt) {
-                    self.finish_display_churn(expected_epoch, true);
+                    self.finish_display_churn(expected_epoch, true, false);
                 }
                 return;
             }
@@ -1249,17 +1258,26 @@ impl SpacesActor {
             self.synthesize_topology_window_delta(expected_epoch, flags, &screens);
             self.state.pending_screen_parameters = None;
             self.state.pending_spaces = None;
+            // The WM controller forwards this snapshot to the reactor. Mark it as
+            // the acknowledgement that may release the reactor's churn gate, so
+            // its refresh cannot observe the pre-churn space mapping.
+            self.state.release_display_churn_quarantine_on_next_forward = true;
             self.forward_screen_parameters(screens, converter);
-            self.finish_display_churn(expected_epoch, false);
+            self.finish_display_churn(expected_epoch, false, true);
             return;
         }
 
         if !self.retry_display_stabilization(expected_epoch, attempt) {
-            self.finish_display_churn(expected_epoch, true);
+            self.finish_display_churn(expected_epoch, true, false);
         }
     }
 
-    fn finish_display_churn(&mut self, expected_epoch: u64, schedule_refresh: bool) {
+    fn finish_display_churn(
+        &mut self,
+        expected_epoch: u64,
+        schedule_refresh: bool,
+        snapshot_already_forwarded: bool,
+    ) {
         if expected_epoch != self.state.display_churn_epoch || !self.state.display_churn_active {
             return;
         }
@@ -1267,8 +1285,12 @@ impl SpacesActor {
         self.state.display_churn_epoch = self.state.display_churn_epoch.wrapping_add(1);
         self.state.display_churn_flags = DisplayReconfigFlags::empty();
         self.state.display_topology_state = None;
+        // If stabilization timed out, keep the reactor quarantined until the
+        // refresh we schedule below yields a later authoritative snapshot.
+        if !snapshot_already_forwarded {
+            self.state.release_display_churn_quarantine_on_next_forward = true;
+        }
         let _ = display_churn::end();
-        self.reactor_tx.send(reactor::Event::DisplayChurnEnd);
 
         if self.state.refresh_deferred_until_stable {
             self.state.refresh_deferred_until_stable = false;
