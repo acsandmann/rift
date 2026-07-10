@@ -4,7 +4,7 @@ use std::ffi::{c_int, c_void};
 use std::num::NonZeroU32;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use objc2_app_kit::NSWindowLevel;
 use objc2_application_services::AXError;
@@ -699,11 +699,6 @@ pub fn app_window_suitable(id: WindowServerId) -> bool {
 
 pub fn space_is_user(sid: u64) -> bool { unsafe { SLSSpaceGetType(*G_CONNECTION, sid) == 0 } }
 pub fn space_is_fullscreen(sid: u64) -> bool { unsafe { SLSSpaceGetType(*G_CONNECTION, sid) == 4 } }
-pub fn wait_for_native_fullscreen_transition() {
-    while !space_is_user(unsafe { CGSGetActiveSpace(*G_CONNECTION) }) {
-        std::thread::sleep(Duration::from_millis(100));
-    }
-}
 
 #[derive(Clone)]
 pub struct CapturedWindowImage(CFRetained<CGImage>);

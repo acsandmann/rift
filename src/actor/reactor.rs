@@ -55,8 +55,6 @@ use crate::sys::executor::Executor;
 use crate::sys::geometry::{CGRectDef, CGRectExt};
 pub use crate::sys::screen::ScreenInfo;
 use crate::sys::screen::{SpaceId, order_visible_spaces_by_position};
-#[cfg(not(test))]
-use crate::sys::window_server::wait_for_native_fullscreen_transition;
 use crate::sys::window_server::{
     self, WindowServerId, WindowServerInfo, window_level, window_sub_level,
 };
@@ -1407,8 +1405,6 @@ impl Reactor {
                 continue;
             }
 
-            Self::wait_for_native_fullscreen_exit();
-
             for record in records {
                 let _ = self
                     .window_manager
@@ -1461,14 +1457,6 @@ impl Reactor {
             self.refocus_manager.refocus_state = RefocusState::Pending(space);
             self.update_layout_or_warn(false, false);
             self.update_focus_follows_mouse_state();
-        }
-    }
-
-    fn wait_for_native_fullscreen_exit() {
-        #[cfg(not(test))]
-        {
-            wait_for_native_fullscreen_transition();
-            thread::sleep(std::time::Duration::from_millis(50));
         }
     }
 
