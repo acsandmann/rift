@@ -1387,12 +1387,6 @@ impl Reactor {
         self.space_state.fullscreen_spaces.contains(&space)
     }
 
-    fn set_screen_spaces(&mut self, spaces: &[Option<SpaceId>]) {
-        for (space, screen) in spaces.iter().copied().zip(&mut self.space_state.screens) {
-            screen.space = space;
-        }
-    }
-
     fn finalize_space_change(
         &mut self,
         spaces: &[Option<SpaceId>],
@@ -1520,35 +1514,6 @@ impl Reactor {
     fn repair_spaces_after_mission_control(&mut self) {
         // First, apply any SpaceChanged that arrived while MC was active.
         self.try_apply_pending_space_change();
-
-        // If we still have missing space ids (or no active spaces), proactively rebuild
-        // per-display current spaces via CGS. This covers the common case where macOS emits
-        // a transient "all None" spaces vector during Mission Control and then doesn't emit
-        // a corresponding steady-state update when exiting back to the same space.
-        let needs_repair = self.active_spaces.is_empty()
-            || self.space_state.screens.iter().all(|s| s.space.is_none());
-        if !needs_repair || self.space_state.screens.is_empty() {
-            return;
-        }
-
-        let spaces: Vec<Option<SpaceId>> = self
-            .space_state
-            .screens
-            .iter()
-            .map(|s| {
-                self.space_state
-                    .last_user_space_by_display
-                    .get(&s.display_uuid)
-                    .copied()
-                    .or(s.space)
-            })
-            .collect();
-
-        if spaces.iter().any(|s| s.is_some()) && spaces.len() == self.space_state.screens.len() {
-            self.set_screen_spaces(&spaces);
-            self.space_state.active_spaces = spaces.iter().copied().flatten().collect();
-            self.recompute_and_set_active_spaces(&spaces);
-        }
     }
 
     fn on_windows_discovered_with_app_info(

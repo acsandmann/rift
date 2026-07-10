@@ -2333,6 +2333,25 @@ fn forwarded_space_state_is_queued_during_mission_control_and_applied_on_exit() 
 }
 
 #[test]
+fn mission_control_exit_does_not_restore_cached_space_without_authoritative_snapshot() {
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let stale_space = SpaceId::new(1);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(stale_space)]));
+    reactor.handle_event(Event::MissionControlNativeEntered);
+    reactor.handle_event(space_state_event(vec![screen], vec![None]));
+    reactor.handle_event(Event::MissionControlNativeExited);
+
+    assert_eq!(reactor.workspace_command_space(), None);
+    assert_eq!(reactor.space_state.screens[0].space, None);
+}
+
+#[test]
 fn mission_control_exit_refresh_drops_windows_missing_from_origin_space_snapshot() {
     let mut apps = Apps::new();
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(
