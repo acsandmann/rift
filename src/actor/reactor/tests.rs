@@ -3916,6 +3916,9 @@ fn display_churn_quarantines_window_frame_and_membership_events() {
         space,
         SpaceEventKind::User,
     ));
+    let space_created = reactor.should_quarantine_during_display_churn(&Event::SpaceCreated(space));
+    let space_destroyed =
+        reactor.should_quarantine_during_display_churn(&Event::SpaceDestroyed(space));
 
     let _ = crate::sys::display_churn::end();
     assert!(
@@ -3930,6 +3933,28 @@ fn display_churn_quarantines_window_frame_and_membership_events() {
         destroyed,
         "WindowServerDestroyed should be quarantined during churn"
     );
+    assert!(space_created, "SpaceCreated should be quarantined during churn");
+    assert!(
+        space_destroyed,
+        "SpaceDestroyed should be quarantined during churn"
+    );
+}
+
+#[test]
+fn lifecycle_events_are_quarantined_during_sleep_and_session_inactivity() {
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let space = SpaceId::new(8);
+
+    reactor.refresh_quarantine_manager.sleeping = true;
+    assert!(reactor.should_quarantine_space_lifecycle_event(&Event::SpaceCreated(space)));
+
+    reactor.refresh_quarantine_manager.sleeping = false;
+    reactor.refresh_quarantine_manager.session_inactive = true;
+    assert!(reactor.should_quarantine_space_lifecycle_event(&Event::SpaceDestroyed(space)));
 }
 
 #[test]

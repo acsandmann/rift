@@ -368,13 +368,13 @@ impl SpacesActor {
                 self.handle_space_inventory_changed();
             }
             Event::SpaceCreated(space) => {
-                if self.classify_space(space).is_some() {
+                if !self.should_buffer_topology_updates() && self.classify_space(space).is_some() {
                     self.reactor_tx.send(reactor::Event::SpaceCreated(space));
                 }
                 self.handle_space_inventory_changed();
             }
             Event::SpaceDestroyed(space) => {
-                if self.classify_space(space).is_some() {
+                if !self.should_buffer_topology_updates() && self.classify_space(space).is_some() {
                     self.reactor_tx.send(reactor::Event::SpaceDestroyed(space));
                 }
                 self.handle_space_inventory_changed();

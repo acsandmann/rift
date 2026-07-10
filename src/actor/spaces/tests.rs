@@ -170,6 +170,8 @@ fn quarantines_window_space_events_during_sleep_before_churn_begins() {
         WindowServerId::new(8),
         SpaceId::new(4),
     ));
+    actor.handle_event(Event::SpaceCreated(SpaceId::new(5)));
+    actor.handle_event(Event::SpaceDestroyed(SpaceId::new(6)));
 
     assert_eq!(actor.state.quarantine_stats, QuarantineStats {
         appeared_dropped: 1,
@@ -418,7 +420,7 @@ fn retains_only_latest_pending_screen_snapshot_during_churn() {
 }
 
 #[test]
-fn forwards_space_lifecycle_events_through_actor_even_during_churn() {
+fn quarantines_space_lifecycle_events_during_churn_until_snapshot() {
     let (mut actor, _wm_rx, mut reactor_rx) = build_actor();
     let space = SpaceId::new(61);
 
@@ -430,14 +432,7 @@ fn forwards_space_lifecycle_events_through_actor_even_during_churn() {
         recv_reactor(&mut reactor_rx),
         reactor::Event::DisplayChurnBegin
     ));
-    assert!(matches!(
-        recv_reactor(&mut reactor_rx),
-        reactor::Event::SpaceCreated(seen) if seen == space
-    ));
-    assert!(matches!(
-        recv_reactor(&mut reactor_rx),
-        reactor::Event::SpaceDestroyed(seen) if seen == space
-    ));
+    assert_no_reactor_event(&mut reactor_rx);
 }
 
 #[test]

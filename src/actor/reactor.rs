@@ -873,6 +873,10 @@ impl Reactor {
             self.handle_query_request(req);
             return;
         }
+        if self.should_quarantine_space_lifecycle_event(&event) {
+            trace!(?event, state = ?self.refresh_quarantine_state(), "quarantined space lifecycle event");
+            return;
+        }
         if self.should_quarantine_during_display_churn(&event) {
             trace!(?event, "quarantined during display churn");
             return;
@@ -938,7 +942,14 @@ impl Reactor {
                 | Event::WindowDeminiaturized(..)
                 | Event::WindowTitleChanged(..)
                 | Event::WindowsDiscovered { .. }
+                | Event::SpaceCreated(..)
+                | Event::SpaceDestroyed(..)
         )
+    }
+
+    fn should_quarantine_space_lifecycle_event(&self, event: &Event) -> bool {
+        self.refreshes_blocked()
+            && matches!(event, Event::SpaceCreated(..) | Event::SpaceDestroyed(..))
     }
 
     fn refresh_quarantine_state(&self) -> RefreshQuarantineState {
