@@ -5007,6 +5007,81 @@ fn wake_gate_waits_for_fresh_space_snapshot_before_refresh() {
 }
 
 #[test]
+fn partial_post_wake_snapshot_preserves_manual_workspace_assignment() {
+    let mut apps = Apps::new();
+    let workspace_cfg = crate::common::config::VirtualWorkspaceSettings {
+        default_workspace_count: 2,
+        ..crate::common::config::VirtualWorkspaceSettings::default()
+    };
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &workspace_cfg,
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let kept = WindowId::new(1, 1);
+    let omitted = WindowId::new(1, 2);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    reactor.handle_events(apps.make_app(1, make_windows(2)));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let secondary_workspace = reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .list_workspaces(space)[1]
+        .0;
+    assert!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager_mut()
+            .assign_window_to_workspace(space, omitted, secondary_workspace)
+    );
+
+    reactor.handle_event(Event::SystemWillSleep);
+    reactor.handle_event(Event::SystemWoke);
+
+    let mut fresh_state = match space_state_event(vec![screen], vec![Some(space)]) {
+        Event::SpaceStateChanged(state) => state,
+        other => panic!("unexpected event: {other:?}"),
+    };
+    fresh_state.releases_lifecycle_refresh_quarantine = true;
+    fresh_state
+        .active_window_spaces
+        .insert(WindowServerId::new(kept.idx.get()), space);
+    reactor.handle_event(Event::SpaceStateChanged(fresh_state));
+
+    assert_eq!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager()
+            .workspace_for_window(space, omitted),
+        Some(secondary_workspace),
+        "a partial recovery snapshot must not erase a manual workspace assignment"
+    );
+
+    reactor.handle_event(Event::WindowsDiscovered {
+        pid: 1,
+        new: vec![],
+        known_visible: vec![kept, omitted],
+    });
+
+    assert_eq!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager()
+            .workspace_for_window(space, omitted),
+        Some(secondary_workspace),
+        "post-wake discovery without an app rule must retain the manual workspace"
+    );
+}
+
+#[test]
 fn authoritative_active_space_membership_comes_from_space_window_ids_directly() {
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(
         &crate::common::config::VirtualWorkspaceSettings::default(),

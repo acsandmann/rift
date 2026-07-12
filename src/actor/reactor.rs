@@ -600,6 +600,16 @@ impl Reactor {
         &mut self,
         previously_visible_wsids: Vec<WindowServerId>,
     ) {
+        // The first post-wake/session snapshot releases the lifecycle quarantine, but
+        // WindowServer can still publish only a partial window list in that snapshot.
+        // Keep Rift's authoritative workspace assignments until the deferred AX
+        // discovery has had a chance to reconcile visibility. Otherwise an omitted
+        // window is removed here and discovery subsequently auto-assigns it to the
+        // active/default workspace when it has no matching app rule.
+        let preserve_assignments_for_lifecycle_refresh =
+            self.refresh_quarantine_manager.awaiting_post_wake_snapshot
+                || self.refresh_quarantine_manager.awaiting_post_session_snapshot;
+
         for wsid in previously_visible_wsids {
             if self.window_manager.is_window_visible(wsid) {
                 continue;
@@ -633,6 +643,15 @@ impl Reactor {
             if let Some(current_space) = inactive_target {
                 self.window_manager.set_window_server_space(wsid, Some(current_space));
                 let _ = self.reassign_window_to_authoritative_space(wid, current_space);
+                continue;
+            }
+
+            if preserve_assignments_for_lifecycle_refresh {
+                debug!(
+                    ?wid,
+                    ?wsid,
+                    "Preserving workspace assignment omitted from lifecycle recovery snapshot"
+                );
                 continue;
             }
 
