@@ -2011,10 +2011,7 @@ impl Reactor {
         if let Some(space) = final_space {
             if self.layout_manager.layout_engine.is_window_floating(wid) {
                 if session.origin_space != final_space {
-                    self.layout_manager
-                        .layout_engine
-                        .virtual_workspace_manager_mut()
-                        .remove_floating_position(wid);
+                    self.layout_manager.layout_engine.remove_floating_position(wid);
                 }
                 if let Some(ws_id) = self
                     .layout_manager
@@ -2023,10 +2020,12 @@ impl Reactor {
                     .workspace_for_window(&self.state.windows, space, wid)
                     .or_else(|| self.layout_manager.layout_engine.active_workspace(space))
                 {
-                    self.layout_manager
-                        .layout_engine
-                        .virtual_workspace_manager_mut()
-                        .store_floating_position(space, ws_id, wid, session.last_frame);
+                    self.layout_manager.layout_engine.store_floating_position(
+                        space,
+                        ws_id,
+                        wid,
+                        session.last_frame,
+                    );
                 }
             }
         }
@@ -2290,19 +2289,16 @@ impl Reactor {
                             window.info.ax_subrole.clone(),
                         )
                     });
-                    self.layout_manager
-                        .layout_engine
-                        .virtual_workspace_manager_mut()
-                        .assign_window_with_app_info(
-                            &mut self.state.windows,
-                            *wid,
-                            space,
-                            app_info.bundle_id.as_deref(),
-                            app_info.localized_name.as_deref(),
-                            window_metadata.as_ref().map(|metadata| metadata.0.as_str()),
-                            window_metadata.as_ref().and_then(|metadata| metadata.1.as_deref()),
-                            window_metadata.as_ref().and_then(|metadata| metadata.2.as_deref()),
-                        )
+                    self.layout_manager.layout_engine.assign_window_with_app_info(
+                        &mut self.state.windows,
+                        *wid,
+                        space,
+                        app_info.bundle_id.as_deref(),
+                        app_info.localized_name.as_deref(),
+                        window_metadata.as_ref().map(|metadata| metadata.0.as_str()),
+                        window_metadata.as_ref().and_then(|metadata| metadata.1.as_deref()),
+                        window_metadata.as_ref().and_then(|metadata| metadata.2.as_deref()),
+                    )
                 };
 
                 match assign_result {

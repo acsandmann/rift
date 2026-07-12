@@ -15,6 +15,4 @@ pub use systems::{
 };
 pub(crate) use workspaces::WorkspaceLayouts;
 
-pub use crate::model::virtual_workspace::{
-    VirtualWorkspaceId, VirtualWorkspaceManager, WorkspaceStats,
-};
+pub use crate::model::virtual_workspace::{VirtualWorkspaceId, WorkspaceStats, WorkspaceStore};

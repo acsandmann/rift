@@ -1079,7 +1079,7 @@ impl WindowStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::virtual_workspace::VirtualWorkspaceManager;
+    use crate::model::virtual_workspace::WorkspaceStore;
 
     #[test]
     fn authoritative_space_only_record_is_not_pruned() {
@@ -1111,7 +1111,7 @@ mod tests {
     fn transfer_persistent_metadata_replaces_existing_target_workspace_assignment() {
         let mut window_store = WindowStore::default();
         let space = SpaceId::new(10);
-        let mut workspaces = VirtualWorkspaceManager::new();
+        let mut workspaces = WorkspaceStore::new();
         let source_workspace = workspaces
             .create_workspace(space, Some("Source".to_string()))
             .expect("source workspace");
@@ -1148,7 +1148,7 @@ mod tests {
         let mut window_store = WindowStore::default();
         let space = SpaceId::new(10);
         let fullscreen_space = SpaceId::new(0x400000000 + space.get());
-        let mut workspaces = VirtualWorkspaceManager::new();
+        let mut workspaces = WorkspaceStore::new();
         let workspace_id =
             workspaces.create_workspace(space, Some("Main".to_string())).expect("workspace");
         let from = WindowId::new(1, 1);
@@ -1393,7 +1393,7 @@ mod tests {
         let mut store = WindowStore::default();
         let wid = WindowId::new(4, 1);
         let wsid = WindowServerId::new(55);
-        let mut workspaces = VirtualWorkspaceManager::new();
+        let mut workspaces = WorkspaceStore::new();
         let workspace_id = workspaces
             .create_workspace(SpaceId::new(9), Some("Cleanup".to_string()))
             .expect("workspace");

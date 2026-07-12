@@ -549,9 +549,11 @@ impl Reactor {
 
     pub(crate) fn serialize_state(&mut self) -> Result<String, serde_json::Error> {
         let layout_engine_ron = self.layout_manager.layout_engine.serialize_to_string();
-        let vwm = self.layout_manager.layout_engine.virtual_workspace_manager_mut();
-
-        let stats = vwm.get_stats(&self.state.windows);
+        let stats = self
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager()
+            .get_stats(&self.state.windows);
         let mut workspace_window_counts = serde_json::Map::new();
         for (ws_id, count) in &stats.workspace_window_counts {
             workspace_window_counts.insert(format!("{:?}", ws_id), serde_json::json!(*count));
@@ -571,18 +573,28 @@ impl Reactor {
 
         for screen in &self.space_state.screens {
             if let Some(space) = screen.space {
-                let workspaces = vwm.list_workspaces(space);
-                let active_ws = vwm.active_workspace(space);
+                let workspaces = self
+                    .layout_manager
+                    .layout_engine
+                    .virtual_workspace_manager_mut()
+                    .list_workspaces(space);
+                let active_ws = self.layout_manager.layout_engine.active_workspace(space);
 
                 let mut ws_entries = Vec::new();
                 for (workspace_id, workspace_name) in workspaces {
                     let window_ids: Vec<crate::actor::app::WindowId> =
-                        vwm.workspace_windows(&self.state.windows, space, workspace_id);
+                        self.state.windows.workspace_windows(space, workspace_id);
 
-                    let last_focused = vwm.last_focused_window(space, workspace_id);
+                    let last_focused = self
+                        .layout_manager
+                        .layout_engine
+                        .virtual_workspace_manager()
+                        .last_focused_window(space, workspace_id);
 
-                    let floating_positions =
-                        vwm.get_workspace_floating_positions(space, workspace_id);
+                    let floating_positions = self
+                        .layout_manager
+                        .layout_engine
+                        .workspace_floating_positions(space, workspace_id);
 
                     ws_entries.push((
                         workspace_id,
@@ -606,8 +618,6 @@ impl Reactor {
         for (window_id, assignment) in self.state.windows.iter_workspace_assignments() {
             mapping_intermediate.push((assignment.space.get(), window_id, assignment.workspace_id));
         }
-
-        let _ = vwm;
 
         let mut included_windows: HashSet<crate::actor::app::WindowId> = HashSet::default();
 

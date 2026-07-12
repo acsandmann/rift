@@ -383,20 +383,16 @@ impl WindowDiscoveryHandler {
         let ax_role = window.info.ax_role.clone();
         let ax_subrole = window.info.ax_subrole.clone();
 
-        reactor
-            .layout_manager
-            .layout_engine
-            .virtual_workspace_manager_mut()
-            .assign_window_with_app_info(
-                &mut reactor.state.windows,
-                wid,
-                space,
-                app_info.as_ref().and_then(|a| a.bundle_id.as_deref()),
-                app_info.as_ref().and_then(|a| a.localized_name.as_deref()),
-                Some(title.as_str()),
-                ax_role.as_deref(),
-                ax_subrole.as_deref(),
-            )
+        reactor.layout_manager.layout_engine.assign_window_with_app_info(
+            &mut reactor.state.windows,
+            wid,
+            space,
+            app_info.as_ref().and_then(|a| a.bundle_id.as_deref()),
+            app_info.as_ref().and_then(|a| a.localized_name.as_deref()),
+            Some(title.as_str()),
+            ax_role.as_deref(),
+            ax_subrole.as_deref(),
+        )
     }
 
     fn apply_assignment_result(

@@ -11,11 +11,11 @@ use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{LayoutMode, LayoutSettings, VirtualWorkspaceSettings};
 use crate::layout_engine::LayoutSystem;
 use crate::layout_engine::systems::WindowLayoutConstraints;
-use crate::model::WindowStore;
 use crate::model::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::model::virtual_workspace::{
-    AppRuleAssignment, AppRuleResult, VirtualWorkspace, VirtualWorkspaceId, VirtualWorkspaceManager,
+    AppRuleAssignment, AppRuleResult, VirtualWorkspace, VirtualWorkspaceId, WorkspaceStore,
 };
+use crate::model::{AppRuleEngine, FloatingPositionStore, WindowRuleContext, WindowStore};
 use crate::sys::screen::SpaceId;
 
 #[derive(Debug, Clone)]
@@ -139,11 +139,14 @@ pub struct EventResponse {
 pub struct LayoutEngine {
     workspace_layouts: WorkspaceLayouts,
     floating: FloatingManager,
+    floating_positions: FloatingPositionStore,
+    #[serde(skip)]
+    app_rules: AppRuleEngine,
     #[serde(skip)]
     focused_window: Option<WindowId>,
     #[serde(skip)]
     window_layout_constraints: HashMap<WindowId, WindowLayoutConstraints>,
-    virtual_workspace_manager: VirtualWorkspaceManager,
+    virtual_workspace_manager: WorkspaceStore,
     #[serde(skip)]
     layout_settings: LayoutSettings,
     #[serde(skip)]
@@ -418,6 +421,7 @@ impl LayoutEngine {
         window_store: &WindowStore,
         settings: &crate::common::config::VirtualWorkspaceSettings,
     ) {
+        self.app_rules = AppRuleEngine::new(&settings.app_rules);
         self.virtual_workspace_manager.update_settings(settings, &self.layout_settings);
 
         // Re-apply workspace layout rules to already-existing workspaces on hot reload.
@@ -973,7 +977,7 @@ impl LayoutEngine {
 
         if !preserve_floating {
             self.virtual_workspace_manager.remove_window(window_store, wid);
-            self.virtual_workspace_manager.remove_floating_position(wid);
+            self.floating_positions.remove_window(wid);
         }
 
         if self.focused_window == Some(wid) {
@@ -1223,6 +1227,7 @@ impl LayoutEngine {
 
         self.workspace_layouts.remap_space(old_space, new_space);
         self.floating.remap_space(old_space, new_space);
+        self.floating_positions.remap_space(old_space, new_space);
         self.virtual_workspace_manager.remap_space(window_store, old_space, new_space);
 
         if let Some(uuid) = self.space_display_map.remove(&old_space) {
@@ -1252,11 +1257,13 @@ impl LayoutEngine {
         broadcast_tx: Option<BroadcastSender>,
     ) -> Self {
         let virtual_workspace_manager =
-            VirtualWorkspaceManager::new_with_config(virtual_workspace_config, layout_settings);
+            WorkspaceStore::new_with_config(virtual_workspace_config, layout_settings);
 
         LayoutEngine {
             workspace_layouts: WorkspaceLayouts::default(),
             floating: FloatingManager::new(),
+            floating_positions: FloatingPositionStore::default(),
+            app_rules: AppRuleEngine::new(&virtual_workspace_config.app_rules),
             focused_window: None,
             window_layout_constraints: HashMap::default(),
             virtual_workspace_manager,
@@ -1352,18 +1359,16 @@ impl LayoutEngine {
                     let ax_subrole_ref = ax_subrole_opt.as_deref();
 
                     let was_floating = self.floating.is_floating(wid);
-                    let assignment = match self
-                        .virtual_workspace_manager
-                        .assign_window_with_app_info(
-                            window_store,
-                            wid,
-                            space,
-                            app_bundle_id,
-                            app_name,
-                            title_ref,
-                            ax_role_ref,
-                            ax_subrole_ref,
-                        ) {
+                    let assignment = match self.assign_window_with_app_info(
+                        window_store,
+                        wid,
+                        space,
+                        app_bundle_id,
+                        app_name,
+                        title_ref,
+                        ax_role_ref,
+                        ax_subrole_ref,
+                    ) {
                         Ok(AppRuleResult::Managed(decision)) => Some(decision),
                         Ok(AppRuleResult::Unmanaged) => None,
                         Err(_) => {
@@ -1434,7 +1439,7 @@ impl LayoutEngine {
                 self.window_layout_constraints.retain(|wid, _| wid.pid != pid);
 
                 self.virtual_workspace_manager.remove_windows_for_app(window_store, pid);
-                self.virtual_workspace_manager.remove_app_floating_positions(pid);
+                self.floating_positions.remove_app(pid);
             }
             LayoutEvent::WindowAdded(space, wid) => {
                 self.debug_tree(space);
@@ -1971,19 +1976,9 @@ impl LayoutEngine {
             let rect = visible.unwrap_or_else(|| center_rect(window_size(wid)));
             positions.insert(wid, rect);
             if store_if_absent {
-                engine.virtual_workspace_manager.store_floating_position_if_absent(
-                    space,
-                    workspace_id,
-                    wid,
-                    rect,
-                );
+                engine.floating_positions.store_if_absent(space, workspace_id, wid, rect);
             } else {
-                engine.virtual_workspace_manager.store_floating_position(
-                    space,
-                    workspace_id,
-                    wid,
-                    rect,
-                );
+                engine.floating_positions.store(space, workspace_id, wid, rect);
             }
         }
 
@@ -2005,9 +2000,8 @@ impl LayoutEngine {
                 }
             }
 
-            let floating_positions = self
-                .virtual_workspace_manager
-                .get_workspace_floating_positions(space, active_workspace_id);
+            let floating_positions =
+                self.floating_positions.workspace_positions(space, active_workspace_id);
             for (window_id, stored_position) in floating_positions {
                 if self.floating.is_floating(window_id)
                     && self.virtual_workspace_manager.workspace_for_window(
@@ -2171,9 +2165,7 @@ impl LayoutEngine {
             }
         }
 
-        let floating_positions = self
-            .virtual_workspace_manager
-            .get_workspace_floating_positions(space, workspace_id);
+        let floating_positions = self.floating_positions.workspace_positions(space, workspace_id);
         for (window_id, stored_position) in floating_positions {
             if self.floating.is_floating(window_id)
                 && self.virtual_workspace_manager.workspace_for_window(
@@ -2461,16 +2453,40 @@ impl LayoutEngine {
         self.switch_to_workspace(window_store, space, workspace_index, Some(focus_window))
     }
 
-    pub fn virtual_workspace_manager(&self) -> &VirtualWorkspaceManager {
-        &self.virtual_workspace_manager
-    }
+    pub fn virtual_workspace_manager(&self) -> &WorkspaceStore { &self.virtual_workspace_manager }
 
-    pub fn virtual_workspace_manager_mut(&mut self) -> &mut VirtualWorkspaceManager {
+    pub fn virtual_workspace_manager_mut(&mut self) -> &mut WorkspaceStore {
         &mut self.virtual_workspace_manager
     }
 
     pub fn active_workspace(&self, space: SpaceId) -> Option<crate::model::VirtualWorkspaceId> {
         self.virtual_workspace_manager.active_workspace(space)
+    }
+
+    pub fn assign_window_with_app_info(
+        &mut self,
+        window_store: &mut WindowStore,
+        window_id: WindowId,
+        space: SpaceId,
+        app_bundle_id: Option<&str>,
+        app_name: Option<&str>,
+        window_title: Option<&str>,
+        ax_role: Option<&str>,
+        ax_subrole: Option<&str>,
+    ) -> Result<AppRuleResult, crate::model::virtual_workspace::WorkspaceError> {
+        let decision = self.app_rules.evaluate(WindowRuleContext {
+            app_bundle_id,
+            app_name,
+            window_title,
+            ax_role,
+            ax_subrole,
+        });
+        self.virtual_workspace_manager.apply_app_rule_decision(
+            window_store,
+            window_id,
+            space,
+            decision,
+        )
     }
 
     pub fn ensure_active_workspace_info(
@@ -2573,7 +2589,7 @@ impl LayoutEngine {
         }
 
         if was_floating {
-            self.virtual_workspace_manager.remove_floating_position(window_id);
+            self.floating_positions.remove_window(window_id);
         }
 
         {
@@ -2661,12 +2677,44 @@ impl LayoutEngine {
         self.floating.is_floating(window_id)
     }
 
+    pub fn store_floating_position(
+        &mut self,
+        space: SpaceId,
+        workspace: VirtualWorkspaceId,
+        window: WindowId,
+        frame: CGRect,
+    ) {
+        self.floating_positions.store(space, workspace, window, frame);
+    }
+
+    pub fn get_floating_position(
+        &self,
+        space: SpaceId,
+        workspace: VirtualWorkspaceId,
+        window: WindowId,
+    ) -> Option<CGRect> {
+        self.floating_positions.get(space, workspace, window)
+    }
+
+    pub fn workspace_floating_positions(
+        &self,
+        space: SpaceId,
+        workspace: VirtualWorkspaceId,
+    ) -> Vec<(WindowId, CGRect)> {
+        self.floating_positions.workspace_positions(space, workspace)
+    }
+
+    pub fn remove_floating_position(&mut self, window: WindowId) {
+        self.floating_positions.remove_window(window);
+    }
+
     pub fn transfer_persistent_window_identity(&mut self, from: WindowId, to: WindowId) {
         if from == to {
             return;
         }
 
         self.virtual_workspace_manager.transfer_window_identity(from, to);
+        self.floating_positions.transfer_window_identity(from, to);
         self.floating.transfer_window_identity(from, to);
         if self.focused_window == Some(from) {
             self.focused_window = Some(to);
@@ -2684,8 +2732,11 @@ impl LayoutEngine {
         space: SpaceId,
         floating_positions: &[(WindowId, CGRect)],
     ) {
-        self.virtual_workspace_manager
-            .store_current_floating_positions(space, floating_positions);
+        if let Some(workspace) = self.active_workspace(space) {
+            for &(window, frame) in floating_positions {
+                self.floating_positions.store(space, workspace, window, frame);
+            }
+        }
     }
 
     fn broadcast_workspace_changed(&self, space_id: SpaceId) {
@@ -3015,12 +3066,7 @@ mod tests {
         engine.remove_window_from_all_tiling_trees(wid);
         engine.floating.add_floating(wid);
         engine.floating.add_active(source_space, pid, wid);
-        engine.virtual_workspace_manager_mut().store_floating_position(
-            source_space,
-            source_workspace,
-            wid,
-            source_position,
-        );
+        engine.store_floating_position(source_space, source_workspace, wid, source_position);
 
         let response = engine.move_window_to_space(
             &mut window_store,
@@ -3040,11 +3086,7 @@ mod tests {
             Some(target_workspace)
         );
         assert_eq!(
-            engine.virtual_workspace_manager().get_floating_position(
-                source_space,
-                source_workspace,
-                wid
-            ),
+            engine.get_floating_position(source_space, source_workspace, wid),
             None,
             "cross-space moves must clear the source workspace's saved floating frame"
         );

@@ -1361,11 +1361,12 @@ fn cross_display_drag_clears_source_floating_position() {
         LayoutCommand::ToggleWindowFloating,
     )));
     assert!(reactor.layout_manager.layout_engine.is_window_floating(wid));
-    reactor
-        .layout_manager
-        .layout_engine
-        .virtual_workspace_manager_mut()
-        .store_floating_position(space1, source_workspace, wid, initial_frame);
+    reactor.layout_manager.layout_engine.store_floating_position(
+        space1,
+        source_workspace,
+        wid,
+        initial_frame,
+    );
 
     let moved_frame = CGRect::new(
         CGPoint::new(screen2.origin.x + 120.0, initial_frame.origin.y),
@@ -1391,7 +1392,6 @@ fn cross_display_drag_clears_source_floating_position() {
         reactor
             .layout_manager
             .layout_engine
-            .virtual_workspace_manager()
             .get_floating_position(space1, source_workspace, wid),
         None,
         "cross-display drags must clear the source workspace's floating position"
@@ -1400,7 +1400,6 @@ fn cross_display_drag_clears_source_floating_position() {
         reactor
             .layout_manager
             .layout_engine
-            .virtual_workspace_manager()
             .get_floating_position(space2, target_workspace, wid),
         Some(moved_frame)
     );
@@ -5390,11 +5389,12 @@ fn wsid_rekey_preserves_floating_membership_and_position() {
         .layout_engine
         .active_workspace(space)
         .expect("active workspace");
-    reactor
-        .layout_manager
-        .layout_engine
-        .virtual_workspace_manager_mut()
-        .store_floating_position(space, active_workspace, old_wid, stored_position);
+    reactor.layout_manager.layout_engine.store_floating_position(
+        space,
+        active_workspace,
+        old_wid,
+        stored_position,
+    );
 
     let old_info = reactor
         .state
@@ -5416,19 +5416,19 @@ fn wsid_rekey_preserves_floating_membership_and_position() {
     assert!(!reactor.layout_manager.layout_engine.is_window_floating(old_wid));
     assert!(reactor.layout_manager.layout_engine.is_window_floating(new_wid));
     assert_eq!(
-        reactor
-            .layout_manager
-            .layout_engine
-            .virtual_workspace_manager()
-            .get_floating_position(space, active_workspace, old_wid),
+        reactor.layout_manager.layout_engine.get_floating_position(
+            space,
+            active_workspace,
+            old_wid
+        ),
         None
     );
     assert_eq!(
-        reactor
-            .layout_manager
-            .layout_engine
-            .virtual_workspace_manager()
-            .get_floating_position(space, active_workspace, new_wid),
+        reactor.layout_manager.layout_engine.get_floating_position(
+            space,
+            active_workspace,
+            new_wid
+        ),
         Some(stored_position)
     );
 }
