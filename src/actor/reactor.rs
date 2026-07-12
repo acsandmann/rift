@@ -188,9 +188,10 @@ pub enum Event {
     /// FIXME: This can be interleaved incorrectly with the MouseState in app
     /// actor events.
     MouseUp,
-    /// The mouse cursor moved over a new window. Only sent if focus-follows-
-    /// mouse is enabled.
-    MouseMoved(#[serde(with = "crate::sys::geometry::CGPointDef")] CGPoint),
+    /// Sent by the event tap only when the cursor enters a different window.
+    /// Window resolution and transition deduplication stay on the input
+    /// thread; the reactor only applies the model-dependent focus/raise work.
+    MouseMoved(WindowServerId),
     /// Forwarded by the spaces actor after wake has been observed.
     ///
     /// The spaces actor is the authority for sleep/lock/display lifecycle.
@@ -261,7 +262,6 @@ pub struct Reactor {
     refresh_quarantine_manager: managers::RefreshQuarantineManager,
     pending_space_change_manager: managers::PendingSpaceChangeManager,
     active_spaces: HashSet<SpaceId>,
-    pub above_window: Option<WindowServerId>,
     pub animation_tx: Option<AnimationSender>,
 }
 
@@ -382,7 +382,6 @@ impl Reactor {
                 pending_space_change: None,
             },
             active_spaces: HashSet::default(),
-            above_window: None,
             animation_tx: None,
         };
         reactor
@@ -810,7 +809,7 @@ impl Reactor {
 
     fn log_event(&self, event: &Event) {
         match event {
-            Event::WindowFrameChanged(..) | Event::MouseUp | Event::MouseMoved(..) => {
+            Event::WindowFrameChanged(..) | Event::MouseUp | Event::MouseMoved(_) => {
                 trace!(?event, "Event")
             }
             _ => debug!(?event, "Event"),
@@ -1086,16 +1085,13 @@ impl Reactor {
             }
             Event::MenuOpened(pid) => SystemEventHandler::handle_menu_opened(self, pid),
             Event::MenuClosed(pid) => SystemEventHandler::handle_menu_closed(self, pid),
-            Event::MouseMoved(point) => {
-                if let Some(wsid) = window_server::get_window_at_point(point) {
-                    window_server::note_windowserver_activity(wsid.as_u32());
-                    if self.above_window != Some(wsid) {
-                        self.above_window = Some(wsid);
-                        WindowEventHandler::handle_mouse_moved_over_window(self, wsid);
-                    }
-                } else {
-                    self.above_window = None;
-                }
+            Event::MouseMoved(wsid) => {
+                WindowEventHandler::handle_mouse_moved_over_window(self, wsid);
+                // Mouse movement has no layout transaction of its own. Any
+                // focus/raise work above queues the real layout event; running
+                // the generic finalization path here would re-check layout
+                // state for every cursor transition.
+                return;
             }
             Event::MissionControlNativeEntered => {
                 SpaceEventHandler::handle_mission_control_native_entered(self);
@@ -1134,7 +1130,6 @@ impl Reactor {
         should_update_notifications: bool,
     ) {
         if let Some(raised_window) = raised_window {
-            self.above_window = None;
             if let Some(space) = self.best_space_for_window_id(raised_window) {
                 self.send_layout_event(LayoutEvent::WindowFocused(space, raised_window));
             }
@@ -2079,10 +2074,10 @@ impl Reactor {
     }
 
     pub fn warp_mouse(&mut self, point: CGPoint) {
-        if let Some(event_tap_tx) = self.communication_manager.event_tap_tx.as_ref() {
-            self.above_window = None;
-            _ = event_tap_tx.send(crate::actor::event_tap::Request::Warp(point));
-        }
+        let Some(event_tap_tx) = self.communication_manager.event_tap_tx.clone() else {
+            return;
+        };
+        _ = event_tap_tx.send(crate::actor::event_tap::Request::Warp(point));
     }
 
     fn warp_mouse_to_space_center(&mut self, space: SpaceId) -> bool {
@@ -2744,10 +2739,6 @@ impl Reactor {
         if let Some(space) = workspace_switch_space {
             self.layout_manager.layout_engine.commit_workspace_focus(space, focus_window);
         }
-        if focus_window.is_some() {
-            self.above_window = None;
-        }
-
         let mut windows_by_app_and_screen = HashMap::default();
         for &wid in &raise_windows {
             windows_by_app_and_screen
@@ -3091,7 +3082,7 @@ impl Reactor {
         }
     }
 
-    fn update_focus_follows_mouse_state(&self) {
+    fn update_focus_follows_mouse_state(&mut self) {
         let should_enable = self.config.settings.focus_follows_mouse
             && matches!(self.menu_manager.menu_state, MenuState::Closed)
             && !self.is_mission_control_active();
