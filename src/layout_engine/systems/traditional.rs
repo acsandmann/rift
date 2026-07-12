@@ -2279,7 +2279,7 @@ impl Layout {
         (min, fixed, max.or(fixed), can_grow)
     }
 
-    fn handle_event(&mut self, map: &NodeMap, event: TreeEvent) {
+    fn handle_event(&mut self, map: &NodeMap, event: TreeEvent, windows: &WindowIndex) {
         match event {
             TreeEvent::AddedToForest(node) => {
                 self.info.insert(node, LayoutInfo::default());
@@ -2294,27 +2294,38 @@ impl Layout {
             }
             TreeEvent::RemovingFromParent(node) => {
                 let parent = node.parent(map).unwrap();
-                let children: Vec<_> =
-                    parent.children(map).filter(|&child| child != node).collect();
-                let total: f32 = children.iter().map(|&child| self.info[child].size.max(0.0)).sum();
+                // Containers are also detached while structural commands reparent their
+                // children (notably `unjoin_windows`). Their size is still the outer share
+                // that must be transferred to the replacement nodes; normalizing the other
+                // siblings here treats that operation as a window removal and loses layout
+                // proportions. Only normalize when an actual window leaf is removed; an empty
+                // container is still being detached during the same structural operation.
+                if windows.at(node).is_some() {
+                    let children: Vec<_> =
+                        parent.children(map).filter(|&child| child != node).collect();
+                    let total: f32 =
+                        children.iter().map(|&child| self.info[child].size.max(0.0)).sum();
 
-                if children.is_empty() {
-                    self.info[parent].total = 0.0;
-                } else if total.is_finite() && total > f32::EPSILON {
-                    // Removing a window must preserve the proportions of the remaining
-                    // siblings. Rebalancing them to 1:1 here loses manual resizes whenever
-                    // discovery briefly removes a window from the tree.
-                    let scale = children.len() as f32 / total;
-                    let child_count = children.len() as f32;
-                    for child in children {
-                        self.info[child].size *= scale;
+                    if children.is_empty() {
+                        self.info[parent].total = 0.0;
+                    } else if total.is_finite() && total > f32::EPSILON {
+                        // Removing a window must preserve the proportions of the remaining
+                        // siblings. Rebalancing them to 1:1 here loses manual resizes whenever
+                        // discovery briefly removes a window from the tree.
+                        let scale = children.len() as f32 / total;
+                        let child_count = children.len() as f32;
+                        for child in children {
+                            self.info[child].size *= scale;
+                        }
+                        self.info[parent].total = child_count;
+                    } else {
+                        for child in children {
+                            self.info[child].size = 1.0;
+                        }
+                        self.info[parent].total = (parent.children(map).count() - 1) as f32;
                     }
-                    self.info[parent].total = child_count;
                 } else {
-                    for child in children {
-                        self.info[child].size = 1.0;
-                    }
-                    self.info[parent].total = (parent.children(map).count() - 1) as f32;
+                    self.info[parent].total -= self.info[node].size;
                 }
             }
             TreeEvent::RemovedFromForest(node) => {
@@ -2852,7 +2863,7 @@ impl Layout {
 impl Components {
     fn dispatch_event(&mut self, map: &NodeMap, event: TreeEvent) {
         self.selection.handle_event(map, event);
-        self.layout.handle_event(map, event);
+        self.layout.handle_event(map, event, &self.window);
         self.window.handle_event(map, event);
     }
 }
@@ -3406,6 +3417,9 @@ mod tests {
             "{}",
             system.draw_tree(layout)
         );
+        let root_children: Vec<_> = root.children(system.map()).collect();
+        assert_eq!(root_children.len(), 3, "{}", system.draw_tree(layout));
+        assert!(root_children.iter().all(|node| system.window_at(*node).is_some()));
     }
 
     #[test]
