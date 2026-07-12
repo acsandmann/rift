@@ -737,6 +737,18 @@ impl EventTap {
                 );
                 let bindings = self.hotkeys.load();
                 if let Some(commands) = bindings.get(&hotkey) {
+                    // A held key generates repeated KeyDown events. Hotkeys
+                    // are press-triggered, so dispatching those repeats can
+                    // execute a command over and over. This is especially
+                    // surprising for workspace_auto_back_and_forth, where
+                    // each repeat toggles back to the other workspace.
+                    let is_repeat = CGEvent::integer_value_field(
+                        Some(event),
+                        CGEventField::KeyboardEventAutorepeat,
+                    ) != 0;
+                    if is_repeat {
+                        return false;
+                    }
                     for cmd in commands {
                         self.wm_sender.send(WmEvent::Command(cmd.clone()));
                     }

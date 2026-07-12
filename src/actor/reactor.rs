@@ -1006,7 +1006,14 @@ impl Reactor {
                 self.clear_menu_state_for_non_owner(pid);
                 if !self.is_login_window_pid(pid) {
                     self.request_visible_windows_for_pid(pid, false);
-                    self.handle_app_activation_workspace_switch(pid);
+                    if self.main_window_tracker.take_global_activation_quiet(pid) == Quiet::No {
+                        self.handle_app_activation_workspace_switch(pid);
+                    } else {
+                        debug!(
+                            pid,
+                            "Skipping auto workspace switch for quiet global activation (initiated by Rift)"
+                        );
+                    }
                 }
             }
             Event::RegisterWmSender(sender) => {

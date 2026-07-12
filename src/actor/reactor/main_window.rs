@@ -88,6 +88,22 @@ impl MainWindowTracker {
             _ => None,
         }
     }
+
+    /// Consume the quiet marker associated with the current global activation.
+    ///
+    /// A workspace switch can raise an app and cause both the app-local
+    /// activation event and the separate global activation notification to be
+    /// delivered. The latter does not carry `Quiet`, so retain the marker from
+    /// the former until the global notification is handled.
+    pub fn take_global_activation_quiet(&mut self, pid: pid_t) -> Quiet {
+        if self.global_frontmost != Some(pid) {
+            return Quiet::No;
+        }
+        self.apps
+            .get_mut(&pid)
+            .map(|app| std::mem::replace(&mut app.frontmost_is_quiet, Quiet::No))
+            .unwrap_or(Quiet::No)
+    }
 }
 
 #[cfg(test)]
