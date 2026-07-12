@@ -17,7 +17,7 @@ impl DragEventHandler {
             reactor.drag_manager.skip_layout_for_window = Some(dragged_wid);
 
             let windows_exist = {
-                let registry = reactor.window_manager.as_ref();
+                let registry = reactor.state.as_ref();
                 registry.contains_window(dragged_wid) && registry.contains_window(target_wid)
             };
             if !windows_exist {
@@ -31,7 +31,7 @@ impl DragEventHandler {
                     reactor.visible_spaces_for_layout(true);
 
                 let swap_space = reactor
-                    .window_manager
+                    .state
                     .window(dragged_wid)
                     .and_then(|w| reactor.best_space_for_window(&w.frame_monotonic, w.info.sys_id))
                     .or_else(|| {
@@ -43,6 +43,7 @@ impl DragEventHandler {
                     })
                     .or_else(|| reactor.space_state.screens.iter().find_map(|s| s.space));
                 let response = reactor.layout_manager.layout_engine.handle_command(
+                    reactor.state.as_mut(),
                     swap_space,
                     &visible_spaces,
                     &visible_space_centers,

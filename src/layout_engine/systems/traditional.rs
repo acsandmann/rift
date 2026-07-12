@@ -2749,25 +2749,15 @@ impl Layout {
                 needs_normalization = true;
             }
         }
-        if !actual_total.is_finite()
+        let normalize_sizes = !actual_total.is_finite()
             || actual_total <= f32::EPSILON
             || needs_normalization
-            || (actual_total - expected_total).abs() > 0.01
-        {
-            unsafe {
-                let info = &mut *(&self.info as *const _
-                    as *mut slotmap::SecondaryMap<NodeId, LayoutInfo>);
-                for &child in &children {
-                    info[child].size = 1.0;
-                }
-                info[node].total = children.len() as f32;
-            }
-        }
-        debug_assert!({
-            let sum_children: f32 = children.iter().map(|c| self.info[*c].size).sum();
-            (sum_children - self.info[node].total).abs() < 0.01
-        });
-        let total = self.info[node].total;
+            || (actual_total - expected_total).abs() > 0.01;
+        let total = if normalize_sizes {
+            expected_total
+        } else {
+            self.info[node].total
+        };
         let inner_gap = if horizontal {
             gaps.inner.horizontal
         } else {
@@ -2807,7 +2797,11 @@ impl Layout {
                     min,
                     fixed,
                     max,
-                    weight: f64::from(self.info[child].size.max(0.0)),
+                    weight: f64::from(if normalize_sizes {
+                        1.0
+                    } else {
+                        self.info[child].size.max(0.0)
+                    }),
                     can_grow,
                 }
             })
@@ -2815,7 +2809,12 @@ impl Layout {
         let seg_lens = solve_axis_lengths(&axis_constraints, usable_axis);
         for (i, &child) in children.iter().enumerate() {
             let fallback = {
-                let ratio = f64::from(self.info[child].size) / f64::from(total);
+                let child_size = if normalize_sizes {
+                    1.0
+                } else {
+                    self.info[child].size
+                };
+                let ratio = f64::from(child_size) / f64::from(total);
                 usable_axis * ratio
             };
             let seg_len = seg_lens.get(i).copied().unwrap_or(fallback.max(0.0));

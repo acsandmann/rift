@@ -263,10 +263,11 @@ impl Reactor {
 
             let workspace_windows_ids: Vec<crate::actor::app::WindowId> =
                 if let Some(space) = space_id {
-                    self.layout_manager
-                        .layout_engine
-                        .virtual_workspace_manager()
-                        .workspace_windows(space, *workspace_id)
+                    self.layout_manager.layout_engine.virtual_workspace_manager().workspace_windows(
+                        self.state.as_ref(),
+                        space,
+                        *workspace_id,
+                    )
                 } else {
                     Vec::new()
                 };
@@ -286,6 +287,7 @@ impl Reactor {
                         let gaps =
                             self.config.settings.layout.gaps.effective_for_display(display_uuid);
                         self.layout_manager.layout_engine.calculate_layout_for_workspace(
+                            self.state.as_ref(),
                             space,
                             *workspace_id,
                             screen.frame,
@@ -438,15 +440,17 @@ impl Reactor {
         let target_space = space_id.or_else(|| self.default_query_space());
 
         if let Some(space) = target_space {
-            let active_windows =
-                self.layout_manager.layout_engine.windows_in_active_workspace(space);
+            let active_windows = self
+                .layout_manager
+                .layout_engine
+                .windows_in_active_workspace(self.state.as_ref(), space);
 
             active_windows
                 .into_iter()
                 .filter_map(|wid| self.create_window_data(wid))
                 .collect()
         } else {
-            self.window_manager
+            self.state
                 .iter_windows()
                 .map(|(wid, _)| wid)
                 .filter_map(|wid| self.create_window_data(wid))
@@ -463,7 +467,7 @@ impl Reactor {
             .apps
             .iter()
             .map(|(&pid, app)| {
-                let window_count = self.window_manager.window_ids_for_pid(pid).count();
+                let window_count = self.state.window_ids_for_pid(pid).count();
 
                 let is_frontmost = self
                     .main_window_tracker
@@ -493,8 +497,10 @@ impl Reactor {
 
         let _active_workspace = self.layout_manager.layout_engine.active_workspace(space_id)?;
 
-        let active_windows =
-            self.layout_manager.layout_engine.windows_in_active_workspace(space_id);
+        let active_windows = self
+            .layout_manager
+            .layout_engine
+            .windows_in_active_workspace(self.state.as_ref(), space_id);
         let floating_windows: Vec<WindowId> = active_windows
             .iter()
             .filter(|&&wid| self.layout_manager.layout_engine.is_window_floating(wid))
@@ -519,7 +525,11 @@ impl Reactor {
     }
 
     fn handle_metrics_query(&self) -> serde_json::Value {
-        let stats = self.layout_manager.layout_engine.virtual_workspace_manager().get_stats();
+        let stats = self
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager()
+            .get_stats(self.state.as_ref());
 
         let workspace_stats: crate::common::collections::HashMap<String, usize> = stats
             .workspace_window_counts
@@ -528,7 +538,7 @@ impl Reactor {
             .collect();
 
         serde_json::json!({
-               "windows_managed": self.window_manager.tracked_window_count(),
+               "windows_managed": self.state.tracked_window_count(),
             "workspaces": stats.total_workspaces,
             "applications": self.app_manager.apps.len(),
             "screens": self.space_state.screens.len(),
@@ -540,7 +550,7 @@ impl Reactor {
         let layout_engine_ron = self.layout_manager.layout_engine.serialize_to_string();
         let vwm = self.layout_manager.layout_engine.virtual_workspace_manager_mut();
 
-        let stats = vwm.get_stats();
+        let stats = vwm.get_stats(self.state.as_ref());
         let mut workspace_window_counts = serde_json::Map::new();
         for (ws_id, count) in &stats.workspace_window_counts {
             workspace_window_counts.insert(format!("{:?}", ws_id), serde_json::json!(*count));
@@ -566,7 +576,7 @@ impl Reactor {
                 let mut ws_entries = Vec::new();
                 for (workspace_id, workspace_name) in workspaces {
                     let window_ids: Vec<crate::actor::app::WindowId> =
-                        vwm.workspace_windows(space, workspace_id);
+                        vwm.workspace_windows(self.state.as_ref(), space, workspace_id);
 
                     let last_focused = vwm.last_focused_window(space, workspace_id);
 
@@ -592,8 +602,7 @@ impl Reactor {
             crate::actor::app::WindowId,
             crate::model::VirtualWorkspaceId,
         )> = Vec::new();
-        let registry = vwm.window_registry();
-        for (window_id, assignment) in registry.get().iter_workspace_assignments() {
+        for (window_id, assignment) in self.state.iter_workspace_assignments() {
             mapping_intermediate.push((assignment.space.get(), window_id, assignment.workspace_id));
         }
 
@@ -683,7 +692,7 @@ impl Reactor {
         }
 
         let known_managed_windows: Vec<serde_json::Value> = self
-            .window_manager
+            .state
             .iter_windows()
             .map(|(wid, _)| wid)
             .filter(|w| !included_windows.contains(w))
@@ -699,9 +708,9 @@ impl Reactor {
 
         let reactor_summary = serde_json::json!({
             "apps": self.app_manager.apps.len(),
-            "managed_windows": self.window_manager.tracked_window_count(),
-            "window_server_info": self.window_manager.window_server_info_count(),
-            "visible_window_server_ids": self.window_manager.visible_window_server_count(),
+            "managed_windows": self.state.tracked_window_count(),
+            "window_server_info": self.state.window_server_info_count(),
+            "visible_window_server_ids": self.state.visible_window_server_count(),
             "screens": self.space_state.screens.len(),
             "known_managed_windows": known_managed_windows,
         });

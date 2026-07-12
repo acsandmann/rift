@@ -1,6 +1,5 @@
 #![allow(stable_features)]
 #![allow(non_upper_case_globals)]
-#![allow(invalid_reference_casting)]
 
 pub mod actor;
 pub mod common;

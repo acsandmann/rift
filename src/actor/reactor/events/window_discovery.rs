@@ -21,16 +21,14 @@ impl WindowDiscoveryHandler {
     ) {
         Self::sync_window_server_id_mapping(reactor, wid, old_sys_id, info.sys_id);
 
-        let was_minimized = reactor
-            .window_manager
-            .window(wid)
-            .is_some_and(|window| window.info.is_minimized);
+        let was_minimized =
+            reactor.state.window(wid).is_some_and(|window| window.info.is_minimized);
         let was_manageable = reactor
-            .window_manager
+            .state
             .window(wid)
             .is_some_and(|window| window.matches_filter(WindowFilter::EffectivelyManageable));
 
-        if let Some(existing) = reactor.window_manager.window_mut(wid) {
+        if let Some(existing) = reactor.state.window_mut(wid) {
             existing.info.title = info.title.clone();
             if info.frame.size.width != 0.0 || info.frame.size.height != 0.0 {
                 existing.frame_monotonic = info.frame;
@@ -58,9 +56,9 @@ impl WindowDiscoveryHandler {
                     info.is_minimized,
                     info.is_standard,
                     info.is_root,
-                    |wsid| reactor.window_manager.get_window_server_info(wsid),
+                    |wsid| reactor.state.get_window_server_info(wsid),
                 );
-                if let Some(existing) = reactor.window_manager.window_mut(wid) {
+                if let Some(existing) = reactor.state.window_mut(wid) {
                     existing.info.is_minimized = info.is_minimized;
                     existing.is_manageable = manageable;
                 }
@@ -80,8 +78,11 @@ impl WindowDiscoveryHandler {
 
     fn should_emit_window_for_space(reactor: &Reactor, space: SpaceId, wid: WindowId) -> bool {
         let engine = &reactor.layout_manager.layout_engine;
-        let assigned_workspace =
-            engine.virtual_workspace_manager().workspace_for_window(space, wid);
+        let assigned_workspace = engine.virtual_workspace_manager().workspace_for_window(
+            reactor.state.as_ref(),
+            space,
+            wid,
+        );
         let active_workspace = engine.active_workspace(space);
 
         match (assigned_workspace, active_workspace) {
@@ -121,22 +122,22 @@ impl WindowDiscoveryHandler {
     ) {
         if old_sys_id != new_sys_id
             && let Some(old_wsid) = old_sys_id
-            && reactor.window_manager.tracked_window_id(old_wsid) == Some(wid)
+            && reactor.state.tracked_window_id(old_wsid) == Some(wid)
         {
-            reactor.window_manager.remove_window_server_state(old_wsid);
+            reactor.state.remove_window_server_state(old_wsid);
         }
 
         if let Some(new_wsid) = new_sys_id {
-            if let Some(previous_wid) = reactor.window_manager.track_window_server_id(new_wsid, wid)
+            if let Some(previous_wid) = reactor.state.track_window_server_id(new_wsid, wid)
                 && previous_wid != wid
             {
-                reactor.window_manager.transfer_persistent_window_metadata(previous_wid, wid);
+                reactor.state.transfer_persistent_window_metadata(previous_wid, wid);
                 reactor
                     .layout_manager
                     .layout_engine
                     .transfer_persistent_window_identity(previous_wid, wid);
                 reactor.send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(previous_wid));
-                reactor.window_manager.remove_window(previous_wid);
+                reactor.state.remove_window(previous_wid);
             }
             Self::retire_native_fullscreen_record_if_window_is_back_on_user_space(
                 reactor, wid, new_wsid,
@@ -149,7 +150,7 @@ impl WindowDiscoveryHandler {
         wid: WindowId,
         wsid: WindowServerId,
     ) {
-        let Some(record) = reactor.window_manager.native_fullscreen_record_for_window(wid) else {
+        let Some(record) = reactor.state.native_fullscreen_record_for_window(wid) else {
             return;
         };
         let Some(current_space) = reactor.resolve_native_space(wsid, None) else {
@@ -161,7 +162,7 @@ impl WindowDiscoveryHandler {
             .or(record.last_known_user_space);
 
         if current_space != record.fullscreen_space && Some(current_space) == target_user_space {
-            let _ = reactor.window_manager.restore_window_from_native_fullscreen(wid);
+            let _ = reactor.state.restore_window_from_native_fullscreen(wid);
         }
     }
 
@@ -181,9 +182,9 @@ impl WindowDiscoveryHandler {
         let has_window_server_visibles_without_ax = {
             let known_visible_set = &known_visible_set;
             reactor
-                .window_manager
+                .state
                 .iter_visible_window_server_ids()
-                .filter_map(|wsid| reactor.window_manager.tracked_window_id(wsid))
+                .filter_map(|wsid| reactor.state.tracked_window_id(wsid))
                 .any(|wid| wid.pid == pid && !known_visible_set.contains(&wid))
         };
         // TODO: Rewrite it
@@ -202,7 +203,7 @@ impl WindowDiscoveryHandler {
         }
 
         let stale_windows = reactor
-            .window_manager
+            .state
             .iter_windows()
             .filter_map(|(wid, state)| {
                 if wid.pid != pid || known_visible_set.contains(&wid) {
@@ -231,7 +232,7 @@ impl WindowDiscoveryHandler {
                 }
 
                 let server_info = reactor
-                    .window_manager
+                    .state
                     .get_window_server_info(ws_id)
                     .or_else(|| window_server::get_window(ws_id));
 
@@ -255,7 +256,7 @@ impl WindowDiscoveryHandler {
                 let too_small =
                     width < MIN_REAL_WINDOW_DIMENSION || height < MIN_REAL_WINDOW_DIMENSION;
                 let ordered_in = window_server::window_is_ordered_in(ws_id);
-                let visible_in_snapshot = reactor.window_manager.is_window_visible(ws_id);
+                let visible_in_snapshot = reactor.state.is_window_visible(ws_id);
 
                 if unsuitable || invalid_layer || too_small || (!ordered_in && !visible_in_snapshot)
                 {
@@ -294,12 +295,11 @@ impl WindowDiscoveryHandler {
 
         let mut new_windows = Vec::new();
 
-        reactor.window_manager.purge_expired(APP_RULE_TTL_MS);
+        reactor.state.purge_expired(APP_RULE_TTL_MS);
 
         let any_recent = new.iter().any(|(_, info)| {
-            info.sys_id.map_or(false, |wsid| {
-                reactor.window_manager.is_wsid_recent(wsid, APP_RULE_TTL_MS)
-            })
+            info.sys_id
+                .map_or(false, |wsid| reactor.state.is_wsid_recent(wsid, APP_RULE_TTL_MS))
         });
 
         if any_recent && app_info.is_none() && !new.is_empty() {
@@ -307,9 +307,9 @@ impl WindowDiscoveryHandler {
             // proceed to emit WindowsOnScreenUpdated so existing mappings are respected
             // without reapplying app rules.
             for (wid, info) in &new {
-                if reactor.window_manager.contains_window(*wid) {
+                if reactor.state.contains_window(*wid) {
                     let old_sys_id =
-                        reactor.window_manager.window(*wid).and_then(|window| window.info.sys_id);
+                        reactor.state.window(*wid).and_then(|window| window.info.sys_id);
                     Self::sync_existing_window_state(reactor, *wid, info, old_sys_id);
                 } else {
                     let mut state: WindowState = WindowState::from((*info).clone());
@@ -318,10 +318,10 @@ impl WindowDiscoveryHandler {
                         state.info.is_minimized,
                         state.info.is_standard,
                         state.info.is_root,
-                        |wsid| reactor.window_manager.get_window_server_info(wsid),
+                        |wsid| reactor.state.get_window_server_info(wsid),
                     );
                     state.is_manageable = manageable;
-                    reactor.window_manager.insert_window(*wid, state);
+                    reactor.state.insert_window(*wid, state);
                 }
                 Self::sync_window_server_id_mapping(reactor, *wid, None, info.sys_id);
             }
@@ -330,9 +330,8 @@ impl WindowDiscoveryHandler {
 
         // Process all new windows
         for (wid, info) in new {
-            if reactor.window_manager.contains_window(wid) {
-                let old_sys_id =
-                    reactor.window_manager.window(wid).and_then(|window| window.info.sys_id);
+            if reactor.state.contains_window(wid) {
+                let old_sys_id = reactor.state.window(wid).and_then(|window| window.info.sys_id);
                 Self::sync_existing_window_state(reactor, wid, &info, old_sys_id);
             } else {
                 Self::sync_window_server_id_mapping(reactor, wid, None, info.sys_id);
@@ -357,10 +356,10 @@ impl WindowDiscoveryHandler {
                 state.info.is_minimized,
                 state.info.is_standard,
                 state.info.is_root,
-                |wsid| reactor.window_manager.get_window_server_info(wsid),
+                |wsid| reactor.state.get_window_server_info(wsid),
             );
             state.is_manageable = manageable;
-            reactor.window_manager.insert_window(wid, state);
+            reactor.state.insert_window(wid, state);
         }
     }
 
@@ -371,7 +370,7 @@ impl WindowDiscoveryHandler {
         space: SpaceId,
         app_info: &Option<AppInfo>,
     ) -> Result<AppRuleResult, WorkspaceError> {
-        let Some(window) = reactor.window_manager.window(wid) else {
+        let Some(window) = reactor.state.window(wid) else {
             return Err(WorkspaceError::AssignmentFailed);
         };
         let title = window.info.title.clone();
@@ -383,6 +382,7 @@ impl WindowDiscoveryHandler {
             .layout_engine
             .virtual_workspace_manager_mut()
             .assign_window_with_app_info(
+                reactor.state.as_mut(),
                 wid,
                 space,
                 app_info.as_ref().and_then(|a| a.bundle_id.as_deref()),
@@ -401,17 +401,20 @@ impl WindowDiscoveryHandler {
     ) {
         match assign_result {
             Ok(AppRuleResult::Managed(_)) => {
-                if let Some(window) = reactor.window_manager.window_mut(wid) {
+                if let Some(window) = reactor.state.window_mut(wid) {
                     window.ignore_app_rule = false;
                 }
             }
             Ok(AppRuleResult::Unmanaged) => {
-                if let Some(window) = reactor.window_manager.window_mut(wid) {
+                if let Some(window) = reactor.state.window_mut(wid) {
                     window.ignore_app_rule = true;
                 }
                 let needs_removal = {
                     let engine = &reactor.layout_manager.layout_engine;
-                    engine.virtual_workspace_manager().workspace_for_window(space, wid).is_some()
+                    engine
+                        .virtual_workspace_manager()
+                        .workspace_for_window(reactor.state.as_ref(), space, wid)
+                        .is_some()
                         || engine.is_window_floating(wid)
                 };
                 if needs_removal {
@@ -428,23 +431,23 @@ impl WindowDiscoveryHandler {
         known_visible: &[WindowId],
         app_info: &Option<AppInfo>,
     ) {
-        if !reactor.window_manager.iter_windows().any(|(wid, _)| wid.pid == pid) {
+        if !reactor.state.iter_windows().any(|(wid, _)| wid.pid == pid) {
             return;
         }
 
         let mut app_windows: BTreeMap<SpaceId, Vec<WindowId>> = BTreeMap::new();
         let mut included: HashSet<WindowId> = HashSet::default();
         let has_visible_window_server_windows = reactor
-            .window_manager
+            .state
             .iter_visible_window_server_ids()
-            .filter_map(|wsid| reactor.window_manager.tracked_window_id(wsid))
+            .filter_map(|wsid| reactor.state.tracked_window_id(wsid))
             .any(|wid| wid.pid == pid && reactor.window_is_standard(wid));
 
         // Collect windows from visible window server IDs
         for wid in reactor
-            .window_manager
+            .state
             .iter_visible_window_server_ids()
-            .filter_map(|wsid| reactor.window_manager.tracked_window_id(wsid))
+            .filter_map(|wsid| reactor.state.tracked_window_id(wsid))
             .filter(|wid| wid.pid == pid)
             .filter(|wid| reactor.window_is_standard(*wid))
         {
@@ -474,7 +477,7 @@ impl WindowDiscoveryHandler {
                 // the current desktop via geometry inference alone.
                 continue;
             }
-            let Some(_state) = reactor.window_manager.window(wid) else {
+            let Some(_state) = reactor.state.window(wid) else {
                 continue;
             };
             let Some(space) = reactor.discovery_space_for_window_id(wid) else {
@@ -535,7 +538,7 @@ impl WindowDiscoveryHandler {
             )> = windows_for_space
                 .iter()
                 .filter_map(|&wid| {
-                    let window = reactor.window_manager.window(wid)?;
+                    let window = reactor.state.window(wid)?;
                     if !window.matches_filter(WindowFilter::EffectivelyManageable) {
                         return None;
                     }

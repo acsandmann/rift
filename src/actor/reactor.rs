@@ -46,6 +46,7 @@ use crate::actor::{self, menu_bar, stack_line};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
 use crate::common::config::Config;
 use crate::layout_engine::{self as layout, Direction, LayoutEngine, LayoutEvent};
+use crate::model::RiftState;
 use crate::model::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy};
 use crate::model::tx_store::WindowTxStore;
@@ -246,7 +247,7 @@ pub struct Reactor {
     pub one_space: bool,
     app_manager: managers::AppManager,
     layout_manager: managers::LayoutManager,
-    window_manager: managers::WindowManager,
+    pub(crate) state: RiftState,
     space_state: ForwardedSpaceState,
     space_activation_policy: SpaceActivationPolicy,
     main_window_tracker: MainWindowTracker,
@@ -318,12 +319,12 @@ impl Reactor {
             Some((tx, store)) => (Some(tx), store),
             None => (None, WindowTxStore::new()),
         };
-        let mut reactor = Reactor {
+        let reactor = Reactor {
             config: config.clone(),
             one_space,
             app_manager: managers::AppManager::new(),
             layout_manager: managers::LayoutManager { layout_engine },
-            window_manager: Box::default(),
+            state: RiftState::default(),
             space_state: ForwardedSpaceState::default(),
             space_activation_policy: SpaceActivationPolicy::new(),
             main_window_tracker: MainWindowTracker::default(),
@@ -384,11 +385,6 @@ impl Reactor {
             active_spaces: HashSet::default(),
             animation_tx: None,
         };
-        reactor
-            .layout_manager
-            .layout_engine
-            .virtual_workspace_manager_mut()
-            .attach_window_registry(reactor.window_manager.as_mut());
         reactor
     }
 
@@ -512,7 +508,7 @@ impl Reactor {
         let activated_set: HashSet<SpaceId> = activated.iter().copied().collect();
         let mut windows_by_pid: HashMap<pid_t, Vec<WindowId>> = HashMap::default();
 
-        for (wid, state) in self.window_manager.iter_windows() {
+        for (wid, state) in self.state.iter_windows() {
             if !state.matches_filter(WindowFilter::Manageable) {
                 continue;
             }
@@ -570,7 +566,7 @@ impl Reactor {
     }
 
     fn has_known_windows_for_active_spaces(&self) -> bool {
-        self.window_manager.iter_windows().any(|(wid, _)| {
+        self.state.iter_windows().any(|(wid, _)| {
             self.authoritative_space_for_window_id(wid)
                 .is_some_and(|space| self.is_space_active(space))
         })
@@ -593,21 +589,21 @@ impl Reactor {
         }
 
         let previously_visible_wsids: Vec<_> =
-            self.window_manager.iter_visible_window_server_ids().collect();
+            self.state.iter_visible_window_server_ids().collect();
         for wsid in previously_visible_wsids {
             if !active_wsids.contains(&wsid) {
-                self.window_manager.mark_window_hidden(wsid);
+                self.state.mark_window_hidden(wsid);
             }
         }
 
         for (wsid, space) in active_windows {
             let space = self.resolve_native_space(wsid, space);
             if let Some(space) = space {
-                self.window_manager.set_window_server_space(wsid, Some(space));
+                self.state.set_window_server_space(wsid, Some(space));
                 self.clear_pending_target_if_confirmed_space(wsid, space);
             }
-            self.window_manager.mark_window_visible(wsid);
-            self.window_manager.clear_window_server_observed(wsid);
+            self.state.mark_window_visible(wsid);
+            self.state.clear_window_server_observed(wsid);
         }
     }
 
@@ -617,10 +613,10 @@ impl Reactor {
         preserve_assignments: bool,
     ) {
         for wsid in previously_visible_wsids {
-            if self.window_manager.is_window_visible(wsid) {
+            if self.state.is_window_visible(wsid) {
                 continue;
             }
-            let Some(wid) = self.window_manager.tracked_window_id(wsid) else {
+            let Some(wid) = self.state.tracked_window_id(wsid) else {
                 continue;
             };
             let Some(space) = self.assigned_space_for_window_id(wid) else {
@@ -646,7 +642,7 @@ impl Reactor {
                 })
                 .filter(|current_space| !self.is_space_active(*current_space));
             if let Some(current_space) = inactive_target {
-                self.window_manager.set_window_server_space(wsid, Some(current_space));
+                self.state.set_window_server_space(wsid, Some(current_space));
                 let _ = self.reassign_window_to_authoritative_space(wid, current_space);
                 continue;
             }
@@ -665,7 +661,7 @@ impl Reactor {
             // native space for it, drop the stale origin-space ownership. Keeping
             // the old assignment lets later discovery/MC refresh rebuild the
             // origin layout from stale workspace state.
-            self.window_manager.set_window_server_space(wsid, None);
+            self.state.set_window_server_space(wsid, None);
             self.send_layout_event(LayoutEvent::WindowRemoved(wid));
         }
     }
@@ -676,7 +672,7 @@ impl Reactor {
         preserve_missing_assignments: bool,
     ) {
         let previously_visible_wsids: Vec<_> =
-            self.window_manager.iter_visible_window_server_ids().collect();
+            self.state.iter_visible_window_server_ids().collect();
         self.refresh_active_space_window_membership(active_windows);
         self.remove_windows_missing_from_active_space_snapshot(
             previously_visible_wsids,
@@ -706,7 +702,7 @@ impl Reactor {
     // }
 
     fn clear_pending_hidden_window_targets(&self) {
-        for (wid, window) in self.window_manager.iter_windows() {
+        for (wid, window) in self.state.iter_windows() {
             if self.hidden_assigned_space_for_window_id(wid).is_none() {
                 continue;
             }
@@ -1196,11 +1192,8 @@ impl Reactor {
         }
 
         if should_update_notifications {
-            let mut ids: Vec<u32> = self
-                .window_manager
-                .iter_tracked_window_server_ids()
-                .map(|wsid| wsid.as_u32())
-                .collect();
+            let mut ids: Vec<u32> =
+                self.state.iter_tracked_window_server_ids().map(|wsid| wsid.as_u32()).collect();
             ids.sort_unstable();
 
             if ids != self.notification_manager.last_sls_notification_ids {
@@ -1213,7 +1206,7 @@ impl Reactor {
     }
 
     fn create_window_data(&self, window_id: WindowId) -> Option<WindowData> {
-        let window_state = self.window_manager.window(window_id)?;
+        let window_state = self.state.window(window_id)?;
         if !window_state.matches_filter(WindowFilter::EffectivelyManageable) {
             return None;
         }
@@ -1237,22 +1230,22 @@ impl Reactor {
     }
 
     fn update_complete_window_server_info(&mut self, ws_info: Vec<WindowServerInfo>) {
-        self.window_manager.clear_visible_windows();
+        self.state.clear_visible_windows();
         self.update_partial_window_server_info(ws_info);
     }
 
     fn update_partial_window_server_info(&mut self, ws_info: Vec<WindowServerInfo>) {
         // Mark visible windows and remove any corresponding observed WSID markers
         // for ids we now have server info for.
-        self.window_manager.set_visible_windows(ws_info.iter().map(|info| info.id));
+        self.state.set_visible_windows(ws_info.iter().map(|info| info.id));
         for info in ws_info.iter() {
             // If we've been observing this server id from SLS callbacks, clear it.
-            self.window_manager.clear_window_server_observed(info.id);
-            self.window_manager.track_window_server_info(*info);
+            self.state.clear_window_server_observed(info.id);
+            self.state.track_window_server_info(*info);
 
-            if let Some(wid) = self.window_manager.tracked_window_id(info.id) {
+            if let Some(wid) = self.state.tracked_window_id(info.id) {
                 let (server_id, is_minimized, is_ax_standard, is_ax_root, was_manageable) =
-                    if let Some(window) = self.window_manager.window_mut(wid) {
+                    if let Some(window) = self.state.window_mut(wid) {
                         if info.layer == 0 {
                             window.frame_monotonic = info.frame;
                         }
@@ -1271,9 +1264,9 @@ impl Reactor {
                     is_minimized,
                     is_ax_standard,
                     is_ax_root,
-                    |wsid| self.window_manager.get_window_server_info(wsid),
+                    |wsid| self.state.get_window_server_info(wsid),
                 );
-                if let Some(window) = self.window_manager.window_mut(wid) {
+                if let Some(window) = self.state.window_mut(wid) {
                     window.is_manageable = manageable;
                 }
                 self.remove_window_if_manageability_lost(wid, was_manageable, manageable);
@@ -1346,7 +1339,7 @@ impl Reactor {
 
         for space in refresh_spaces {
             let records: Vec<_> = self
-                .window_manager
+                .state
                 .iter_native_fullscreen_records()
                 .filter(|record| {
                     record.last_known_user_space == Some(space)
@@ -1359,9 +1352,7 @@ impl Reactor {
             }
 
             for record in records {
-                let _ = self
-                    .window_manager
-                    .restore_window_from_native_fullscreen(record.current_window_id);
+                let _ = self.state.restore_window_from_native_fullscreen(record.current_window_id);
 
                 if let Some(app) = self.app_manager.apps.get(&record.current_window_id.pid) {
                     if let Err(e) = app.handle.send(Request::GetVisibleWindows) {
@@ -1374,9 +1365,9 @@ impl Reactor {
 
                 let live_window_id = record
                     .window_server_id
-                    .and_then(|wsid| self.window_manager.tracked_window_id(wsid))
+                    .and_then(|wsid| self.state.tracked_window_id(wsid))
                     .or_else(|| {
-                        self.window_manager
+                        self.state
                             .contains_window(record.current_window_id)
                             .then_some(record.current_window_id)
                     });
@@ -1398,6 +1389,7 @@ impl Reactor {
                         .unwrap_or_else(|| CGSize::new(0.0, 0.0));
 
                     let response = self.layout_manager.layout_engine.move_window_to_space(
+                        self.state.as_mut(),
                         source_space,
                         target_space,
                         target_screen_size,
@@ -1506,7 +1498,7 @@ impl Reactor {
             return;
         }
 
-        let (is_manageable, wsid) = match self.window_manager.window(window_id) {
+        let (is_manageable, wsid) = match self.state.window(window_id) {
             Some(window_state) => (
                 window_state.matches_filter(WindowFilter::Manageable),
                 window_state.info.sys_id,
@@ -1524,7 +1516,7 @@ impl Reactor {
         };
 
         if let Some(window_server_id) = wsid {
-            self.window_manager.mark_wsids_recent(std::iter::once(window_server_id));
+            self.state.mark_wsids_recent(std::iter::once(window_server_id));
         }
 
         self.process_windows_for_app_rules(window_id.pid, vec![window_id], app_info);
@@ -1604,7 +1596,7 @@ impl Reactor {
         let needs_new_session =
             self.get_active_drag_session().map_or(true, |session| session.window != wid);
         if needs_new_session {
-            let server_id = self.window_manager.window(wid).and_then(|window| window.info.sys_id);
+            let server_id = self.state.window(wid).and_then(|window| window.info.sys_id);
             let origin_space = self.best_space_for_window(frame, server_id);
             let session = DragSession {
                 window: wid,
@@ -1644,8 +1636,7 @@ impl Reactor {
     }
 
     fn resolve_drag_space(&self, session: &DragSession, frame: &CGRect) -> Option<SpaceId> {
-        let server_id =
-            self.window_manager.window(session.window).and_then(|window| window.info.sys_id);
+        let server_id = self.state.window(session.window).and_then(|window| window.info.sys_id);
         if frame.area() <= 0.0 {
             return session
                 .settled_space
@@ -1667,7 +1658,7 @@ impl Reactor {
         _frame: &CGRect,
     ) -> Option<SpaceId> {
         let wsid = window_server_id?;
-        let wid = self.window_manager.tracked_window_id(wsid)?;
+        let wid = self.state.tracked_window_id(wsid)?;
         let assigned_space = self.assigned_space_for_window_id(wid)?;
         if !self.is_space_active(assigned_space)
             || !self.window_in_non_active_workspace(assigned_space, wid)
@@ -1679,7 +1670,7 @@ impl Reactor {
     }
 
     fn hidden_assigned_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
-        let window = self.window_manager.window(wid)?;
+        let window = self.state.window(wid)?;
         self.hidden_assigned_space_for_frame(window.info.sys_id, &window.frame_monotonic)
     }
 
@@ -1687,12 +1678,12 @@ impl Reactor {
         self.layout_manager
             .layout_engine
             .virtual_workspace_manager()
-            .workspace_info_for_window_any(wid)
+            .workspace_info_for_window_any(self.state.as_ref(), wid)
             .map(|info| info.space)
     }
 
     fn pending_target_space_for_window_server_id(&self, wsid: WindowServerId) -> Option<SpaceId> {
-        let wid = self.window_manager.tracked_window_id(wsid)?;
+        let wid = self.state.tracked_window_id(wsid)?;
         let target_frame = self.transaction_manager.get_target_frame(wsid)?;
         let assigned_space = self.assigned_space_for_window_id(wid)?;
         let target_space = self
@@ -1738,7 +1729,7 @@ impl Reactor {
         // if a window is not query-manageable, remove any stale layout/workspace
         // membership instead of re-assigning it from the WindowServer snapshot.
         if !self
-            .window_manager
+            .state
             .window(wid)
             .is_some_and(|window| window.matches_filter(WindowFilter::EffectivelyManageable))
         {
@@ -1764,7 +1755,11 @@ impl Reactor {
             self.layout_manager
                 .layout_engine
                 .virtual_workspace_manager_mut()
-                .assign_window_to_workspace_preserving_ordinal(authoritative_space, wid)
+                .assign_window_to_workspace_preserving_ordinal(
+                    self.state.as_mut(),
+                    authoritative_space,
+                    wid,
+                )
                 .is_some()
         } else {
             let Some(target_workspace) = self
@@ -1782,7 +1777,12 @@ impl Reactor {
             self.layout_manager
                 .layout_engine
                 .virtual_workspace_manager_mut()
-                .assign_window_to_workspace(authoritative_space, wid, target_workspace)
+                .assign_window_to_workspace(
+                    self.state.as_mut(),
+                    authoritative_space,
+                    wid,
+                    target_workspace,
+                )
         };
         if !assigned {
             return assigned_space.is_some_and(|space| self.is_space_active(space));
@@ -1803,7 +1803,7 @@ impl Reactor {
             return false;
         }
 
-        let Some(window) = self.window_manager.window(wid) else {
+        let Some(window) = self.state.window(wid) else {
             return false;
         };
         // Same invariant as `reassign_window_to_authoritative_space`: a visible
@@ -1817,7 +1817,7 @@ impl Reactor {
         let Some(wsid) = window.info.sys_id else {
             return false;
         };
-        if !self.window_manager.is_window_visible(wsid) {
+        if !self.state.is_window_visible(wsid) {
             return false;
         }
 
@@ -1832,7 +1832,7 @@ impl Reactor {
             return false;
         }
 
-        let windows: Vec<_> = self.window_manager.iter_windows().map(|(wid, _)| wid).collect();
+        let windows: Vec<_> = self.state.iter_windows().map(|(wid, _)| wid).collect();
         let mut layout_changed = false;
 
         for wid in windows {
@@ -1846,7 +1846,7 @@ impl Reactor {
     }
 
     fn current_reported_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
-        self.window_manager
+        self.state
             .window(wid)
             .and_then(|window| window.info.sys_id)
             .and_then(|wsid| self.resolve_native_space(wsid, None))
@@ -1879,7 +1879,7 @@ impl Reactor {
     ) -> Option<SpaceId> {
         let pending = self.pending_target_space_for_window_server_id(wsid);
         let live = window_server::window_space(wsid);
-        let prior = self.window_manager.window_server_space(wsid);
+        let prior = self.state.window_server_space(wsid);
 
         match (observation, pending) {
             (Some(observed), Some(target)) if observed != target => {
@@ -1896,7 +1896,7 @@ impl Reactor {
 
     fn best_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
         self.authoritative_space_for_window_id(wid).or_else(|| {
-            self.window_manager
+            self.state
                 .window(wid)
                 .and_then(|window| self.best_space_for_window_state(window))
         })
@@ -1908,7 +1908,7 @@ impl Reactor {
     }
 
     fn discovery_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
-        let window = self.window_manager.window(wid)?;
+        let window = self.state.window(wid)?;
         let authoritative = self.authoritative_space_for_window_id(wid);
         if let Some(space) = authoritative {
             return Some(space);
@@ -1942,7 +1942,7 @@ impl Reactor {
     }
 
     fn is_known_fullscreen_window(&self, wsid: WindowServerId) -> bool {
-        self.window_manager.is_window_server_id_native_fullscreen_suspended(wsid)
+        self.state.is_window_server_id_native_fullscreen_suspended(wsid)
     }
 
     fn finalize_active_drag(&mut self) -> bool {
@@ -1966,18 +1966,16 @@ impl Reactor {
                 self.send_layout_event(LayoutEvent::WindowRemoved(wid));
             }
             if let Some(space) = final_space {
-                if let Some(wsid) =
-                    self.window_manager.window(wid).and_then(|window| window.info.sys_id)
-                {
-                    self.window_manager.set_window_server_space(wsid, Some(space));
-                    self.window_manager.mark_window_visible(wsid);
+                if let Some(wsid) = self.state.window(wid).and_then(|window| window.info.sys_id) {
+                    self.state.set_window_server_space(wsid, Some(space));
+                    self.state.mark_window_visible(wsid);
                 }
                 if let Some(active_ws) = self.layout_manager.layout_engine.active_workspace(space) {
                     let assigned = self
                         .layout_manager
                         .layout_engine
                         .virtual_workspace_manager_mut()
-                        .assign_window_to_workspace(space, wid, active_ws);
+                        .assign_window_to_workspace(self.state.as_mut(), space, wid, active_ws);
                     if !assigned {
                         warn!("Failed to assign window {:?} to workspace {:?}", wid, active_ws);
                     }
@@ -2005,7 +2003,7 @@ impl Reactor {
                     .layout_manager
                     .layout_engine
                     .virtual_workspace_manager()
-                    .workspace_for_window(space, wid)
+                    .workspace_for_window(self.state.as_ref(), space, wid)
                     .or_else(|| self.layout_manager.layout_engine.active_workspace(space))
                 {
                     self.layout_manager
@@ -2018,25 +2016,24 @@ impl Reactor {
 
         if session.origin_space != final_space
             && let Some(target_space) = final_space
-            && let Some(wsid) =
-                self.window_manager.window(wid).and_then(|window| window.info.sys_id)
+            && let Some(wsid) = self.state.window(wid).and_then(|window| window.info.sys_id)
         {
-            self.window_manager.set_window_server_space(wsid, Some(target_space));
-            self.window_manager.mark_window_visible(wsid);
+            self.state.set_window_server_space(wsid, Some(target_space));
+            self.state.mark_window_visible(wsid);
         }
 
         needs_layout
     }
 
     fn window_center_on_known_screen(&self, wid: WindowId) -> Option<CGPoint> {
-        let window_center = self.window_manager.window(wid)?.frame_monotonic.mid();
+        let window_center = self.state.window(wid)?.frame_monotonic.mid();
         self.screen_for_point(window_center).map(|_| window_center)
     }
 
     fn has_visible_window_server_ids_for_pid(&self, pid: pid_t) -> bool {
-        self.window_manager.iter_visible_window_server_ids().any(|wsid| {
-            self.window_manager.tracked_window_id(wsid).is_some_and(|wid| wid.pid == pid)
-        })
+        self.state
+            .iter_visible_window_server_ids()
+            .any(|wsid| self.state.tracked_window_id(wsid).is_some_and(|wid| wid.pid == pid))
     }
 
     pub fn warp_mouse(&mut self, point: CGPoint) {
@@ -2094,7 +2091,7 @@ impl Reactor {
     }
 
     fn window_is_standard(&self, id: WindowId) -> bool {
-        self.window_manager
+        self.state
             .window(id)
             .is_some_and(|window| window.matches_filter(WindowFilter::EffectivelyManageable))
     }
@@ -2128,7 +2125,7 @@ impl Reactor {
 
     fn send_layout_event(&mut self, event: LayoutEvent) {
         let event_clone = event.clone();
-        let response = self.layout_manager.layout_engine.handle_event(event);
+        let response = self.layout_manager.layout_engine.handle_event(self.state.as_mut(), event);
         self.prepare_refocus_after_layout_event(&event_clone);
         self.handle_layout_response(response, None);
         for space in self.space_state.iter_known_spaces() {
@@ -2139,7 +2136,7 @@ impl Reactor {
     // Returns true if the window should be raised on mouse over considering
     // active workspace membership and potential occlusion of floating windows above it.
     pub(crate) fn should_raise_on_mouse_over(&self, wid: WindowId) -> bool {
-        let Some(window) = self.window_manager.window(wid) else {
+        let Some(window) = self.state.window(wid) else {
             return false;
         };
 
@@ -2163,7 +2160,11 @@ impl Reactor {
             return false;
         }
 
-        if !self.layout_manager.layout_engine.is_window_in_active_workspace(space, wid) {
+        if !self.layout_manager.layout_engine.is_window_in_active_workspace(
+            self.state.as_ref(),
+            space,
+            wid,
+        ) {
             trace!("Ignoring mouse over window {:?} - not in active workspace", wid);
             return false;
         }
@@ -2186,7 +2187,7 @@ impl Reactor {
             }
 
             let above_wsid = WindowServerId::new(above_u32);
-            let Some(above_wid) = self.window_manager.tracked_window_id(above_wsid) else {
+            let Some(above_wid) = self.state.tracked_window_id(above_wsid) else {
                 continue;
             };
 
@@ -2194,7 +2195,7 @@ impl Reactor {
                 continue;
             }
 
-            let Some(above_state) = self.window_manager.window(above_wid) else {
+            let Some(above_state) = self.state.window(above_wid) else {
                 continue;
             };
             let above_frame = above_state.frame_monotonic;
@@ -2228,7 +2229,7 @@ impl Reactor {
 
         let mut windows_by_space: BTreeMap<SpaceId, Vec<WindowId>> = BTreeMap::new();
         for &wid in &window_ids {
-            let Some(state) = self.window_manager.window(wid) else {
+            let Some(state) = self.state.window(wid) else {
                 continue;
             };
             if !state.matches_filter(WindowFilter::Manageable) {
@@ -2252,34 +2253,41 @@ impl Reactor {
                     (
                         engine
                             .virtual_workspace_manager()
-                            .workspace_for_window(space, *wid)
+                            .workspace_for_window(self.state.as_ref(), space, *wid)
                             .is_some(),
                         engine.is_window_floating(*wid),
-                        self.window_manager
+                        self.state
                             .window(*wid)
                             .map(|window| window.ignore_app_rule)
                             .unwrap_or(false),
                     )
                 };
                 let assign_result = {
-                    let window = self.window_manager.window(*wid);
+                    let window_metadata = self.state.window(*wid).map(|window| {
+                        (
+                            window.info.title.clone(),
+                            window.info.ax_role.clone(),
+                            window.info.ax_subrole.clone(),
+                        )
+                    });
                     self.layout_manager
                         .layout_engine
                         .virtual_workspace_manager_mut()
                         .assign_window_with_app_info(
+                            self.state.as_mut(),
                             *wid,
                             space,
                             app_info.bundle_id.as_deref(),
                             app_info.localized_name.as_deref(),
-                            window.map(|w| w.info.title.as_str()),
-                            window.and_then(|w| w.info.ax_role.as_deref()),
-                            window.and_then(|w| w.info.ax_subrole.as_deref()),
+                            window_metadata.as_ref().map(|metadata| metadata.0.as_str()),
+                            window_metadata.as_ref().and_then(|metadata| metadata.1.as_deref()),
+                            window_metadata.as_ref().and_then(|metadata| metadata.2.as_deref()),
                         )
                 };
 
                 match assign_result {
                     Ok(AppRuleResult::Managed(assignment)) => {
-                        if let Some(window) = self.window_manager.window_mut(*wid) {
+                        if let Some(window) = self.state.window_mut(*wid) {
                             window.ignore_app_rule = false;
                         }
 
@@ -2292,7 +2300,7 @@ impl Reactor {
                         }
                     }
                     Ok(AppRuleResult::Unmanaged) => {
-                        if let Some(window) = self.window_manager.window_mut(*wid) {
+                        if let Some(window) = self.state.window_mut(*wid) {
                             window.ignore_app_rule = true;
                         }
 
@@ -2300,7 +2308,7 @@ impl Reactor {
                             let engine = &self.layout_manager.layout_engine;
                             engine
                                 .virtual_workspace_manager()
-                                .workspace_for_window(space, *wid)
+                                .workspace_for_window(self.state.as_ref(), space, *wid)
                                 .is_some()
                                 || engine.is_window_floating(*wid)
                         };
@@ -2310,7 +2318,7 @@ impl Reactor {
                     }
                     Err(e) => {
                         warn!("Failed to assign window {:?} to workspace: {:?}", wid, e);
-                        if let Some(window) = self.window_manager.window_mut(*wid) {
+                        if let Some(window) = self.state.window_mut(*wid) {
                             window.ignore_app_rule = false;
                         }
 
@@ -2337,7 +2345,7 @@ impl Reactor {
             )> = windows_needing_layout_refresh
                 .iter()
                 .map(|&wid| {
-                    let window = self.window_manager.window(wid);
+                    let window = self.state.window(wid);
                     let title_opt = window.map(|w| w.info.title.clone());
                     let ax_role = window.and_then(|w| w.info.ax_role.clone());
                     let ax_subrole = window.and_then(|w| w.info.ax_subrole.clone());
@@ -2409,28 +2417,26 @@ impl Reactor {
         }
 
         let visible_spaces: HashSet<SpaceId> = self.iter_active_spaces().collect();
-        let app_is_on_visible_workspace =
-            self.window_manager.iter_windows().any(|(wid, _window_state)| {
-                if wid.pid != pid {
-                    return false;
-                }
-                let Some(space) = self.best_space_for_window_id(wid) else {
-                    return false;
-                };
-                if !visible_spaces.contains(&space) {
-                    return false;
-                }
-                let Some(active_workspace) =
-                    self.layout_manager.layout_engine.active_workspace(space)
-                else {
-                    return false;
-                };
-                self.layout_manager
-                    .layout_engine
-                    .virtual_workspace_manager()
-                    .workspace_for_window(space, wid)
-                    .is_some_and(|window_workspace| window_workspace == active_workspace)
-            });
+        let app_is_on_visible_workspace = self.state.iter_windows().any(|(wid, _window_state)| {
+            if wid.pid != pid {
+                return false;
+            }
+            let Some(space) = self.best_space_for_window_id(wid) else {
+                return false;
+            };
+            if !visible_spaces.contains(&space) {
+                return false;
+            }
+            let Some(active_workspace) = self.layout_manager.layout_engine.active_workspace(space)
+            else {
+                return false;
+            };
+            self.layout_manager
+                .layout_engine
+                .virtual_workspace_manager()
+                .workspace_for_window(self.state.as_ref(), space, wid)
+                .is_some_and(|window_workspace| window_workspace == active_workspace)
+        });
 
         if app_is_on_visible_workspace {
             debug!("App {} is already on a visible workspace, not switching.", pid);
@@ -2462,9 +2468,7 @@ impl Reactor {
             .main_window()
             .filter(|wid| wid.pid == pid && self.window_is_standard(*wid))
             .or_else(|| {
-                self.window_manager
-                    .window_ids_for_pid(pid)
-                    .find(|wid| self.window_is_standard(*wid))
+                self.state.window_ids_for_pid(pid).find(|wid| self.window_is_standard(*wid))
             });
 
         let Some(app_window_id) = app_window else {
@@ -2486,7 +2490,7 @@ impl Reactor {
     ) {
         let workspace_state = self.layout_manager.layout_engine.virtual_workspace_manager();
         let Some(window_workspace) =
-            workspace_state.workspace_for_window(window_space, app_window_id)
+            workspace_state.workspace_for_window(self.state.as_ref(), window_space, app_window_id)
         else {
             return;
         };
@@ -2516,6 +2520,7 @@ impl Reactor {
                     .start_workspace_switch(WorkspaceSwitchOrigin::Auto);
 
                 let response = self.layout_manager.layout_engine.switch_to_workspace_with_focus(
+                    self.state.as_ref(),
                     window_space,
                     workspace_index,
                     app_window_id,
@@ -2582,10 +2587,11 @@ impl Reactor {
             if let Some(cmd) = cmd {
                 let space = workspace_switch_space.or_else(|| self.command_context_space());
                 if let Some(space) = space {
-                    let resp = self
-                        .layout_manager
-                        .layout_engine
-                        .handle_virtual_workspace_command(space, &cmd);
+                    let resp = self.layout_manager.layout_engine.handle_virtual_workspace_command(
+                        self.state.as_mut(),
+                        space,
+                        &cmd,
+                    );
 
                     if self.config.settings.gestures.haptics_enabled {
                         let _ = crate::sys::haptics::perform_haptic(
@@ -2622,7 +2628,7 @@ impl Reactor {
                         .map(|space| {
                             self.layout_manager
                                 .layout_engine
-                                .windows_in_active_workspace(space)
+                                .windows_in_active_workspace(self.state.as_ref(), space)
                                 .is_empty()
                         })
                         .unwrap_or(false);
@@ -2650,10 +2656,10 @@ impl Reactor {
         };
 
         if let Some(wid) = focus_window
-            && let Some(state) = self.window_manager.window(wid)
+            && let Some(state) = self.state.window(wid)
             && let Some(wsid) = state.info.sys_id
         {
-            let is_visible = self.window_manager.is_window_visible(wsid);
+            let is_visible = self.state.is_window_visible(wsid);
             let best_space = self.best_space_for_window_state(state);
             if !is_visible {
                 focus_window = None;
@@ -2703,7 +2709,11 @@ impl Reactor {
             .collect();
         let focus_window = focus_window.filter(|wid| self.is_window_on_active_space(*wid));
         if let Some(space) = workspace_switch_space {
-            self.layout_manager.layout_engine.commit_workspace_focus(space, focus_window);
+            self.layout_manager.layout_engine.commit_workspace_focus(
+                self.state.as_mut(),
+                space,
+                focus_window,
+            );
         }
         let mut windows_by_app_and_screen = HashMap::default();
         for &wid in &raise_windows {
@@ -2746,7 +2756,7 @@ impl Reactor {
         wid: WindowId,
         space: SpaceId,
     ) -> Vec<(WindowId, CGRect)> {
-        self.window_manager
+        self.state
             .iter_windows()
             .filter_map(|(other_wid, other_state)| {
                 if other_wid == wid {
@@ -2754,10 +2764,11 @@ impl Reactor {
                 }
                 let other_space = self.best_space_for_window_state(other_state)?;
                 if other_space != space
-                    || !self
-                        .layout_manager
-                        .layout_engine
-                        .is_window_in_active_workspace(space, other_wid)
+                    || !self.layout_manager.layout_engine.is_window_in_active_workspace(
+                        self.state.as_ref(),
+                        space,
+                        other_wid,
+                    )
                     || self.layout_manager.layout_engine.is_window_floating(other_wid)
                 {
                     return None;
@@ -2774,7 +2785,7 @@ impl Reactor {
         }
 
         let server_id = {
-            let Some(window) = self.window_manager.window(wid) else {
+            let Some(window) = self.state.window(wid) else {
                 return;
             };
             window.info.sys_id
@@ -2822,7 +2833,11 @@ impl Reactor {
             return;
         }
 
-        if !self.layout_manager.layout_engine.is_window_in_active_workspace(space, wid) {
+        if !self.layout_manager.layout_engine.is_window_in_active_workspace(
+            self.state.as_ref(),
+            space,
+            wid,
+        ) {
             return;
         }
 
@@ -2890,13 +2905,13 @@ impl Reactor {
 
     fn tracked_window_under_cursor(&self) -> Option<(WindowServerId, WindowId)> {
         let wsid = self.window_server_id_under_cursor()?;
-        let wid = self.window_manager.tracked_window_id(wsid)?;
+        let wid = self.state.tracked_window_id(wsid)?;
         Some((wsid, wid))
     }
 
     fn activation_from_unmanageable_window(&self, pid: pid_t) -> Option<WindowServerId> {
         let (wsid, wid) = self.tracked_window_under_cursor()?;
-        let window = self.window_manager.window(wid)?;
+        let window = self.state.window(wid)?;
         (wid.pid == pid && !window.matches_filter(WindowFilter::EffectivelyManageable))
             .then_some(wsid)
     }
@@ -2905,12 +2920,12 @@ impl Reactor {
         let Some(wsid) = self.window_server_id_under_cursor() else {
             return false;
         };
-        if self.window_manager.tracked_window_id(wsid).is_some() {
+        if self.state.tracked_window_id(wsid).is_some() {
             return false;
         }
 
         let window_info = self
-            .window_manager
+            .state
             .get_window_server_info(wsid)
             .or_else(|| window_server::get_window(wsid));
 
@@ -2925,16 +2940,12 @@ impl Reactor {
             .layout_engine
             .virtual_workspace_manager()
             .last_focused_window(space, active_workspace)?;
-        let window = self.window_manager.window(wid)?;
+        let window = self.state.window(wid)?;
 
         if self.best_space_for_window_id(wid)? != space {
             return None;
         }
-        if window
-            .info
-            .sys_id
-            .is_some_and(|wsid| !self.window_manager.is_window_visible(wsid))
-        {
+        if window.info.sys_id.is_some_and(|wsid| !self.state.is_window_visible(wsid)) {
             return None;
         }
         Some(wid)
@@ -2946,15 +2957,19 @@ impl Reactor {
         preferred: Option<WindowId>,
     ) -> Option<WindowId> {
         let is_visible_in_space = |wid: WindowId| {
-            let Some(window) = self.window_manager.window(wid) else {
+            let Some(window) = self.state.window(wid) else {
                 return false;
             };
             let Some(wsid) = window.info.sys_id else {
                 return false;
             };
-            self.window_manager.is_window_visible(wsid)
+            self.state.is_window_visible(wsid)
                 && self.best_space_for_window_id(wid) == Some(space)
-                && self.layout_manager.layout_engine.is_window_in_active_workspace(space, wid)
+                && self.layout_manager.layout_engine.is_window_in_active_workspace(
+                    self.state.as_ref(),
+                    space,
+                    wid,
+                )
         };
 
         if let Some(wid) = preferred.filter(|wid| is_visible_in_space(*wid)) {
@@ -2969,7 +2984,7 @@ impl Reactor {
 
         self.layout_manager
             .layout_engine
-            .windows_in_active_workspace(space)
+            .windows_in_active_workspace(self.state.as_ref(), space)
             .into_iter()
             .find(|wid| is_visible_in_space(*wid))
     }
@@ -2988,7 +3003,7 @@ impl Reactor {
         self.layout_manager
             .layout_engine
             .virtual_workspace_manager()
-            .workspace_for_window(space, window_id)
+            .workspace_for_window(self.state.as_ref(), space, window_id)
             .is_some_and(|window_workspace| window_workspace != active_workspace)
     }
 
@@ -3318,13 +3333,11 @@ impl Reactor {
         let floating_windows_in_workspace = self
             .layout_manager
             .layout_engine
-            .windows_in_active_workspace(space)
+            .windows_in_active_workspace(self.state.as_ref(), space)
             .into_iter()
             .filter(|&wid| self.layout_manager.layout_engine.is_window_floating(wid))
             .filter_map(|wid| {
-                self.window_manager
-                    .window(wid)
-                    .map(|window_state| (wid, window_state.frame_monotonic))
+                self.state.window(wid).map(|window_state| (wid, window_state.frame_monotonic))
             })
             .collect::<Vec<_>>();
 

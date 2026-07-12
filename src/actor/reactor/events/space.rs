@@ -122,7 +122,11 @@ impl SpaceEventHandler {
         }
 
         for (previous_space, space) in space_remaps {
-            reactor.layout_manager.layout_engine.remap_space(previous_space, space);
+            reactor.layout_manager.layout_engine.remap_space(
+                reactor.state.as_mut(),
+                previous_space,
+                space,
+            );
         }
         for screen in &reactor.space_state.screens {
             let (Some(space), Some(display_uuid)) = (screen.space, screen.display_uuid_opt())
@@ -187,15 +191,14 @@ impl SpaceEventHandler {
     ) {
         if matches!(kind, SpaceEventKind::Fullscreen) {
             let mut layout_changed = false;
-            let (_pid, window_id) =
-                if let Some(wid) = reactor.window_manager.tracked_window_id(wsid) {
-                    (wid.pid, Some(wid))
-                } else if let Some(info) = reactor.window_manager.get_window_server_info(wsid) {
-                    (info.pid, None)
-                } else {
-                    // We don't know who owned this fullscreen window.
-                    return;
-                };
+            let (_pid, window_id) = if let Some(wid) = reactor.state.tracked_window_id(wsid) {
+                (wid.pid, Some(wid))
+            } else if let Some(info) = reactor.state.get_window_server_info(wsid) {
+                (info.pid, None)
+            } else {
+                // We don't know who owned this fullscreen window.
+                return;
+            };
 
             let last_known_user_space = resolve_last_known_user_space(reactor, window_id);
             record_fullscreen_window(
@@ -229,13 +232,13 @@ impl SpaceEventHandler {
             let resolved_space = reactor.resolve_native_space(wsid, None);
             if resolved_space.is_some_and(|space| space != sid) {
                 let current_space = resolved_space.expect("checked above");
-                reactor.window_manager.set_window_server_space(wsid, Some(current_space));
+                reactor.state.set_window_server_space(wsid, Some(current_space));
                 if reactor.is_space_active(current_space) {
-                    reactor.window_manager.mark_window_visible(wsid);
+                    reactor.state.mark_window_visible(wsid);
                 } else {
-                    reactor.window_manager.mark_window_hidden(wsid);
+                    reactor.state.mark_window_hidden(wsid);
                 }
-                if let Some(wid) = reactor.window_manager.tracked_window_id(wsid) {
+                if let Some(wid) = reactor.state.tracked_window_id(wsid) {
                     let layout_changed =
                         reactor.reassign_window_to_authoritative_space(wid, current_space);
                     if layout_changed && !reactor.is_mission_control_active() {
@@ -251,7 +254,7 @@ impl SpaceEventHandler {
                 return;
             }
 
-            if let Some(wid) = reactor.window_manager.tracked_window_id(wsid) {
+            if let Some(wid) = reactor.state.tracked_window_id(wsid) {
                 if !crate::sys::window_server::window_is_ordered_in(wsid) {
                     // since the connection has dropped it wont be shown in space_windows_list
                     // so ordered in can be authorative because it doesnt consider
@@ -266,8 +269,8 @@ impl SpaceEventHandler {
                     return;
                 }
 
-                reactor.window_manager.set_window_server_space(wsid, Some(sid));
-                reactor.window_manager.mark_window_hidden(wsid);
+                reactor.state.set_window_server_space(wsid, Some(sid));
+                reactor.state.mark_window_hidden(wsid);
                 let layout_changed = reactor.assigned_space_for_window_id(wid) == Some(sid);
                 if layout_changed {
                     reactor.send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
@@ -281,8 +284,8 @@ impl SpaceEventHandler {
                     }
                 }
             } else {
-                reactor.window_manager.set_window_server_space(wsid, Some(sid));
-                reactor.window_manager.mark_window_hidden(wsid);
+                reactor.state.set_window_server_space(wsid, Some(sid));
+                reactor.state.mark_window_hidden(wsid);
                 debug!(
                     ?wsid,
                     "Received WindowServerDestroyed for unknown window - ignoring"
@@ -302,13 +305,13 @@ impl SpaceEventHandler {
             let resolved_space = reactor.resolve_native_space(wsid, Some(sid));
             if let Some(resolved_space) = resolved_space {
                 if resolved_space != sid {
-                    reactor.window_manager.set_window_server_space(wsid, Some(resolved_space));
+                    reactor.state.set_window_server_space(wsid, Some(resolved_space));
                     if reactor.is_space_active(resolved_space) {
-                        reactor.window_manager.mark_window_visible(wsid);
+                        reactor.state.mark_window_visible(wsid);
                     } else {
-                        reactor.window_manager.mark_window_hidden(wsid);
+                        reactor.state.mark_window_hidden(wsid);
                     }
-                    if let Some(wid) = reactor.window_manager.tracked_window_id(wsid) {
+                    if let Some(wid) = reactor.state.tracked_window_id(wsid) {
                         let layout_changed =
                             reactor.reassign_window_to_authoritative_space(wid, resolved_space);
                         if layout_changed && !reactor.is_mission_control_active() {
@@ -324,19 +327,19 @@ impl SpaceEventHandler {
                     return;
                 }
 
-                reactor.window_manager.set_window_server_space(wsid, Some(resolved_space));
-                reactor.window_manager.mark_window_visible(wsid);
+                reactor.state.set_window_server_space(wsid, Some(resolved_space));
+                reactor.state.mark_window_visible(wsid);
                 reactor.clear_pending_target_if_confirmed_space(wsid, resolved_space);
             }
         }
 
-        if reactor.window_manager.knows_window_server_id(wsid)
-            || reactor.window_manager.is_window_server_observed(wsid)
+        if reactor.state.knows_window_server_id(wsid)
+            || reactor.state.is_window_server_observed(wsid)
         {
             if !reactor.is_mission_control_active() {
                 match kind {
                     SpaceEventKind::User => {
-                        if let Some(wid) = reactor.window_manager.tracked_window_id(wsid) {
+                        if let Some(wid) = reactor.state.tracked_window_id(wsid) {
                             let layout_changed =
                                 restore_fullscreen_window_to_user_space(reactor, wsid, sid, wid)
                                     .unwrap_or_else(|| {
@@ -345,9 +348,8 @@ impl SpaceEventHandler {
                             if layout_changed {
                                 let _ = reactor.update_layout_or_warn(false, false);
                             }
-                        } else if let Some(pid) = reactor
-                            .window_manager
-                            .pending_native_fullscreen_pid_for_window_server_id(wsid)
+                        } else if let Some(pid) =
+                            reactor.state.pending_native_fullscreen_pid_for_window_server_id(wsid)
                         {
                             request_visible_windows(
                                 reactor,
@@ -358,9 +360,9 @@ impl SpaceEventHandler {
                     }
                     SpaceEventKind::Fullscreen => {
                         let mut layout_changed = false;
-                        let tracked_window_id = reactor.window_manager.tracked_window_id(wsid);
+                        let tracked_window_id = reactor.state.tracked_window_id(wsid);
                         let owner_pid = tracked_window_id.map(|wid| wid.pid).or_else(|| {
-                            reactor.window_manager.get_window_server_info(wsid).map(|info| info.pid)
+                            reactor.state.get_window_server_info(wsid).map(|info| info.pid)
                         });
                         let last_known_user_space =
                             resolve_last_known_user_space(reactor, tracked_window_id);
@@ -404,7 +406,7 @@ impl SpaceEventHandler {
             return;
         }
 
-        reactor.window_manager.mark_window_server_observed(wsid);
+        reactor.state.mark_window_server_observed(wsid);
         // TODO: figure out why this is happening, we should really know about this app,
         // why dont we get notifications that its being launched?
         if let Some(window_server_info) = crate::sys::window_server::get_window(wsid) {
@@ -433,7 +435,7 @@ impl SpaceEventHandler {
             }
 
             if matches!(kind, SpaceEventKind::Fullscreen) {
-                let window_id = reactor.window_manager.tracked_window_id(wsid);
+                let window_id = reactor.state.tracked_window_id(wsid);
                 record_fullscreen_window(
                     reactor,
                     sid,
@@ -511,11 +513,10 @@ fn record_fullscreen_window(
     window_server_id: Option<WindowServerId>,
     last_known_user_space: Option<SpaceId>,
 ) {
-    let resolved_window_id = window_id.or_else(|| {
-        window_server_id.and_then(|wsid| reactor.window_manager.tracked_window_id(wsid))
-    });
+    let resolved_window_id = window_id
+        .or_else(|| window_server_id.and_then(|wsid| reactor.state.tracked_window_id(wsid)));
     if let Some(window_id) = resolved_window_id {
-        let _ = reactor.window_manager.suspend_window_to_native_fullscreen(
+        let _ = reactor.state.suspend_window_to_native_fullscreen(
             window_id,
             window_server_id,
             last_known_user_space,
@@ -523,7 +524,7 @@ fn record_fullscreen_window(
             NativeFullscreenTransition::Suspended,
         );
     } else if let (Some(pid), Some(wsid)) = (pid, window_server_id) {
-        let _ = reactor.window_manager.suspend_window_server_to_native_fullscreen(
+        let _ = reactor.state.suspend_window_server_to_native_fullscreen(
             pid,
             wsid,
             last_known_user_space,
@@ -546,17 +547,17 @@ fn apply_topology_window_delta(reactor: &mut Reactor, delta: TopologyWindowDelta
         let authoritative_space = reactor.resolve_native_space(wsid, appeared_space);
 
         if let Some(target_space) = authoritative_space {
-            reactor.window_manager.set_window_server_space(wsid, Some(target_space));
+            reactor.state.set_window_server_space(wsid, Some(target_space));
             if appeared_space == Some(target_space) {
                 reactor.clear_pending_target_if_confirmed_space(wsid, target_space);
             }
             if reactor.is_space_active(target_space) {
-                reactor.window_manager.mark_window_visible(wsid);
+                reactor.state.mark_window_visible(wsid);
             } else {
-                reactor.window_manager.mark_window_hidden(wsid);
+                reactor.state.mark_window_hidden(wsid);
             }
 
-            if let Some(wid) = reactor.window_manager.tracked_window_id(wsid) {
+            if let Some(wid) = reactor.state.tracked_window_id(wsid) {
                 let _ = restore_fullscreen_window_to_user_space(reactor, wsid, target_space, wid)
                     .unwrap_or_else(|| {
                         reactor.reassign_window_to_authoritative_space_preserving_workspace_ordinal(
@@ -569,9 +570,9 @@ fn apply_topology_window_delta(reactor: &mut Reactor, delta: TopologyWindowDelta
         }
 
         if let Some(previous_space) = disappeared_space {
-            reactor.window_manager.set_window_server_space(wsid, Some(previous_space));
-            reactor.window_manager.mark_window_hidden(wsid);
-            if let Some(wid) = reactor.window_manager.tracked_window_id(wsid)
+            reactor.state.set_window_server_space(wsid, Some(previous_space));
+            reactor.state.mark_window_hidden(wsid);
+            if let Some(wid) = reactor.state.tracked_window_id(wsid)
                 && reactor.assigned_space_for_window_id(wid) == Some(previous_space)
                 && reactor.is_space_active(previous_space)
             {
@@ -588,21 +589,21 @@ fn restore_fullscreen_window_to_user_space(
     wid: WindowId,
 ) -> Option<bool> {
     let restored_window = reactor
-        .window_manager
+        .state
         .restore_window_from_native_fullscreen_by_window_server_id(wsid)
-        .or_else(|| reactor.window_manager.restore_window_from_native_fullscreen(wid))?;
+        .or_else(|| reactor.state.restore_window_from_native_fullscreen(wid))?;
 
     let owner_window = reactor
-        .window_manager
+        .state
         .contains_window(restored_window.current_window_id)
         .then_some(restored_window.current_window_id)
         .or_else(|| {
             restored_window
                 .window_server_id
-                .and_then(|tracked_wsid| reactor.window_manager.tracked_window_id(tracked_wsid))
+                .and_then(|tracked_wsid| reactor.state.tracked_window_id(tracked_wsid))
         })
-        .or_else(|| reactor.window_manager.tracked_window_id(wsid))
-        .or_else(|| reactor.window_manager.contains_window(wid).then_some(wid))?;
+        .or_else(|| reactor.state.tracked_window_id(wsid))
+        .or_else(|| reactor.state.contains_window(wid).then_some(wid))?;
 
     if owner_window != wid && reactor.assigned_space_for_window_id(wid).is_some() {
         reactor.send_layout_event(LayoutEvent::WindowRemoved(wid));

@@ -1,4 +1,3 @@
-use std::ptr::NonNull;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -817,31 +816,6 @@ impl WindowRegistry {
                 })
             })?;
         self.window_server_space(wsid)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct WindowRegistryHandle(Option<NonNull<WindowRegistry>>);
-
-// SAFETY: The handle is only attached to the boxed registry owned by Reactor and
-// is used from the reactor thread after construction. It does not provide
-// independent ownership or synchronization.
-unsafe impl Send for WindowRegistryHandle {}
-unsafe impl Sync for WindowRegistryHandle {}
-
-impl WindowRegistryHandle {
-    pub fn new() -> Self { Self::default() }
-
-    pub fn attach(&mut self, registry: &mut WindowRegistry) {
-        self.0 = Some(NonNull::from(registry));
-    }
-
-    pub fn get(&self) -> &WindowRegistry {
-        unsafe { self.0.expect("window registry was not attached").as_ref() }
-    }
-
-    pub fn get_mut(&mut self) -> &mut WindowRegistry {
-        unsafe { self.0.expect("window registry was not attached").as_mut() }
     }
 }
 

@@ -4,9 +4,39 @@ use serde::{Deserialize, Serialize};
 use crate::actor::app::{AppInfo, AppThreadHandle, WindowId, pid_t};
 use crate::common::log::MetricsCommand;
 use crate::layout_engine::{Direction, LayoutCommand};
+use crate::model::WindowRegistry;
 use crate::sys::app::WindowInfo;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::WindowServerId;
+
+/// All mutable domain state is owned by the reactor thread.
+///
+/// Workspace topology is still carried by the layout coordinator during this
+/// migration, but window identity, native-space observations, and workspace
+/// assignments have one explicit owner here. Cross-store operations receive
+/// this registry by reference instead of retaining an alias to it.
+#[derive(Debug, Default)]
+pub struct RiftState {
+    pub windows: WindowRegistry,
+}
+
+impl std::ops::Deref for RiftState {
+    type Target = WindowRegistry;
+
+    fn deref(&self) -> &Self::Target { &self.windows }
+}
+
+impl std::ops::DerefMut for RiftState {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.windows }
+}
+
+impl AsRef<WindowRegistry> for RiftState {
+    fn as_ref(&self) -> &WindowRegistry { &self.windows }
+}
+
+impl AsMut<WindowRegistry> for RiftState {
+    fn as_mut(&mut self) -> &mut WindowRegistry { &mut self.windows }
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Requested(pub bool);

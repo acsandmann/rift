@@ -370,20 +370,20 @@ fn layout_commands_follow_active_display_space_across_active_displays() {
         .expect("right workspace");
 
     for (wid, wsid, space, frame) in windows {
-        reactor.window_manager.track_window_server_id(wsid, wid);
-        reactor.window_manager.track_window_server_info(
-            crate::sys::window_server::WindowServerInfo {
+        reactor.state.track_window_server_id(wsid, wid);
+        reactor
+            .state
+            .track_window_server_info(crate::sys::window_server::WindowServerInfo {
                 id: wsid,
                 pid: wid.pid,
                 layer: 0,
                 frame,
                 min_frame: frame.size,
                 max_frame: frame.size,
-            },
-        );
-        reactor.window_manager.set_window_server_space(wsid, Some(space));
-        reactor.window_manager.mark_window_visible(wsid);
-        reactor.window_manager.insert_window(wid, WindowState {
+            });
+        reactor.state.set_window_server_space(wsid, Some(space));
+        reactor.state.mark_window_visible(wsid);
+        reactor.state.insert_window(wid, WindowState {
             info: WindowInfo {
                 is_standard: true,
                 is_root: true,
@@ -413,7 +413,7 @@ fn layout_commands_follow_active_display_space_across_active_displays() {
                 .layout_manager
                 .layout_engine
                 .virtual_workspace_manager_mut()
-                .assign_window_to_workspace(space, wid, workspace)
+                .assign_window_to_workspace(reactor.state.as_mut(), space, wid, workspace)
         );
         reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
     }
@@ -489,20 +489,20 @@ fn workspace_commands_follow_active_display_space_across_active_displays() {
     let right_workspace = right_workspaces.first().map(|(id, _)| *id).expect("right workspace");
 
     for (wid, wsid, space, frame) in windows {
-        reactor.window_manager.track_window_server_id(wsid, wid);
-        reactor.window_manager.track_window_server_info(
-            crate::sys::window_server::WindowServerInfo {
+        reactor.state.track_window_server_id(wsid, wid);
+        reactor
+            .state
+            .track_window_server_info(crate::sys::window_server::WindowServerInfo {
                 id: wsid,
                 pid: wid.pid,
                 layer: 0,
                 frame,
                 min_frame: frame.size,
                 max_frame: frame.size,
-            },
-        );
-        reactor.window_manager.set_window_server_space(wsid, Some(space));
-        reactor.window_manager.mark_window_visible(wsid);
-        reactor.window_manager.insert_window(wid, WindowState {
+            });
+        reactor.state.set_window_server_space(wsid, Some(space));
+        reactor.state.mark_window_visible(wsid);
+        reactor.state.insert_window(wid, WindowState {
             info: WindowInfo {
                 is_standard: true,
                 is_root: true,
@@ -532,7 +532,7 @@ fn workspace_commands_follow_active_display_space_across_active_displays() {
                 .layout_manager
                 .layout_engine
                 .virtual_workspace_manager_mut()
-                .assign_window_to_workspace(space, wid, workspace)
+                .assign_window_to_workspace(reactor.state.as_mut(), space, wid, workspace)
         );
         reactor.send_layout_event(LayoutEvent::WindowAdded(space, wid));
     }
@@ -673,14 +673,16 @@ fn queries_prefer_authoritative_active_space_over_stale_command_space() {
     let space2 = SpaceId::new(2);
 
     reactor.handle_event(space_state_event(vec![screen], vec![Some(space1)]));
-    let _ = reactor
-        .layout_manager
-        .layout_engine
-        .handle_virtual_workspace_command(space1, &LayoutCommand::SwitchToWorkspace(0));
-    let _ = reactor
-        .layout_manager
-        .layout_engine
-        .handle_virtual_workspace_command(space2, &LayoutCommand::SwitchToWorkspace(1));
+    let _ = reactor.layout_manager.layout_engine.handle_virtual_workspace_command(
+        reactor.state.as_mut(),
+        space1,
+        &LayoutCommand::SwitchToWorkspace(0),
+    );
+    let _ = reactor.layout_manager.layout_engine.handle_virtual_workspace_command(
+        reactor.state.as_mut(),
+        space2,
+        &LayoutCommand::SwitchToWorkspace(1),
+    );
 
     reactor.handle_event(Event::SpaceStateChanged(ForwardedSpaceState {
         screens: make_screen_snapshots(vec![screen], vec![Some(space2)]),
@@ -772,14 +774,16 @@ fn workspace_queries_are_isolated_per_macos_space() {
         Some(space2),
     ]));
 
-    let _ = reactor
-        .layout_manager
-        .layout_engine
-        .handle_virtual_workspace_command(space1, &LayoutCommand::SwitchToWorkspace(0));
-    let _ = reactor
-        .layout_manager
-        .layout_engine
-        .handle_virtual_workspace_command(space2, &LayoutCommand::SwitchToWorkspace(1));
+    let _ = reactor.layout_manager.layout_engine.handle_virtual_workspace_command(
+        reactor.state.as_mut(),
+        space1,
+        &LayoutCommand::SwitchToWorkspace(0),
+    );
+    let _ = reactor.layout_manager.layout_engine.handle_virtual_workspace_command(
+        reactor.state.as_mut(),
+        space2,
+        &LayoutCommand::SwitchToWorkspace(1),
+    );
 
     let space1_workspaces = reactor.query_workspaces(Some(space1));
     let space2_workspaces = reactor.query_workspaces(Some(space2));
@@ -835,9 +839,9 @@ fn best_space_prefers_authoritative_window_server_space_over_geometry() {
     let wsid = WindowServerId::new(11);
 
     reactor.handle_event(space_state_event(vec![frame], vec![Some(space2)]));
-    reactor.window_manager.track_window_server_id(wsid, wid);
-    reactor.window_manager.set_window_server_space(wsid, Some(space1));
-    reactor.window_manager.insert_window(wid, WindowState {
+    reactor.state.track_window_server_id(wsid, wid);
+    reactor.state.set_window_server_space(wsid, Some(space1));
+    reactor.state.insert_window(wid, WindowState {
         info: WindowInfo {
             is_standard: true,
             is_root: true,
@@ -874,9 +878,9 @@ fn user_space_window_server_events_preserve_hidden_window_state() {
     let wsid = WindowServerId::new(21);
 
     reactor.handle_event(space_state_event(vec![frame], vec![Some(space1)]));
-    reactor.window_manager.track_window_server_id(wsid, wid);
-    reactor.window_manager.set_window_server_space(wsid, Some(space1));
-    reactor.window_manager.insert_window(wid, WindowState {
+    reactor.state.track_window_server_id(wsid, wid);
+    reactor.state.set_window_server_space(wsid, Some(space1));
+    reactor.state.insert_window(wid, WindowState {
         info: WindowInfo {
             is_standard: true,
             is_root: true,
@@ -906,9 +910,9 @@ fn user_space_window_server_events_preserve_hidden_window_state() {
     );
     crate::sys::window_server::set_window_ordered_in_override(wsid, None);
 
-    assert!(reactor.window_manager.contains_window(wid));
-    assert_eq!(reactor.window_manager.window_server_space(wsid), Some(space1));
-    assert!(!reactor.window_manager.is_window_visible(wsid));
+    assert!(reactor.state.contains_window(wid));
+    assert_eq!(reactor.state.window_server_space(wsid), Some(space1));
+    assert!(!reactor.state.is_window_visible(wsid));
 }
 
 #[test]
@@ -924,10 +928,10 @@ fn user_space_window_server_destroyed_removes_window_when_window_server_is_gone(
     let wsid = WindowServerId::new(22);
 
     reactor.handle_event(space_state_event(vec![frame], vec![Some(space1)]));
-    reactor.window_manager.track_window_server_id(wsid, wid);
-    reactor.window_manager.set_window_server_space(wsid, Some(space1));
-    reactor.window_manager.mark_window_visible(wsid);
-    reactor.window_manager.insert_window(wid, WindowState {
+    reactor.state.track_window_server_id(wsid, wid);
+    reactor.state.set_window_server_space(wsid, Some(space1));
+    reactor.state.mark_window_visible(wsid);
+    reactor.state.insert_window(wid, WindowState {
         info: WindowInfo {
             is_standard: true,
             is_root: true,
@@ -957,8 +961,8 @@ fn user_space_window_server_destroyed_removes_window_when_window_server_is_gone(
     );
     crate::sys::window_server::set_window_ordered_in_override(wsid, None);
 
-    assert!(!reactor.window_manager.contains_window(wid));
-    assert_eq!(reactor.window_manager.tracked_window_id(wsid), None);
+    assert!(!reactor.state.contains_window(wid));
+    assert_eq!(reactor.state.tracked_window_id(wsid), None);
     assert_eq!(reactor.assigned_space_for_window_id(wid), None);
 }
 
@@ -1004,9 +1008,9 @@ fn reactor_with_window_on_space1() -> (Reactor, WindowId, WindowServerId, SpaceI
         .virtual_workspace_manager_mut()
         .list_workspaces(space2);
 
-    reactor.window_manager.track_window_server_id(wsid, wid);
+    reactor.state.track_window_server_id(wsid, wid);
     reactor
-        .window_manager
+        .state
         .track_window_server_info(crate::sys::window_server::WindowServerInfo {
             id: wsid,
             pid,
@@ -1015,9 +1019,9 @@ fn reactor_with_window_on_space1() -> (Reactor, WindowId, WindowServerId, SpaceI
             min_frame: frame.size,
             max_frame: frame.size,
         });
-    reactor.window_manager.set_window_server_space(wsid, Some(space1));
-    reactor.window_manager.mark_window_visible(wsid);
-    reactor.window_manager.insert_window(wid, WindowState {
+    reactor.state.set_window_server_space(wsid, Some(space1));
+    reactor.state.mark_window_visible(wsid);
+    reactor.state.insert_window(wid, WindowState {
         info: WindowInfo {
             is_standard: true,
             is_root: true,
@@ -1043,7 +1047,7 @@ fn reactor_with_window_on_space1() -> (Reactor, WindowId, WindowServerId, SpaceI
             .layout_manager
             .layout_engine
             .virtual_workspace_manager_mut()
-            .assign_window_to_workspace(space1, wid, space1_workspace)
+            .assign_window_to_workspace(reactor.state.as_mut(), space1, wid, space1_workspace)
     );
     assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space1));
 
@@ -1097,9 +1101,9 @@ fn reactor_with_window_moved_to_space2()
         .map(|(id, _)| *id)
         .expect("space2 workspace");
 
-    reactor.window_manager.track_window_server_id(wsid, wid);
+    reactor.state.track_window_server_id(wsid, wid);
     reactor
-        .window_manager
+        .state
         .track_window_server_info(crate::sys::window_server::WindowServerInfo {
             id: wsid,
             pid,
@@ -1108,9 +1112,9 @@ fn reactor_with_window_moved_to_space2()
             min_frame: moved_frame.size,
             max_frame: moved_frame.size,
         });
-    reactor.window_manager.set_window_server_space(wsid, Some(space2));
-    reactor.window_manager.mark_window_visible(wsid);
-    reactor.window_manager.insert_window(wid, WindowState {
+    reactor.state.set_window_server_space(wsid, Some(space2));
+    reactor.state.mark_window_visible(wsid);
+    reactor.state.insert_window(wid, WindowState {
         info: WindowInfo {
             is_standard: true,
             is_root: true,
@@ -1136,14 +1140,14 @@ fn reactor_with_window_moved_to_space2()
             .layout_manager
             .layout_engine
             .virtual_workspace_manager_mut()
-            .assign_window_to_workspace(space1, wid, space1_workspace)
+            .assign_window_to_workspace(reactor.state.as_mut(), space1, wid, space1_workspace)
     );
     assert!(
         reactor
             .layout_manager
             .layout_engine
             .virtual_workspace_manager_mut()
-            .assign_window_to_workspace(space2, wid, space2_workspace)
+            .assign_window_to_workspace(reactor.state.as_mut(), space2, wid, space2_workspace)
     );
     let txid = reactor.transaction_manager.generate_next_txid(wsid);
     reactor.transaction_manager.store_txid(wsid, txid, moved_frame);
@@ -1203,9 +1207,9 @@ fn reactor_with_window_on_space1_two_displays() -> (
         .virtual_workspace_manager_mut()
         .list_workspaces(space2);
 
-    reactor.window_manager.track_window_server_id(wsid, wid);
+    reactor.state.track_window_server_id(wsid, wid);
     reactor
-        .window_manager
+        .state
         .track_window_server_info(crate::sys::window_server::WindowServerInfo {
             id: wsid,
             pid,
@@ -1214,9 +1218,9 @@ fn reactor_with_window_on_space1_two_displays() -> (
             min_frame: initial_frame.size,
             max_frame: initial_frame.size,
         });
-    reactor.window_manager.set_window_server_space(wsid, Some(space1));
-    reactor.window_manager.mark_window_visible(wsid);
-    reactor.window_manager.insert_window(wid, WindowState {
+    reactor.state.set_window_server_space(wsid, Some(space1));
+    reactor.state.mark_window_visible(wsid);
+    reactor.state.insert_window(wid, WindowState {
         info: WindowInfo {
             is_standard: true,
             is_root: true,
@@ -1242,7 +1246,7 @@ fn reactor_with_window_on_space1_two_displays() -> (
             .layout_manager
             .layout_engine
             .virtual_workspace_manager_mut()
-            .assign_window_to_workspace(space1, wid, space1_workspace)
+            .assign_window_to_workspace(reactor.state.as_mut(), space1, wid, space1_workspace)
     );
 
     (reactor, wid, wsid, space1, space2, initial_frame, screen2)
@@ -1293,7 +1297,7 @@ fn geometry_cross_display_frame_change_updates_authoritative_space() {
         "geometry-only cross-display move should update workspace ownership"
     );
     assert_eq!(
-        reactor.window_manager.window_server_space(wsid),
+        reactor.state.window_server_space(wsid),
         Some(space2),
         "geometry-only cross-display move should update authoritative server space"
     );
@@ -1324,7 +1328,7 @@ fn matching_rift_frame_clears_pending_target() {
     );
     assert!(
         reactor
-            .window_manager
+            .state
             .window(wid)
             .expect("window should still exist")
             .frame_monotonic
@@ -1409,9 +1413,9 @@ fn stale_user_space_disappearance_does_not_restore_old_display_assignment() {
         SpaceEventKind::User,
     );
 
-    assert_eq!(reactor.window_manager.window_server_space(wsid), Some(space2));
+    assert_eq!(reactor.state.window_server_space(wsid), Some(space2));
     assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
-    assert!(reactor.window_manager.is_window_visible(wsid));
+    assert!(reactor.state.is_window_visible(wsid));
 
     let _ = reactor.reconcile_windows_with_authoritative_spaces();
 
@@ -1433,7 +1437,7 @@ fn stale_user_space_appearance_does_not_restore_old_display_assignment() {
         SpaceEventKind::User,
     );
 
-    assert_eq!(reactor.window_manager.window_server_space(wsid), Some(space2));
+    assert_eq!(reactor.state.window_server_space(wsid), Some(space2));
     assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
 
     let _ = reactor.reconcile_windows_with_authoritative_spaces();
@@ -1462,9 +1466,9 @@ fn stale_user_space_appearance_is_ignored_when_server_state_already_matches_pend
             .layout_manager
             .layout_engine
             .virtual_workspace_manager_mut()
-            .assign_window_to_workspace(space1, wid, space1_workspace)
+            .assign_window_to_workspace(reactor.state.as_mut(), space1, wid, space1_workspace)
     );
-    reactor.window_manager.set_window_server_space(wsid, Some(space1));
+    reactor.state.set_window_server_space(wsid, Some(space1));
     let txid = reactor.transaction_manager.generate_next_txid(wsid);
     let target_frame = CGRect::new(CGPoint::new(100., 100.), CGSize::new(800., 600.));
     reactor.transaction_manager.store_txid(wsid, txid, target_frame);
@@ -1476,7 +1480,7 @@ fn stale_user_space_appearance_is_ignored_when_server_state_already_matches_pend
         SpaceEventKind::User,
     );
 
-    assert_eq!(reactor.window_manager.window_server_space(wsid), Some(space1));
+    assert_eq!(reactor.state.window_server_space(wsid), Some(space1));
     assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space1));
     assert_eq!(
         reactor.authoritative_space_for_window_id(wid),
@@ -1499,7 +1503,7 @@ fn stale_user_space_appearance_is_ignored_when_authoritative_window_space_differ
 
     crate::sys::window_server::set_window_spaces_override(wsid, None);
 
-    assert_eq!(reactor.window_manager.window_server_space(wsid), Some(space2));
+    assert_eq!(reactor.state.window_server_space(wsid), Some(space2));
     assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
     assert_eq!(reactor.authoritative_space_for_window_id(wid), Some(space2));
 }
@@ -1515,10 +1519,10 @@ fn multi_active_visible_window_appearance_keeps_display_assignment_and_visibilit
         SpaceEventKind::User,
     );
 
-    assert_eq!(reactor.window_manager.window_server_space(wsid), Some(space2));
+    assert_eq!(reactor.state.window_server_space(wsid), Some(space2));
     assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
     assert_eq!(reactor.authoritative_space_for_window_id(wid), Some(space2));
-    assert!(reactor.window_manager.is_window_visible(wsid));
+    assert!(reactor.state.is_window_visible(wsid));
 }
 
 #[test]
@@ -1532,9 +1536,9 @@ fn multi_active_visible_window_disappearance_does_not_reassign_between_display_s
         SpaceEventKind::User,
     );
 
-    assert_eq!(reactor.window_manager.window_server_space(wsid), Some(space2));
+    assert_eq!(reactor.state.window_server_space(wsid), Some(space2));
     assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
-    assert!(reactor.window_manager.is_window_visible(wsid));
+    assert!(reactor.state.is_window_visible(wsid));
 }
 
 #[test]
@@ -1585,9 +1589,9 @@ fn hidden_window_can_move_to_another_native_space_without_staying_pinned_to_old_
         .virtual_workspace_manager_mut()
         .list_workspaces(space2);
 
-    reactor.window_manager.track_window_server_id(wsid, wid);
+    reactor.state.track_window_server_id(wsid, wid);
     reactor
-        .window_manager
+        .state
         .track_window_server_info(crate::sys::window_server::WindowServerInfo {
             id: wsid,
             pid,
@@ -1596,9 +1600,9 @@ fn hidden_window_can_move_to_another_native_space_without_staying_pinned_to_old_
             min_frame: frame.size,
             max_frame: frame.size,
         });
-    reactor.window_manager.set_window_server_space(wsid, Some(space1));
-    reactor.window_manager.mark_window_visible(wsid);
-    reactor.window_manager.insert_window(wid, WindowState {
+    reactor.state.set_window_server_space(wsid, Some(space1));
+    reactor.state.mark_window_visible(wsid);
+    reactor.state.insert_window(wid, WindowState {
         info: WindowInfo {
             is_standard: true,
             is_root: true,
@@ -1631,7 +1635,7 @@ fn hidden_window_can_move_to_another_native_space_without_staying_pinned_to_old_
             .layout_manager
             .layout_engine
             .virtual_workspace_manager_mut()
-            .assign_window_to_workspace(space1, wid, hidden_workspace)
+            .assign_window_to_workspace(reactor.state.as_mut(), space1, wid, hidden_workspace)
     );
     assert_eq!(reactor.hidden_assigned_space_for_window_id(wid), Some(space1));
 
@@ -1644,7 +1648,7 @@ fn hidden_window_can_move_to_another_native_space_without_staying_pinned_to_old_
     );
     crate::sys::window_server::set_window_spaces_override(wsid, None);
 
-    assert_eq!(reactor.window_manager.window_server_space(wsid), Some(space2));
+    assert_eq!(reactor.state.window_server_space(wsid), Some(space2));
     assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
     assert_eq!(reactor.authoritative_space_for_window_id(wid), Some(space2));
 }
@@ -1655,13 +1659,9 @@ fn discovery_prefers_authoritative_space_over_geometry_when_displays_overlap_wor
         reactor_with_window_moved_to_space2();
     let conflicting_frame = CGRect::new(CGPoint::new(100., 100.), CGSize::new(800., 600.));
 
+    reactor.state.window_mut(wid).expect("window should exist").frame_monotonic = conflicting_frame;
     reactor
-        .window_manager
-        .window_mut(wid)
-        .expect("window should exist")
-        .frame_monotonic = conflicting_frame;
-    reactor
-        .window_manager
+        .state
         .track_window_server_info(crate::sys::window_server::WindowServerInfo {
             id: wsid,
             pid: wid.pid,
@@ -1697,7 +1697,7 @@ fn recent_cross_display_move_ignores_conflicting_geometry_space_change() {
     ));
 
     assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
-    assert_eq!(reactor.window_manager.window_server_space(wsid), Some(space2));
+    assert_eq!(reactor.state.window_server_space(wsid), Some(space2));
 }
 
 #[test]
@@ -1705,7 +1705,7 @@ fn central_space_resolution_prefers_recent_move_target_over_stale_server_space()
     let (mut reactor, wid, wsid, space1, space2, moved_frame) =
         reactor_with_window_moved_to_space2();
 
-    reactor.window_manager.set_window_server_space(wsid, Some(space1));
+    reactor.state.set_window_server_space(wsid, Some(space1));
 
     assert_eq!(reactor.authoritative_space_for_window_id(wid), Some(space2));
     assert_eq!(
@@ -1723,11 +1723,11 @@ fn active_space_membership_refresh_does_not_overwrite_recent_move_target() {
 
     assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
     assert_eq!(
-        reactor.window_manager.window_server_space(wsid),
+        reactor.state.window_server_space(wsid),
         Some(space2),
         "active-space reconciliation must not overwrite a recent cross-display move with stale membership"
     );
-    assert!(reactor.window_manager.is_window_visible(wsid));
+    assert!(reactor.state.is_window_visible(wsid));
 }
 
 #[test]
@@ -1750,7 +1750,7 @@ fn known_fullscreen_window_appearance_removes_window_from_layout() {
     apps.simulate_until_quiet(&mut reactor);
 
     assert!(has_window_in_layout(&mut reactor, user_space, frame, wid));
-    let wsid = reactor.window_manager.window(wid).unwrap().info.sys_id.unwrap();
+    let wsid = reactor.state.window(wid).unwrap().info.sys_id.unwrap();
 
     SpaceEventHandler::handle_window_server_appeared(
         &mut reactor,
@@ -1765,7 +1765,7 @@ fn known_fullscreen_window_appearance_removes_window_from_layout() {
     );
     assert!(
         reactor
-            .window_manager
+            .state
             .native_fullscreen_record_for_window_server_id(wsid)
             .is_some_and(|record| record.fullscreen_space == fullscreen_space),
         "fullscreen transition should record suspended window state"
@@ -1791,7 +1791,7 @@ fn known_window_server_appearance_restores_same_workspace_after_fullscreen() {
     reactor.handle_event(Event::ApplicationGloballyActivated(1));
     apps.simulate_until_quiet(&mut reactor);
 
-    let wsid = reactor.window_manager.window(wid).unwrap().info.sys_id.unwrap();
+    let wsid = reactor.state.window(wid).unwrap().info.sys_id.unwrap();
     SpaceEventHandler::handle_window_server_appeared(
         &mut reactor,
         wsid,
@@ -1840,7 +1840,7 @@ fn fullscreen_tracking_survives_until_ax_window_id_arrives() {
     });
 
     reactor
-        .window_manager
+        .state
         .track_window_server_info(crate::sys::window_server::WindowServerInfo {
             id: wsid,
             pid,
@@ -1859,7 +1859,7 @@ fn fullscreen_tracking_survives_until_ax_window_id_arrives() {
 
     assert!(
         reactor
-            .window_manager
+            .state
             .pending_native_fullscreen_record_for_window_server_id(wsid)
             .is_some_and(|record| {
                 record.pid == pid
@@ -1907,13 +1907,13 @@ fn fullscreen_tracking_survives_until_ax_window_id_arrives() {
 
     assert!(
         reactor
-            .window_manager
+            .state
             .pending_native_fullscreen_record_for_window_server_id(wsid)
             .is_none(),
         "binding the AX window id should consume the pending fullscreen record"
     );
     assert!(
-        reactor.window_manager.native_fullscreen_record_for_window(wid).is_none(),
+        reactor.state.native_fullscreen_record_for_window(wid).is_none(),
         "once the window is back on its user space, the fullscreen lifecycle should retire"
     );
     assert_eq!(reactor.assigned_space_for_window_id(wid), Some(user_space));
@@ -1989,9 +1989,9 @@ fn fullscreen_exit_removes_non_queryable_duplicate_from_layout() {
         SpaceEventKind::Fullscreen,
     );
 
-    reactor.window_manager.track_window_server_id(duplicate_wsid, duplicate_wid);
+    reactor.state.track_window_server_id(duplicate_wsid, duplicate_wid);
     reactor
-        .window_manager
+        .state
         .track_window_server_info(crate::sys::window_server::WindowServerInfo {
             id: duplicate_wsid,
             pid: original_wid.pid,
@@ -2000,11 +2000,9 @@ fn fullscreen_exit_removes_non_queryable_duplicate_from_layout() {
             min_frame: frame.size,
             max_frame: frame.size,
         });
-    reactor
-        .window_manager
-        .set_window_server_space(duplicate_wsid, Some(fullscreen_space));
-    reactor.window_manager.mark_window_visible(duplicate_wsid);
-    reactor.window_manager.insert_window(duplicate_wid, WindowState {
+    reactor.state.set_window_server_space(duplicate_wsid, Some(fullscreen_space));
+    reactor.state.mark_window_visible(duplicate_wsid);
+    reactor.state.insert_window(duplicate_wid, WindowState {
         info: WindowInfo {
             is_standard: true,
             is_root: true,
@@ -2037,7 +2035,12 @@ fn fullscreen_exit_removes_non_queryable_duplicate_from_layout() {
             .layout_manager
             .layout_engine
             .virtual_workspace_manager_mut()
-            .assign_window_to_workspace(user_space, duplicate_wid, active_workspace)
+            .assign_window_to_workspace(
+                reactor.state.as_mut(),
+                user_space,
+                duplicate_wid,
+                active_workspace
+            )
     );
     reactor.send_layout_event(LayoutEvent::WindowAdded(user_space, duplicate_wid));
     assert!(has_window_in_layout(
@@ -2051,8 +2054,8 @@ fn fullscreen_exit_removes_non_queryable_duplicate_from_layout() {
         "duplicate is absent from query windows because it is not manageable"
     );
 
-    reactor.window_manager.set_window_server_space(duplicate_wsid, Some(user_space));
-    reactor.window_manager.mark_window_visible(duplicate_wsid);
+    reactor.state.set_window_server_space(duplicate_wsid, Some(user_space));
+    reactor.state.mark_window_visible(duplicate_wsid);
     SpaceEventHandler::handle_window_server_appeared(
         &mut reactor,
         duplicate_wsid,
@@ -2091,7 +2094,7 @@ fn fullscreen_restore_uses_live_rekeyed_window_id() {
     );
 
     let old_info = reactor
-        .window_manager
+        .state
         .window(old_wid)
         .expect("old window should still exist while fullscreen is active")
         .info
@@ -2107,7 +2110,7 @@ fn fullscreen_restore_uses_live_rekeyed_window_id() {
     });
 
     assert!(
-        reactor.window_manager.window(old_wid).is_none(),
+        reactor.state.window(old_wid).is_none(),
         "rekey should retire the old AX window id before fullscreen restore"
     );
 
@@ -2196,9 +2199,9 @@ fn discovery_preserves_hidden_windows_on_their_original_same_display_space() {
     ];
 
     for (wid, wsid, space) in windows {
-        reactor.window_manager.track_window_server_id(wsid, wid);
-        reactor.window_manager.set_window_server_space(wsid, Some(space));
-        reactor.window_manager.insert_window(wid, WindowState {
+        reactor.state.track_window_server_id(wsid, wid);
+        reactor.state.set_window_server_space(wsid, Some(space));
+        reactor.state.insert_window(wid, WindowState {
             info: WindowInfo {
                 is_standard: true,
                 is_root: true,
@@ -2225,26 +2228,41 @@ fn discovery_preserves_hidden_windows_on_their_original_same_display_space() {
             .layout_manager
             .layout_engine
             .virtual_workspace_manager_mut()
-            .assign_window_to_workspace(space1, WindowId::new(pid, 1), space1_workspace)
+            .assign_window_to_workspace(
+                reactor.state.as_mut(),
+                space1,
+                WindowId::new(pid, 1),
+                space1_workspace
+            )
     );
     assert!(
         reactor
             .layout_manager
             .layout_engine
             .virtual_workspace_manager_mut()
-            .assign_window_to_workspace(space1, WindowId::new(pid, 2), space1_workspace)
+            .assign_window_to_workspace(
+                reactor.state.as_mut(),
+                space1,
+                WindowId::new(pid, 2),
+                space1_workspace
+            )
     );
     assert!(
         reactor
             .layout_manager
             .layout_engine
             .virtual_workspace_manager_mut()
-            .assign_window_to_workspace(space2, WindowId::new(pid, 3), space2_workspace)
+            .assign_window_to_workspace(
+                reactor.state.as_mut(),
+                space2,
+                WindowId::new(pid, 3),
+                space2_workspace
+            )
     );
 
     reactor.handle_event(space_state_event(vec![frame], vec![Some(space2)]));
-    reactor.window_manager.clear_visible_windows();
-    reactor.window_manager.mark_window_visible(WindowServerId::new(103));
+    reactor.state.clear_visible_windows();
+    reactor.state.mark_window_visible(WindowServerId::new(103));
     reactor.mission_control_manager.pending_mission_control_refresh.insert(pid);
 
     WindowDiscoveryHandler::handle_discovery(
@@ -2273,7 +2291,7 @@ fn discovery_preserves_hidden_windows_on_their_original_same_display_space() {
             .layout_manager
             .layout_engine
             .virtual_workspace_manager()
-            .workspace_for_window(space1, WindowId::new(pid, 1))
+            .workspace_for_window(reactor.state.as_ref(), space1, WindowId::new(pid, 1))
             .is_some()
     );
     assert!(
@@ -2281,7 +2299,7 @@ fn discovery_preserves_hidden_windows_on_their_original_same_display_space() {
             .layout_manager
             .layout_engine
             .virtual_workspace_manager()
-            .workspace_for_window(space1, WindowId::new(pid, 2))
+            .workspace_for_window(reactor.state.as_ref(), space1, WindowId::new(pid, 2))
             .is_some()
     );
     assert!(
@@ -2289,7 +2307,7 @@ fn discovery_preserves_hidden_windows_on_their_original_same_display_space() {
             .layout_manager
             .layout_engine
             .virtual_workspace_manager()
-            .workspace_for_window(space2, WindowId::new(pid, 1))
+            .workspace_for_window(reactor.state.as_ref(), space2, WindowId::new(pid, 1))
             .is_none()
     );
     assert!(
@@ -2297,7 +2315,7 @@ fn discovery_preserves_hidden_windows_on_their_original_same_display_space() {
             .layout_manager
             .layout_engine
             .virtual_workspace_manager()
-            .workspace_for_window(space2, WindowId::new(pid, 2))
+            .workspace_for_window(reactor.state.as_ref(), space2, WindowId::new(pid, 2))
             .is_none()
     );
 }
@@ -2406,10 +2424,11 @@ fn mission_control_refresh_known_visible_fallback_does_not_restore_window_moved_
     reactor.handle_events(apps.make_app(pid, make_windows(2)));
     apps.simulate_until_quiet(&mut reactor);
 
-    let _ = reactor
-        .layout_manager
-        .layout_engine
-        .handle_virtual_workspace_command(space, &LayoutCommand::CreateWorkspace);
+    let _ = reactor.layout_manager.layout_engine.handle_virtual_workspace_command(
+        reactor.state.as_mut(),
+        space,
+        &LayoutCommand::CreateWorkspace,
+    );
 
     reactor.refresh_windows_after_mission_control_with_active_windows(vec![(
         retained_wsid,
@@ -2449,7 +2468,7 @@ fn mission_control_enter_clears_active_drag_state() {
     let frame = CGRect::new(CGPoint::new(50., 50.), CGSize::new(100., 100.));
 
     reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
-    reactor.window_manager.insert_window(wid, WindowState {
+    reactor.state.insert_window(wid, WindowState {
         info: WindowInfo {
             is_standard: true,
             is_root: true,
@@ -2726,7 +2745,7 @@ fn topology_change_clears_stale_pending_hide_target_before_next_workspace_layout
     let _ = apps.requests();
 
     let wsid = reactor
-        .window_manager
+        .state
         .window(wid)
         .and_then(|window| window.info.sys_id)
         .expect("tracked window should have a window server id");
@@ -2751,10 +2770,10 @@ fn topology_change_clears_stale_pending_hide_target_before_next_workspace_layout
             .layout_manager
             .layout_engine
             .virtual_workspace_manager_mut()
-            .assign_window_to_workspace(space, wid, hidden_workspace)
+            .assign_window_to_workspace(reactor.state.as_mut(), space, wid, hidden_workspace)
     );
 
-    if let Some(window) = reactor.window_manager.window_mut(wid) {
+    if let Some(window) = reactor.state.window_mut(wid) {
         window.frame_monotonic = CGRect::new(CGPoint::new(200.0, 200.0), CGSize::new(400.0, 400.0));
     }
 
@@ -2763,15 +2782,14 @@ fn topology_change_clears_stale_pending_hide_target_before_next_workspace_layout
         .layout_manager
         .layout_engine
         .calculate_layout_with_virtual_workspaces(
+            reactor.state.as_ref(),
             space,
             screen,
             &gaps,
             0.0,
             Default::default(),
             Default::default(),
-            |query_wid| {
-                reactor.window_manager.window(query_wid).map(|window| window.frame_monotonic)
-            },
+            |query_wid| reactor.state.window(query_wid).map(|window| window.frame_monotonic),
             &[screen],
         )
         .into_iter()
@@ -2912,7 +2930,10 @@ fn windows_discovered_does_not_reintroduce_inactive_workspace_window() {
     });
 
     assert_eq!(
-        reactor.layout_manager.layout_engine.windows_in_active_workspace(space),
+        reactor
+            .layout_manager
+            .layout_engine
+            .windows_in_active_workspace(reactor.state.as_ref(), space),
         vec![WindowId::new(1, 2)],
     );
 }
@@ -2956,7 +2977,7 @@ fn workspace_query_uses_authoritative_assignment_after_move() {
             .layout_manager
             .layout_engine
             .virtual_workspace_manager()
-            .workspace_for_window(space, wid),
+            .workspace_for_window(reactor.state.as_ref(), space, wid),
         Some(ws2)
     );
 
@@ -2969,7 +2990,7 @@ fn workspace_query_uses_authoritative_assignment_after_move() {
             .layout_manager
             .layout_engine
             .virtual_workspace_manager()
-            .workspace_windows(space, ws1),
+            .workspace_windows(reactor.state.as_ref(), space, ws1),
         Vec::<WindowId>::new()
     );
     assert_eq!(
@@ -2977,7 +2998,7 @@ fn workspace_query_uses_authoritative_assignment_after_move() {
             .layout_manager
             .layout_engine
             .virtual_workspace_manager()
-            .workspace_windows(space, ws2),
+            .workspace_windows(reactor.state.as_ref(), space, ws2),
         vec![wid]
     );
 }
@@ -3100,17 +3121,20 @@ fn login_screen_refresh_preserves_manual_workspace_assignment() {
         .layout_manager
         .layout_engine
         .virtual_workspace_manager()
-        .workspace_for_window(space, wid2)
+        .workspace_for_window(reactor.state.as_ref(), space, wid2)
         .expect("window should be assigned to workspace 2 before login refresh");
     let other_workspace_before = reactor
         .layout_manager
         .layout_engine
         .virtual_workspace_manager()
-        .workspace_for_window(space, wid1)
+        .workspace_for_window(reactor.state.as_ref(), space, wid1)
         .expect("window should remain assigned to original workspace before login refresh");
     assert_ne!(workspace_before, other_workspace_before);
     assert_eq!(
-        reactor.layout_manager.layout_engine.windows_in_active_workspace(space),
+        reactor
+            .layout_manager
+            .layout_engine
+            .windows_in_active_workspace(reactor.state.as_ref(), space),
         vec![wid2],
         "switched workspace should show only the moved window before login refresh"
     );
@@ -3142,7 +3166,7 @@ fn login_screen_refresh_preserves_manual_workspace_assignment() {
             .layout_manager
             .layout_engine
             .virtual_workspace_manager()
-            .workspace_for_window(space, wid2),
+            .workspace_for_window(reactor.state.as_ref(), space, wid2),
         Some(workspace_before),
         "login refresh must preserve the moved window's workspace assignment"
     );
@@ -3151,12 +3175,15 @@ fn login_screen_refresh_preserves_manual_workspace_assignment() {
             .layout_manager
             .layout_engine
             .virtual_workspace_manager()
-            .workspace_for_window(space, wid1),
+            .workspace_for_window(reactor.state.as_ref(), space, wid1),
         Some(other_workspace_before),
         "login refresh must preserve other windows' original workspace assignments"
     );
     assert_eq!(
-        reactor.layout_manager.layout_engine.windows_in_active_workspace(space),
+        reactor
+            .layout_manager
+            .layout_engine
+            .windows_in_active_workspace(reactor.state.as_ref(), space),
         vec![wid2],
         "active workspace contents must survive login refresh"
     );
@@ -3489,12 +3516,12 @@ fn authoritative_active_window_snapshot_reassigns_window_across_active_displays(
         reactor_with_window_on_space1_two_displays();
 
     assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space1));
-    assert_eq!(reactor.window_manager.window_server_space(wsid), Some(space1));
+    assert_eq!(reactor.state.window_server_space(wsid), Some(space1));
 
     reactor.reconcile_authoritative_active_window_snapshot(vec![(wsid, Some(space2))], false);
 
     assert_eq!(
-        reactor.window_manager.window_server_space(wsid),
+        reactor.state.window_server_space(wsid),
         Some(space2),
         "authoritative active-space membership should update the tracked native space"
     );
@@ -3527,10 +3554,10 @@ fn authoritative_active_window_snapshot_removes_missing_window_from_active_layou
 
     assert!(has_window_in_layout(&mut reactor, space, frame, moved));
     assert!(has_window_in_layout(&mut reactor, space, frame, retained));
-    reactor.window_manager.set_window_server_space(moved_wsid, Some(space));
-    reactor.window_manager.mark_window_visible(moved_wsid);
-    reactor.window_manager.set_window_server_space(retained_wsid, Some(space));
-    reactor.window_manager.mark_window_visible(retained_wsid);
+    reactor.state.set_window_server_space(moved_wsid, Some(space));
+    reactor.state.mark_window_visible(moved_wsid);
+    reactor.state.set_window_server_space(retained_wsid, Some(space));
+    reactor.state.mark_window_visible(retained_wsid);
     reactor
         .reconcile_authoritative_active_window_snapshot(vec![(retained_wsid, Some(space))], false);
 
@@ -3539,7 +3566,7 @@ fn authoritative_active_window_snapshot_removes_missing_window_from_active_layou
         "active-space window missing from the authoritative snapshot must be removed immediately"
     );
     assert!(
-        !reactor.window_manager.is_window_visible(moved_wsid),
+        !reactor.state.is_window_visible(moved_wsid),
         "authoritative snapshot reconcile should clear visible state for missing windows"
     );
     assert!(has_window_in_layout(&mut reactor, space, frame, retained));
@@ -3566,12 +3593,10 @@ fn authoritative_active_window_snapshot_reassigns_missing_window_to_inactive_spa
     reactor.handle_events(apps.make_app(pid, make_windows(2)));
     apps.simulate_until_quiet(&mut reactor);
 
-    reactor.window_manager.set_window_server_space(moved_wsid, Some(active_space));
-    reactor.window_manager.mark_window_visible(moved_wsid);
-    reactor
-        .window_manager
-        .set_window_server_space(retained_wsid, Some(active_space));
-    reactor.window_manager.mark_window_visible(retained_wsid);
+    reactor.state.set_window_server_space(moved_wsid, Some(active_space));
+    reactor.state.mark_window_visible(moved_wsid);
+    reactor.state.set_window_server_space(retained_wsid, Some(active_space));
+    reactor.state.mark_window_visible(retained_wsid);
     crate::sys::window_server::set_window_spaces_override(
         moved_wsid,
         Some(vec![inactive_space.get()]),
@@ -3594,7 +3619,7 @@ fn authoritative_active_window_snapshot_reassigns_missing_window_to_inactive_spa
             .layout_manager
             .layout_engine
             .virtual_workspace_manager()
-            .workspace_for_window(active_space, moved)
+            .workspace_for_window(reactor.state.as_ref(), active_space, moved)
             .is_none(),
         "window should no longer belong to the old active native space"
     );
@@ -3603,7 +3628,7 @@ fn authoritative_active_window_snapshot_reassigns_missing_window_to_inactive_spa
             .layout_manager
             .layout_engine
             .virtual_workspace_manager()
-            .workspace_for_window(inactive_space, moved)
+            .workspace_for_window(reactor.state.as_ref(), inactive_space, moved)
             .is_some(),
         "window should now belong to the inactive native space that WindowServer reports"
     );
@@ -3660,24 +3685,29 @@ fn topology_window_delta_reassigns_missing_window_to_inactive_space() {
             .layout_manager
             .layout_engine
             .virtual_workspace_manager_mut()
-            .assign_window_to_workspace(active_space, moved, preserved_workspace)
+            .assign_window_to_workspace(
+                reactor.state.as_mut(),
+                active_space,
+                moved,
+                preserved_workspace
+            )
     );
-    let _ = reactor
-        .layout_manager
-        .layout_engine
-        .handle_virtual_workspace_command(active_space, &LayoutCommand::SwitchToWorkspace(2));
+    let _ = reactor.layout_manager.layout_engine.handle_virtual_workspace_command(
+        reactor.state.as_mut(),
+        active_space,
+        &LayoutCommand::SwitchToWorkspace(2),
+    );
     reactor.send_layout_event(LayoutEvent::WindowAdded(active_space, moved));
-    let _ = reactor
-        .layout_manager
-        .layout_engine
-        .handle_virtual_workspace_command(active_space, &LayoutCommand::SwitchToWorkspace(0));
+    let _ = reactor.layout_manager.layout_engine.handle_virtual_workspace_command(
+        reactor.state.as_mut(),
+        active_space,
+        &LayoutCommand::SwitchToWorkspace(0),
+    );
 
-    reactor.window_manager.set_window_server_space(moved_wsid, Some(active_space));
-    reactor.window_manager.mark_window_visible(moved_wsid);
-    reactor
-        .window_manager
-        .set_window_server_space(retained_wsid, Some(active_space));
-    reactor.window_manager.mark_window_visible(retained_wsid);
+    reactor.state.set_window_server_space(moved_wsid, Some(active_space));
+    reactor.state.mark_window_visible(moved_wsid);
+    reactor.state.set_window_server_space(retained_wsid, Some(active_space));
+    reactor.state.mark_window_visible(retained_wsid);
     crate::sys::window_server::set_window_spaces_override(
         moved_wsid,
         Some(vec![inactive_space.get()]),
@@ -3722,7 +3752,7 @@ fn topology_window_delta_reassigns_missing_window_to_inactive_space() {
             .layout_manager
             .layout_engine
             .virtual_workspace_manager()
-            .workspace_for_window(active_space, moved)
+            .workspace_for_window(reactor.state.as_ref(), active_space, moved)
             .is_none()
     );
     assert!(
@@ -3730,7 +3760,7 @@ fn topology_window_delta_reassigns_missing_window_to_inactive_space() {
             .layout_manager
             .layout_engine
             .virtual_workspace_manager()
-            .workspace_for_window(inactive_space, moved)
+            .workspace_for_window(reactor.state.as_ref(), inactive_space, moved)
             .is_some_and(|workspace| workspace == expected_destination_workspace)
     );
     assert!(!has_window_in_layout(&mut reactor, active_space, frame, moved));
@@ -3785,7 +3815,7 @@ fn topology_window_delta_is_not_ignored_by_command_space_only_short_circuit() {
         Some(space2),
         "topology delta should still be processed even when the forwarded screens snapshot is unchanged"
     );
-    assert_eq!(reactor.window_manager.window_server_space(wsid), Some(space2));
+    assert_eq!(reactor.state.window_server_space(wsid), Some(space2));
 }
 
 #[test]
@@ -3814,9 +3844,14 @@ fn forwarded_space_state_does_not_clear_existing_fullscreen_tracks_when_snapshot
             .layout_manager
             .layout_engine
             .virtual_workspace_manager_mut()
-            .assign_window_to_workspace(tracked_user_space, window_id, tracked_workspace)
+            .assign_window_to_workspace(
+                reactor.state.as_mut(),
+                tracked_user_space,
+                window_id,
+                tracked_workspace
+            )
     );
-    let _ = reactor.window_manager.suspend_window_to_native_fullscreen(
+    let _ = reactor.state.suspend_window_to_native_fullscreen(
         window_id,
         Some(WindowServerId::new(1)),
         Some(tracked_user_space),
@@ -3847,7 +3882,7 @@ fn forwarded_space_state_does_not_clear_existing_fullscreen_tracks_when_snapshot
 
     assert!(
         reactor
-            .window_manager
+            .state
             .native_fullscreen_record_for_window(window_id)
             .is_some_and(|record| record.fullscreen_space == fullscreen_space),
         "empty forwarded fullscreen state must not clear existing fullscreen exit tracking"
@@ -3875,7 +3910,7 @@ fn non_active_workspace_windows_remain_hidden_even_if_frame_no_longer_matches_co
     apps.simulate_until_quiet(&mut reactor);
 
     let wsid = reactor
-        .window_manager
+        .state
         .window(wid)
         .and_then(|window| window.info.sys_id)
         .expect("tracked window should have a window server id");
@@ -3899,10 +3934,10 @@ fn non_active_workspace_windows_remain_hidden_even_if_frame_no_longer_matches_co
             .layout_manager
             .layout_engine
             .virtual_workspace_manager_mut()
-            .assign_window_to_workspace(space, wid, inactive_workspace)
+            .assign_window_to_workspace(reactor.state.as_mut(), space, wid, inactive_workspace)
     );
 
-    if let Some(window) = reactor.window_manager.window_mut(wid) {
+    if let Some(window) = reactor.state.window_mut(wid) {
         window.frame_monotonic = CGRect::new(CGPoint::new(200.0, 200.0), CGSize::new(400.0, 400.0));
     }
 
@@ -4283,7 +4318,7 @@ fn fullscreen_startup_applies_app_rules_to_hidden_user_space_windows() {
     });
 
     reactor
-        .window_manager
+        .state
         .track_window_server_info(crate::sys::window_server::WindowServerInfo {
             id: wsid,
             pid,
@@ -4292,7 +4327,7 @@ fn fullscreen_startup_applies_app_rules_to_hidden_user_space_windows() {
             min_frame: screen.size,
             max_frame: screen.size,
         });
-    reactor.window_manager.set_window_server_space(wsid, Some(user_space));
+    reactor.state.set_window_server_space(wsid, Some(user_space));
 
     reactor.handle_event(Event::WindowsDiscovered {
         pid,
@@ -4328,7 +4363,7 @@ fn fullscreen_startup_applies_app_rules_to_hidden_user_space_windows() {
             .layout_manager
             .layout_engine
             .virtual_workspace_manager()
-            .workspace_for_window(user_space, wid),
+            .workspace_for_window(reactor.state.as_ref(), user_space, wid),
         Some(target_workspace),
         "fullscreen startup should still apply app rules to the hidden user-space window"
     );
@@ -4403,11 +4438,16 @@ fn fullscreen_startup_discovery_preserves_existing_hidden_assignment_without_app
             .layout_manager
             .layout_engine
             .virtual_workspace_manager_mut()
-            .assign_window_to_workspace(user_space, wid, secondary_workspace)
+            .assign_window_to_workspace(
+                reactor.state.as_mut(),
+                user_space,
+                wid,
+                secondary_workspace
+            )
     );
 
     reactor
-        .window_manager
+        .state
         .track_window_server_info(crate::sys::window_server::WindowServerInfo {
             id: wsid,
             pid,
@@ -4416,7 +4456,7 @@ fn fullscreen_startup_discovery_preserves_existing_hidden_assignment_without_app
             min_frame: screen.size,
             max_frame: screen.size,
         });
-    reactor.window_manager.set_window_server_space(wsid, Some(user_space));
+    reactor.state.set_window_server_space(wsid, Some(user_space));
 
     reactor.handle_event(Event::WindowsDiscovered {
         pid,
@@ -4444,7 +4484,7 @@ fn fullscreen_startup_discovery_preserves_existing_hidden_assignment_without_app
             .layout_manager
             .layout_engine
             .virtual_workspace_manager()
-            .workspace_for_window(user_space, wid),
+            .workspace_for_window(reactor.state.as_ref(), user_space, wid),
         Some(secondary_workspace),
         "fullscreen startup discovery must preserve the existing hidden assignment instead of defaulting it"
     );
@@ -4498,10 +4538,7 @@ fn discovery_minimize_transition_removes_window_from_layout() {
         "minimized window must be removed from layout when discovery reports it minimized"
     );
     assert!(
-        reactor
-            .window_manager
-            .window(wid)
-            .is_some_and(|window| window.info.is_minimized),
+        reactor.state.window(wid).is_some_and(|window| window.info.is_minimized),
         "reactor state must keep the window marked minimized"
     );
 }
@@ -4540,10 +4577,7 @@ fn discovery_restore_transition_readds_window_to_layout() {
         "restored window must return to layout when discovery reports it visible again"
     );
     assert!(
-        reactor
-            .window_manager
-            .window(wid)
-            .is_some_and(|window| !window.info.is_minimized),
+        reactor.state.window(wid).is_some_and(|window| !window.info.is_minimized),
         "reactor state must clear the minimized flag after restore"
     );
 }
@@ -4581,7 +4615,7 @@ fn discovery_manageability_loss_removes_window_from_layout() {
     );
     assert!(
         reactor
-            .window_manager
+            .state
             .window(wid)
             .is_some_and(|window| !window.matches_filter(WindowFilter::Manageable)),
         "reactor state must keep the window marked unmanageable"
@@ -4615,7 +4649,7 @@ fn unfullscreen_restores_window_tracking() {
 
     // Record the window as fullscreened.
     let window_id = WindowId::new(1, 1);
-    let _ = reactor.window_manager.suspend_window_to_native_fullscreen(
+    let _ = reactor.state.suspend_window_to_native_fullscreen(
         window_id,
         Some(WindowServerId::new(1)),
         Some(user_space),
@@ -4644,7 +4678,7 @@ fn unfullscreen_restores_window_tracking() {
 
     // The fullscreen track should be removed.
     assert!(
-        reactor.window_manager.native_fullscreen_record_for_window(window_id).is_none(),
+        reactor.state.native_fullscreen_record_for_window(window_id).is_none(),
         "Fullscreen track should be removed from space manager"
     );
 }
@@ -4665,7 +4699,7 @@ fn fullscreen_exit_space_restore_does_not_revive_stale_pre_rekey_window() {
     ));
 
     reactor.space_state.fullscreen_spaces.insert(fullscreen_space);
-    let _ = reactor.window_manager.suspend_window_to_native_fullscreen(
+    let _ = reactor.state.suspend_window_to_native_fullscreen(
         old_wid,
         Some(wsid),
         Some(user_space),
@@ -4675,7 +4709,7 @@ fn fullscreen_exit_space_restore_does_not_revive_stale_pre_rekey_window() {
     reactor.send_layout_event(LayoutEvent::WindowRemovedPreserveFloating(old_wid));
 
     let old_info = reactor
-        .window_manager
+        .state
         .window(old_wid)
         .expect("old window should exist before rekey")
         .info
@@ -4689,7 +4723,7 @@ fn fullscreen_exit_space_restore_does_not_revive_stale_pre_rekey_window() {
         known_visible: vec![new_wid],
     });
     assert!(
-        reactor.window_manager.window(old_wid).is_none(),
+        reactor.state.window(old_wid).is_none(),
         "rekey should retire the old AX id before the fullscreen exit snapshot arrives"
     );
 
@@ -4797,7 +4831,7 @@ fn display_churn_end_refresh_preserves_non_default_workspace_without_app_rules()
             .layout_manager
             .layout_engine
             .virtual_workspace_manager_mut()
-            .assign_window_to_workspace(space, wid, secondary_workspace)
+            .assign_window_to_workspace(reactor.state.as_mut(), space, wid, secondary_workspace)
     );
     assert!(
         reactor
@@ -4817,7 +4851,7 @@ fn display_churn_end_refresh_preserves_non_default_workspace_without_app_rules()
             .layout_manager
             .layout_engine
             .virtual_workspace_manager()
-            .workspace_for_window(space, wid),
+            .workspace_for_window(reactor.state.as_ref(), space, wid),
         Some(secondary_workspace)
     );
     assert_ne!(secondary_workspace, default_workspace);
@@ -4831,7 +4865,7 @@ fn display_churn_end_refresh_preserves_non_default_workspace_without_app_rules()
             .layout_manager
             .layout_engine
             .virtual_workspace_manager()
-            .workspace_for_window(space, wid),
+            .workspace_for_window(reactor.state.as_ref(), space, wid),
         Some(secondary_workspace),
         "visibility refresh must preserve an existing non-default assignment when no app rule matches"
     );
@@ -4879,7 +4913,7 @@ fn session_gate_ignores_discovery_and_replays_one_refresh_after_unlock() {
             .layout_manager
             .layout_engine
             .virtual_workspace_manager_mut()
-            .assign_window_to_workspace(space, wid, secondary_workspace)
+            .assign_window_to_workspace(reactor.state.as_mut(), space, wid, secondary_workspace)
     );
     assert!(
         reactor
@@ -4908,7 +4942,7 @@ fn session_gate_ignores_discovery_and_replays_one_refresh_after_unlock() {
             .layout_manager
             .layout_engine
             .virtual_workspace_manager()
-            .workspace_for_window(space, wid),
+            .workspace_for_window(reactor.state.as_ref(), space, wid),
         Some(secondary_workspace),
         "ignored lock-session discovery must not reassign the window back to the default workspace"
     );
@@ -5041,7 +5075,12 @@ fn partial_post_wake_snapshot_preserves_manual_workspace_assignment() {
             .layout_manager
             .layout_engine
             .virtual_workspace_manager_mut()
-            .assign_window_to_workspace(space, omitted, secondary_workspace)
+            .assign_window_to_workspace(
+                reactor.state.as_mut(),
+                space,
+                omitted,
+                secondary_workspace
+            )
     );
 
     reactor.handle_event(Event::SystemWillSleep);
@@ -5062,7 +5101,7 @@ fn partial_post_wake_snapshot_preserves_manual_workspace_assignment() {
             .layout_manager
             .layout_engine
             .virtual_workspace_manager()
-            .workspace_for_window(space, omitted),
+            .workspace_for_window(reactor.state.as_ref(), space, omitted),
         Some(secondary_workspace),
         "a partial recovery snapshot must not erase a manual workspace assignment"
     );
@@ -5078,7 +5117,7 @@ fn partial_post_wake_snapshot_preserves_manual_workspace_assignment() {
             .layout_manager
             .layout_engine
             .virtual_workspace_manager()
-            .workspace_for_window(space, omitted),
+            .workspace_for_window(reactor.state.as_ref(), space, omitted),
         Some(secondary_workspace),
         "post-wake discovery without an app rule must retain the manual workspace"
     );
@@ -5175,15 +5214,15 @@ fn empty_active_space_membership_during_wake_race_does_not_blank_known_active_wi
     reactor.handle_events(apps.make_app(1, make_windows(1)));
     apps.simulate_until_quiet(&mut reactor);
 
-    reactor.window_manager.set_window_server_space(wsid, Some(space));
-    reactor.window_manager.mark_window_visible(wsid);
+    reactor.state.set_window_server_space(wsid, Some(space));
+    reactor.state.mark_window_visible(wsid);
 
     crate::sys::window_server::set_space_window_list_for_connection_override(Some(vec![]));
     reactor.refresh_window_server_snapshot_for_active_spaces();
     crate::sys::window_server::set_space_window_list_for_connection_override(None);
 
     assert!(
-        reactor.window_manager.is_window_visible(wsid),
+        reactor.state.is_window_visible(wsid),
         "a transient empty active-space WS-id result after wake must not blank windows we already know belong to the active space"
     );
     assert!(
@@ -5226,7 +5265,12 @@ fn wsid_rekey_preserves_non_default_workspace_without_app_rules() {
             .layout_manager
             .layout_engine
             .virtual_workspace_manager_mut()
-            .assign_window_to_workspace(space, old_wid, secondary_workspace)
+            .assign_window_to_workspace(
+                reactor.state.as_mut(),
+                space,
+                old_wid,
+                secondary_workspace
+            )
     );
     assert!(
         reactor
@@ -5236,12 +5280,7 @@ fn wsid_rekey_preserves_non_default_workspace_without_app_rules() {
             .set_active_workspace(space, secondary_workspace)
     );
 
-    let old_info = reactor
-        .window_manager
-        .window(old_wid)
-        .expect("old window should exist")
-        .info
-        .clone();
+    let old_info = reactor.state.window(old_wid).expect("old window should exist").info.clone();
 
     reactor.handle_event(Event::WindowsDiscovered {
         pid: 1,
@@ -5257,7 +5296,7 @@ fn wsid_rekey_preserves_non_default_workspace_without_app_rules() {
             .layout_manager
             .layout_engine
             .virtual_workspace_manager()
-            .workspace_for_window(space, new_wid),
+            .workspace_for_window(reactor.state.as_ref(), space, new_wid),
         Some(secondary_workspace),
         "AX id churn for the same WindowServer window must preserve its workspace assignment"
     );
@@ -5266,7 +5305,7 @@ fn wsid_rekey_preserves_non_default_workspace_without_app_rules() {
             .layout_manager
             .layout_engine
             .virtual_workspace_manager()
-            .workspace_info_for_window_any(old_wid),
+            .workspace_info_for_window_any(reactor.state.as_ref(), old_wid),
         None,
         "old AX window id should relinquish its assignment after rekey"
     );
@@ -5308,12 +5347,7 @@ fn wsid_rekey_preserves_floating_membership_and_position() {
         .virtual_workspace_manager_mut()
         .store_floating_position(space, active_workspace, old_wid, stored_position);
 
-    let old_info = reactor
-        .window_manager
-        .window(old_wid)
-        .expect("old window should exist")
-        .info
-        .clone();
+    let old_info = reactor.state.window(old_wid).expect("old window should exist").info.clone();
 
     reactor.handle_event(Event::WindowsDiscovered {
         pid: 1,
