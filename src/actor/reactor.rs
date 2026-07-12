@@ -22,6 +22,7 @@ mod tests;
 use std::thread;
 
 use animation::Sender as AnimationSender;
+use events::EventOutcome;
 use events::app::AppEventHandler;
 use events::command::CommandEventHandler;
 use events::drag::DragEventHandler;
@@ -1147,37 +1148,38 @@ impl Reactor {
             _ => (),
         }
 
-        self.finalize_event_processing(
+        self.apply_event_outcome(EventOutcome::finalized_event(
             raised_window,
             is_resize,
             window_was_destroyed,
             should_update_notifications,
-        );
+        ));
     }
 
-    fn finalize_event_processing(
-        &mut self,
-        raised_window: Option<WindowId>,
-        is_resize: bool,
-        window_was_destroyed: bool,
-        should_update_notifications: bool,
-    ) {
-        if let Some(raised_window) = raised_window {
-            if let Some(space) = self.best_space_for_window_id(raised_window) {
-                self.send_layout_event(LayoutEvent::WindowFocused(space, raised_window));
-            }
-        }
-
+    /// Applies workflow follow-up requests in one stable order.
+    ///
+    /// Layout calculation and its frame/animation writes happen first. Focus
+    /// selection follows those writes, then UI/platform presentation state is
+    /// refreshed. Broadcast and discovery requests made directly by a workflow
+    /// are consequently observed only after its model mutation is complete.
+    fn apply_event_outcome(&mut self, outcome: EventOutcome) {
         let mut layout_changed = false;
-        if !self.is_in_drag() || window_was_destroyed {
+        if outcome.arrange.requested && (!self.is_in_drag() || outcome.arrange.window_was_destroyed)
+        {
             layout_changed = self.update_layout_or_warn(
-                is_resize,
+                outcome.arrange.is_resize,
                 matches!(
                     self.workspace_switch_manager.workspace_switch_state,
                     WorkspaceSwitchState::Active
                 ),
             );
             self.maybe_send_menu_update();
+        }
+
+        if let Some(raised_window) = outcome.focused_window {
+            if let Some(space) = self.best_space_for_window_id(raised_window) {
+                self.send_layout_event(LayoutEvent::WindowFocused(space, raised_window));
+            }
         }
 
         self.workspace_switch_manager.mark_workspace_switch_inactive();
@@ -1193,7 +1195,7 @@ impl Reactor {
             }
         }
 
-        if should_update_notifications {
+        if outcome.refresh_window_notifications {
             let mut ids: Vec<u32> = self
                 .state
                 .windows
@@ -1208,7 +1210,9 @@ impl Reactor {
                 self.notification_manager.last_sls_notification_ids = ids;
             }
         }
-        self.update_event_tap_layout_mode();
+        if outcome.refresh_layout_mode {
+            self.update_event_tap_layout_mode();
+        }
     }
 
     fn create_window_data(&self, window_id: WindowId) -> Option<WindowData> {

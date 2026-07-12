@@ -5,3 +5,7 @@ pub mod space;
 pub mod system;
 pub mod window;
 pub mod window_discovery;
+
+mod outcome;
+
+pub(crate) use outcome::EventOutcome;
