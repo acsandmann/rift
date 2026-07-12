@@ -58,6 +58,7 @@ impl SystemEventHandler {
     pub fn handle_system_woke(reactor: &mut Reactor) {
         let ids: Vec<u32> = reactor
             .state
+            .windows
             .iter_tracked_window_server_ids()
             .map(|wsid| wsid.as_u32())
             .collect();

@@ -12,7 +12,7 @@ use crate::common::config::{
 use crate::common::log::trace_misc;
 use crate::layout_engine::Direction;
 use crate::layout_engine::systems::LayoutSystemKind;
-use crate::model::{WindowRegistry, WindowWorkspaceInfo};
+use crate::model::{WindowStore, WindowWorkspaceInfo};
 use crate::sys::app::pid_t;
 use crate::sys::geometry::CGRectDef;
 use crate::sys::screen::SpaceId;
@@ -60,7 +60,7 @@ pub enum AppRuleResult {
 /// Workspace-local configuration and layout state.
 ///
 /// This intentionally does not own the set of member windows. Window-to-
-/// workspace assignment is authoritative in `WindowRegistry`; the layout system
+/// workspace assignment is authoritative in `WindowStore`; the layout system
 /// here is only the arrangement for the windows currently projected into this
 /// workspace.
 #[derive(Debug, Serialize, Deserialize)]
@@ -145,9 +145,9 @@ impl HideCorner {
 
 /// Owns the virtual workspace topology for each native macOS space.
 ///
-/// Membership is single-source-of-truth in `window_registry`. Any code that
+/// Membership is single-source-of-truth in `WindowStore`. Any code that
 /// needs to answer "which workspace owns this window?" or "which windows belong
-/// to this workspace?" must go through the registry-backed helpers on this
+/// to this workspace?" must go through the store-backed helpers on this
 /// manager. Keeping the mapping out of `VirtualWorkspace` prevents stale
 /// duplicated membership from surviving topology churn or discovery refreshes.
 #[derive(Debug, Serialize, Deserialize)]
@@ -336,7 +336,7 @@ impl VirtualWorkspaceManager {
 
     pub fn remap_space(
         &mut self,
-        registry: &mut WindowRegistry,
+        window_store: &mut WindowStore,
         old_space: SpaceId,
         new_space: SpaceId,
     ) {
@@ -360,7 +360,7 @@ impl VirtualWorkspaceManager {
         self.active_workspace_per_space.remove(&new_space);
 
         if !deleted_target_workspace_ids.is_empty() {
-            let stale_windows: Vec<_> = registry
+            let stale_windows: Vec<_> = window_store
                 .iter_workspace_assignments()
                 .filter_map(|(window_id, assignment)| {
                     deleted_target_workspace_ids
@@ -369,7 +369,7 @@ impl VirtualWorkspaceManager {
                 })
                 .collect();
             for window_id in stale_windows {
-                let _ = registry.remove_window_assignment(window_id);
+                let _ = window_store.remove_window_assignment(window_id);
             }
         }
 
@@ -387,7 +387,7 @@ impl VirtualWorkspaceManager {
             self.active_workspace_per_space.insert(new_space, (last, active));
         }
 
-        registry.remap_space(old_space, new_space);
+        window_store.remap_space(old_space, new_space);
 
         let mut new_positions = HashMap::default();
         for ((space, ws_id), positions) in std::mem::take(&mut self.floating_positions) {
@@ -485,7 +485,7 @@ impl VirtualWorkspaceManager {
 
     fn filtered_workspace_ids(
         &self,
-        registry: &WindowRegistry,
+        window_store: &WindowStore,
         space: SpaceId,
         skip_empty: Option<bool>,
     ) -> Vec<VirtualWorkspaceId> {
@@ -500,7 +500,8 @@ impl VirtualWorkspaceManager {
             .copied()
             .filter(|id| {
                 if self.workspaces.contains_key(*id) {
-                    !(require_non_empty && self.workspace_windows(registry, space, *id).is_empty())
+                    !(require_non_empty
+                        && self.workspace_windows(window_store, space, *id).is_empty())
                 } else {
                     false
                 }
@@ -510,14 +511,14 @@ impl VirtualWorkspaceManager {
 
     fn step_workspace(
         &self,
-        registry: &WindowRegistry,
+        window_store: &WindowStore,
         space: SpaceId,
         current: VirtualWorkspaceId,
         skip_empty: Option<bool>,
         dir: Direction,
     ) -> Option<VirtualWorkspaceId> {
         let base_ids: Vec<VirtualWorkspaceId> = if skip_empty == Some(true) {
-            self.filtered_workspace_ids(registry, space, Some(true))
+            self.filtered_workspace_ids(window_store, space, Some(true))
         } else {
             self.workspaces_by_space.get(&space).cloned().unwrap_or_default()
         };
@@ -531,7 +532,7 @@ impl VirtualWorkspaceManager {
             return Some(base_ids[i]);
         }
 
-        let fallback_ids = self.filtered_workspace_ids(registry, space, Some(false));
+        let fallback_ids = self.filtered_workspace_ids(window_store, space, Some(false));
         if fallback_ids.is_empty() {
             return None;
         }
@@ -545,7 +546,7 @@ impl VirtualWorkspaceManager {
 
         for _ in 0..fallback_ids.len() {
             let id = fallback_ids[i];
-            if !self.workspace_windows(registry, space, id).is_empty() {
+            if !self.workspace_windows(window_store, space, id).is_empty() {
                 return Some(id);
             }
             i = dir.step(i, fallback_ids.len());
@@ -555,27 +556,27 @@ impl VirtualWorkspaceManager {
 
     pub fn next_workspace(
         &self,
-        registry: &WindowRegistry,
+        window_store: &WindowStore,
         space: SpaceId,
         current: VirtualWorkspaceId,
         skip_empty: Option<bool>,
     ) -> Option<VirtualWorkspaceId> {
-        self.step_workspace(registry, space, current, skip_empty, Direction::Right)
+        self.step_workspace(window_store, space, current, skip_empty, Direction::Right)
     }
 
     pub fn prev_workspace(
         &self,
-        registry: &WindowRegistry,
+        window_store: &WindowStore,
         space: SpaceId,
         current: VirtualWorkspaceId,
         skip_empty: Option<bool>,
     ) -> Option<VirtualWorkspaceId> {
-        self.step_workspace(registry, space, current, skip_empty, Direction::Left)
+        self.step_workspace(window_store, space, current, skip_empty, Direction::Left)
     }
 
     pub fn assign_window_to_workspace(
         &mut self,
-        registry: &mut WindowRegistry,
+        window_store: &mut WindowStore,
         space: SpaceId,
         window_id: WindowId,
         workspace_id: VirtualWorkspaceId,
@@ -591,8 +592,8 @@ impl VirtualWorkspaceManager {
                 return false;
             }
 
-            let previous_assignment = registry.workspace_info_for_window(window_id);
-            registry
+            let previous_assignment = window_store.workspace_info_for_window(window_id);
+            window_store
                 .assign_window_to_workspace(window_id, WindowWorkspaceInfo { space, workspace_id });
             if let Some(previous_assignment) = previous_assignment
                 && previous_assignment.workspace_id != workspace_id
@@ -613,13 +614,13 @@ impl VirtualWorkspaceManager {
     /// the window to the destination's active workspace.
     pub fn assign_window_to_workspace_preserving_ordinal(
         &mut self,
-        registry: &mut WindowRegistry,
+        window_store: &mut WindowStore,
         space: SpaceId,
         window_id: WindowId,
     ) -> Option<VirtualWorkspaceId> {
         self.ensure_space_initialized(space);
 
-        let existing_assignment = registry.workspace_info_for_window(window_id)?;
+        let existing_assignment = window_store.workspace_info_for_window(window_id)?;
         if existing_assignment.space == space {
             return Some(existing_assignment.workspace_id);
         }
@@ -631,92 +632,92 @@ impl VirtualWorkspaceManager {
             .position(|&workspace_id| workspace_id == existing_assignment.workspace_id)?;
         let target_workspace_id = *self.workspaces_by_space.get(&space)?.get(source_index)?;
 
-        self.assign_window_to_workspace(registry, space, window_id, target_workspace_id)
+        self.assign_window_to_workspace(window_store, space, window_id, target_workspace_id)
             .then_some(target_workspace_id)
     }
 
     pub fn workspace_for_window(
         &self,
-        registry: &WindowRegistry,
+        window_store: &WindowStore,
         space: SpaceId,
         window_id: WindowId,
     ) -> Option<VirtualWorkspaceId> {
-        registry.workspace_for_window(space, window_id)
+        window_store.workspace_for_window(space, window_id)
     }
 
     pub fn workspace_for_window_any(
         &self,
-        registry: &WindowRegistry,
+        window_store: &WindowStore,
         window_id: WindowId,
     ) -> Option<VirtualWorkspaceId> {
-        registry.workspace_info_for_window(window_id).map(|info| info.workspace_id)
+        window_store.workspace_info_for_window(window_id).map(|info| info.workspace_id)
     }
 
     pub fn workspace_info_for_window_any(
         &self,
-        registry: &WindowRegistry,
+        window_store: &WindowStore,
         window_id: WindowId,
     ) -> Option<WindowWorkspaceInfo> {
-        registry.workspace_info_for_window(window_id)
+        window_store.workspace_info_for_window(window_id)
     }
 
     pub fn workspaces_for_window(
         &self,
-        registry: &WindowRegistry,
+        window_store: &WindowStore,
         window_id: WindowId,
     ) -> Vec<VirtualWorkspaceId> {
-        registry.workspaces_for_window(window_id)
+        window_store.workspaces_for_window(window_id)
     }
 
     pub fn set_last_rule_decision(
         &mut self,
-        registry: &mut WindowRegistry,
+        window_store: &mut WindowStore,
         space: SpaceId,
         window_id: WindowId,
         value: bool,
     ) {
         let _ = space;
-        registry.set_last_rule_decision(window_id, value);
+        window_store.set_last_rule_decision(window_id, value);
     }
 
-    pub fn remove_window(&mut self, registry: &mut WindowRegistry, window_id: WindowId) {
-        let _ = registry.remove_window_assignment(window_id);
-        registry.clear_rule_metadata(window_id);
+    pub fn remove_window(&mut self, window_store: &mut WindowStore, window_id: WindowId) {
+        let _ = window_store.remove_window_assignment(window_id);
+        window_store.clear_rule_metadata(window_id);
     }
 
-    pub fn remove_windows_for_app(&mut self, registry: &mut WindowRegistry, pid: pid_t) {
-        let windows_to_remove: Vec<_> = registry
+    pub fn remove_windows_for_app(&mut self, window_store: &mut WindowStore, pid: pid_t) {
+        let windows_to_remove: Vec<_> = window_store
             .iter_workspace_assignments()
             .map(|(window_id, _)| window_id)
             .filter(|wid| wid.pid == pid)
             .collect();
 
         for window_id in windows_to_remove {
-            let _ = registry.remove_window_assignment(window_id);
-            registry.clear_rule_metadata(window_id);
+            let _ = window_store.remove_window_assignment(window_id);
+            window_store.clear_rule_metadata(window_id);
         }
     }
 
     /// Gets all windows in the active virtual workspace for a given native space.
     pub fn windows_in_active_workspace(
         &self,
-        registry: &WindowRegistry,
+        window_store: &WindowStore,
         space: SpaceId,
     ) -> Vec<WindowId> {
         if let Some(workspace_id) = self.active_workspace(space) {
-            return self.workspace_windows(registry, space, workspace_id);
+            return self.workspace_windows(window_store, space, workspace_id);
         }
         Vec::new()
     }
 
     pub fn is_window_in_active_workspace(
         &self,
-        registry: &WindowRegistry,
+        window_store: &WindowStore,
         space: SpaceId,
         window_id: WindowId,
     ) -> bool {
         if let Some(active_workspace_id) = self.active_workspace(space) {
-            if let Some(window_workspace_id) = registry.workspace_for_window(space, window_id) {
+            if let Some(window_workspace_id) = window_store.workspace_for_window(space, window_id) {
                 return window_workspace_id == active_workspace_id;
             }
         }
@@ -725,7 +726,7 @@ impl VirtualWorkspaceManager {
 
     pub fn windows_in_inactive_workspaces(
         &self,
-        registry: &WindowRegistry,
+        window_store: &WindowStore,
         space: SpaceId,
     ) -> Vec<WindowId> {
         let active_workspace_id = self.active_workspace(space);
@@ -733,24 +734,24 @@ impl VirtualWorkspaceManager {
         self.workspaces
             .iter()
             .filter(|(id, workspace)| workspace.space == space && Some(*id) != active_workspace_id)
-            .flat_map(|(id, _)| self.workspace_windows(registry, space, id))
+            .flat_map(|(id, _)| self.workspace_windows(window_store, space, id))
             .collect()
     }
 
     pub fn find_window_by_idx(
         &self,
-        registry: &WindowRegistry,
+        window_store: &WindowStore,
         space: SpaceId,
         idx: u32,
     ) -> Option<WindowId> {
-        registry
+        window_store
             .iter_workspace_assignments()
             .find_map(|(wid, info)| (info.space == space && wid.idx.get() == idx).then_some(wid))
     }
 
     pub fn find_window_in_workspace_by_idx(
         &self,
-        registry: &WindowRegistry,
+        window_store: &WindowStore,
         space: SpaceId,
         workspace_id: VirtualWorkspaceId,
         idx: u32,
@@ -760,7 +761,7 @@ impl VirtualWorkspaceManager {
         }
 
         self.workspaces.get(workspace_id).and_then(|_| {
-            self.workspace_windows(registry, space, workspace_id)
+            self.workspace_windows(window_store, space, workspace_id)
                 .into_iter()
                 .find(|wid| wid.idx.get() == idx)
         })
@@ -1084,25 +1085,25 @@ impl VirtualWorkspaceManager {
 
     pub fn workspace_windows(
         &self,
-        registry: &WindowRegistry,
+        window_store: &WindowStore,
         space: SpaceId,
         workspace_id: VirtualWorkspaceId,
     ) -> Vec<WindowId> {
         if self.workspaces.get(workspace_id).map(|workspace| workspace.space) == Some(space) {
-            return registry.workspace_windows(space, workspace_id);
+            return window_store.workspace_windows(space, workspace_id);
         }
         Vec::new()
     }
 
     pub fn auto_assign_window(
         &mut self,
-        registry: &mut WindowRegistry,
+        window_store: &mut WindowStore,
         window_id: WindowId,
         space: SpaceId,
     ) -> Result<VirtualWorkspaceId, WorkspaceError> {
         let default_workspace_id = self.get_default_workspace(space)?;
-        if self.assign_window_to_workspace(registry, space, window_id, default_workspace_id) {
-            registry.clear_rule_floating(window_id);
+        if self.assign_window_to_workspace(window_store, space, window_id, default_workspace_id) {
+            window_store.clear_rule_floating(window_id);
             Ok(default_workspace_id)
         } else {
             Err(WorkspaceError::AssignmentFailed)
@@ -1111,11 +1112,11 @@ impl VirtualWorkspaceManager {
 
     fn preserved_workspace_assignment(
         &self,
-        registry: &WindowRegistry,
+        window_store: &WindowStore,
         window_id: WindowId,
         space: SpaceId,
     ) -> Option<WindowWorkspaceInfo> {
-        let existing_assignment = registry.workspace_info_for_window(window_id)?;
+        let existing_assignment = window_store.workspace_info_for_window(window_id)?;
         if existing_assignment.space == space {
             return Some(existing_assignment);
         }
@@ -1124,7 +1125,7 @@ impl VirtualWorkspaceManager {
         // candidate and preserve workspace ownership by ordinal. Once the target space already
         // has assignments, prefer the normal resolution path so real cross-space moves still
         // follow the destination space.
-        if registry.has_workspace_assignments_in_space(space) {
+        if window_store.has_workspace_assignments_in_space(space) {
             return None;
         }
 
@@ -1142,15 +1143,15 @@ impl VirtualWorkspaceManager {
 
     fn ensure_window_assignment(
         &mut self,
-        registry: &mut WindowRegistry,
+        window_store: &mut WindowStore,
         window_id: WindowId,
         assignment: WindowWorkspaceInfo,
     ) -> bool {
-        if registry.workspace_info_for_window(window_id) == Some(assignment) {
+        if window_store.workspace_info_for_window(window_id) == Some(assignment) {
             true
         } else {
             self.assign_window_to_workspace(
-                registry,
+                window_store,
                 assignment.space,
                 window_id,
                 assignment.workspace_id,
@@ -1160,7 +1161,7 @@ impl VirtualWorkspaceManager {
 
     pub fn assign_window_with_app_info(
         &mut self,
-        registry: &mut WindowRegistry,
+        window_store: &mut WindowStore,
         window_id: WindowId,
         space: SpaceId,
         app_bundle_id: Option<&str>,
@@ -1169,7 +1170,7 @@ impl VirtualWorkspaceManager {
         ax_role: Option<&str>,
         ax_subrole: Option<&str>,
     ) -> Result<AppRuleResult, WorkspaceError> {
-        let prev_rule_decision = registry.last_rule_decision(window_id);
+        let prev_rule_decision = window_store.last_rule_decision(window_id);
 
         self.ensure_space_initialized(space);
         if self
@@ -1185,11 +1186,12 @@ impl VirtualWorkspaceManager {
             .find_matching_app_rule(app_bundle_id, app_name, window_title, ax_role, ax_subrole)
             .cloned();
 
-        let existing_assignment = self.preserved_workspace_assignment(registry, window_id, space);
+        let existing_assignment =
+            self.preserved_workspace_assignment(window_store, window_id, space);
 
         if let Some(rule) = rule_match {
             if !rule.manage {
-                registry.clear_rule_floating(window_id);
+                window_store.clear_rule_floating(window_id);
                 return Ok(AppRuleResult::Unmanaged);
             }
 
@@ -1250,11 +1252,11 @@ impl VirtualWorkspaceManager {
             };
 
             if let Some(existing_assignment) = existing_assignment {
-                if !self.ensure_window_assignment(registry, window_id, existing_assignment) {
+                if !self.ensure_window_assignment(window_store, window_id, existing_assignment) {
                     error!("Failed to preserve window workspace assignment from app rule");
                     return Err(WorkspaceError::AssignmentFailed);
                 }
-                registry.set_rule_floating(window_id, rule.floating);
+                window_store.set_rule_floating(window_id, rule.floating);
                 return Ok(AppRuleResult::Managed(AppRuleAssignment {
                     workspace_id: existing_assignment.workspace_id,
                     floating: rule.floating,
@@ -1262,8 +1264,9 @@ impl VirtualWorkspaceManager {
                 }));
             }
 
-            if self.assign_window_to_workspace(registry, space, window_id, target_workspace_id) {
-                registry.set_rule_floating(window_id, rule.floating);
+            if self.assign_window_to_workspace(window_store, space, window_id, target_workspace_id)
+            {
+                window_store.set_rule_floating(window_id, rule.floating);
                 return Ok(AppRuleResult::Managed(AppRuleAssignment {
                     workspace_id: target_workspace_id,
                     floating: rule.floating,
@@ -1279,11 +1282,11 @@ impl VirtualWorkspaceManager {
         // the default workspace, or windows on non-default workspaces will appear
         // to "reset" after sleep/display churn.
         if let Some(existing_assignment) = existing_assignment {
-            if !self.ensure_window_assignment(registry, window_id, existing_assignment) {
+            if !self.ensure_window_assignment(window_store, window_id, existing_assignment) {
                 error!("Failed to preserve existing window workspace assignment");
                 return Err(WorkspaceError::AssignmentFailed);
             }
-            registry.clear_rule_floating(window_id);
+            window_store.clear_rule_floating(window_id);
             return Ok(AppRuleResult::Managed(AppRuleAssignment {
                 workspace_id: existing_assignment.workspace_id,
                 floating: false,
@@ -1292,8 +1295,8 @@ impl VirtualWorkspaceManager {
         }
 
         let default_workspace_id = self.get_default_workspace(space)?;
-        if self.assign_window_to_workspace(registry, space, window_id, default_workspace_id) {
-            registry.clear_rule_floating(window_id);
+        if self.assign_window_to_workspace(window_store, space, window_id, default_workspace_id) {
+            window_store.clear_rule_floating(window_id);
             Ok(AppRuleResult::Managed(AppRuleAssignment {
                 workspace_id: default_workspace_id,
                 floating: false,
@@ -1506,10 +1509,10 @@ impl VirtualWorkspaceManager {
         best_overall.map(|(_, rule, _)| *rule)
     }
 
-    pub fn get_stats(&self, registry: &WindowRegistry) -> WorkspaceStats {
+    pub fn get_stats(&self, window_store: &WindowStore) -> WorkspaceStats {
         let mut stats = WorkspaceStats {
             total_workspaces: self.workspaces.len(),
-            total_windows: registry.workspace_assignment_count(),
+            total_windows: window_store.workspace_assignment_count(),
             active_spaces: self.active_workspace_per_space.len(),
             workspace_window_counts: HashMap::default(),
         };
@@ -1517,7 +1520,7 @@ impl VirtualWorkspaceManager {
         for (workspace_id, workspace) in &self.workspaces {
             stats.workspace_window_counts.insert(
                 workspace_id,
-                registry.workspace_window_count(workspace.space, workspace_id),
+                window_store.workspace_window_count(workspace.space, workspace_id),
             );
         }
 
@@ -1584,7 +1587,7 @@ mod tests {
 
     fn assign(
         manager: &mut VirtualWorkspaceManager,
-        registry: &mut WindowRegistry,
+        window_store: &mut WindowStore,
         window_id: WindowId,
         space: SpaceId,
         app_id: Option<&str>,
@@ -1594,7 +1597,7 @@ mod tests {
         ax_subrole: Option<&str>,
     ) -> AppRuleAssignment {
         expect_managed(manager.assign_window_with_app_info(
-            registry,
+            window_store,
             window_id,
             space,
             app_id,
@@ -1629,7 +1632,7 @@ mod tests {
 
     #[test]
     fn test_window_assignment() {
-        let mut registry = WindowRegistry::default();
+        let mut window_store = WindowStore::default();
         let mut manager = VirtualWorkspaceManager::new();
         let space = SpaceId::new(1);
         let ws1_id = manager.create_workspace(space, Some("WS1".to_string())).unwrap();
@@ -1638,75 +1641,79 @@ mod tests {
         let window1 = WindowId::new(1, 1);
         let window2 = WindowId::new(1, 2);
 
-        assert!(manager.assign_window_to_workspace(&mut registry, space, window1, ws1_id));
-        assert!(manager.assign_window_to_workspace(&mut registry, space, window2, ws2_id));
+        assert!(manager.assign_window_to_workspace(&mut window_store, space, window1, ws1_id));
+        assert!(manager.assign_window_to_workspace(&mut window_store, space, window2, ws2_id));
 
         assert_eq!(
-            manager.workspace_for_window(&registry, space, window1),
+            manager.workspace_for_window(&window_store, space, window1),
             Some(ws1_id)
         );
         assert_eq!(
-            manager.workspace_for_window(&registry, space, window2),
+            manager.workspace_for_window(&window_store, space, window2),
             Some(ws2_id)
         );
 
-        assert_eq!(manager.workspace_windows(&registry, space, ws1_id), vec![
+        assert_eq!(manager.workspace_windows(&window_store, space, ws1_id), vec![
             window1
         ]);
-        assert_eq!(manager.workspace_windows(&registry, space, ws2_id), vec![
+        assert_eq!(manager.workspace_windows(&window_store, space, ws2_id), vec![
             window2
         ]);
     }
 
     #[test]
     fn reassignment_updates_authoritative_workspace_index() {
-        let mut registry = WindowRegistry::default();
+        let mut window_store = WindowStore::default();
         let mut manager = VirtualWorkspaceManager::new();
         let space = SpaceId::new(1);
         let ws1_id = manager.create_workspace(space, Some("WS1".to_string())).unwrap();
         let ws2_id = manager.create_workspace(space, Some("WS2".to_string())).unwrap();
         let window = WindowId::new(9, 1);
 
-        assert!(manager.assign_window_to_workspace(&mut registry, space, window, ws1_id));
+        assert!(manager.assign_window_to_workspace(&mut window_store, space, window, ws1_id));
         assert_eq!(
-            manager.workspace_for_window(&registry, space, window),
+            manager.workspace_for_window(&window_store, space, window),
             Some(ws1_id)
         );
-        assert_eq!(manager.workspace_windows(&registry, space, ws1_id), vec![window]);
+        assert_eq!(manager.workspace_windows(&window_store, space, ws1_id), vec![
+            window
+        ]);
 
-        assert!(manager.assign_window_to_workspace(&mut registry, space, window, ws2_id));
+        assert!(manager.assign_window_to_workspace(&mut window_store, space, window, ws2_id));
         assert_eq!(
-            manager.workspace_for_window(&registry, space, window),
+            manager.workspace_for_window(&window_store, space, window),
             Some(ws2_id)
         );
-        assert!(manager.workspace_windows(&registry, space, ws1_id).is_empty());
-        assert_eq!(manager.workspace_windows(&registry, space, ws2_id), vec![window]);
+        assert!(manager.workspace_windows(&window_store, space, ws1_id).is_empty());
+        assert_eq!(manager.workspace_windows(&window_store, space, ws2_id), vec![
+            window
+        ]);
     }
 
     #[test]
     fn reassignment_clears_stale_last_focused_on_source_workspace() {
-        let mut registry = WindowRegistry::default();
+        let mut window_store = WindowStore::default();
         let mut manager = VirtualWorkspaceManager::new();
         let space = SpaceId::new(1);
         let ws1_id = manager.create_workspace(space, Some("WS1".to_string())).unwrap();
         let ws2_id = manager.create_workspace(space, Some("WS2".to_string())).unwrap();
         let window = WindowId::new(9, 1);
 
-        assert!(manager.assign_window_to_workspace(&mut registry, space, window, ws1_id));
+        assert!(manager.assign_window_to_workspace(&mut window_store, space, window, ws1_id));
         manager.set_last_focused_window(space, ws1_id, Some(window));
 
-        assert!(manager.assign_window_to_workspace(&mut registry, space, window, ws2_id));
+        assert!(manager.assign_window_to_workspace(&mut window_store, space, window, ws2_id));
 
         assert_eq!(manager.last_focused_window(space, ws1_id), None);
         assert_eq!(
-            manager.workspace_for_window(&registry, space, window),
+            manager.workspace_for_window(&window_store, space, window),
             Some(ws2_id)
         );
     }
 
     #[test]
     fn remap_space_drops_assignments_to_deleted_target_workspaces() {
-        let mut registry = WindowRegistry::default();
+        let mut window_store = WindowStore::default();
         let mut manager = VirtualWorkspaceManager::new();
         let old_space = SpaceId::new(1);
         let new_space = SpaceId::new(2);
@@ -1717,39 +1724,39 @@ mod tests {
         let transient_window = WindowId::new(11, 1);
 
         assert!(manager.assign_window_to_workspace(
-            &mut registry,
+            &mut window_store,
             old_space,
             migrated_window,
             migrated_ws
         ));
         assert!(manager.assign_window_to_workspace(
-            &mut registry,
+            &mut window_store,
             new_space,
             transient_window,
             transient_ws
         ));
 
-        manager.remap_space(&mut registry, old_space, new_space);
+        manager.remap_space(&mut window_store, old_space, new_space);
 
         assert_eq!(
-            manager.workspace_for_window(&registry, new_space, migrated_window),
+            manager.workspace_for_window(&window_store, new_space, migrated_window),
             Some(migrated_ws)
         );
         assert_eq!(
-            manager.workspace_windows(&registry, new_space, migrated_ws),
+            manager.workspace_windows(&window_store, new_space, migrated_ws),
             vec![migrated_window]
         );
         assert_eq!(
-            manager.workspace_info_for_window_any(&registry, transient_window),
+            manager.workspace_info_for_window_any(&window_store, transient_window),
             None
         );
-        assert!(manager.workspace_windows(&registry, new_space, transient_ws).is_empty());
+        assert!(manager.workspace_windows(&window_store, new_space, transient_ws).is_empty());
         assert!(manager.workspace_info(new_space, transient_ws).is_none());
     }
 
     #[test]
     fn preserves_workspace_ordinal_across_transient_space_id_churn() {
-        let mut registry = WindowRegistry::default();
+        let mut window_store = WindowStore::default();
         let mut settings = VirtualWorkspaceSettings::default();
         settings.default_workspace_count = 3;
         let mut manager =
@@ -1764,7 +1771,7 @@ mod tests {
         let expected_target_workspace = new_workspaces[2].0;
 
         assert!(manager.assign_window_to_workspace(
-            &mut registry,
+            &mut window_store,
             old_space,
             window,
             preserved_workspace
@@ -1772,7 +1779,7 @@ mod tests {
 
         let assignment = assign(
             &mut manager,
-            &mut registry,
+            &mut window_store,
             window,
             new_space,
             None,
@@ -1784,7 +1791,7 @@ mod tests {
 
         assert_eq!(assignment.workspace_id, expected_target_workspace);
         assert_eq!(
-            manager.workspace_info_for_window_any(&registry, window),
+            manager.workspace_info_for_window_any(&window_store, window),
             Some(WindowWorkspaceInfo {
                 space: new_space,
                 workspace_id: expected_target_workspace,
@@ -1794,7 +1801,7 @@ mod tests {
 
     #[test]
     fn does_not_preserve_workspace_ordinal_when_target_space_already_has_assignments() {
-        let mut registry = WindowRegistry::default();
+        let mut window_store = WindowStore::default();
         let mut settings = VirtualWorkspaceSettings::default();
         settings.default_workspace_count = 3;
         let mut manager =
@@ -1808,13 +1815,13 @@ mod tests {
         let new_workspaces = manager.list_workspaces(new_space);
 
         assert!(manager.assign_window_to_workspace(
-            &mut registry,
+            &mut window_store,
             old_space,
             moved_window,
             old_workspaces[2].0
         ));
         assert!(manager.assign_window_to_workspace(
-            &mut registry,
+            &mut window_store,
             new_space,
             existing_window,
             new_workspaces[1].0
@@ -1822,7 +1829,7 @@ mod tests {
 
         let assignment = assign(
             &mut manager,
-            &mut registry,
+            &mut window_store,
             moved_window,
             new_space,
             None,
@@ -1834,7 +1841,7 @@ mod tests {
 
         assert_eq!(assignment.workspace_id, new_workspaces[0].0);
         assert_eq!(
-            manager.workspace_info_for_window_any(&registry, moved_window),
+            manager.workspace_info_for_window_any(&window_store, moved_window),
             Some(WindowWorkspaceInfo {
                 space: new_space,
                 workspace_id: new_workspaces[0].0,
@@ -1844,7 +1851,7 @@ mod tests {
 
     #[test]
     fn topology_reassignment_preserves_workspace_ordinal_with_destination_assignments() {
-        let mut registry = WindowRegistry::default();
+        let mut window_store = WindowStore::default();
         let mut settings = VirtualWorkspaceSettings::default();
         settings.default_workspace_count = 3;
         let mut manager =
@@ -1857,13 +1864,13 @@ mod tests {
         let source_workspaces = manager.list_workspaces(source_space);
         let destination_workspaces = manager.list_workspaces(destination_space);
         assert!(manager.assign_window_to_workspace(
-            &mut registry,
+            &mut window_store,
             source_space,
             moved_window,
             source_workspaces[2].0
         ));
         assert!(manager.assign_window_to_workspace(
-            &mut registry,
+            &mut window_store,
             destination_space,
             destination_window,
             destination_workspaces[0].0
@@ -1871,14 +1878,14 @@ mod tests {
 
         assert_eq!(
             manager.assign_window_to_workspace_preserving_ordinal(
-                &mut registry,
+                &mut window_store,
                 destination_space,
                 moved_window
             ),
             Some(destination_workspaces[2].0)
         );
         assert_eq!(
-            manager.workspace_info_for_window_any(&registry, moved_window),
+            manager.workspace_info_for_window_any(&window_store, moved_window),
             Some(WindowWorkspaceInfo {
                 space: destination_space,
                 workspace_id: destination_workspaces[2].0,
@@ -1888,7 +1895,7 @@ mod tests {
 
     #[test]
     fn unmanaged_rule_does_not_reassign_window_during_transient_space_id_churn() {
-        let mut registry = WindowRegistry::default();
+        let mut window_store = WindowStore::default();
         let mut settings = VirtualWorkspaceSettings::default();
         settings.default_workspace_count = 3;
         settings.app_rules = vec![AppWorkspaceRule {
@@ -1914,14 +1921,14 @@ mod tests {
             workspace_id: old_workspaces[2].0,
         };
         assert!(manager.assign_window_to_workspace(
-            &mut registry,
+            &mut window_store,
             old_space,
             window,
             old_assignment.workspace_id
         ));
 
         let result = manager.assign_window_with_app_info(
-            &mut registry,
+            &mut window_store,
             window,
             new_space,
             Some("com.example.unmanaged"),
@@ -1932,9 +1939,12 @@ mod tests {
         );
 
         assert!(matches!(result, Ok(AppRuleResult::Unmanaged)));
-        assert_eq!(manager.workspace_for_window(&registry, new_space, window), None);
         assert_eq!(
-            manager.workspace_info_for_window_any(&registry, window),
+            manager.workspace_for_window(&window_store, new_space, window),
+            None
+        );
+        assert_eq!(
+            manager.workspace_info_for_window_any(&window_store, window),
             Some(old_assignment)
         );
     }
@@ -1955,14 +1965,14 @@ mod tests {
 
     #[test]
     fn test_window_visibility() {
-        let mut registry = WindowRegistry::default();
+        let mut window_store = WindowStore::default();
         fn is_window_visible(
             wm: &VirtualWorkspaceManager,
-            registry: &WindowRegistry,
+            window_store: &WindowStore,
             window_id: WindowId,
             space: SpaceId,
         ) -> bool {
-            let window_workspace = wm.workspace_for_window(registry, space, window_id);
+            let window_workspace = wm.workspace_for_window(window_store, space, window_id);
             let active_workspace = wm.active_workspace(space);
 
             match (window_workspace, active_workspace) {
@@ -1978,15 +1988,15 @@ mod tests {
         let window2 = WindowId::new(1, 2);
 
         manager.set_active_workspace(space, ws1_id);
-        manager.assign_window_to_workspace(&mut registry, space, window1, ws1_id);
-        manager.assign_window_to_workspace(&mut registry, space, window2, ws2_id);
+        manager.assign_window_to_workspace(&mut window_store, space, window1, ws1_id);
+        manager.assign_window_to_workspace(&mut window_store, space, window2, ws2_id);
 
-        assert!(is_window_visible(&manager, &registry, window1, space));
-        assert!(!is_window_visible(&manager, &registry, window2, space));
+        assert!(is_window_visible(&manager, &window_store, window1, space));
+        assert!(!is_window_visible(&manager, &window_store, window2, space));
 
         manager.set_active_workspace(space, ws2_id);
-        assert!(!is_window_visible(&manager, &registry, window1, space));
-        assert!(is_window_visible(&manager, &registry, window2, space));
+        assert!(!is_window_visible(&manager, &window_store, window1, space));
+        assert!(is_window_visible(&manager, &window_store, window2, space));
     }
 
     #[test]
@@ -2007,7 +2017,7 @@ mod tests {
 
     #[test]
     fn test_workspace_navigation() {
-        let registry = WindowRegistry::default();
+        let window_store = WindowStore::default();
         let mut manager = VirtualWorkspaceManager::new();
         let space = SpaceId::new(1);
         let ws1_id = manager.create_workspace(space, Some("WS1".to_string())).unwrap();
@@ -2015,27 +2025,27 @@ mod tests {
         let ws3_id = manager.create_workspace(space, Some("WS3".to_string())).unwrap();
 
         assert_eq!(
-            manager.next_workspace(&registry, space, ws1_id, None),
+            manager.next_workspace(&window_store, space, ws1_id, None),
             Some(ws2_id)
         );
         assert_eq!(
-            manager.next_workspace(&registry, space, ws2_id, None),
+            manager.next_workspace(&window_store, space, ws2_id, None),
             Some(ws3_id)
         );
 
         assert_eq!(
-            manager.prev_workspace(&registry, space, ws2_id, None),
+            manager.prev_workspace(&window_store, space, ws2_id, None),
             Some(ws1_id)
         );
         assert_eq!(
-            manager.prev_workspace(&registry, space, ws3_id, None),
+            manager.prev_workspace(&window_store, space, ws3_id, None),
             Some(ws2_id)
         );
     }
 
     #[test]
     fn app_rules() {
-        let mut registry = WindowRegistry::default();
+        let mut window_store = WindowStore::default();
         let space1 = SpaceId::new(1);
         let space2 = SpaceId::new(2);
 
@@ -2201,7 +2211,7 @@ mod tests {
         let w_float = WindowId::new(10, 1);
         let assignment = assign(
             &mut manager,
-            &mut registry,
+            &mut window_store,
             w_float,
             space1,
             Some("COM.EXAMPLE.Test"),
@@ -2212,12 +2222,12 @@ mod tests {
         );
         assert!(assignment.floating);
 
-        manager.remove_window(&mut registry, w_float);
+        manager.remove_window(&mut window_store, w_float);
 
         // After removal, reassign should still float.
         let assignment_again = assign(
             &mut manager,
-            &mut registry,
+            &mut window_store,
             w_float,
             space1,
             Some("com.example.test"),
@@ -2232,7 +2242,7 @@ mod tests {
         let w_name = WindowId::new(20, 2);
         let ws_name = assign(
             &mut manager,
-            &mut registry,
+            &mut window_store,
             w_name,
             space1,
             None,
@@ -2251,7 +2261,7 @@ mod tests {
         let w_dialog = WindowId::new(30, 4);
         let ws_pref = assign(
             &mut manager,
-            &mut registry,
+            &mut window_store,
             w_pref,
             space1,
             Some("com.example.foo"),
@@ -2263,7 +2273,7 @@ mod tests {
         .workspace_id;
         let ws_dialog = assign(
             &mut manager,
-            &mut registry,
+            &mut window_store,
             w_dialog,
             space1,
             Some("com.example.foo"),
@@ -2282,7 +2292,7 @@ mod tests {
         let w_ax = WindowId::new(40, 5);
         let ax_assignment = assign(
             &mut manager,
-            &mut registry,
+            &mut window_store,
             w_ax,
             space1,
             Some("com.example.special"),
@@ -2297,7 +2307,7 @@ mod tests {
         let w_named = WindowId::new(50, 6);
         let ws_named = assign(
             &mut manager,
-            &mut registry,
+            &mut window_store,
             w_named,
             space1,
             Some("com.example.name"),
@@ -2315,7 +2325,7 @@ mod tests {
         let w_tie = WindowId::new(60, 7);
         let ws_tie = assign(
             &mut manager,
-            &mut registry,
+            &mut window_store,
             w_tie,
             space1,
             Some("com.example.tie"),
@@ -2332,7 +2342,7 @@ mod tests {
         let w_bw = WindowId::new(70, 8);
         let bw_initial_assignment = assign(
             &mut manager,
-            &mut registry,
+            &mut window_store,
             w_bw,
             space1,
             Some("app.zen-browser.zen"),
@@ -2344,7 +2354,7 @@ mod tests {
         assert!(!bw_initial_assignment.floating);
         let bw_updated_assignment = assign(
             &mut manager,
-            &mut registry,
+            &mut window_store,
             w_bw,
             space1,
             Some("app.zen-browser.zen"),
@@ -2363,7 +2373,7 @@ mod tests {
         let w_bw2 = WindowId::new(80, 9);
         let bw2_initial_assignment = assign(
             &mut manager,
-            &mut registry,
+            &mut window_store,
             w_bw2,
             space2,
             Some("app.zen-browser.zen"),
@@ -2375,7 +2385,7 @@ mod tests {
         assert!(!bw2_initial_assignment.floating);
         let bw2_updated_assignment = assign(
             &mut manager,
-            &mut registry,
+            &mut window_store,
             w_bw2,
             space2,
             Some("app.zen-browser.zen"),

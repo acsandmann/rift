@@ -11,7 +11,7 @@ use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{LayoutMode, LayoutSettings, VirtualWorkspaceSettings};
 use crate::layout_engine::LayoutSystem;
 use crate::layout_engine::systems::WindowLayoutConstraints;
-use crate::model::WindowRegistry;
+use crate::model::WindowStore;
 use crate::model::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::model::virtual_workspace::{
     AppRuleAssignment, AppRuleResult, VirtualWorkspace, VirtualWorkspaceId, VirtualWorkspaceManager,
@@ -194,7 +194,7 @@ impl LayoutEngine {
 
     fn switch_workspace_layout_mode(
         &mut self,
-        registry: &WindowRegistry,
+        window_store: &WindowStore,
         space: SpaceId,
         workspace_id: VirtualWorkspaceId,
         mode: LayoutMode,
@@ -214,7 +214,7 @@ impl LayoutEngine {
             // Keep windows hidden by stack/group selection when rebuilding into a new mode.
             let mut hidden_windows: Vec<_> = self
                 .virtual_workspace_manager
-                .workspace_windows(registry, space, workspace_id)
+                .workspace_windows(window_store, space, workspace_id)
                 .into_iter()
                 .filter(|wid| !ordered.contains(wid))
                 .collect();
@@ -415,7 +415,7 @@ impl LayoutEngine {
 
     pub fn update_virtual_workspace_settings(
         &mut self,
-        registry: &WindowRegistry,
+        window_store: &WindowStore,
         settings: &crate::common::config::VirtualWorkspaceSettings,
     ) {
         self.virtual_workspace_manager.update_settings(settings, &self.layout_settings);
@@ -434,7 +434,7 @@ impl LayoutEngine {
                     .unwrap_or_default();
                 if current_mode != desired_mode {
                     let _ = self.switch_workspace_layout_mode(
-                        registry,
+                        window_store,
                         space,
                         *workspace_id,
                         desired_mode,
@@ -485,25 +485,25 @@ impl LayoutEngine {
 
     fn active_floating_windows_in_workspace(
         &self,
-        registry: &WindowRegistry,
+        window_store: &WindowStore,
         space: SpaceId,
     ) -> Vec<WindowId> {
         self.floating
             .active_flat(space)
             .into_iter()
-            .filter(|wid| self.is_window_in_active_workspace(registry, space, *wid))
+            .filter(|wid| self.is_window_in_active_workspace(window_store, space, *wid))
             .collect()
     }
 
     fn preferred_focus_for_workspace(
         &self,
-        registry: &WindowRegistry,
+        window_store: &WindowStore,
         space: SpaceId,
         workspace_id: VirtualWorkspaceId,
         preferred_focus_window: Option<WindowId>,
     ) -> Option<WindowId> {
         let mut focus_window = preferred_focus_window.filter(|wid| {
-            self.virtual_workspace_manager.workspace_for_window(registry, space, *wid)
+            self.virtual_workspace_manager.workspace_for_window(window_store, space, *wid)
                 == Some(workspace_id)
         });
 
@@ -512,7 +512,7 @@ impl LayoutEngine {
                 .virtual_workspace_manager
                 .last_focused_window(space, workspace_id)
                 .filter(|wid| {
-                    self.virtual_workspace_manager.workspace_for_window(registry, space, *wid)
+                    self.virtual_workspace_manager.workspace_for_window(window_store, space, *wid)
                         == Some(workspace_id)
                 });
         }
@@ -521,23 +521,29 @@ impl LayoutEngine {
             if let Some(layout) = self.workspace_layouts.active(space, workspace_id) {
                 let selected =
                     self.workspace_tree(workspace_id).selected_window(layout).filter(|wid| {
-                        self.virtual_workspace_manager.workspace_for_window(registry, space, *wid)
-                            == Some(workspace_id)
+                        self.virtual_workspace_manager.workspace_for_window(
+                            window_store,
+                            space,
+                            *wid,
+                        ) == Some(workspace_id)
                     });
                 let visible = self
                     .workspace_tree(workspace_id)
                     .visible_windows_in_layout(layout)
                     .into_iter()
                     .find(|wid| {
-                        self.virtual_workspace_manager.workspace_for_window(registry, space, *wid)
-                            == Some(workspace_id)
+                        self.virtual_workspace_manager.workspace_for_window(
+                            window_store,
+                            space,
+                            *wid,
+                        ) == Some(workspace_id)
                     });
                 focus_window = selected.or(visible);
             }
         }
 
         if focus_window.is_none() {
-            let floating_windows = self.active_floating_windows_in_workspace(registry, space);
+            let floating_windows = self.active_floating_windows_in_workspace(window_store, space);
             let floating_focus =
                 self.floating.last_focus().filter(|wid| floating_windows.contains(wid));
             focus_window = floating_focus.or_else(|| floating_windows.first().copied());
@@ -548,7 +554,7 @@ impl LayoutEngine {
 
     pub fn commit_workspace_focus(
         &mut self,
-        registry: &mut WindowRegistry,
+        window_store: &mut WindowStore,
         space: SpaceId,
         focus_window: Option<WindowId>,
     ) {
@@ -558,7 +564,7 @@ impl LayoutEngine {
         };
 
         let focus_window = focus_window.filter(|wid| {
-            self.virtual_workspace_manager.workspace_for_window(registry, space, *wid)
+            self.virtual_workspace_manager.workspace_for_window(window_store, space, *wid)
                 == Some(workspace_id)
         });
 
@@ -580,19 +586,19 @@ impl LayoutEngine {
 
     fn activate_workspace(
         &mut self,
-        registry: &WindowRegistry,
+        window_store: &WindowStore,
         space: SpaceId,
         workspace_id: VirtualWorkspaceId,
         preferred_focus_window: Option<WindowId>,
     ) -> EventResponse {
         self.virtual_workspace_manager.set_active_workspace(space, workspace_id);
-        self.update_active_floating_windows(registry, space);
+        self.update_active_floating_windows(window_store, space);
         self.broadcast_workspace_changed(space);
-        self.broadcast_windows_changed(registry, space);
+        self.broadcast_windows_changed(window_store, space);
 
         EventResponse {
             focus_window: self.preferred_focus_for_workspace(
-                registry,
+                window_store,
                 space,
                 workspace_id,
                 preferred_focus_window,
@@ -604,7 +610,7 @@ impl LayoutEngine {
 
     fn switch_to_workspace(
         &mut self,
-        registry: &WindowRegistry,
+        window_store: &WindowStore,
         space: SpaceId,
         workspace_index: usize,
         preferred_focus_window: Option<WindowId>,
@@ -619,35 +625,40 @@ impl LayoutEngine {
                     if let Some(last_workspace) =
                         self.virtual_workspace_manager.last_workspace(space)
                     {
-                        return self.activate_workspace(registry, space, last_workspace, None);
+                        return self.activate_workspace(window_store, space, last_workspace, None);
                     }
                 }
                 return EventResponse::default();
             }
-            return self.activate_workspace(registry, space, workspace_id, preferred_focus_window);
+            return self.activate_workspace(
+                window_store,
+                space,
+                workspace_id,
+                preferred_focus_window,
+            );
         }
         EventResponse::default()
     }
 
     fn filter_active_workspace_windows(
         &self,
-        registry: &WindowRegistry,
+        window_store: &WindowStore,
         space: SpaceId,
         windows: Vec<WindowId>,
     ) -> Vec<WindowId> {
         windows
             .into_iter()
-            .filter(|wid| self.is_window_in_active_workspace(registry, space, *wid))
+            .filter(|wid| self.is_window_in_active_workspace(window_store, space, *wid))
             .collect()
     }
 
     fn filter_active_workspace_window(
         &self,
-        registry: &WindowRegistry,
+        window_store: &WindowStore,
         space: SpaceId,
         window: Option<WindowId>,
     ) -> Option<WindowId> {
-        window.filter(|wid| self.is_window_in_active_workspace(registry, space, *wid))
+        window.filter(|wid| self.is_window_in_active_workspace(window_store, space, *wid))
     }
 
     pub fn resize_selection(
@@ -661,7 +672,7 @@ impl LayoutEngine {
 
     fn apply_focus_response(
         &mut self,
-        _registry: &mut WindowRegistry,
+        _window_store: &mut WindowStore,
         space: SpaceId,
         ws_id: VirtualWorkspaceId,
         layout: LayoutId,
@@ -680,7 +691,7 @@ impl LayoutEngine {
 
     fn move_focus_internal(
         &mut self,
-        registry: &mut WindowRegistry,
+        window_store: &mut WindowStore,
         space: SpaceId,
         visible_spaces: &[SpaceId],
         visible_space_centers: &HashMap<SpaceId, CGPoint>,
@@ -696,7 +707,7 @@ impl LayoutEngine {
         };
 
         if is_floating {
-            let floating_windows = self.active_floating_windows_in_workspace(registry, space);
+            let floating_windows = self.active_floating_windows_in_workspace(window_store, space);
             debug!(
                 "Floating navigation: found {} floating windows: {:?}",
                 floating_windows.len(),
@@ -736,7 +747,13 @@ impl LayoutEngine {
                                 raise_windows: vec![],
                                 boundary_hit: None,
                             };
-                            self.apply_focus_response(registry, space, ws_id, layout, &response);
+                            self.apply_focus_response(
+                                window_store,
+                                space,
+                                ws_id,
+                                layout,
+                                &response,
+                            );
                             return response;
                         } else {
                             debug!("Could not find current window in floating windows list");
@@ -754,7 +771,7 @@ impl LayoutEngine {
             }
 
             let tiled_windows = self.filter_active_workspace_windows(
-                registry,
+                window_store,
                 space,
                 self.workspace_tree(ws_id).visible_windows_in_layout(layout),
             );
@@ -765,7 +782,7 @@ impl LayoutEngine {
                     raise_windows: tiled_windows,
                     boundary_hit: None,
                 };
-                self.apply_focus_response(registry, space, ws_id, layout, &response);
+                self.apply_focus_response(window_store, space, ws_id, layout, &response);
                 return response;
             }
 
@@ -777,15 +794,17 @@ impl LayoutEngine {
 
         let (focus_window_raw, raise_windows) =
             self.workspace_tree_mut(ws_id).move_focus(layout, direction);
-        let focus_window = self.filter_active_workspace_window(registry, space, focus_window_raw);
-        let raise_windows = self.filter_active_workspace_windows(registry, space, raise_windows);
+        let focus_window =
+            self.filter_active_workspace_window(window_store, space, focus_window_raw);
+        let raise_windows =
+            self.filter_active_workspace_windows(window_store, space, raise_windows);
         if focus_window.is_some() {
             let response = EventResponse {
                 focus_window,
                 raise_windows,
                 boundary_hit: None,
             };
-            self.apply_focus_response(registry, space, ws_id, layout, &response);
+            self.apply_focus_response(window_store, space, ws_id, layout, &response);
             response
         } else {
             if let Some(prev_wid) = previous_selection {
@@ -805,13 +824,13 @@ impl LayoutEngine {
                     return EventResponse::default();
                 };
                 let windows_in_new_space = self.filter_active_workspace_windows(
-                    registry,
+                    window_store,
                     new_space,
                     self.workspace_tree(new_ws_id).visible_windows_in_layout(new_layout),
                 );
                 if let Some(target_window) = self
                     .filter_active_workspace_window(
-                        registry,
+                        window_store,
                         new_space,
                         self.workspace_tree(new_ws_id).window_in_direction(new_layout, direction),
                     )
@@ -825,13 +844,17 @@ impl LayoutEngine {
                         boundary_hit: None,
                     };
                     self.apply_focus_response(
-                        registry, new_space, new_ws_id, new_layout, &response,
+                        window_store,
+                        new_space,
+                        new_ws_id,
+                        new_layout,
+                        &response,
                     );
                     return response;
                 }
             }
 
-            let floating_windows = self.active_floating_windows_in_workspace(registry, space);
+            let floating_windows = self.active_floating_windows_in_workspace(window_store, space);
 
             if let Some(&first_floating) = floating_windows.first() {
                 let focus_window = Some(first_floating);
@@ -840,18 +863,18 @@ impl LayoutEngine {
                     raise_windows: vec![],
                     boundary_hit: None,
                 };
-                self.apply_focus_response(registry, space, ws_id, layout, &response);
+                self.apply_focus_response(window_store, space, ws_id, layout, &response);
                 return response;
             }
 
             let visible_windows = self.filter_active_workspace_windows(
-                registry,
+                window_store,
                 space,
                 self.workspace_tree(ws_id).visible_windows_in_layout(layout),
             );
 
             if let Some(fallback_focus) = self
-                .filter_active_workspace_window(registry, space, previous_selection)
+                .filter_active_workspace_window(window_store, space, previous_selection)
                 .or_else(|| visible_windows.first().copied())
             {
                 let response = EventResponse {
@@ -859,7 +882,7 @@ impl LayoutEngine {
                     raise_windows: vec![],
                     boundary_hit: None,
                 };
-                self.apply_focus_response(registry, space, ws_id, layout, &response);
+                self.apply_focus_response(window_store, space, ws_id, layout, &response);
                 return response;
             }
 
@@ -936,11 +959,11 @@ impl LayoutEngine {
 
     fn remove_window_internal(
         &mut self,
-        registry: &mut WindowRegistry,
+        window_store: &mut WindowStore,
         wid: WindowId,
         preserve_floating: bool,
     ) {
-        let removal = self.remove_window_layout_membership(registry, wid);
+        let removal = self.remove_window_layout_membership(window_store, wid);
 
         if preserve_floating {
             self.floating.remove_active_for_window(wid);
@@ -949,7 +972,7 @@ impl LayoutEngine {
         }
 
         if !preserve_floating {
-            self.virtual_workspace_manager.remove_window(registry, wid);
+            self.virtual_workspace_manager.remove_window(window_store, wid);
             self.virtual_workspace_manager.remove_floating_position(wid);
         }
 
@@ -959,17 +982,18 @@ impl LayoutEngine {
         self.window_layout_constraints.remove(&wid);
 
         if let Some(space) = removal.active_space {
-            self.broadcast_windows_changed(registry, space);
+            self.broadcast_windows_changed(window_store, space);
         }
     }
 
     fn remove_window_layout_membership(
         &mut self,
-        registry: &WindowRegistry,
+        window_store: &WindowStore,
         wid: WindowId,
     ) -> WindowRemovalImpact {
         let active_space = self.space_with_window(wid);
-        let tiled_workspaces = self.virtual_workspace_manager.workspaces_for_window(registry, wid);
+        let tiled_workspaces =
+            self.virtual_workspace_manager.workspaces_for_window(window_store, wid);
 
         if !tiled_workspaces.is_empty() {
             for ws_id in &tiled_workspaces {
@@ -978,7 +1002,7 @@ impl LayoutEngine {
             return WindowRemovalImpact { active_space };
         }
 
-        // The registry may already have dropped the record (for example after
+        // The store may already have dropped the record (for example after
         // WindowDestroyed). Layout membership is only a projection, so scrub
         // every tree when its authoritative assignment is unavailable.
         let ws_ids: Vec<_> = self.virtual_workspace_manager.workspaces.keys().collect();
@@ -990,27 +1014,29 @@ impl LayoutEngine {
 
     fn add_window_to_layout(
         &mut self,
-        registry: &mut WindowRegistry,
+        window_store: &mut WindowStore,
         space: SpaceId,
         wid: WindowId,
     ) -> bool {
         let active_space_before = self.space_with_window(wid);
 
-        let assigned_workspace = match self
-            .virtual_workspace_manager
-            .workspace_for_window(registry, space, wid)
-        {
-            Some(workspace_id) => workspace_id,
-            None => match self.virtual_workspace_manager.auto_assign_window(registry, wid, space) {
-                Ok(workspace_id) => workspace_id,
-                Err(e) => {
-                    warn!("Failed to auto-assign window to workspace: {:?}", e);
-                    self.virtual_workspace_manager
-                        .active_workspace(space)
-                        .expect("No active workspace available")
-                }
-            },
-        };
+        let assigned_workspace =
+            match self.virtual_workspace_manager.workspace_for_window(window_store, space, wid) {
+                Some(workspace_id) => workspace_id,
+                None => match self.virtual_workspace_manager.auto_assign_window(
+                    window_store,
+                    wid,
+                    space,
+                ) {
+                    Ok(workspace_id) => workspace_id,
+                    Err(e) => {
+                        warn!("Failed to auto-assign window to workspace: {:?}", e);
+                        self.virtual_workspace_manager
+                            .active_workspace(space)
+                            .expect("No active workspace available")
+                    }
+                },
+            };
 
         let should_be_floating = self.floating.is_floating(wid);
 
@@ -1070,18 +1096,18 @@ impl LayoutEngine {
 
     fn window_no_longer_assigned_to_space(
         &self,
-        registry: &WindowRegistry,
+        window_store: &WindowStore,
         space: SpaceId,
         wid: WindowId,
     ) -> bool {
         self.virtual_workspace_manager
-            .workspace_for_window(registry, space, wid)
+            .workspace_for_window(window_store, space, wid)
             .is_none()
     }
 
     fn sync_tiled_windows_for_app(
         &mut self,
-        registry: &WindowRegistry,
+        window_store: &WindowStore,
         space: SpaceId,
         pid: pid_t,
         tiled_by_workspace: &HashMap<crate::model::VirtualWorkspaceId, Vec<WindowId>>,
@@ -1091,16 +1117,17 @@ impl LayoutEngine {
 
         for (ws_id, layout) in self.workspace_layouts.active_layouts_for_space(space) {
             let mut desired = tiled_by_workspace.get(&ws_id).cloned().unwrap_or_default();
-            for wid in self.virtual_workspace_manager.workspace_windows(registry, space, ws_id) {
+            for wid in self.virtual_workspace_manager.workspace_windows(window_store, space, ws_id)
+            {
                 let authoritative_native_space =
-                    registry.current_window_server_space_for_window(wid);
+                    window_store.current_window_server_space_for_window(wid);
                 // Skip re-adding if the VWM no longer assigns this window to this space
                 // (it was moved to another space during this discovery cycle).
                 if wid.pid != pid
                     || self.floating.is_floating(wid)
                     || desired.contains(&wid)
                     || authoritative_native_space.is_some_and(|native_space| native_space != space)
-                    || self.window_no_longer_assigned_to_space(registry, space, wid)
+                    || self.window_no_longer_assigned_to_space(window_store, space, wid)
                 {
                     continue;
                 }
@@ -1115,8 +1142,11 @@ impl LayoutEngine {
                 desired = tree_windows
                     .into_iter()
                     .filter(|wid| {
-                        self.virtual_workspace_manager.workspace_for_window(registry, space, *wid)
-                            == Some(ws_id)
+                        self.virtual_workspace_manager.workspace_for_window(
+                            window_store,
+                            space,
+                            *wid,
+                        ) == Some(ws_id)
                     })
                     .collect();
             }
@@ -1131,7 +1161,7 @@ impl LayoutEngine {
             for wid in current.iter().copied() {
                 if !desired.contains(&wid)
                     && !self.floating.is_floating(wid)
-                    && self.virtual_workspace_manager.workspace_for_window(registry, space, wid)
+                    && self.virtual_workspace_manager.workspace_for_window(window_store, space, wid)
                         == Some(ws_id)
                 {
                     desired.push(wid);
@@ -1183,7 +1213,7 @@ impl LayoutEngine {
     /// Move all per-space layout state from `old_space` to `new_space`.
     pub fn remap_space(
         &mut self,
-        registry: &mut WindowRegistry,
+        window_store: &mut WindowStore,
         old_space: SpaceId,
         new_space: SpaceId,
     ) {
@@ -1193,7 +1223,7 @@ impl LayoutEngine {
 
         self.workspace_layouts.remap_space(old_space, new_space);
         self.floating.remap_space(old_space, new_space);
-        self.virtual_workspace_manager.remap_space(registry, old_space, new_space);
+        self.virtual_workspace_manager.remap_space(window_store, old_space, new_space);
 
         if let Some(uuid) = self.space_display_map.remove(&old_space) {
             self.space_display_map.insert(new_space, uuid);
@@ -1263,7 +1293,7 @@ impl LayoutEngine {
 
     pub fn handle_event(
         &mut self,
-        registry: &mut WindowRegistry,
+        window_store: &mut WindowStore,
         event: LayoutEvent,
     ) -> EventResponse {
         debug!(?event);
@@ -1325,7 +1355,7 @@ impl LayoutEngine {
                     let assignment = match self
                         .virtual_workspace_manager
                         .assign_window_with_app_info(
-                            registry,
+                            window_store,
                             wid,
                             space,
                             app_bundle_id,
@@ -1337,10 +1367,11 @@ impl LayoutEngine {
                         Ok(AppRuleResult::Managed(decision)) => Some(decision),
                         Ok(AppRuleResult::Unmanaged) => None,
                         Err(_) => {
-                            match self
-                                .virtual_workspace_manager
-                                .auto_assign_window(registry, wid, space)
-                            {
+                            match self.virtual_workspace_manager.auto_assign_window(
+                                window_store,
+                                wid,
+                                space,
+                            ) {
                                 Ok(ws) => Some(AppRuleAssignment {
                                     workspace_id: ws,
                                     floating: was_floating,
@@ -1380,7 +1411,7 @@ impl LayoutEngine {
                     }
 
                     self.virtual_workspace_manager_mut().set_last_rule_decision(
-                        registry,
+                        window_store,
                         space,
                         wid,
                         rule_says_float,
@@ -1390,9 +1421,9 @@ impl LayoutEngine {
                 // `windows_by_workspace` already excludes floating windows.
                 let tiled_by_workspace = windows_by_workspace;
                 let changed_layouts =
-                    self.sync_tiled_windows_for_app(registry, space, pid, &tiled_by_workspace);
+                    self.sync_tiled_windows_for_app(window_store, space, pid, &tiled_by_workspace);
                 if !changed_layouts.is_empty() {
-                    self.broadcast_windows_changed(registry, space);
+                    self.broadcast_windows_changed(window_store, space);
                 }
             }
             LayoutEvent::AppClosed(pid) => {
@@ -1402,20 +1433,20 @@ impl LayoutEngine {
                 self.floating.remove_all_for_pid(pid);
                 self.window_layout_constraints.retain(|wid, _| wid.pid != pid);
 
-                self.virtual_workspace_manager.remove_windows_for_app(registry, pid);
+                self.virtual_workspace_manager.remove_windows_for_app(window_store, pid);
                 self.virtual_workspace_manager.remove_app_floating_positions(pid);
             }
             LayoutEvent::WindowAdded(space, wid) => {
                 self.debug_tree(space);
-                if self.add_window_to_layout(registry, space, wid) {
-                    self.broadcast_windows_changed(registry, space);
+                if self.add_window_to_layout(window_store, space, wid) {
+                    self.broadcast_windows_changed(window_store, space);
                 }
             }
             LayoutEvent::WindowRemoved(wid) => {
-                self.remove_window_internal(registry, wid, false);
+                self.remove_window_internal(window_store, wid, false);
             }
             LayoutEvent::WindowRemovedPreserveFloating(wid) => {
-                self.remove_window_internal(registry, wid, true);
+                self.remove_window_internal(window_store, wid, true);
             }
             LayoutEvent::WindowFocused(space, wid) => {
                 if self.floating.is_floating(wid) {
@@ -1473,7 +1504,7 @@ impl LayoutEngine {
 
     pub fn handle_command(
         &mut self,
-        registry: &mut WindowRegistry,
+        window_store: &mut WindowStore,
         space: Option<SpaceId>,
         visible_spaces: &[SpaceId],
         visible_space_centers: &HashMap<SpaceId, CGPoint>,
@@ -1506,7 +1537,7 @@ impl LayoutEngine {
                 if let Some(space) = space {
                     let assigned_workspace = self
                         .virtual_workspace_manager
-                        .workspace_for_window(registry, space, wid)
+                        .workspace_for_window(window_store, space, wid)
                         .unwrap_or_else(|| {
                             self.virtual_workspace_manager
                                 .active_workspace(space)
@@ -1577,11 +1608,11 @@ impl LayoutEngine {
                     focus_window,
                     boundary_hit: None,
                 };
-                self.apply_focus_response(registry, space, workspace_id, layout, &response);
+                self.apply_focus_response(window_store, space, workspace_id, layout, &response);
                 return response;
             } else {
                 let floating_windows: Vec<WindowId> =
-                    self.active_floating_windows_in_workspace(registry, space);
+                    self.active_floating_windows_in_workspace(window_store, space);
                 let mut raise_windows: Vec<_> = floating_windows
                     .iter()
                     .copied()
@@ -1593,7 +1624,7 @@ impl LayoutEngine {
                     focus_window,
                     boundary_hit: None,
                 };
-                self.apply_focus_response(registry, space, workspace_id, layout, &response);
+                self.apply_focus_response(window_store, space, workspace_id, layout, &response);
                 return response;
             }
         }
@@ -1610,10 +1641,10 @@ impl LayoutEngine {
             LayoutCommand::NextWindow | LayoutCommand::PrevWindow => {
                 let forward = matches!(command, LayoutCommand::NextWindow);
                 let windows = if is_floating {
-                    self.active_floating_windows_in_workspace(registry, space)
+                    self.active_floating_windows_in_workspace(window_store, space)
                 } else {
                     self.filter_active_workspace_windows(
-                        registry,
+                        window_store,
                         space,
                         self.workspace_tree(workspace_id).visible_windows_in_layout(layout),
                     )
@@ -1629,7 +1660,7 @@ impl LayoutEngine {
                         raise_windows: vec![windows[next]],
                         boundary_hit: None,
                     };
-                    self.apply_focus_response(registry, space, workspace_id, layout, &response);
+                    self.apply_focus_response(window_store, space, workspace_id, layout, &response);
                     return response;
                 } else {
                     let focus_window = self
@@ -1643,7 +1674,7 @@ impl LayoutEngine {
                         raise_windows,
                         boundary_hit: None,
                     };
-                    self.apply_focus_response(registry, space, workspace_id, layout, &response);
+                    self.apply_focus_response(window_store, space, workspace_id, layout, &response);
                     return response;
                 }
             }
@@ -1653,7 +1684,7 @@ impl LayoutEngine {
                     direction, is_floating
                 );
                 return self.move_focus_internal(
-                    registry,
+                    window_store,
                     space,
                     visible_spaces,
                     visible_space_centers,
@@ -1696,8 +1727,12 @@ impl LayoutEngine {
                             self.workspace_tree_mut(workspace_id).remove_window(wid);
                             self.workspace_tree_mut(new_ws_id)
                                 .add_window_after_selection(new_layout, wid);
-                            self.virtual_workspace_manager
-                                .assign_window_to_workspace(registry, new_space, wid, new_ws_id);
+                            self.virtual_workspace_manager.assign_window_to_workspace(
+                                window_store,
+                                new_space,
+                                wid,
+                                new_ws_id,
+                            );
                         }
                     }
                 }
@@ -1883,7 +1918,7 @@ impl LayoutEngine {
 
     pub fn calculate_layout_with_virtual_workspaces<F>(
         &mut self,
-        registry: &WindowRegistry,
+        window_store: &WindowStore,
         space: SpaceId,
         screen: CGRect,
         gaps: &crate::common::config::GapSettings,
@@ -1975,10 +2010,11 @@ impl LayoutEngine {
                 .get_workspace_floating_positions(space, active_workspace_id);
             for (window_id, stored_position) in floating_positions {
                 if self.floating.is_floating(window_id)
-                    && self
-                        .virtual_workspace_manager
-                        .workspace_for_window(registry, space, window_id)
-                        == Some(active_workspace_id)
+                    && self.virtual_workspace_manager.workspace_for_window(
+                        window_store,
+                        space,
+                        window_id,
+                    ) == Some(active_workspace_id)
                 {
                     ensure_visible_floating(
                         self,
@@ -1996,7 +2032,7 @@ impl LayoutEngine {
                 }
             }
 
-            let floating_windows = self.active_floating_windows_in_workspace(registry, space);
+            let floating_windows = self.active_floating_windows_in_workspace(window_store, space);
             for wid in floating_windows {
                 ensure_visible_floating(
                     self,
@@ -2014,14 +2050,15 @@ impl LayoutEngine {
             }
         }
 
-        let hidden_windows =
-            self.virtual_workspace_manager.windows_in_inactive_workspaces(registry, space);
+        let hidden_windows = self
+            .virtual_workspace_manager
+            .windows_in_inactive_workspaces(window_store, space);
         for wid in hidden_windows {
             let original_frame = get_window_frame(wid);
 
             if self.floating.is_floating(wid) {
                 if let Some(workspace_id) =
-                    self.virtual_workspace_manager.workspace_for_window(registry, space, wid)
+                    self.virtual_workspace_manager.workspace_for_window(window_store, space, wid)
                 {
                     ensure_visible_floating(
                         self,
@@ -2107,7 +2144,7 @@ impl LayoutEngine {
 
     pub fn calculate_layout_for_workspace(
         &self,
-        registry: &WindowRegistry,
+        window_store: &WindowStore,
         space: SpaceId,
         workspace_id: crate::model::VirtualWorkspaceId,
         screen: CGRect,
@@ -2139,8 +2176,11 @@ impl LayoutEngine {
             .get_workspace_floating_positions(space, workspace_id);
         for (window_id, stored_position) in floating_positions {
             if self.floating.is_floating(window_id)
-                && self.virtual_workspace_manager.workspace_for_window(registry, space, window_id)
-                    == Some(workspace_id)
+                && self.virtual_workspace_manager.workspace_for_window(
+                    window_store,
+                    space,
+                    window_id,
+                ) == Some(workspace_id)
             {
                 positions.insert(window_id, stored_position);
             }
@@ -2202,7 +2242,7 @@ impl LayoutEngine {
 
     pub fn handle_virtual_workspace_command(
         &mut self,
-        registry: &mut WindowRegistry,
+        window_store: &mut WindowStore,
         space: SpaceId,
         command: &LayoutCommand,
     ) -> EventResponse {
@@ -2212,12 +2252,12 @@ impl LayoutEngine {
                     self.virtual_workspace_manager.active_workspace(space)
                 {
                     if let Some(next_workspace) = self.virtual_workspace_manager.next_workspace(
-                        registry,
+                        window_store,
                         space,
                         current_workspace,
                         *skip_empty,
                     ) {
-                        return self.activate_workspace(registry, space, next_workspace, None);
+                        return self.activate_workspace(window_store, space, next_workspace, None);
                     }
                 }
                 EventResponse::default()
@@ -2227,28 +2267,29 @@ impl LayoutEngine {
                     self.virtual_workspace_manager.active_workspace(space)
                 {
                     if let Some(prev_workspace) = self.virtual_workspace_manager.prev_workspace(
-                        registry,
+                        window_store,
                         space,
                         current_workspace,
                         *skip_empty,
                     ) {
-                        return self.activate_workspace(registry, space, prev_workspace, None);
+                        return self.activate_workspace(window_store, space, prev_workspace, None);
                     }
                 }
                 EventResponse::default()
             }
             LayoutCommand::SwitchToWorkspace(workspace_index) => {
-                self.switch_to_workspace(registry, space, *workspace_index, None)
+                self.switch_to_workspace(window_store, space, *workspace_index, None)
             }
             LayoutCommand::MoveWindowToWorkspace {
                 workspace: workspace_index,
                 window_id: maybe_id,
             } => {
                 let focused_window = if let Some(spec_u32) = maybe_id {
-                    match self
-                        .virtual_workspace_manager
-                        .find_window_by_idx(registry, space, *spec_u32)
-                    {
+                    match self.virtual_workspace_manager.find_window_by_idx(
+                        window_store,
+                        space,
+                        *spec_u32,
+                    ) {
                         Some(w) => w,
                         None => return EventResponse::default(),
                     }
@@ -2274,7 +2315,7 @@ impl LayoutEngine {
 
                 let Some(current_workspace_id) = self
                     .virtual_workspace_manager
-                    .workspace_for_window(registry, op_space, focused_window)
+                    .workspace_for_window(window_store, op_space, focused_window)
                 else {
                     return EventResponse::default();
                 };
@@ -2292,7 +2333,7 @@ impl LayoutEngine {
                 }
 
                 let assigned = self.virtual_workspace_manager.assign_window_to_workspace(
-                    registry,
+                    window_store,
                     op_space,
                     focused_window,
                     target_workspace_id,
@@ -2324,7 +2365,7 @@ impl LayoutEngine {
                     if is_floating {
                         self.floating.add_active(op_space, focused_window.pid, focused_window);
                     }
-                    self.broadcast_windows_changed(registry, op_space);
+                    self.broadcast_windows_changed(window_store, op_space);
                     return EventResponse {
                         focus_window: Some(focused_window),
                         raise_windows: vec![],
@@ -2340,9 +2381,9 @@ impl LayoutEngine {
 
                     let remaining_windows = self
                         .virtual_workspace_manager
-                        .windows_in_active_workspace(registry, op_space);
+                        .windows_in_active_workspace(window_store, op_space);
                     if let Some(&new_focus) = remaining_windows.first() {
-                        self.broadcast_windows_changed(registry, op_space);
+                        self.broadcast_windows_changed(window_store, op_space);
                         return EventResponse {
                             focus_window: Some(new_focus),
                             raise_windows: vec![],
@@ -2357,7 +2398,7 @@ impl LayoutEngine {
                     Some(focused_window),
                 );
 
-                self.broadcast_windows_changed(registry, op_space);
+                self.broadcast_windows_changed(window_store, op_space);
                 EventResponse::default()
             }
             LayoutCommand::CreateWorkspace => {
@@ -2373,7 +2414,7 @@ impl LayoutEngine {
             }
             LayoutCommand::SwitchToLastWorkspace => {
                 if let Some(last_workspace) = self.virtual_workspace_manager.last_workspace(space) {
-                    return self.activate_workspace(registry, space, last_workspace, None);
+                    return self.activate_workspace(window_store, space, last_workspace, None);
                 }
                 EventResponse::default()
             }
@@ -2382,19 +2423,19 @@ impl LayoutEngine {
                     return EventResponse::default();
                 };
 
-                if !self.switch_workspace_layout_mode(registry, space, workspace_id, *mode) {
+                if !self.switch_workspace_layout_mode(window_store, space, workspace_id, *mode) {
                     return EventResponse::default();
                 }
 
                 let is_active_workspace =
                     self.virtual_workspace_manager.active_workspace(space) == Some(workspace_id);
                 let raise_windows = if is_active_workspace {
-                    self.windows_in_active_workspace(registry, space)
+                    self.windows_in_active_workspace(window_store, space)
                 } else {
                     Vec::new()
                 };
                 self.broadcast_workspace_changed(space);
-                self.broadcast_windows_changed(registry, space);
+                self.broadcast_windows_changed(window_store, space);
 
                 EventResponse {
                     raise_windows,
@@ -2412,12 +2453,12 @@ impl LayoutEngine {
 
     pub fn switch_to_workspace_with_focus(
         &mut self,
-        registry: &WindowRegistry,
+        window_store: &WindowStore,
         space: SpaceId,
         workspace_index: usize,
         focus_window: WindowId,
     ) -> EventResponse {
-        self.switch_to_workspace(registry, space, workspace_index, Some(focus_window))
+        self.switch_to_workspace(window_store, space, workspace_index, Some(focus_window))
     }
 
     pub fn virtual_workspace_manager(&self) -> &VirtualWorkspaceManager {
@@ -2464,7 +2505,7 @@ impl LayoutEngine {
 
     pub fn move_window_to_space(
         &mut self,
-        registry: &mut WindowRegistry,
+        window_store: &mut WindowStore,
         source_space: SpaceId,
         target_space: SpaceId,
         target_screen_size: CGSize,
@@ -2483,7 +2524,7 @@ impl LayoutEngine {
 
         let source_workspace = self
             .virtual_workspace_manager
-            .workspace_for_window(registry, source_space, window_id)
+            .workspace_for_window(window_store, source_space, window_id)
             .or_else(|| self.virtual_workspace_manager.active_workspace(source_space));
 
         let Some(source_workspace_id) = source_workspace else {
@@ -2513,7 +2554,7 @@ impl LayoutEngine {
         }
 
         let assigned = self.virtual_workspace_manager.assign_window_to_workspace(
-            registry,
+            window_store,
             target_space,
             window_id,
             target_workspace_id,
@@ -2580,9 +2621,9 @@ impl LayoutEngine {
         self.focused_window = Some(window_id);
 
         if source_space != target_space {
-            self.broadcast_windows_changed(registry, source_space);
+            self.broadcast_windows_changed(window_store, source_space);
         }
-        self.broadcast_windows_changed(registry, target_space);
+        self.broadcast_windows_changed(window_store, target_space);
 
         EventResponse {
             raise_windows: vec![window_id],
@@ -2603,17 +2644,17 @@ impl LayoutEngine {
 
     pub fn windows_in_active_workspace(
         &self,
-        registry: &WindowRegistry,
+        window_store: &WindowStore,
         space: SpaceId,
     ) -> Vec<WindowId> {
-        self.virtual_workspace_manager.windows_in_active_workspace(registry, space)
+        self.virtual_workspace_manager.windows_in_active_workspace(window_store, space)
     }
 
     pub fn get_workspace_stats(
         &self,
-        registry: &WindowRegistry,
+        window_store: &WindowStore,
     ) -> crate::model::virtual_workspace::WorkspaceStats {
-        self.virtual_workspace_manager.get_stats(registry)
+        self.virtual_workspace_manager.get_stats(window_store)
     }
 
     pub fn is_window_floating(&self, window_id: WindowId) -> bool {
@@ -2632,9 +2673,9 @@ impl LayoutEngine {
         }
     }
 
-    fn update_active_floating_windows(&mut self, registry: &WindowRegistry, space: SpaceId) {
+    fn update_active_floating_windows(&mut self, window_store: &WindowStore, space: SpaceId) {
         let windows_in_workspace =
-            self.virtual_workspace_manager.windows_in_active_workspace(registry, space);
+            self.virtual_workspace_manager.windows_in_active_workspace(window_store, space);
         self.floating.rebuild_active_for_workspace(space, windows_in_workspace);
     }
 
@@ -2663,14 +2704,14 @@ impl LayoutEngine {
         }
     }
 
-    fn broadcast_windows_changed(&self, registry: &WindowRegistry, space_id: SpaceId) {
+    fn broadcast_windows_changed(&self, window_store: &WindowStore, space_id: SpaceId) {
         if let Some(ref broadcast_tx) = self.broadcast_tx {
             if let Some((workspace_id, workspace_name)) =
                 self.active_workspace_id_and_name(space_id)
             {
                 let windows = self
                     .virtual_workspace_manager
-                    .windows_in_active_workspace(registry, space_id)
+                    .windows_in_active_workspace(window_store, space_id)
                     .iter()
                     .map(|window_id| window_id.to_debug_string())
                     .collect();
@@ -2689,8 +2730,8 @@ impl LayoutEngine {
         }
     }
 
-    pub fn debug_log_workspace_stats(&self, registry: &WindowRegistry) {
-        let stats = self.virtual_workspace_manager.get_stats(registry);
+    pub fn debug_log_workspace_stats(&self, window_store: &WindowStore) {
+        let stats = self.virtual_workspace_manager.get_stats(window_store);
         info!(
             "Workspace Stats: {} workspaces, {} windows, {} active spaces",
             stats.total_workspaces, stats.total_windows, stats.active_spaces
@@ -2701,15 +2742,16 @@ impl LayoutEngine {
         }
     }
 
-    pub fn debug_log_workspace_state(&self, registry: &WindowRegistry, space: SpaceId) {
+    pub fn debug_log_workspace_state(&self, window_store: &WindowStore, space: SpaceId) {
         if let Some(active_workspace) = self.virtual_workspace_manager.active_workspace(space) {
             if let Some(workspace) =
                 self.virtual_workspace_manager.workspace_info(space, active_workspace)
             {
                 let active_windows =
-                    self.virtual_workspace_manager.windows_in_active_workspace(registry, space);
-                let inactive_windows =
-                    self.virtual_workspace_manager.windows_in_inactive_workspaces(registry, space);
+                    self.virtual_workspace_manager.windows_in_active_workspace(window_store, space);
+                let inactive_windows = self
+                    .virtual_workspace_manager
+                    .windows_in_inactive_workspaces(window_store, space);
 
                 info!(
                     "Space {:?}: Active workspace '{}' with {} windows",
@@ -2730,12 +2772,12 @@ impl LayoutEngine {
 
     pub fn is_window_in_active_workspace(
         &self,
-        registry: &WindowRegistry,
+        window_store: &WindowStore,
         space: SpaceId,
         window_id: WindowId,
     ) -> bool {
         self.virtual_workspace_manager
-            .is_window_in_active_workspace(registry, space, window_id)
+            .is_window_in_active_workspace(window_store, space, window_id)
     }
 }
 
@@ -2800,7 +2842,7 @@ mod tests {
 
     #[test]
     fn handle_command_does_not_panic_before_layout_initialization() {
-        let mut registry = WindowRegistry::default();
+        let mut window_store = WindowStore::default();
         let mut engine = test_engine();
         let space = SpaceId::new(42);
         let visible_spaces = vec![space];
@@ -2808,7 +2850,7 @@ mod tests {
 
         let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
             engine.handle_command(
-                &mut registry,
+                &mut window_store,
                 Some(space),
                 &visible_spaces,
                 &visible_space_centers,
@@ -2824,7 +2866,7 @@ mod tests {
 
     #[test]
     fn tiled_membership_sync_does_not_rebalance_other_spaces() {
-        let mut registry = WindowRegistry::default();
+        let mut window_store = WindowStore::default();
         let mut engine = test_engine();
         let space_a = SpaceId::new(101);
         let space_b = SpaceId::new(202);
@@ -2836,9 +2878,12 @@ mod tests {
         let window_c = WindowId::new(2, 1);
         let window_info = |wid| (wid, None, None, None, true, CGSize::new(0.0, 0.0), None, None);
 
-        let _ = engine.handle_event(&mut registry, LayoutEvent::SpaceExposed(space_a, screen.size));
         let _ = engine.handle_event(
-            &mut registry,
+            &mut window_store,
+            LayoutEvent::SpaceExposed(space_a, screen.size),
+        );
+        let _ = engine.handle_event(
+            &mut window_store,
             LayoutEvent::WindowsOnScreenUpdated(
                 space_a,
                 1,
@@ -2847,7 +2892,7 @@ mod tests {
             ),
         );
         let _ = engine.handle_command(
-            &mut registry,
+            &mut window_store,
             Some(space_a),
             &visible_spaces,
             &visible_space_centers,
@@ -2863,9 +2908,12 @@ mod tests {
             Default::default(),
         );
 
-        let _ = engine.handle_event(&mut registry, LayoutEvent::SpaceExposed(space_b, screen.size));
         let _ = engine.handle_event(
-            &mut registry,
+            &mut window_store,
+            LayoutEvent::SpaceExposed(space_b, screen.size),
+        );
+        let _ = engine.handle_event(
+            &mut window_store,
             LayoutEvent::WindowsOnScreenUpdated(space_b, 2, vec![window_info(window_c)], None),
         );
 
@@ -2885,7 +2933,7 @@ mod tests {
 
     #[test]
     fn window_removed_preserve_floating_keeps_workspace_assignment() {
-        let mut registry = WindowRegistry::default();
+        let mut window_store = WindowStore::default();
         let mut engine = test_engine();
         let space = SpaceId::new(303);
         let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
@@ -2893,29 +2941,37 @@ mod tests {
         let wid = WindowId::new(pid, 1);
         let window_info = |wid| (wid, None, None, None, true, CGSize::new(0.0, 0.0), None, None);
 
-        let _ = engine.handle_event(&mut registry, LayoutEvent::SpaceExposed(space, screen.size));
+        let _ =
+            engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen.size));
         let _ = engine.handle_event(
-            &mut registry,
+            &mut window_store,
             LayoutEvent::WindowsOnScreenUpdated(space, pid, vec![window_info(wid)], None),
         );
 
         let assigned_workspace = engine
             .virtual_workspace_manager()
-            .workspace_for_window(&registry, space, wid)
+            .workspace_for_window(&window_store, space, wid)
             .expect("window should have a workspace assignment");
 
-        let _ = engine.handle_event(&mut registry, LayoutEvent::WindowRemovedPreserveFloating(wid));
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::WindowRemovedPreserveFloating(wid),
+        );
 
         assert_eq!(
-            engine.virtual_workspace_manager().workspace_for_window(&registry, space, wid),
+            engine
+                .virtual_workspace_manager()
+                .workspace_for_window(&window_store, space, wid),
             Some(assigned_workspace),
             "temporary layout removal must not clear workspace ownership"
         );
 
-        let _ = engine.handle_event(&mut registry, LayoutEvent::WindowAdded(space, wid));
+        let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowAdded(space, wid));
 
         assert_eq!(
-            engine.virtual_workspace_manager().workspace_for_window(&registry, space, wid),
+            engine
+                .virtual_workspace_manager()
+                .workspace_for_window(&window_store, space, wid),
             Some(assigned_workspace),
             "window should reappear in the same workspace after a temporary hide"
         );
@@ -2923,7 +2979,7 @@ mod tests {
 
     #[test]
     fn moving_floating_window_to_space_clears_source_floating_state() {
-        let mut registry = WindowRegistry::default();
+        let mut window_store = WindowStore::default();
         let mut engine = test_engine();
         let source_space = SpaceId::new(304);
         let target_space = SpaceId::new(305);
@@ -2935,15 +2991,15 @@ mod tests {
         let window_info = |wid| (wid, None, None, None, true, CGSize::new(0.0, 0.0), None, None);
 
         let _ = engine.handle_event(
-            &mut registry,
+            &mut window_store,
             LayoutEvent::SpaceExposed(source_space, source_screen.size),
         );
         let _ = engine.handle_event(
-            &mut registry,
+            &mut window_store,
             LayoutEvent::SpaceExposed(target_space, target_screen.size),
         );
         let _ = engine.handle_event(
-            &mut registry,
+            &mut window_store,
             LayoutEvent::WindowsOnScreenUpdated(source_space, pid, vec![window_info(wid)], None),
         );
 
@@ -2967,7 +3023,7 @@ mod tests {
         );
 
         let response = engine.move_window_to_space(
-            &mut registry,
+            &mut window_store,
             source_space,
             target_space,
             target_screen.size,
@@ -2976,9 +3032,11 @@ mod tests {
 
         assert_eq!(response.focus_window, Some(wid));
         assert_eq!(
-            engine
-                .virtual_workspace_manager()
-                .workspace_for_window(&registry, target_space, wid),
+            engine.virtual_workspace_manager().workspace_for_window(
+                &window_store,
+                target_space,
+                wid
+            ),
             Some(target_workspace)
         );
         assert_eq!(
@@ -2993,7 +3051,7 @@ mod tests {
         assert!(
             !engine
                 .calculate_layout_for_workspace(
-                    &registry,
+                    &window_store,
                     source_space,
                     source_workspace,
                     source_screen,
@@ -3010,7 +3068,7 @@ mod tests {
 
     #[test]
     fn move_focus_to_uninitialized_adjacent_space_does_not_panic() {
-        let mut registry = WindowRegistry::default();
+        let mut window_store = WindowStore::default();
         let mut engine = test_engine();
         let current_space = SpaceId::new(50);
         let adjacent_space = SpaceId::new(51);
@@ -3021,13 +3079,13 @@ mod tests {
         visible_space_centers.insert(adjacent_space, CGPoint::new(1920.0, 0.0));
 
         let _ = engine.handle_event(
-            &mut registry,
+            &mut window_store,
             LayoutEvent::SpaceExposed(current_space, screen_size),
         );
 
         let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
             engine.handle_command(
-                &mut registry,
+                &mut window_store,
                 Some(current_space),
                 &visible_spaces,
                 &visible_space_centers,
@@ -3043,7 +3101,7 @@ mod tests {
 
     #[test]
     fn update_virtual_workspace_settings_reapplies_workspace_rules() {
-        let registry = WindowRegistry::default();
+        let window_store = WindowStore::default();
         let mut engine = test_engine();
         let space = SpaceId::new(7);
         let workspace_list = engine.virtual_workspace_manager_mut().list_workspaces(space);
@@ -3062,7 +3120,7 @@ mod tests {
             layout: LayoutMode::Scrolling,
         }];
 
-        engine.update_virtual_workspace_settings(&registry, &settings);
+        engine.update_virtual_workspace_settings(&window_store, &settings);
 
         assert_eq!(
             engine
@@ -3075,20 +3133,20 @@ mod tests {
 
     #[test]
     fn set_workspace_layout_for_inactive_workspace_does_not_raise_active_windows() {
-        let mut registry = WindowRegistry::default();
+        let mut window_store = WindowStore::default();
         let mut engine = test_engine();
         let space = SpaceId::new(8);
         let window_id = WindowId::new(999, 1);
 
         let _ = engine.virtual_workspace_manager_mut().list_workspaces(space);
         let _ = engine.virtual_workspace_manager_mut().auto_assign_window(
-            &mut registry,
+            &mut window_store,
             window_id,
             space,
         );
 
         let response = engine.handle_virtual_workspace_command(
-            &mut registry,
+            &mut window_store,
             space,
             &LayoutCommand::SetWorkspaceLayout {
                 workspace: Some(1),
@@ -3102,7 +3160,7 @@ mod tests {
 
     #[test]
     fn locked_tiled_windows_stay_within_screen_bounds() {
-        let mut registry = WindowRegistry::default();
+        let mut window_store = WindowStore::default();
         let mut engine = test_engine();
         let space = SpaceId::new(90);
         let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1200.0, 800.0));
@@ -3112,9 +3170,10 @@ mod tests {
         let other_a = WindowId::new(pid, 101);
         let other_b = WindowId::new(pid, 102);
 
-        let _ = engine.handle_event(&mut registry, LayoutEvent::SpaceExposed(space, screen.size));
+        let _ =
+            engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen.size));
         let _ = engine.handle_event(
-            &mut registry,
+            &mut window_store,
             LayoutEvent::WindowsOnScreenUpdated(
                 space,
                 pid,
@@ -3158,7 +3217,7 @@ mod tests {
 
         let gaps = engine.layout_settings.gaps.effective_for_display(None);
         let positions = engine.calculate_layout_with_virtual_workspaces(
-            &registry,
+            &window_store,
             space,
             screen,
             &gaps,
@@ -3185,7 +3244,7 @@ mod tests {
 
     #[test]
     fn repeated_windows_on_screen_update_does_not_rebalance_unchanged_tiled_layout() {
-        let mut registry = WindowRegistry::default();
+        let mut window_store = WindowStore::default();
         let mut engine = test_engine();
         let space = SpaceId::new(91);
         let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 1000.0));
@@ -3224,13 +3283,14 @@ mod tests {
             ),
         ];
 
-        let _ = engine.handle_event(&mut registry, LayoutEvent::SpaceExposed(space, screen.size));
+        let _ =
+            engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen.size));
         let _ = engine.handle_event(
-            &mut registry,
+            &mut window_store,
             LayoutEvent::WindowsOnScreenUpdated(space, pid, windows.clone(), None),
         );
         let _ = engine.handle_event(
-            &mut registry,
+            &mut window_store,
             LayoutEvent::WindowFocused(space, WindowId::new(pid, 1)),
         );
         let gaps = engine.layout_settings.gaps.clone();
@@ -3245,7 +3305,7 @@ mod tests {
         );
 
         let _ = engine.handle_command(
-            &mut registry,
+            &mut window_store,
             Some(space),
             &[space],
             &HashMap::default(),
@@ -3263,7 +3323,7 @@ mod tests {
         assert_ne!(baseline, modified);
 
         let _ = engine.handle_event(
-            &mut registry,
+            &mut window_store,
             LayoutEvent::WindowsOnScreenUpdated(space, pid, windows, None),
         );
 
@@ -3282,7 +3342,7 @@ mod tests {
 
     #[test]
     fn partial_windows_on_screen_update_preserves_assigned_tiled_windows() {
-        let mut registry = WindowRegistry::default();
+        let mut window_store = WindowStore::default();
         let mut engine = test_engine();
         let space = SpaceId::new(94);
         let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 1000.0));
@@ -3302,14 +3362,15 @@ mod tests {
             )
         };
 
-        let _ = engine.handle_event(&mut registry, LayoutEvent::SpaceExposed(space, screen.size));
+        let _ =
+            engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen.size));
         let _ = engine.handle_event(
-            &mut registry,
+            &mut window_store,
             LayoutEvent::WindowsOnScreenUpdated(space, pid, vec![info(w1), info(w2)], None),
         );
-        let _ = engine.handle_event(&mut registry, LayoutEvent::WindowFocused(space, w1));
+        let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowFocused(space, w1));
         let _ = engine.handle_command(
-            &mut registry,
+            &mut window_store,
             Some(space),
             &[space],
             &HashMap::default(),
@@ -3328,7 +3389,7 @@ mod tests {
 
         // Simulate a discovery snapshot that temporarily omitted w2.
         let _ = engine.handle_event(
-            &mut registry,
+            &mut window_store,
             LayoutEvent::WindowsOnScreenUpdated(space, pid, vec![info(w1)], None),
         );
 
@@ -3348,7 +3409,7 @@ mod tests {
 
     #[test]
     fn removing_a_window_does_not_rebalance_other_workspaces() {
-        let mut registry = WindowRegistry::default();
+        let mut window_store = WindowStore::default();
         let mut engine = test_engine();
         let space_a = SpaceId::new(95);
         let space_b = SpaceId::new(96);
@@ -3369,15 +3430,21 @@ mod tests {
         let a2 = WindowId::new(5154, 2);
         let b1 = WindowId::new(5155, 1);
 
-        let _ = engine.handle_event(&mut registry, LayoutEvent::SpaceExposed(space_a, screen.size));
-        let _ = engine.handle_event(&mut registry, LayoutEvent::SpaceExposed(space_b, screen.size));
         let _ = engine.handle_event(
-            &mut registry,
+            &mut window_store,
+            LayoutEvent::SpaceExposed(space_a, screen.size),
+        );
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::SpaceExposed(space_b, screen.size),
+        );
+        let _ = engine.handle_event(
+            &mut window_store,
             LayoutEvent::WindowsOnScreenUpdated(space_a, a1.pid, vec![info(a1), info(a2)], None),
         );
-        let _ = engine.handle_event(&mut registry, LayoutEvent::WindowFocused(space_a, a1));
+        let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowFocused(space_a, a1));
         let _ = engine.handle_command(
-            &mut registry,
+            &mut window_store,
             Some(space_a),
             &[space_a, space_b],
             &HashMap::default(),
@@ -3395,11 +3462,11 @@ mod tests {
         );
 
         let _ = engine.handle_event(
-            &mut registry,
+            &mut window_store,
             LayoutEvent::WindowsOnScreenUpdated(space_b, b1.pid, vec![info(b1)], None),
         );
-        let _ = registry.remove_window_assignment(b1);
-        let _ = engine.handle_event(&mut registry, LayoutEvent::WindowRemoved(b1));
+        let _ = window_store.remove_window_assignment(b1);
+        let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowRemoved(b1));
 
         assert_eq!(
             engine.calculate_layout(
@@ -3417,7 +3484,7 @@ mod tests {
 
     #[test]
     fn removing_unassigned_window_rebalances_only_its_immediate_split() {
-        let mut registry = WindowRegistry::default();
+        let mut window_store = WindowStore::default();
         let mut engine = test_engine();
         let space = SpaceId::new(97);
         let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1200.0, 800.0));
@@ -3438,9 +3505,10 @@ mod tests {
             )
         };
 
-        let _ = engine.handle_event(&mut registry, LayoutEvent::SpaceExposed(space, screen.size));
+        let _ =
+            engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen.size));
         let _ = engine.handle_event(
-            &mut registry,
+            &mut window_store,
             LayoutEvent::WindowsOnScreenUpdated(
                 space,
                 pid,
@@ -3448,9 +3516,9 @@ mod tests {
                 None,
             ),
         );
-        let _ = engine.handle_event(&mut registry, LayoutEvent::WindowFocused(space, w1));
+        let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowFocused(space, w1));
         let _ = engine.handle_command(
-            &mut registry,
+            &mut window_store,
             Some(space),
             &[space],
             &HashMap::default(),
@@ -3468,9 +3536,9 @@ mod tests {
             "test must start with a manual resize"
         );
 
-        // WindowDestroyed can remove registry state before layout membership is scrubbed.
-        let _ = registry.remove_window_assignment(w3);
-        let _ = engine.handle_event(&mut registry, LayoutEvent::WindowRemoved(w3));
+        // WindowDestroyed can remove store state before layout membership is scrubbed.
+        let _ = window_store.remove_window_assignment(w3);
+        let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowRemoved(w3));
 
         let after: HashMap<_, _> = engine
             .calculate_layout(space, screen, &gaps, 0.0, Default::default(), Default::default())
@@ -3482,7 +3550,7 @@ mod tests {
 
     #[test]
     fn removing_unknown_window_does_not_rebalance_layout() {
-        let mut registry = WindowRegistry::default();
+        let mut window_store = WindowStore::default();
         let mut engine = test_engine();
         let space = SpaceId::new(92);
         let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 1000.0));
@@ -3521,19 +3589,20 @@ mod tests {
             ),
         ];
 
-        let _ = engine.handle_event(&mut registry, LayoutEvent::SpaceExposed(space, screen.size));
+        let _ =
+            engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen.size));
         let _ = engine.handle_event(
-            &mut registry,
+            &mut window_store,
             LayoutEvent::WindowsOnScreenUpdated(space, pid, windows, None),
         );
         let _ = engine.handle_event(
-            &mut registry,
+            &mut window_store,
             LayoutEvent::WindowFocused(space, WindowId::new(pid, 1)),
         );
         let gaps = engine.layout_settings.gaps.clone();
 
         let _ = engine.handle_command(
-            &mut registry,
+            &mut window_store,
             Some(space),
             &[space],
             &HashMap::default(),
@@ -3549,8 +3618,10 @@ mod tests {
             Default::default(),
         );
 
-        let _ =
-            engine.handle_event(&mut registry, LayoutEvent::WindowRemoved(WindowId::new(9999, 1)));
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::WindowRemoved(WindowId::new(9999, 1)),
+        );
 
         assert_eq!(
             engine.calculate_layout(
@@ -3567,16 +3638,17 @@ mod tests {
 
     #[test]
     fn duplicate_window_added_is_treated_as_noop_for_active_layout() {
-        let mut registry = WindowRegistry::default();
+        let mut window_store = WindowStore::default();
         let mut engine = test_engine();
         let space = SpaceId::new(93);
         let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 1000.0));
         let pid: pid_t = 5152;
         let wid = WindowId::new(pid, 1);
 
-        let _ = engine.handle_event(&mut registry, LayoutEvent::SpaceExposed(space, screen.size));
+        let _ =
+            engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen.size));
         let _ = engine.handle_event(
-            &mut registry,
+            &mut window_store,
             LayoutEvent::WindowsOnScreenUpdated(
                 space,
                 pid,
@@ -3603,7 +3675,7 @@ mod tests {
             Default::default(),
         );
 
-        assert!(!engine.add_window_to_layout(&mut registry, space, wid));
+        assert!(!engine.add_window_to_layout(&mut window_store, space, wid));
         assert_eq!(
             engine.calculate_layout(
                 space,
@@ -3619,7 +3691,7 @@ mod tests {
 
     #[test]
     fn workspace_switch_only_commits_focus_after_authoritative_commit() {
-        let mut registry = WindowRegistry::default();
+        let mut window_store = WindowStore::default();
         let mut engine = test_engine();
         let space = SpaceId::new(94);
         let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 1000.0));
@@ -3627,9 +3699,10 @@ mod tests {
         let wid1 = WindowId::new(pid, 1);
         let wid2 = WindowId::new(pid, 2);
 
-        let _ = engine.handle_event(&mut registry, LayoutEvent::SpaceExposed(space, screen.size));
+        let _ =
+            engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen.size));
         let _ = engine.handle_event(
-            &mut registry,
+            &mut window_store,
             LayoutEvent::WindowsOnScreenUpdated(
                 space,
                 pid,
@@ -3658,10 +3731,10 @@ mod tests {
                 None,
             ),
         );
-        let _ = engine.handle_event(&mut registry, LayoutEvent::WindowFocused(space, wid1));
+        let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowFocused(space, wid1));
 
         let _ = engine.handle_virtual_workspace_command(
-            &mut registry,
+            &mut window_store,
             space,
             &LayoutCommand::CreateWorkspace,
         );
@@ -3669,7 +3742,7 @@ mod tests {
         let workspace_two = workspaces[1].0;
 
         let _ = engine.handle_virtual_workspace_command(
-            &mut registry,
+            &mut window_store,
             space,
             &LayoutCommand::MoveWindowToWorkspace {
                 workspace: 1,
@@ -3678,7 +3751,7 @@ mod tests {
         );
 
         let response = engine.handle_virtual_workspace_command(
-            &mut registry,
+            &mut window_store,
             space,
             &LayoutCommand::SwitchToWorkspace(1),
         );
@@ -3687,7 +3760,7 @@ mod tests {
         assert_eq!(response.focus_window, Some(wid2));
         assert_ne!(engine.focused_window, Some(wid2));
 
-        engine.commit_workspace_focus(&mut registry, space, response.focus_window);
+        engine.commit_workspace_focus(&mut window_store, space, response.focus_window);
 
         assert_eq!(engine.focused_window, Some(wid2));
         assert_eq!(
@@ -3698,16 +3771,17 @@ mod tests {
 
     #[test]
     fn move_window_to_workspace_updates_authoritative_workspace_membership() {
-        let mut registry = WindowRegistry::default();
+        let mut window_store = WindowStore::default();
         let mut engine = test_engine();
         let space = SpaceId::new(95);
         let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 1000.0));
         let pid: pid_t = 6001;
         let wid = WindowId::new(pid, 1);
 
-        let _ = engine.handle_event(&mut registry, LayoutEvent::SpaceExposed(space, screen.size));
+        let _ =
+            engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen.size));
         let _ = engine.handle_event(
-            &mut registry,
+            &mut window_store,
             LayoutEvent::WindowsOnScreenUpdated(
                 space,
                 pid,
@@ -3726,7 +3800,7 @@ mod tests {
         );
 
         let _ = engine.handle_virtual_workspace_command(
-            &mut registry,
+            &mut window_store,
             space,
             &LayoutCommand::CreateWorkspace,
         );
@@ -3735,7 +3809,7 @@ mod tests {
         let ws2 = workspaces[1].0;
 
         let _ = engine.handle_virtual_workspace_command(
-            &mut registry,
+            &mut window_store,
             space,
             &LayoutCommand::MoveWindowToWorkspace {
                 workspace: 1,
@@ -3746,16 +3820,16 @@ mod tests {
         assert!(
             engine
                 .virtual_workspace_manager
-                .workspace_windows(&registry, space, ws1)
+                .workspace_windows(&window_store, space, ws1)
                 .is_empty(),
             "source workspace must be empty after a same-space workspace move"
         );
         assert_eq!(
-            engine.virtual_workspace_manager.workspace_for_window(&registry, space, wid),
+            engine.virtual_workspace_manager.workspace_for_window(&window_store, space, wid),
             Some(ws2)
         );
         assert_eq!(
-            engine.virtual_workspace_manager.workspace_windows(&registry, space, ws2),
+            engine.virtual_workspace_manager.workspace_windows(&window_store, space, ws2),
             vec![wid]
         );
     }

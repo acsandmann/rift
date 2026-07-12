@@ -164,8 +164,8 @@ impl AnimationManager {
 
             let target_frame = target_frame.round();
             let (current_frame, window_server_id, txid) = {
-                let registry = reactor.state.as_mut();
-                match registry.window_mut(wid) {
+                let window_store = &mut reactor.state.windows;
+                match window_store.window_mut(wid) {
                     Some(window) => {
                         let current_frame = window.frame_monotonic;
                         if target_frame.same_as(current_frame) {
@@ -204,7 +204,7 @@ impl AnimationManager {
                 .layout_manager
                 .layout_engine
                 .virtual_workspace_manager()
-                .workspace_for_window(reactor.state.as_ref(), space, wid)
+                .workspace_for_window(&reactor.state.windows, space, wid)
                 .is_some_and(|ws| ws == active_ws);
 
             if is_active {
@@ -233,7 +233,7 @@ impl AnimationManager {
                 }
             }
 
-            if let Some(window) = reactor.state.window_mut(wid) {
+            if let Some(window) = reactor.state.windows.window_mut(wid) {
                 window.frame_monotonic = target_frame;
             }
         }
@@ -283,12 +283,12 @@ impl AnimationManager {
             }
 
             let is_hidden = !reactor.layout_manager.layout_engine.is_window_in_active_workspace(
-                reactor.state.as_ref(),
+                &reactor.state.windows,
                 space,
                 wid,
             );
-            let registry = reactor.state.as_mut();
-            let Some(window) = registry.window_mut(wid) else {
+            let window_store = &mut reactor.state.windows;
+            let Some(window) = window_store.window_mut(wid) else {
                 debug!(?wid, "Skipping layout - window no longer exists");
                 continue;
             };
@@ -336,7 +336,7 @@ impl AnimationManager {
             let mut txid = TransactionId::default();
             let mut has_txid = false;
             let mut txid_entries: Vec<(WindowServerId, TransactionId, CGRect)> = Vec::new();
-            if let Some(window) = reactor.state.window_mut(first_wid) {
+            if let Some(window) = reactor.state.windows.window_mut(first_wid) {
                 if let Some(wsid) = window.info.sys_id {
                     txid = reactor.transaction_manager.generate_next_txid(wsid);
                     has_txid = true;
@@ -346,7 +346,7 @@ impl AnimationManager {
 
             if has_txid {
                 for (wid, frame) in frames.iter().skip(1) {
-                    if let Some(w) = reactor.state.window_mut(*wid)
+                    if let Some(w) = reactor.state.windows.window_mut(*wid)
                         && let Some(wsid) = w.info.sys_id
                     {
                         reactor.transaction_manager.set_last_sent_txid(wsid, txid);

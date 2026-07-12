@@ -207,7 +207,7 @@ impl LayoutManager {
     }
 
     fn calculate_layout(reactor: &mut Reactor) -> LayoutResult {
-        if reactor.state.tracked_window_count() == 0 {
+        if reactor.state.windows.tracked_window_count() == 0 {
             return LayoutResult::new();
         }
         let screens = reactor.space_state.screens.clone();
@@ -239,14 +239,14 @@ impl LayoutManager {
                 .update_space_display(space, display_uuid_opt.clone());
             let mut layout =
                 reactor.layout_manager.layout_engine.calculate_layout_with_virtual_workspaces(
-                    reactor.state.as_ref(),
+                    &reactor.state.windows,
                     space,
                     screen.frame.clone(),
                     &gaps,
                     reactor.config.settings.ui.stack_line.thickness(),
                     reactor.config.settings.ui.stack_line.horiz_placement,
                     reactor.config.settings.ui.stack_line.vert_placement,
-                    |wid| reactor.state.window(wid).map(|w| w.frame_monotonic),
+                    |wid| reactor.state.windows.window(wid).map(|w| w.frame_monotonic),
                     &all_screen_frames,
                 );
             if active_space_count > 1
@@ -256,7 +256,7 @@ impl LayoutManager {
                 let active_workspace_windows: HashSet<WindowId> = reactor
                     .layout_manager
                     .layout_engine
-                    .windows_in_active_workspace(reactor.state.as_ref(), space)
+                    .windows_in_active_workspace(&reactor.state.windows, space)
                     .into_iter()
                     .collect();
                 bound_scrolling_tiled_frames_to_screen(

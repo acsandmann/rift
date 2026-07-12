@@ -77,7 +77,7 @@ impl CommandEventHandler {
             | LayoutCommand::SwitchToLastWorkspace => {
                 if let Some(space) = workspace_space {
                     reactor.layout_manager.layout_engine.handle_virtual_workspace_command(
-                        reactor.state.as_mut(),
+                        &mut reactor.state.windows,
                         space,
                         &cmd,
                     )
@@ -88,7 +88,7 @@ impl CommandEventHandler {
             LayoutCommand::MoveWindowToWorkspace { .. } => {
                 if let Some(space) = command_space {
                     reactor.layout_manager.layout_engine.handle_virtual_workspace_command(
-                        reactor.state.as_mut(),
+                        &mut reactor.state.windows,
                         space,
                         &cmd,
                     )
@@ -104,7 +104,7 @@ impl CommandEventHandler {
                     return;
                 }
                 reactor.layout_manager.layout_engine.handle_command(
-                    reactor.state.as_mut(),
+                    &mut reactor.state.windows,
                     command_space,
                     &visible_spaces,
                     &visible_space_centers,
@@ -133,7 +133,7 @@ impl CommandEventHandler {
             .set_layout_settings(&reactor.config.settings.layout);
 
         reactor.layout_manager.layout_engine.update_virtual_workspace_settings(
-            reactor.state.as_ref(),
+            &reactor.state.windows,
             &reactor.config.virtual_workspaces,
         );
 
@@ -258,7 +258,7 @@ impl CommandEventHandler {
         window_id: WindowId,
         window_server_id: Option<WindowServerId>,
     ) {
-        if let Some(window) = reactor.state.window(window_id) {
+        if let Some(window) = reactor.state.windows.window(window_id) {
             let Some(space) = reactor.best_space_for_window_id(window_id).or_else(|| {
                 reactor.best_space_for_window(&window.frame_monotonic, window.info.sys_id)
             }) else {
@@ -297,7 +297,7 @@ impl CommandEventHandler {
                 reactor
                     .layout_manager
                     .layout_engine
-                    .windows_in_active_workspace(reactor.state.as_ref(), space)
+                    .windows_in_active_workspace(&reactor.state.windows, space)
                     .into_iter()
                     .next()
             });
@@ -363,26 +363,26 @@ impl CommandEventHandler {
 
         let resolved_window = {
             let vwm = reactor.layout_manager.layout_engine.virtual_workspace_manager();
-            let registry = reactor.state.as_ref();
+            let window_store = &reactor.state.windows;
             match window_idx {
                 Some(idx) => {
                     if let Some(space) = reactor.workspace_command_space() {
-                        vwm.find_window_by_idx(registry, space, idx).or_else(|| {
+                        vwm.find_window_by_idx(window_store, space, idx).or_else(|| {
                             reactor
                                 .iter_active_spaces()
-                                .find_map(|sp| vwm.find_window_by_idx(registry, sp, idx))
+                                .find_map(|sp| vwm.find_window_by_idx(window_store, sp, idx))
                         })
                     } else {
                         reactor
                             .iter_active_spaces()
-                            .find_map(|sp| vwm.find_window_by_idx(registry, sp, idx))
+                            .find_map(|sp| vwm.find_window_by_idx(window_store, sp, idx))
                     }
                 }
                 None => reactor.main_window().or_else(|| reactor.window_id_under_cursor()).or_else(
                     || {
                         reactor
                             .workspace_command_space()
-                            .and_then(|space| vwm.find_window_by_idx(registry, space, 0))
+                            .and_then(|space| vwm.find_window_by_idx(window_store, space, 0))
                     },
                 ),
             }
@@ -393,7 +393,7 @@ impl CommandEventHandler {
             return;
         };
 
-        let (window_server_id, window_frame) = match reactor.state.window(window_id) {
+        let (window_server_id, window_frame) = match reactor.state.windows.window(window_id) {
             Some(state) => (state.info.sys_id, state.frame_monotonic),
             None => {
                 warn!(?window_id, "Move window to display ignored: unknown window");
@@ -486,12 +486,12 @@ impl CommandEventHandler {
             }
         }
 
-        if let Some(state) = reactor.state.window_mut(window_id) {
+        if let Some(state) = reactor.state.windows.window_mut(window_id) {
             state.frame_monotonic = target_frame;
         }
 
         let response = reactor.layout_manager.layout_engine.move_window_to_space(
-            reactor.state.as_mut(),
+            &mut reactor.state.windows,
             source_space,
             target_space,
             target_screen.frame.size,
@@ -501,8 +501,8 @@ impl CommandEventHandler {
         if reactor.assigned_space_for_window_id(window_id) == Some(target_space)
             && let Some(wsid) = window_server_id
         {
-            reactor.state.set_window_server_space(wsid, Some(target_space));
-            reactor.state.mark_window_visible(wsid);
+            reactor.state.windows.set_window_server_space(wsid, Some(target_space));
+            reactor.state.windows.mark_window_visible(wsid);
         }
 
         reactor.handle_layout_response(response, None);
@@ -515,7 +515,7 @@ impl CommandEventHandler {
         window_server_id: Option<WindowServerId>,
     ) {
         let target = window_server_id
-            .and_then(|wsid| reactor.state.tracked_window_id(wsid))
+            .and_then(|wsid| reactor.state.windows.tracked_window_id(wsid))
             .or_else(|| reactor.main_window());
         if let Some(wid) = target {
             reactor.request_close_window(wid);

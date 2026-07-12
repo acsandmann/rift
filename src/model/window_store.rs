@@ -9,12 +9,79 @@ use crate::model::reactor::WindowState;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WindowVisibility {
+    #[default]
+    Unknown,
+    Visible,
+    Hidden,
+    Minimized,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WindowPlacement {
+    #[default]
+    Tiled,
+    Floating,
+    NativeFullscreen,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PendingWindowOperation {
+    pub generation: u64,
+    pub requested_frame: Option<objc2_core_foundation::CGRect>,
+    pub requested_space: Option<SpaceId>,
+}
+
+/// The complete reactor-owned state for one AX window identity.
 #[derive(Debug, Default)]
-struct WindowRecord {
+pub struct WindowRecord {
     state: Option<WindowState>,
+    window_server_id: Option<WindowServerId>,
+    native_space: Option<SpaceId>,
     workspace: Option<WindowWorkspaceInfo>,
+    visibility: WindowVisibility,
+    placement: WindowPlacement,
+    pending_operation: Option<PendingWindowOperation>,
+    operation_generation: u64,
     rule_floating: bool,
     last_rule_decision: bool,
+}
+
+impl WindowRecord {
+    /// Last frame observed from Accessibility/WindowServer.
+    pub fn observed_frame(&self) -> Option<objc2_core_foundation::CGRect> {
+        self.state.as_ref().map(|state| state.info.frame)
+    }
+
+    /// Latest frame accepted by the reactor, including its own completed writes.
+    pub fn frame(&self) -> Option<objc2_core_foundation::CGRect> {
+        self.state.as_ref().map(|state| state.frame_monotonic)
+    }
+
+    pub fn requested_frame(&self) -> Option<objc2_core_foundation::CGRect> {
+        self.pending_operation.and_then(|operation| operation.requested_frame)
+    }
+
+    pub fn is_manageable(&self) -> bool {
+        self.state.as_ref().is_some_and(|state| state.is_manageable)
+    }
+
+    pub fn is_effectively_manageable(&self) -> bool {
+        self.state.as_ref().is_some_and(WindowState::is_effectively_manageable)
+    }
+
+    pub fn window_server_id(&self) -> Option<WindowServerId> { self.window_server_id }
+
+    pub fn native_space(&self) -> Option<SpaceId> { self.native_space }
+
+    pub fn workspace(&self) -> Option<WindowWorkspaceInfo> { self.workspace }
+
+    pub fn visibility(&self) -> WindowVisibility { self.visibility }
+
+    pub fn placement(&self) -> WindowPlacement { self.placement }
+
+    pub fn pending_operation(&self) -> Option<PendingWindowOperation> { self.pending_operation }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,8 +144,9 @@ pub struct WindowWorkspaceInfo {
 /// present in multiple workspace-owned sets after sleep/wake or same-space
 /// workspace moves, which then leaked into queries and layout recovery.
 #[derive(Debug, Default)]
-pub struct WindowRegistry {
+pub struct WindowStore {
     windows: HashMap<WindowId, WindowRecord>,
+    app_windows: HashMap<i32, HashSet<WindowId>>,
     window_servers: HashMap<WindowServerId, WindowServerRecord>,
     workspace_windows: HashMap<WindowWorkspaceInfo, HashSet<WindowId>>,
     native_fullscreen_records_by_original_window: HashMap<WindowId, NativeFullscreenRecord>,
@@ -86,7 +154,7 @@ pub struct WindowRegistry {
     native_fullscreen_original_window_by_window_server: HashMap<WindowServerId, WindowId>,
 }
 
-impl WindowRegistry {
+impl WindowStore {
     fn native_fullscreen_original_window(&self, window_id: WindowId) -> Option<WindowId> {
         if self.native_fullscreen_records_by_original_window.contains_key(&window_id) {
             Some(window_id)
@@ -169,7 +237,17 @@ impl WindowRegistry {
     }
 
     pub(crate) fn insert_window(&mut self, window_id: WindowId, window: WindowState) {
-        self.windows.entry(window_id).or_default().state = Some(window);
+        let wsid = window.info.sys_id;
+        let record = self.windows.entry(window_id).or_default();
+        record.state = Some(window);
+        self.app_windows.entry(window_id.pid).or_default().insert(window_id);
+        if let Some(wsid) = wsid {
+            self.track_window_server_id(wsid, window_id);
+        }
+    }
+
+    pub fn record(&self, window_id: WindowId) -> Option<&WindowRecord> {
+        self.windows.get(&window_id)
     }
 
     pub fn contains_window(&self, window_id: WindowId) -> bool { self.window(window_id).is_some() }
@@ -185,9 +263,10 @@ impl WindowRegistry {
     }
 
     pub fn window_ids_for_pid(&self, pid: i32) -> impl Iterator<Item = WindowId> + '_ {
-        self.iter_windows()
-            .filter(move |(window_id, _)| window_id.pid == pid)
-            .map(|(window_id, _)| window_id)
+        self.app_windows
+            .get(&pid)
+            .into_iter()
+            .flat_map(|windows| windows.iter().copied())
     }
 
     pub fn iter_window_server_ids(&self) -> impl Iterator<Item = WindowServerId> + '_ {
@@ -227,6 +306,12 @@ impl WindowRegistry {
         });
         if should_remove {
             self.windows.remove(&window_id);
+            if let Some(windows) = self.app_windows.get_mut(&window_id.pid) {
+                windows.remove(&window_id);
+                if windows.is_empty() {
+                    self.app_windows.remove(&window_id.pid);
+                }
+            }
         }
     }
 
@@ -261,6 +346,23 @@ impl WindowRegistry {
             let pending = record.pending_native_fullscreen.take();
             (old, pending)
         };
+        if let Some(old) = old.filter(|old| *old != window_id)
+            && let Some(record) = self.windows.get_mut(&old)
+        {
+            record.window_server_id = None;
+        }
+        if let Some(previous_wsid) = self
+            .windows
+            .get(&window_id)
+            .and_then(|record| record.window_server_id)
+            .filter(|previous| *previous != wsid)
+            && let Some(record) = self.window_servers.get_mut(&previous_wsid)
+        {
+            record.window_id = None;
+            self.prune_window_server_record(previous_wsid);
+        }
+        self.windows.entry(window_id).or_default().window_server_id = Some(wsid);
+        self.app_windows.entry(window_id.pid).or_default().insert(window_id);
         if let Some(pending_record) = pending_record {
             if pending_record.pid != window_id.pid {
                 self.prune_window_server_record(wsid);
@@ -303,6 +405,9 @@ impl WindowRegistry {
         let record = self.server_record_mut(wsid);
         let changed = !record.visible;
         record.visible = true;
+        if let Some(window_id) = record.window_id {
+            self.windows.entry(window_id).or_default().visibility = WindowVisibility::Visible;
+        }
         changed
     }
 
@@ -318,6 +423,10 @@ impl WindowRegistry {
         for wsid in known_wsids {
             if let Some(record) = self.window_servers.get_mut(&wsid) {
                 record.visible = false;
+                if let Some(window_id) = record.window_id {
+                    self.windows.entry(window_id).or_default().visibility =
+                        WindowVisibility::Hidden;
+                }
             }
             self.prune_window_server_record(wsid);
         }
@@ -327,6 +436,9 @@ impl WindowRegistry {
         let changed = self.window_servers.get(&wsid).is_some_and(|record| record.visible);
         if let Some(record) = self.window_servers.get_mut(&wsid) {
             record.visible = false;
+            if let Some(window_id) = record.window_id {
+                self.windows.entry(window_id).or_default().visibility = WindowVisibility::Hidden;
+            }
         }
         self.prune_window_server_record(wsid);
         changed
@@ -359,6 +471,9 @@ impl WindowRegistry {
     pub fn set_window_server_space(&mut self, wsid: WindowServerId, space: Option<SpaceId>) {
         let record = self.server_record_mut(wsid);
         record.space = space;
+        if let Some(window_id) = record.window_id {
+            self.windows.entry(window_id).or_default().native_space = space;
+        }
         self.prune_window_server_record(wsid);
     }
 
@@ -375,6 +490,12 @@ impl WindowRegistry {
             record.space = None;
             record.info = None;
             record.recent_at = None;
+        }
+        if let Some(wid) = wid
+            && let Some(record) = self.windows.get_mut(&wid)
+        {
+            record.window_server_id = None;
+            record.native_space = None;
         }
         self.prune_window_server_record(wsid);
         wid
@@ -408,6 +529,8 @@ impl WindowRegistry {
             fullscreen_space,
             transition,
         };
+        self.windows.entry(window_id).or_default().placement = WindowPlacement::NativeFullscreen;
+        self.app_windows.entry(window_id.pid).or_default().insert(window_id);
         self.upsert_native_fullscreen_record(record)
     }
 
@@ -490,7 +613,15 @@ impl WindowRegistry {
         window_id: WindowId,
     ) -> Option<NativeFullscreenRecord> {
         let original_window_id = self.native_fullscreen_original_window(window_id)?;
-        self.remove_native_fullscreen_record_by_original_window(original_window_id)
+        let record = self.remove_native_fullscreen_record_by_original_window(original_window_id)?;
+        if let Some(window) = self.windows.get_mut(&record.current_window_id) {
+            window.placement = if window.rule_floating {
+                WindowPlacement::Floating
+            } else {
+                WindowPlacement::Tiled
+            };
+        }
+        Some(record)
     }
 
     pub fn restore_window_from_native_fullscreen_by_window_server_id(
@@ -499,7 +630,11 @@ impl WindowRegistry {
     ) -> Option<NativeFullscreenRecord> {
         let original_window_id =
             self.native_fullscreen_original_window_by_window_server.get(&wsid).copied()?;
-        self.remove_native_fullscreen_record_by_original_window(original_window_id)
+        let current_window_id = self
+            .native_fullscreen_records_by_original_window
+            .get(&original_window_id)?
+            .current_window_id;
+        self.restore_window_from_native_fullscreen(current_window_id)
     }
 
     pub fn is_window_native_fullscreen_suspended(&self, window_id: WindowId) -> bool {
@@ -530,6 +665,7 @@ impl WindowRegistry {
             self.remove_window_from_workspace_index(window_id, old_assignment);
         }
         self.windows.entry(window_id).or_default().workspace = Some(assignment);
+        self.app_windows.entry(window_id.pid).or_default().insert(window_id);
         self.add_window_to_workspace_index(window_id, assignment);
         if let Some(original_window_id) = self.native_fullscreen_original_window(window_id)
             && let Some(mut record) =
@@ -609,8 +745,24 @@ impl WindowRegistry {
             return;
         }
 
-        let (workspace, rule_floating, last_rule_decision) = match self.windows.get(&from) {
-            Some(record) => (record.workspace, record.rule_floating, record.last_rule_decision),
+        let (
+            workspace,
+            rule_floating,
+            last_rule_decision,
+            placement,
+            visibility,
+            pending,
+            generation,
+        ) = match self.windows.get(&from) {
+            Some(record) => (
+                record.workspace,
+                record.rule_floating,
+                record.last_rule_decision,
+                record.placement,
+                record.visibility,
+                record.pending_operation,
+                record.operation_generation,
+            ),
             None => return,
         };
 
@@ -630,11 +782,17 @@ impl WindowRegistry {
         }
         target.rule_floating |= rule_floating;
         target.last_rule_decision |= last_rule_decision;
+        target.placement = placement;
+        target.visibility = visibility;
+        target.pending_operation = pending;
+        target.operation_generation = target.operation_generation.max(generation);
+        self.app_windows.entry(to.pid).or_default().insert(to);
 
         if let Some(source) = self.windows.get_mut(&from) {
             source.workspace = None;
             source.rule_floating = false;
             source.last_rule_decision = false;
+            source.pending_operation = None;
         }
 
         if let Some(original_window_id) = self.native_fullscreen_original_window(from)
@@ -657,13 +815,22 @@ impl WindowRegistry {
     }
 
     pub fn set_rule_floating(&mut self, window_id: WindowId, value: bool) {
-        self.windows.entry(window_id).or_default().rule_floating = value;
+        let record = self.windows.entry(window_id).or_default();
+        record.rule_floating = value;
+        record.placement = if value {
+            WindowPlacement::Floating
+        } else {
+            WindowPlacement::Tiled
+        };
         self.prune_window_record(window_id);
     }
 
     pub fn clear_rule_floating(&mut self, window_id: WindowId) {
         if let Some(record) = self.windows.get_mut(&window_id) {
             record.rule_floating = false;
+            if record.placement == WindowPlacement::Floating {
+                record.placement = WindowPlacement::Tiled;
+            }
         }
         self.prune_window_record(window_id);
     }
@@ -674,6 +841,7 @@ impl WindowRegistry {
 
     pub fn set_last_rule_decision(&mut self, window_id: WindowId, value: bool) {
         self.windows.entry(window_id).or_default().last_rule_decision = value;
+        self.app_windows.entry(window_id.pid).or_default().insert(window_id);
     }
 
     pub fn last_rule_decision(&self, window_id: WindowId) -> bool {
@@ -702,11 +870,17 @@ impl WindowRegistry {
         for wsid in server_ids {
             self.remove_window_server_state(wsid);
         }
+        if let Some(windows) = self.app_windows.get_mut(&window_id.pid) {
+            windows.remove(&window_id);
+            if windows.is_empty() {
+                self.app_windows.remove(&window_id.pid);
+            }
+        }
     }
 
     pub fn remove_windows_for_app(&mut self, pid: i32) {
         let window_ids: Vec<_> =
-            self.windows.keys().copied().filter(|window_id| window_id.pid == pid).collect();
+            self.app_windows.get(&pid).into_iter().flatten().copied().collect();
         for window_id in window_ids {
             self.remove_window(window_id);
         }
@@ -773,6 +947,14 @@ impl WindowRegistry {
             {
                 assignment.space = new_space;
             }
+            if record.native_space == Some(old_space) {
+                record.native_space = Some(new_space);
+            }
+        }
+        for record in self.window_servers.values_mut() {
+            if record.space == Some(old_space) {
+                record.space = Some(new_space);
+            }
         }
     }
 
@@ -817,6 +999,81 @@ impl WindowRegistry {
             })?;
         self.window_server_space(wsid)
     }
+
+    pub fn set_visibility(&mut self, window_id: WindowId, visibility: WindowVisibility) {
+        self.windows.entry(window_id).or_default().visibility = visibility;
+        self.app_windows.entry(window_id.pid).or_default().insert(window_id);
+    }
+
+    pub fn set_placement(&mut self, window_id: WindowId, placement: WindowPlacement) {
+        self.windows.entry(window_id).or_default().placement = placement;
+        self.app_windows.entry(window_id.pid).or_default().insert(window_id);
+    }
+
+    pub fn begin_operation(
+        &mut self,
+        window_id: WindowId,
+        requested_frame: Option<objc2_core_foundation::CGRect>,
+        requested_space: Option<SpaceId>,
+    ) -> PendingWindowOperation {
+        let record = self.windows.entry(window_id).or_default();
+        record.operation_generation = record.operation_generation.wrapping_add(1);
+        let operation = PendingWindowOperation {
+            generation: record.operation_generation,
+            requested_frame,
+            requested_space,
+        };
+        record.pending_operation = Some(operation);
+        self.app_windows.entry(window_id.pid).or_default().insert(window_id);
+        operation
+    }
+
+    pub fn confirm_operation(&mut self, window_id: WindowId, generation: u64) -> bool {
+        let Some(record) = self.windows.get_mut(&window_id) else {
+            return false;
+        };
+        if record
+            .pending_operation
+            .is_some_and(|operation| operation.generation == generation)
+        {
+            record.pending_operation = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn debug_assert_invariants(&self) {
+        for (&wid, record) in &self.windows {
+            debug_assert!(self.app_windows.get(&wid.pid).is_some_and(|ids| ids.contains(&wid)));
+            if let Some(wsid) = record.window_server_id {
+                debug_assert_eq!(self.tracked_window_id(wsid), Some(wid));
+            }
+            if let Some(workspace) = record.workspace {
+                debug_assert!(
+                    self.workspace_windows.get(&workspace).is_some_and(|ids| ids.contains(&wid))
+                );
+            }
+        }
+        for (&pid, ids) in &self.app_windows {
+            debug_assert!(ids.iter().all(|wid| wid.pid == pid && self.windows.contains_key(wid)));
+        }
+        for (&wsid, server) in &self.window_servers {
+            if let Some(wid) = server.window_id {
+                debug_assert_eq!(
+                    self.windows.get(&wid).and_then(|record| record.window_server_id),
+                    Some(wsid)
+                );
+            }
+        }
+        for (workspace, ids) in &self.workspace_windows {
+            debug_assert!(
+                ids.iter().all(|wid| self.windows.get(wid).and_then(|record| record.workspace)
+                    == Some(*workspace))
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -826,31 +1083,33 @@ mod tests {
 
     #[test]
     fn authoritative_space_only_record_is_not_pruned() {
-        let mut registry = WindowRegistry::default();
+        let mut window_store = WindowStore::default();
         let wsid = WindowServerId::new(77);
         let space = SpaceId::new(9);
 
-        registry.set_window_server_space(wsid, Some(space));
+        window_store.set_window_server_space(wsid, Some(space));
 
-        assert_eq!(registry.window_server_space(wsid), Some(space));
-        assert_eq!(registry.iter_window_server_ids().collect::<Vec<_>>(), vec![wsid]);
+        assert_eq!(window_store.window_server_space(wsid), Some(space));
+        assert_eq!(window_store.iter_window_server_ids().collect::<Vec<_>>(), vec![
+            wsid
+        ]);
     }
 
     #[test]
     fn authoritative_space_record_is_pruned_when_space_is_cleared() {
-        let mut registry = WindowRegistry::default();
+        let mut window_store = WindowStore::default();
         let wsid = WindowServerId::new(78);
 
-        registry.set_window_server_space(wsid, Some(SpaceId::new(10)));
-        registry.set_window_server_space(wsid, None);
+        window_store.set_window_server_space(wsid, Some(SpaceId::new(10)));
+        window_store.set_window_server_space(wsid, None);
 
-        assert_eq!(registry.window_server_space(wsid), None);
-        assert!(registry.iter_window_server_ids().next().is_none());
+        assert_eq!(window_store.window_server_space(wsid), None);
+        assert!(window_store.iter_window_server_ids().next().is_none());
     }
 
     #[test]
     fn transfer_persistent_metadata_replaces_existing_target_workspace_assignment() {
-        let mut registry = WindowRegistry::default();
+        let mut window_store = WindowStore::default();
         let space = SpaceId::new(10);
         let mut workspaces = VirtualWorkspaceManager::new();
         let source_workspace = workspaces
@@ -862,31 +1121,31 @@ mod tests {
         let from = WindowId::new(1, 1);
         let to = WindowId::new(1, 2);
 
-        registry.assign_window_to_workspace(from, WindowWorkspaceInfo {
+        window_store.assign_window_to_workspace(from, WindowWorkspaceInfo {
             space,
             workspace_id: source_workspace,
         });
-        registry.assign_window_to_workspace(to, WindowWorkspaceInfo {
+        window_store.assign_window_to_workspace(to, WindowWorkspaceInfo {
             space,
             workspace_id: target_workspace,
         });
 
-        registry.transfer_persistent_window_metadata(from, to);
+        window_store.transfer_persistent_window_metadata(from, to);
 
         assert_eq!(
-            registry.workspace_info_for_window(to),
+            window_store.workspace_info_for_window(to),
             Some(WindowWorkspaceInfo {
                 space,
                 workspace_id: source_workspace,
             })
         );
-        assert!(registry.workspace_windows(space, target_workspace).is_empty());
-        assert_eq!(registry.workspace_windows(space, source_workspace), vec![to]);
+        assert!(window_store.workspace_windows(space, target_workspace).is_empty());
+        assert_eq!(window_store.workspace_windows(space, source_workspace), vec![to]);
     }
 
     #[test]
     fn transfer_persistent_metadata_rekeys_native_fullscreen_record() {
-        let mut registry = WindowRegistry::default();
+        let mut window_store = WindowStore::default();
         let space = SpaceId::new(10);
         let fullscreen_space = SpaceId::new(0x400000000 + space.get());
         let mut workspaces = VirtualWorkspaceManager::new();
@@ -896,8 +1155,8 @@ mod tests {
         let to = WindowId::new(1, 2);
         let wsid = WindowServerId::new(77);
 
-        registry.assign_window_to_workspace(from, WindowWorkspaceInfo { space, workspace_id });
-        let _ = registry.suspend_window_to_native_fullscreen(
+        window_store.assign_window_to_workspace(from, WindowWorkspaceInfo { space, workspace_id });
+        let _ = window_store.suspend_window_to_native_fullscreen(
             from,
             Some(wsid),
             Some(space),
@@ -905,9 +1164,9 @@ mod tests {
             NativeFullscreenTransition::Suspended,
         );
 
-        registry.transfer_persistent_window_metadata(from, to);
+        window_store.transfer_persistent_window_metadata(from, to);
 
-        let record = registry
+        let record = window_store
             .native_fullscreen_record_for_window(to)
             .expect("fullscreen record should follow rekey");
         assert_eq!(record.current_window_id, to);
@@ -917,7 +1176,7 @@ mod tests {
             Some(WindowWorkspaceInfo { space, workspace_id })
         );
         assert_eq!(
-            registry
+            window_store
                 .native_fullscreen_record_for_window(from)
                 .expect("original key should still resolve the lifecycle")
                 .current_window_id,
@@ -927,13 +1186,13 @@ mod tests {
 
     #[test]
     fn native_fullscreen_record_preserves_explicit_fallback_user_space_without_assignment() {
-        let mut registry = WindowRegistry::default();
+        let mut window_store = WindowStore::default();
         let wid = WindowId::new(1, 1);
         let wsid = WindowServerId::new(91);
         let user_space = SpaceId::new(11);
         let fullscreen_space = SpaceId::new(0x400000000 + user_space.get());
 
-        let record = registry.suspend_window_to_native_fullscreen(
+        let record = window_store.suspend_window_to_native_fullscreen(
             wid,
             Some(wsid),
             Some(user_space),
@@ -944,7 +1203,7 @@ mod tests {
         assert_eq!(record.workspace, None);
         assert_eq!(record.last_known_user_space, Some(user_space));
         assert_eq!(
-            registry
+            window_store
                 .native_fullscreen_record_for_window_server_id(wsid)
                 .expect("record should be discoverable by wsid")
                 .last_known_user_space,
@@ -954,7 +1213,7 @@ mod tests {
 
     #[test]
     fn remove_window_preserves_native_fullscreen_record_until_app_cleanup() {
-        let mut registry = WindowRegistry::default();
+        let mut window_store = WindowStore::default();
         let wid = WindowId::new(7, 1);
         let wsid = WindowServerId::new(92);
         let user_space = SpaceId::new(12);
@@ -964,7 +1223,7 @@ mod tests {
             objc2_core_foundation::CGPoint::new(0.0, 0.0),
             objc2_core_foundation::CGSize::new(100.0, 100.0),
         );
-        registry.insert_window(
+        window_store.insert_window(
             wid,
             WindowState::from(crate::sys::app::WindowInfo {
                 is_standard: true,
@@ -982,7 +1241,7 @@ mod tests {
                 ax_subrole: None,
             }),
         );
-        let _ = registry.suspend_window_to_native_fullscreen(
+        let _ = window_store.suspend_window_to_native_fullscreen(
             wid,
             Some(wsid),
             Some(user_space),
@@ -990,30 +1249,30 @@ mod tests {
             NativeFullscreenTransition::Suspended,
         );
 
-        registry.remove_window(wid);
+        window_store.remove_window(wid);
 
         assert!(
-            registry.native_fullscreen_record_for_window(wid).is_some(),
+            window_store.native_fullscreen_record_for_window(wid).is_some(),
             "transient AX removal should not drop the fullscreen lifecycle record"
         );
 
-        registry.remove_windows_for_app(wid.pid);
+        window_store.remove_windows_for_app(wid.pid);
 
         assert!(
-            registry.native_fullscreen_record_for_window(wid).is_none(),
+            window_store.native_fullscreen_record_for_window(wid).is_none(),
             "app cleanup should retire the fullscreen lifecycle record"
         );
     }
 
     #[test]
     fn track_window_server_id_binds_pending_native_fullscreen_record() {
-        let mut registry = WindowRegistry::default();
+        let mut window_store = WindowStore::default();
         let wid = WindowId::new(8, 1);
         let wsid = WindowServerId::new(93);
         let user_space = SpaceId::new(13);
         let fullscreen_space = SpaceId::new(0x400000000 + user_space.get());
 
-        let pending = registry.suspend_window_server_to_native_fullscreen(
+        let pending = window_store.suspend_window_server_to_native_fullscreen(
             wid.pid,
             wsid,
             Some(user_space),
@@ -1022,14 +1281,16 @@ mod tests {
         );
         assert_eq!(pending.pid, wid.pid);
 
-        registry.track_window_server_id(wsid, wid);
+        window_store.track_window_server_id(wsid, wid);
 
         assert!(
-            registry.pending_native_fullscreen_record_for_window_server_id(wsid).is_none(),
+            window_store
+                .pending_native_fullscreen_record_for_window_server_id(wsid)
+                .is_none(),
             "binding AX identity should consume the pending fullscreen record"
         );
         assert_eq!(
-            registry
+            window_store
                 .native_fullscreen_record_for_window_server_id(wsid)
                 .expect("resolved record should be indexed by wsid")
                 .current_window_id,
@@ -1039,14 +1300,14 @@ mod tests {
 
     #[test]
     fn track_window_server_id_discards_stale_pending_native_fullscreen_record_on_pid_mismatch() {
-        let mut registry = WindowRegistry::default();
+        let mut window_store = WindowStore::default();
         let pending_wid = WindowId::new(8, 1);
         let rebound_wid = WindowId::new(9, 1);
         let wsid = WindowServerId::new(94);
         let user_space = SpaceId::new(14);
         let fullscreen_space = SpaceId::new(0x400000000 + user_space.get());
 
-        let pending = registry.suspend_window_server_to_native_fullscreen(
+        let pending = window_store.suspend_window_server_to_native_fullscreen(
             pending_wid.pid,
             wsid,
             Some(user_space),
@@ -1055,15 +1316,99 @@ mod tests {
         );
         assert_eq!(pending.pid, pending_wid.pid);
 
-        registry.track_window_server_id(wsid, rebound_wid);
+        window_store.track_window_server_id(wsid, rebound_wid);
 
         assert!(
-            registry.pending_native_fullscreen_record_for_window_server_id(wsid).is_none(),
+            window_store
+                .pending_native_fullscreen_record_for_window_server_id(wsid)
+                .is_none(),
             "binding a different app to the wsid should discard stale pending fullscreen state"
         );
         assert!(
-            registry.native_fullscreen_record_for_window_server_id(wsid).is_none(),
+            window_store.native_fullscreen_record_for_window_server_id(wsid).is_none(),
             "stale pending fullscreen state must not be rebound onto a different app"
         );
+    }
+
+    #[test]
+    fn rebinding_server_identity_keeps_both_indexes_unique() {
+        let mut store = WindowStore::default();
+        let first = WindowId::new(1, 1);
+        let second = WindowId::new(1, 2);
+        let wsid = WindowServerId::new(44);
+
+        store.track_window_server_id(wsid, first);
+        assert_eq!(store.track_window_server_id(wsid, second), Some(first));
+
+        assert_eq!(
+            store.record(first).and_then(WindowRecord::window_server_id),
+            None
+        );
+        assert_eq!(
+            store.record(second).and_then(WindowRecord::window_server_id),
+            Some(wsid)
+        );
+        assert_eq!(store.tracked_window_id(wsid), Some(second));
+        store.debug_assert_invariants();
+    }
+
+    #[test]
+    fn stale_operation_confirmation_cannot_clear_a_newer_request() {
+        let mut store = WindowStore::default();
+        let wid = WindowId::new(2, 1);
+        let first = store.begin_operation(wid, None, Some(SpaceId::new(1)));
+        let second = store.begin_operation(wid, None, Some(SpaceId::new(2)));
+
+        assert!(!store.confirm_operation(wid, first.generation));
+        assert_eq!(
+            store.record(wid).and_then(WindowRecord::pending_operation),
+            Some(second)
+        );
+        assert!(store.confirm_operation(wid, second.generation));
+        assert_eq!(store.record(wid).and_then(WindowRecord::pending_operation), None);
+    }
+
+    #[test]
+    fn rekey_transfers_placement_and_pending_operation() {
+        let mut store = WindowStore::default();
+        let from = WindowId::new(3, 1);
+        let to = WindowId::new(3, 2);
+        store.set_placement(from, WindowPlacement::Floating);
+        let pending = store.begin_operation(from, None, Some(SpaceId::new(8)));
+
+        store.transfer_persistent_window_metadata(from, to);
+
+        let target = store.record(to).expect("target record");
+        assert_eq!(target.placement(), WindowPlacement::Floating);
+        assert_eq!(target.pending_operation(), Some(pending));
+        assert_eq!(
+            store.record(from).and_then(WindowRecord::pending_operation),
+            None
+        );
+        store.debug_assert_invariants();
+    }
+
+    #[test]
+    fn app_cleanup_removes_all_indexes_and_pending_operations() {
+        let mut store = WindowStore::default();
+        let wid = WindowId::new(4, 1);
+        let wsid = WindowServerId::new(55);
+        let mut workspaces = VirtualWorkspaceManager::new();
+        let workspace_id = workspaces
+            .create_workspace(SpaceId::new(9), Some("Cleanup".to_string()))
+            .expect("workspace");
+        store.track_window_server_id(wsid, wid);
+        store.assign_window_to_workspace(wid, WindowWorkspaceInfo {
+            space: SpaceId::new(9),
+            workspace_id,
+        });
+        store.begin_operation(wid, None, Some(SpaceId::new(9)));
+
+        store.remove_windows_for_app(wid.pid);
+
+        assert!(store.record(wid).is_none());
+        assert_eq!(store.tracked_window_id(wsid), None);
+        assert!(store.window_ids_for_pid(wid.pid).next().is_none());
+        store.debug_assert_invariants();
     }
 }
