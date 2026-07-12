@@ -2293,7 +2293,29 @@ impl Layout {
                 self.info.insert(dest, self.info[src]);
             }
             TreeEvent::RemovingFromParent(node) => {
-                self.info[node.parent(map).unwrap()].total -= self.info[node].size;
+                let parent = node.parent(map).unwrap();
+                let children: Vec<_> =
+                    parent.children(map).filter(|&child| child != node).collect();
+                let total: f32 = children.iter().map(|&child| self.info[child].size.max(0.0)).sum();
+
+                if children.is_empty() {
+                    self.info[parent].total = 0.0;
+                } else if total.is_finite() && total > f32::EPSILON {
+                    // Removing a window must preserve the proportions of the remaining
+                    // siblings. Rebalancing them to 1:1 here loses manual resizes whenever
+                    // discovery briefly removes a window from the tree.
+                    let scale = children.len() as f32 / total;
+                    let child_count = children.len() as f32;
+                    for child in children {
+                        self.info[child].size *= scale;
+                    }
+                    self.info[parent].total = child_count;
+                } else {
+                    for child in children {
+                        self.info[child].size = 1.0;
+                    }
+                    self.info[parent].total = (parent.children(map).count() - 1) as f32;
+                }
             }
             TreeEvent::RemovedFromForest(node) => {
                 self.info.remove(node);
@@ -3414,6 +3436,30 @@ mod tests {
         assert!((system.tree.data.layout.info[n2].size - 1.0).abs() < 0.0001);
         assert!((system.tree.data.layout.info[n3].size - 1.0).abs() < 0.0001);
         assert!((system.tree.data.layout.info[root].total - 3.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn removing_a_sibling_preserves_remaining_proportions() {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
+
+        system.add_window_after_selection(layout, w(173));
+        system.add_window_after_selection(layout, w(174));
+        system.add_window_after_selection(layout, w(175));
+
+        let n1 = system.tree.data.window.node_for(layout, w(173)).expect("w1 node");
+        let n2 = system.tree.data.window.node_for(layout, w(174)).expect("w2 node");
+        system.tree.data.layout.info[n1].size = 0.8;
+        system.tree.data.layout.info[n2].size = 1.2;
+        system.tree.data.layout.info[root].total = 3.0;
+
+        system.remove_window(w(175));
+
+        assert!((system.tree.data.layout.info[n1].size - 0.8).abs() < 0.0001);
+        assert!((system.tree.data.layout.info[n2].size - 1.2).abs() < 0.0001);
+        assert!((system.tree.data.layout.info[root].total - 2.0).abs() < 0.0001);
     }
 
     #[test]

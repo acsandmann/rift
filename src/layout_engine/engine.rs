@@ -31,13 +31,6 @@ pub struct GroupContainerInfo {
 #[derive(Debug, Default)]
 struct WindowRemovalImpact {
     active_space: Option<SpaceId>,
-    tiled_workspaces: Vec<VirtualWorkspaceId>,
-}
-
-impl WindowRemovalImpact {
-    fn changes_layout(&self) -> bool {
-        self.active_space.is_some() || !self.tiled_workspaces.is_empty()
-    }
 }
 
 #[non_exhaustive]
@@ -931,10 +924,6 @@ impl LayoutEngine {
         if let Some(space) = removal.active_space {
             self.broadcast_windows_changed(space);
         }
-
-        if removal.changes_layout() {
-            self.rebalance_all_layouts();
-        }
     }
 
     fn remove_window_layout_membership(&mut self, wid: WindowId) -> WindowRemovalImpact {
@@ -945,7 +934,7 @@ impl LayoutEngine {
             for ws_id in &tiled_workspaces {
                 self.workspace_tree_mut(*ws_id).remove_window(wid);
             }
-            return WindowRemovalImpact { active_space, tiled_workspaces };
+            return WindowRemovalImpact { active_space };
         }
 
         if active_space.is_some() {
@@ -955,10 +944,10 @@ impl LayoutEngine {
             for ws_id in ws_ids {
                 self.workspace_tree_mut(ws_id).remove_window(wid);
             }
-            return WindowRemovalImpact { active_space, tiled_workspaces };
+            return WindowRemovalImpact { active_space };
         }
 
-        WindowRemovalImpact { active_space, tiled_workspaces }
+        WindowRemovalImpact { active_space }
     }
 
     fn add_window_to_layout(&mut self, space: SpaceId, wid: WindowId) -> bool {
@@ -1085,6 +1074,20 @@ impl LayoutEngine {
             desired.sort_unstable();
             let mut current = self.workspace_tree(ws_id).windows_for_app(layout, pid);
             current.sort_unstable();
+
+            // AX/window-server discovery can temporarily omit windows. Keep windows that are
+            // still assigned to this workspace so a partial snapshot does not tear them out
+            // of the tree and cause their sibling weights to be rebuilt.
+            for wid in current.iter().copied() {
+                if !desired.contains(&wid)
+                    && !self.floating.is_floating(wid)
+                    && self.virtual_workspace_manager.workspace_for_window(space, wid)
+                        == Some(ws_id)
+                {
+                    desired.push(wid);
+                }
+            }
+            desired.sort_unstable();
             if desired == current {
                 continue;
             }
@@ -1326,9 +1329,6 @@ impl LayoutEngine {
                     self.sync_tiled_windows_for_app(space, pid, &tiled_by_workspace);
                 if !changed_layouts.is_empty() {
                     self.broadcast_windows_changed(space);
-                    for (ws_id, layout) in changed_layouts {
-                        self.workspace_tree_mut(ws_id).rebalance(layout);
-                    }
                 }
             }
             LayoutEvent::AppClosed(pid) => {
@@ -2641,13 +2641,6 @@ impl LayoutEngine {
         }
     }
 
-    fn rebalance_all_layouts(&mut self) {
-        let active_layouts = self.workspace_layouts.active_layouts_with_workspace();
-        for (ws_id, layout) in active_layouts {
-            self.workspace_tree_mut(ws_id).rebalance(layout);
-        }
-    }
-
     pub fn is_window_in_active_workspace(&self, space: SpaceId, window_id: WindowId) -> bool {
         self.virtual_workspace_manager.is_window_in_active_workspace(space, window_id)
     }
@@ -3149,6 +3142,144 @@ mod tests {
                 Default::default(),
             ),
             modified
+        );
+    }
+
+    #[test]
+    fn partial_windows_on_screen_update_preserves_assigned_tiled_windows() {
+        let mut engine = test_engine();
+        let space = SpaceId::new(94);
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 1000.0));
+        let pid: pid_t = 5153;
+        let w1 = WindowId::new(pid, 1);
+        let w2 = WindowId::new(pid, 2);
+        let info = |wid| {
+            (
+                wid,
+                None,
+                None,
+                None,
+                true,
+                CGSize::new(500.0, 500.0),
+                None,
+                None,
+            )
+        };
+
+        let _ = engine.handle_event(LayoutEvent::SpaceExposed(space, screen.size));
+        let _ = engine.handle_event(LayoutEvent::WindowsOnScreenUpdated(
+            space,
+            pid,
+            vec![info(w1), info(w2)],
+            None,
+        ));
+        let _ = engine.handle_event(LayoutEvent::WindowFocused(space, w1));
+        let _ = engine.handle_command(
+            Some(space),
+            &[space],
+            &HashMap::default(),
+            LayoutCommand::ResizeWindowBy { amount: 0.2 },
+        );
+
+        let gaps = engine.layout_settings.gaps.clone();
+        let before = engine.calculate_layout(
+            space,
+            screen,
+            &gaps,
+            0.0,
+            Default::default(),
+            Default::default(),
+        );
+
+        // Simulate a discovery snapshot that temporarily omitted w2.
+        let _ = engine.handle_event(LayoutEvent::WindowsOnScreenUpdated(
+            space,
+            pid,
+            vec![info(w1)],
+            None,
+        ));
+
+        assert_eq!(
+            engine.calculate_layout(
+                space,
+                screen,
+                &gaps,
+                0.0,
+                Default::default(),
+                Default::default(),
+            ),
+            before,
+            "partial discovery must not remove an assigned window or reset its split"
+        );
+    }
+
+    #[test]
+    fn removing_a_window_does_not_rebalance_other_workspaces() {
+        let mut engine = test_engine();
+        let space_a = SpaceId::new(95);
+        let space_b = SpaceId::new(96);
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 1000.0));
+        let info = |wid| {
+            (
+                wid,
+                None,
+                None,
+                None,
+                true,
+                CGSize::new(500.0, 500.0),
+                None,
+                None,
+            )
+        };
+        let a1 = WindowId::new(5154, 1);
+        let a2 = WindowId::new(5154, 2);
+        let b1 = WindowId::new(5155, 1);
+
+        let _ = engine.handle_event(LayoutEvent::SpaceExposed(space_a, screen.size));
+        let _ = engine.handle_event(LayoutEvent::SpaceExposed(space_b, screen.size));
+        let _ = engine.handle_event(LayoutEvent::WindowsOnScreenUpdated(
+            space_a,
+            a1.pid,
+            vec![info(a1), info(a2)],
+            None,
+        ));
+        let _ = engine.handle_event(LayoutEvent::WindowFocused(space_a, a1));
+        let _ = engine.handle_command(
+            Some(space_a),
+            &[space_a, space_b],
+            &HashMap::default(),
+            LayoutCommand::ResizeWindowBy { amount: 0.2 },
+        );
+
+        let gaps = engine.layout_settings.gaps.clone();
+        let before = engine.calculate_layout(
+            space_a,
+            screen,
+            &gaps,
+            0.0,
+            Default::default(),
+            Default::default(),
+        );
+
+        let _ = engine.handle_event(LayoutEvent::WindowsOnScreenUpdated(
+            space_b,
+            b1.pid,
+            vec![info(b1)],
+            None,
+        ));
+        let _ = engine.handle_event(LayoutEvent::WindowRemoved(b1));
+
+        assert_eq!(
+            engine.calculate_layout(
+                space_a,
+                screen,
+                &gaps,
+                0.0,
+                Default::default(),
+                Default::default(),
+            ),
+            before,
+            "removing a window must not rebalance layouts in other workspaces"
         );
     }
 
