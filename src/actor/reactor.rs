@@ -538,7 +538,7 @@ impl Reactor {
 
     fn refresh_window_server_snapshot_for_active_spaces(&mut self) {
         let active_windows = self.authoritative_active_space_windows();
-        self.reconcile_authoritative_active_window_snapshot(active_windows);
+        self.reconcile_authoritative_active_window_snapshot(active_windows, false);
     }
 
     fn authoritative_active_space_windows(&self) -> Vec<(WindowServerId, Option<SpaceId>)> {
@@ -599,17 +599,8 @@ impl Reactor {
     fn remove_windows_missing_from_active_space_snapshot(
         &mut self,
         previously_visible_wsids: Vec<WindowServerId>,
+        preserve_assignments: bool,
     ) {
-        // The first post-wake/session snapshot releases the lifecycle quarantine, but
-        // WindowServer can still publish only a partial window list in that snapshot.
-        // Keep Rift's authoritative workspace assignments until the deferred AX
-        // discovery has had a chance to reconcile visibility. Otherwise an omitted
-        // window is removed here and discovery subsequently auto-assigns it to the
-        // active/default workspace when it has no matching app rule.
-        let preserve_assignments_for_lifecycle_refresh =
-            self.refresh_quarantine_manager.awaiting_post_wake_snapshot
-                || self.refresh_quarantine_manager.awaiting_post_session_snapshot;
-
         for wsid in previously_visible_wsids {
             if self.window_manager.is_window_visible(wsid) {
                 continue;
@@ -646,11 +637,11 @@ impl Reactor {
                 continue;
             }
 
-            if preserve_assignments_for_lifecycle_refresh {
+            if preserve_assignments {
                 debug!(
                     ?wid,
                     ?wsid,
-                    "Preserving workspace assignment omitted from lifecycle recovery snapshot"
+                    "Preserving workspace assignment omitted from partial authoritative snapshot"
                 );
                 continue;
             }
@@ -668,11 +659,15 @@ impl Reactor {
     fn reconcile_authoritative_active_window_snapshot(
         &mut self,
         active_windows: Vec<(WindowServerId, Option<SpaceId>)>,
+        preserve_missing_assignments: bool,
     ) {
         let previously_visible_wsids: Vec<_> =
             self.window_manager.iter_visible_window_server_ids().collect();
         self.refresh_active_space_window_membership(active_windows);
-        self.remove_windows_missing_from_active_space_snapshot(previously_visible_wsids);
+        self.remove_windows_missing_from_active_space_snapshot(
+            previously_visible_wsids,
+            preserve_missing_assignments,
+        );
         self.reconcile_windows_with_authoritative_spaces();
     }
 
@@ -1412,6 +1407,7 @@ impl Reactor {
         &mut self,
         spaces: &[Option<SpaceId>],
         active_windows: Vec<(WindowServerId, Option<SpaceId>)>,
+        preserve_missing_assignments: bool,
     ) {
         self.refocus_manager.stale_cleanup_state = if spaces.iter().all(|space| space.is_none()) {
             StaleCleanupState::Suppressed
@@ -1424,7 +1420,10 @@ impl Reactor {
                 self.send_layout_event(LayoutEvent::WindowFocused(space, main_window));
             }
         }
-        self.reconcile_authoritative_active_window_snapshot(active_windows);
+        self.reconcile_authoritative_active_window_snapshot(
+            active_windows,
+            preserve_missing_assignments,
+        );
         self.check_for_new_windows();
 
         if let Some(space) = self
@@ -3194,7 +3193,7 @@ impl Reactor {
         // matching destroy/appear pair for the origin space. Reconcile the active
         // spaces from the same space-aware WS-id list used everywhere else so we do
         // not depend on the global CG on-screen window list during recovery.
-        self.reconcile_authoritative_active_window_snapshot(active_windows);
+        self.reconcile_authoritative_active_window_snapshot(active_windows, false);
         self.mission_control_manager.pending_mission_control_refresh.clear();
         self.force_refresh_all_windows();
         self.check_for_new_windows();

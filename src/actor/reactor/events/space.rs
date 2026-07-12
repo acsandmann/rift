@@ -34,7 +34,7 @@ impl SpaceEventHandler {
             topology_changed: _,
             allow_space_remap: _,
             should_force_refresh_layout,
-            releases_lifecycle_refresh_quarantine: _,
+            releases_lifecycle_refresh_quarantine,
             resized_spaces,
             topology_window_delta,
             active_window_spaces,
@@ -156,7 +156,14 @@ impl SpaceEventHandler {
         }
 
         let active_windows = reactor.authoritative_active_space_windows();
-        reactor.finalize_space_change(&spaces, active_windows);
+        // Lifecycle recovery belongs to the spaces actor. The first snapshot
+        // after wake/unlock may have partial WindowServer membership, so obey
+        // the actor's preservation decision instead of re-deriving it here.
+        reactor.finalize_space_change(
+            &spaces,
+            active_windows,
+            releases_lifecycle_refresh_quarantine,
+        );
         reactor.try_apply_pending_space_change();
 
         if should_force_refresh_layout {

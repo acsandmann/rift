@@ -3491,7 +3491,7 @@ fn authoritative_active_window_snapshot_reassigns_window_across_active_displays(
     assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space1));
     assert_eq!(reactor.window_manager.window_server_space(wsid), Some(space1));
 
-    reactor.reconcile_authoritative_active_window_snapshot(vec![(wsid, Some(space2))]);
+    reactor.reconcile_authoritative_active_window_snapshot(vec![(wsid, Some(space2))], false);
 
     assert_eq!(
         reactor.window_manager.window_server_space(wsid),
@@ -3531,7 +3531,8 @@ fn authoritative_active_window_snapshot_removes_missing_window_from_active_layou
     reactor.window_manager.mark_window_visible(moved_wsid);
     reactor.window_manager.set_window_server_space(retained_wsid, Some(space));
     reactor.window_manager.mark_window_visible(retained_wsid);
-    reactor.reconcile_authoritative_active_window_snapshot(vec![(retained_wsid, Some(space))]);
+    reactor
+        .reconcile_authoritative_active_window_snapshot(vec![(retained_wsid, Some(space))], false);
 
     assert!(
         !has_window_in_layout(&mut reactor, space, frame, moved),
@@ -3576,8 +3577,10 @@ fn authoritative_active_window_snapshot_reassigns_missing_window_to_inactive_spa
         Some(vec![inactive_space.get()]),
     );
 
-    reactor
-        .reconcile_authoritative_active_window_snapshot(vec![(retained_wsid, Some(active_space))]);
+    reactor.reconcile_authoritative_active_window_snapshot(
+        vec![(retained_wsid, Some(active_space))],
+        false,
+    );
 
     crate::sys::window_server::set_window_spaces_override(moved_wsid, None);
 
