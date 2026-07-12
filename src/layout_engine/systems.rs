@@ -120,6 +120,7 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId>;
     fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId);
     fn remove_window(&mut self, wid: WindowId);
+    fn remove_window_and_rebalance_parent(&mut self, wid: WindowId) { self.remove_window(wid) }
     fn remove_windows_for_app(&mut self, pid: pid_t);
     fn windows_for_app(&self, layout: LayoutId, pid: pid_t) -> Vec<WindowId>;
     fn set_windows_for_app(&mut self, layout: LayoutId, pid: pid_t, desired: Vec<WindowId>);

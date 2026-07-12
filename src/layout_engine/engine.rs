@@ -969,13 +969,6 @@ impl LayoutEngine {
         wid: WindowId,
     ) -> WindowRemovalImpact {
         let active_space = self.space_with_window(wid);
-        let active_layout = active_space.and_then(|space| {
-            let workspace_id = self.virtual_workspace_manager.active_workspace(space)?;
-            let layout = self.workspace_layouts.active(space, workspace_id)?;
-            self.workspace_tree(workspace_id)
-                .contains_window(layout, wid)
-                .then_some((workspace_id, layout))
-        });
         let tiled_workspaces = self.virtual_workspace_manager.workspaces_for_window(registry, wid);
 
         if !tiled_workspaces.is_empty() {
@@ -990,10 +983,7 @@ impl LayoutEngine {
         // every tree when its authoritative assignment is unavailable.
         let ws_ids: Vec<_> = self.virtual_workspace_manager.workspaces.keys().collect();
         for ws_id in ws_ids {
-            self.workspace_tree_mut(ws_id).remove_window(wid);
-        }
-        if let Some((workspace_id, layout)) = active_layout {
-            self.workspace_tree_mut(workspace_id).rebalance(layout);
+            self.workspace_tree_mut(ws_id).remove_window_and_rebalance_parent(wid);
         }
         WindowRemovalImpact { active_space }
     }
@@ -3423,6 +3413,71 @@ mod tests {
             before,
             "removing a window must not rebalance layouts in other workspaces"
         );
+    }
+
+    #[test]
+    fn removing_unassigned_window_rebalances_only_its_immediate_split() {
+        let mut registry = WindowRegistry::default();
+        let mut engine = test_engine();
+        let space = SpaceId::new(97);
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1200.0, 800.0));
+        let pid: pid_t = 5156;
+        let w1 = WindowId::new(pid, 1);
+        let w2 = WindowId::new(pid, 2);
+        let w3 = WindowId::new(pid, 3);
+        let info = |wid| {
+            (
+                wid,
+                None,
+                None,
+                None,
+                true,
+                CGSize::new(400.0, 800.0),
+                None,
+                None,
+            )
+        };
+
+        let _ = engine.handle_event(&mut registry, LayoutEvent::SpaceExposed(space, screen.size));
+        let _ = engine.handle_event(
+            &mut registry,
+            LayoutEvent::WindowsOnScreenUpdated(
+                space,
+                pid,
+                vec![info(w1), info(w2), info(w3)],
+                None,
+            ),
+        );
+        let _ = engine.handle_event(&mut registry, LayoutEvent::WindowFocused(space, w1));
+        let _ = engine.handle_command(
+            &mut registry,
+            Some(space),
+            &[space],
+            &HashMap::default(),
+            LayoutCommand::ResizeWindowBy { amount: 0.2 },
+        );
+
+        let gaps = engine.layout_settings.gaps.clone();
+        let before: HashMap<_, _> = engine
+            .calculate_layout(space, screen, &gaps, 0.0, Default::default(), Default::default())
+            .into_iter()
+            .collect();
+        let ratio_before = before[&w1].size.width / before[&w2].size.width;
+        assert!(
+            (ratio_before - 1.0).abs() > 0.1,
+            "test must start with a manual resize"
+        );
+
+        // WindowDestroyed can remove registry state before layout membership is scrubbed.
+        let _ = registry.remove_window_assignment(w3);
+        let _ = engine.handle_event(&mut registry, LayoutEvent::WindowRemoved(w3));
+
+        let after: HashMap<_, _> = engine
+            .calculate_layout(space, screen, &gaps, 0.0, Default::default(), Default::default())
+            .into_iter()
+            .collect();
+        let ratio_after = after[&w1].size.width / after[&w2].size.width;
+        assert!((ratio_after - 1.0).abs() < 0.0001);
     }
 
     #[test]
