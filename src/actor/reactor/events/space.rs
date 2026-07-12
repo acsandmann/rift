@@ -226,39 +226,27 @@ impl SpaceEventHandler {
 
             return;
         } else if matches!(kind, SpaceEventKind::User) {
-            if let Some(current_space) = reactor.window_manager.window_server_space(wsid)
-                && current_space != sid
-            {
-                debug!(?wsid, reported_space = ?sid, ?current_space, "Ignoring stale user-space disappearance due to authoritative current space");
-                return;
-            }
-            if reactor.iter_active_spaces().nth(1).is_some()
-                && reactor.window_manager.is_window_visible(wsid)
-                && let Some(wid) = reactor.window_manager.tracked_window_id(wsid)
-                && reactor.hidden_assigned_space_for_window_id(wid).is_none()
-                && reactor
-                    .assigned_space_for_window_id(wid)
-                    .is_some_and(|assigned| assigned != sid)
-            {
+            let resolved_space = reactor.resolve_native_space(wsid, None);
+            if resolved_space.is_some_and(|space| space != sid) {
+                let current_space = resolved_space.expect("checked above");
+                reactor.window_manager.set_window_server_space(wsid, Some(current_space));
+                if reactor.is_space_active(current_space) {
+                    reactor.window_manager.mark_window_visible(wsid);
+                } else {
+                    reactor.window_manager.mark_window_hidden(wsid);
+                }
+                if let Some(wid) = reactor.window_manager.tracked_window_id(wsid) {
+                    let layout_changed =
+                        reactor.reassign_window_to_authoritative_space(wid, current_space);
+                    if layout_changed && !reactor.is_mission_control_active() {
+                        let _ = reactor.update_layout_or_warn(false, false);
+                    }
+                }
                 debug!(
-                    ?wid,
                     ?wsid,
                     reported_space = ?sid,
-                    assigned_space = ?reactor.assigned_space_for_window_id(wid),
-                    "Ignoring user-space disappearance that conflicts with visible multi-display assignment"
-                );
-                return;
-            }
-            if let Some(wid) = reactor.window_manager.tracked_window_id(wsid)
-                && reactor.should_ignore_conflicting_user_space_event(wid, sid)
-            {
-                debug!(
-                    ?wid,
-                    ?wsid,
-                    reported_space = ?sid,
-                    assigned_space = ?reactor.assigned_space_for_window_id(wid),
-                    authoritative_space = ?reactor.authoritative_space_for_window_id(wid),
-                    "Ignoring stale user-space disappearance for moved window"
+                    resolved_space = ?current_space,
+                    "Resolved user-space disappearance to newer native membership"
                 );
                 return;
             }
@@ -310,51 +298,36 @@ impl SpaceEventHandler {
         sid: SpaceId,
         kind: SpaceEventKind,
     ) {
-        if matches!(kind, SpaceEventKind::User)
-            && let Some(current_space) = reactor.window_manager.window_server_space(wsid)
-            && current_space != sid
-        {
-            debug!(?wsid, reported_space = ?sid, ?current_space, "Ignoring stale user-space appearance due to authoritative current space");
-            return;
-        }
-        if matches!(kind, SpaceEventKind::User)
-            && reactor.iter_active_spaces().nth(1).is_some()
-            && reactor.window_manager.is_window_visible(wsid)
-            && let Some(wid) = reactor.window_manager.tracked_window_id(wsid)
-            && reactor.hidden_assigned_space_for_window_id(wid).is_none()
-            && reactor
-                .assigned_space_for_window_id(wid)
-                .is_some_and(|assigned| assigned != sid)
-        {
-            debug!(
-                ?wid,
-                ?wsid,
-                reported_space = ?sid,
-                assigned_space = ?reactor.assigned_space_for_window_id(wid),
-                "Ignoring user-space appearance that conflicts with visible multi-display assignment"
-            );
-            return;
-        }
-
-        if matches!(kind, SpaceEventKind::User)
-            && let Some(wid) = reactor.window_manager.tracked_window_id(wsid)
-            && reactor.should_ignore_conflicting_user_space_event(wid, sid)
-        {
-            debug!(
-                ?wid,
-                ?wsid,
-                reported_space = ?sid,
-                assigned_space = ?reactor.assigned_space_for_window_id(wid),
-                authoritative_space = ?reactor.authoritative_space_for_window_id(wid),
-                "Ignoring stale user-space appearance for moved window"
-            );
-            return;
-        }
-
         if matches!(kind, SpaceEventKind::User) {
-            reactor.window_manager.set_window_server_space(wsid, Some(sid));
-            reactor.window_manager.mark_window_visible(wsid);
-            reactor.clear_pending_target_if_confirmed_space(wsid, sid);
+            let resolved_space = reactor.resolve_native_space(wsid, Some(sid));
+            if let Some(resolved_space) = resolved_space {
+                if resolved_space != sid {
+                    reactor.window_manager.set_window_server_space(wsid, Some(resolved_space));
+                    if reactor.is_space_active(resolved_space) {
+                        reactor.window_manager.mark_window_visible(wsid);
+                    } else {
+                        reactor.window_manager.mark_window_hidden(wsid);
+                    }
+                    if let Some(wid) = reactor.window_manager.tracked_window_id(wsid) {
+                        let layout_changed =
+                            reactor.reassign_window_to_authoritative_space(wid, resolved_space);
+                        if layout_changed && !reactor.is_mission_control_active() {
+                            let _ = reactor.update_layout_or_warn(false, false);
+                        }
+                    }
+                    debug!(
+                        ?wsid,
+                        reported_space = ?sid,
+                        resolved_space = ?resolved_space,
+                        "Resolved user-space appearance to stronger native membership"
+                    );
+                    return;
+                }
+
+                reactor.window_manager.set_window_server_space(wsid, Some(resolved_space));
+                reactor.window_manager.mark_window_visible(wsid);
+                reactor.clear_pending_target_if_confirmed_space(wsid, resolved_space);
+            }
         }
 
         if reactor.window_manager.knows_window_server_id(wsid)
@@ -570,11 +543,13 @@ fn apply_topology_window_delta(reactor: &mut Reactor, delta: TopologyWindowDelta
     for wsid in wsids {
         let appeared_space = appeared_by_wsid.get(&wsid).copied();
         let disappeared_space = disappeared_by_wsid.get(&wsid).copied();
-        let authoritative_space =
-            appeared_space.or_else(|| reactor.window_manager.window_server_space(wsid));
+        let authoritative_space = reactor.resolve_native_space(wsid, appeared_space);
 
         if let Some(target_space) = authoritative_space {
             reactor.window_manager.set_window_server_space(wsid, Some(target_space));
+            if appeared_space == Some(target_space) {
+                reactor.clear_pending_target_if_confirmed_space(wsid, target_space);
+            }
             if reactor.is_space_active(target_space) {
                 reactor.window_manager.mark_window_visible(wsid);
             } else {

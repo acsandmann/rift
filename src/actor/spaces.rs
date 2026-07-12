@@ -849,60 +849,49 @@ impl SpacesActor {
         &self,
         screens: &[ScreenInfo],
     ) -> HashMap<WindowServerId, SpaceId> {
-        #[cfg(test)]
-        {
+        let mut active_spaces = Vec::new();
+        let mut active_space_set = HashSet::default();
+        for space in screens.iter().filter_map(|screen| screen.space) {
+            if active_space_set.insert(space) {
+                active_spaces.push(space);
+            }
+        }
+
+        if active_spaces.is_empty() {
+            return HashMap::default();
+        }
+
+        // A global visible-window union is not space-aware and can lag one display
+        // behind another. Query every active native space independently, including
+        // in tests where the per-space query is overridden.
+        let mut visible = HashMap::default();
+        for &space in &active_spaces {
+            for wsid in window_server::space_window_list_for_connection(&[space.get()], 0, false)
+                .into_iter()
+                .map(WindowServerId::new)
+            {
+                Self::record_visible_window_space(
+                    &mut visible,
+                    &self.state.visible_window_spaces,
+                    &active_space_set,
+                    wsid,
+                    space,
+                    window_server::window_space(wsid),
+                );
+            }
+        }
+
+        // An empty result can be a partial post-wake sample. Preserve the last
+        // accepted membership until a later complete query can reconcile it.
+        if visible.is_empty() {
             self.state
                 .visible_window_spaces
                 .iter()
                 .filter_map(|(&wsid, &space)| {
-                    screens
-                        .iter()
-                        .any(|screen| screen.space == Some(space))
-                        .then_some((wsid, space))
+                    active_space_set.contains(&space).then_some((wsid, space))
                 })
                 .collect()
-        }
-        #[cfg(not(test))]
-        {
-            let mut active_spaces = Vec::new();
-            let mut active_space_set = HashSet::default();
-            for space in screens.iter().filter_map(|screen| screen.space) {
-                if active_space_set.insert(space) {
-                    active_spaces.push(space);
-                }
-            }
-
-            if active_spaces.is_empty() {
-                return HashMap::default();
-            }
-
-            if active_spaces.len() == 1 {
-                let space = active_spaces[0];
-                return window_server::space_window_list_for_connection(&[space.get()], 0, false)
-                    .into_iter()
-                    .map(WindowServerId::new)
-                    .map(|wsid| (wsid, space))
-                    .collect();
-            }
-
-            let mut visible = HashMap::default();
-            for &space in &active_spaces {
-                for wsid in
-                    window_server::space_window_list_for_connection(&[space.get()], 0, false)
-                        .into_iter()
-                        .map(WindowServerId::new)
-                {
-                    Self::record_visible_window_space(
-                        &mut visible,
-                        &self.state.visible_window_spaces,
-                        &active_space_set,
-                        wsid,
-                        space,
-                        window_server::window_space(wsid),
-                    );
-                }
-            }
-
+        } else {
             visible
         }
     }

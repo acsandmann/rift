@@ -5343,3 +5343,72 @@ fn wsid_rekey_preserves_floating_membership_and_position() {
         Some(stored_position)
     );
 }
+
+#[test]
+fn native_space_resolution_policy_table() {
+    let mut cases = Vec::new();
+
+    // A direct observation from the old space is stale while Rift's target is
+    // still pending.
+    {
+        let (reactor, _wid, wsid, space1, space2, _) = reactor_with_window_moved_to_space2();
+        cases.push((
+            "stale origin",
+            reactor.resolve_native_space(wsid, Some(space1)),
+            Some(space2),
+        ));
+    }
+
+    // A direct observation of the target confirms the pending move.
+    {
+        let (reactor, _wid, wsid, _space1, space2, _) = reactor_with_window_moved_to_space2();
+        let resolved = reactor.resolve_native_space(wsid, Some(space2));
+        reactor.clear_pending_target_if_confirmed_space(wsid, space2);
+        cases.push(("confirmed target", resolved, Some(space2)));
+    }
+
+    // With no pending Rift move, a live WindowServer observation is an external move.
+    {
+        let (reactor, _wid, wsid, _space1, space2, _) = reactor_with_window_on_space1();
+        crate::sys::window_server::set_window_spaces_override(wsid, Some(vec![space2.get()]));
+        let resolved = reactor.resolve_native_space(wsid, Some(space2));
+        crate::sys::window_server::set_window_spaces_override(wsid, None);
+        cases.push(("newer external move", resolved, Some(space2)));
+    }
+
+    // With only an accepted prior observation, a partial sample keeps it.
+    {
+        let (reactor, _wid, wsid, space1, _space2, _) = reactor_with_window_on_space1();
+        cases.push((
+            "partial observation",
+            reactor.resolve_native_space(wsid, None),
+            Some(space1),
+        ));
+    }
+
+    // Geometry is used only when no native or prior WindowServer state exists.
+    {
+        let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+            &crate::common::config::VirtualWorkspaceSettings::default(),
+            &crate::common::config::LayoutSettings::default(),
+            None,
+        ));
+        let left = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+        let right = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
+        let space2 = SpaceId::new(2);
+        reactor.handle_event(space_state_event(vec![left, right], vec![
+            Some(SpaceId::new(1)),
+            Some(space2),
+        ]));
+        let frame = CGRect::new(CGPoint::new(1200., 100.), CGSize::new(400., 400.));
+        cases.push((
+            "geometry fallback",
+            reactor.best_space_for_window(&frame, Some(WindowServerId::new(9999))),
+            Some(space2),
+        ));
+    }
+
+    for (case, resolved, expected) in cases {
+        assert_eq!(resolved, expected, "resolver case: {case}");
+    }
+}

@@ -542,16 +542,31 @@ impl Reactor {
     }
 
     fn authoritative_active_space_windows(&self) -> Vec<(WindowServerId, Option<SpaceId>)> {
-        self.space_state
-            .active_window_spaces
-            .iter()
-            .map(|(&wsid, &space)| {
-                (
-                    wsid,
-                    self.pending_target_space_for_window_server_id(wsid).or(Some(space)),
-                )
-            })
-            .collect()
+        let mut queried = HashMap::default();
+        for space in self.iter_active_spaces() {
+            for wsid in window_server::space_window_list_for_connection(&[space.get()], 0, false)
+                .into_iter()
+                .map(WindowServerId::new)
+            {
+                queried.entry(wsid).or_insert(space);
+            }
+        }
+
+        // A refresh can be partial while WindowServer is waking. Keep the last
+        // forwarded per-space sample in that case, but never use the global
+        // visible-window union as a substitute for querying each active space.
+        let membership = if queried.is_empty() {
+            self.space_state.active_window_spaces.clone()
+        } else {
+            queried
+        };
+
+        let mut membership: Vec<_> = membership
+            .into_iter()
+            .map(|(wsid, space)| (wsid, self.resolve_native_space(wsid, Some(space))))
+            .collect();
+        membership.sort_by_key(|(wsid, _)| *wsid);
+        membership
     }
 
     fn has_known_windows_for_active_spaces(&self) -> bool {
@@ -586,7 +601,7 @@ impl Reactor {
         }
 
         for (wsid, space) in active_windows {
-            let space = self.pending_target_space_for_window_server_id(wsid).or(space);
+            let space = self.resolve_native_space(wsid, space);
             if let Some(space) = space {
                 self.window_manager.set_window_server_space(wsid, Some(space));
                 self.clear_pending_target_if_confirmed_space(wsid, space);
@@ -616,8 +631,7 @@ impl Reactor {
             }
 
             let inactive_target = self
-                .window_manager
-                .window_server_space(wsid)
+                .resolve_native_space(wsid, None)
                 .filter(|current_space| *current_space != space)
                 .filter(|current_space| {
                     #[cfg(test)]
@@ -1557,19 +1571,14 @@ impl Reactor {
             return None;
         }
 
-        if let Some(space) = self.hidden_assigned_space_for_frame(window_server_id, frame) {
-            return Some(space);
-        }
-
         if let Some(wsid) = window_server_id {
-            let reported_space = self.window_manager.window_server_space(wsid);
-            if let Some(space) = self
-                .pending_target_space_for_window_server_id(wsid)
-                .or_else(|| self.assigned_space_matching_frame_for_window_server_id(wsid, frame))
-                .or(reported_space)
-            {
+            if let Some(space) = self.resolve_native_space(wsid, None) {
                 return Some(space);
             }
+        }
+
+        if let Some(space) = self.hidden_assigned_space_for_frame(window_server_id, frame) {
+            return Some(space);
         }
 
         self.best_space_for_frame(frame)
@@ -1682,27 +1691,6 @@ impl Reactor {
             .map(|info| info.space)
     }
 
-    fn assigned_space_matching_frame_for_window_server_id(
-        &self,
-        wsid: WindowServerId,
-        frame: &CGRect,
-    ) -> Option<SpaceId> {
-        let wid = self.window_manager.tracked_window_id(wsid)?;
-        let assigned_space = self.assigned_space_for_window_id(wid)?;
-        (self.best_space_for_frame(frame) == Some(assigned_space)).then_some(assigned_space)
-    }
-
-    fn visible_assigned_space_for_window_server_id(&self, wsid: WindowServerId) -> Option<SpaceId> {
-        let wid = self.window_manager.tracked_window_id(wsid)?;
-        if self.hidden_assigned_space_for_window_id(wid).is_some()
-            || !self.window_manager.is_window_visible(wsid)
-        {
-            return None;
-        }
-        let frame = self.window_manager.window(wid)?.frame_monotonic;
-        self.assigned_space_matching_frame_for_window_server_id(wsid, &frame)
-    }
-
     fn pending_target_space_for_window_server_id(&self, wsid: WindowServerId) -> Option<SpaceId> {
         let wid = self.window_manager.tracked_window_id(wsid)?;
         let target_frame = self.transaction_manager.get_target_frame(wsid)?;
@@ -1711,79 +1699,6 @@ impl Reactor {
             .hidden_assigned_space_for_frame(Some(wsid), &target_frame)
             .or_else(|| self.best_space_for_frame(&target_frame))?;
         (target_space == assigned_space).then_some(target_space)
-    }
-
-    fn should_ignore_conflicting_user_space_event(
-        &self,
-        wid: WindowId,
-        reported_space: SpaceId,
-    ) -> bool {
-        let current_server_space = self.current_reported_space_for_window_id(wid);
-        let hidden_assigned_space = self.hidden_assigned_space_for_window_id(wid);
-        if let Some(hidden_assigned_space) = hidden_assigned_space
-            && hidden_assigned_space != reported_space
-            && current_server_space
-                .is_none_or(|current_space| current_space == hidden_assigned_space)
-        {
-            return true;
-        }
-        let is_visible = self
-            .window_manager
-            .window(wid)
-            .and_then(|window| window.info.sys_id)
-            .is_some_and(|wsid| self.window_manager.is_window_visible(wsid));
-
-        if self.active_spaces.len() > 1
-            && is_visible
-            && current_server_space
-                .is_some_and(|current| self.is_space_active(current) && current != reported_space)
-        {
-            return true;
-        }
-
-        let Some(assigned_space) = self.assigned_space_for_window_id(wid) else {
-            return false;
-        };
-        if assigned_space == reported_space {
-            return false;
-        }
-
-        if self.active_spaces.len() > 1
-            && hidden_assigned_space.is_none()
-            && let Some(window) = self.window_manager.window(wid)
-            && let Some(geometry_space) =
-                self.geometry_space_for_window(&window.frame_monotonic, window.info.sys_id)
-            && self.is_space_active(geometry_space)
-            && geometry_space != reported_space
-            && (assigned_space == geometry_space || current_server_space == Some(geometry_space))
-        {
-            return true;
-        }
-
-        let Some(target_space) = self
-            .window_manager
-            .window(wid)
-            .and_then(|window| window.info.sys_id)
-            .and_then(|wsid| self.pending_target_space_for_window_server_id(wsid))
-        else {
-            return false;
-        };
-        if target_space != assigned_space || reported_space == target_space {
-            return false;
-        }
-
-        if current_server_space == Some(assigned_space) {
-            return true;
-        }
-
-        let Some(window) = self.window_manager.window(wid) else {
-            return false;
-        };
-
-        matches!(
-            self.geometry_space_for_window(&window.frame_monotonic, window.info.sys_id),
-            Some(geometry_space) if geometry_space == assigned_space
-        )
     }
 
     fn reassign_window_to_authoritative_space(
@@ -1934,11 +1849,7 @@ impl Reactor {
         self.window_manager
             .window(wid)
             .and_then(|window| window.info.sys_id)
-            .and_then(|wsid| {
-                self.pending_target_space_for_window_server_id(wsid)
-                    .or_else(|| self.window_manager.window_server_space(wsid))
-                    .or_else(|| self.visible_assigned_space_for_window_server_id(wsid))
-            })
+            .and_then(|wsid| self.resolve_native_space(wsid, None))
     }
 
     fn authoritative_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
@@ -1951,6 +1862,36 @@ impl Reactor {
         }
 
         reported_space.or_else(|| self.assigned_space_for_window_id(wid))
+    }
+
+    /// Resolve native space ownership from the strongest available source.
+    ///
+    /// `observation` is a direct per-space membership observation. A pending
+    /// Rift move wins over an observation that is not backed by the live
+    /// WindowServer state, while a live conflict is treated as a newer external
+    /// move. With no direct observation, the live WindowServer query wins over
+    /// the accepted prior observation and the pending target wins over stale
+    /// cached state.
+    pub(crate) fn resolve_native_space(
+        &self,
+        wsid: WindowServerId,
+        observation: Option<SpaceId>,
+    ) -> Option<SpaceId> {
+        let pending = self.pending_target_space_for_window_server_id(wsid);
+        let live = window_server::window_space(wsid);
+        let prior = self.window_manager.window_server_space(wsid);
+
+        match (observation, pending) {
+            (Some(observed), Some(target)) if observed != target => {
+                if live == Some(observed) {
+                    Some(observed)
+                } else {
+                    Some(target)
+                }
+            }
+            (Some(observed), _) => Some(observed),
+            (None, _) => live.or(pending).or(prior),
+        }
     }
 
     fn best_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {

@@ -152,7 +152,7 @@ impl WindowDiscoveryHandler {
         let Some(record) = reactor.window_manager.native_fullscreen_record_for_window(wid) else {
             return;
         };
-        let Some(current_space) = reactor.window_manager.window_server_space(wsid) else {
+        let Some(current_space) = reactor.resolve_native_space(wsid, None) else {
             return;
         };
         let target_user_space = record
