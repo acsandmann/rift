@@ -684,6 +684,64 @@ fn topology_change_emits_space_remap_from_display_history() {
 }
 
 #[test]
+fn wake_transient_cannot_steal_another_displays_space_history() {
+    let (mut actor, mut wm_rx, _reactor_rx) = build_actor();
+    let builtin_space = SpaceId::new(3);
+    let external_space_before_sleep = SpaceId::new(506);
+    let external_space_after_wake = SpaceId::new(517);
+
+    actor.handle_event(Event::ScreenParametersChanged(
+        vec![
+            make_screen_with(1, "builtin", 0.0, 1000.0, Some(builtin_space)),
+            make_screen_with(2, "external", 1000.0, 1000.0, Some(external_space_before_sleep)),
+        ],
+        CoordinateConverter::from_height(800.0),
+    ));
+    let _ = recv_wm(&mut wm_rx);
+
+    // WindowServer can publish this transient while the built-in display is
+    // absent. The external display must not adopt the built-in display's space.
+    actor.handle_event(Event::ScreenParametersChanged(
+        vec![make_screen_with(
+            2,
+            "external",
+            0.0,
+            1000.0,
+            Some(builtin_space),
+        )],
+        CoordinateConverter::from_height(800.0),
+    ));
+    match recv_wm(&mut wm_rx) {
+        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
+            assert!(state.space_remaps.is_empty());
+            assert_eq!(
+                state.last_user_space_by_display.get("external"),
+                Some(&external_space_before_sleep)
+            );
+        }
+        other => panic!("unexpected wm event: {other:?}"),
+    }
+
+    actor.handle_event(Event::ScreenParametersChanged(
+        vec![
+            make_screen_with(1, "builtin", 0.0, 1000.0, Some(builtin_space)),
+            make_screen_with(2, "external", 1000.0, 1000.0, Some(external_space_after_wake)),
+        ],
+        CoordinateConverter::from_height(800.0),
+    ));
+    match recv_wm(&mut wm_rx) {
+        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
+            assert_eq!(state.space_remaps, vec![(
+                external_space_before_sleep,
+                external_space_after_wake
+            )]);
+            assert!(!state.space_remaps.contains(&(builtin_space, external_space_after_wake)));
+        }
+        other => panic!("unexpected wm event: {other:?}"),
+    }
+}
+
+#[test]
 fn sleep_wake_display_reattach_flushes_latest_stable_spaces_only() {
     let (mut actor, mut wm_rx, mut reactor_rx) = build_actor();
     let left = SpaceId::new(201);

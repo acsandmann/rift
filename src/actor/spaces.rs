@@ -727,6 +727,16 @@ impl SpacesActor {
     ) -> Vec<(SpaceId, SpaceId)> {
         let mut remaps = Vec::new();
         let mut seen_displays: HashSet<String> = HashSet::default();
+        let current_space_owners: HashMap<SpaceId, &str> = screens
+            .iter()
+            .filter_map(|screen| Some((screen.space?, screen.display_uuid_opt()?)))
+            .collect();
+        let historical_space_owners: HashMap<SpaceId, String> = self
+            .state
+            .last_user_space_by_display
+            .iter()
+            .map(|(display_uuid, &space)| (space, display_uuid.clone()))
+            .collect();
 
         for screen in screens {
             let Some(space) = screen.space else {
@@ -739,12 +749,27 @@ impl SpacesActor {
                 continue;
             }
 
-            if allow_space_remap
-                && let Some(previous_space) =
-                    self.state.last_user_space_by_display.get(display_uuid).copied()
+            // During sleep/wake macOS can briefly report the remaining display with
+            // the space belonging to a display that has not reappeared yet. Treat
+            // that as cross-display contamination: accepting it poisons history and
+            // the eventual stable snapshot remaps the built-in display's layout onto
+            // the external display (resetting virtual workspaces in the process).
+            let target_belongs_to_another_display =
+                historical_space_owners.get(&space).is_some_and(|owner| *owner != display_uuid);
+            if target_belongs_to_another_display {
+                continue;
+            }
+
+            if let Some(previous_space) =
+                self.state.last_user_space_by_display.get(display_uuid).copied()
                 && previous_space != space
             {
-                remaps.push((previous_space, space));
+                let source_is_now_owned_by_another_display = current_space_owners
+                    .get(&previous_space)
+                    .is_some_and(|owner| *owner != display_uuid);
+                if allow_space_remap && !source_is_now_owned_by_another_display {
+                    remaps.push((previous_space, space));
+                }
             }
 
             self.state.last_user_space_by_display.insert(display_uuid.to_string(), space);
