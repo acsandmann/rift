@@ -906,9 +906,12 @@ impl SpacesActor {
             }
         }
 
-        // An empty result can be a partial post-wake sample. Preserve the last
-        // accepted membership until a later complete query can reconcile it.
-        if visible.is_empty() {
+        // The first coherent snapshot after wake/unlock can race WindowServer and
+        // temporarily contain no windows. Preserve the last accepted membership
+        // only while releasing that lifecycle quarantine. Outside recovery, an
+        // empty result is authoritative (and is required to reconcile windows
+        // whose destroy notifications were quarantined during display churn).
+        if visible.is_empty() && self.state.release_reactor_quarantine_on_next_forward {
             self.state
                 .visible_window_spaces
                 .iter()

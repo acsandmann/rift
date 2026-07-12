@@ -814,10 +814,11 @@ fn topology_window_delta_is_emitted_when_windows_leave_space_during_churn_withou
     );
     let _ = recv_wm(&mut wm_rx);
 
-    actor.state.visible_window_spaces.clear();
+    crate::sys::window_server::set_space_window_list_for_space_override(space.get(), Some(vec![]));
     actor.synthesize_topology_window_delta(9, actor.state.display_churn_flags, &[make_screen(
         Some(space),
     )]);
+    crate::sys::window_server::set_space_window_list_for_space_override(space.get(), None);
     actor.forward_screen_parameters(
         vec![make_screen(Some(space))],
         CoordinateConverter::from_height(800.0),
@@ -829,6 +830,32 @@ fn topology_window_delta_is_emitted_when_windows_leave_space_during_churn_withou
             assert_eq!(delta.epoch, 9);
             assert!(delta.appeared.is_empty());
             assert_eq!(delta.disappeared, vec![(wsid, space)]);
+        }
+        other => panic!("unexpected wm event: {other:?}"),
+    }
+}
+
+#[test]
+fn first_empty_post_wake_snapshot_preserves_known_visible_windows() {
+    let (mut actor, mut wm_rx, _reactor_rx) = build_actor();
+    let space = SpaceId::new(302);
+    let wsid = WindowServerId::new(79);
+
+    actor.state.screens = vec![make_screen(Some(space))];
+    actor.state.visible_window_spaces.insert(wsid, space);
+    actor.state.release_reactor_quarantine_on_next_forward = true;
+    crate::sys::window_server::set_space_window_list_for_space_override(space.get(), Some(vec![]));
+
+    actor.forward_screen_parameters(
+        vec![make_screen(Some(space))],
+        CoordinateConverter::from_height(800.0),
+    );
+
+    crate::sys::window_server::set_space_window_list_for_space_override(space.get(), None);
+    match recv_wm(&mut wm_rx) {
+        wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
+            assert_eq!(state.active_window_spaces.get(&wsid), Some(&space));
+            assert!(state.releases_lifecycle_refresh_quarantine);
         }
         other => panic!("unexpected wm event: {other:?}"),
     }
@@ -856,10 +883,15 @@ fn topology_window_delta_treats_same_window_space_move_as_remove_then_add() {
 
     actor.state.visible_window_spaces.clear();
     actor.state.visible_window_spaces.insert(wsid, new_space);
+    crate::sys::window_server::set_space_window_list_for_space_override(
+        new_space.get(),
+        Some(vec![wsid.as_u32()]),
+    );
     actor.synthesize_topology_window_delta(10, actor.state.display_churn_flags, &[
         make_screen_with(1, "display-left", 0.0, 1000.0, Some(old_space)),
         make_screen_with(2, "display-right", 1000.0, 1000.0, Some(new_space)),
     ]);
+    crate::sys::window_server::set_space_window_list_for_space_override(new_space.get(), None);
     actor.forward_screen_parameters(
         vec![
             make_screen_with(1, "display-left", 0.0, 1000.0, Some(old_space)),
