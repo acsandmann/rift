@@ -4,8 +4,6 @@ use test_log::test;
 use super::testing::*;
 use super::*;
 use crate::actor::app::{AppThreadHandle, Request, pid_t};
-use crate::actor::reactor::events::command::CommandEventHandler;
-use crate::actor::reactor::events::window_discovery::WindowDiscoveryHandler;
 use crate::layout_engine::{Direction, LayoutCommand, LayoutEngine, LayoutEvent};
 use crate::model::window_store::NativeFullscreenTransition;
 use crate::sys::app::{AppInfo, WindowInfo};
@@ -304,7 +302,9 @@ fn forwarded_space_snapshot_respects_toggled_space_activation_policy() {
     reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
     assert!(reactor.is_space_active(space));
 
-    CommandEventHandler::handle_command_reactor_toggle_space_activated(&mut reactor);
+    reactor.handle_event(Event::Command(Command::Reactor(
+        ReactorCommand::ToggleSpaceActivated,
+    )));
     assert!(!reactor.is_space_active(space));
 
     reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
@@ -427,7 +427,7 @@ fn layout_commands_follow_active_display_space_across_active_displays() {
         Some(target_a)
     );
 
-    CommandEventHandler::handle_command_layout(&mut reactor, LayoutCommand::NextWindow);
+    reactor.handle_event(Event::Command(Command::Layout(LayoutCommand::NextWindow)));
 
     assert_eq!(
         reactor.layout_manager.layout_engine.focused_window(),
@@ -546,7 +546,9 @@ fn workspace_commands_follow_active_display_space_across_active_displays() {
         Some(right_workspace)
     );
 
-    CommandEventHandler::handle_command_layout(&mut reactor, LayoutCommand::NextWorkspace(None));
+    reactor.handle_event(Event::Command(Command::Layout(LayoutCommand::NextWorkspace(
+        None,
+    ))));
 
     assert_eq!(
         reactor.layout_manager.layout_engine.active_workspace(left_space),
@@ -904,10 +906,13 @@ fn user_space_window_server_events_preserve_hidden_window_state() {
     crate::sys::window_server::set_window_ordered_in_override(wsid, Some(true));
     SpaceEventHandler::handle_window_server_destroyed(
         &mut reactor,
-        wsid,
-        space1,
-        SpaceEventKind::User,
-    );
+        SpaceEventHandler::WindowServerLifecyclePayload {
+            window_server_id: wsid,
+            space: space1,
+            kind: SpaceEventKind::User,
+        },
+    )
+    .unwrap();
     crate::sys::window_server::set_window_ordered_in_override(wsid, None);
 
     assert!(reactor.state.windows.contains_window(wid));
@@ -955,10 +960,13 @@ fn user_space_window_server_destroyed_removes_window_when_window_server_is_gone(
     crate::sys::window_server::set_window_ordered_in_override(wsid, Some(false));
     SpaceEventHandler::handle_window_server_destroyed(
         &mut reactor,
-        wsid,
-        space1,
-        SpaceEventKind::User,
-    );
+        SpaceEventHandler::WindowServerLifecyclePayload {
+            window_server_id: wsid,
+            space: space1,
+            kind: SpaceEventKind::User,
+        },
+    )
+    .unwrap();
     crate::sys::window_server::set_window_ordered_in_override(wsid, None);
 
     assert!(!reactor.state.windows.contains_window(wid));
@@ -1382,10 +1390,22 @@ fn cross_display_drag_clears_source_floating_position() {
         },
     };
 
-    assert!(
-        reactor.finalize_active_drag(),
-        "cross-display drop should request a layout refresh"
-    );
+    let (visible_spaces, visible_space_centers) = reactor.visible_spaces_for_layout(true);
+    let outcome = crate::actor::reactor::events::drag::handle_mouse_up(
+        &mut reactor.state,
+        &mut reactor.layout_manager,
+        &mut reactor.drag_manager,
+        crate::actor::reactor::events::drag::MouseUpPayload {
+            pending_swap: None,
+            swap_space: Some(space2),
+            final_space: Some(space2),
+            visible_spaces,
+            visible_space_centers,
+        },
+    )
+    .unwrap();
+    assert!(outcome.arrange.requested);
+    assert!(matches!(reactor.drag_manager.drag_state, DragState::Inactive));
 
     assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
     assert_eq!(
@@ -1411,10 +1431,13 @@ fn stale_user_space_disappearance_does_not_restore_old_display_assignment() {
 
     SpaceEventHandler::handle_window_server_destroyed(
         &mut reactor,
-        wsid,
-        space1,
-        SpaceEventKind::User,
-    );
+        SpaceEventHandler::WindowServerLifecyclePayload {
+            window_server_id: wsid,
+            space: space1,
+            kind: SpaceEventKind::User,
+        },
+    )
+    .unwrap();
 
     assert_eq!(reactor.state.windows.window_server_space(wsid), Some(space2));
     assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
@@ -1534,10 +1557,13 @@ fn multi_active_visible_window_disappearance_does_not_reassign_between_display_s
 
     SpaceEventHandler::handle_window_server_destroyed(
         &mut reactor,
-        wsid,
-        space1,
-        SpaceEventKind::User,
-    );
+        SpaceEventHandler::WindowServerLifecyclePayload {
+            window_server_id: wsid,
+            space: space1,
+            kind: SpaceEventKind::User,
+        },
+    )
+    .unwrap();
 
     assert_eq!(reactor.state.windows.window_server_space(wsid), Some(space2));
     assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
@@ -1948,8 +1974,7 @@ fn fullscreen_does_not_suppress_other_same_pid_windows() {
         SpaceEventKind::Fullscreen,
     );
 
-    WindowEventHandler::handle_window_created(
-        &mut reactor,
+    reactor.handle_event(Event::WindowCreated(
         second_wid,
         WindowInfo {
             is_standard: true,
@@ -1975,7 +2000,7 @@ fn fullscreen_does_not_suppress_other_same_pid_windows() {
             max_frame: frame.size,
         }),
         None,
-    );
+    ));
 
     assert_eq!(
         reactor.assigned_space_for_window_id(second_wid),
@@ -2284,13 +2309,7 @@ fn discovery_preserves_hidden_windows_on_their_original_same_display_space() {
     reactor.state.windows.mark_window_visible(WindowServerId::new(103));
     reactor.mission_control_manager.pending_mission_control_refresh.insert(pid);
 
-    WindowDiscoveryHandler::handle_discovery(
-        &mut reactor,
-        pid,
-        vec![],
-        vec![WindowId::new(pid, 3)],
-        None,
-    );
+    reactor.on_windows_discovered_with_app_info(pid, vec![], vec![WindowId::new(pid, 3)], None);
 
     let space1_workspaces = reactor.query_workspaces(Some(space1));
     let space2_workspaces = reactor.query_workspaces(Some(space2));

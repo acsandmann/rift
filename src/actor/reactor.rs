@@ -17,18 +17,61 @@ mod utils;
 mod testing;
 
 #[cfg(test)]
+#[allow(non_snake_case)]
+mod SpaceEventHandler {
+    pub use super::events::space::WindowServerLifecyclePayload;
+
+    pub fn handle_window_server_destroyed(
+        reactor: &mut super::Reactor,
+        payload: WindowServerLifecyclePayload,
+    ) -> anyhow::Result<super::EventOutcome> {
+        let wsid = payload.window_server_id;
+        let tracked_window = reactor.state.windows.tracked_window_id(wsid);
+        let assigned_space =
+            tracked_window.and_then(|window| reactor.assigned_space_for_window_id(window));
+        let observations = super::events::space::WindowServerDestroyedObservations {
+            resolved_space: reactor.resolve_native_space(wsid, None),
+            active_spaces: reactor.active_spaces.clone(),
+            mission_control_active: reactor.is_mission_control_active(),
+            ordered_in: crate::sys::window_server::window_is_ordered_in(wsid),
+            assigned_space,
+            last_known_user_space: super::events::space::resolve_last_known_user_space(
+                tracked_window.and_then(|window| reactor.best_space_for_window_id(window)),
+                reactor.space_state.iter_known_spaces().next(),
+            ),
+        };
+        let outcome = super::events::space::handle_window_server_destroyed(
+            &mut reactor.state,
+            &reactor.transaction_manager,
+            &mut reactor.drag_manager,
+            payload,
+            observations,
+        )?;
+        reactor.apply_event_outcome(outcome);
+        Ok(super::EventOutcome::default())
+    }
+
+    pub fn handle_window_server_appeared(
+        reactor: &mut super::Reactor,
+        window_server_id: crate::sys::window_server::WindowServerId,
+        space: crate::sys::screen::SpaceId,
+        kind: super::SpaceEventKind,
+    ) {
+        reactor.handle_event(super::Event::WindowServerAppeared(window_server_id, space, kind));
+    }
+}
+
+#[cfg(test)]
 mod tests;
 
 use std::thread;
 
 use animation::Sender as AnimationSender;
-use events::EventOutcome;
-use events::app::AppEventHandler;
-use events::command::CommandEventHandler;
-use events::drag::DragEventHandler;
-use events::space::SpaceEventHandler;
-use events::system::SystemEventHandler;
-use events::window::WindowEventHandler;
+use events::{
+    EventOutcome, app as application_workflow, command as command_workflow,
+    drag as interaction_workflow, focus as focus_service, space as topology_workflow,
+    system as system_workflow, window as window_workflow,
+};
 use main_window::MainWindowTracker;
 use managers::LayoutManager;
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
@@ -41,8 +84,8 @@ use transaction_manager::TransactionId;
 use super::{event_tap, gesture_tap};
 use crate::actor::app::{AppInfo, AppThreadHandle, Quiet, Request, WindowId, WindowInfo, pid_t};
 use crate::actor::raise_manager::{self, RaiseManager, RaiseRequest};
-use crate::actor::reactor::events::window_discovery::WindowDiscoveryHandler;
-use crate::actor::spaces::ForwardedSpaceState;
+use crate::actor::reactor::events::window_discovery;
+use crate::actor::spaces::{ForwardedSpaceState, TopologyWindowDelta};
 use crate::actor::{self, menu_bar, stack_line};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
 use crate::common::config::Config;
@@ -753,14 +796,6 @@ impl Reactor {
         }
     }
 
-    fn get_active_drag_session_mut(&mut self) -> Option<&mut DragSession> {
-        if let DragState::Active { session } = &mut self.drag_manager.drag_state {
-            Some(session)
-        } else {
-            None
-        }
-    }
-
     fn take_active_drag_session(&mut self) -> Option<DragSession> {
         match std::mem::replace(&mut self.drag_manager.drag_state, DragState::Inactive) {
             DragState::Active { session } => Some(session),
@@ -935,17 +970,18 @@ impl Reactor {
         self.flush_deferred_visible_refresh();
     }
 
-    fn handle_space_lifecycle(&mut self, space: SpaceId, created: bool) {
-        if created {
-            self.space_activation_policy.on_space_created(space);
-        } else {
-            self.space_activation_policy.on_space_destroyed(space);
-        }
-        self.recompute_and_set_active_spaces_from_current_screens();
-    }
-
     #[instrument(name = "reactor::handle_event", skip(self), fields(event=?event))]
     fn handle_event(&mut self, event: Event) {
+        match self.dispatch_workflow(event) {
+            Ok(outcome) => self.apply_event_outcome(outcome),
+            Err(error) => warn!(%error, "reactor workflow failed"),
+        }
+    }
+
+    /// Dispatches one event and returns all ordered follow-up work without
+    /// applying it. This is the migration boundary used by the individual
+    /// workflow modules.
+    fn dispatch_workflow(&mut self, event: Event) -> anyhow::Result<EventOutcome> {
         self.log_event(&event);
         self.recording_manager.record.on_event(&event);
 
@@ -953,34 +989,34 @@ impl Reactor {
             Event::SystemWillSleep => {
                 self.refresh_quarantine_manager.sleeping = true;
                 self.refresh_quarantine_manager.awaiting_post_wake_snapshot = false;
-                return;
+                return Ok(EventOutcome::default());
             }
             Event::SystemWoke => {
                 self.refresh_quarantine_manager.sleeping = true;
                 self.refresh_quarantine_manager.awaiting_post_wake_snapshot = true;
-                SystemEventHandler::handle_system_woke(self);
+                let outcome = system_workflow::handle_system_woke()?;
                 self.defer_visible_refresh(true);
-                return;
+                return Ok(outcome);
             }
             Event::SessionDidResignActive => {
                 self.refresh_quarantine_manager.session_inactive = true;
                 self.refresh_quarantine_manager.awaiting_post_session_snapshot = false;
-                return;
+                return Ok(EventOutcome::default());
             }
             Event::SessionDidBecomeActive => {
                 self.refresh_quarantine_manager.session_inactive = true;
                 self.refresh_quarantine_manager.awaiting_post_session_snapshot = true;
                 self.defer_visible_refresh(true);
-                return;
+                return Ok(EventOutcome::default());
             }
             Event::DisplayChurnBegin => {
                 self.refresh_quarantine_manager.display_churn_active = true;
-                return;
+                return Ok(EventOutcome::default());
             }
             Event::DisplayChurnEnd => {
                 self.refresh_quarantine_manager.display_churn_active = false;
                 self.request_refresh_when_spaces_actor_stabilizes();
-                return;
+                return Ok(EventOutcome::default());
             }
             _ => {}
         }
@@ -988,9 +1024,6 @@ impl Reactor {
         let should_update_notifications = Self::should_update_notifications(&event);
 
         let raised_window = self.main_window_tracker.handle_event(&event);
-        let mut is_resize = false;
-        let mut window_was_destroyed = false;
-
         match event {
             Event::ApplicationLaunched {
                 pid,
@@ -1001,27 +1034,37 @@ impl Reactor {
                 is_frontmost,
                 main_window,
             } => {
-                AppEventHandler::handle_application_launched(
-                    self,
-                    pid,
-                    info,
-                    handle,
-                    visible_windows,
-                    window_server_info,
-                    is_frontmost,
-                    main_window,
-                );
+                let _ = (is_frontmost, main_window);
+                let mut outcome = application_workflow::handle_application_launched(
+                    &mut self.app_manager,
+                    application_workflow::ApplicationLaunchedPayload {
+                        pid,
+                        info,
+                        handle,
+                        visible_windows,
+                        window_server_info,
+                    },
+                )?;
+                outcome.focused_window = raised_window;
+                return Ok(outcome);
             }
             Event::ApplicationTerminated(pid) => {
-                AppEventHandler::handle_application_terminated(self, pid);
+                return application_workflow::handle_application_terminated(pid);
             }
             Event::ApplicationThreadTerminated(pid) => {
                 self.clear_menu_state_for_pid(pid);
-                AppEventHandler::handle_application_thread_terminated(self, pid);
+                return application_workflow::handle_application_thread_terminated(
+                    &mut self.app_manager,
+                    pid,
+                );
             }
             Event::ApplicationActivated(pid, quiet) => {
                 self.clear_menu_state_for_non_owner(pid);
-                AppEventHandler::handle_application_activated(self, pid, quiet);
+                let mut outcome = application_workflow::handle_application_activated(
+                    application_workflow::ApplicationActivatedPayload { pid, quiet },
+                )?;
+                outcome.focused_window = raised_window;
+                return Ok(outcome);
             }
             Event::ApplicationDeactivated(pid) => {
                 self.clear_menu_state_for_pid(pid);
@@ -1044,7 +1087,10 @@ impl Reactor {
                 }
             }
             Event::RegisterWmSender(sender) => {
-                SystemEventHandler::handle_register_wm_sender(self, sender)
+                return Ok(system_workflow::handle_register_wm_sender(
+                    &mut self.communication_manager,
+                    sender,
+                )?);
             }
             Event::WindowsDiscovered { pid, new, known_visible } => {
                 if self.refreshes_blocked() {
@@ -1054,53 +1100,240 @@ impl Reactor {
                         "Ignoring windows discovery while refresh quarantine is active"
                     );
                     self.defer_visible_refresh(true);
-                    return;
+                    return Ok(EventOutcome::default());
                 }
-                AppEventHandler::handle_windows_discovered(self, pid, new, known_visible);
+                let mut outcome = application_workflow::handle_windows_discovered(
+                    application_workflow::WindowsDiscoveredPayload { pid, new, known_visible },
+                )?;
+                outcome.focused_window = raised_window;
+                return Ok(outcome);
             }
             Event::WindowCreated(wid, window, ws_info, mouse_state) => {
-                WindowEventHandler::handle_window_created(self, wid, window, ws_info, mouse_state);
+                let _ = mouse_state;
+                let mut outcome = window_workflow::handle_window_created(
+                    &mut self.state,
+                    &self.transaction_manager,
+                    window_workflow::WindowCreatedPayload {
+                        window_id: wid,
+                        window,
+                        window_server_info: ws_info,
+                    },
+                )?;
+                outcome.focused_window = raised_window;
+                return Ok(outcome);
             }
             Event::WindowDestroyed(wid) => {
-                window_was_destroyed = WindowEventHandler::handle_window_destroyed(self, wid);
+                let window_server_id =
+                    self.state.windows.window(wid).and_then(|window| window.info.sys_id);
+                let suppress_if_window_alive =
+                    !self.has_user_space_context() || self.is_mission_control_active();
+                let platform_window_alive = window_server_id.is_some_and(|window_server_id| {
+                    window_server::get_window(window_server_id)
+                        .is_some_and(|info| info.pid == wid.pid)
+                });
+                let mut outcome = window_workflow::handle_window_destroyed(
+                    &mut self.state,
+                    &self.transaction_manager,
+                    &mut self.drag_manager,
+                    window_workflow::WindowDestroyedPayload {
+                        window: wid,
+                        suppress_if_window_alive,
+                        platform_window_alive,
+                    },
+                )?;
+                outcome.focused_window = raised_window;
+                return Ok(outcome);
             }
             Event::WindowServerDestroyed(wsid, sid, kind) => {
-                SpaceEventHandler::handle_window_server_destroyed(self, wsid, sid, kind);
-            }
-            Event::WindowServerAppeared(wsid, sid, kind) => {
-                SpaceEventHandler::handle_window_server_appeared(self, wsid, sid, kind);
-            }
-            Event::SpaceCreated(space) => {
-                self.handle_space_lifecycle(space, true);
-            }
-            Event::SpaceDestroyed(space) => {
-                self.handle_space_lifecycle(space, false);
-            }
-            Event::WindowMinimized(wid) => {
-                WindowEventHandler::handle_window_minimized(self, wid);
-            }
-            Event::WindowDeminiaturized(wid) => {
-                WindowEventHandler::handle_window_deminiaturized(self, wid);
-            }
-            Event::WindowFrameChanged(wid, new_frame, last_seen, requested, mouse_state) => {
-                is_resize = WindowEventHandler::handle_window_frame_changed(
-                    self,
-                    wid,
-                    new_frame,
-                    last_seen,
-                    requested,
-                    mouse_state,
+                let tracked_window = self.state.windows.tracked_window_id(wsid);
+                let assigned_space =
+                    tracked_window.and_then(|window| self.assigned_space_for_window_id(window));
+                let last_known_user_space = topology_workflow::resolve_last_known_user_space(
+                    tracked_window.and_then(|window| self.best_space_for_window_id(window)),
+                    self.space_state.iter_known_spaces().next(),
+                );
+                let observations = topology_workflow::WindowServerDestroyedObservations {
+                    resolved_space: self.resolve_native_space(wsid, None),
+                    active_spaces: self.active_spaces.clone(),
+                    mission_control_active: self.is_mission_control_active(),
+                    ordered_in: window_server::window_is_ordered_in(wsid),
+                    assigned_space,
+                    last_known_user_space,
+                };
+                return topology_workflow::handle_window_server_destroyed(
+                    &mut self.state,
+                    &self.transaction_manager,
+                    &mut self.drag_manager,
+                    topology_workflow::WindowServerLifecyclePayload {
+                        window_server_id: wsid,
+                        space: sid,
+                        kind,
+                    },
+                    observations,
                 );
             }
+            Event::WindowServerAppeared(wsid, sid, kind) => {
+                let tracked_window = self.state.windows.tracked_window_id(wsid);
+                let assigned_space =
+                    tracked_window.and_then(|window| self.assigned_space_for_window_id(window));
+                let last_known_user_space = topology_workflow::resolve_last_known_user_space(
+                    tracked_window.and_then(|window| self.best_space_for_window_id(window)),
+                    self.space_state.iter_known_spaces().next(),
+                );
+                let window_server_info = window_server::get_window(wsid);
+                let owner_pid = window_server_info.as_ref().map(|info| info.pid);
+                let app_known =
+                    owner_pid.is_some_and(|pid| self.app_manager.apps.contains_key(&pid));
+                let running_app_info = owner_pid.filter(|_| !app_known).and_then(|pid| {
+                    objc2_app_kit::NSRunningApplication::runningApplicationWithProcessIdentifier(
+                        pid,
+                    )
+                    .map(|app| AppInfo::from(&*app))
+                });
+                let observations = topology_workflow::WindowServerAppearedObservations {
+                    resolved_space: self.resolve_native_space(wsid, Some(sid)),
+                    active_spaces: self.active_spaces.clone(),
+                    mission_control_active: self.is_mission_control_active(),
+                    assigned_space,
+                    last_known_user_space,
+                    window_server_info,
+                    app_known,
+                    running_app_info,
+                };
+                return topology_workflow::handle_window_server_appeared(
+                    &mut self.state,
+                    topology_workflow::WindowServerLifecyclePayload {
+                        window_server_id: wsid,
+                        space: sid,
+                        kind,
+                    },
+                    observations,
+                );
+            }
+            Event::SpaceCreated(space) => {
+                return topology_workflow::handle_space_lifecycle(
+                    &mut self.space_activation_policy,
+                    topology_workflow::SpaceLifecyclePayload { space, created: true },
+                );
+            }
+            Event::SpaceDestroyed(space) => {
+                return topology_workflow::handle_space_lifecycle(
+                    &mut self.space_activation_policy,
+                    topology_workflow::SpaceLifecyclePayload { space, created: false },
+                );
+            }
+            Event::WindowMinimized(wid) => {
+                return window_workflow::handle_window_minimized(&mut self.state, wid);
+            }
+            Event::WindowDeminiaturized(wid) => {
+                let active_space = self.state.windows.window(wid).and_then(|window| {
+                    self.best_space_for_window(&window.frame_monotonic, window.info.sys_id)
+                        .filter(|space| self.is_space_active(*space))
+                        .or_else(|| {
+                            window
+                                .info
+                                .sys_id
+                                .is_none()
+                                .then(|| self.workspace_command_space())
+                                .flatten()
+                        })
+                });
+                return window_workflow::handle_window_deminiaturized(
+                    &mut self.state,
+                    window_workflow::WindowDeminiaturizedPayload { window: wid, active_space },
+                );
+            }
+            Event::WindowFrameChanged(wid, new_frame, last_seen, requested, mouse_state) => {
+                let effective_mouse_state = mouse_state.or_else(crate::sys::event::get_mouse_state);
+                let (server_id, old_frame) = self
+                    .state
+                    .windows
+                    .window(wid)
+                    .map(|window| (window.info.sys_id, window.frame_monotonic))
+                    .unwrap_or((None, new_frame));
+                let old_space = self.geometry_space_for_window(&old_frame, server_id);
+                let new_space = self.geometry_space_for_window(&new_frame, server_id);
+                let old_space_active = old_space.is_some_and(|space| self.is_space_active(space));
+                let new_space_active = new_space.is_some_and(|space| self.is_space_active(space));
+                let best_resize_space = self.best_space_for_window(&new_frame, server_id);
+                let active_resize_space =
+                    best_resize_space.filter(|space| self.is_space_active(*space)).or_else(|| {
+                        server_id.is_none().then(|| self.workspace_command_space()).flatten()
+                    });
+                let pending_target_space = server_id
+                    .and_then(|server| self.pending_target_space_for_window_server_id(server));
+                let assigned_space = self.assigned_space_for_window_id(wid);
+                let keep_assigned_for_scrolling = old_space.is_some_and(|space| {
+                    self.layout_manager.layout_engine.active_layout_mode_at(space)
+                        == crate::common::config::LayoutMode::Scrolling
+                        && !self.layout_manager.layout_engine.is_window_floating(wid)
+                        && self
+                            .layout_manager
+                            .layout_engine
+                            .virtual_workspace_manager()
+                            .workspace_for_window(&self.state.windows, space, wid)
+                            .is_some()
+                });
+                let screens = self
+                    .space_state
+                    .screens
+                    .iter()
+                    .filter_map(|screen| {
+                        Some((screen.space?, screen.frame, screen.display_uuid_owned()))
+                    })
+                    .collect();
+                let mission_control_active = self.is_mission_control_active();
+                let mut outcome = window_workflow::handle_window_frame_changed(
+                    &mut self.state,
+                    &mut self.layout_manager,
+                    &self.transaction_manager,
+                    &mut self.drag_manager,
+                    window_workflow::WindowFrameChangedPayload {
+                        window: wid,
+                        new_frame,
+                        last_seen,
+                        requested,
+                        mouse_state: effective_mouse_state,
+                        mission_control_active,
+                        old_space,
+                        new_space,
+                        old_space_active,
+                        new_space_active,
+                        active_resize_space,
+                        pending_target_space,
+                        assigned_space,
+                        keep_assigned_for_scrolling,
+                        screens,
+                    },
+                )?;
+                // Frame acknowledgements and no-op geometry changes can return
+                // early from the reducer. Mouse release still has to terminate
+                // an existing drag session in those cases.
+                if effective_mouse_state == Some(crate::sys::event::MouseState::Up)
+                    && (matches!(
+                        self.drag_manager.drag_state,
+                        DragState::Active { .. } | DragState::PendingSwap { .. }
+                    ) || self.drag_manager.skip_layout_for_window.is_some())
+                {
+                    outcome.dispatch_mouse_up = true;
+                }
+                outcome.focused_window = raised_window;
+                return Ok(outcome);
+            }
             Event::WindowTitleChanged(wid, new_title) => {
-                WindowEventHandler::handle_window_title_changed(self, wid, new_title);
+                let mut outcome = window_workflow::handle_window_title_changed(
+                    &mut self.state,
+                    window_workflow::WindowTitleChangedPayload { window: wid, title: new_title },
+                )?;
+                outcome.focused_window = raised_window;
+                return Ok(outcome);
             }
             Event::SpaceStateChanged(space_state) => {
                 let releases_lifecycle_refresh_quarantine =
                     space_state.releases_lifecycle_refresh_quarantine;
                 let releases_display_churn_refresh_quarantine =
                     space_state.releases_display_churn_refresh_quarantine;
-                SpaceEventHandler::handle_space_state_changed(self, space_state);
+                let outcome = self.handle_authoritative_space_snapshot(space_state)?;
                 if releases_lifecycle_refresh_quarantine {
                     self.release_post_instability_quarantine_after_authoritative_snapshot();
                 }
@@ -1108,52 +1341,368 @@ impl Reactor {
                     self.refresh_quarantine_manager.display_churn_active = false;
                     self.request_refresh_when_spaces_actor_stabilizes();
                 }
+                return Ok(outcome);
             }
             Event::MouseUp => {
-                DragEventHandler::handle_mouse_up(self);
-                if let Some(wid) = self.window_id_under_cursor() {
-                    if let Some(space) = self.best_space_for_window_id(wid) {
-                        self.send_layout_event(LayoutEvent::WindowFocused(space, wid));
+                let pending_swap = self.get_pending_drag_swap();
+                let (visible_spaces, visible_space_centers) = self.visible_spaces_for_layout(true);
+                let swap_space = pending_swap
+                    .and_then(|(dragged, _)| {
+                        self.state.windows.window(dragged).and_then(|window| {
+                            self.best_space_for_window(&window.frame_monotonic, window.info.sys_id)
+                        })
+                    })
+                    .or_else(|| {
+                        self.drag_manager
+                            .drag_swap_manager
+                            .origin_frame()
+                            .and_then(|frame| self.best_space_for_frame(&frame))
+                    })
+                    .or_else(|| self.space_state.screens.iter().find_map(|screen| screen.space));
+                let session = match &self.drag_manager.drag_state {
+                    DragState::Active { session } | DragState::PendingSwap { session, .. } => {
+                        Some(session.clone())
                     }
+                    DragState::Inactive => None,
+                };
+                let final_space = session.as_ref().and_then(|session| {
+                    session
+                        .settled_space
+                        .or_else(|| self.best_space_for_frame(&session.last_frame))
+                        .or_else(|| self.best_space_for_window_id(session.window))
+                });
+                let focused = self.window_id_under_cursor().and_then(|window| {
+                    self.best_space_for_window_id(window).map(|space| (space, window))
+                });
+                let mut outcome = interaction_workflow::handle_mouse_up(
+                    &mut self.state,
+                    &mut self.layout_manager,
+                    &mut self.drag_manager,
+                    interaction_workflow::MouseUpPayload {
+                        pending_swap,
+                        swap_space,
+                        final_space,
+                        visible_spaces,
+                        visible_space_centers,
+                    },
+                )?;
+                if let Some((space, window)) = focused {
+                    outcome = outcome.with_layout_event(LayoutEvent::WindowFocused(space, window));
                 }
+                return Ok(outcome);
             }
-            Event::MenuOpened(pid) => SystemEventHandler::handle_menu_opened(self, pid),
-            Event::MenuClosed(pid) => SystemEventHandler::handle_menu_closed(self, pid),
+            Event::MenuOpened(pid) => {
+                return Ok(system_workflow::handle_menu_opened(&mut self.menu_manager, pid)?);
+            }
+            Event::MenuClosed(pid) => {
+                return Ok(system_workflow::handle_menu_closed(&mut self.menu_manager, pid)?);
+            }
             Event::MouseMoved(wsid) => {
-                WindowEventHandler::handle_mouse_moved_over_window(self, wsid);
-                // Mouse movement has no layout transaction of its own. Any
-                // focus/raise work above queues the real layout event; running
-                // the generic finalization path here would re-check layout
-                // state for every cursor transition.
-                return;
+                let window = self.state.windows.tracked_window_id(wsid);
+                let active_space = window.and_then(|window| {
+                    self.state.windows.window(window).and_then(|state| {
+                        self.best_space_for_window(&state.frame_monotonic, state.info.sys_id)
+                            .filter(|space| self.is_space_active(*space))
+                            .or_else(|| {
+                                state
+                                    .info
+                                    .sys_id
+                                    .is_none()
+                                    .then(|| self.workspace_command_space())
+                                    .flatten()
+                            })
+                    })
+                });
+                return window_workflow::handle_mouse_moved_over_window(
+                    &self.app_manager,
+                    window_workflow::MouseMovedPayload {
+                        window,
+                        should_sync: window
+                            .is_some_and(|window| self.should_raise_on_mouse_over(window)),
+                        is_main: window.is_some_and(|window| self.main_window() == Some(window)),
+                        needs_layout_sync: window.is_some_and(|window| {
+                            self.layout_manager.layout_engine.focused_window() != Some(window)
+                        }),
+                        active_space,
+                    },
+                );
             }
             Event::MissionControlNativeEntered => {
-                SpaceEventHandler::handle_mission_control_native_entered(self);
+                return topology_workflow::handle_mission_control_native_entered(
+                    &mut self.mission_control_manager,
+                    &mut self.drag_manager,
+                );
             }
             Event::MissionControlNativeExited => {
-                SpaceEventHandler::handle_mission_control_native_exited(self);
+                return topology_workflow::handle_mission_control_native_exited(
+                    &mut self.mission_control_manager,
+                );
             }
             Event::RaiseCompleted { window_id, sequence_id } => {
-                SystemEventHandler::handle_raise_completed(self, window_id, sequence_id);
+                return Ok(system_workflow::handle_raise_completed(
+                    system_workflow::RaiseCompletedPayload {
+                        window: window_id,
+                        sequence: sequence_id,
+                    },
+                )?);
             }
             Event::RaiseTimeout { sequence_id } => {
-                SystemEventHandler::handle_raise_timeout(self, sequence_id);
+                return Ok(system_workflow::handle_raise_timeout(sequence_id)?);
             }
             Event::ConfigUpdated(new_cfg) => {
-                CommandEventHandler::handle_config_updated(self, new_cfg);
+                return command_workflow::handle_config_updated(
+                    &mut self.config,
+                    &mut self.layout_manager,
+                    &self.state,
+                    &mut self.drag_manager,
+                    new_cfg,
+                );
             }
-            Event::Command(cmd) => {
-                CommandEventHandler::handle_command(self, cmd);
+            Event::Command(Command::Metrics(cmd)) => {
+                return command_workflow::handle_command_metrics(cmd);
+            }
+            Event::Command(Command::Reactor(ReactorCommand::Debug)) => {
+                return command_workflow::handle_command_reactor_debug(
+                    &self.layout_manager,
+                    &self.space_state,
+                );
+            }
+            Event::Command(Command::Reactor(ReactorCommand::SaveAndExit)) => {
+                return command_workflow::handle_command_reactor_save_and_exit(
+                    &self.layout_manager,
+                );
+            }
+            Event::Command(Command::Reactor(ReactorCommand::Serialize)) => {
+                let serialized = self.serialize_state();
+                return command_workflow::handle_command_reactor_serialize(serialized);
+            }
+            Event::Command(Command::Reactor(ReactorCommand::SwitchSpace(direction))) => {
+                return command_workflow::handle_switch_native_space(direction);
+            }
+            Event::Command(Command::Reactor(ReactorCommand::ToggleSpaceActivated)) => {
+                let space = self.active_display_space();
+                let display_uuid = space.and_then(|space| {
+                    self.space_state
+                        .screen_by_space(space)
+                        .and_then(|screen| screen.display_uuid_owned())
+                });
+                let config = self.activation_cfg();
+                return command_workflow::handle_command_reactor_toggle_space_activated(
+                    &mut self.space_activation_policy,
+                    command_workflow::ToggleSpacePayload { config, space, display_uuid },
+                );
+            }
+            Event::Command(Command::Reactor(ReactorCommand::ShowMissionControlAll)) => {
+                return command_workflow::handle_mission_control_command(
+                    crate::actor::wm_controller::WmCmd::ShowMissionControlAll,
+                );
+            }
+            Event::Command(Command::Reactor(ReactorCommand::ShowMissionControlCurrent)) => {
+                return command_workflow::handle_mission_control_command(
+                    crate::actor::wm_controller::WmCmd::ShowMissionControlCurrent,
+                );
+            }
+            Event::Command(Command::Reactor(ReactorCommand::DismissMissionControl)) => {
+                return command_workflow::handle_mission_control_command(
+                    crate::actor::wm_controller::WmCmd::DismissMissionControl,
+                );
+            }
+            Event::Command(Command::Reactor(ReactorCommand::CloseWindow { window_server_id })) => {
+                return command_workflow::handle_close_window(window_server_id);
+            }
+            Event::Command(Command::Reactor(ReactorCommand::FocusWindow {
+                window_id,
+                window_server_id,
+            })) => {
+                let resolved_space = self.best_space_for_window_id(window_id).or_else(|| {
+                    self.state.windows.window(window_id).and_then(|window| {
+                        self.best_space_for_window(&window.frame_monotonic, window.info.sys_id)
+                    })
+                });
+                return command_workflow::handle_command_reactor_focus_window(
+                    &self.state,
+                    &self.app_manager,
+                    command_workflow::FocusWindowPayload {
+                        window_id,
+                        window_server_id,
+                        resolved_space,
+                        space_is_active: resolved_space
+                            .is_some_and(|space| self.is_space_active(space)),
+                    },
+                );
+            }
+            Event::Command(Command::Reactor(ReactorCommand::MoveMouseToDisplay(selector))) => {
+                let screen = self.screen_for_selector(&selector, None).cloned();
+                let focus_window = screen.as_ref().and_then(|screen| {
+                    let space = screen.space?;
+                    self.last_focused_window_in_space(space).or_else(|| {
+                        self.layout_manager
+                            .layout_engine
+                            .windows_in_active_workspace(&self.state.windows, space)
+                            .into_iter()
+                            .next()
+                    })
+                });
+                let target_is_active = screen
+                    .as_ref()
+                    .and_then(|screen| screen.space)
+                    .is_none_or(|space| self.is_space_active(space));
+                return command_workflow::handle_move_mouse_to_display(
+                    command_workflow::DisplayFocusPayload {
+                        screen,
+                        target_is_active,
+                        focus_window,
+                    },
+                );
+            }
+            Event::Command(Command::Reactor(ReactorCommand::FocusDisplay(selector))) => {
+                let screen = self.screen_for_selector(&selector, None).cloned();
+                let focus_window = screen.as_ref().and_then(|screen| {
+                    let space = screen.space?;
+                    self.last_focused_window_in_space(space).or_else(|| {
+                        self.layout_manager
+                            .layout_engine
+                            .windows_in_active_workspace(&self.state.windows, space)
+                            .into_iter()
+                            .next()
+                    })
+                });
+                let target_is_active = screen
+                    .as_ref()
+                    .and_then(|screen| screen.space)
+                    .is_none_or(|space| self.is_space_active(space));
+                return command_workflow::handle_focus_display(
+                    command_workflow::DisplayFocusPayload {
+                        screen,
+                        target_is_active,
+                        focus_window,
+                    },
+                );
+            }
+            Event::Command(Command::Layout(command)) => {
+                let command_space = self.command_context_space();
+                let (visible_spaces, visible_space_centers) = self.visible_spaces_for_layout(false);
+                return command_workflow::handle_command_layout(
+                    &mut self.state,
+                    &mut self.layout_manager,
+                    &mut self.workspace_switch_manager,
+                    command_workflow::LayoutCommandPayload {
+                        command,
+                        command_space,
+                        visible_spaces,
+                        visible_space_centers,
+                    },
+                );
+            }
+            Event::Command(Command::Reactor(ReactorCommand::MoveWindowToDisplay {
+                selector,
+                window_id,
+            })) => {
+                if self.is_in_drag() {
+                    warn!("Ignoring move-window-to-display while a drag is active");
+                    return Ok(EventOutcome::finalized_event(None, false, false, false));
+                }
+                let command_space = self.workspace_command_space();
+                let resolved_window = {
+                    let workspaces = self.layout_manager.layout_engine.virtual_workspace_manager();
+                    match window_id {
+                        Some(index) => command_space
+                            .and_then(|space| {
+                                workspaces.find_window_by_idx(&self.state.windows, space, index)
+                            })
+                            .or_else(|| {
+                                self.iter_active_spaces().find_map(|space| {
+                                    workspaces.find_window_by_idx(&self.state.windows, space, index)
+                                })
+                            }),
+                        None => self
+                            .main_window()
+                            .or_else(|| self.window_id_under_cursor())
+                            .or_else(|| {
+                                command_space.and_then(|space| {
+                                    workspaces.find_window_by_idx(&self.state.windows, space, 0)
+                                })
+                            }),
+                    }
+                };
+                let Some(window) = resolved_window else {
+                    warn!("Move window to display ignored because no target window was resolved");
+                    return Ok(EventOutcome::finalized_event(None, false, false, false));
+                };
+                let Some(window_state) = self.state.windows.window(window) else {
+                    warn!(?window, "Move window to display ignored: unknown window");
+                    return Ok(EventOutcome::finalized_event(None, false, false, false));
+                };
+                let window_server_id = window_state.info.sys_id;
+                let window_frame = window_state.frame_monotonic;
+                let source_space = self
+                    .assigned_space_for_window_id(window)
+                    .or_else(|| self.best_space_for_window_id(window))
+                    .or_else(|| self.best_space_for_window(&window_frame, window_server_id));
+                let Some(source_space) = source_space.filter(|space| self.is_space_active(*space))
+                else {
+                    warn!(
+                        ?window,
+                        "Move window to display ignored: source space unavailable"
+                    );
+                    return Ok(EventOutcome::finalized_event(None, false, false, false));
+                };
+                let origin = self
+                    .space_state
+                    .screen_by_space(source_space)
+                    .map(|screen| screen.frame.mid())
+                    .or_else(|| self.current_screen_center());
+                let Some(target_screen) = self.screen_for_selector(&selector, origin).cloned()
+                else {
+                    warn!(
+                        ?selector,
+                        "Move window to display ignored: target display not found"
+                    );
+                    return Ok(EventOutcome::finalized_event(None, false, false, false));
+                };
+                let Some(target_space) =
+                    target_screen.space.filter(|space| self.is_space_active(*space))
+                else {
+                    warn!(
+                        ?selector,
+                        "Move window to display ignored: target space unavailable"
+                    );
+                    return Ok(EventOutcome::finalized_event(None, false, false, false));
+                };
+                if source_space == target_space {
+                    return Ok(EventOutcome::finalized_event(None, false, false, false));
+                }
+                let mut target_frame = window_frame;
+                let mut origin = target_screen.frame.mid();
+                origin.x -= window_frame.size.width / 2.0;
+                origin.y -= window_frame.size.height / 2.0;
+                let min = target_screen.frame.min();
+                let max = target_screen.frame.max();
+                origin.x = origin.x.max(min.x).min(max.x - window_frame.size.width);
+                origin.y = origin.y.max(min.y).min(max.y - window_frame.size.height);
+                target_frame.origin = origin;
+                return command_workflow::handle_command_reactor_move_window_to_display(
+                    &mut self.state,
+                    &mut self.layout_manager,
+                    command_workflow::MoveWindowToDisplayPayload {
+                        window,
+                        window_server_id,
+                        source_space,
+                        target_space,
+                        target_screen: target_screen.frame,
+                        target_frame,
+                    },
+                );
             }
             _ => (),
         }
 
-        self.apply_event_outcome(EventOutcome::finalized_event(
+        Ok(EventOutcome::finalized_event(
             raised_window,
-            is_resize,
-            window_was_destroyed,
+            false,
+            false,
             should_update_notifications,
-        ));
+        ))
     }
 
     /// Applies workflow follow-up requests in one stable order.
@@ -1163,25 +1712,228 @@ impl Reactor {
     /// refreshed. Broadcast and discovery requests made directly by a workflow
     /// are consequently observed only after its model mutation is complete.
     fn apply_event_outcome(&mut self, outcome: EventOutcome) {
-        let mut layout_changed = false;
-        if outcome.arrange.requested && (!self.is_in_drag() || outcome.arrange.window_was_destroyed)
-        {
-            layout_changed = self.update_layout_or_warn(
-                outcome.arrange.is_resize,
-                matches!(
-                    self.workspace_switch_manager.workspace_switch_state,
-                    WorkspaceSwitchState::Active
-                ),
+        if !outcome.window_server_updates.is_empty() {
+            self.update_partial_window_server_info(outcome.window_server_updates);
+        }
+        if outcome.recompute_active_spaces {
+            self.recompute_and_set_active_spaces_from_current_screens();
+        }
+        if outcome.repair_spaces_after_mission_control {
+            self.repair_spaces_after_mission_control();
+        }
+        if outcome.refresh_after_mission_control {
+            self.refresh_windows_after_mission_control();
+        }
+        if outcome.force_refresh_all_windows {
+            self.force_refresh_all_windows();
+        }
+        // Discovery responses reconcile model state before layout. Requests
+        // which schedule new discovery are deferred to the final phase below.
+        for discovery in outcome.discoveries {
+            self.on_windows_discovered_with_app_info(
+                discovery.pid,
+                discovery.new,
+                discovery.known_visible,
+                discovery.app_info,
             );
-            self.maybe_send_menu_update();
+        }
+        if let Some(pid) = outcome.activate_application {
+            self.handle_app_activation_workspace_switch(pid);
         }
 
-        if let Some(raised_window) = outcome.focused_window {
-            if let Some(space) = self.best_space_for_window_id(raised_window) {
-                self.send_layout_event(LayoutEvent::WindowFocused(space, raised_window));
+        for window in outcome.reapply_app_rules {
+            self.maybe_reapply_app_rules_for_window(window);
+        }
+        for window in outcome.finalize_created_windows {
+            let active_space = self.state.windows.window(window).and_then(|state| {
+                self.best_space_for_window(&state.frame_monotonic, state.info.sys_id)
+                    .filter(|space| self.is_space_active(*space))
+                    .or_else(|| {
+                        state
+                            .info
+                            .sys_id
+                            .is_none()
+                            .then(|| self.workspace_command_space())
+                            .flatten()
+                    })
+            });
+            if let Some(space) = active_space {
+                if let Some(app_info) =
+                    self.app_manager.apps.get(&window.pid).map(|app| app.info.clone())
+                {
+                    if let Some(window_server_id) =
+                        self.state.windows.window(window).and_then(|state| state.info.sys_id)
+                    {
+                        self.state.windows.mark_wsids_recent(std::iter::once(window_server_id));
+                    }
+                    self.process_windows_for_app_rules(window.pid, vec![window], app_info);
+                }
+                if self
+                    .state
+                    .windows
+                    .window(window)
+                    .is_some_and(|state| state.matches_filter(WindowFilter::EffectivelyManageable))
+                {
+                    self.send_layout_event(LayoutEvent::WindowAdded(space, window));
+                }
             }
         }
 
+        for (window_server_id, space) in outcome.confirmed_window_spaces {
+            self.clear_pending_target_if_confirmed_space(window_server_id, space);
+        }
+        for (window_server_id, space, window) in outcome.fullscreen_restorations {
+            let mut nested = EventOutcome::default();
+            if self
+                .restore_fullscreen_window_to_user_space(
+                    window_server_id,
+                    space,
+                    window,
+                    &mut nested,
+                )
+                .is_none()
+            {
+                self.reassign_window_to_authoritative_space(window, space);
+            }
+            self.apply_event_outcome(nested);
+        }
+        for reassignment in outcome.topology_reassignments {
+            if reassignment.preserve_workspace_ordinal {
+                self.reassign_window_to_authoritative_space_preserving_workspace_ordinal(
+                    reassignment.window,
+                    reassignment.space,
+                );
+            } else {
+                self.reassign_window_to_authoritative_space(
+                    reassignment.window,
+                    reassignment.space,
+                );
+            }
+        }
+
+        for event in outcome.layout_events {
+            self.send_layout_event(event);
+        }
+        for (response, workspace_switch_space) in outcome.layout_responses {
+            self.handle_layout_response(response, workspace_switch_space);
+        }
+        for (window, frame) in outcome.drag_swap_evaluations {
+            self.maybe_swap_on_drag(window, frame);
+        }
+        if outcome.dispatch_mouse_up {
+            self.handle_event(Event::MouseUp);
+        }
+
+        let mut layout_changed = false;
+        if outcome.arrange.requested && (!self.is_in_drag() || outcome.arrange.window_was_destroyed)
+        {
+            for _ in 0..outcome.arrange.passes.max(1) {
+                layout_changed |= self.update_layout_or_warn(
+                    outcome.arrange.is_resize,
+                    matches!(
+                        self.workspace_switch_manager.workspace_switch_state,
+                        WorkspaceSwitchState::Active
+                    ),
+                );
+            }
+            self.maybe_send_menu_update();
+        }
+
+        for write in outcome.window_frame_writes {
+            let window_server_id =
+                self.state.windows.window(write.window).and_then(|window| window.info.sys_id);
+            let transaction = if let Some(window_server_id) = window_server_id {
+                let transaction = self.transaction_manager.generate_next_txid(window_server_id);
+                self.transaction_manager.store_txid(window_server_id, transaction, write.frame);
+                transaction
+            } else {
+                TransactionId::default()
+            };
+            if let Some(app) = self.app_manager.apps.get(&write.window.pid)
+                && let Err(error) = app.handle.send(Request::SetWindowFrame(
+                    write.window,
+                    write.frame,
+                    transaction,
+                    write.requested,
+                ))
+            {
+                warn!(window = ?write.window, %error, "failed to write requested window frame");
+            }
+        }
+
+        for request in outcome.raise_requests {
+            if let Err(error) = self.communication_manager.raise_manager_tx.try_send(request) {
+                warn!(%error, "failed to send raise request");
+            }
+        }
+
+        if let Some((space, window)) =
+            focus_service::resolve(outcome.focused_window, |wid| self.best_space_for_window_id(wid))
+        {
+            self.send_layout_event(LayoutEvent::WindowFocused(space, window));
+        }
+
+        if let Some(direction) = outcome.switch_native_space {
+            unsafe { window_server::switch_space(direction) };
+        }
+
+        for (pid, window) in outcome.make_key_windows {
+            if let Err(error) = window_server::make_key_window(pid, window) {
+                warn!(?error, "failed to make key window");
+            }
+        }
+        for point in outcome.mouse_warps {
+            self.warp_mouse(point);
+        }
+
+        for command in outcome.wm_commands {
+            let is_dismiss = matches!(
+                command,
+                crate::actor::wm_controller::WmCmd::DismissMissionControl
+            );
+            if let Some(wm) = self.communication_manager.wm_sender.as_ref() {
+                wm.send(crate::actor::wm_controller::WmEvent::Command(
+                    crate::actor::wm_controller::WmCommand::Wm(command),
+                ));
+            } else if is_dismiss {
+                self.set_mission_control_active(false);
+            }
+        }
+        for event in outcome.wm_events {
+            if let Some(wm) = self.communication_manager.wm_sender.as_ref() {
+                wm.send(event);
+            }
+        }
+
+        if let Some(window_server_id) = outcome.close_window {
+            let target = window_server_id
+                .and_then(|wsid| self.state.windows.tracked_window_id(wsid))
+                .or_else(|| self.main_window());
+            if let Some(window) = target {
+                self.request_close_window(window);
+            } else {
+                warn!("Close window command ignored because no window is tracked");
+            }
+        }
+
+        if let Some((config, keys_changed)) = outcome.service_config_update {
+            if let Some(tx) = &self.communication_manager.stack_line_tx
+                && let Err(error) = tx.try_send(stack_line::Event::ConfigUpdated(config.clone()))
+            {
+                warn!(%error, "failed to update stack line config");
+            }
+            if let Some(tx) = &self.menu_manager.menu_tx
+                && let Err(error) = tx.try_send(menu_bar::Event::ConfigUpdated(config.clone()))
+            {
+                warn!(%error, "failed to update menu bar config");
+            }
+            if keys_changed && let Some(wm) = &self.communication_manager.wm_sender {
+                wm.send(crate::actor::wm_controller::WmEvent::ConfigUpdated(config));
+            }
+        }
+        for line in outcome.stdout_lines {
+            println!("{line}");
+        }
         self.workspace_switch_manager.mark_workspace_switch_inactive();
         if self.workspace_switch_manager.active_workspace_switch.is_some() && !layout_changed {
             self.workspace_switch_manager.active_workspace_switch = None;
@@ -1210,8 +1962,27 @@ impl Reactor {
                 self.notification_manager.last_sls_notification_ids = ids;
             }
         }
+        if outcome.refresh_focus_follows_mouse {
+            self.update_focus_follows_mouse_state();
+        }
         if outcome.refresh_layout_mode {
             self.update_event_tap_layout_mode();
+        }
+        for broadcast in outcome.window_title_broadcasts {
+            self.broadcast_window_title_changed(
+                broadcast.window,
+                broadcast.previous_title,
+                broadcast.new_title,
+            );
+        }
+        // Requests which schedule fresh discovery are last so observers see
+        // the fully reconciled model, layout, UI, and broadcasts.
+        for (pid, request) in outcome.app_requests {
+            if let Some(app) = self.app_manager.apps.get(&pid)
+                && let Err(error) = app.handle.send(request)
+            {
+                warn!(pid, %error, "failed to send deferred application request");
+            }
         }
     }
 
@@ -1279,19 +2050,11 @@ impl Reactor {
                 if let Some(window) = self.state.windows.window_mut(wid) {
                     window.is_manageable = manageable;
                 }
-                self.remove_window_if_manageability_lost(wid, was_manageable, manageable);
-            }
-        }
-    }
 
-    fn remove_window_if_manageability_lost(
-        &mut self,
-        wid: WindowId,
-        was_effectively_manageable: bool,
-        is_manageable: bool,
-    ) {
-        if was_effectively_manageable && !is_manageable {
-            self.send_layout_event(LayoutEvent::WindowRemoved(wid));
+                if was_manageable && !manageable {
+                    self.send_layout_event(LayoutEvent::WindowRemoved(wid));
+                }
+            }
         }
     }
 
@@ -1537,15 +2300,138 @@ impl Reactor {
         self.process_windows_for_app_rules(window_id.pid, vec![window_id], app_info);
     }
 
+    fn handle_authoritative_space_snapshot(
+        &mut self,
+        space_state: ForwardedSpaceState,
+    ) -> anyhow::Result<EventOutcome> {
+        let mut outcome = EventOutcome::finalized_event(None, false, false, true);
+        let analysis = topology_workflow::analyze_space_snapshot(
+            &self.space_state,
+            &self.active_spaces,
+            &self.space_activation_policy,
+            self.activation_cfg(),
+            &space_state,
+        );
+        let pending_space_state = space_state.clone();
+        let ForwardedSpaceState {
+            screens,
+            fullscreen_spaces,
+            has_seen_display_set,
+            active_spaces,
+            menu_bar_space,
+            command_space,
+            display_space_ids,
+            last_user_space_by_display,
+            space_remaps,
+            display_set_changed,
+            should_force_refresh_layout,
+            releases_lifecycle_refresh_quarantine,
+            resized_spaces,
+            topology_window_delta,
+            active_window_spaces,
+            ..
+        } = space_state;
+        self.space_state.active_window_spaces = active_window_spaces;
+        let activation_config = self.activation_cfg();
+        let topology_workflow::SpaceSnapshotAnalysis {
+            spaces,
+            authoritative_spaces,
+            command_space_only_update,
+            invalidates_pending_targets,
+        } = analysis;
+
+        self.space_state.has_seen_display_set = has_seen_display_set;
+        self.space_state.fullscreen_spaces = fullscreen_spaces;
+        self.space_state.active_spaces = active_spaces;
+        if command_space_only_update {
+            self.space_state.menu_bar_space = menu_bar_space;
+            self.space_state.command_space = command_space;
+            return Ok(outcome);
+        }
+        if display_set_changed {
+            let active_displays: Vec<String> =
+                screens.iter().map(|screen| screen.display_uuid.clone()).collect();
+            self.layout_manager.layout_engine.prune_display_state(&active_displays);
+        }
+        self.space_state.menu_bar_space = menu_bar_space;
+        self.space_state.command_space = command_space;
+        self.space_state.display_space_ids = display_space_ids;
+        self.space_state.last_user_space_by_display = last_user_space_by_display;
+
+        if screens.is_empty() {
+            self.refocus_manager.stale_cleanup_state = StaleCleanupState::Suppressed;
+            if !self.space_state.screens.is_empty() {
+                self.space_state.screens.clear();
+                self.expose_all_spaces();
+            }
+            self.recompute_and_set_active_spaces(&[]);
+            self.update_complete_window_server_info(Vec::new());
+            self.try_apply_pending_space_change();
+            return Ok(outcome);
+        }
+
+        self.refocus_manager.stale_cleanup_state = StaleCleanupState::Enabled;
+        self.space_state.screens = screens;
+        if invalidates_pending_targets {
+            self.clear_pending_hidden_window_targets();
+        }
+        if self.is_mission_control_active() {
+            self.pending_space_change_manager.pending_space_change = Some(pending_space_state);
+            return Ok(outcome);
+        }
+        for (previous_space, space) in space_remaps {
+            self.layout_manager.layout_engine.remap_space(
+                &mut self.state.windows,
+                previous_space,
+                space,
+            );
+        }
+        for screen in &self.space_state.screens {
+            let (Some(space), Some(display_uuid)) = (screen.space, screen.display_uuid_opt())
+            else {
+                continue;
+            };
+            self.layout_manager
+                .layout_engine
+                .update_space_display(space, Some(display_uuid.to_string()));
+        }
+        let current_screens = self.screens_for_current_spaces();
+        self.space_activation_policy
+            .on_spaces_updated(activation_config, &current_screens);
+        self.recompute_and_set_active_spaces(&authoritative_spaces);
+        self.restore_windows_after_fullscreen_exit(&spaces);
+
+        for (space, size) in resized_spaces {
+            if !self.is_space_active(space) {
+                continue;
+            }
+            self.layout_manager
+                .layout_engine
+                .virtual_workspace_manager_mut()
+                .list_workspaces(space);
+            outcome = outcome.with_layout_event(LayoutEvent::SpaceExposed(space, size));
+        }
+        if let Some(delta) = topology_window_delta {
+            outcome.absorb(self.apply_topology_window_delta(delta));
+        }
+        let active_windows = self.authoritative_active_space_windows();
+        self.finalize_space_change(&spaces, active_windows, releases_lifecycle_refresh_quarantine);
+        self.try_apply_pending_space_change();
+        if should_force_refresh_layout {
+            outcome = outcome.with_force_window_refresh().with_arrange_passes(1);
+        }
+        Ok(outcome)
+    }
+
     fn try_apply_pending_space_change(&mut self) {
         if let Some(pending) = self.pending_space_change_manager.pending_space_change.take() {
             if pending.screens.len() == self.space_state.screens.len() {
                 // During native Mission Control we must preserve the full forwarded snapshot,
                 // not just the raw spaces vector, otherwise command-space and per-display space
                 // metadata can remain stale after exit.
-                crate::actor::reactor::events::space::SpaceEventHandler::handle_space_state_changed(
-                    self, pending,
-                );
+                if let Ok(outcome) = self.handle_authoritative_space_snapshot(pending) {
+                    self.apply_event_outcome(outcome);
+                }
             } else {
                 self.pending_space_change_manager.pending_space_change = Some(pending);
             }
@@ -1564,7 +2450,139 @@ impl Reactor {
         known_visible: Vec<WindowId>,
         app_info: Option<AppInfo>,
     ) {
-        WindowDiscoveryHandler::handle_discovery(self, pid, new, known_visible, app_info);
+        let app_info =
+            app_info.or_else(|| self.app_manager.apps.get(&pid).map(|app| app.info.clone()));
+        let inactive_windows = self
+            .state
+            .windows
+            .iter_windows()
+            .filter_map(|(wid, _)| {
+                (wid.pid == pid && self.is_window_on_known_inactive_space(wid)).then_some(wid)
+            })
+            .collect();
+        let server_observations = self
+            .state
+            .windows
+            .iter_windows()
+            .filter_map(|(wid, window)| (wid.pid == pid).then_some(window.info.sys_id).flatten())
+            .map(|wsid| {
+                let info = self
+                    .state
+                    .windows
+                    .get_window_server_info(wsid)
+                    .or_else(|| window_server::get_window(wsid));
+                (wsid, window_discovery::StaleWindowObservation {
+                    info,
+                    suitable: window_server::app_window_suitable(wsid),
+                    ordered_in: window_server::window_is_ordered_in(wsid),
+                })
+            })
+            .collect();
+        let stale_snapshot = window_discovery::StaleCleanupSnapshot {
+            pending_refresh: self
+                .mission_control_manager
+                .pending_mission_control_refresh
+                .contains(&pid),
+            suppressed: matches!(
+                self.refocus_manager.stale_cleanup_state,
+                StaleCleanupState::Suppressed
+            ),
+            mission_control_active: self.is_mission_control_active(),
+            drag_active: self.is_in_drag(),
+            inactive_windows,
+            server_observations,
+        };
+        let (stale_windows, pending_refresh) = window_discovery::identify_stale_windows(
+            &self.state,
+            pid,
+            &known_visible,
+            &stale_snapshot,
+        );
+        let mut outcome = match window_discovery::cleanup_stale_windows(
+            &mut self.state,
+            &self.transaction_manager,
+            &mut self.drag_manager,
+            &mut self.mission_control_manager,
+            pid,
+            stale_windows,
+            pending_refresh,
+        ) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                warn!(%error, pid, "window discovery cleanup failed");
+                return;
+            }
+        };
+        let observed_windows = new
+            .into_iter()
+            .map(|(wid, info)| {
+                let current_native_space =
+                    info.sys_id.and_then(|wsid| self.resolve_native_space(wsid, None));
+                let active_space = self
+                    .best_space_for_window(&info.frame, info.sys_id)
+                    .filter(|space| self.is_space_active(*space))
+                    .or_else(|| {
+                        info.sys_id.is_none().then(|| self.workspace_command_space()).flatten()
+                    });
+                window_discovery::ObservedWindow {
+                    wid,
+                    info,
+                    current_native_space,
+                    active_space,
+                }
+            })
+            .collect();
+        let (new_windows, process_outcome) = window_discovery::process_window_list(
+            &mut self.state,
+            &mut self.layout_manager,
+            observed_windows,
+            &app_info,
+        );
+        outcome.absorb(process_outcome);
+        window_discovery::update_window_states(&mut self.state, new_windows);
+
+        let candidate_windows: HashSet<WindowId> = self
+            .state
+            .windows
+            .iter_windows()
+            .filter_map(|(wid, _)| (wid.pid == pid).then_some(wid))
+            .chain(known_visible.iter().copied().filter(|wid| wid.pid == pid))
+            .collect();
+        let discovery_spaces = candidate_windows
+            .iter()
+            .filter_map(|wid| self.discovery_space_for_window_id(*wid).map(|space| (*wid, space)))
+            .collect();
+        let authoritative_spaces = candidate_windows
+            .iter()
+            .filter_map(|wid| {
+                self.authoritative_space_for_window_id(*wid).map(|space| (*wid, space))
+            })
+            .collect();
+        let active_spaces = self
+            .space_state
+            .screens
+            .iter()
+            .filter_map(|screen| screen.space)
+            .filter(|space| self.is_space_active(*space))
+            .collect();
+        let focused_window = self
+            .main_window()
+            .zip(self.main_window_space())
+            .and_then(|(window, space)| self.is_space_active(space).then_some((space, window)));
+        outcome.absorb(window_discovery::emit_layout_events(
+            &mut self.state,
+            &mut self.layout_manager,
+            window_discovery::EmitLayoutPayload {
+                pid,
+                known_visible: &known_visible,
+                app_info: &app_info,
+                discovery_spaces,
+                authoritative_spaces,
+                active_spaces,
+                focused_window,
+            },
+        ));
+        self.apply_event_outcome(outcome);
     }
 
     fn best_space_for_window(
@@ -1607,61 +2625,24 @@ impl Reactor {
         })
     }
 
+    #[cfg(test)]
     fn ensure_active_drag(&mut self, wid: WindowId, frame: &CGRect) {
         let needs_new_session =
-            self.get_active_drag_session().map_or(true, |session| session.window != wid);
+            self.get_active_drag_session().is_none_or(|session| session.window != wid);
         if needs_new_session {
             let server_id = self.state.windows.window(wid).and_then(|window| window.info.sys_id);
             let origin_space = self.best_space_for_window(frame, server_id);
-            let session = DragSession {
-                window: wid,
-                last_frame: *frame,
-                origin_space,
-                settled_space: origin_space,
-                layout_dirty: false,
+            self.drag_manager.drag_state = DragState::Active {
+                session: DragSession {
+                    window: wid,
+                    last_frame: *frame,
+                    origin_space,
+                    settled_space: origin_space,
+                    layout_dirty: false,
+                },
             };
-            self.drag_manager.drag_state = DragState::Active { session };
         }
         self.drag_manager.skip_layout_for_window = Some(wid);
-    }
-
-    fn update_active_drag(&mut self, wid: WindowId, new_frame: &CGRect) {
-        let resolved_space = match self.get_active_drag_session() {
-            Some(session) if session.window == wid => self.resolve_drag_space(session, new_frame),
-            _ => return,
-        };
-
-        if let Some(session) = self.get_active_drag_session_mut() {
-            let frame_changed = session.last_frame != *new_frame;
-            session.last_frame = *new_frame;
-            if frame_changed {
-                session.layout_dirty = true;
-            }
-            if session.settled_space != resolved_space {
-                session.settled_space = resolved_space;
-                session.layout_dirty = true;
-                self.drag_manager.skip_layout_for_window = Some(session.window);
-            }
-        }
-    }
-
-    fn drag_space_candidate(&self, frame: &CGRect) -> Option<SpaceId> {
-        let center = frame.mid();
-        self.screen_for_point(center).and_then(|screen| screen.space)
-    }
-
-    fn resolve_drag_space(&self, session: &DragSession, frame: &CGRect) -> Option<SpaceId> {
-        let server_id =
-            self.state.windows.window(session.window).and_then(|window| window.info.sys_id);
-        if frame.area() <= 0.0 {
-            return session
-                .settled_space
-                .or_else(|| self.geometry_space_for_window(frame, server_id));
-        }
-
-        self.drag_space_candidate(frame)
-            .or_else(|| self.geometry_space_for_window(frame, server_id))
-            .or(session.settled_space)
     }
 
     fn best_space_for_window_state(&self, window: &WindowState) -> Option<SpaceId> {
@@ -1718,6 +2699,100 @@ impl Reactor {
             authoritative_space,
             false,
         )
+    }
+
+    fn apply_topology_window_delta(&mut self, delta: TopologyWindowDelta) -> EventOutcome {
+        let appeared: HashMap<WindowServerId, SpaceId> = delta.appeared.into_iter().collect();
+        let disappeared: HashMap<WindowServerId, SpaceId> = delta.disappeared.into_iter().collect();
+        let window_server_ids: HashSet<WindowServerId> =
+            appeared.keys().chain(disappeared.keys()).copied().collect();
+        let mut outcome = EventOutcome::default();
+
+        for window_server_id in window_server_ids {
+            let appeared_space = appeared.get(&window_server_id).copied();
+            let disappeared_space = disappeared.get(&window_server_id).copied();
+            let authoritative_space = self.resolve_native_space(window_server_id, appeared_space);
+            if let Some(target_space) = authoritative_space {
+                self.state.windows.set_window_server_space(window_server_id, Some(target_space));
+                if appeared_space == Some(target_space) {
+                    self.clear_pending_target_if_confirmed_space(window_server_id, target_space);
+                }
+                if self.is_space_active(target_space) {
+                    self.state.windows.mark_window_visible(window_server_id);
+                } else {
+                    self.state.windows.mark_window_hidden(window_server_id);
+                }
+                if let Some(window) = self.state.windows.tracked_window_id(window_server_id) {
+                    let restored = self.restore_fullscreen_window_to_user_space(
+                        window_server_id,
+                        target_space,
+                        window,
+                        &mut outcome,
+                    );
+                    if restored.is_none() {
+                        self.reassign_window_to_authoritative_space_preserving_workspace_ordinal(
+                            window,
+                            target_space,
+                        );
+                    }
+                }
+            } else if let Some(previous_space) = disappeared_space {
+                self.state
+                    .windows
+                    .set_window_server_space(window_server_id, Some(previous_space));
+                self.state.windows.mark_window_hidden(window_server_id);
+                if let Some(window) = self.state.windows.tracked_window_id(window_server_id)
+                    && self.assigned_space_for_window_id(window) == Some(previous_space)
+                    && self.is_space_active(previous_space)
+                {
+                    outcome = outcome
+                        .with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(window));
+                }
+            }
+        }
+        outcome
+    }
+
+    fn restore_fullscreen_window_to_user_space(
+        &mut self,
+        window_server_id: WindowServerId,
+        space: SpaceId,
+        original_window: WindowId,
+        outcome: &mut EventOutcome,
+    ) -> Option<bool> {
+        let restored = self
+            .state
+            .windows
+            .restore_window_from_native_fullscreen_by_window_server_id(window_server_id)
+            .or_else(|| {
+                self.state.windows.restore_window_from_native_fullscreen(original_window)
+            })?;
+        let owner = self
+            .state
+            .windows
+            .contains_window(restored.current_window_id)
+            .then_some(restored.current_window_id)
+            .or_else(|| {
+                restored
+                    .window_server_id
+                    .and_then(|id| self.state.windows.tracked_window_id(id))
+            })
+            .or_else(|| self.state.windows.tracked_window_id(window_server_id))
+            .or_else(|| {
+                self.state.windows.contains_window(original_window).then_some(original_window)
+            })?;
+        if owner != original_window && self.assigned_space_for_window_id(original_window).is_some()
+        {
+            *outcome = std::mem::take(outcome)
+                .with_layout_event(LayoutEvent::WindowRemoved(original_window));
+        }
+        *outcome = std::mem::take(outcome).with_app_request(owner.pid, Request::GetVisibleWindows);
+        Some(if self.assigned_space_for_window_id(owner) == Some(space) {
+            self.is_space_active(space)
+                && self.restore_window_to_active_layout_if_visible(owner, space)
+        } else {
+            self.reassign_window_to_authoritative_space(owner, space)
+        })
     }
 
     pub(crate) fn reassign_window_to_authoritative_space_preserving_workspace_ordinal(
@@ -1964,96 +3039,9 @@ impl Reactor {
         self.state.windows.is_window_server_id_native_fullscreen_suspended(wsid)
     }
 
-    fn finalize_active_drag(&mut self) -> bool {
-        let Some(session) = self.take_active_drag_session() else {
-            return false;
-        };
-        let wid = session.window;
-
-        // During a drag the window server can continue reporting the origin
-        // space even after the user has moved the window onto another display.
-        // Trust the drag session’s resolved space (or the final frame’s screen)
-        // before falling back to the server-reported space so that cross-display
-        // drags do not snap the window back to the original monitor.
-        let final_space = session
-            .settled_space
-            .or_else(|| self.best_space_for_frame(&session.last_frame))
-            .or_else(|| self.best_space_for_window_id(wid));
-
-        let needs_layout = if session.origin_space != final_space {
-            if session.origin_space.is_some() {
-                self.send_layout_event(LayoutEvent::WindowRemoved(wid));
-            }
-            if let Some(space) = final_space {
-                if let Some(wsid) =
-                    self.state.windows.window(wid).and_then(|window| window.info.sys_id)
-                {
-                    self.state.windows.set_window_server_space(wsid, Some(space));
-                    self.state.windows.mark_window_visible(wsid);
-                }
-                if let Some(active_ws) = self.layout_manager.layout_engine.active_workspace(space) {
-                    let assigned = self
-                        .layout_manager
-                        .layout_engine
-                        .virtual_workspace_manager_mut()
-                        .assign_window_to_workspace(&mut self.state.windows, space, wid, active_ws);
-                    if !assigned {
-                        warn!("Failed to assign window {:?} to workspace {:?}", wid, active_ws);
-                    }
-                }
-                self.send_layout_event(LayoutEvent::WindowAdded(space, wid));
-            }
-            self.drag_manager.skip_layout_for_window = Some(wid);
-            true
-        } else if session.layout_dirty {
-            self.drag_manager.skip_layout_for_window = Some(wid);
-            true
-        } else {
-            false
-        };
-
-        if let Some(space) = final_space {
-            if self.layout_manager.layout_engine.is_window_floating(wid) {
-                if session.origin_space != final_space {
-                    self.layout_manager.layout_engine.remove_floating_position(wid);
-                }
-                if let Some(ws_id) = self
-                    .layout_manager
-                    .layout_engine
-                    .virtual_workspace_manager()
-                    .workspace_for_window(&self.state.windows, space, wid)
-                    .or_else(|| self.layout_manager.layout_engine.active_workspace(space))
-                {
-                    self.layout_manager.layout_engine.store_floating_position(
-                        space,
-                        ws_id,
-                        wid,
-                        session.last_frame,
-                    );
-                }
-            }
-        }
-
-        if session.origin_space != final_space
-            && let Some(target_space) = final_space
-            && let Some(wsid) = self.state.windows.window(wid).and_then(|window| window.info.sys_id)
-        {
-            self.state.windows.set_window_server_space(wsid, Some(target_space));
-            self.state.windows.mark_window_visible(wsid);
-        }
-
-        needs_layout
-    }
-
     fn window_center_on_known_screen(&self, wid: WindowId) -> Option<CGPoint> {
         let window_center = self.state.windows.window(wid)?.frame_monotonic.mid();
         self.screen_for_point(window_center).map(|_| window_center)
-    }
-
-    fn has_visible_window_server_ids_for_pid(&self, pid: pid_t) -> bool {
-        self.state.windows.iter_visible_window_server_ids().any(|wsid| {
-            self.state.windows.tracked_window_id(wsid).is_some_and(|wid| wid.pid == pid)
-        })
     }
 
     pub fn warp_mouse(&mut self, point: CGPoint) {
@@ -3056,22 +4044,6 @@ impl Reactor {
     }
 
     #[instrument(skip(self))]
-    fn raise_window(&mut self, wid: WindowId, quiet: Quiet, warp: Option<CGPoint>) {
-        let mut app_handles = HashMap::default();
-        if let Some(app) = self.app_manager.apps.get(&wid.pid) {
-            app_handles.insert(wid.pid, app.handle.clone());
-        }
-        _ = self
-            .communication_manager
-            .raise_manager_tx
-            .send(raise_manager::Event::RaiseRequest(RaiseRequest {
-                raise_windows: vec![vec![wid]],
-                focus_window: Some((wid, warp)),
-                app_handles,
-                focus_quiet: quiet,
-            }));
-    }
-
     fn clear_menu_state_for_pid(&mut self, pid: pid_t) {
         if matches!(self.menu_manager.menu_state, MenuState::Open(owner) if owner == pid) {
             debug!(pid, "Clearing menu-open state for deactivated app");
