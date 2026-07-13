@@ -1910,13 +1910,14 @@ impl Reactor {
         }
 
         if let Some(window_server_id) = outcome.close_window {
-            let target = window_server_id
-                .and_then(|wsid| self.state.windows.tracked_window_id(wsid))
-                .or_else(|| self.main_window());
+            let target = match window_server_id {
+                Some(wsid) => self.state.windows.tracked_window_id(wsid),
+                None => self.main_window(),
+            };
             if let Some(window) = target {
-                self.request_close_window(window);
+                self.request_close_window(window.pid, window_server_id);
             } else {
-                warn!("Close window command ignored because no window is tracked");
+                warn!(?window_server_id, "Close target not found");
             }
         }
 
@@ -4170,10 +4171,15 @@ impl Reactor {
         self.raw_command_space().is_some_and(|space| !self.is_fullscreen_space(space))
     }
 
-    fn request_close_window(&mut self, wid: WindowId) {
-        if let Some(app) = self.app_manager.apps.get(&wid.pid) {
-            if let Err(err) = app.handle.send(Request::CloseWindow(wid)) {
-                warn!(?wid, "Failed to send close window request: {}", err);
+    fn request_close_window(&mut self, pid: pid_t, window_server_id: Option<WindowServerId>) {
+        if let Some(app) = self.app_manager.apps.get(&pid) {
+            if let Err(err) = app.handle.send(Request::CloseWindow(window_server_id)) {
+                warn!(
+                    pid,
+                    ?window_server_id,
+                    "Failed to send close window request: {}",
+                    err
+                );
             }
         }
     }

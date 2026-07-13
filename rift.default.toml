@@ -375,7 +375,7 @@ comb1 = "Alt + Shift"
 # - exec = "command" | exec = ["cmd", "arg1", "..."]
 # - move_mouse_to_display = "left"|"right"|"up"|"down"|N|"<display_uuid>"
 # - move_window_to_display = { selector = "left"|"right"|"up"|"down"|N|"<display_uuid>", window_id = 123 }
-# - close_window = { window_server_id = 123 }
+# - close_window / close_window = { window_server_id = 123 } (optional window id)
 # - focus_window = { window_id = 123, window_server_id = 456 }
 # - show_mission_control_all / show_mission_control_current / dismiss_mission_control (this is rift's own mission control, not macOS's)
 

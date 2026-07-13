@@ -322,7 +322,7 @@ pub enum Request {
     Terminate,
     GetVisibleWindows,
     WindowMaybeDestroyed(WindowId),
-    CloseWindow(WindowId),
+    CloseWindow(Option<WindowServerId>),
 
     SetWindowFrame(WindowId, CGRect, TransactionId, bool),
     SetBatchWindowFrame(Vec<(WindowId, CGRect)>, TransactionId, bool),
@@ -713,11 +713,15 @@ impl State {
                 self.refresh_visible_windows()?;
                 return Ok(false);
             }
-            Request::CloseWindow(wid) => {
-                if let Some(window) = self.windows.get(&wid)
-                    && let Err(err) = window.elem.close()
+            Request::CloseWindow(window_server_id) => {
+                if let Some(wsid) = window_server_id
+                    && let Err(err) = window_server::make_key_window(self.pid, wsid)
                 {
-                    warn!(?wid, error = ?err, "Failed to close window");
+                    warn!(pid = self.pid, ?wsid, ?err, "Failed to focus close target");
+                    return Ok(false);
+                }
+                if !event::post_command_w(self.pid) {
+                    warn!(pid = self.pid, ?window_server_id, "Failed to post Command-W");
                 }
             }
             Request::GetVisibleWindows => {

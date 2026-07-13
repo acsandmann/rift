@@ -158,11 +158,11 @@ enum WindowCommands {
     ///   rift-cli execute window resize-by --amount 0.05    # grow by 5%
     ///   rift-cli execute window resize-by --amount -0.10   # shrink by 10%
     ResizeBy { amount: f64 },
-    /// Close a window by window server identifier
+    /// Close a window as if Command-W was pressed
     Close {
-        /// Window Id (window server id or idx from window id)
-        #[arg(long)]
-        window_id: String,
+        /// Optional window server ID; defaults to the focused window
+        #[arg(long, visible_alias = "window-server-id")]
+        window_id: Option<String>,
     },
 }
 
@@ -577,9 +577,9 @@ fn map_window_command(cmd: WindowCommands) -> Result<RiftCommand, String> {
             LC::ResizeWindowBy { amount },
         ))),
         WindowCommands::Close { window_id } => {
-            let wsid = parse_window_server_id(&window_id)?;
+            let window_server_id = window_id.as_deref().map(parse_window_server_id).transpose()?;
             Ok(RiftCommand::Reactor(reactor::Command::Reactor(
-                reactor::ReactorCommand::CloseWindow { window_server_id: Some(wsid) },
+                reactor::ReactorCommand::CloseWindow { window_server_id },
             )))
         }
     }

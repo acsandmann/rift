@@ -69,6 +69,7 @@ pub enum WmCmd {
     ShowMissionControlAll,
     ShowMissionControlCurrent,
     DismissMissionControl,
+    CloseWindow,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -380,6 +381,11 @@ impl WmController {
                     let _ = tx.try_send(mission_control::Event::Dismiss);
                 }
             }
+            Command(Wm(CloseWindow)) => {
+                self.events_tx.send(reactor::Event::Command(reactor::Command::Reactor(
+                    reactor::ReactorCommand::CloseWindow { window_server_id: None },
+                )));
+            }
             Command(Wm(Exec(cmd))) => {
                 self.exec_cmd(cmd);
             }
@@ -475,5 +481,16 @@ impl ExecCmd {
             ExecCmd::Array(vec) => Cow::Borrowed(&*vec),
             ExecCmd::String(s) => s.split(' ').map(|s| s.to_owned()).collect::<Vec<_>>().into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn close_window_accepts_simple_form() {
+        let simple: WmCommand = serde_json::from_str(r#""close_window""#).unwrap();
+        assert_eq!(simple, WmCommand::Wm(WmCmd::CloseWindow));
     }
 }

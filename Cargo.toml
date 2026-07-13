@@ -108,7 +108,9 @@ objc2-core-graphics = { version = "0.3.2", default-features = false, features = 
 	"CGError",
 	"CGEvent",
 	"CGEventTypes",
+	"CGRemoteOperation",
 	"CGWindow",
+	"libc",
 	"objc2"
 ]}
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
