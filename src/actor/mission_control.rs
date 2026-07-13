@@ -9,7 +9,7 @@ use crate::actor::{self, reactor};
 use crate::common::config::Config;
 use crate::sys::event::current_cursor_location;
 use crate::sys::geometry::CGRectExt;
-use crate::sys::screen::{NSScreenExt, ScreenCache, get_active_space_number};
+use crate::sys::screen::NSScreenExt;
 use crate::ui::mission_control::{MissionControlAction, MissionControlMode, MissionControlOverlay};
 
 #[derive(Debug)]
@@ -85,18 +85,15 @@ impl MissionControlActor {
             CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1280.0, 800.0)),
             1.0,
         );
-        let mut cache = ScreenCache::new(self.mtm);
-        let Some((screens, _)) = cache.refresh() else {
+        let screens = self.reactor.query_displays();
+        if screens.is_empty() {
             return fallback;
-        };
+        }
 
         let selected = current_cursor_location()
             .ok()
-            .and_then(|cursor| screens.iter().find(|screen| screen.frame.contains(cursor)))
-            .or_else(|| {
-                let active_space = get_active_space_number()?;
-                screens.iter().find(|screen| screen.space == Some(active_space))
-            })
+            .and_then(|cursor| screens.iter().find(|screen| screen.info.frame.contains(cursor)))
+            .or_else(|| screens.iter().find(|screen| screen.is_active_context))
             .or_else(|| screens.first());
 
         let Some(selected) = selected else {
@@ -107,7 +104,7 @@ impl MissionControlActor {
             .iter()
             .find_map(|ns| {
                 let id = ns.get_number().ok()?;
-                if id == selected.id {
+                if id == selected.info.id {
                     Some(ns.backingScaleFactor())
                 } else {
                     None
@@ -115,7 +112,7 @@ impl MissionControlActor {
             })
             .unwrap_or(1.0);
 
-        (selected.frame, scale)
+        (selected.info.frame, scale)
     }
 
     fn dispose_overlay(&mut self) {

@@ -1,9 +1,12 @@
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use nix::libc::pid_t;
-use objc2_app_kit::NSWorkspace;
-use tracing::{info, instrument};
+use objc2_app_kit::NSRunningApplication;
+use objc2_foundation::ns_string;
+use tracing::{error, info, instrument, warn};
 
 use crate::actor::reactor;
 use crate::actor::reactor::Event;
@@ -16,11 +19,12 @@ const K_AX_EXPOSE_SHOW_FRONT_WINDOWS: &str = "AXExposeShowFrontWindows";
 const K_AX_EXPOSE_SHOW_DESKTOP: &str = "AXExposeShowDesktop";
 const K_AX_EXPOSE_EXIT: &str = "AXExposeExit";
 
-#[derive(Copy, Clone)]
-enum MissionControlNotification {
-    Enter = 1,
-    Exit = 2,
-}
+const NOTIFICATIONS: &[&str] = &[
+    K_AX_EXPOSE_EXIT,
+    K_AX_EXPOSE_SHOW_ALL_WINDOWS,
+    K_AX_EXPOSE_SHOW_FRONT_WINDOWS,
+    K_AX_EXPOSE_SHOW_DESKTOP,
+];
 
 #[derive(Debug)]
 pub enum Request {
@@ -32,9 +36,14 @@ pub type Receiver = crate::actor::Receiver<Request>;
 
 pub struct NativeMissionControl {
     rx: Receiver,
-    events_tx: reactor::Sender,
     observer: Option<Observer>,
     app_elem: Option<AXUIElement>,
+    active: Arc<AtomicBool>,
+    events_tx: reactor::Sender,
+}
+
+struct State {
+    events_tx: reactor::Sender,
     active: Arc<AtomicBool>,
 }
 
@@ -42,10 +51,10 @@ impl NativeMissionControl {
     pub fn new(events_tx: reactor::Sender, rx: Receiver) -> Self {
         Self {
             rx,
-            events_tx,
             observer: None,
             app_elem: None,
             active: Arc::new(AtomicBool::new(false)),
+            events_tx,
         }
     }
 
@@ -68,39 +77,34 @@ impl NativeMissionControl {
             return;
         }
 
-        let pid = find_dock_pid();
-        if pid == 0 {
-            // Dock not found
+        let Some(pid) = find_dock_pid() else {
+            warn!("Could not find the Dock process; Mission Control observer disabled");
             return;
-        }
-
-        let builder = match Observer::new(pid) {
-            Ok(b) => b,
-            Err(_) => return,
         };
 
-        let tx_clone = self.events_tx.clone();
-        let active_clone = self.active.clone();
-        let observer = builder.install(move |_elem: AXUIElement, data: usize| match data {
-            value if value == MissionControlNotification::Enter as usize => {
-                active_clone.store(true, Ordering::SeqCst);
-                let _ = tx_clone.send(Event::MissionControlNativeEntered);
+        let builder = match Observer::new_with_notification(pid) {
+            Ok(builder) => builder,
+            Err(err) => {
+                warn!(?err, pid, "Could not create Dock accessibility observer");
+                return;
             }
-            value if value == MissionControlNotification::Exit as usize => {
-                active_clone.store(false, Ordering::SeqCst);
-                let _ = tx_clone.send(Event::MissionControlNativeExited);
-            }
-            _ => (),
+        };
+
+        let state = Rc::new(RefCell::new(State {
+            events_tx: self.events_tx.clone(),
+            active: self.active.clone(),
+        }));
+        let callback_state = state.clone();
+        let observer = builder.install_with_notification(move |_elem, notification| {
+            callback_state.borrow_mut().handle_notification(notification);
         });
 
         let elem = AXUIElement::application(pid);
-
-        let enter = MissionControlNotification::Enter as usize;
-        let exit = MissionControlNotification::Exit as usize;
-        let _ = observer.add_notification_with_data(&elem, K_AX_EXPOSE_SHOW_ALL_WINDOWS, enter);
-        let _ = observer.add_notification_with_data(&elem, K_AX_EXPOSE_SHOW_FRONT_WINDOWS, enter);
-        let _ = observer.add_notification_with_data(&elem, K_AX_EXPOSE_SHOW_DESKTOP, enter);
-        let _ = observer.add_notification_with_data(&elem, K_AX_EXPOSE_EXIT, exit);
+        for notification in NOTIFICATIONS {
+            if let Err(err) = observer.add_notification(&elem, notification) {
+                warn!(?err, notification, "Could not observe Dock notification");
+            }
+        }
 
         self.observer = Some(observer);
         self.app_elem = Some(elem);
@@ -112,10 +116,9 @@ impl NativeMissionControl {
         }
 
         if let (Some(observer), Some(elem)) = (self.observer.as_ref(), self.app_elem.as_ref()) {
-            let _ = observer.remove_notification(elem, K_AX_EXPOSE_SHOW_ALL_WINDOWS);
-            let _ = observer.remove_notification(elem, K_AX_EXPOSE_SHOW_FRONT_WINDOWS);
-            let _ = observer.remove_notification(elem, K_AX_EXPOSE_SHOW_DESKTOP);
-            let _ = observer.remove_notification(elem, K_AX_EXPOSE_EXIT);
+            for notification in NOTIFICATIONS {
+                let _ = observer.remove_notification(elem, notification);
+            }
         }
 
         self.observer = None;
@@ -126,14 +129,31 @@ impl NativeMissionControl {
     pub fn is_active(&self) -> bool { self.active.load(Ordering::SeqCst) }
 }
 
-fn find_dock_pid() -> pid_t {
-    let workspace = NSWorkspace::sharedWorkspace();
-    for app in workspace.runningApplications().into_iter() {
-        if let Some(bid) = app.bundle_id() {
-            if bid.to_string() == "com.apple.dock" {
-                return app.processIdentifier();
+impl State {
+    #[instrument(skip(self))]
+    fn handle_notification(&mut self, notification: &'static str) {
+        match notification {
+            K_AX_EXPOSE_SHOW_ALL_WINDOWS
+            | K_AX_EXPOSE_SHOW_FRONT_WINDOWS
+            | K_AX_EXPOSE_SHOW_DESKTOP => {
+                self.active.store(true, Ordering::SeqCst);
+                self.events_tx.send(Event::MissionControlNativeEntered);
             }
+            K_AX_EXPOSE_EXIT => {
+                self.active.store(false, Ordering::SeqCst);
+                self.events_tx.send(Event::MissionControlNativeExited);
+            }
+            _ => error!(?notification, "Unhandled notification from Dock"),
         }
     }
-    0
+}
+
+fn find_dock_pid() -> Option<pid_t> {
+    let apps =
+        NSRunningApplication::runningApplicationsWithBundleIdentifier(ns_string!("com.apple.dock"))
+            .to_vec();
+    let [app] = apps.as_slice() else {
+        return None;
+    };
+    Some(app.pid())
 }

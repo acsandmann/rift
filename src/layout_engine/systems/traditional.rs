@@ -590,6 +590,22 @@ impl LayoutSystem for TraditionalLayoutSystem {
         }
     }
 
+    fn remove_window_and_rebalance_parent(&mut self, wid: WindowId) {
+        let nodes: Vec<_> =
+            self.tree.data.window.take_nodes_for(wid).map(|(_, node)| node).collect();
+        for node in nodes {
+            let parent = node.parent(&self.tree.map);
+            node.detach(&mut self.tree).remove();
+            if let Some(parent) = parent
+                && self.tree.data.layout.info.contains_key(parent)
+            {
+                // Restore the automatic split at the level where the window disappeared,
+                // without wiping user-defined weights in any ancestor container.
+                self.rebalance_node(parent);
+            }
+        }
+    }
+
     fn remove_windows_for_app(&mut self, pid: pid_t) {
         let nodes: Vec<_> =
             self.tree.data.window.take_nodes_for_app(pid).map(|(_, _, node)| node).collect();
@@ -977,17 +993,35 @@ impl LayoutSystem for TraditionalLayoutSystem {
                 let local_selected_child =
                     self.tree.data.selection.local_selection(&self.tree.map, parent);
                 let next_sibling = parent.next_sibling(&self.tree.map);
+                let parent_size = self.tree.data.layout.info[parent].size.max(0.0);
+                let child_total: f32 = children
+                    .iter()
+                    .map(|&child| self.tree.data.layout.info[child].size.max(0.0))
+                    .sum();
+                let promoted_sizes: Vec<_> = children
+                    .iter()
+                    .map(|&child| {
+                        let child_size = self.tree.data.layout.info[child].size.max(0.0);
+                        if child_total.is_finite() && child_total > f32::EPSILON {
+                            parent_size * child_size / child_total
+                        } else {
+                            parent_size / children.len() as f32
+                        }
+                    })
+                    .collect();
 
-                for child in children.iter() {
+                for (&child, &promoted_size) in children.iter().zip(&promoted_sizes) {
                     let detached = child.detach(&mut self.tree);
                     if let Some(next_sibling) = next_sibling {
                         detached.insert_before(next_sibling);
                     } else {
                         detached.push_back(grandparent);
                     }
+                    self.tree.data.layout.info[child].size = promoted_size;
                 }
 
                 parent.detach(&mut self.tree).remove();
+                self.tree.data.layout.recompute_total(&self.tree.map, grandparent);
 
                 if let Some(sel_child) = local_selected_child {
                     self.select(sel_child);
@@ -1112,9 +1146,9 @@ impl LayoutSystem for TraditionalLayoutSystem {
             other => other,
         };
 
+        // Split weights are axis-independent. Rotating a container should preserve the
+        // user's ratios; `rebalance` is the explicit operation that resets them.
         self.set_layout(target_node, new_kind);
-
-        self.rebalance(layout);
     }
 }
 
@@ -1681,9 +1715,21 @@ impl TraditionalLayoutSystem {
         let Some(old_parent) = moving_node.parent(map) else {
             return false;
         };
+        // Detach/insert events initialize an inserted node with weight 1.  That is useful
+        // for genuinely new children, but a pure reorder must be geometry-neutral.
+        let old_sibling_sizes: Vec<_> = old_parent
+            .children(map)
+            .map(|node| (node, self.tree.data.layout.info[node].size))
+            .collect();
         let is_selection =
             self.tree.data.selection.local_selection(map, old_parent) == Some(moving_node);
         let moved = self.move_node_inner(layout, moving_node, direction);
+        if moved && moving_node.parent(&self.tree.map) == Some(old_parent) {
+            for (node, size) in old_sibling_sizes {
+                self.tree.data.layout.info[node].size = size;
+            }
+            self.tree.data.layout.recompute_total(&self.tree.map, old_parent);
+        }
         if moved && is_selection {
             for node in moving_node.ancestors(&self.tree.map) {
                 if node == old_parent {
@@ -1798,7 +1844,10 @@ impl TraditionalLayoutSystem {
             .unwrap_or(1.0);
         let local_ratio = f64::from(screen_ratio)
             * f64::from(
-                self.tree.data.layout.info[resizing_node.parent(&self.tree.map).unwrap()].total,
+                self.tree
+                    .data
+                    .layout
+                    .children_total(&self.tree.map, resizing_node.parent(&self.tree.map).unwrap()),
             )
             / exchange_rate;
         self.tree.data.layout.take_share(
@@ -2257,6 +2306,14 @@ pub(crate) struct LayoutInfo {
 }
 
 impl Layout {
+    fn children_total(&self, map: &NodeMap, parent: NodeId) -> f32 {
+        parent.children(map).map(|child| self.info[child].size.max(0.0)).sum()
+    }
+
+    fn recompute_total(&mut self, map: &NodeMap, parent: NodeId) {
+        self.info[parent].total = self.children_total(map, parent);
+    }
+
     fn effective_leaf_axis_constraints(
         &self,
         c: WindowLayoutConstraints,
@@ -2279,7 +2336,7 @@ impl Layout {
         (min, fixed, max.or(fixed), can_grow)
     }
 
-    fn handle_event(&mut self, map: &NodeMap, event: TreeEvent) {
+    fn handle_event(&mut self, map: &NodeMap, event: TreeEvent, windows: &WindowIndex) {
         match event {
             TreeEvent::AddedToForest(node) => {
                 self.info.insert(node, LayoutInfo::default());
@@ -2293,7 +2350,40 @@ impl Layout {
                 self.info.insert(dest, self.info[src]);
             }
             TreeEvent::RemovingFromParent(node) => {
-                self.info[node.parent(map).unwrap()].total -= self.info[node].size;
+                let parent = node.parent(map).unwrap();
+                // Containers are also detached while structural commands reparent their
+                // children (notably `unjoin_windows`). Their size is still the outer share
+                // that must be transferred to the replacement nodes; normalizing the other
+                // siblings here treats that operation as a window removal and loses layout
+                // proportions. Only normalize when an actual window leaf is removed; an empty
+                // container is still being detached during the same structural operation.
+                if windows.at(node).is_some() {
+                    let children: Vec<_> =
+                        parent.children(map).filter(|&child| child != node).collect();
+                    let total: f32 =
+                        children.iter().map(|&child| self.info[child].size.max(0.0)).sum();
+
+                    if children.is_empty() {
+                        self.info[parent].total = 0.0;
+                    } else if total.is_finite() && total > f32::EPSILON {
+                        // Removing a window must preserve the proportions of the remaining
+                        // siblings. Rebalancing them to 1:1 here loses manual resizes whenever
+                        // discovery briefly removes a window from the tree.
+                        let scale = children.len() as f32 / total;
+                        let child_count = children.len() as f32;
+                        for child in children {
+                            self.info[child].size *= scale;
+                        }
+                        self.info[parent].total = child_count;
+                    } else {
+                        for child in children {
+                            self.info[child].size = 1.0;
+                        }
+                        self.info[parent].total = (parent.children(map).count() - 1) as f32;
+                    }
+                } else {
+                    self.info[parent].total -= self.info[node].size;
+                }
             }
             TreeEvent::RemovedFromForest(node) => {
                 self.info.remove(node);
@@ -2319,7 +2409,9 @@ impl Layout {
 
     fn proportion(&self, map: &NodeMap, node: NodeId) -> Option<f64> {
         let Some(parent) = node.parent(map) else { return None };
-        Some(f64::from(self.info[node].size) / f64::from(self.info[parent].total))
+        let total = self.children_total(map, parent);
+        (total.is_finite() && total > f32::EPSILON)
+            .then(|| f64::from(self.info[node].size.max(0.0)) / f64::from(total))
     }
 
     fn take_share(&mut self, map: &NodeMap, node: NodeId, from: NodeId, share: f32) {
@@ -2706,7 +2798,6 @@ impl Layout {
             return;
         }
         let min_size = 0.05;
-        let expected_total = children.len() as f32;
         let mut needs_normalization = false;
         let mut actual_total = 0.0;
         for &child in &children {
@@ -2716,25 +2807,16 @@ impl Layout {
                 needs_normalization = true;
             }
         }
-        if !actual_total.is_finite()
-            || actual_total <= f32::EPSILON
-            || needs_normalization
-            || (actual_total - expected_total).abs() > 0.01
-        {
-            unsafe {
-                let info = &mut *(&self.info as *const _
-                    as *mut slotmap::SecondaryMap<NodeId, LayoutInfo>);
-                for &child in &children {
-                    info[child].size = 1.0;
-                }
-                info[node].total = children.len() as f32;
-            }
-        }
-        debug_assert!({
-            let sum_children: f32 = children.iter().map(|c| self.info[*c].size).sum();
-            (sum_children - self.info[node].total).abs() < 0.01
-        });
-        let total = self.info[node].total;
+        let normalize_sizes =
+            !actual_total.is_finite() || actual_total <= f32::EPSILON || needs_normalization;
+        let total = if normalize_sizes {
+            children.len() as f32
+        } else {
+            // The sum need not equal the child count. Structural operations can combine
+            // or promote weights while preserving their ratios (for example 1.8/1.2).
+            // Rendering those as 1/1 silently discards a valid user resize.
+            actual_total
+        };
         let inner_gap = if horizontal {
             gaps.inner.horizontal
         } else {
@@ -2774,7 +2856,11 @@ impl Layout {
                     min,
                     fixed,
                     max,
-                    weight: f64::from(self.info[child].size.max(0.0)),
+                    weight: f64::from(if normalize_sizes {
+                        1.0
+                    } else {
+                        self.info[child].size.max(0.0)
+                    }),
                     can_grow,
                 }
             })
@@ -2782,7 +2868,12 @@ impl Layout {
         let seg_lens = solve_axis_lengths(&axis_constraints, usable_axis);
         for (i, &child) in children.iter().enumerate() {
             let fallback = {
-                let ratio = f64::from(self.info[child].size) / f64::from(total);
+                let child_size = if normalize_sizes {
+                    1.0
+                } else {
+                    self.info[child].size
+                };
+                let ratio = f64::from(child_size) / f64::from(total);
                 usable_axis * ratio
             };
             let seg_len = seg_lens.get(i).copied().unwrap_or(fallback.max(0.0));
@@ -2830,7 +2921,7 @@ impl Layout {
 impl Components {
     fn dispatch_event(&mut self, map: &NodeMap, event: TreeEvent) {
         self.selection.handle_event(map, event);
-        self.layout.handle_event(map, event);
+        self.layout.handle_event(map, event, &self.window);
         self.window.handle_event(map, event);
     }
 }
@@ -3357,6 +3448,25 @@ mod tests {
             (system.tree.data.layout.info[sibling].size - 1.0).abs() < 0.0001,
             "unrelated sibling share should be preserved when grouping neighbors"
         );
+
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1200.0, 800.0));
+        let frames: HashMap<_, _> = system
+            .calculate_layout(
+                layout,
+                screen,
+                0.0,
+                &HashMap::default(),
+                &Default::default(),
+                0.0,
+                Default::default(),
+                Default::default(),
+            )
+            .into_iter()
+            .collect();
+        assert!(
+            (frames[&w3].size.width - 200.0).abs() < 1.0,
+            "layout pass must render the grouped 5:1 outer ratio"
+        );
     }
 
     #[test]
@@ -3384,6 +3494,45 @@ mod tests {
             "{}",
             system.draw_tree(layout)
         );
+        let root_children: Vec<_> = root.children(system.map()).collect();
+        assert_eq!(root_children.len(), 3, "{}", system.draw_tree(layout));
+        assert!(root_children.iter().all(|node| system.window_at(*node).is_some()));
+    }
+
+    #[test]
+    fn unjoin_preserves_nested_and_outer_resize_ratios() {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
+
+        let w1 = w(163);
+        let w2 = w(164);
+        let w3 = w(165);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+        system.add_window_after_selection(layout, w3);
+        assert!(system.select_window(layout, w1));
+        system.join_selection_with_direction(layout, Direction::Right);
+
+        let n1 = system.tree.data.window.node_for(layout, w1).unwrap();
+        let n2 = system.tree.data.window.node_for(layout, w2).unwrap();
+        let n3 = system.tree.data.window.node_for(layout, w3).unwrap();
+        let group = n1.parent(system.map()).unwrap();
+        system.tree.data.layout.info[group].size = 6.0;
+        system.tree.data.layout.info[n3].size = 4.0;
+        system.tree.data.layout.info[root].total = 10.0;
+        system.tree.data.layout.info[n1].size = 3.0;
+        system.tree.data.layout.info[n2].size = 1.0;
+        system.tree.data.layout.info[group].total = 4.0;
+
+        system.select(n1);
+        system.unjoin_selection(layout);
+
+        assert!((system.tree.data.layout.info[n1].size - 4.5).abs() < 0.0001);
+        assert!((system.tree.data.layout.info[n2].size - 1.5).abs() < 0.0001);
+        assert!((system.tree.data.layout.info[n3].size - 4.0).abs() < 0.0001);
+        assert!((system.tree.data.layout.info[root].total - 10.0).abs() < 0.0001);
     }
 
     #[test]
@@ -3414,6 +3563,122 @@ mod tests {
         assert!((system.tree.data.layout.info[n2].size - 1.0).abs() < 0.0001);
         assert!((system.tree.data.layout.info[n3].size - 1.0).abs() < 0.0001);
         assert!((system.tree.data.layout.info[root].total - 3.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn toggling_orientation_preserves_user_resize_ratios() {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
+        system.add_window_after_selection(layout, w(176));
+        system.add_window_after_selection(layout, w(177));
+
+        let n1 = system.tree.data.window.node_for(layout, w(176)).unwrap();
+        let n2 = system.tree.data.window.node_for(layout, w(177)).unwrap();
+        system.tree.data.layout.info[n1].size = 3.0;
+        system.tree.data.layout.info[n2].size = 1.0;
+        system.tree.data.layout.info[root].total = 4.0;
+
+        system.select(n1);
+        system.toggle_tile_orientation(layout);
+
+        assert_eq!(system.layout(root), LayoutKind::Vertical);
+        assert!((system.tree.data.layout.info[n1].size - 3.0).abs() < 0.0001);
+        assert!((system.tree.data.layout.info[n2].size - 1.0).abs() < 0.0001);
+        assert!((system.tree.data.layout.info[root].total - 4.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn reordering_siblings_preserves_user_resize_ratios() {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
+        system.add_window_after_selection(layout, w(178));
+        system.add_window_after_selection(layout, w(179));
+        system.add_window_after_selection(layout, w(180));
+
+        let n1 = system.tree.data.window.node_for(layout, w(178)).unwrap();
+        let n2 = system.tree.data.window.node_for(layout, w(179)).unwrap();
+        let n3 = system.tree.data.window.node_for(layout, w(180)).unwrap();
+        system.tree.data.layout.info[n1].size = 5.0;
+        system.tree.data.layout.info[n2].size = 2.0;
+        system.tree.data.layout.info[n3].size = 1.0;
+        system.tree.data.layout.info[root].total = 8.0;
+
+        assert!(system.move_node(layout, n2, Direction::Right));
+
+        assert_eq!(root.children(system.map()).collect::<Vec<_>>(), vec![n1, n3, n2]);
+        assert!((system.tree.data.layout.info[n1].size - 5.0).abs() < 0.0001);
+        assert!((system.tree.data.layout.info[n2].size - 2.0).abs() < 0.0001);
+        assert!((system.tree.data.layout.info[n3].size - 1.0).abs() < 0.0001);
+        assert!((system.tree.data.layout.info[root].total - 8.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn removing_a_sibling_preserves_remaining_proportions() {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
+
+        system.add_window_after_selection(layout, w(173));
+        system.add_window_after_selection(layout, w(174));
+        system.add_window_after_selection(layout, w(175));
+
+        let n1 = system.tree.data.window.node_for(layout, w(173)).expect("w1 node");
+        let n2 = system.tree.data.window.node_for(layout, w(174)).expect("w2 node");
+        system.tree.data.layout.info[n1].size = 0.8;
+        system.tree.data.layout.info[n2].size = 1.2;
+        system.tree.data.layout.info[root].total = 3.0;
+
+        system.remove_window(w(175));
+
+        assert!((system.tree.data.layout.info[n1].size - 0.8).abs() < 0.0001);
+        assert!((system.tree.data.layout.info[n2].size - 1.2).abs() < 0.0001);
+        assert!((system.tree.data.layout.info[root].total - 2.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn fallback_removal_rebalances_stack_only_and_preserves_outer_resize() {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
+        let w1 = w(181);
+        let w2 = w(182);
+        let outside = w(183);
+        let closing = w(184);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+        system.add_window_after_selection(layout, outside);
+        assert!(system.select_window(layout, w1));
+        system.join_selection_with_direction(layout, Direction::Right);
+
+        let n1 = system.tree.data.window.node_for(layout, w1).unwrap();
+        let n2 = system.tree.data.window.node_for(layout, w2).unwrap();
+        let outside_node = system.tree.data.window.node_for(layout, outside).unwrap();
+        let stack = n1.parent(system.map()).unwrap();
+        system.set_layout(stack, LayoutKind::HorizontalStack);
+        let closing_node = system.add_window_under(layout, stack, closing);
+
+        system.tree.data.layout.info[stack].size = 0.6;
+        system.tree.data.layout.info[outside_node].size = 1.4;
+        system.tree.data.layout.info[root].total = 2.0;
+        system.tree.data.layout.info[n1].size = 1.0;
+        system.tree.data.layout.info[n2].size = 0.5;
+        system.tree.data.layout.info[closing_node].size = 0.5;
+        system.tree.data.layout.info[stack].total = 2.0;
+
+        system.remove_window_and_rebalance_parent(closing);
+
+        assert!((system.tree.data.layout.info[stack].size - 0.6).abs() < 0.0001);
+        assert!((system.tree.data.layout.info[outside_node].size - 1.4).abs() < 0.0001);
+        assert!((system.tree.data.layout.info[root].total - 2.0).abs() < 0.0001);
+        assert!((system.tree.data.layout.info[n1].size - 1.0).abs() < 0.0001);
+        assert!((system.tree.data.layout.info[n2].size - 1.0).abs() < 0.0001);
+        assert!((system.tree.data.layout.info[stack].total - 2.0).abs() < 0.0001);
     }
 
     #[test]
@@ -3536,8 +3801,8 @@ mod tests {
             "focused fixed-size settings window should not keep an oversized stack slot"
         );
         assert!(
-            sibling_frame.size.width >= 399.0,
-            "sibling outside mixed stack should keep its normal split share"
+            sibling_frame.size.width >= 290.0,
+            "sibling outside mixed stack should keep its pre-grouping quarter share: {sibling_frame:?}"
         );
     }
 

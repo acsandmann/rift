@@ -176,8 +176,7 @@ extern "C" fn connection_callback(
 
         CGSEventType::Known(KnownCGSEvent::SpaceCreated)
         | CGSEventType::Known(KnownCGSEvent::SpaceDestroyed)
-        | CGSEventType::Known(KnownCGSEvent::SpaceCurrentChanged)
-        | CGSEventType::Known(KnownCGSEvent::PackagesStatusBarSpaceChanged) => {
+        | CGSEventType::Known(KnownCGSEvent::SpaceCurrentChanged) => {
             if let Some(sid) = read::<u64>(bytes, 0) {
                 space_id = Some(sid)
             } else {

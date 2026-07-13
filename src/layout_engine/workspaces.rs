@@ -161,15 +161,6 @@ impl WorkspaceLayouts {
             .collect()
     }
 
-    pub(crate) fn active_layouts_with_workspace(
-        &self,
-    ) -> Vec<(crate::model::VirtualWorkspaceId, LayoutId)> {
-        self.map
-            .iter()
-            .filter_map(|(&(_, ws_id), info)| info.active().map(|l| (ws_id, l)))
-            .collect()
-    }
-
     pub(crate) fn ensure_active_for_workspace(
         &mut self,
         space: SpaceId,

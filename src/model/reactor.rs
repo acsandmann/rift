@@ -4,9 +4,21 @@ use serde::{Deserialize, Serialize};
 use crate::actor::app::{AppInfo, AppThreadHandle, WindowId, pid_t};
 use crate::common::log::MetricsCommand;
 use crate::layout_engine::{Direction, LayoutCommand};
+use crate::model::WindowStore;
 use crate::sys::app::WindowInfo;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::WindowServerId;
+
+/// All mutable domain state is owned by the reactor thread.
+///
+/// Workspace topology is still carried by the layout coordinator during this
+/// migration, but window identity, native-space observations, and workspace
+/// assignments have one explicit owner here. Cross-store operations receive
+/// this store by reference instead of retaining an alias to it.
+#[derive(Debug, Default)]
+pub struct RiftState {
+    pub windows: WindowStore,
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Requested(pub bool);
@@ -51,23 +63,6 @@ pub enum ReactorCommand {
         selector: DisplaySelector,
         window_id: Option<u32>,
     },
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct FullscreenWindowTrack {
-    pub(crate) pid: pid_t,
-    pub(crate) window_id: Option<WindowId>,
-    pub(crate) last_known_user_space: Option<SpaceId>,
-    pub(crate) _last_seen_fullscreen_space: SpaceId,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct FullscreenSpaceTrack {
-    pub(crate) windows: Vec<FullscreenWindowTrack>,
-}
-
-impl Default for FullscreenSpaceTrack {
-    fn default() -> Self { FullscreenSpaceTrack { windows: Vec::new() } }
 }
 
 #[derive(Debug, Clone)]
@@ -133,11 +128,6 @@ pub(crate) struct AppState {
     #[allow(unused)]
     pub(crate) info: AppInfo,
     pub(crate) handle: AppThreadHandle,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct PendingSpaceChange {
-    pub(crate) spaces: Vec<Option<SpaceId>>,
 }
 
 #[derive(Debug)]

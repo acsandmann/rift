@@ -10,6 +10,7 @@ use tracing::instrument;
 
 use crate::actor::app::WindowId;
 use crate::actor::reactor::{Command, ReactorCommand};
+use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::{self, reactor};
 use crate::common::collections::HashMap;
 use crate::common::config::{Config, HorizontalPlacement, VerticalPlacement};
@@ -45,7 +46,7 @@ pub enum Event {
         groups: Vec<GroupInfo>,
         active_workspace_for_space_has_fullscreen: bool,
     },
-    ScreenParametersChanged(CoordinateConverter),
+    SpaceStateUpdated(CoordinateConverter, ForwardedSpaceState),
     ConfigUpdated(Config),
     /// A click that the event tap already confirmed lands on a visible,
     /// non-occluded stack-line indicator.
@@ -129,7 +130,7 @@ impl StackLine {
             && !matches!(
                 event,
                 Event::ConfigUpdated(_)
-                    | Event::ScreenParametersChanged(_)
+                    | Event::SpaceStateUpdated(..)
                     | Event::MouseDown(_)
                     | Event::MouseMoved { .. }
             )
@@ -151,8 +152,8 @@ impl StackLine {
                 );
                 self.sync_shared_hit_rects();
             }
-            Event::ScreenParametersChanged(converter) => {
-                self.handle_screen_parameters_changed(converter);
+            Event::SpaceStateUpdated(converter, _space_state) => {
+                self.handle_space_state_updated(converter);
             }
             Event::ConfigUpdated(config) => {
                 self.handle_config_updated(config);
@@ -230,7 +231,7 @@ impl StackLine {
         }
     }
 
-    fn handle_screen_parameters_changed(&mut self, converter: CoordinateConverter) {
+    fn handle_space_state_updated(&mut self, converter: CoordinateConverter) {
         self.coordinate_converter = converter;
         tracing::debug!("Updated coordinate converter for group indicators");
     }

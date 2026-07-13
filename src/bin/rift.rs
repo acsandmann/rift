@@ -15,6 +15,7 @@ use rift_wm::actor::mission_control_observer::NativeMissionControl;
 use rift_wm::actor::notification_center::NotificationCenter;
 use rift_wm::actor::process::ProcessActor;
 use rift_wm::actor::reactor::{self, Reactor};
+use rift_wm::actor::spaces::SpacesActor;
 use rift_wm::actor::stack_line::StackLine;
 use rift_wm::actor::window_notify as window_notify_actor;
 use rift_wm::actor::wm_controller::{self, WmController};
@@ -31,6 +32,7 @@ use rift_wm::sys::screen::{CoordinateConverter, displays_have_separate_spaces};
 use rift_wm::sys::service::{ServiceCommands, handle_service_command};
 use rift_wm::sys::skylight::{
     CGEnableEventStateCombining, CGSEventType, CGSetLocalEventsSuppressionInterval, KnownCGSEvent,
+    SLSWindowManagementBridgeSetDelegate,
 };
 use tokio::join;
 
@@ -123,6 +125,8 @@ fn main() {
         NSApplication::load();
     }
 
+    unsafe { SLSWindowManagementBridgeSetDelegate(std::ptr::null_mut()) };
+
     ensure_accessibility_permission();
     init_window_sub_level_server_port();
 
@@ -182,20 +186,6 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
 
     ConfigWatcher::spawn(config_tx.clone(), config.clone(), config_path.clone());
 
-    let wn_actor = window_notify_actor::WindowNotify::new(
-        events_tx.clone(),
-        wnd_rx,
-        &[
-            CGSEventType::Known(KnownCGSEvent::SpaceWindowDestroyed),
-            CGSEventType::Known(KnownCGSEvent::SpaceWindowCreated),
-            CGSEventType::Known(KnownCGSEvent::SpaceCreated),
-            CGSEventType::Known(KnownCGSEvent::SpaceDestroyed),
-            //CGSEventType::Known(KnownCGSEvent::WindowMoved),
-            //CGSEventType::Known(KnownCGSEvent::WindowResized),
-        ],
-        Some(window_tx_store.clone()),
-    );
-
     let server_state = match ipc::run_mach_server(reactor.clone(), config_tx.clone()) {
         Ok(state) => state,
         Err(err) => {
@@ -241,7 +231,30 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
 
     let _ = events_tx.send(reactor::Event::RegisterWmSender(wm_controller_sender.clone()));
 
-    let notification_center = NotificationCenter::new(wm_controller_sender.clone());
+    let (spaces_actor, spaces_tx) =
+        SpacesActor::new(events_tx.clone(), wm_controller_sender.clone());
+    let wn_actor = window_notify_actor::WindowNotify::new(
+        events_tx.clone(),
+        spaces_tx.clone(),
+        wnd_rx,
+        &[
+            // this event seems bugged
+            //CGSEventType::Known(KnownCGSEvent::SpaceCurrentChanged),
+            // repl for aboce
+            CGSEventType::Known(KnownCGSEvent::WorkspaceDidChange),
+            CGSEventType::Known(KnownCGSEvent::ManagedSpaceMembershipUpdated),
+            CGSEventType::Known(KnownCGSEvent::SpaceWindowManagementCapabilitiesChanged),
+            CGSEventType::Known(KnownCGSEvent::SpaceWindowDestroyed),
+            CGSEventType::Known(KnownCGSEvent::SpaceWindowCreated),
+            CGSEventType::Known(KnownCGSEvent::SpaceCreated),
+            CGSEventType::Known(KnownCGSEvent::SpaceDestroyed),
+            //CGSEventType::Known(KnownCGSEvent::WindowMoved),
+            //CGSEventType::Known(KnownCGSEvent::WindowResized),
+        ],
+        Some(window_tx_store.clone()),
+    );
+
+    let notification_center = NotificationCenter::new(wm_controller_sender.clone(), spaces_tx);
 
     let process_actor = ProcessActor::new(wm_controller_sender.clone());
 
@@ -304,6 +317,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
                 "notification_center",
                 notification_center.watch_for_notifications()
             ),
+            supervise("spaces", spaces_actor.run()),
             supervise("gesture_tap", gesture_tap.run()),
             supervise("menu", menu.run()),
             supervise("stack_line", stack_line.run()),

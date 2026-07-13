@@ -11,9 +11,9 @@ use nix::libc::{
 };
 use tracing::error;
 
-use crate::actor::broadcast::BroadcastEvent;
 use crate::common::collections::{HashMap, HashSet};
 use crate::ipc::subscriptions::CliSubscription;
+use crate::model::broadcast::BroadcastEvent;
 
 pub trait CliExecutor: Send + Sync + 'static {
     fn execute(
