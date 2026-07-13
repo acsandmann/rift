@@ -16,7 +16,8 @@ fn sanitize(v: f64) -> f64 { if v.is_finite() { v.max(0.0) } else { 0.0 } }
 /// - `min` is a lower bound unless physically infeasible (then minima are scaled down proportionally)
 /// - `fixed` values are enforced before distributing remainder
 /// - `max` caps growth when positive
-/// - remainder is given to growable nodes by weight, then equally
+/// - growable nodes preserve their final weighted proportions whenever their bounds allow it
+/// - zero-weight growable nodes share equally when no positive weights are present
 /// - if nothing can grow, remainder becomes blank space
 pub(crate) fn solve_axis_lengths(items: &[AxisConstraints], usable: f64) -> Vec<f64> {
     if items.is_empty() {
@@ -79,49 +80,59 @@ pub(crate) fn solve_axis_lengths(items: &[AxisConstraints], usable: f64) -> Vec<
         }
     }
 
+    // Non-growable segments stay at their minimum. Growable segments are solved from their
+    // *final* weighted sizes, clamped to their bounds. Seeding every segment with its minimum and
+    // distributing only the remainder would skew equal-weight splits whenever the minima differ.
+    let mut growable: Vec<usize> = Vec::new();
     for idx in 0..n {
         if fixed[idx].is_none() {
-            let need = mins[idx].min(remaining);
-            lengths[idx] += need;
-            remaining = (remaining - need).max(0.0);
+            if can_grow[idx] {
+                growable.push(idx);
+            } else {
+                let assigned = mins[idx].min(remaining);
+                lengths[idx] = assigned;
+                remaining = (remaining - assigned).max(0.0);
+            }
         }
     }
 
-    while remaining > f64::EPSILON {
-        let growable: Vec<usize> = (0..n)
-            .filter(|&idx| fixed[idx].is_none() && can_grow[idx])
-            .filter(|&idx| match maxs[idx] {
-                Some(max) => lengths[idx] + f64::EPSILON < max,
-                None => true,
-            })
-            .collect();
-        if growable.is_empty() {
+    while !growable.is_empty() && remaining > f64::EPSILON {
+        let total_weight: f64 = growable.iter().map(|&idx| weights[idx]).sum();
+        let use_equal_weights = total_weight <= f64::EPSILON;
+        let divisor = if use_equal_weights {
+            growable.len() as f64
+        } else {
+            total_weight
+        };
+
+        let mut clamped = Vec::new();
+        for &idx in &growable {
+            let weight = if use_equal_weights { 1.0 } else { weights[idx] };
+            let proposed = remaining * weight / divisor;
+            let max = maxs[idx].map(|value| value.max(mins[idx]));
+            if proposed + f64::EPSILON < mins[idx] {
+                lengths[idx] = mins[idx].min(remaining);
+                clamped.push(idx);
+            } else if let Some(max) = max
+                && proposed > max + f64::EPSILON
+            {
+                lengths[idx] = max.min(remaining);
+                clamped.push(idx);
+            }
+        }
+
+        if clamped.is_empty() {
+            for &idx in &growable {
+                let weight = if use_equal_weights { 1.0 } else { weights[idx] };
+                lengths[idx] = remaining * weight / divisor;
+            }
+            remaining = 0.0;
             break;
         }
 
-        let total_weight: f64 = growable.iter().map(|&idx| weights[idx]).sum();
-        let mut consumed = 0.0;
-        if total_weight > 0.0 {
-            for &idx in &growable {
-                let share = remaining * (weights[idx] / total_weight);
-                let cap = maxs[idx].map(|max| (max - lengths[idx]).max(0.0)).unwrap_or(share);
-                let delta = share.min(cap);
-                lengths[idx] += delta;
-                consumed += delta;
-            }
-        } else {
-            let each = remaining / growable.len() as f64;
-            for &idx in &growable {
-                let cap = maxs[idx].map(|max| (max - lengths[idx]).max(0.0)).unwrap_or(each);
-                let delta = each.min(cap);
-                lengths[idx] += delta;
-                consumed += delta;
-            }
-        }
-        if consumed <= f64::EPSILON {
-            break;
-        }
-        remaining = (remaining - consumed).max(0.0);
+        let clamped_sum: f64 = clamped.iter().map(|&idx| lengths[idx]).sum();
+        remaining = (remaining - clamped_sum).max(0.0);
+        growable.retain(|idx| !clamped.contains(idx));
     }
 
     if remaining <= f64::EPSILON {
@@ -228,5 +239,32 @@ mod tests {
         assert_eq!(solved.len(), 2);
         assert!((solved[0] - 600.0).abs() < 0.001);
         assert!((solved[1] - 1000.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn non_binding_minima_do_not_skew_equal_weight_segments() {
+        let solved = solve_axis_lengths(
+            &[
+                AxisConstraints {
+                    min: 0.0,
+                    fixed: None,
+                    max: None,
+                    weight: 1.0,
+                    can_grow: true,
+                },
+                AxisConstraints {
+                    min: 400.0,
+                    fixed: None,
+                    max: None,
+                    weight: 1.0,
+                    can_grow: true,
+                },
+            ],
+            1200.0,
+        );
+
+        assert_eq!(solved.len(), 2);
+        assert!((solved[0] - 600.0).abs() < 0.001);
+        assert!((solved[1] - 600.0).abs() < 0.001);
     }
 }

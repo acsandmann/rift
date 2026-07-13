@@ -857,6 +857,49 @@ mod tests {
     }
 
     #[test]
+    fn non_binding_window_minimum_keeps_half_split_centered() {
+        let mut system = BspLayoutSystem::default();
+        let layout = system.create_layout();
+
+        let browser = w(106);
+        let finder = w(107);
+        system.add_window_after_selection(layout, browser);
+        system.add_window_after_selection(layout, finder);
+
+        let mut constraints = HashMap::default();
+        constraints.insert(
+            finder,
+            WindowLayoutConstraints {
+                is_resizable: true,
+                min_width: 400.0,
+                ..Default::default()
+            }
+            .normalized(),
+        );
+
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1200.0, 900.0));
+        let frames: HashMap<WindowId, CGRect> = system
+            .calculate_layout(
+                layout,
+                screen,
+                0.0,
+                &constraints,
+                &Default::default(),
+                0.0,
+                Default::default(),
+                Default::default(),
+            )
+            .into_iter()
+            .collect();
+
+        let browser_frame = frames.get(&browser).copied().expect("browser frame missing");
+        let finder_frame = frames.get(&finder).copied().expect("Finder frame missing");
+        assert!((browser_frame.size.width - 600.0).abs() < 1.0);
+        assert!((finder_frame.size.width - 600.0).abs() < 1.0);
+        assert!((finder_frame.origin.x - 600.0).abs() < 1.0);
+    }
+
+    #[test]
     fn max_only_height_does_not_cap_cross_axis_subtree() {
         let mut system = BspLayoutSystem::default();
         let layout = system.create_layout();
