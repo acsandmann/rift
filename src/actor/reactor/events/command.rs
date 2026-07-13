@@ -367,5 +367,5 @@ pub fn handle_command_reactor_move_window_to_display(
 
     Ok(EventOutcome::finalized_event(None, false, false, false)
         .with_layout_response(response, None)
-        .with_window_frame_write(payload.window, payload.target_frame, true))
+        .with_pre_layout_window_frame_write(payload.window, payload.target_frame, true))
 }

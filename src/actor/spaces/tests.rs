@@ -186,16 +186,14 @@ fn active_space_changed_forwards_immediately_when_space_snapshot_changes() {
 #[test]
 fn quarantines_window_space_events_during_sleep_before_churn_begins() {
     let (mut actor, mut wm_rx, mut reactor_rx) = build_actor();
+    let appeared = WindowServerId::new(7);
+    let existing = WindowServerId::new(8);
+    let existing_space = SpaceId::new(4);
+    actor.state.visible_window_spaces.insert(existing, existing_space);
 
     actor.handle_event(Event::SystemWillSleep);
-    actor.handle_event(Event::WindowServerAppeared(
-        WindowServerId::new(7),
-        SpaceId::new(3),
-    ));
-    actor.handle_event(Event::WindowServerDestroyed(
-        WindowServerId::new(8),
-        SpaceId::new(4),
-    ));
+    actor.handle_event(Event::WindowServerAppeared(appeared, SpaceId::new(3)));
+    actor.handle_event(Event::WindowServerDestroyed(existing, existing_space));
     actor.handle_event(Event::SpaceCreated(SpaceId::new(5)));
     actor.handle_event(Event::SpaceDestroyed(SpaceId::new(6)));
 
@@ -203,6 +201,11 @@ fn quarantines_window_space_events_during_sleep_before_churn_begins() {
         appeared_dropped: 1,
         destroyed_dropped: 1
     });
+    assert!(!actor.state.visible_window_spaces.contains_key(&appeared));
+    assert_eq!(
+        actor.state.visible_window_spaces.get(&existing),
+        Some(&existing_space)
+    );
     assert_no_wm_event(&mut wm_rx);
     assert!(matches!(
         recv_reactor(&mut reactor_rx),

@@ -629,7 +629,7 @@ fn command_space_only_snapshot_does_not_trigger_full_space_reconcile() {
 }
 
 #[test]
-fn command_space_change_focuses_destination_display_workspace() {
+fn passive_command_space_change_does_not_override_clicked_window_focus() {
     let mut apps = Apps::new();
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(
         &crate::common::config::VirtualWorkspaceSettings::default(),
@@ -711,46 +711,23 @@ fn command_space_change_focuses_destination_display_workspace() {
 
     assert_eq!(
         reactor.layout_manager.layout_engine.focused_window(),
-        Some(destination_focus)
+        Some(old_focus),
+        "a passive display snapshot must leave focus ownership to the AX click event"
     );
-    let message = raise_manager_rx
-        .try_recv()
-        .expect("display switch should focus the destination workspace")
-        .1;
-    match message {
-        raise_manager::Event::RaiseRequest(RaiseRequest { focus_window, focus_quiet, .. }) => {
-            assert_eq!(focus_window.map(|(window, _)| window), Some(destination_focus));
-            assert_eq!(focus_quiet, Quiet::Yes);
-        }
-        _ => panic!("unexpected raise-manager event: {message:?}"),
-    }
+    assert!(
+        raise_manager_rx.try_recv().is_err(),
+        "a passive active-display change must not raise the workspace's stale selection"
+    );
 
-    // The AX main-window tracker can still point at the old display while the
-    // refresh caused by the display switch is in flight. Rediscovering that
-    // same application must not undo the authoritative command-space focus.
-    let discovered = [old_focus, destination_focus]
-        .into_iter()
-        .map(|window| {
-            let info = reactor
-                .state
-                .windows
-                .window(window)
-                .expect("application window should remain tracked")
-                .info
-                .clone();
-            (window, info)
-        })
-        .collect();
-    reactor.handle_event(Event::WindowsDiscovered {
-        pid: 1,
-        new: discovered,
-        known_visible: vec![old_focus, destination_focus],
-    });
-    assert_eq!(reactor.main_window(), Some(old_focus));
+    reactor.handle_event(Event::ApplicationMainWindowChanged(
+        1,
+        Some(destination_focus),
+        Quiet::No,
+    ));
     assert_eq!(
         reactor.layout_manager.layout_engine.focused_window(),
         Some(destination_focus),
-        "stale AX focus from the previous display must not override command-space focus"
+        "the subsequent AX focus event should select the window that activated the display"
     );
 }
 
@@ -3722,6 +3699,58 @@ fn display_index_selector_uses_physical_left_to_right_order() {
         .expect("expected display index 0 to resolve");
 
     assert_eq!(selected.frame, left);
+}
+
+#[test]
+fn moving_tiled_window_to_display_applies_destination_layout_after_transfer_frame() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let left = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let right = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
+    reactor.handle_event(space_state_event(vec![left, right], vec![
+        Some(SpaceId::new(1)),
+        Some(SpaceId::new(2)),
+    ]));
+    reactor.handle_events(apps.make_app(1, make_windows(2)));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let moved = WindowId::new(1, 1);
+    reactor.handle_event(Event::Command(Command::Reactor(
+        ReactorCommand::MoveWindowToDisplay {
+            selector: DisplaySelector::Index(1),
+            window_id: Some(1),
+        },
+    )));
+
+    let writes: Vec<CGRect> = apps
+        .requests()
+        .into_iter()
+        .flat_map(|request| match request {
+            Request::SetWindowFrame(wid, frame, _, _) if wid == moved => vec![frame],
+            Request::SetBatchWindowFrame(frames, _, _) => frames
+                .into_iter()
+                .filter_map(|(wid, frame)| (wid == moved).then_some(frame))
+                .collect(),
+            _ => Vec::new(),
+        })
+        .collect();
+
+    assert!(
+        writes.len() >= 2,
+        "expected transfer and tiled writes: {writes:?}"
+    );
+    assert!(
+        writes.last().is_some_and(|frame| frame.same_as(right)),
+        "the destination layout must supply the final frame: {writes:?}"
+    );
+    assert!(
+        !writes.first().is_some_and(|frame| frame.same_as(right)),
+        "the initial transfer frame should preserve the source tile size: {writes:?}"
+    );
 }
 
 #[test]

@@ -62,7 +62,7 @@ pub(crate) struct EventOutcome {
     pub(crate) raise_requests: Vec<raise_manager::Event>,
     pub(crate) make_key_windows: Vec<(pid_t, WindowServerId)>,
     pub(crate) mouse_warps: Vec<CGPoint>,
-    pub(crate) window_frame_writes: Vec<WindowFrameWriteRequest>,
+    pub(crate) pre_layout_window_frame_writes: Vec<WindowFrameWriteRequest>,
     pub(crate) drag_swap_evaluations: Vec<(WindowId, CGRect)>,
     pub(crate) dispatch_mouse_up: bool,
     pub(crate) close_window: Option<Option<WindowServerId>>,
@@ -109,7 +109,8 @@ impl EventOutcome {
         self.raise_requests.append(&mut other.raise_requests);
         self.make_key_windows.append(&mut other.make_key_windows);
         self.mouse_warps.append(&mut other.mouse_warps);
-        self.window_frame_writes.append(&mut other.window_frame_writes);
+        self.pre_layout_window_frame_writes
+            .append(&mut other.pre_layout_window_frame_writes);
         self.drag_swap_evaluations.append(&mut other.drag_swap_evaluations);
         self.dispatch_mouse_up |= other.dispatch_mouse_up;
         self.close_window = other.close_window.or(self.close_window);
@@ -157,7 +158,7 @@ impl EventOutcome {
             raise_requests: Vec::new(),
             make_key_windows: Vec::new(),
             mouse_warps: Vec::new(),
-            window_frame_writes: Vec::new(),
+            pre_layout_window_frame_writes: Vec::new(),
             drag_swap_evaluations: Vec::new(),
             dispatch_mouse_up: false,
             close_window: None,
@@ -312,14 +313,17 @@ impl EventOutcome {
         self
     }
 
-    pub(crate) fn with_window_frame_write(
+    pub(crate) fn with_pre_layout_window_frame_write(
         mut self,
         window: WindowId,
         frame: CGRect,
         requested: bool,
     ) -> Self {
-        self.window_frame_writes
-            .push(WindowFrameWriteRequest { window, frame, requested });
+        self.pre_layout_window_frame_writes.push(WindowFrameWriteRequest {
+            window,
+            frame,
+            requested,
+        });
         self
     }
 
