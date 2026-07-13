@@ -139,6 +139,10 @@ impl ModFamily {
             || (flags.bits() & self.left_mask) != 0
             || (flags.bits() & self.right_mask) != 0
     }
+
+    fn left_is_active(&self, flags: CGEventFlags) -> bool { (flags.bits() & self.left_mask) != 0 }
+
+    fn right_is_active(&self, flags: CGEventFlags) -> bool { (flags.bits() & self.right_mask) != 0 }
 }
 
 const MOD_FAMILIES: &[ModFamily] = &[
@@ -692,8 +696,11 @@ pub fn modifiers_from_flags_with_keys<S: std::hash::BuildHasher>(
             continue;
         }
 
-        let has_left = pressed_keys.contains(&m.left_key);
-        let has_right = pressed_keys.contains(&m.right_key);
+        // Prefer the tracked key set during normal event processing, while
+        // retaining side information directly from the event flags when
+        // recovering after a dropped event or re-enabled tap.
+        let has_left = pressed_keys.contains(&m.left_key) || m.left_is_active(flags);
+        let has_right = pressed_keys.contains(&m.right_key) || m.right_is_active(flags);
 
         if has_left {
             mods.insert(m.left);
@@ -723,6 +730,23 @@ pub fn modifier_flag_for_key(key_code: KeyCode) -> Option<CGEventFlags> {
         KeyCode::NumLock => Some(CGEventFlags::MaskNumericPad),
         _ => None,
     }
+}
+
+/// Returns whether the specific physical modifier key is active.
+///
+/// The device-independent Core Graphics masks only identify a modifier
+/// family. The low device-dependent bits retain the left/right distinction.
+pub fn modifier_key_is_active(flags: CGEventFlags, key_code: KeyCode) -> bool {
+    for m in MOD_FAMILIES {
+        if key_code == m.left_key {
+            return m.left_is_active(flags);
+        }
+        if key_code == m.right_key {
+            return m.right_is_active(flags);
+        }
+    }
+
+    modifier_flag_for_key(key_code).is_some_and(|flag| flags.contains(flag))
 }
 
 pub fn is_modifier_key(key_code: KeyCode) -> bool { modifier_flag_for_key(key_code).is_some() }
@@ -1085,5 +1109,33 @@ mod tests {
             KeyCode::from_str("slash").unwrap(),
             keycode_from_char("/").unwrap_or(KeyCode::Slash)
         );
+    }
+
+    #[test]
+    fn modifier_key_activity_distinguishes_left_and_right_alt() {
+        let left_alt = CGEventFlags::from_bits_retain(
+            CGEventFlags::MaskAlternate.bits() | MOD_FAMILIES[1].left_mask,
+        );
+        let right_alt = CGEventFlags::from_bits_retain(
+            CGEventFlags::MaskAlternate.bits() | MOD_FAMILIES[1].right_mask,
+        );
+
+        assert!(modifier_key_is_active(left_alt, KeyCode::AltLeft));
+        assert!(!modifier_key_is_active(left_alt, KeyCode::AltRight));
+        assert!(modifier_key_is_active(right_alt, KeyCode::AltRight));
+        assert!(!modifier_key_is_active(right_alt, KeyCode::AltLeft));
+    }
+
+    #[test]
+    fn modifier_recovery_preserves_right_alt_from_flags() {
+        let right_alt = CGEventFlags::from_bits_retain(
+            CGEventFlags::MaskAlternate.bits() | MOD_FAMILIES[1].right_mask,
+        );
+        let pressed_keys = std::collections::HashSet::new();
+
+        let modifiers = modifiers_from_flags_with_keys(right_alt, &pressed_keys);
+
+        assert!(modifiers.contains(Modifiers::ALT_RIGHT));
+        assert!(!modifiers.contains(Modifiers::ALT_LEFT));
     }
 }

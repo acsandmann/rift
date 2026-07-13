@@ -40,7 +40,7 @@ use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{Config, LayoutMode};
 use crate::sys::event::{self, Hotkey, KeyCode, MouseState, set_mouse_state};
 use crate::sys::hotkey::{
-    Modifiers, is_modifier_key, key_code_from_event, modifier_flag_for_key,
+    Modifiers, is_modifier_key, key_code_from_event, modifier_key_is_active,
     modifiers_from_flags_with_keys,
 };
 use crate::sys::screen::{CoordinateConverter, SpaceId};
@@ -721,6 +721,11 @@ impl EventTap {
     ) -> bool {
         let key_code_opt = key_code_from_event(event);
 
+        // FlagsChanged must be interpreted using the flags from this event,
+        // rather than the previous event's modifier state.
+        let flags = CGEvent::flags(Some(event));
+        state.current_flags = flags;
+
         if let Some(key_code) = key_code_opt {
             match event_type {
                 CGEventType::KeyDown => state.note_key_down(key_code),
@@ -729,9 +734,6 @@ impl EventTap {
                 _ => {}
             }
         }
-
-        let flags = CGEvent::flags(Some(event));
-        state.current_flags = flags;
         self.refresh_disable_hotkey_state(state);
 
         if event_type == CGEventType::KeyDown {
@@ -862,21 +864,19 @@ impl State {
         if !is_modifier_key(key_code) {
             return;
         }
-        // Determine whether this modifier is currently pressed by checking
-        // the authoritative CGEventFlags, not our tracked set.
-        if let Some(flag) = modifier_flag_for_key(key_code) {
-            if self.current_flags.contains(flag) {
-                self.pressed_keys.insert(key_code);
-            } else {
-                self.pressed_keys.remove(&key_code);
-            }
+        // Use the device-dependent side bit; the family-wide mask cannot
+        // distinguish (for example) AltLeft from AltRight.
+        if modifier_key_is_active(self.current_flags, key_code) {
+            self.pressed_keys.insert(key_code);
+        } else {
+            self.pressed_keys.remove(&key_code);
         }
     }
 
     fn reconcile_modifier_keys(&mut self) {
         self.pressed_keys.retain(|key| {
-            if let Some(flag) = modifier_flag_for_key(*key) {
-                self.current_flags.contains(flag)
+            if is_modifier_key(*key) {
+                modifier_key_is_active(self.current_flags, *key)
             } else {
                 true // non-modifier keys are not reconciled here
             }
@@ -917,9 +917,7 @@ impl State {
 
     fn base_key_active(&self, key_code: KeyCode) -> bool {
         if is_modifier_key(key_code) {
-            modifier_flag_for_key(key_code)
-                .map(|flag| self.current_flags.contains(flag))
-                .unwrap_or(false)
+            modifier_key_is_active(self.current_flags, key_code)
         } else {
             self.pressed_keys.contains(&key_code)
         }
