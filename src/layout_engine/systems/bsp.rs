@@ -1547,6 +1547,21 @@ impl LayoutSystem for BspLayoutSystem {
         }
     }
 
+    fn consume_or_expel_selection(&mut self, layout: LayoutId, direction: Direction) {
+        let is_joined = self
+            .selection_of_layout(layout)
+            .map(|selection| self.descend_to_leaf(selection))
+            .and_then(|leaf| leaf.parent(&self.tree.map))
+            .and_then(|parent| parent.parent(&self.tree.map))
+            .is_some();
+
+        if is_joined {
+            self.unjoin_selection(layout);
+        } else {
+            self.join_selection_with_direction(layout, direction);
+        }
+    }
+
     fn apply_stacking_to_parent_of_selection(
         &mut self,
         _: LayoutId,

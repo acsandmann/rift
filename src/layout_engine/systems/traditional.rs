@@ -831,6 +831,20 @@ impl LayoutSystem for TraditionalLayoutSystem {
         }
     }
 
+    fn consume_or_expel_selection(&mut self, layout: LayoutId, direction: Direction) {
+        let selection = self.selection(layout);
+        let is_joined = selection
+            .parent(self.map())
+            .and_then(|parent| parent.parent(self.map()))
+            .is_some();
+
+        if is_joined {
+            self.unjoin_selection(layout);
+        } else {
+            self.join_selection_with_direction(layout, direction);
+        }
+    }
+
     fn apply_stacking_to_parent_of_selection(
         &mut self,
         layout: LayoutId,
@@ -3494,6 +3508,38 @@ mod tests {
             "{}",
             system.draw_tree(layout)
         );
+        let root_children: Vec<_> = root.children(system.map()).collect();
+        assert_eq!(root_children.len(), 3, "{}", system.draw_tree(layout));
+        assert!(root_children.iter().all(|node| system.window_at(*node).is_some()));
+    }
+
+    #[test]
+    fn consume_or_expel_toggles_between_joined_and_unjoined() {
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
+
+        let w1 = w(166);
+        let w2 = w(167);
+        let w3 = w(168);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+        system.add_window_after_selection(layout, w3);
+        assert!(system.select_window(layout, w1));
+
+        system.consume_or_expel_selection(layout, Direction::Right);
+        let joined_parent = system
+            .tree
+            .data
+            .window
+            .node_for(layout, w1)
+            .unwrap()
+            .parent(system.map())
+            .unwrap();
+        assert_eq!(joined_parent.children(system.map()).count(), 2);
+
+        system.consume_or_expel_selection(layout, Direction::Right);
         let root_children: Vec<_> = root.children(system.map()).collect();
         assert_eq!(root_children.len(), 3, "{}", system.draw_tree(layout));
         assert!(root_children.iter().all(|node| system.window_at(*node).is_some()));

@@ -45,6 +45,7 @@ pub enum LayoutCommand {
     MoveNode(Direction),
 
     JoinWindow(Direction),
+    ConsumeOrExpelWindow(Direction),
     ToggleStack,
     ToggleOrientation,
     UnjoinWindows,
@@ -1790,6 +1791,12 @@ impl LayoutEngine {
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
                 self.workspace_tree_mut(workspace_id)
                     .join_selection_with_direction(layout, direction);
+                EventResponse::default()
+            }
+            LayoutCommand::ConsumeOrExpelWindow(direction) => {
+                self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
+                self.workspace_tree_mut(workspace_id)
+                    .consume_or_expel_selection(layout, direction);
                 EventResponse::default()
             }
             LayoutCommand::ToggleStack => {

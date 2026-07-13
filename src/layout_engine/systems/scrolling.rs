@@ -1380,6 +1380,56 @@ impl LayoutSystem for ScrollingLayoutSystem {
         state.move_window_to_column_end(selected, target_col);
     }
 
+    fn consume_or_expel_selection(&mut self, layout: LayoutId, direction: Direction) {
+        if !matches!(direction, Direction::Left | Direction::Right) {
+            return;
+        }
+
+        let is_joined = self
+            .layout_state(layout)
+            .and_then(|state| {
+                let (col_idx, _) = state.selected_location()?;
+                Some(state.columns[col_idx].windows.len() > 1)
+            })
+            .unwrap_or(false);
+
+        if !is_joined {
+            self.join_selection_with_direction(layout, direction);
+            return;
+        }
+
+        let niri_navigation = matches!(
+            self.settings.focus_navigation_style,
+            ScrollingFocusNavigationStyle::Niri
+        );
+        let Some(state) = self.layout_state_mut(layout) else {
+            return;
+        };
+        let Some((col_idx, row_idx)) = state.selected_location() else {
+            return;
+        };
+        state.columns[col_idx].ensure_height_weights();
+        let wid = state.columns[col_idx].windows.remove(row_idx);
+        let weight = state.columns[col_idx].height_weights.remove(row_idx);
+        let insert_at = match direction {
+            Direction::Left => col_idx,
+            Direction::Right => col_idx + 1,
+            Direction::Up | Direction::Down => unreachable!(),
+        };
+        state.columns.insert(insert_at, Column {
+            windows: vec![wid],
+            width_offset: 0.0,
+            height_weights: vec![weight],
+        });
+        state.selected = Some(wid);
+        if niri_navigation {
+            state.reveal_selected_without_direction();
+        } else {
+            state.align_scroll_to_selected();
+        }
+        state.clamp_scroll_offset();
+    }
+
     fn apply_stacking_to_parent_of_selection(
         &mut self,
         layout: LayoutId,
@@ -2127,6 +2177,36 @@ mod tests {
         assert_eq!(state.columns.len(), 2);
         assert_eq!(state.columns[0].windows, vec![w2]);
         assert_eq!(state.columns[1].windows, vec![w1]);
+        assert_eq!(state.selected, Some(w2));
+    }
+
+    #[test]
+    fn consume_or_expel_left_toggles_selected_window_on_left_side() {
+        let (mut system, layout, w1, w2) = setup_two_windows(ScrollingLayoutSettings::default());
+
+        system.consume_or_expel_selection(layout, Direction::Left);
+        let state = system.layouts.get(layout).expect("layout state missing");
+        assert_eq!(state.columns.len(), 1);
+        assert_eq!(state.columns[0].windows, vec![w1, w2]);
+
+        system.consume_or_expel_selection(layout, Direction::Left);
+        let state = system.layouts.get(layout).expect("layout state missing");
+        assert_eq!(state.columns.len(), 2);
+        assert_eq!(state.columns[0].windows, vec![w2]);
+        assert_eq!(state.columns[1].windows, vec![w1]);
+        assert_eq!(state.selected, Some(w2));
+    }
+
+    #[test]
+    fn consume_or_expel_right_expels_selected_window_on_right_side() {
+        let (mut system, layout, w1, w2) = setup_two_windows(ScrollingLayoutSettings::default());
+        system.join_selection_with_direction(layout, Direction::Left);
+
+        system.consume_or_expel_selection(layout, Direction::Right);
+        let state = system.layouts.get(layout).expect("layout state missing");
+        assert_eq!(state.columns.len(), 2);
+        assert_eq!(state.columns[0].windows, vec![w1]);
+        assert_eq!(state.columns[1].windows, vec![w2]);
         assert_eq!(state.selected, Some(w2));
     }
 

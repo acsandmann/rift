@@ -221,6 +221,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
     let (_mc_native_tx, mc_native_rx) = rift_wm::actor::channel();
     let (wm_controller, wm_controller_sender) = WmController::new(
         wm_config,
+        config_tx.clone(),
         events_tx.clone(),
         event_tap_tx.clone(),
         stack_line_tx.clone(),
