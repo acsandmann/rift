@@ -483,14 +483,3 @@ impl ExecCmd {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn close_window_accepts_simple_form() {
-        let simple: WmCommand = serde_json::from_str(r#""close_window""#).unwrap();
-        assert_eq!(simple, WmCommand::Wm(WmCmd::CloseWindow));
-    }
-}

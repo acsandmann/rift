@@ -680,7 +680,7 @@ fn map_layout_command(cmd: LayoutCommands) -> Result<RiftCommand, String> {
             LC::ToggleFocusFloating,
         ))),
         LayoutCommands::AdjustMasterRatio { delta } => Ok(RiftCommand::Reactor(
-            reactor::Command::Layout(LC::AdjustMasterRatio { delta }),
+            reactor::Command::Layout(LC::AdjustMasterRatio(delta)),
         )),
         LayoutCommands::AdjustMasterCount { delta } => Ok(RiftCommand::Reactor(
             reactor::Command::Layout(LC::AdjustMasterCount { delta }),

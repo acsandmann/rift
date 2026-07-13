@@ -85,9 +85,7 @@ pub enum LayoutCommand {
 
     SwapWindows(crate::actor::app::WindowId, crate::actor::app::WindowId),
 
-    AdjustMasterRatio {
-        delta: f64,
-    },
+    AdjustMasterRatio(f64),
     AdjustMasterCount {
         delta: i32,
     },
@@ -1857,7 +1855,7 @@ impl LayoutEngine {
                 self.workspace_tree_mut(workspace_id).resize_selection_by(layout, amount);
                 EventResponse::default()
             }
-            LayoutCommand::AdjustMasterRatio { delta } => {
+            LayoutCommand::AdjustMasterRatio(delta) => {
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
                 if let LayoutSystemKind::MasterStack(s) = self.workspace_tree_mut(workspace_id) {
                     s.adjust_master_ratio(layout, delta);
