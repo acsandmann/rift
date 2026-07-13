@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
 use crate::actor::{self, reactor};
-use crate::common::config::{Config, ConfigCommand};
+use crate::common::config::{Config, ConfigCommand, MAX_WORKSPACES};
 
 pub type Sender = actor::Sender<Event>;
 pub type Receiver = actor::Receiver<Event>;
@@ -172,7 +172,7 @@ impl ConfigActor {
                 }
             }
             ConfigCommand::SetWorkspaceNames(names) => {
-                if names.len() <= 32 {
+                if names.len() <= MAX_WORKSPACES {
                     new_config.virtual_workspaces.workspace_names = names.clone();
                     config_changed = true;
                     info!("Updated workspace names to: {:?}", names);

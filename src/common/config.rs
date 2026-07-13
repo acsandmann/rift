@@ -9,7 +9,7 @@ use super::collections::HashMap;
 use crate::actor::wm_controller::WmCommand;
 use crate::sys::hotkey::{Hotkey, HotkeySpec};
 
-const MAX_WORKSPACES: usize = 32;
+pub const MAX_WORKSPACES: usize = 128;
 
 // TODO: when to remove these?
 const DEPRECATED_MAP: &[(&str, &str)] = &[
