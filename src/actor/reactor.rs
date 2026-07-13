@@ -2305,6 +2305,7 @@ impl Reactor {
         space_state: ForwardedSpaceState,
     ) -> anyhow::Result<EventOutcome> {
         let mut outcome = EventOutcome::finalized_event(None, false, false, true);
+        let previous_command_space = self.raw_command_space();
         let analysis = topology_workflow::analyze_space_snapshot(
             &self.space_state,
             &self.active_spaces,
@@ -2346,6 +2347,11 @@ impl Reactor {
         if command_space_only_update {
             self.space_state.menu_bar_space = menu_bar_space;
             self.space_state.command_space = command_space;
+            self.reconcile_active_display_focus(
+                previous_command_space,
+                command_space,
+                &mut outcome,
+            );
             return Ok(outcome);
         }
         if display_set_changed {
@@ -2416,6 +2422,11 @@ impl Reactor {
         }
         let active_windows = self.authoritative_active_space_windows();
         self.finalize_space_change(&spaces, active_windows, releases_lifecycle_refresh_quarantine);
+        self.reconcile_active_display_focus(
+            previous_command_space,
+            self.raw_command_space(),
+            &mut outcome,
+        );
         self.try_apply_pending_space_change();
         if should_force_refresh_layout {
             outcome = outcome.with_force_window_refresh().with_arrange_passes(1);
@@ -2565,10 +2576,7 @@ impl Reactor {
             .filter_map(|screen| screen.space)
             .filter(|space| self.is_space_active(*space))
             .collect();
-        let focused_window = self
-            .main_window()
-            .zip(self.main_window_space())
-            .and_then(|(window, space)| self.is_space_active(space).then_some((space, window)));
+        let focused_window = self.focused_window_for_discovery(pid);
         outcome.absorb(window_discovery::emit_layout_events(
             &mut self.state,
             &mut self.layout_manager,
@@ -4183,6 +4191,54 @@ impl Reactor {
         // TODO: Optimize this with a cache or something.
         let wid = self.main_window()?;
         self.best_space_for_window_id(wid)
+    }
+
+    /// Window discovery is scoped to one application. It may restore that
+    /// application's current focus after its windows have been inserted into
+    /// the layout, but it must never replay another application's global main
+    /// window. Requiring the command space also prevents a refresh racing an
+    /// active-display change from restoring focus on the display being left.
+    fn focused_window_for_discovery(&self, pid: pid_t) -> Option<(SpaceId, WindowId)> {
+        let window = self.main_window().filter(|window| window.pid == pid)?;
+        let space = self.main_window_space()?;
+        (self.workspace_command_space() == Some(space)).then_some((space, window))
+    }
+
+    /// Treat a command-space transition as the authoritative active-display
+    /// focus edge. AX can continue to report the previous display's main
+    /// window briefly, so choose focus from the destination display's active
+    /// virtual workspace instead of waiting for (or replaying) that stale AX
+    /// state. Initial topology discovery is not a display switch.
+    fn reconcile_active_display_focus(
+        &self,
+        previous_space: Option<SpaceId>,
+        current_space: Option<SpaceId>,
+        outcome: &mut EventOutcome,
+    ) {
+        let (Some(previous_space), Some(current_space)) = (previous_space, current_space) else {
+            return;
+        };
+        if previous_space == current_space || !self.is_space_active(current_space) {
+            return;
+        }
+
+        let preferred = self
+            .main_window()
+            .filter(|window| self.best_space_for_window_id(*window) == Some(current_space));
+        let focus_window =
+            self.visible_focus_candidate_in_active_workspace(current_space, preferred);
+        let Some(focus_window) = focus_window else {
+            return;
+        };
+
+        outcome.layout_responses.push((
+            layout::EventResponse {
+                raise_windows: Vec::new(),
+                focus_window: Some(focus_window),
+                boundary_hit: None,
+            },
+            Some(current_space),
+        ));
     }
 
     fn raw_command_space(&self) -> Option<SpaceId> { self.space_state.command_space }

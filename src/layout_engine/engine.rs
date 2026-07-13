@@ -1176,7 +1176,17 @@ impl LayoutEngine {
                 continue;
             }
 
+            // Per-app membership reconciliation is not a focus operation.
+            // Several layout systems select newly inserted windows as part of
+            // their normal insertion semantics, so preserve the selection
+            // explicitly across discovery-driven synchronization.
+            let selected_window = self.workspace_tree(ws_id).selected_window(layout);
             self.workspace_tree_mut(ws_id).set_windows_for_app(layout, pid, desired);
+            if let Some(selected_window) = selected_window
+                && self.workspace_tree(ws_id).contains_window(layout, selected_window)
+            {
+                let _ = self.workspace_tree_mut(ws_id).select_window(layout, selected_window);
+            }
             changed_layouts.push((ws_id, layout));
         }
 

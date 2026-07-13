@@ -629,6 +629,179 @@ fn command_space_only_snapshot_does_not_trigger_full_space_reconcile() {
 }
 
 #[test]
+fn command_space_change_focuses_destination_display_workspace() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let (raise_manager_tx, mut raise_manager_rx) = actor::channel();
+    reactor.communication_manager.raise_manager_tx = raise_manager_tx;
+
+    let left = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let right = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
+    let left_space = SpaceId::new(1);
+    let right_space = SpaceId::new(2);
+    reactor.handle_event(Event::SpaceStateChanged(ForwardedSpaceState {
+        screens: make_screen_snapshots(vec![left, right], vec![
+            Some(left_space),
+            Some(right_space),
+        ]),
+        fullscreen_spaces: Default::default(),
+        has_seen_display_set: true,
+        active_spaces: [left_space, right_space].into_iter().collect(),
+        menu_bar_space: Some(left_space),
+        command_space: Some(left_space),
+        display_space_ids: Default::default(),
+        last_user_space_by_display: Default::default(),
+        space_remaps: Vec::new(),
+        display_set_changed: false,
+        topology_changed: false,
+        allow_space_remap: false,
+        should_force_refresh_layout: false,
+        releases_lifecycle_refresh_quarantine: false,
+        releases_display_churn_refresh_quarantine: false,
+        resized_spaces: Vec::new(),
+        topology_window_delta: None,
+        active_window_spaces: Default::default(),
+    }));
+
+    let mut windows = make_windows(2);
+    windows[1].frame.origin = CGPoint::new(1100., 100.);
+    reactor.handle_event(Event::ApplicationGloballyActivated(1));
+    reactor.handle_events(apps.make_app_with_opts(
+        1,
+        windows,
+        Some(WindowId::new(1, 1)),
+        true,
+        true,
+    ));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let old_focus = WindowId::new(1, 1);
+    let destination_focus = WindowId::new(1, 2);
+    reactor.send_layout_event(LayoutEvent::WindowFocused(right_space, destination_focus));
+    reactor.send_layout_event(LayoutEvent::WindowFocused(left_space, old_focus));
+    while raise_manager_rx.try_recv().is_ok() {}
+
+    reactor.handle_event(Event::SpaceStateChanged(ForwardedSpaceState {
+        screens: make_screen_snapshots(vec![left, right], vec![
+            Some(left_space),
+            Some(right_space),
+        ]),
+        fullscreen_spaces: Default::default(),
+        has_seen_display_set: true,
+        active_spaces: [left_space, right_space].into_iter().collect(),
+        menu_bar_space: Some(right_space),
+        command_space: Some(right_space),
+        display_space_ids: Default::default(),
+        last_user_space_by_display: Default::default(),
+        space_remaps: Vec::new(),
+        display_set_changed: false,
+        topology_changed: false,
+        allow_space_remap: false,
+        should_force_refresh_layout: false,
+        releases_lifecycle_refresh_quarantine: false,
+        releases_display_churn_refresh_quarantine: false,
+        resized_spaces: Vec::new(),
+        topology_window_delta: None,
+        active_window_spaces: Default::default(),
+    }));
+
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        Some(destination_focus)
+    );
+    let message = raise_manager_rx
+        .try_recv()
+        .expect("display switch should focus the destination workspace")
+        .1;
+    match message {
+        raise_manager::Event::RaiseRequest(RaiseRequest { focus_window, focus_quiet, .. }) => {
+            assert_eq!(focus_window.map(|(window, _)| window), Some(destination_focus));
+            assert_eq!(focus_quiet, Quiet::Yes);
+        }
+        _ => panic!("unexpected raise-manager event: {message:?}"),
+    }
+
+    // The AX main-window tracker can still point at the old display while the
+    // refresh caused by the display switch is in flight. Rediscovering that
+    // same application must not undo the authoritative command-space focus.
+    let discovered = [old_focus, destination_focus]
+        .into_iter()
+        .map(|window| {
+            let info = reactor
+                .state
+                .windows
+                .window(window)
+                .expect("application window should remain tracked")
+                .info
+                .clone();
+            (window, info)
+        })
+        .collect();
+    reactor.handle_event(Event::WindowsDiscovered {
+        pid: 1,
+        new: discovered,
+        known_visible: vec![old_focus, destination_focus],
+    });
+    assert_eq!(reactor.main_window(), Some(old_focus));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        Some(destination_focus),
+        "stale AX focus from the previous display must not override command-space focus"
+    );
+}
+
+#[test]
+fn discovery_does_not_replay_another_apps_global_main_window() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let space = SpaceId::new(1);
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+
+    reactor.handle_event(Event::ApplicationGloballyActivated(1));
+    reactor.handle_events(apps.make_app_with_opts(
+        1,
+        make_windows(1),
+        Some(WindowId::new(1, 1)),
+        true,
+        true,
+    ));
+    reactor.handle_events(apps.make_app_with_opts(2, make_windows(1), None, false, true));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let app_two_window = WindowId::new(2, 1);
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, app_two_window));
+    let info = reactor
+        .state
+        .windows
+        .window(app_two_window)
+        .expect("app two window should be tracked")
+        .info
+        .clone();
+
+    reactor.handle_event(Event::WindowsDiscovered {
+        pid: 2,
+        new: vec![(app_two_window, info)],
+        known_visible: vec![app_two_window],
+    });
+
+    assert_eq!(reactor.main_window(), Some(WindowId::new(1, 1)));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        Some(app_two_window),
+        "app-scoped discovery must not replay another app's global main window"
+    );
+}
+
+#[test]
 fn forwarded_space_state_updates_fullscreen_spaces() {
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(
         &crate::common::config::VirtualWorkspaceSettings::default(),
