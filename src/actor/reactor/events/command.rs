@@ -249,7 +249,27 @@ pub struct DisplayFocusPayload {
     pub focus_window: Option<WindowId>,
 }
 
-pub fn handle_move_mouse_to_display(payload: DisplayFocusPayload) -> anyhow::Result<EventOutcome> {
+/// Build a raise request that moves real (window server) focus to `window`,
+/// mirroring what `handle_command_reactor_focus_window` emits. Without this,
+/// display-focus commands only update the layout engine's internal selection
+/// and macOS keyboard focus stays on the previous display.
+fn display_focus_raise_request(apps: &AppManager, window: WindowId) -> raise_manager::Event {
+    let mut app_handles: HashMap<i32, AppThreadHandle> = HashMap::default();
+    if let Some(app) = apps.apps.get(&window.pid) {
+        app_handles.insert(window.pid, app.handle.clone());
+    }
+    raise_manager::Event::RaiseRequest(raise_manager::RaiseRequest {
+        raise_windows: Vec::new(),
+        focus_window: Some((window, None)),
+        app_handles,
+        focus_quiet: Quiet::No,
+    })
+}
+
+pub fn handle_move_mouse_to_display(
+    apps: &AppManager,
+    payload: DisplayFocusPayload,
+) -> anyhow::Result<EventOutcome> {
     let Some(screen) = payload.screen else {
         return Ok(EventOutcome::finalized_event(None, false, false, false));
     };
@@ -260,12 +280,17 @@ pub fn handle_move_mouse_to_display(payload: DisplayFocusPayload) -> anyhow::Res
     let mut outcome = EventOutcome::finalized_event(None, false, false, false)
         .with_mouse_warp(screen.frame.mid());
     if let (Some(space), Some(window)) = (screen.space, payload.focus_window) {
-        outcome = outcome.with_layout_event(LayoutEvent::WindowFocused(space, window));
+        outcome = outcome
+            .with_layout_event(LayoutEvent::WindowFocused(space, window))
+            .with_raise_request(display_focus_raise_request(apps, window));
     }
     Ok(outcome)
 }
 
-pub fn handle_focus_display(payload: DisplayFocusPayload) -> anyhow::Result<EventOutcome> {
+pub fn handle_focus_display(
+    apps: &AppManager,
+    payload: DisplayFocusPayload,
+) -> anyhow::Result<EventOutcome> {
     let Some(screen) = payload.screen else {
         return Ok(EventOutcome::finalized_event(None, false, false, false));
     };
@@ -275,7 +300,8 @@ pub fn handle_focus_display(payload: DisplayFocusPayload) -> anyhow::Result<Even
     }
     if let (Some(space), Some(window)) = (screen.space, payload.focus_window) {
         return Ok(EventOutcome::finalized_event(None, false, false, false)
-            .with_layout_event(LayoutEvent::WindowFocused(space, window)));
+            .with_layout_event(LayoutEvent::WindowFocused(space, window))
+            .with_raise_request(display_focus_raise_request(apps, window)));
     }
     Ok(
         EventOutcome::finalized_event(None, false, false, false)

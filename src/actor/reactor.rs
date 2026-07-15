@@ -1558,6 +1558,7 @@ impl Reactor {
                     .and_then(|screen| screen.space)
                     .is_none_or(|space| self.is_space_active(space));
                 return command_workflow::handle_move_mouse_to_display(
+                    &self.app_manager,
                     command_workflow::DisplayFocusPayload {
                         screen,
                         target_is_active,
@@ -1582,6 +1583,7 @@ impl Reactor {
                     .and_then(|screen| screen.space)
                     .is_none_or(|space| self.is_space_active(space));
                 return command_workflow::handle_focus_display(
+                    &self.app_manager,
                     command_workflow::DisplayFocusPayload {
                         screen,
                         target_is_active,
