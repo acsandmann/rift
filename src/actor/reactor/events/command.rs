@@ -247,6 +247,9 @@ pub struct DisplayFocusPayload {
     pub screen: Option<ScreenInfo>,
     pub target_is_active: bool,
     pub focus_window: Option<WindowId>,
+    /// Center of `focus_window`'s frame, used to warp the cursor onto the
+    /// window that receives focus. Falls back to the screen center.
+    pub focus_window_center: Option<objc2_core_foundation::CGPoint>,
 }
 
 /// Build a raise request that moves real (window server) focus to `window`,
@@ -301,7 +304,8 @@ pub fn handle_focus_display(
     if let (Some(space), Some(window)) = (screen.space, payload.focus_window) {
         return Ok(EventOutcome::finalized_event(None, false, false, false)
             .with_layout_event(LayoutEvent::WindowFocused(space, window))
-            .with_raise_request(display_focus_raise_request(apps, window)));
+            .with_raise_request(display_focus_raise_request(apps, window))
+            .with_mouse_warp(payload.focus_window_center.unwrap_or_else(|| screen.frame.mid())));
     }
     Ok(
         EventOutcome::finalized_event(None, false, false, false)
