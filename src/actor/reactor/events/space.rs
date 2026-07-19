@@ -195,7 +195,6 @@ pub fn handle_window_server_destroyed(
                     drag,
                     window::WindowDestroyedPayload {
                         window: wid,
-                        suppress_if_window_alive: false,
                         platform_window_alive: false,
                     },
                 ) {

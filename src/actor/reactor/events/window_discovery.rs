@@ -276,7 +276,6 @@ pub(crate) fn cleanup_stale_windows(
             drag,
             window::WindowDestroyedPayload {
                 window: wid,
-                suppress_if_window_alive: false,
                 platform_window_alive: false,
             },
         )?);

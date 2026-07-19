@@ -1,7 +1,7 @@
 use objc2_core_foundation::CGRect;
 use tracing::{debug, trace};
 
-use crate::actor::app::WindowId;
+use crate::actor::app::{Request, WindowId};
 use crate::actor::reactor::events::EventOutcome;
 use crate::actor::reactor::managers::DragManager;
 use crate::actor::reactor::transaction_manager::TransactionManager;
@@ -70,7 +70,6 @@ pub fn handle_window_created(
 #[derive(Debug, Clone, Copy)]
 pub struct WindowDestroyedPayload {
     pub window: WindowId,
-    pub suppress_if_window_alive: bool,
     pub platform_window_alive: bool,
 }
 
@@ -86,13 +85,22 @@ pub fn handle_window_destroyed(
         None => return Ok(EventOutcome::finalized_event(None, false, false, false)),
     };
 
-    // Suppress false-positive destructions when on a fullscreen space or during MC.
-    // kAXMainWindowChangedNotification triggers remove_stale_windows in app.rs, which
-    // calls kAXWindowsAttribute (space-filtered), omitting Desktop windows and emitting
-    // WindowDestroyed for them. `get_window()` is a direct Skylight window query
-    // rather than an AX space-filtered view, so Some here means the window still exists.
-    if payload.suppress_if_window_alive && payload.platform_window_alive {
-        return Ok(EventOutcome::finalized_event(None, false, false, false));
+    // AX element lifetime is not native window lifetime. macOS invalidates and replaces AX
+    // elements during lock/unlock, display churn, fullscreen transitions, and native tab
+    // changes. WindowServer identity is authoritative: if the same window id still belongs
+    // to the same process, preserve all persistent window/workspace state and ask the app
+    // actor to acquire the replacement AX element.
+    //
+    // This must not depend on a lifecycle quarantine. A stabilized topology snapshot can
+    // legitimately arrive just before AX invalidates the old elements, so timing-based gates
+    // leave a race that resets rediscovered windows to the default virtual workspace.
+    if payload.platform_window_alive {
+        debug!(
+            ?wid,
+            "Preserving window whose AX element was destroyed while WindowServer peer is alive"
+        );
+        return Ok(EventOutcome::finalized_event(None, false, false, false)
+            .with_app_request(wid.pid, Request::GetVisibleWindows));
     }
 
     if let Some(ws_id) = window_server_id {

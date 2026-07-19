@@ -5387,6 +5387,79 @@ fn partial_post_wake_snapshot_preserves_manual_workspace_assignment() {
 }
 
 #[test]
+fn ax_invalidation_after_quarantine_release_preserves_workspace_assignment() {
+    let mut apps = Apps::new();
+    let workspace_cfg = crate::common::config::VirtualWorkspaceSettings {
+        default_workspace_count: 2,
+        ..crate::common::config::VirtualWorkspaceSettings::default()
+    };
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &workspace_cfg,
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+
+    let secondary_workspace = reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager_mut()
+        .list_workspaces(space)[1]
+        .0;
+    assert!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager_mut()
+            .assign_window_to_workspace(
+                &mut reactor.state.windows,
+                space,
+                wid,
+                secondary_workspace,
+            )
+    );
+
+    // Reproduce the ordering from the dock-wake log: the topology snapshot has already
+    // released every timing-based quarantine, then the old AX element is invalidated while
+    // its WindowServer window remains alive.
+    assert!(!reactor.refreshes_blocked());
+    let outcome = window_workflow::handle_window_destroyed(
+        &mut reactor.state,
+        &reactor.transaction_manager,
+        &mut reactor.drag_manager,
+        window_workflow::WindowDestroyedPayload {
+            window: wid,
+            platform_window_alive: true,
+        },
+    )
+    .expect("AX invalidation should be handled");
+    reactor.apply_event_outcome(outcome);
+
+    assert!(reactor.state.windows.window(wid).is_some());
+    assert_eq!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager()
+            .workspace_for_window(&reactor.state.windows, space, wid),
+        Some(secondary_workspace),
+        "a live WindowServer peer must preserve the virtual-workspace assignment",
+    );
+    assert!(
+        apps.requests()
+            .into_iter()
+            .any(|request| matches!(request, Request::GetVisibleWindows)),
+        "Rift should reacquire the replacement AX element after preserving model state",
+    );
+}
+
+#[test]
 fn authoritative_active_space_membership_comes_from_space_window_ids_directly() {
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(
         &crate::common::config::VirtualWorkspaceSettings::default(),

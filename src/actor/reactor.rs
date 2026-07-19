@@ -1126,17 +1126,6 @@ impl Reactor {
                 let window_server_id =
                     self.state.windows.window(wid).and_then(|window| window.info.sys_id);
 
-                // AX emits spurious destroy notifications for windows whose
-                // elements are transiently invalidated while the session is
-                // locked, the system is sleeping, or displays are churning
-                // (e.g. AXError -25202 during unlock). The window server is
-                // authoritative in those states: if it still knows the window,
-                // keep its state (and workspace assignment) and let the
-                // post-quarantine refresh reconcile.
-                let suppress_if_window_alive = !self.has_user_space_context()
-                    || self.is_mission_control_active()
-                    || self.refreshes_blocked();
-
                 let platform_window_alive = window_server_id.is_some_and(|window_server_id| {
                     window_server::get_window(window_server_id)
                         .is_some_and(|info| info.pid == wid.pid)
@@ -1147,7 +1136,6 @@ impl Reactor {
                     &mut self.drag_manager,
                     window_workflow::WindowDestroyedPayload {
                         window: wid,
-                        suppress_if_window_alive,
                         platform_window_alive,
                     },
                 )?;
