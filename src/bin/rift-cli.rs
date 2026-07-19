@@ -119,13 +119,19 @@ enum ExecuteCommands {
         #[command(subcommand)]
         display_cmd: DisplayCommands,
     },
+    /// macOS space commands (Mission Control spaces, not virtual workspaces)
+    Space {
+        #[command(subcommand)]
+        space_cmd: SpaceCommands,
+    },
     /// Save current state and exit rift
     SaveAndExit,
     /// Print layout tree debugging output in the running rift instance
     Debug,
     /// Serialize and print runtime state
     Serialize,
-    /// Toggle whether the current space is managed by rift
+    /// this command is deprecated, use `rift-cli execute space toggle-activated`
+    #[deprecated]
     ToggleSpaceActivated,
     /// Show timing metrics
     ShowTiming,
@@ -137,9 +143,16 @@ enum WindowCommands {
     Next,
     /// Focus the previous window
     Prev,
-    /// Move focus in a direction
+    /// Focus a window by direction or by a specific window ID
     Focus {
-        direction: String, // up, down, left, right
+        /// Direction to focus (left, right, up, down)
+        direction: Option<String>,
+        /// Rift window ID as JSON (`{"pid":123,"idx":456}`) or debug text
+        #[arg(long, conflicts_with = "direction")]
+        window_id: Option<String>,
+        /// Optional macOS window server ID for the target window
+        #[arg(long, requires = "window_id")]
+        window_server_id: Option<String>,
     },
     /// Toggle window floating state
     ToggleFloat,
@@ -163,6 +176,17 @@ enum WindowCommands {
         /// Optional window server ID; defaults to the focused window
         #[arg(long, visible_alias = "window-server-id")]
         window_id: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SpaceCommands {
+    /// Toggle whether rift manages the current macOS space
+    ToggleActivated,
+    /// Switch to an adjacent macOS space (Mission Control spaces, not virtual workspaces)
+    Switch {
+        /// Direction to switch (left, right, up, down)
+        direction: String,
     },
 }
 
@@ -507,6 +531,7 @@ fn build_execute_request(execute: ExecuteCommands) -> Result<RiftRequest, String
             map_mission_control_command(mission_cmd)?
         }
         ExecuteCommands::Display { display_cmd } => map_display_command(display_cmd)?,
+        ExecuteCommands::Space { space_cmd } => map_space_command(space_cmd)?,
         ExecuteCommands::SaveAndExit => {
             RiftCommand::Reactor(reactor::Command::Reactor(reactor::ReactorCommand::SaveAndExit))
         }
@@ -516,9 +541,13 @@ fn build_execute_request(execute: ExecuteCommands) -> Result<RiftRequest, String
         ExecuteCommands::Serialize => {
             RiftCommand::Reactor(reactor::Command::Reactor(reactor::ReactorCommand::Serialize))
         }
-        ExecuteCommands::ToggleSpaceActivated => RiftCommand::Reactor(reactor::Command::Reactor(
-            reactor::ReactorCommand::ToggleSpaceActivated,
-        )),
+        #[allow(deprecated)]
+        ExecuteCommands::ToggleSpaceActivated => {
+            eprintln!("this command is deprecated, use rift-cli execute space toggle-activated");
+            RiftCommand::Reactor(reactor::Command::Reactor(
+                reactor::ReactorCommand::ToggleSpaceActivated,
+            ))
+        }
         ExecuteCommands::ShowTiming => RiftCommand::Reactor(reactor::Command::Metrics(
             rift_wm::common::log::MetricsCommand::ShowTiming,
         )),
@@ -557,9 +586,28 @@ fn map_window_command(cmd: WindowCommands) -> Result<RiftCommand, String> {
     match cmd {
         WindowCommands::Next => Ok(RiftCommand::Reactor(reactor::Command::Layout(LC::NextWindow))),
         WindowCommands::Prev => Ok(RiftCommand::Reactor(reactor::Command::Layout(LC::PrevWindow))),
-        WindowCommands::Focus { direction } => Ok(RiftCommand::Reactor(reactor::Command::Layout(
-            LC::MoveFocus(direction.into()),
-        ))),
+        WindowCommands::Focus {
+            direction,
+            window_id,
+            window_server_id,
+        } => match (direction, window_id) {
+            (Some(direction), None) => Ok(RiftCommand::Reactor(reactor::Command::Layout(
+                LC::MoveFocus(parse_focus_direction(&direction)?),
+            ))),
+            (None, Some(window_id)) => Ok(RiftCommand::Reactor(reactor::Command::Reactor(
+                reactor::ReactorCommand::FocusWindow {
+                    window_id: parse_window_id(&window_id)?,
+                    window_server_id: window_server_id
+                        .as_deref()
+                        .map(parse_window_server_id)
+                        .transpose()?,
+                },
+            ))),
+            (None, None) => Err("window focus requires a direction or --window-id".to_string()),
+            (Some(_), Some(_)) => {
+                Err("window focus accepts either a direction or --window-id, not both".to_string())
+            }
+        },
         WindowCommands::ToggleFloat => Ok(RiftCommand::Reactor(reactor::Command::Layout(
             LC::ToggleWindowFloating,
         ))),
@@ -603,12 +651,18 @@ fn parse_window_server_id(input: &str) -> Result<WindowServerId, String> {
 }
 
 fn parse_window_id(input: &str) -> Result<WindowId, String> {
-    WindowId::from_debug_string(input.trim()).ok_or_else(|| {
-        format!(
-            "Invalid window id '{}'; expected `WindowId {{ pid: 123, idx: 456 }}`",
-            input
-        )
-    })
+    let input = input.trim();
+    if let Ok(window_id) = serde_json::from_str(input) {
+        return Ok(window_id);
+    }
+    if let Some(window_id) = WindowId::from_debug_string(input) {
+        return Ok(window_id);
+    }
+
+    Err(format!(
+        "Invalid window id '{}'; expected `{{\"pid\":123,\"idx\":456}}` or `WindowId {{ pid: 123, idx: 456 }}`",
+        input
+    ))
 }
 
 fn parse_layout_mode(value: &str) -> Result<LayoutMode, String> {
@@ -809,6 +863,17 @@ fn map_mission_control_command(cmd: MissionControlCommands) -> Result<RiftComman
             reactor::ReactorCommand::DismissMissionControl,
         ))),
     }
+}
+
+fn map_space_command(cmd: SpaceCommands) -> Result<RiftCommand, String> {
+    let command = match cmd {
+        SpaceCommands::ToggleActivated => reactor::ReactorCommand::ToggleSpaceActivated,
+        SpaceCommands::Switch { direction } => {
+            reactor::ReactorCommand::SwitchSpace(parse_focus_direction(&direction)?)
+        }
+    };
+
+    Ok(RiftCommand::Reactor(reactor::Command::Reactor(command)))
 }
 
 fn map_display_command(cmd: DisplayCommands) -> Result<RiftCommand, String> {
