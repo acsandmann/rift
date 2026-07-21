@@ -42,10 +42,6 @@ impl FloatingManager {
         }
     }
 
-    pub(crate) fn is_fullscreen(&self, window_id: WindowId) -> bool {
-        self.fullscreen_windows.contains_key(&window_id)
-    }
-
     pub(crate) fn set_fullscreen(
         &mut self,
         window_id: WindowId,

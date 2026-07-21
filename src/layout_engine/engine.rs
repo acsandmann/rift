@@ -1606,7 +1606,7 @@ impl LayoutEngine {
                 LayoutCommand::ToggleFullscreenWithinGaps => FloatingFullscreenKind::WithinGaps,
                 _ => FloatingFullscreenKind::Full,
             };
-            if self.floating.is_fullscreen(wid) {
+            if self.floating.fullscreen_kind(wid) == Some(target) {
                 self.floating.set_fullscreen(wid, None);
             } else {
                 // Only save the pre-fullscreen frame when switching from a non-fullscreen state,
