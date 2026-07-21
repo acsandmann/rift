@@ -93,6 +93,7 @@ use crate::actor::spaces::{ForwardedSpaceState, TopologyWindowDelta};
 use crate::actor::{self, menu_bar, stack_line};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
 use crate::common::config::Config;
+use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{self as layout, Direction, LayoutEngine, LayoutEvent, ResolvedWindow};
 use crate::model::broadcast::{
     BroadcastEvent, BroadcastSender, protocol_window_id, protocol_workspace_id,
@@ -258,7 +259,7 @@ pub enum Event {
     /// Sent by the event tap only when the cursor enters a different window.
     /// Window resolution and transition deduplication stay on the input
     /// thread; the reactor only applies the model-dependent focus/raise work.
-    MouseMoved(WindowServerId),
+    MouseMoved(WindowServerId, Option<Direction>, Option<Direction>, u64),
     /// Forwarded by the spaces actor after wake has been observed.
     ///
     /// The spaces actor is the authority for sleep/lock/display lifecycle.
@@ -334,6 +335,35 @@ pub struct Reactor {
     pending_space_change_manager: managers::PendingSpaceChangeManager,
     active_spaces: HashSet<SpaceId>,
     pub animation_tx: Option<AnimationSender>,
+}
+
+fn is_clipped_neighbor(direction: Direction, frame: CGRect, tiling: CGRect) -> bool {
+    match direction {
+        Direction::Left
+            if frame.origin.x < tiling.origin.x
+                && frame.origin.x + frame.size.width > tiling.origin.x =>
+        {
+            true
+        }
+        Direction::Right
+            if frame.origin.x < tiling.origin.x + tiling.size.width
+                && frame.origin.x + frame.size.width > tiling.origin.x + tiling.size.width =>
+        {
+            true
+        }
+        _ => false,
+    }
+}
+
+fn should_suppress_latched_column(
+    latched_direction: Direction,
+    column_order: Option<std::cmp::Ordering>,
+) -> bool {
+    matches!(
+        (latched_direction, column_order),
+        (Direction::Left, Some(std::cmp::Ordering::Less))
+            | (Direction::Right, Some(std::cmp::Ordering::Greater))
+    )
 }
 
 impl Reactor {
@@ -1122,7 +1152,7 @@ impl Reactor {
         // yields focus back to the pre-sleep application. Only real input makes
         // a subsequent activation a trustworthy request to follow an app to a
         // different virtual workspace.
-        if matches!(event, Event::MouseUp | Event::MouseMoved(_) | Event::Command(_)) {
+        if matches!(event, Event::MouseUp | Event::MouseMoved(..) | Event::Command(_)) {
             self.refresh_quarantine_manager.suppress_auto_workspace_switch_until_input = false;
         }
 
@@ -1636,7 +1666,12 @@ impl Reactor {
             Event::MenuClosed(pid) => {
                 return Ok(system_workflow::handle_menu_closed(&mut self.menu_manager, pid)?);
             }
-            Event::MouseMoved(wsid) => {
+            Event::MouseMoved(
+                wsid,
+                edge_hover_direction,
+                latched_direction,
+                edge_hover_generation,
+            ) => {
                 let window = self.state.windows.tracked_window_id(wsid);
                 let active_space = window.and_then(|window| {
                     self.state.windows.window(window).and_then(|state| {
@@ -1655,6 +1690,38 @@ impl Reactor {
                 let needs_layout_sync = window.is_some_and(|window| {
                     self.layout_manager.layout_engine.focused_window() != Some(window)
                 });
+                let mut clear_latched = false;
+                if let Some(latched_direction) = latched_direction {
+                    let column_order = window.zip(active_space).and_then(|(window, space)| {
+                        let focused = self.layout_manager.layout_engine.focused_window()?;
+                        self.layout_manager
+                            .layout_engine
+                            .scrolling_column_order(space, focused, window)
+                    });
+                    if should_suppress_latched_column(latched_direction, column_order) {
+                        return Ok(crate::actor::reactor::events::EventOutcome::default());
+                    }
+                    clear_latched = column_order != Some(std::cmp::Ordering::Equal);
+                }
+                let confirmed_edge_hover = window.zip(active_space).and_then(|(window, space)| {
+                    self.scrolling_neighbor_peek_latch(space, window)
+                        .map(|direction| (space, direction))
+                });
+                if let Some((space, direction)) = confirmed_edge_hover {
+                    if let Some(event_tap_tx) = self.communication_manager.event_tap_tx.as_ref() {
+                        _ = event_tap_tx.send(event_tap::Request::SetEdgeHoverLatch {
+                            generation: edge_hover_generation,
+                            space,
+                            direction,
+                        });
+                    }
+                } else if edge_hover_direction.is_some() || clear_latched {
+                    if let Some(event_tap_tx) = self.communication_manager.event_tap_tx.as_ref() {
+                        _ = event_tap_tx.send(event_tap::Request::ClearEdgeHoverLatch {
+                            generation: edge_hover_generation,
+                        });
+                    }
+                }
                 return window_workflow::handle_mouse_moved_over_window(
                     &self.app_manager,
                     window_workflow::MouseMovedPayload {
@@ -3606,6 +3673,31 @@ impl Reactor {
                 Some(screen.display_uuid.as_str()),
             );
         }
+    }
+
+    fn scrolling_neighbor_peek_latch(&self, space: SpaceId, target: WindowId) -> Option<Direction> {
+        let Some(focused) = self.layout_manager.layout_engine.focused_window() else {
+            return None;
+        };
+        let direction = self
+            .layout_manager
+            .layout_engine
+            .scrolling_neighbor_direction(space, focused, target)?;
+        let Some(screen) = self.space_state.screen_by_space(space) else {
+            return None;
+        };
+        let Some(target_state) = self.state.windows.window(target) else {
+            return None;
+        };
+        let gaps = self
+            .config
+            .settings
+            .layout
+            .gaps
+            .effective_for_display(screen.display_uuid_opt());
+        let tiling = compute_tiling_area(screen.frame, &gaps);
+        let frame = target_state.frame_monotonic;
+        is_clipped_neighbor(direction, frame, tiling).then_some(direction)
     }
 
     // Returns true if the window should be raised on mouse over considering
