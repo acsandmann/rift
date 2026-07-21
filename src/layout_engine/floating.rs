@@ -10,10 +10,14 @@ pub(crate) struct FloatingManager {
     #[serde(skip)]
     active_floating_windows: HashMap<SpaceId, HashMap<pid_t, HashSet<WindowId>>>,
     last_floating_focus: Option<WindowId>,
+    #[serde(skip)]
+    fullscreen_windows: HashSet<WindowId>,
 }
 
 impl FloatingManager {
-    pub(crate) fn new() -> Self { Self::default() }
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
 
     pub(crate) fn is_floating(&self, window_id: WindowId) -> bool {
         self.floating_windows.contains(&window_id)
@@ -25,9 +29,22 @@ impl FloatingManager {
 
     pub(crate) fn remove_floating(&mut self, window_id: WindowId) {
         self.floating_windows.remove(&window_id);
+        self.fullscreen_windows.remove(&window_id);
         self.remove_active_entries(window_id);
         if self.last_floating_focus == Some(window_id) {
             self.last_floating_focus = None;
+        }
+    }
+
+    pub(crate) fn is_fullscreen(&self, window_id: WindowId) -> bool {
+        self.fullscreen_windows.contains(&window_id)
+    }
+
+    pub(crate) fn set_fullscreen(&mut self, window_id: WindowId, on: bool) {
+        if on {
+            self.fullscreen_windows.insert(window_id);
+        } else {
+            self.fullscreen_windows.remove(&window_id);
         }
     }
 
@@ -70,6 +87,10 @@ impl FloatingManager {
             self.floating_windows.insert(to);
         }
 
+        if self.fullscreen_windows.remove(&from) {
+            self.fullscreen_windows.insert(to);
+        }
+
         for space_map in self.active_floating_windows.values_mut() {
             if let Some(app_set) = space_map.get_mut(&from.pid)
                 && app_set.remove(&from)
@@ -94,10 +115,14 @@ impl FloatingManager {
         self.last_floating_focus = wid;
     }
 
-    pub(crate) fn last_focus(&self) -> Option<WindowId> { self.last_floating_focus }
+    pub(crate) fn last_focus(&self) -> Option<WindowId> {
+        self.last_floating_focus
+    }
 
     pub(crate) fn remove_all_for_pid(&mut self, pid: pid_t) {
         let _ = self.floating_windows.remove_all_for_pid(pid);
+
+        self.fullscreen_windows.retain(|w| w.pid != pid);
 
         for space_map in self.active_floating_windows.values_mut() {
             space_map.remove(&pid);

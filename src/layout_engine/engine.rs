@@ -157,7 +157,9 @@ pub struct LayoutEngine {
 }
 
 impl LayoutEngine {
-    pub fn focused_window(&self) -> Option<WindowId> { self.focused_window }
+    pub fn focused_window(&self) -> Option<WindowId> {
+        self.focused_window
+    }
 
     /// Get the active workspace ID for a space, ensuring initialization.
     fn active_workspace_id(&self, space: SpaceId) -> Option<VirtualWorkspaceId> {
@@ -1283,7 +1285,9 @@ impl LayoutEngine {
         }
     }
 
-    pub fn debug_tree(&self, space: SpaceId) { self.debug_tree_desc(space, "", false); }
+    pub fn debug_tree(&self, space: SpaceId) {
+        self.debug_tree_desc(space, "", false);
+    }
 
     pub fn debug_tree_desc(&self, space: SpaceId, desc: &'static str, print: bool) {
         if let Some(workspace_id) = self.virtual_workspace_manager.active_workspace(space) {
@@ -1588,6 +1592,35 @@ impl LayoutEngine {
                 debug!("Removed window {:?} from tiling tree, now floating", wid);
             }
             return EventResponse::default();
+        }
+
+        if let LayoutCommand::ToggleFullscreen = &command
+            && is_floating
+        {
+            let Some(wid) = self.focused_window else {
+                return EventResponse::default();
+            };
+            if self.floating.is_fullscreen(wid) {
+                self.floating.set_fullscreen(wid, false);
+            } else {
+                if let Some(space) = space {
+                    let ws = self
+                        .virtual_workspace_manager
+                        .workspace_for_window(window_store, space, wid)
+                        .or_else(|| self.virtual_workspace_manager.active_workspace(space));
+                    if let (Some(ws), Some(frame)) =
+                        (ws, window_store.window(wid).map(|w| w.frame_monotonic))
+                    {
+                        self.floating_positions.store(space, ws, wid, frame);
+                    }
+                }
+                self.floating.set_fullscreen(wid, true);
+            }
+            return EventResponse {
+                raise_windows: vec![wid],
+                focus_window: Some(wid),
+                boundary_hit: None,
+            };
         }
 
         let Some(space) = space else {
@@ -2057,6 +2090,12 @@ impl LayoutEngine {
                     &window_size,
                 );
             }
+
+            let fullscreen: Vec<WindowId> =
+                positions.keys().copied().filter(|w| self.floating.is_fullscreen(*w)).collect();
+            for w in fullscreen {
+                positions.insert(w, screen);
+            }
         }
 
         let hidden_windows = self
@@ -2237,9 +2276,13 @@ impl LayoutEngine {
         ))
     }
 
-    pub fn save(&self, _path: PathBuf) -> std::io::Result<()> { Ok(()) }
+    pub fn save(&self, _path: PathBuf) -> std::io::Result<()> {
+        Ok(())
+    }
 
-    pub fn serialize_to_string(&self) -> String { ron::ser::to_string(&self).unwrap() }
+    pub fn serialize_to_string(&self) -> String {
+        ron::ser::to_string(&self).unwrap()
+    }
 
     #[cfg(test)]
     pub(crate) fn selected_window(&mut self, space: SpaceId) -> Option<WindowId> {
@@ -2468,7 +2511,9 @@ impl LayoutEngine {
         self.switch_to_workspace(window_store, space, workspace_index, Some(focus_window))
     }
 
-    pub fn virtual_workspace_manager(&self) -> &WorkspaceStore { &self.virtual_workspace_manager }
+    pub fn virtual_workspace_manager(&self) -> &WorkspaceStore {
+        &self.virtual_workspace_manager
+    }
 
     pub fn virtual_workspace_manager_mut(&mut self) -> &mut WorkspaceStore {
         &mut self.virtual_workspace_manager
