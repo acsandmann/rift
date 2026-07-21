@@ -475,6 +475,32 @@ impl LayoutEngine {
         }
     }
 
+    pub fn scrolling_neighbor_direction(
+        &self,
+        space: SpaceId,
+        from: WindowId,
+        to: WindowId,
+    ) -> Option<Direction> {
+        let (workspace_id, layout) = self.workspace_and_layout(space)?;
+        match self.workspace_tree(workspace_id) {
+            LayoutSystemKind::Scrolling(system) => system.neighbor_direction(layout, from, to),
+            _ => None,
+        }
+    }
+
+    pub fn scrolling_column_order(
+        &self,
+        space: SpaceId,
+        from: WindowId,
+        to: WindowId,
+    ) -> Option<Ordering> {
+        let (workspace_id, layout) = self.workspace_and_layout(space)?;
+        match self.workspace_tree(workspace_id) {
+            LayoutSystemKind::Scrolling(system) => system.column_order(layout, from, to),
+            _ => None,
+        }
+    }
+
     pub fn layout_specific_animate_settings(&self, space: SpaceId) -> Option<bool> {
         if let Some(ws_id) = self.virtual_workspace_manager.active_workspace(space) {
             match self.workspace_tree(ws_id) {

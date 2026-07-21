@@ -108,6 +108,11 @@ alignment = "center"
 # 			(disrespects alignment setting above)
 # - "anchored": always align focused column according to `alignment`
 focus_navigation_style = "niri"
+# In niri mode, keep this many pixels of each immediate neighboring column visible.
+# The default of 0 preserves standard reveal-only navigation.
+neighbor_peek_width = 0
+# Horizontal pointer travel required before another neighbor peek can receive focus.
+neighbor_peek_rearm_distance = 20
 # the scrolling layout tends to function better without animations,
 # so you can disable them if you like
 # animate = false

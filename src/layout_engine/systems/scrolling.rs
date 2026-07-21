@@ -333,6 +333,36 @@ impl ScrollingLayoutSystem {
             .max(0.05)
     }
 
+    pub(crate) fn neighbor_direction(
+        &self,
+        layout: LayoutId,
+        from: WindowId,
+        to: WindowId,
+    ) -> Option<Direction> {
+        let state = self.layouts.get(layout)?;
+        let (from_column, _) = state.locate(from)?;
+        let (to_column, _) = state.locate(to)?;
+        if to_column + 1 == from_column {
+            Some(Direction::Left)
+        } else if from_column + 1 == to_column {
+            Some(Direction::Right)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn column_order(
+        &self,
+        layout: LayoutId,
+        from: WindowId,
+        to: WindowId,
+    ) -> Option<std::cmp::Ordering> {
+        let state = self.layouts.get(layout)?;
+        let (from_column, _) = state.locate(from)?;
+        let (to_column, _) = state.locate(to)?;
+        Some(to_column.cmp(&from_column))
+    }
+
     fn clamp_ratio_with_bounds(ratio: f64, min_ratio: f64, max_ratio: f64) -> f64 {
         ratio.clamp(min_ratio, max_ratio).max(0.05)
     }
@@ -747,6 +777,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
             .last_center_offset_delta_px
             .store(center_offset_delta.to_bits(), Ordering::Relaxed);
 
+        let align_requested = state.pending_align.load(Ordering::Relaxed);
         if state.pending_center_align.load(Ordering::Relaxed) {
             let offset = state
                 .selected_location()
@@ -802,6 +833,62 @@ impl LayoutSystem for ScrollingLayoutSystem {
                     }
                     _ => {}
                 }
+                state.scroll_offset_px.store(offset.to_bits(), Ordering::Relaxed);
+            }
+        }
+        if niri_navigation
+            && state.center_override_window.is_none()
+            && self.settings.neighbor_peek_width > 0.0
+            && (align_requested || reveal_direction != 0)
+        {
+            if let Some((selected_col_idx, _)) = state.selected_location() {
+                let selected_start = column_starts.get(selected_col_idx).copied().unwrap_or(0.0);
+                let selected_width = column_widths
+                    .get(selected_col_idx)
+                    .copied()
+                    .unwrap_or((tiling.size.width * base_ratio).max(1.0));
+                let visible_left = tiling.origin.x;
+                let visible_right = tiling.origin.x + tiling.size.width;
+                let left_margin = if selected_col_idx > 0 {
+                    gap_x + self.settings.neighbor_peek_width
+                } else {
+                    0.0
+                };
+                let right_margin = if selected_col_idx + 1 < state.columns.len() {
+                    gap_x + self.settings.neighbor_peek_width
+                } else {
+                    0.0
+                };
+                let available_width = tiling.size.width - left_margin - right_margin;
+                let mut offset = f64::from_bits(state.scroll_offset_px.load(Ordering::Relaxed));
+                let selected_x = anchor_x + selected_start - offset;
+
+                let target_x = if selected_width <= available_width {
+                    selected_x.clamp(
+                        visible_left + left_margin,
+                        visible_right - right_margin - selected_width,
+                    )
+                } else if reveal_direction == -1
+                    && left_margin > 0.0
+                    && selected_width + left_margin <= tiling.size.width
+                {
+                    selected_x.clamp(
+                        visible_left + left_margin,
+                        visible_right - selected_width,
+                    )
+                } else if reveal_direction == 1
+                    && right_margin > 0.0
+                    && selected_width + right_margin <= tiling.size.width
+                {
+                    selected_x.clamp(
+                        visible_left,
+                        visible_right - right_margin - selected_width,
+                    )
+                } else {
+                    selected_x
+                };
+
+                offset += selected_x - target_x;
                 state.scroll_offset_px.store(offset.to_bits(), Ordering::Relaxed);
             }
         }
@@ -1657,6 +1744,20 @@ mod tests {
         (system, layout, w1, w2)
     }
 
+    fn setup_three_windows(
+        settings: ScrollingLayoutSettings,
+    ) -> (ScrollingLayoutSystem, LayoutId, WindowId, WindowId, WindowId) {
+        let mut system = ScrollingLayoutSystem::new(&settings);
+        let layout = system.create_layout();
+        let w1 = wid(2, 1);
+        let w2 = wid(2, 2);
+        let w3 = wid(2, 3);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+        system.add_window_after_selection(layout, w3);
+        (system, layout, w1, w2, w3)
+    }
+
     #[test]
     fn respects_min_width_and_min_height_independently() {
         let mut system = ScrollingLayoutSystem::new(&ScrollingLayoutSettings::default());
@@ -2036,6 +2137,126 @@ mod tests {
             w1_x_after_left,
             w2_x_after_right
         );
+    }
+
+    #[test]
+    fn niri_neighbor_peek_exposes_both_adjacent_columns() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.focus_navigation_style =
+            crate::common::config::ScrollingFocusNavigationStyle::Niri;
+        settings.column_width_ratio = 0.7;
+        settings.neighbor_peek_width = 24.0;
+        let (mut system, layout, w1, w2, w3) = setup_three_windows(settings);
+
+        let screen = screen(1000.0, 800.0);
+        let mut gaps = GapSettings::default();
+        gaps.inner.horizontal = 30.0;
+
+        // Initial selection is w3. Move to the interior column so both neighbors exist.
+        let _ = render(&system, layout, screen, &gaps);
+        let _ = system.move_focus(layout, Direction::Left);
+        let frames = render(&system, layout, screen, &gaps);
+        let tiling = compute_tiling_area(screen, &gaps);
+        let left = frame_for(&frames, w1);
+        let focused = frame_for(&frames, w2);
+        let right = frame_for(&frames, w3);
+        let left_visible = left.origin.x + left.size.width - tiling.origin.x;
+        let right_visible = tiling.origin.x + tiling.size.width - right.origin.x;
+
+        assert!(left_visible >= 23.0, "left peek was {left_visible}px");
+        assert!(right_visible >= 23.0, "right peek was {right_visible}px");
+        assert!(focused.origin.x >= tiling.origin.x);
+        assert!(
+            focused.origin.x + focused.size.width <= tiling.origin.x + tiling.size.width
+        );
+    }
+
+    #[test]
+    fn niri_neighbor_peek_prioritizes_navigation_direction_when_both_do_not_fit() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.focus_navigation_style =
+            crate::common::config::ScrollingFocusNavigationStyle::Niri;
+        settings.column_width_ratio = 0.96;
+        settings.max_column_width_ratio = 0.98;
+        settings.neighbor_peek_width = 24.0;
+        let (mut system, layout, w1, w2, w3) = setup_three_windows(settings);
+
+        let screen = screen(1000.0, 800.0);
+        let gaps = GapSettings::default();
+        let _ = render(&system, layout, screen, &gaps);
+
+        let _ = system.move_focus(layout, Direction::Left);
+        let left_frames = render(&system, layout, screen, &gaps);
+        let left_neighbor = frame_for(&left_frames, w1);
+        let focused = frame_for(&left_frames, w2);
+        let right_neighbor = frame_for(&left_frames, w3);
+        let left_visible = left_neighbor.origin.x + left_neighbor.size.width;
+        let right_visible = screen.size.width - right_neighbor.origin.x;
+        assert!(left_visible >= 23.0, "left peek was {left_visible}px");
+        assert!(right_visible < 23.0, "unexpected right peek was {right_visible}px");
+        assert!(focused.origin.x >= 0.0 && focused.origin.x + focused.size.width <= 1000.0);
+
+        let _ = system.move_focus(layout, Direction::Left);
+        let _ = render(&system, layout, screen, &gaps);
+        let _ = system.move_focus(layout, Direction::Right);
+        let right_frames = render(&system, layout, screen, &gaps);
+        let left_neighbor = frame_for(&right_frames, w1);
+        let focused = frame_for(&right_frames, w2);
+        let right_neighbor = frame_for(&right_frames, w3);
+        let left_visible = left_neighbor.origin.x + left_neighbor.size.width;
+        let right_visible = screen.size.width - right_neighbor.origin.x;
+        assert!(left_visible < 23.0, "unexpected left peek was {left_visible}px");
+        assert!(right_visible >= 23.0, "right peek was {right_visible}px");
+        assert!(focused.origin.x >= 0.0 && focused.origin.x + focused.size.width <= 1000.0);
+    }
+
+    #[test]
+    fn niri_neighbor_peek_does_not_treat_neutral_reveal_as_rightward() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.focus_navigation_style =
+            crate::common::config::ScrollingFocusNavigationStyle::Niri;
+        settings.column_width_ratio = 0.96;
+        settings.max_column_width_ratio = 0.98;
+        settings.neighbor_peek_width = 24.0;
+        let (mut system, layout, w1, _, w3) = setup_three_windows(settings);
+
+        let screen = screen(1000.0, 800.0);
+        let gaps = GapSettings::default();
+        let _ = render(&system, layout, screen, &gaps);
+        let _ = system.move_focus(layout, Direction::Left);
+        let left_frames = render(&system, layout, screen, &gaps);
+        let offset_after_left = scroll_offset(&system, layout);
+        assert!(
+            frame_for(&left_frames, w1).origin.x + frame_for(&left_frames, w1).size.width >= 23.0
+        );
+        assert!(screen.size.width - frame_for(&left_frames, w3).origin.x < 23.0);
+
+        system
+            .layout_state_mut(layout)
+            .expect("layout")
+            .reveal_selected_without_direction();
+        let neutral_frames = render(&system, layout, screen, &gaps);
+
+        assert!((scroll_offset(&system, layout) - offset_after_left).abs() < 1.0);
+        assert!(
+            frame_for(&neutral_frames, w1).origin.x + frame_for(&neutral_frames, w1).size.width
+                >= 23.0
+        );
+        assert!(screen.size.width - frame_for(&neutral_frames, w3).origin.x < 23.0);
+    }
+
+    #[test]
+    fn neighbor_direction_only_matches_immediate_adjacent_columns() {
+        let (system, layout, w1, w2, w3) =
+            setup_three_windows(ScrollingLayoutSettings::default());
+
+        assert_eq!(system.neighbor_direction(layout, w2, w1), Some(Direction::Left));
+        assert_eq!(system.neighbor_direction(layout, w2, w3), Some(Direction::Right));
+        assert_eq!(system.neighbor_direction(layout, w1, w3), None);
+        assert_eq!(system.neighbor_direction(layout, w2, w2), None);
+        assert_eq!(system.column_order(layout, w2, w1), Some(std::cmp::Ordering::Less));
+        assert_eq!(system.column_order(layout, w2, w3), Some(std::cmp::Ordering::Greater));
+        assert_eq!(system.column_order(layout, w2, w2), Some(std::cmp::Ordering::Equal));
     }
 
     #[test]
