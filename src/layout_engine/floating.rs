@@ -4,6 +4,12 @@ use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::{BTreeExt, BTreeSet, HashMap, HashSet};
 use crate::sys::screen::SpaceId;
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FloatingFullscreenKind {
+    Full,
+    WithinGaps,
+}
+
 #[derive(Serialize, Deserialize, Default)]
 pub(crate) struct FloatingManager {
     floating_windows: BTreeSet<WindowId>,
@@ -11,7 +17,7 @@ pub(crate) struct FloatingManager {
     active_floating_windows: HashMap<SpaceId, HashMap<pid_t, HashSet<WindowId>>>,
     last_floating_focus: Option<WindowId>,
     #[serde(skip)]
-    fullscreen_windows: HashSet<WindowId>,
+    fullscreen_windows: HashMap<WindowId, FloatingFullscreenKind>,
 }
 
 impl FloatingManager {
@@ -37,15 +43,26 @@ impl FloatingManager {
     }
 
     pub(crate) fn is_fullscreen(&self, window_id: WindowId) -> bool {
-        self.fullscreen_windows.contains(&window_id)
+        self.fullscreen_windows.contains_key(&window_id)
     }
 
-    pub(crate) fn set_fullscreen(&mut self, window_id: WindowId, on: bool) {
-        if on {
-            self.fullscreen_windows.insert(window_id);
-        } else {
-            self.fullscreen_windows.remove(&window_id);
+    pub(crate) fn set_fullscreen(
+        &mut self,
+        window_id: WindowId,
+        kind: Option<FloatingFullscreenKind>,
+    ) {
+        match kind {
+            Some(k) => {
+                self.fullscreen_windows.insert(window_id, k);
+            }
+            None => {
+                self.fullscreen_windows.remove(&window_id);
+            }
         }
+    }
+
+    pub(crate) fn fullscreen_kind(&self, window_id: WindowId) -> Option<FloatingFullscreenKind> {
+        self.fullscreen_windows.get(&window_id).copied()
     }
 
     pub(crate) fn clear_active_for_app(&mut self, space: SpaceId, pid: pid_t) {
@@ -87,8 +104,8 @@ impl FloatingManager {
             self.floating_windows.insert(to);
         }
 
-        if self.fullscreen_windows.remove(&from) {
-            self.fullscreen_windows.insert(to);
+        if let Some(k) = self.fullscreen_windows.remove(&from) {
+            self.fullscreen_windows.insert(to, k);
         }
 
         for space_map in self.active_floating_windows.values_mut() {
@@ -122,7 +139,7 @@ impl FloatingManager {
     pub(crate) fn remove_all_for_pid(&mut self, pid: pid_t) {
         let _ = self.floating_windows.remove_all_for_pid(pid);
 
-        self.fullscreen_windows.retain(|w| w.pid != pid);
+        self.fullscreen_windows.retain(|w, _| w.pid != pid);
 
         for space_map in self.active_floating_windows.values_mut() {
             space_map.remove(&pid);

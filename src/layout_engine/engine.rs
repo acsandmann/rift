@@ -10,6 +10,7 @@ use crate::actor::app::{AppInfo, WindowId, pid_t};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{LayoutMode, LayoutSettings, VirtualWorkspaceSettings};
 use crate::layout_engine::LayoutSystem;
+use crate::layout_engine::floating::FloatingFullscreenKind;
 use crate::layout_engine::systems::WindowLayoutConstraints;
 use crate::model::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::model::virtual_workspace::{
@@ -1594,16 +1595,25 @@ impl LayoutEngine {
             return EventResponse::default();
         }
 
-        if let LayoutCommand::ToggleFullscreen = &command
+        if let LayoutCommand::ToggleFullscreen | LayoutCommand::ToggleFullscreenWithinGaps =
+            &command
             && is_floating
         {
             let Some(wid) = self.focused_window else {
                 return EventResponse::default();
             };
+            let target = match command {
+                LayoutCommand::ToggleFullscreenWithinGaps => FloatingFullscreenKind::WithinGaps,
+                _ => FloatingFullscreenKind::Full,
+            };
             if self.floating.is_fullscreen(wid) {
-                self.floating.set_fullscreen(wid, false);
+                self.floating.set_fullscreen(wid, None);
             } else {
-                if let Some(space) = space {
+                // Only save the pre-fullscreen frame when switching from a non-fullscreen state,
+                // and _not_ when switching between fullscreen kinds.
+                if self.floating.fullscreen_kind(wid).is_none()
+                    && let Some(space) = space
+                {
                     let ws = self
                         .virtual_workspace_manager
                         .workspace_for_window(window_store, space, wid)
@@ -1614,7 +1624,7 @@ impl LayoutEngine {
                         self.floating_positions.store(space, ws, wid, frame);
                     }
                 }
-                self.floating.set_fullscreen(wid, true);
+                self.floating.set_fullscreen(wid, Some(target));
             }
             return EventResponse {
                 raise_windows: vec![wid],
@@ -2091,10 +2101,26 @@ impl LayoutEngine {
                 );
             }
 
-            let fullscreen: Vec<WindowId> =
-                positions.keys().copied().filter(|w| self.floating.is_fullscreen(*w)).collect();
-            for w in fullscreen {
-                positions.insert(w, screen);
+            let fullscreen: Vec<(WindowId, FloatingFullscreenKind)> = positions
+                .keys()
+                .copied()
+                .filter_map(|w| self.floating.fullscreen_kind(w).map(|k| (w, k)))
+                .collect();
+            for (w, kind) in fullscreen {
+                let rect = match kind {
+                    FloatingFullscreenKind::Full => screen,
+                    FloatingFullscreenKind::WithinGaps => {
+                        let o = &gaps.outer;
+                        CGRect::new(
+                            CGPoint::new(screen.origin.x + o.left, screen.origin.y + o.top),
+                            CGSize::new(
+                                screen.size.width - o.left - o.right,
+                                screen.size.height - o.top - o.bottom,
+                            ),
+                        )
+                    }
+                };
+                positions.insert(w, rect);
             }
         }
 
