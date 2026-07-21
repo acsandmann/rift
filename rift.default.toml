@@ -66,10 +66,11 @@ hot_reload = true
 
 [settings.layout]
 # Layout Types:
-# 	- "traditional" (i3/sway-like containers)
-#	- "bsp" (binary space partitioning),
+#   - "traditional" (i3/sway-like containers)
+#   - "bsp" (binary space partitioning)
 #   - "stack" (single stacked container)
 #   - "master_stack" (master area + stack area)
+#   - "scrolling" (niri-like)
 # defaults to "traditional" if omitted
 #
 # This is the default layout mode if there is nothing else configured
