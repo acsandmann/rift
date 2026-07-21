@@ -516,6 +516,8 @@ pub struct MenuBarSettings {
     pub enabled: bool,
     #[serde(default = "no")]
     pub show_empty: bool,
+    #[serde(default = "no")]
+    pub show_app_icons: bool,
     #[serde(default)]
     pub mode: MenuBarDisplayMode,
     #[serde(default)]

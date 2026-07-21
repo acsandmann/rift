@@ -7,8 +7,9 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{ClassType, DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSColor, NSControlStateValueOff, NSControlStateValueOn, NSEventModifierFlags, NSFont,
-    NSFontAttributeName, NSForegroundColorAttributeName, NSGraphicsContext, NSMenu, NSMenuItem,
-    NSStatusBar, NSStatusItem, NSVariableStatusItemLength, NSView,
+    NSFontAttributeName, NSForegroundColorAttributeName, NSGraphicsContext, NSImage, NSMenu,
+    NSMenuItem, NSRunningApplication, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
+    NSView, NSWorkspace,
 };
 use objc2_core_foundation::{
     CFAttributedString, CFDictionary, CFRetained, CFString, CGFloat, CGPoint, CGRect, CGSize,
@@ -42,6 +43,11 @@ const CORNER_RADIUS: f64 = 3.0;
 const BORDER_WIDTH: f64 = 1.0;
 const CONTENT_INSET: f64 = 2.0;
 const FONT_SIZE: f64 = 12.0;
+const MAX_APP_ICONS: usize = 5;
+const APP_ICON_SIZE: f64 = 17.0;
+const APP_ICON_GROUP_PADDING_X: f64 = 0.0;
+const APP_ICON_GROUP_PADDING_Y: f64 = 0.0;
+const APP_ICON_GAP: f64 = 0.0;
 
 #[derive(Debug, Clone, Copy)]
 pub enum MenuAction {
@@ -156,6 +162,7 @@ impl MenuIcon {
                         workspace: ws,
                         label: String::new(),
                         show_windows: true,
+                        show_app_icons: settings.show_app_icons,
                     })
                     .collect()
             }
@@ -171,6 +178,7 @@ impl MenuIcon {
                         workspace: clone,
                         label: label_for(&ws),
                         show_windows: false,
+                        show_app_icons: false,
                     }
                 })
                 .collect(),
@@ -183,6 +191,7 @@ impl MenuIcon {
                         workspace: ws,
                         label: String::new(),
                         show_windows: true,
+                        show_app_icons: settings.show_app_icons,
                     }]
                 })
                 .unwrap_or_default(),
@@ -198,6 +207,7 @@ impl MenuIcon {
                         workspace: clone,
                         label: label_for(&ws),
                         show_windows: false,
+                        show_app_icons: false,
                     }]
                 })
                 .unwrap_or_default(),
@@ -266,12 +276,19 @@ struct WorkspaceRenderData {
     windows: Vec<CGRect>,
     label_line: Option<CachedTextLine>,
     show_windows: bool,
+    app_icon_group: Option<AppIconGroupRenderData>,
 }
 
 struct WorkspaceRenderInput {
     workspace: WorkspaceData,
     label: String,
     show_windows: bool,
+    show_app_icons: bool,
+}
+
+struct AppIconGroupRenderData {
+    bg_rect: CGRect,
+    icons: Vec<Retained<NSImage>>,
 }
 
 struct CachedTextLine {
@@ -845,17 +862,20 @@ fn build_layout(
     active_attrs: &NSDictionary<NSAttributedStringKey, AnyObject>,
     inactive_attrs: &NSDictionary<NSAttributedStringKey, AnyObject>,
 ) -> MenuIconLayout {
-    let count = inputs.len();
-    let total_width =
-        (CELL_WIDTH * count as f64) + (CELL_SPACING * (count.saturating_sub(1) as f64));
-    let total_height = CELL_HEIGHT;
+    let mut total_width = 0.0;
+    let total_height = CELL_HEIGHT.max(APP_ICON_SIZE + APP_ICON_GROUP_PADDING_Y * 2.0);
 
-    let mut workspaces = Vec::with_capacity(count);
-    for (i, input) in inputs.iter().enumerate() {
+    let mut workspaces = Vec::with_capacity(inputs.len());
+    for input in inputs.iter() {
         let workspace = &input.workspace;
-        let bg_x = i as f64 * (CELL_WIDTH + CELL_SPACING);
+        if total_width > 0.0 {
+            total_width += CELL_SPACING;
+        }
+
+        let bg_x = total_width;
         let bg_y = 0.0;
         let bg_rect = CGRect::new(CGPoint::new(bg_x, bg_y), CGSize::new(CELL_WIDTH, CELL_HEIGHT));
+        total_width += CELL_WIDTH;
 
         let fill_alpha = if input.show_windows {
             if workspace.is_active {
@@ -906,12 +926,35 @@ fn build_layout(
             None
         };
 
+        let app_icon_group = if input.show_windows && input.show_app_icons {
+            let icons = workspace_app_icons(workspace)
+                .into_iter()
+                .take(MAX_APP_ICONS)
+                .collect::<Vec<_>>();
+            if icons.is_empty() {
+                None
+            } else {
+                let width = APP_ICON_GROUP_PADDING_X * 2.0
+                    + (APP_ICON_SIZE * icons.len() as f64)
+                    + (APP_ICON_GAP * icons.len().saturating_sub(1) as f64);
+                let bg_x = total_width + CELL_SPACING;
+                total_width = bg_x + width;
+                Some(AppIconGroupRenderData {
+                    bg_rect: CGRect::new(CGPoint::new(bg_x, bg_y), CGSize::new(width, total_height)),
+                    icons,
+                })
+            }
+        } else {
+            None
+        };
+
         workspaces.push(WorkspaceRenderData {
             bg_rect,
             fill_alpha,
             windows,
             label_line,
             show_windows: input.show_windows,
+            app_icon_group,
         });
     }
 
@@ -920,6 +963,68 @@ fn build_layout(
         total_height,
         workspaces,
     }
+}
+
+fn workspace_app_icons(workspace: &WorkspaceData) -> Vec<Retained<NSImage>> {
+    let mut seen = std::collections::HashSet::<String>::new();
+    let mut icons = Vec::new();
+
+    let mut windows = workspace.windows.iter().collect::<Vec<_>>();
+    windows.sort_by_key(|window| !window.is_focused);
+
+    for window in windows {
+        let key = window
+            .info
+            .bundle_id
+            .clone()
+            .or_else(|| window.app_name.clone())
+            .unwrap_or_default();
+        if key.is_empty() || !seen.insert(key) {
+            continue;
+        }
+
+        if let Some(icon) = window_app_icon(window) {
+            icons.push(icon);
+        }
+    }
+
+    icons
+}
+
+fn window_app_icon(window: &WindowData) -> Option<Retained<NSImage>> {
+    if let Some(bundle_id) = window.info.bundle_id.as_deref() {
+        if let Some(icon) = app_icon_for_bundle_id(bundle_id) {
+            return Some(icon);
+        }
+    }
+
+    window
+        .app_name
+        .as_deref()
+        .and_then(app_icon_for_application_name)
+}
+
+fn app_icon_for_bundle_id(bundle_id: &str) -> Option<Retained<NSImage>> {
+    let bundle_id = NSString::from_str(bundle_id);
+    let apps: Option<Retained<AnyObject>> = unsafe {
+        msg_send![
+            NSRunningApplication::class(),
+            runningApplicationsWithBundleIdentifier: &*bundle_id
+        ]
+    };
+    let apps = apps?;
+    let app: Option<Retained<NSRunningApplication>> = unsafe { msg_send![&*apps, firstObject] };
+    let app = app?;
+    unsafe { msg_send![&*app, icon] }
+}
+
+fn app_icon_for_application_name(app_name: &str) -> Option<Retained<NSImage>> {
+    let app_name = NSString::from_str(app_name);
+    let workspace = NSWorkspace::sharedWorkspace();
+    let path: Option<Retained<NSString>> =
+        unsafe { msg_send![&*workspace, fullPathForApplication: &*app_name] };
+    let path = path?;
+    unsafe { msg_send![&*workspace, iconForFile: &*path] }
 }
 
 fn add_rounded_rect(ctx: &CGContext, x: f64, y: f64, w: f64, h: f64, r: f64) {
@@ -1040,6 +1145,23 @@ define_class!(
                         let line_ref: &CTLine = label_line.line.as_ref();
                         unsafe { line_ref.draw(cg) };
                         CGContext::restore_g_state(Some(cg));
+                    }
+
+                    if let Some(app_icon_group) = &workspace.app_icon_group {
+                        let rect = app_icon_group.bg_rect;
+                        let bg_y = rect.origin.y + y_offset;
+                        for (idx, icon) in app_icon_group.icons.iter().enumerate() {
+                            let icon_rect = CGRect::new(
+                                CGPoint::new(
+                                    rect.origin.x
+                                        + APP_ICON_GROUP_PADDING_X
+                                        + idx as f64 * (APP_ICON_SIZE + APP_ICON_GAP),
+                                    bg_y + APP_ICON_GROUP_PADDING_Y,
+                                ),
+                                CGSize::new(APP_ICON_SIZE, APP_ICON_SIZE),
+                            );
+                            let _: () = unsafe { msg_send![&**icon, drawInRect: icon_rect] };
+                        }
                     }
                 }
 
