@@ -274,10 +274,7 @@ pub(crate) fn cleanup_stale_windows(
             state,
             transactions,
             drag,
-            window::WindowDestroyedPayload {
-                window: wid,
-                platform_window_alive: false,
-            },
+            window::WindowDestroyedPayload { window: wid },
         )?);
     }
     if pending_refresh {

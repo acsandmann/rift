@@ -5405,6 +5405,13 @@ fn ax_invalidation_after_quarantine_release_preserves_workspace_assignment() {
     reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
     reactor.handle_events(apps.make_app(1, make_windows(1)));
     apps.simulate_until_quiet(&mut reactor);
+    let rediscovered_info = reactor
+        .state
+        .windows
+        .window(wid)
+        .expect("window should initially be tracked")
+        .info
+        .clone();
 
     let secondary_workspace = reactor
         .layout_manager
@@ -5429,17 +5436,49 @@ fn ax_invalidation_after_quarantine_release_preserves_workspace_assignment() {
     // released every timing-based quarantine, then the old AX element is invalidated while
     // its WindowServer window remains alive.
     assert!(!reactor.refreshes_blocked());
-    let outcome = window_workflow::handle_window_destroyed(
+    let outcome = window_workflow::handle_window_invalidated(
         &mut reactor.state,
         &reactor.transaction_manager,
         &mut reactor.drag_manager,
-        window_workflow::WindowDestroyedPayload {
-            window: wid,
-            platform_window_alive: true,
-        },
+        window_workflow::WindowInvalidatedPayload { window: wid },
     )
     .expect("AX invalidation should be handled");
     reactor.apply_event_outcome(outcome);
+
+    assert!(
+        reactor.state.windows.window(wid).is_none(),
+        "the invalid AX-backed state must not remain as a live ghost",
+    );
+    assert_eq!(
+        reactor
+            .state
+            .windows
+            .workspace_info_for_window(wid)
+            .map(|info| info.workspace_id),
+        Some(secondary_workspace),
+        "detached recovery metadata must retain the virtual-workspace assignment",
+    );
+    assert!(
+        !reactor
+            .state
+            .windows
+            .workspace_windows(space, secondary_workspace)
+            .contains(&wid),
+        "detached metadata must not appear in live workspace membership",
+    );
+    let requests = apps.requests();
+    assert!(
+        requests
+            .into_iter()
+            .any(|request| matches!(request, Request::GetVisibleWindows)),
+        "Rift should reacquire the replacement AX element after preserving model state",
+    );
+
+    reactor.handle_event(Event::WindowsDiscovered {
+        pid: wid.pid,
+        new: vec![(wid, rediscovered_info)],
+        known_visible: vec![wid],
+    });
 
     assert!(reactor.state.windows.window(wid).is_some());
     assert_eq!(
@@ -5449,14 +5488,102 @@ fn ax_invalidation_after_quarantine_release_preserves_workspace_assignment() {
             .virtual_workspace_manager()
             .workspace_for_window(&reactor.state.windows, space, wid),
         Some(secondary_workspace),
-        "a live WindowServer peer must preserve the virtual-workspace assignment",
+        "rediscovery must restore the detached assignment instead of defaulting to WS1",
     );
-    assert!(
-        apps.requests()
-            .into_iter()
-            .any(|request| matches!(request, Request::GetVisibleWindows)),
-        "Rift should reacquire the replacement AX element after preserving model state",
-    );
+}
+
+#[test]
+fn authoritative_destruction_removes_window_server_backed_state() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+    let wsid = reactor
+        .state
+        .windows
+        .window(wid)
+        .and_then(|window| window.info.sys_id)
+        .expect("test window should have a WindowServer identity");
+
+    let outcome = window_workflow::handle_window_destroyed(
+        &mut reactor.state,
+        &reactor.transaction_manager,
+        &mut reactor.drag_manager,
+        window_workflow::WindowDestroyedPayload { window: wid },
+    )
+    .expect("authoritative destruction should be handled");
+    reactor.apply_event_outcome(outcome);
+
+    assert!(reactor.state.windows.record(wid).is_none());
+    assert_eq!(reactor.state.windows.tracked_window_id(wsid), None);
+    assert_eq!(reactor.state.windows.workspace_info_for_window(wid), None);
+}
+
+#[test]
+fn window_server_disappearance_retires_detached_ax_recovery_state() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+    let wsid = reactor
+        .state
+        .windows
+        .window(wid)
+        .and_then(|window| window.info.sys_id)
+        .expect("test window should have a WindowServer identity");
+
+    let invalidated = window_workflow::handle_window_invalidated(
+        &mut reactor.state,
+        &reactor.transaction_manager,
+        &mut reactor.drag_manager,
+        window_workflow::WindowInvalidatedPayload { window: wid },
+    )
+    .expect("AX invalidation should be handled");
+    reactor.apply_event_outcome(invalidated);
+    assert!(reactor.state.windows.window(wid).is_none());
+    assert!(reactor.state.windows.record(wid).is_some());
+
+    let disappeared = topology_workflow::handle_window_server_destroyed(
+        &mut reactor.state,
+        &reactor.transaction_manager,
+        &mut reactor.drag_manager,
+        topology_workflow::WindowServerLifecyclePayload {
+            window_server_id: wsid,
+            space,
+            kind: SpaceEventKind::User,
+        },
+        topology_workflow::WindowServerDestroyedObservations {
+            resolved_space: Some(space),
+            active_spaces: [space].into_iter().collect(),
+            mission_control_active: false,
+            ordered_in: true,
+            assigned_space: Some(space),
+            last_known_user_space: Some(space),
+        },
+    )
+    .expect("WindowServer disappearance should be handled");
+    reactor.apply_event_outcome(disappeared);
+
+    assert!(reactor.state.windows.record(wid).is_none());
+    assert_eq!(reactor.state.windows.tracked_window_id(wsid), None);
 }
 
 #[test]

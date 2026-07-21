@@ -1123,22 +1123,32 @@ impl Reactor {
                 return Ok(outcome);
             }
             Event::WindowDestroyed(wid) => {
+                // AX destruction is not always native window destruction. AXWindows is
+                // space-filtered, and macOS also replaces AX elements during unlock,
+                // fullscreen/Mission Control, and display churn. A direct WindowServer query
+                // is the existence authority; a live peer takes the detached-recovery path so
+                // the stale AX state cannot remain as a ghost.
                 let window_server_id =
-                    self.state.windows.window(wid).and_then(|window| window.info.sys_id);
-
+                    self.state.windows.record(wid).and_then(|record| record.window_server_id());
                 let platform_window_alive = window_server_id.is_some_and(|window_server_id| {
                     window_server::get_window(window_server_id)
                         .is_some_and(|info| info.pid == wid.pid)
                 });
-                let mut outcome = window_workflow::handle_window_destroyed(
-                    &mut self.state,
-                    &self.transaction_manager,
-                    &mut self.drag_manager,
-                    window_workflow::WindowDestroyedPayload {
-                        window: wid,
-                        platform_window_alive,
-                    },
-                )?;
+                let mut outcome = if platform_window_alive {
+                    window_workflow::handle_window_invalidated(
+                        &mut self.state,
+                        &self.transaction_manager,
+                        &mut self.drag_manager,
+                        window_workflow::WindowInvalidatedPayload { window: wid },
+                    )?
+                } else {
+                    window_workflow::handle_window_destroyed(
+                        &mut self.state,
+                        &self.transaction_manager,
+                        &mut self.drag_manager,
+                        window_workflow::WindowDestroyedPayload { window: wid },
+                    )?
+                };
                 outcome.focused_window = raised_window;
                 return Ok(outcome);
             }

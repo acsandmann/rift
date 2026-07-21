@@ -70,7 +70,56 @@ pub fn handle_window_created(
 #[derive(Debug, Clone, Copy)]
 pub struct WindowDestroyedPayload {
     pub window: WindowId,
-    pub platform_window_alive: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct WindowInvalidatedPayload {
+    pub window: WindowId,
+}
+
+pub fn handle_window_invalidated(
+    state: &mut crate::model::RiftState,
+    transactions: &TransactionManager,
+    drag: &mut DragManager,
+    payload: WindowInvalidatedPayload,
+) -> anyhow::Result<EventOutcome> {
+    let wid = payload.window;
+    let window_server_id = state.windows.record(wid).and_then(|record| record.window_server_id());
+    let Some(window_server_id) = window_server_id else {
+        return handle_window_destroyed(state, transactions, drag, WindowDestroyedPayload {
+            window: wid,
+        });
+    };
+
+    // AX identity and native-window identity have different lifetimes. Detach the dead AX
+    // state so it cannot remain in layouts or queries as a ghost, but retain its assignment
+    // off-index until the same WindowServer identity is rediscovered. A later AX loss with no
+    // native peer, or an authoritative WindowServer disappearance, takes the permanent-removal
+    // path below.
+    transactions.remove_for_window(window_server_id);
+    state.windows.detach_window_state(wid);
+    debug!(
+        ?wid,
+        ?window_server_id,
+        "Detached invalid AX identity for later reacquisition"
+    );
+
+    if let DragState::PendingSwap { session, target } = &drag.drag_state
+        && (session.window == wid || *target == wid)
+    {
+        drag.drag_state = DragState::Inactive;
+    }
+    if drag.dragged() == Some(wid) || drag.last_target() == Some(wid) {
+        drag.reset();
+        drag.drag_state = DragState::Inactive;
+    }
+    if drag.skip_layout_for_window == Some(wid) {
+        drag.skip_layout_for_window = None;
+    }
+
+    Ok(EventOutcome::finalized_event(None, false, true, true)
+        .with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid))
+        .with_app_request(wid.pid, Request::GetVisibleWindows))
 }
 
 pub fn handle_window_destroyed(
@@ -80,28 +129,10 @@ pub fn handle_window_destroyed(
     payload: WindowDestroyedPayload,
 ) -> anyhow::Result<EventOutcome> {
     let wid = payload.window;
-    let window_server_id = match state.windows.window(wid) {
-        Some(window) => window.info.sys_id,
+    let window_server_id = match state.windows.record(wid) {
+        Some(record) => record.window_server_id(),
         None => return Ok(EventOutcome::finalized_event(None, false, false, false)),
     };
-
-    // AX element lifetime is not native window lifetime. macOS invalidates and replaces AX
-    // elements during lock/unlock, display churn, fullscreen transitions, and native tab
-    // changes. WindowServer identity is authoritative: if the same window id still belongs
-    // to the same process, preserve all persistent window/workspace state and ask the app
-    // actor to acquire the replacement AX element.
-    //
-    // This must not depend on a lifecycle quarantine. A stabilized topology snapshot can
-    // legitimately arrive just before AX invalidates the old elements, so timing-based gates
-    // leave a race that resets rediscovered windows to the default virtual workspace.
-    if payload.platform_window_alive {
-        debug!(
-            ?wid,
-            "Preserving window whose AX element was destroyed while WindowServer peer is alive"
-        );
-        return Ok(EventOutcome::finalized_event(None, false, false, false)
-            .with_app_request(wid.pid, Request::GetVisibleWindows));
-    }
 
     if let Some(ws_id) = window_server_id {
         transactions.remove_for_window(ws_id);
