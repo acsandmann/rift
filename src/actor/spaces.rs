@@ -177,6 +177,7 @@ pub struct AuthorityState {
     display_topology_state: Option<DisplayTopologyState>,
     last_user_space_by_display: HashMap<String, SpaceId>,
     display_space_ids: HashMap<String, Vec<SpaceId>>,
+    active_display_uuid: Option<String>,
     awaiting_space_switch_confirmation: bool,
     refresh_deferred_until_stable: bool,
     release_reactor_quarantine_on_next_forward: bool,
@@ -206,6 +207,7 @@ impl Default for AuthorityState {
             display_topology_state: None,
             last_user_space_by_display: HashMap::default(),
             display_space_ids: HashMap::default(),
+            active_display_uuid: None,
             awaiting_space_switch_confirmation: false,
             refresh_deferred_until_stable: false,
             release_reactor_quarantine_on_next_forward: false,
@@ -422,6 +424,19 @@ impl SpacesActor {
     }
 
     fn handle_active_display_changed(&mut self) {
+        #[cfg(not(test))]
+        let active_display_uuid = crate::sys::screen::active_menu_bar_display_uuid();
+        #[cfg(test)]
+        let active_display_uuid: Option<String> = None;
+
+        self.handle_active_display_changed_for(active_display_uuid.as_deref());
+    }
+
+    fn handle_active_display_changed_for(&mut self, active_display_uuid: Option<&str>) {
+        if self.active_display_matches_state(active_display_uuid) {
+            return;
+        }
+
         if self.should_buffer_topology_updates() {
             self.schedule_screen_refresh_after(0, 0);
             return;
@@ -430,6 +445,11 @@ impl SpacesActor {
         if !self.try_forward_authoritative_snapshot(true, true) {
             self.schedule_screen_refresh_after(0, 0);
         }
+    }
+
+    fn active_display_matches_state(&self, active_display_uuid: Option<&str>) -> bool {
+        active_display_uuid.is_some()
+            && active_display_uuid == self.state.active_display_uuid.as_deref()
     }
 
     fn handle_active_space_changed(&mut self) {
@@ -591,7 +611,21 @@ impl SpacesActor {
             && screens.iter().all(|screen| screen.space.is_some());
         let space_remaps = self.compute_space_remaps(&screens, allow_space_remap);
         let menu_bar_space = self.resolve_menu_bar_space(&screens);
-        let command_space = self.resolve_command_space(&screens);
+        #[cfg(not(test))]
+        let active_display_uuid = crate::sys::screen::active_menu_bar_display_uuid();
+        #[cfg(test)]
+        let active_display_uuid: Option<String> = None;
+        let command_space = self.resolve_command_space(&screens, active_display_uuid.as_deref());
+        self.state.active_display_uuid = active_display_uuid
+            .filter(|uuid| screens.iter().any(|screen| screen.display_uuid == *uuid))
+            .or_else(|| {
+                command_space.and_then(|space| {
+                    screens
+                        .iter()
+                        .find(|screen| screen.space == Some(space))
+                        .map(|screen| screen.display_uuid.clone())
+                })
+            });
         #[cfg(test)]
         {
             let mut display_space_ids: HashMap<String, Vec<SpaceId>> = HashMap::default();
@@ -783,21 +817,23 @@ impl SpacesActor {
         remaps
     }
 
-    fn resolve_command_space(&self, screens: &[ScreenInfo]) -> Option<SpaceId> {
+    fn resolve_command_space(
+        &self,
+        screens: &[ScreenInfo],
+        active_display_uuid: Option<&str>,
+    ) -> Option<SpaceId> {
         #[cfg(test)]
         {
+            let _ = active_display_uuid;
             Self::resolve_active_display_space(screens, None, None)
                 .or_else(|| self.state.screens.iter().find_map(|screen| screen.space))
         }
         #[cfg(not(test))]
         {
-            let active_display_uuid = crate::sys::screen::active_menu_bar_display_uuid();
             let active_space = crate::sys::screen::get_active_space_number();
-            if let Some(space) = Self::resolve_active_display_space(
-                screens,
-                active_display_uuid.as_deref(),
-                active_space,
-            ) {
+            if let Some(space) =
+                Self::resolve_active_display_space(screens, active_display_uuid, active_space)
+            {
                 return Some(space);
             }
 
