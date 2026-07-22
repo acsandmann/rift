@@ -1114,6 +1114,33 @@ impl LayoutSystem for ScrollingLayoutSystem {
         }
     }
 
+    fn replace_window(&mut self, from: WindowId, to: WindowId) {
+        if from == to {
+            return;
+        }
+        for state in self.layouts.values_mut() {
+            for column in &mut state.columns {
+                for window in &mut column.windows {
+                    if *window == from {
+                        *window = to;
+                    }
+                }
+            }
+            if state.selected == Some(from) {
+                state.selected = Some(to);
+            }
+            if state.center_override_window == Some(from) {
+                state.center_override_window = Some(to);
+            }
+            if state.fullscreen.remove(&from) {
+                state.fullscreen.insert(to);
+            }
+            if state.fullscreen_within_gaps.remove(&from) {
+                state.fullscreen_within_gaps.insert(to);
+            }
+        }
+    }
+
     fn remove_window(&mut self, wid: WindowId) {
         for state in self.layouts.values_mut() {
             let _ = state.remove_window(wid);

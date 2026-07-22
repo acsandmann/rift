@@ -167,6 +167,7 @@ pub enum KnownCGSEvent {
     WindowUpdated = 723,
     // maybe loginwindow active? kCGSEventNotificationSystemDefined = 724,
     WindowClosed = 804,
+    WindowDisplayChanged = 805,
     WindowMoved = 806,
     WindowResized = 807,
     WindowReordered = 808,
@@ -379,6 +380,8 @@ unsafe extern "C" {
         mode: u32,
     ) -> CGError;
     pub fn _SLPSGetFrontProcess(psn: *mut ProcessSerialNumber) -> CGError;
+    pub fn SLPSGetKeyFocusProcess(psn: *mut ProcessSerialNumber, fallback_flag: *mut u8)
+    -> CGError;
     pub fn SLPSPostEventRecordTo(psn: *const ProcessSerialNumber, bytes: *const u8) -> CGError;
     pub fn SLSFindWindowAndOwner(
         cid: c_int,
@@ -403,6 +406,7 @@ unsafe extern "C" {
         event: u32,
         data: *mut c_void,
     ) -> i32;
+    // window_count must be below 1024
     pub fn SLSRequestNotificationsForWindows(
         cid: cid_t,
         window_list: *const u32,
@@ -431,8 +435,11 @@ unsafe extern "C" {
     pub fn SLSWindowQueryWindows(
         cid: c_int,
         windows: *mut CFArray<CFNumber>,
-        count: c_int,
+        flags: c_int,
     ) -> *mut CFType;
+    pub fn SLSWindowQueryCreate(initial_values: *mut CFDictionary) -> *mut CFType;
+    pub fn SLSWindowQuerySetValue(query: *mut CFType, key: *mut CFString, value: *mut CFType);
+    pub fn SLSWindowQueryRun(cid: c_int, query: *mut CFType, flags: c_int) -> *mut CFType;
     pub fn SLSWindowQueryResultCopyWindows(query: *mut CFType) -> *mut CFType;
     pub fn SLSGetWindowLevel(cid: cid_t, wid: u32, level: *mut i32) -> CGError;
 

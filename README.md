@@ -31,6 +31,7 @@
   - Scrolling columns (niri-style) <details> <summary><sup>note</sup></summary>when using multiple displays and the scrolling layout, displays must be arranged in a vertical stack or windows may leak into other displays due to displays all existing in the same coordinate space</details>
   - Stack (accordion)
 - Menubar icon that opens a menu for switching workspaces, changing layouts, and accessing quick Rift controls <details> <summary><sup>click to see the menu bar icon</sup></summary><img src="assets/menu_menu.png" alt="Rift menu bar icon" /></details>
+- Save and restore layouts from the menu bar or CLI, with reusable layouts listed from a configurable folder <details> <summary><sup>click to see the menu</sup></summary><img src="assets/menu_layouts.png" alt="Rift menu for restoring layouts" /></details>
 - MacOS-style mission control that allows you to visually navigate between workspaces <details><summary><sup>click to see mission control</sup></summary><img src="assets/mission_control.png" alt="Rift Mission Control view" /></details>
 - Focus follows the mouse with auto raise
 - Drag windows over one another to swap positions

@@ -1,11 +1,12 @@
 #[cfg(test)]
 use std::cell::RefCell;
-use std::ffi::{c_int, c_void};
+use std::ffi::{CStr, c_int, c_void};
 use std::num::NonZeroU32;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use nix::libc::{RTLD_DEFAULT, dlsym};
 use objc2_app_kit::NSWindowLevel;
 use objc2_application_services::AXError;
 use objc2_core_foundation::{
@@ -29,6 +30,7 @@ use crate::sys::axuielement::{AXUIElement, Error as AxError};
 use crate::sys::cg_ok;
 use crate::sys::mach::mach_get_window_sub_level;
 use crate::sys::process::ProcessSerialNumber;
+use crate::sys::screen::SpaceId;
 use crate::sys::skylight::*;
 
 static G_CONNECTION: Lazy<i32> = Lazy::new(|| unsafe { SLSMainConnectionID() });
@@ -104,41 +106,63 @@ pub fn windowserver_quiet_for_us(quiet_us: u64) -> bool {
 }
 
 #[inline]
-pub fn cf_array_from_ids(ids: &[WindowServerId]) -> CFRetained<CFArray<CFNumber>> {
+fn cf_array_from_ids(ids: &[WindowServerId]) -> CFRetained<CFArray<CFNumber>> {
+    if let [id] = ids {
+        let number = CFNumber::new_i64(id.as_u32() as i64);
+        return CFArray::from_retained_objects(std::slice::from_ref(&number));
+    }
     let nums: Vec<CFRetained<CFNumber>> =
         ids.iter().map(|w| CFNumber::new_i64(w.as_u32() as i64)).collect();
     CFArray::from_retained_objects(&nums)
 }
 
-pub struct WindowQuery {
-    query: *mut CFType,
+#[inline]
+fn cf_array_from_u64s(ids: &[u64]) -> CFRetained<CFArray<CFNumber>> {
+    if let [id] = ids {
+        let number = CFNumber::new_i64(*id as i64);
+        return CFArray::from_retained_objects(std::slice::from_ref(&number));
+    }
+    let nums: Vec<CFRetained<CFNumber>> =
+        ids.iter().map(|&id| CFNumber::new_i64(id as i64)).collect();
+    CFArray::from_retained_objects(&nums)
+}
+
+pub struct WindowIterator {
     iter: *mut CFType,
 }
 
-impl WindowQuery {
+impl WindowIterator {
     pub fn new(ids: &[WindowServerId]) -> Option<Self> {
         if ids.is_empty() {
             return None;
         }
         let cf_numbers = cf_array_from_ids(ids);
-        Self::new_from_cfarray(CFRetained::as_ptr(&cf_numbers).as_ptr(), ids.len() as c_int)
+        Self::new_from_cfarray(CFRetained::as_ptr(&cf_numbers).as_ptr(), 0)
     }
 
-    /// expected_count is a hint; keep whatever you used at call sites (0, 1, ids.len()).
-    pub fn new_from_cfarray(
-        cf_numbers: *mut CFArray<CFNumber>,
-        expected_count: c_int,
-    ) -> Option<Self> {
-        let query = unsafe { SLSWindowQueryWindows(*G_CONNECTION, cf_numbers, expected_count) };
+    /// `flags` controls optional result decoding; bit 0 requests window titles.
+    fn new_from_cfarray(cf_numbers: *mut CFArray<CFNumber>, flags: c_int) -> Option<Self> {
+        let query = unsafe { SLSWindowQueryWindows(*G_CONNECTION, cf_numbers, flags) };
         if query.is_null() {
             return None;
         }
         let iter = unsafe { SLSWindowQueryResultCopyWindows(query) };
+        unsafe { CFRelease(query) };
         if iter.is_null() {
-            unsafe { CFRelease(query) };
             return None;
         }
-        Some(Self { query, iter })
+        Self::from_owned_iterator(iter)
+    }
+
+    fn from_owned_iterator(iter: *mut CFType) -> Option<Self> {
+        if iter.is_null() {
+            return None;
+        }
+        let iterator = Self { iter };
+        // Settle the SLS iterator before its first Advance. Some reply shapes
+        // otherwise produce a valid iterator that initially appears empty.
+        let _ = iterator.count();
+        Some(iterator)
     }
 
     #[inline]
@@ -202,13 +226,123 @@ impl WindowQuery {
     }
 }
 
-impl Drop for WindowQuery {
-    fn drop(&mut self) {
+impl Drop for WindowIterator {
+    fn drop(&mut self) { unsafe { CFRelease(self.iter) } }
+}
+
+/// Server-side filter for `SLSWindowQueryRun`.
+///
+/// Unlike [`WindowIterator`], this describes which windows WindowServer should
+/// materialize. Results are returned in native z-order.
+#[derive(Debug, Clone, Copy)]
+struct WindowQueryFilter<'a> {
+    owner: i32,
+    spaces: &'a [u64],
+    space_list_options: i32,
+    window_list_options: i32,
+    query_flags: i32,
+    include_tags: u64,
+    exclude_tags: u64,
+}
+
+#[derive(Clone, Copy)]
+struct WindowQueryKeys {
+    owner: usize,
+    spaces: usize,
+    space_options: usize,
+    window_options: usize,
+    include_tags: usize,
+    exclude_tags: usize,
+}
+
+fn resolve_window_query_key(name: &CStr) -> Option<usize> {
+    let slot = unsafe { dlsym(RTLD_DEFAULT, name.as_ptr()) };
+    if slot.is_null() {
+        return None;
+    }
+    let key = unsafe { *(slot.cast::<*mut CFString>()) };
+    (!key.is_null()).then_some(key as usize)
+}
+
+static WINDOW_QUERY_KEYS: Lazy<Option<WindowQueryKeys>> = Lazy::new(|| {
+    Some(WindowQueryKeys {
+        owner: resolve_window_query_key(c"SLSWindowQueryKeyOwner")?,
+        spaces: resolve_window_query_key(c"SLSWindowQueryKeySpaces").unwrap_or(0),
+        space_options: resolve_window_query_key(c"SLSWindowQueryKeySpaceListOptions").unwrap_or(0),
+        // This key appeared later than the core query API. A missing value is
+        // represented by zero and simply leaves the server default in place.
+        window_options: resolve_window_query_key(c"SLSWindowQueryKeyWorkspaceWindowListOptions")
+            .unwrap_or(0),
+        include_tags: resolve_window_query_key(c"SLSWindowQueryKeyIncludeTags")?,
+        exclude_tags: resolve_window_query_key(c"SLSWindowQueryKeyExcludeTags")?,
+    })
+});
+
+unsafe fn set_window_query_value<T: Type>(query: *mut CFType, key: usize, value: &CFRetained<T>) {
+    if key != 0 {
         unsafe {
-            CFRelease(self.iter);
-            CFRelease(self.query);
+            SLSWindowQuerySetValue(
+                query,
+                key as *mut CFString,
+                CFRetained::as_ptr(value).as_ptr().cast::<CFType>(),
+            )
+        };
+    }
+}
+
+/// Run a native, server-side window query and return its z-ordered iterator.
+fn window_query_run(filter: &WindowQueryFilter<'_>) -> Option<WindowIterator> {
+    let keys = (*WINDOW_QUERY_KEYS)?;
+    let uses_explicit_spaces = !filter.spaces.is_empty();
+    if (uses_explicit_spaces && keys.spaces == 0)
+        || (!uses_explicit_spaces && keys.space_options == 0)
+    {
+        return None;
+    }
+
+    let query = unsafe { SLSWindowQueryCreate(std::ptr::null_mut()) };
+    if query.is_null() {
+        return None;
+    }
+
+    let owner = CFNumber::new_i32(filter.owner);
+    let include_tags = CFNumber::new_i64(filter.include_tags as i64);
+    let exclude_tags = CFNumber::new_i64(filter.exclude_tags as i64);
+    let window_options =
+        (keys.window_options != 0).then(|| CFNumber::new_i32(filter.window_list_options));
+    unsafe {
+        set_window_query_value(query, keys.owner, &owner);
+        set_window_query_value(query, keys.include_tags, &include_tags);
+        set_window_query_value(query, keys.exclude_tags, &exclude_tags);
+        if let Some(window_options) = &window_options {
+            set_window_query_value(query, keys.window_options, window_options);
         }
     }
+
+    let space_array = uses_explicit_spaces.then(|| cf_array_from_u64s(filter.spaces));
+    let space_options =
+        (!uses_explicit_spaces).then(|| CFNumber::new_i32(filter.space_list_options));
+    unsafe {
+        if let Some(space_array) = &space_array {
+            set_window_query_value(query, keys.spaces, space_array);
+        } else if let Some(space_options) = &space_options {
+            set_window_query_value(query, keys.space_options, space_options);
+        }
+    }
+
+    let result = unsafe { SLSWindowQueryRun(*G_CONNECTION, query, filter.query_flags) };
+    let iterator = if result.is_null() {
+        std::ptr::null_mut()
+    } else {
+        unsafe { SLSWindowQueryResultCopyWindows(result) }
+    };
+    unsafe {
+        if !result.is_null() {
+            CFRelease(result);
+        }
+        CFRelease(query);
+    }
+    WindowIterator::from_owned_iterator(iterator)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Copy)]
@@ -265,8 +399,7 @@ pub fn mission_control_dock_overlay_visible() -> bool {
 }
 
 pub fn window_parent(id: WindowServerId) -> Option<WindowServerId> {
-    let cf_windows = cf_array_from_ids(&[id]);
-    let query = WindowQuery::new_from_cfarray(CFRetained::as_ptr(&cf_windows).as_ptr(), 1)?;
+    let query = WindowIterator::new(&[id])?;
     if query.count() == 1 {
         let p = query.advance()?.parent_id();
         (p != 0).then(|| WindowServerId::new(p))
@@ -380,14 +513,7 @@ pub fn get_windows(ids: &[WindowServerId]) -> Vec<WindowServerInfo> {
 
 #[cfg(not(test))]
 pub fn get_windows(ids: &[WindowServerId]) -> Vec<WindowServerInfo> {
-    if ids.is_empty() {
-        return Vec::new();
-    }
-    let cf_ids = cf_array_from_ids(ids);
-
-    let Some(query) =
-        WindowQuery::new_from_cfarray(CFRetained::as_ptr(&cf_ids).as_ptr(), ids.len() as c_int)
-    else {
+    let Some(query) = WindowIterator::new(ids) else {
         return Vec::new();
     };
 
@@ -408,8 +534,7 @@ pub fn get_window(id: WindowServerId) -> Option<WindowServerInfo> {
 
     #[cfg(not(test))]
     {
-        let cf_ids = cf_array_from_ids(&[id]);
-        let query = WindowQuery::new_from_cfarray(CFRetained::as_ptr(&cf_ids).as_ptr(), 1)?;
+        let query = WindowIterator::new(&[id])?;
         if query.count() != 1 || query.advance().is_none() {
             return None;
         }
@@ -431,7 +556,7 @@ fn window_is_effectively_invisible(alpha: f32, layer: i32) -> bool {
 }
 
 #[cfg_attr(test, allow(dead_code))]
-fn window_info_from_query(query: &WindowQuery) -> Option<WindowServerInfo> {
+fn window_info_from_query(query: &WindowIterator) -> Option<WindowServerInfo> {
     let layer = query.level();
     if window_is_effectively_invisible(query.alpha(), layer) {
         return None;
@@ -530,12 +655,7 @@ pub fn window_level(_wid: u32) -> Option<NSWindowLevel> { Some(0) }
 
 #[cfg(not(test))]
 pub fn window_level(wid: u32) -> Option<NSWindowLevel> {
-    let cf = cf_array_from_ids(&[WindowServerId::new(wid)]);
-
-    let query = WindowQuery::new_from_cfarray(
-        CFRetained::as_ptr(&cf).as_ptr(),
-        0x1, // preserve your hint
-    )?;
+    let query = WindowIterator::new(&[WindowServerId::new(wid)])?;
     Some(query.advance()?.level() as NSWindowLevel)
 }
 
@@ -582,9 +702,7 @@ pub fn space_window_list_for_connection(
         return override_ids;
     }
 
-    let cf_numbers: Vec<CFRetained<CFNumber>> =
-        spaces.iter().map(|&sid| CFNumber::new_i64(sid as i64)).collect();
-    let cf_space_array = CFArray::from_retained_objects(&cf_numbers);
+    let cf_space_array = cf_array_from_u64s(spaces);
 
     let mut set_tags: u64 = 0;
     let mut clear_tags: u64 = 0;
@@ -611,15 +729,18 @@ pub fn space_window_list_for_connection(
         return Vec::new();
     }
 
-    let query = unsafe { SLSWindowQueryWindows(*G_CONNECTION, window_list_ref, expected) };
-    let iterator = unsafe { SLSWindowQueryResultCopyWindows(query) };
+    let iterator = WindowIterator::new_from_cfarray(window_list_ref, 0);
+    unsafe { CFRelease(window_list_ref as *mut CFType) };
+    let Some(iterator) = iterator else {
+        return Vec::new();
+    };
 
     let mut windows = Vec::with_capacity(expected as usize);
 
-    while unsafe { SLSWindowIteratorAdvance(iterator) } {
-        let tags = iterator_window_tags(iterator);
-        let parent_id = unsafe { SLSWindowIteratorGetParentID(iterator) };
-        let wid = unsafe { SLSWindowIteratorGetWindowID(iterator) };
+    while iterator.advance().is_some() {
+        let tags = iterator_window_tags(iterator.iter);
+        let parent_id = iterator.parent_id();
+        let wid = iterator.window_id();
         // Previous Rust path also checked level, attributes, and
         // fullscreen/minimized tag hints before accepting the window.
         let is_candidate = parent_id == 0 && tags_match_app_window_role(tags);
@@ -629,15 +750,53 @@ pub fn space_window_list_for_connection(
         }
     }
 
-    unsafe {
-        CFRelease(iterator);
-        CFRelease(query);
-        CFRelease(window_list_ref as *mut CFType);
-    }
-
-    windows.shrink_to_fit();
     windows
 }
+
+/// Resolve the actual key window on `space` from WindowServer state.
+///
+/// The key-focus process can differ briefly from the globally frontmost process,
+/// especially during rapid focus changes. Scoping the native, z-ordered window
+/// list to that process avoids the delayed or missing `AXMainWindow` read used by
+/// the application actors. The returned id is intentionally independent of the
+/// reactor's tracked-window state so callers can use it to trigger discovery of
+/// a newly materialized native tab.
+pub fn key_focused_window(space: SpaceId) -> Option<WindowId> {
+    let mut psn = ProcessSerialNumber::default();
+    let mut fallback = 0u8;
+    if cg_ok(unsafe { SLPSGetKeyFocusProcess(&mut psn, &mut fallback) }).is_err() {
+        return None;
+    }
+
+    let mut owner = 0;
+    if unsafe { SLSGetConnectionIDForPSN(*G_CONNECTION, &psn, &mut owner) } != 0 || owner == 0 {
+        return None;
+    }
+
+    let filter = WindowQueryFilter {
+        owner,
+        spaces: &[space.get()],
+        space_list_options: 0,
+        window_list_options: 0x2,
+        query_flags: 0x2,
+        include_tags: SLSWindowTags::DOCUMENT.bits(),
+        exclude_tags: (SLSWindowTags::ON_ALL_WORKSPACES
+            | SLSWindowTags::HIDDEN
+            | SLSWindowTags::MINIATURIZED)
+            .bits(),
+    };
+    let query = window_query_run(&filter)?;
+    query.advance()?;
+    let wsid = WindowServerId::new(query.window_id());
+
+    Some(WindowId {
+        pid: query.pid(),
+        idx: wsid.as_nonzero()?,
+    })
+}
+
+/// The space on the display currently holding WindowServer focus.
+pub fn active_space() -> SpaceId { SpaceId::new(unsafe { CGSGetActiveSpace(*G_CONNECTION) }) }
 
 #[cfg(test)]
 pub fn set_space_window_list_for_connection_override(ids: Option<Vec<u32>>) {
@@ -681,12 +840,7 @@ pub fn set_window_ordered_in_override(id: WindowServerId, ordered: Option<bool>)
 }
 
 pub fn app_window_suitable(id: WindowServerId) -> bool {
-    let cf = cf_array_from_ids(&[id]);
-
-    let Some(query) = WindowQuery::new_from_cfarray(
-        CFRetained::as_ptr(&cf).as_ptr(),
-        0x0, // keep your original hint
-    ) else {
+    let Some(query) = WindowIterator::new(&[id]) else {
         return false;
     };
 

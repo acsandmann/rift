@@ -582,6 +582,10 @@ impl LayoutSystem for TraditionalLayoutSystem {
         self.select(node);
     }
 
+    fn replace_window(&mut self, from: WindowId, to: WindowId) {
+        self.tree.data.window.replace_window(from, to);
+    }
+
     fn remove_window(&mut self, wid: WindowId) {
         let nodes: Vec<_> =
             self.tree.data.window.take_nodes_for(wid).map(|(_, node)| node).collect();
@@ -2179,6 +2183,20 @@ impl WindowIndex {
             .or_default()
             .0
             .push(WindowNodeInfo { layout, node });
+    }
+
+    fn replace_window(&mut self, from: WindowId, to: WindowId) {
+        if from == to {
+            return;
+        }
+        let nodes = self.window_nodes.remove(&from).unwrap_or_default();
+        if nodes.0.is_empty() {
+            return;
+        }
+        for info in &nodes.0 {
+            self.windows.insert(info.node, to);
+        }
+        self.window_nodes.entry(to).or_default().0.extend(nodes.0);
     }
 
     fn take_nodes_for(&mut self, wid: WindowId) -> impl Iterator<Item = (LayoutId, NodeId)> {

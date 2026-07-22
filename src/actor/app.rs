@@ -438,7 +438,7 @@ impl State {
             }
 
             let Some(wid) = self.id(&elem).ok().or_else(|| {
-                self.register_window(elem, hint).map(|(info, wid, _)| {
+                self.register_window(elem.clone(), hint).map(|(info, wid, _)| {
                     if !info.is_minimized {
                         known_visible.push(wid);
                     }
@@ -448,6 +448,13 @@ impl State {
             }) else {
                 continue;
             };
+
+            // The WindowServer id is stable across sleep/display transitions, but
+            // the corresponding AXUIElement is not. `id` intentionally resolves the
+            // fresh element to the existing wid by that stable id; refresh the actor's
+            // handle as well or subsequent frame writes keep targeting the pre-wake
+            // element and can never recover.
+            self.rebind_window_element(wid, elem, &info);
 
             if !info.is_minimized {
                 known_visible.push(wid);
@@ -1160,6 +1167,20 @@ impl State {
 
         let is_frontmost = trace("is_frontmost", &this.app, || this.app.frontmost())?;
 
+        // Focus-follows-mouse can enqueue a final hover transition while the
+        // pointer is moving off a window (for example, into the menu bar).
+        // Reissuing make-key/raise for the window that is already focused is
+        // not only redundant: it can visibly pulse focus and pull it back from
+        // transient system UI. Complete the request without touching focus.
+        //
+        // Only elide a single-window request. Multi-window batches still need
+        // their raises to establish the requested stacking order.
+        if is_frontmost && this.main_window == Some(first) && wids.len() == 1 {
+            trace!(?first, "Skipping raise for already focused window");
+            this.send_event(Event::RaiseCompleted { window_id: first, sequence_id });
+            return Ok(());
+        }
+
         let window_server_id = match WindowServerId::try_from(&this.window(first)?.elem) {
             Ok(wsid) => Some(wsid),
             Err(AxError::NotFound) => {
@@ -1177,7 +1198,23 @@ impl State {
             warn!(?this.pid, ?err, "Failed to activate app");
         }
 
-        if !is_frontmost && make_key_result.as_ref().is_some_and(Result::is_ok) && is_standard {
+        let waits_for_activation =
+            !is_frontmost && make_key_result.as_ref().is_some_and(Result::is_ok) && is_standard;
+        if waits_for_activation {
+            // Keep the WindowServer make-key request and AX raise adjacent, matching
+            // yabai's focus ordering. If we wait for process activation first, macOS
+            // can temporarily make the application's previous key window authoritative.
+            // For apps with windows on multiple displays that produces a spurious
+            // active-display hop before the requested window is finally raised.
+            //
+            // This deliberately starts the focus operation before the cancellable
+            // activation wait. Cancellation can stop follow-up batch raises, but it
+            // must not leave process activation detached from its target window.
+            let window = this.window(first)?;
+            trace("raise before activation wait", &window.elem, || {
+                window.elem.raise()
+            })?;
+
             if wids.len() == 1 {
                 // `quiet` only applies if the first window is also the last.
                 let quiet_window_change = (quiet == Quiet::Yes).then_some(first);
@@ -1196,8 +1233,12 @@ impl State {
 
         for (i, &wid) in wids.iter().enumerate() {
             debug_assert_eq!(wid.pid, this.pid);
-            let window = this.window(wid)?;
-            trace("raise", &window.elem, || window.elem.raise())?;
+            if waits_for_activation && i == 0 {
+                trace!(?wid, "Skipping duplicate raise after activation wait");
+            } else {
+                let window = this.window(wid)?;
+                trace("raise", &window.elem, || window.elem.raise())?;
+            }
 
             // TODO: Check the frontmost (layer 0) window of the window server and retry if necessary.
 
@@ -1486,7 +1527,7 @@ impl State {
             return None;
         }
 
-        if !register_notifs(&elem, self, wid) {
+        if !self.register_window_notifications(&elem, wid) {
             return None;
         }
         let hidden_by_app = self.is_hidden;
@@ -1506,31 +1547,80 @@ impl State {
         if hidden_by_app {
             self.send_event(Event::WindowMinimized(wid));
         }
-        return Some((info, wid, server_info));
+        Some((info, wid, server_info))
+    }
 
-        fn register_notifs(win: &AXUIElement, state: &State, wid: WindowId) -> bool {
-            match win.role() {
-                Ok(role) if role == AX_WINDOW_ROLE => (),
-                _ => return false,
-            }
-            for &(kind, notif) in WINDOW_NOTIFICATIONS {
-                let res = state.observer.add_notification_with_data(
-                    win,
-                    notif,
-                    encode_notification_data(kind, Some(wid)),
+    fn register_window_notifications(&self, elem: &AXUIElement, wid: WindowId) -> bool {
+        match elem.role() {
+            Ok(role) if role == AX_WINDOW_ROLE => (),
+            _ => return false,
+        }
+        for &(kind, notif) in WINDOW_NOTIFICATIONS {
+            let res = self.observer.add_notification_with_data(
+                elem,
+                notif,
+                encode_notification_data(kind, Some(wid)),
+            );
+            if let Err(err) = res {
+                let is_already_registered = matches!(
+                    err,
+                    AxError::Ax(code) if code == AXError::NotificationAlreadyRegistered
                 );
-                if let Err(err) = res {
-                    let is_already_registered = matches!(
-                        err,
-                        AxError::Ax(code) if code == AXError::NotificationAlreadyRegistered
-                    );
-                    if !is_already_registered {
-                        trace!("Watching failed with error {err:?} on window {win:#?}");
-                        return false;
-                    }
+                if !is_already_registered {
+                    trace!("Watching failed with error {err:?} on window {elem:#?}");
+                    return false;
                 }
             }
-            true
+        }
+        true
+    }
+
+    fn rebind_window_element(&mut self, wid: WindowId, elem: AXUIElement, info: &WindowInfo) {
+        let Some((old_elem, was_animating)) =
+            self.windows.get(&wid).map(|window| (window.elem.clone(), window.is_animating))
+        else {
+            return;
+        };
+        if old_elem == elem {
+            return;
+        }
+
+        // Move observer ownership before replacing the handle. Removing from an
+        // invalid old element can legitimately fail; Observer retains its callback
+        // context in that case, so a late notification remains memory-safe and its
+        // encoded wid still resolves to this logical window.
+        self.remove_window_notifications(&old_elem);
+        if !self.register_window_notifications(&elem, wid) {
+            // Keep the last usable binding and restore its notifications when the
+            // replacement cannot yet be observed. A later AXWindows refresh retries.
+            self.remove_window_notifications(&elem);
+            let _ = self.register_window_notifications(&old_elem, wid);
+            return;
+        }
+        if was_animating {
+            self.stop_notifications_for_animation(&elem);
+        }
+
+        self.elem_to_wid.remove(&old_elem);
+        self.elem_to_wid.insert(elem.clone(), wid);
+        if let Some(window) = self.windows.get_mut(&wid) {
+            window.elem = elem;
+            window.window_server_id = info.sys_id.or(window.window_server_id);
+            window.title = info.title.clone();
+        }
+        debug!(?wid, "Rebound window to refreshed AX element");
+    }
+
+    fn remove_window_notifications(&self, elem: &AXUIElement) {
+        for &(_, notif) in WINDOW_NOTIFICATIONS {
+            if let Err(err) = self.observer.remove_notification(elem, notif) {
+                trace!(
+                    ?elem,
+                    notif,
+                    ?err,
+                    "Could not remove notification from superseded AX element"
+                );
+            }
         }
     }
 

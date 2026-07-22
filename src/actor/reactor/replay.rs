@@ -77,7 +77,7 @@ pub fn replay(
     DESERIALIZE_THREAD_HANDLE.with(|h| h.borrow_mut().replace(handle));
     let mut lines = file.lines();
     let config = ron::de::from_str(&lines.next().expect("Empty restore file")?)?;
-    let layout = ron::de::from_str(&lines.next().expect("Expected layout line")?)?;
+    let layout = LayoutEngine::deserialize_from_str(&lines.next().expect("Expected layout line")?)?;
     let (broadcast_tx, _) = actor::channel();
     let mut reactor = Reactor::new(config, layout, Record::new(None), broadcast_tx, None, false);
     std::thread::spawn(move || {

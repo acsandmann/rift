@@ -60,13 +60,14 @@ impl Menu {
         mtm: MainThreadMarker,
     ) -> Self {
         let (action_tx, action_rx) = tokio::sync::mpsc::unbounded_channel();
+        let layout_folder = config.settings.ui.menu_bar.resolved_layout_folder();
         Self {
             icon: config
                 .settings
                 .ui
                 .menu_bar
                 .enabled
-                .then(|| MenuIcon::new(mtm, action_tx.clone())),
+                .then(|| MenuIcon::new(mtm, action_tx.clone(), &layout_folder)),
             config,
             rx,
             reactor_tx,
@@ -177,7 +178,8 @@ impl Menu {
         self.config = new_config;
 
         if should_enable && self.icon.is_none() {
-            self.icon = Some(MenuIcon::new(self.mtm, self.action_tx.clone()));
+            let layout_folder = self.config.settings.ui.menu_bar.resolved_layout_folder();
+            self.icon = Some(MenuIcon::new(self.mtm, self.action_tx.clone(), &layout_folder));
         } else if !should_enable && self.icon.is_some() {
             self.icon = None;
         }
@@ -201,6 +203,36 @@ impl Menu {
             MenuAction::SwitchToWorkspace(workspace) => {
                 self.send_layout_command(LayoutCommand::SwitchToWorkspace(workspace));
             }
+            MenuAction::RestoreLayout { path, scope } => {
+                self.reactor_tx.send(reactor::Event::Command(reactor::Command::Reactor(
+                    reactor::ReactorCommand::RestoreLayout { path, scope },
+                )));
+            }
+            MenuAction::RestoreMasterFile(scope) => {
+                self.reactor_tx.send(reactor::Event::Command(reactor::Command::Reactor(
+                    reactor::ReactorCommand::RestoreLayout {
+                        path: common::config::restore_file(),
+                        scope,
+                    },
+                )));
+            }
+            MenuAction::SaveLayout(path) => {
+                self.reactor_tx.send(reactor::Event::Command(reactor::Command::Reactor(
+                    reactor::ReactorCommand::SaveLayout { path },
+                )));
+                let action_tx = self.action_tx.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(150));
+                    let _ = action_tx.send(MenuAction::RefreshLayoutFiles);
+                });
+            }
+            MenuAction::SaveMasterFile => {
+                self.reactor_tx.send(reactor::Event::Command(reactor::Command::Reactor(
+                    reactor::ReactorCommand::SaveLayout {
+                        path: common::config::restore_file(),
+                    },
+                )));
+            }
             MenuAction::ToggleSpaceActivated => {
                 self.reactor_tx.send(reactor::Event::Command(reactor::Command::Reactor(
                     reactor::ReactorCommand::ToggleSpaceActivated,
@@ -215,10 +247,19 @@ impl Menu {
             MenuAction::OpenMatrix => {
                 Self::open_path_or_url("https://matrix.to/#/#rift:matrix.org");
             }
+            MenuAction::OpenSponsor => {
+                Self::open_path_or_url("https://github.com/sponsors/acsandmann");
+            }
             MenuAction::OpenConfig => {
                 Self::open_path_or_url(common::config::config_file());
             }
             MenuAction::ReloadConfig => self.reload_config(),
+            MenuAction::RefreshLayoutFiles => {
+                self.last_signature = None;
+                if let Some(update) = self.last_update.clone() {
+                    self.apply_update(&update);
+                }
+            }
             MenuAction::QuitRift => {
                 self.reactor_tx.send(reactor::Event::Command(reactor::Command::Reactor(
                     reactor::ReactorCommand::SaveAndExit,

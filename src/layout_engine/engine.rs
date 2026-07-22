@@ -1,5 +1,4 @@
 use std::cmp::Ordering;
-use std::path::PathBuf;
 
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use serde::{Deserialize, Serialize};
@@ -8,8 +7,9 @@ use tracing::{debug, info, warn};
 use super::{Direction, FloatingManager, LayoutId, LayoutSystemKind, WorkspaceLayouts};
 use crate::actor::app::{AppInfo, WindowId, pid_t};
 use crate::common::collections::{HashMap, HashSet};
-use crate::common::config::{LayoutMode, LayoutSettings, VirtualWorkspaceSettings};
+use crate::common::config::{LayoutMode, LayoutSettings};
 use crate::layout_engine::LayoutSystem;
+use crate::layout_engine::floating::FloatingFullscreenKind;
 use crate::layout_engine::systems::WindowLayoutConstraints;
 use crate::model::broadcast::{BroadcastEvent, BroadcastSender};
 use crate::model::virtual_workspace::{
@@ -17,6 +17,11 @@ use crate::model::virtual_workspace::{
 };
 use crate::model::{AppRuleEngine, FloatingPositionStore, WindowRuleContext, WindowStore};
 use crate::sys::screen::SpaceId;
+
+mod persistence;
+
+use persistence::PersistenceState;
+pub use persistence::RestoreScope;
 
 #[derive(Debug, Clone)]
 pub struct GroupContainerInfo {
@@ -154,6 +159,8 @@ pub struct LayoutEngine {
     space_display_map: HashMap<SpaceId, Option<String>>,
     #[serde(skip)]
     display_last_space: HashMap<String, SpaceId>,
+    #[serde(flatten)]
+    persistence: PersistenceState,
 }
 
 impl LayoutEngine {
@@ -1003,6 +1010,7 @@ impl LayoutEngine {
         if !preserve_floating {
             self.virtual_workspace_manager.remove_window(window_store, wid);
             self.floating_positions.remove_window(wid);
+            self.forget_persisted_window(wid);
         }
 
         if self.focused_window == Some(wid) {
@@ -1306,6 +1314,7 @@ impl LayoutEngine {
             broadcast_tx,
             space_display_map: HashMap::default(),
             display_last_space: HashMap::default(),
+            persistence: PersistenceState::default(),
         }
     }
 
@@ -1375,6 +1384,15 @@ impl LayoutEngine {
                     max_size,
                 ) in windows_with_titles
                 {
+                    self.observe_window_for_persistence(
+                        window_store,
+                        space,
+                        wid,
+                        title_opt.as_deref(),
+                        size_hint,
+                        app_bundle_id,
+                    );
+
                     self.window_layout_constraints.insert(
                         wid,
                         WindowLayoutConstraints {
@@ -1472,6 +1490,7 @@ impl LayoutEngine {
                 }
                 self.floating.remove_all_for_pid(pid);
                 self.window_layout_constraints.retain(|wid, _| wid.pid != pid);
+                self.forget_persisted_app(pid);
 
                 self.virtual_workspace_manager.remove_windows_for_app(window_store, pid);
                 self.floating_positions.remove_app(pid);
@@ -1614,6 +1633,44 @@ impl LayoutEngine {
                 debug!("Removed window {:?} from tiling tree, now floating", wid);
             }
             return EventResponse::default();
+        }
+
+        if let LayoutCommand::ToggleFullscreen | LayoutCommand::ToggleFullscreenWithinGaps =
+            &command
+            && is_floating
+        {
+            let Some(wid) = self.focused_window else {
+                return EventResponse::default();
+            };
+            let target = match command {
+                LayoutCommand::ToggleFullscreenWithinGaps => FloatingFullscreenKind::WithinGaps,
+                _ => FloatingFullscreenKind::Full,
+            };
+            if self.floating.fullscreen_kind(wid) == Some(target) {
+                self.floating.set_fullscreen(wid, None);
+            } else {
+                // Only save the pre-fullscreen frame when switching from a non-fullscreen state,
+                // and _not_ when switching between fullscreen kinds.
+                if self.floating.fullscreen_kind(wid).is_none()
+                    && let Some(space) = space
+                {
+                    let ws = self
+                        .virtual_workspace_manager
+                        .workspace_for_window(window_store, space, wid)
+                        .or_else(|| self.virtual_workspace_manager.active_workspace(space));
+                    if let (Some(ws), Some(frame)) =
+                        (ws, window_store.window(wid).map(|w| w.frame_monotonic))
+                    {
+                        self.floating_positions.store(space, ws, wid, frame);
+                    }
+                }
+                self.floating.set_fullscreen(wid, Some(target));
+            }
+            return EventResponse {
+                raise_windows: vec![wid],
+                focus_window: Some(wid),
+                boundary_hit: None,
+            };
         }
 
         let Some(space) = space else {
@@ -2083,6 +2140,28 @@ impl LayoutEngine {
                     &window_size,
                 );
             }
+
+            let fullscreen: Vec<(WindowId, FloatingFullscreenKind)> = positions
+                .keys()
+                .copied()
+                .filter_map(|w| self.floating.fullscreen_kind(w).map(|k| (w, k)))
+                .collect();
+            for (w, kind) in fullscreen {
+                let rect = match kind {
+                    FloatingFullscreenKind::Full => screen,
+                    FloatingFullscreenKind::WithinGaps => {
+                        let o = &gaps.outer;
+                        CGRect::new(
+                            CGPoint::new(screen.origin.x + o.left, screen.origin.y + o.top),
+                            CGSize::new(
+                                screen.size.width - o.left - o.right,
+                                screen.size.height - o.top - o.bottom,
+                            ),
+                        )
+                    }
+                };
+                positions.insert(w, rect);
+            }
         }
 
         let hidden_windows = self
@@ -2254,16 +2333,6 @@ impl LayoutEngine {
                 .expect("Failed to create an active layout for the workspace")
         }
     }
-
-    pub fn load(_path: PathBuf) -> anyhow::Result<Self> {
-        Ok(Self::new(
-            &VirtualWorkspaceSettings::default(),
-            &LayoutSettings::default(),
-            None,
-        ))
-    }
-
-    pub fn save(&self, _path: PathBuf) -> std::io::Result<()> { Ok(()) }
 
     pub fn serialize_to_string(&self) -> String { ron::ser::to_string(&self).unwrap() }
 
@@ -2754,9 +2823,16 @@ impl LayoutEngine {
             return;
         }
 
+        for (_, workspace) in self.virtual_workspace_manager.workspaces.iter_mut() {
+            workspace.layout_system.replace_window(from, to);
+        }
         self.virtual_workspace_manager.transfer_window_identity(from, to);
         self.floating_positions.transfer_window_identity(from, to);
         self.floating.transfer_window_identity(from, to);
+        self.transfer_persisted_window_identity(from, to);
+        if let Some(constraints) = self.window_layout_constraints.remove(&from) {
+            self.window_layout_constraints.insert(to, constraints);
+        }
         if self.focused_window == Some(from) {
             self.focused_window = Some(to);
         }

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use super::{LayoutId, LayoutSystem};
 use crate::sys::screen::SpaceId;
 
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub(crate) struct WorkspaceLayouts {
     map: crate::common::collections::HashMap<
         (SpaceId, crate::model::VirtualWorkspaceId),
@@ -12,7 +12,7 @@ pub(crate) struct WorkspaceLayouts {
     >,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct SpaceLayoutInfo {
     configurations: crate::common::collections::HashMap<Size, LayoutId>,
     active_size: Size,
@@ -39,6 +39,21 @@ impl From<CGSize> for Size {
 }
 
 impl WorkspaceLayouts {
+    pub(crate) fn replace_workspace_from(
+        &mut self,
+        source: &Self,
+        source_space: SpaceId,
+        source_workspace: crate::model::VirtualWorkspaceId,
+        target_space: SpaceId,
+        target_workspace: crate::model::VirtualWorkspaceId,
+    ) -> bool {
+        let Some(info) = source.map.get(&(source_space, source_workspace)).cloned() else {
+            return false;
+        };
+        self.map.insert((target_space, target_workspace), info);
+        true
+    }
+
     pub(crate) fn ensure_active_for_space(
         &mut self,
         space: SpaceId,

@@ -4,6 +4,7 @@ use test_log::test;
 use super::testing::*;
 use super::*;
 use crate::actor::app::{AppThreadHandle, Request, pid_t};
+use crate::common::config::OuterGaps;
 use crate::layout_engine::{Direction, LayoutCommand, LayoutEngine, LayoutEvent};
 use crate::model::window_store::NativeFullscreenTransition;
 use crate::sys::app::{AppInfo, WindowInfo};
@@ -659,6 +660,40 @@ fn command_space_only_snapshot_does_not_trigger_full_space_reconcile() {
     assert!(
         apps.requests().is_empty(),
         "changing only command_space should not trigger visible-window refresh or space reconciliation"
+    );
+}
+
+#[test]
+fn active_display_update_only_changes_command_context() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let left = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let right = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
+    let left_space = SpaceId::new(1);
+    let right_space = SpaceId::new(2);
+
+    reactor.handle_event(space_state_event(vec![left, right], vec![
+        Some(left_space),
+        Some(right_space),
+    ]));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+    assert!(apps.requests().is_empty());
+
+    reactor.handle_event(Event::ActiveDisplayChanged {
+        menu_bar_space: Some(right_space),
+        command_space: Some(right_space),
+    });
+
+    assert_eq!(reactor.workspace_command_space(), Some(right_space));
+    assert_eq!(reactor.space_state.menu_bar_space, Some(right_space));
+    assert!(
+        apps.requests().is_empty(),
+        "active-display updates must not trigger window discovery"
     );
 }
 
@@ -1445,6 +1480,34 @@ fn reactor_with_window_on_space1_two_displays() -> (
     );
 
     (reactor, wid, wsid, space1, space2, initial_frame, screen2)
+}
+
+fn reactor_with_floating_window() -> (Reactor, WindowId, SpaceId, CGRect, CGRect) {
+    let (mut reactor, wid, _wsid, space1, _space2, screen) = reactor_with_window_on_space1();
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space1, wid));
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space1, wid));
+    reactor.handle_event(Event::Command(Command::Layout(
+        LayoutCommand::ToggleWindowFloating,
+    )));
+    assert!(reactor.layout_manager.layout_engine.is_window_floating(wid));
+
+    let workspace = reactor
+        .layout_manager
+        .layout_engine
+        .active_workspace(space1)
+        .expect("workspace");
+    let floating_frame = CGRect::new(CGPoint::new(100., 100.), CGSize::new(400., 300.));
+    if let Some(w) = reactor.state.windows.window_mut(wid) {
+        w.frame_monotonic = floating_frame;
+    }
+    reactor.layout_manager.layout_engine.store_floating_position(
+        space1,
+        workspace,
+        wid,
+        floating_frame,
+    );
+
+    (reactor, wid, space1, screen, floating_frame)
 }
 
 #[test]
@@ -4263,6 +4326,8 @@ fn display_churn_quarantines_window_frame_and_membership_events() {
         space,
         SpaceEventKind::User,
     ));
+    let ax_invalidated = reactor
+        .should_quarantine_during_display_churn(&Event::WindowDestroyed(WindowId::new(99, 77)));
     let space_created = reactor.should_quarantine_during_display_churn(&Event::SpaceCreated(space));
     let space_destroyed =
         reactor.should_quarantine_during_display_churn(&Event::SpaceDestroyed(space));
@@ -4279,6 +4344,10 @@ fn display_churn_quarantines_window_frame_and_membership_events() {
     assert!(
         destroyed,
         "WindowServerDestroyed should be quarantined during churn"
+    );
+    assert!(
+        !ax_invalidated,
+        "AX invalidation must detach live state instead of being dropped during churn"
     );
     assert!(space_created, "SpaceCreated should be quarantined during churn");
     assert!(
@@ -5527,6 +5596,35 @@ fn ax_invalidation_after_quarantine_release_preserves_workspace_assignment() {
 }
 
 #[test]
+fn ax_invalidation_during_refresh_quarantine_detaches_live_state() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+    reactor.refresh_quarantine_manager.display_churn_active = true;
+
+    reactor.handle_event(Event::WindowDestroyed(wid));
+
+    assert!(
+        reactor.state.windows.window(wid).is_none(),
+        "an invalid AX handle must leave live/layout state even while native evidence is unstable",
+    );
+    assert!(
+        reactor.state.windows.record(wid).is_some(),
+        "the unstable native snapshot must not erase recovery identity",
+    );
+}
+
+#[test]
 fn authoritative_destruction_removes_window_server_backed_state() {
     let mut apps = Apps::new();
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(
@@ -5955,4 +6053,79 @@ fn native_space_resolution_policy_table() {
     for (case, resolved, expected) in cases {
         assert_eq!(resolved, expected, "resolver case: {case}");
     }
+}
+
+fn laid_out_frame(
+    reactor: &mut Reactor,
+    space: SpaceId,
+    screen: CGRect,
+    wid: WindowId,
+) -> Option<CGRect> {
+    let gaps = reactor.config.settings.layout.gaps.clone();
+    reactor
+        .layout_manager
+        .layout_engine
+        .calculate_layout_with_virtual_workspaces(
+            &reactor.state.windows,
+            space,
+            screen,
+            &gaps,
+            0.0,
+            Default::default(),
+            Default::default(),
+            |q| reactor.state.windows.window(q).map(|w| w.frame_monotonic),
+            &[screen],
+        )
+        .into_iter()
+        .find(|(w, _)| *w == wid)
+        .map(|(_, f)| f)
+}
+
+#[test]
+fn floating_window_toggles_to_fullscreen() {
+    let (mut reactor, wid, space1, screen, _floating_frame) = reactor_with_floating_window();
+    reactor.handle_event(Event::Command(Command::Layout(LayoutCommand::ToggleFullscreen)));
+    let laid_out = laid_out_frame(&mut reactor, space1, screen, wid).expect("window laid out");
+    assert!(
+        laid_out.same_as(screen),
+        "expected fullscreen {screen:?}, got {laid_out:?}"
+    );
+}
+
+#[test]
+fn floating_window_toggle_off_restore_previous_frame() {
+    let (mut reactor, wid, space1, screen, floating_frame) = reactor_with_floating_window();
+    // Turn on
+    reactor.handle_event(Event::Command(Command::Layout(LayoutCommand::ToggleFullscreen)));
+    // Turn off
+    reactor.handle_event(Event::Command(Command::Layout(LayoutCommand::ToggleFullscreen)));
+    let laid_out = laid_out_frame(&mut reactor, space1, screen, wid).expect("window laid out");
+    assert!(
+        laid_out.same_as(floating_frame),
+        "expected restore to {floating_frame:?}, got {laid_out:?}"
+    );
+}
+
+#[test]
+fn floating_window_toggles_to_fullscreen_within_gaps() {
+    let (mut reactor, wid, space1, screen, _floating_frame) = reactor_with_floating_window();
+    // Assymetric gaps to prevent swapped left/right or swapped width/height bugs from passing
+    reactor.config.settings.layout.gaps.outer = OuterGaps {
+        top: 10.,
+        left: 20.,
+        bottom: 30.,
+        right: 40.,
+    };
+    reactor.handle_event(Event::Command(Command::Layout(
+        LayoutCommand::ToggleFullscreenWithinGaps,
+    )));
+    let expected = CGRect::new(
+        CGPoint::new(screen.origin.x + 20., screen.origin.y + 10.),
+        CGSize::new(screen.size.width - 20. - 40., screen.size.height - 10. - 30.),
+    );
+    let laid_out = laid_out_frame(&mut reactor, space1, screen, wid).expect("window laid out");
+    assert!(
+        laid_out.same_as(expected),
+        "expected {expected:?}, got {laid_out:?}"
+    );
 }

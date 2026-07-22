@@ -141,11 +141,7 @@ impl WmController {
         window_tx_store: Option<WindowTxStore>,
     ) -> (Self, actor::Sender<WmEvent>) {
         let (sender, receiver) = actor::channel();
-        sys::app::set_activation_policy_callback({
-            let sender = sender.clone();
-            move |pid, info| sender.send(WmEvent::AppLaunch(pid, info))
-        });
-        sys::app::set_finished_launching_callback({
+        sys::app::set_application_callback({
             let sender = sender.clone();
             move |pid, info| sender.send(WmEvent::AppLaunch(pid, info))
         });
@@ -249,9 +245,7 @@ impl WmController {
                 self.events_tx.send(Event::ApplicationGloballyDeactivated(pid));
             }
             AppTerminated(pid) => {
-                sys::app::remove_activation_policy_observer(pid);
-                sys::app::remove_finished_launching_observer(pid);
-                sys::app::clear_ready_callback_notified(pid);
+                sys::app::remove_application_observer(pid);
                 self.events_tx.send(Event::ApplicationTerminated(pid));
             }
             ConfigUpdated(new_cfg) => {
