@@ -4,6 +4,7 @@ use test_log::test;
 use super::testing::*;
 use super::*;
 use crate::actor::app::{AppThreadHandle, Request, pid_t};
+use crate::common::config::OuterGaps;
 use crate::layout_engine::{Direction, LayoutCommand, LayoutEngine, LayoutEvent};
 use crate::model::window_store::NativeFullscreenTransition;
 use crate::sys::app::{AppInfo, WindowInfo};
@@ -1411,6 +1412,34 @@ fn reactor_with_window_on_space1_two_displays() -> (
     );
 
     (reactor, wid, wsid, space1, space2, initial_frame, screen2)
+}
+
+fn reactor_with_floating_window() -> (Reactor, WindowId, SpaceId, CGRect, CGRect) {
+    let (mut reactor, wid, _wsid, space1, _space2, screen) = reactor_with_window_on_space1();
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space1, wid));
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space1, wid));
+    reactor.handle_event(Event::Command(Command::Layout(
+        LayoutCommand::ToggleWindowFloating,
+    )));
+    assert!(reactor.layout_manager.layout_engine.is_window_floating(wid));
+
+    let workspace = reactor
+        .layout_manager
+        .layout_engine
+        .active_workspace(space1)
+        .expect("workspace");
+    let floating_frame = CGRect::new(CGPoint::new(100., 100.), CGSize::new(400., 300.));
+    if let Some(w) = reactor.state.windows.window_mut(wid) {
+        w.frame_monotonic = floating_frame;
+    }
+    reactor.layout_manager.layout_engine.store_floating_position(
+        space1,
+        workspace,
+        wid,
+        floating_frame,
+    );
+
+    (reactor, wid, space1, screen, floating_frame)
 }
 
 #[test]
@@ -5956,4 +5985,79 @@ fn native_space_resolution_policy_table() {
     for (case, resolved, expected) in cases {
         assert_eq!(resolved, expected, "resolver case: {case}");
     }
+}
+
+fn laid_out_frame(
+    reactor: &mut Reactor,
+    space: SpaceId,
+    screen: CGRect,
+    wid: WindowId,
+) -> Option<CGRect> {
+    let gaps = reactor.config.settings.layout.gaps.clone();
+    reactor
+        .layout_manager
+        .layout_engine
+        .calculate_layout_with_virtual_workspaces(
+            &reactor.state.windows,
+            space,
+            screen,
+            &gaps,
+            0.0,
+            Default::default(),
+            Default::default(),
+            |q| reactor.state.windows.window(q).map(|w| w.frame_monotonic),
+            &[screen],
+        )
+        .into_iter()
+        .find(|(w, _)| *w == wid)
+        .map(|(_, f)| f)
+}
+
+#[test]
+fn floating_window_toggles_to_fullscreen() {
+    let (mut reactor, wid, space1, screen, _floating_frame) = reactor_with_floating_window();
+    reactor.handle_event(Event::Command(Command::Layout(LayoutCommand::ToggleFullscreen)));
+    let laid_out = laid_out_frame(&mut reactor, space1, screen, wid).expect("window laid out");
+    assert!(
+        laid_out.same_as(screen),
+        "expected fullscreen {screen:?}, got {laid_out:?}"
+    );
+}
+
+#[test]
+fn floating_window_toggle_off_restore_previous_frame() {
+    let (mut reactor, wid, space1, screen, floating_frame) = reactor_with_floating_window();
+    // Turn on
+    reactor.handle_event(Event::Command(Command::Layout(LayoutCommand::ToggleFullscreen)));
+    // Turn off
+    reactor.handle_event(Event::Command(Command::Layout(LayoutCommand::ToggleFullscreen)));
+    let laid_out = laid_out_frame(&mut reactor, space1, screen, wid).expect("window laid out");
+    assert!(
+        laid_out.same_as(floating_frame),
+        "expected restore to {floating_frame:?}, got {laid_out:?}"
+    );
+}
+
+#[test]
+fn floating_window_toggles_to_fullscreen_within_gaps() {
+    let (mut reactor, wid, space1, screen, _floating_frame) = reactor_with_floating_window();
+    // Assymetric gaps to prevent swapped left/right or swapped width/height bugs from passing
+    reactor.config.settings.layout.gaps.outer = OuterGaps {
+        top: 10.,
+        left: 20.,
+        bottom: 30.,
+        right: 40.,
+    };
+    reactor.handle_event(Event::Command(Command::Layout(
+        LayoutCommand::ToggleFullscreenWithinGaps,
+    )));
+    let expected = CGRect::new(
+        CGPoint::new(screen.origin.x + 20., screen.origin.y + 10.),
+        CGSize::new(screen.size.width - 20. - 40., screen.size.height - 10. - 30.),
+    );
+    let laid_out = laid_out_frame(&mut reactor, space1, screen, wid).expect("window laid out");
+    assert!(
+        laid_out.same_as(expected),
+        "expected {expected:?}, got {laid_out:?}"
+    );
 }
