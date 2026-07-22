@@ -156,6 +156,11 @@ pub enum SpaceEventKind {
 pub enum Event {
     #[serde(skip)]
     SpaceStateChanged(ForwardedSpaceState),
+    #[serde(skip)]
+    ActiveDisplayChanged {
+        menu_bar_space: Option<SpaceId>,
+        command_space: Option<SpaceId>,
+    },
 
     /// An application was launched. This event is also sent for every running
     /// application on startup.
@@ -1354,6 +1359,11 @@ impl Reactor {
                     self.request_refresh_when_spaces_actor_stabilizes();
                 }
                 return Ok(outcome);
+            }
+            Event::ActiveDisplayChanged { menu_bar_space, command_space } => {
+                self.space_state.menu_bar_space = menu_bar_space;
+                self.space_state.command_space = command_space;
+                return Ok(EventOutcome::default());
             }
             Event::MouseUp => {
                 let pending_swap = self.get_pending_drag_swap();

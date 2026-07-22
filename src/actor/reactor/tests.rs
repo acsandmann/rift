@@ -630,6 +630,40 @@ fn command_space_only_snapshot_does_not_trigger_full_space_reconcile() {
 }
 
 #[test]
+fn active_display_update_only_changes_command_context() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let left = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let right = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
+    let left_space = SpaceId::new(1);
+    let right_space = SpaceId::new(2);
+
+    reactor.handle_event(space_state_event(vec![left, right], vec![
+        Some(left_space),
+        Some(right_space),
+    ]));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+    assert!(apps.requests().is_empty());
+
+    reactor.handle_event(Event::ActiveDisplayChanged {
+        menu_bar_space: Some(right_space),
+        command_space: Some(right_space),
+    });
+
+    assert_eq!(reactor.workspace_command_space(), Some(right_space));
+    assert_eq!(reactor.space_state.menu_bar_space, Some(right_space));
+    assert!(
+        apps.requests().is_empty(),
+        "active-display updates must not trigger window discovery"
+    );
+}
+
+#[test]
 fn passive_command_space_change_does_not_override_clicked_window_focus() {
     let mut apps = Apps::new();
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(

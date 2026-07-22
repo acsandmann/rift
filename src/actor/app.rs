@@ -1184,7 +1184,23 @@ impl State {
             warn!(?this.pid, ?err, "Failed to activate app");
         }
 
-        if !is_frontmost && make_key_result.as_ref().is_some_and(Result::is_ok) && is_standard {
+        let waits_for_activation =
+            !is_frontmost && make_key_result.as_ref().is_some_and(Result::is_ok) && is_standard;
+        if waits_for_activation {
+            // Keep the WindowServer make-key request and AX raise adjacent, matching
+            // yabai's focus ordering. If we wait for process activation first, macOS
+            // can temporarily make the application's previous key window authoritative.
+            // For apps with windows on multiple displays that produces a spurious
+            // active-display hop before the requested window is finally raised.
+            //
+            // This deliberately starts the focus operation before the cancellable
+            // activation wait. Cancellation can stop follow-up batch raises, but it
+            // must not leave process activation detached from its target window.
+            let window = this.window(first)?;
+            trace("raise before activation wait", &window.elem, || {
+                window.elem.raise()
+            })?;
+
             if wids.len() == 1 {
                 // `quiet` only applies if the first window is also the last.
                 let quiet_window_change = (quiet == Quiet::Yes).then_some(first);
@@ -1203,8 +1219,12 @@ impl State {
 
         for (i, &wid) in wids.iter().enumerate() {
             debug_assert_eq!(wid.pid, this.pid);
-            let window = this.window(wid)?;
-            trace("raise", &window.elem, || window.elem.raise())?;
+            if waits_for_activation && i == 0 {
+                trace!(?wid, "Skipping duplicate raise after activation wait");
+            } else {
+                let window = this.window(wid)?;
+                trace("raise", &window.elem, || window.elem.raise())?;
+            }
 
             // TODO: Check the frontmost (layer 0) window of the window server and retry if necessary.
 

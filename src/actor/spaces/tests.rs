@@ -102,26 +102,28 @@ fn build_actor() -> (
 
 #[test]
 fn active_display_changed_skips_refresh_when_display_is_already_active() {
-    let (mut actor, mut wm_rx, _) = build_actor();
+    let (mut actor, mut wm_rx, mut reactor_rx) = build_actor();
     actor.handle_event(Event::ScreenParametersChanged(
-        vec![make_screen_with(
-            1,
-            "display-left",
-            0.0,
-            1000.0,
-            Some(SpaceId::new(1)),
-        )],
+        vec![
+            make_screen_with(1, "display-left", 0.0, 1000.0, Some(SpaceId::new(1))),
+            make_screen_with(2, "display-right", 1000.0, 1000.0, Some(SpaceId::new(2))),
+        ],
         CoordinateConverter::default(),
     ));
     let _ = recv_wm(&mut wm_rx);
 
     actor.handle_active_display_changed_for(Some("display-left"));
     assert_no_wm_event(&mut wm_rx);
+    assert_no_reactor_event(&mut reactor_rx);
 
     actor.handle_active_display_changed_for(Some("display-right"));
+    assert_no_wm_event(&mut wm_rx);
     assert!(matches!(
-        recv_wm(&mut wm_rx),
-        wm_controller::WmEvent::SpaceStateUpdated(..)
+        recv_reactor(&mut reactor_rx),
+        reactor::Event::ActiveDisplayChanged {
+            menu_bar_space: Some(space),
+            command_space: Some(command_space),
+        } if space == SpaceId::new(2) && command_space == SpaceId::new(2)
     ));
 }
 

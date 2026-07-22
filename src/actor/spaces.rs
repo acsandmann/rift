@@ -442,6 +442,22 @@ impl SpacesActor {
             return;
         }
 
+        if let Some(active_display_uuid) = active_display_uuid
+            && let Some(active_space) = self
+                .state
+                .screens
+                .iter()
+                .find(|screen| screen.display_uuid == active_display_uuid)
+                .and_then(|screen| screen.space)
+        {
+            self.state.active_display_uuid = Some(active_display_uuid.to_string());
+            self.reactor_tx.send(reactor::Event::ActiveDisplayChanged {
+                menu_bar_space: Some(active_space),
+                command_space: Some(active_space),
+            });
+            return;
+        }
+
         if !self.try_forward_authoritative_snapshot(true, true) {
             self.schedule_screen_refresh_after(0, 0);
         }
