@@ -166,7 +166,7 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
 
     let mut layout = if opt.restore {
         let path = restore_file();
-        match LayoutEngine::load(path.clone()) {
+        match LayoutEngine::load_for_startup_restore(path.clone()) {
             Ok(layout) => layout,
             Err(error) => {
                 eprintln!(

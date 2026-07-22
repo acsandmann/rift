@@ -561,6 +561,10 @@ impl LayoutSystem for MasterStackLayoutSystem {
         self.inner.selected_window(layout)
     }
 
+    fn all_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
+        MasterStackLayoutSystem::all_windows_in_layout(self, layout)
+    }
+
     fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
         self.inner.visible_windows_in_layout(layout)
     }

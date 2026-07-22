@@ -161,7 +161,6 @@ pub enum Event {
         menu_bar_space: Option<SpaceId>,
         command_space: Option<SpaceId>,
     },
-
     /// An application was launched. This event is also sent for every running
     /// application on startup.
     ///
@@ -1527,20 +1526,14 @@ impl Reactor {
                 let Some(active_space) = self.active_display_space() else {
                     return Ok(EventOutcome::finalized_event(None, false, false, false));
                 };
-                match self.layout_manager.layout_engine.restore_saved_layout(
+                if let Err(error) = self.layout_manager.layout_engine.restore_layout(
                     path,
-                    scope,
-                    active_space,
+                    layout::RestoreRequest::new(scope, active_space),
                     &mut self.state.windows,
                     &self.config.virtual_workspaces,
                     &self.config.settings.layout,
                 ) {
-                    Ok(matched) => {
-                        tracing::info!(?scope, matched, "Restored saved layout");
-                    }
-                    Err(error) => {
-                        tracing::error!(?scope, %error, "Could not restore saved layout");
-                    }
+                    tracing::error!(?scope, %error, "Could not restore saved layout");
                 }
                 return Ok(EventOutcome::finalized_event(None, false, false, true));
             }

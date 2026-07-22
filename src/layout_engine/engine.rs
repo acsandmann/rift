@@ -21,7 +21,7 @@ use crate::sys::screen::SpaceId;
 mod persistence;
 
 use persistence::PersistenceState;
-pub use persistence::RestoreScope;
+pub use persistence::{RestoreReport, RestoreRequest, RestoreScope, RestoreWarning};
 
 #[derive(Debug, Clone)]
 pub struct GroupContainerInfo {
@@ -117,6 +117,8 @@ pub enum LayoutEvent {
         )>,
         Option<AppInfo>,
     ),
+    /// The complete cross-space discovery batch for one application has been applied.
+    WindowDiscoveryCompleted(pid_t, Option<String>, Vec<SpaceId>),
     AppClosed(pid_t),
     WindowAdded(SpaceId, WindowId),
     WindowRemoved(WindowId),
@@ -139,27 +141,18 @@ pub struct EventResponse {
     pub boundary_hit: Option<Direction>,
 }
 
-#[derive(Serialize, Deserialize)]
 pub struct LayoutEngine {
     workspace_layouts: WorkspaceLayouts,
     floating: FloatingManager,
     floating_positions: FloatingPositionStore,
-    #[serde(skip)]
     app_rules: AppRuleEngine,
-    #[serde(skip)]
     focused_window: Option<WindowId>,
-    #[serde(skip)]
     window_layout_constraints: HashMap<WindowId, WindowLayoutConstraints>,
     virtual_workspace_manager: WorkspaceStore,
-    #[serde(skip)]
     layout_settings: LayoutSettings,
-    #[serde(skip)]
     broadcast_tx: Option<BroadcastSender>,
-    #[serde(skip)]
     space_display_map: HashMap<SpaceId, Option<String>>,
-    #[serde(skip)]
     display_last_space: HashMap<String, SpaceId>,
-    #[serde(flatten)]
     persistence: PersistenceState,
 }
 
@@ -1458,6 +1451,21 @@ impl LayoutEngine {
                     self.broadcast_windows_changed(window_store, space);
                 }
             }
+            LayoutEvent::WindowDiscoveryCompleted(pid, app_id, discovered_spaces) => {
+                let ignored = self.discard_unmatched_candidates_for_app(
+                    pid,
+                    app_id.as_deref(),
+                    &discovered_spaces,
+                );
+                if ignored > 0 {
+                    tracing::info!(
+                        pid,
+                        native_spaces = discovered_spaces.len(),
+                        windows_ignored = ignored,
+                        "Ignored unmatched persisted windows after application discovery"
+                    );
+                }
+            }
             LayoutEvent::AppClosed(pid) => {
                 for (_, ws) in self.virtual_workspace_manager.workspaces.iter_mut() {
                     ws.layout_system.remove_windows_for_app(pid);
@@ -2308,8 +2316,6 @@ impl LayoutEngine {
         }
     }
 
-    pub fn serialize_to_string(&self) -> String { ron::ser::to_string(&self).unwrap() }
-
     #[cfg(test)]
     pub(crate) fn selected_window(&mut self, space: SpaceId) -> Option<WindowId> {
         let (ws_id, layout) = self.workspace_and_layout(space)?;
@@ -2792,11 +2798,25 @@ impl LayoutEngine {
         self.floating_positions.remove_window(window);
     }
 
-    pub fn transfer_persistent_window_identity(&mut self, from: WindowId, to: WindowId) {
+    pub fn rekey_window_identity(
+        &mut self,
+        window_store: &mut WindowStore,
+        from: WindowId,
+        to: WindowId,
+    ) {
+        window_store.transfer_persistent_window_metadata(from, to);
+        self.transfer_persistent_window_identity(from, to);
+    }
+
+    pub(crate) fn transfer_persistent_window_identity(&mut self, from: WindowId, to: WindowId) {
         if from == to {
             return;
         }
 
+        // A live `to` identity can already be provisionally present when a saved `from` identity
+        // is matched. Remove that projection before replacement; LayoutSystem::replace_window is
+        // not required to deduplicate and otherwise the same window can survive in two workspaces.
+        self.remove_window_from_all_tiling_trees(to);
         for (_, workspace) in self.virtual_workspace_manager.workspaces.iter_mut() {
             workspace.layout_system.replace_window(from, to);
         }

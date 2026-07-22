@@ -501,6 +501,13 @@ impl LayoutSystem for TraditionalLayoutSystem {
         self.tree.data.window.at(selection)
     }
 
+    fn all_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
+        self.root(layout)
+            .traverse_preorder(&self.tree.map)
+            .filter_map(|node| self.tree.data.window.at(node))
+            .collect()
+    }
+
     fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
         let root = self.root(layout);
         self.visible_windows_under_internal(root)

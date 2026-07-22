@@ -108,6 +108,10 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     ) -> Vec<(WindowId, CGRect)>;
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId>;
+    /// Return every window stored in this layout, including members hidden by a stack.
+    /// Persistence validation must not confuse "currently visible" with "serialized" or an
+    /// unmatchable hidden member can survive forever as a ghost.
+    fn all_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId>;
     fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId>;
     fn visible_windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId>;
     fn ascend_selection(&mut self, layout: LayoutId) -> bool;

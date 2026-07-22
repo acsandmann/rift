@@ -118,15 +118,26 @@ pub fn handle_command_layout(
         .with_layout_response(response, workspace_space))
 }
 
-fn store_current_floating_positions(state: &RiftState, layout: &mut LayoutManager, space: SpaceId) {
-    let positions = layout
+fn current_floating_positions(
+    state: &RiftState,
+    layout: &LayoutManager,
+    space: SpaceId,
+) -> Vec<(SpaceId, WindowId, objc2_core_foundation::CGRect)> {
+    layout
         .layout_engine
         .windows_in_active_workspace(&state.windows, space)
         .into_iter()
         .filter(|window| layout.layout_engine.is_window_floating(*window))
         .filter_map(|window| {
-            state.windows.window(window).map(|state| (window, state.frame_monotonic))
+            state.windows.window(window).map(|state| (space, window, state.frame_monotonic))
         })
+        .collect()
+}
+
+fn store_current_floating_positions(state: &RiftState, layout: &mut LayoutManager, space: SpaceId) {
+    let positions = current_floating_positions(state, layout, space)
+        .into_iter()
+        .map(|(_, window, frame)| (window, frame))
         .collect::<Vec<_>>();
     if !positions.is_empty() {
         layout.layout_engine.store_floating_window_positions(space, &positions);
@@ -217,11 +228,16 @@ fn save_layout(
     layout: &mut LayoutManager,
     path: std::path::PathBuf,
 ) -> std::io::Result<()> {
-    layout.layout_engine.refresh_window_fingerprints(&state.windows);
-    for space in layout.layout_engine.virtual_workspace_manager().initialized_spaces() {
-        store_current_floating_positions(state, layout, space);
-    }
-    layout.layout_engine.save(path)
+    let floating_positions = layout
+        .layout_engine
+        .virtual_workspace_manager()
+        .initialized_spaces()
+        .into_iter()
+        .flat_map(|space| current_floating_positions(state, layout, space))
+        .collect::<Vec<_>>();
+    layout
+        .layout_engine
+        .save_current_layout(path, &state.windows, &floating_positions)
 }
 
 pub fn handle_command_reactor_save_layout(

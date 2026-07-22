@@ -184,6 +184,10 @@ impl LayoutSystem for StackLayoutSystem {
         self.inner.selected_window(layout)
     }
 
+    fn all_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
+        self.windows_in_layout_preorder(layout)
+    }
+
     fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
         self.inner.visible_windows_in_layout(layout)
     }

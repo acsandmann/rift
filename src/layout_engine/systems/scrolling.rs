@@ -924,6 +924,10 @@ impl LayoutSystem for ScrollingLayoutSystem {
         self.layout_state(layout).and_then(|state| state.selected_or_first())
     }
 
+    fn all_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
+        self.layout_state(layout).map(Self::all_windows).unwrap_or_default()
+    }
+
     fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
         self.layout_state(layout).map(Self::all_windows).unwrap_or_default()
     }

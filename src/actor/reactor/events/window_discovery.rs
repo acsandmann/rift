@@ -120,8 +120,9 @@ fn sync_window_server_id_mapping(
         if let Some(previous_wid) = state.windows.track_window_server_id(new_wsid, wid)
             && previous_wid != wid
         {
-            state.windows.transfer_persistent_window_metadata(previous_wid, wid);
-            layout.layout_engine.transfer_persistent_window_identity(previous_wid, wid);
+            layout
+                .layout_engine
+                .rekey_window_identity(&mut state.windows, previous_wid, wid);
             outcome =
                 outcome.with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(previous_wid));
             state.windows.remove_window(previous_wid);
@@ -596,6 +597,7 @@ pub(crate) fn emit_layout_events(
         }
     }
 
+    let discovered_spaces = active_spaces.iter().copied().collect::<Vec<_>>();
     for space in active_spaces {
         let windows_for_space = app_windows.remove(&space).unwrap_or_default();
 
@@ -646,6 +648,15 @@ pub(crate) fn emit_layout_events(
             app_info.clone(),
         ));
     }
+
+    // Matching is allowed to observe every native-space slice for this application before stale
+    // saved identities are discarded. Cleaning after an individual slice would incorrectly drop
+    // windows that are discovered on a later space in the same batch.
+    outcome = outcome.with_layout_event(LayoutEvent::WindowDiscoveryCompleted(
+        pid,
+        app_info.as_ref().and_then(|info| info.bundle_id.clone()),
+        discovered_spaces,
+    ));
 
     if let Some((space, main_window)) = focused_window {
         outcome = outcome.with_layout_event(LayoutEvent::WindowFocused(space, main_window));

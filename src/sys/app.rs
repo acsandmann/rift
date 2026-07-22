@@ -314,6 +314,15 @@ pub fn running_apps(bundle: Option<String>) -> impl Iterator<Item = (pid_t, AppI
         })
 }
 
+/// Check one bundle identity without producing a process inventory.
+///
+/// Persistence uses this only to decide whether a stale saved window still has a running
+/// application whose AX discovery may provide a fuzzy match.
+pub fn is_bundle_running(bundle_id: &str) -> bool {
+    !NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(bundle_id))
+        .is_empty()
+}
+
 pub trait NSRunningApplicationExt {
     fn with_process_id(pid: pid_t) -> Option<Retained<Self>>;
     fn pid(&self) -> pid_t;

@@ -27,6 +27,10 @@ impl FloatingManager {
         self.floating_windows.contains(&window_id)
     }
 
+    pub(crate) fn persisted_windows(&self) -> Vec<WindowId> {
+        self.floating_windows.iter().copied().collect()
+    }
+
     pub(crate) fn add_floating(&mut self, window_id: WindowId) {
         self.floating_windows.insert(window_id);
     }
@@ -94,20 +98,34 @@ impl FloatingManager {
             return;
         }
 
-        if self.floating_windows.remove(&from) {
+        // Identity transfer is replacement, not union. `to` may already have provisional live
+        // state while `from` carries restored state. Keeping both lets stale floating/fullscreen
+        // flags survive reconciliation and disagree with the restored workspace tree.
+        let was_floating = self.floating_windows.remove(&from);
+        self.floating_windows.remove(&to);
+        if was_floating {
             self.floating_windows.insert(to);
         }
 
-        if let Some(k) = self.fullscreen_windows.remove(&from) {
+        let fullscreen = self.fullscreen_windows.remove(&from);
+        self.fullscreen_windows.remove(&to);
+        if let Some(k) = fullscreen {
             self.fullscreen_windows.insert(to, k);
         }
 
-        for space_map in self.active_floating_windows.values_mut() {
-            if let Some(app_set) = space_map.get_mut(&from.pid)
-                && app_set.remove(&from)
-            {
-                app_set.insert(to);
-            }
+        let active_spaces: Vec<_> = self
+            .active_floating_windows
+            .iter()
+            .filter_map(|(space, apps)| {
+                apps.get(&from.pid)
+                    .is_some_and(|windows| windows.contains(&from))
+                    .then_some(*space)
+            })
+            .collect();
+        self.remove_active_entries(from);
+        self.remove_active_entries(to);
+        for space in active_spaces {
+            self.add_active(space, to.pid, to);
         }
 
         if self.last_floating_focus == Some(from) {
@@ -184,5 +202,28 @@ impl FloatingManager {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_transfer_replaces_provisional_target_state() {
+        let mut floating = FloatingManager::new();
+        let restored_tiled = WindowId::new(1, 1);
+        let provisional_live = WindowId::new(2, 2);
+        let space = SpaceId::new(3);
+
+        floating.add_floating(provisional_live);
+        floating.set_fullscreen(provisional_live, Some(FloatingFullscreenKind::Full));
+        floating.add_active(space, provisional_live.pid, provisional_live);
+
+        floating.transfer_window_identity(restored_tiled, provisional_live);
+
+        assert!(!floating.is_floating(provisional_live));
+        assert_eq!(floating.fullscreen_kind(provisional_live), None);
+        assert!(!floating.active_flat(space).contains(&provisional_live));
     }
 }

@@ -1052,6 +1052,14 @@ impl LayoutSystem for BspLayoutSystem {
         self.layouts.get(layout).and_then(|s| self.selection_window(s))
     }
 
+    fn all_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
+        let mut out = Vec::new();
+        if let Some(state) = self.layouts.get(layout).copied() {
+            self.collect_windows_under(state.root, &mut out);
+        }
+        out
+    }
+
     fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
         let mut out = Vec::new();
         if let Some(state) = self.layouts.get(layout).copied() {
