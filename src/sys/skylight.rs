@@ -167,6 +167,7 @@ pub enum KnownCGSEvent {
     WindowUpdated = 723,
     // maybe loginwindow active? kCGSEventNotificationSystemDefined = 724,
     WindowClosed = 804,
+    WindowDisplayChanged = 805,
     WindowMoved = 806,
     WindowResized = 807,
     WindowReordered = 808,
@@ -403,6 +404,7 @@ unsafe extern "C" {
         event: u32,
         data: *mut c_void,
     ) -> i32;
+    // window_count must be below 1024
     pub fn SLSRequestNotificationsForWindows(
         cid: cid_t,
         window_list: *const u32,
