@@ -6,6 +6,8 @@ use crate::common::collections::HashMap;
 pub(crate) struct MainWindowTracker {
     apps: HashMap<pid_t, AppState>,
     global_frontmost: Option<pid_t>,
+    window_server_focus: Option<WindowId>,
+    window_server_focus_authoritative: bool,
 }
 
 struct AppState {
@@ -30,6 +32,15 @@ impl MainWindowTracker {
             }
             &Event::ApplicationThreadTerminated(pid) => {
                 self.apps.remove(&pid);
+                if self.window_server_focus.is_some_and(|wid| wid.pid == pid) {
+                    self.window_server_focus = None;
+                }
+                return None;
+            }
+            &Event::WindowDestroyed(wid) => {
+                if self.window_server_focus == Some(wid) {
+                    self.window_server_focus = None;
+                }
                 return None;
             }
             &Event::ApplicationActivated(pid, quiet) => {
@@ -65,8 +76,20 @@ impl MainWindowTracker {
                 app.main_window = wid;
                 (pid, quiet)
             }
+            &Event::WindowServerFocusChanged(wid, _) => {
+                self.window_server_focus_authoritative = true;
+                self.window_server_focus = Some(wid);
+                return None;
+            }
             _ => return None,
         };
+        // Once WindowServer focus has produced a result, AX activation/main-window
+        // events remain useful as metadata and cold-start fallback only. Letting
+        // them emit focus here can replay the previous native focus while the new
+        // 808/815 resolution is still in flight.
+        if self.window_server_focus_authoritative {
+            return None;
+        }
         if Some(event_pid) == self.global_frontmost && quiet_edge == Quiet::No {
             if let Some(wid) = self.main_window() {
                 return Some(wid);
@@ -79,6 +102,9 @@ impl MainWindowTracker {
         let Some(pid) = self.global_frontmost else {
             return None;
         };
+        if let Some(window) = self.window_server_focus.filter(|window| window.pid == pid) {
+            return Some(window);
+        }
         match self.apps.get(&pid) {
             Some(&AppState {
                 is_frontmost: true,
@@ -113,7 +139,49 @@ mod tests {
 
     use super::super::testing::{Apps, make_windows, space_state_event};
     use super::super::{Event, Quiet, Reactor, SpaceId, WindowId};
+    use super::{AppState, MainWindowTracker};
     use crate::layout_engine::LayoutEngine;
+
+    #[test]
+    fn window_server_focus_supersedes_ax_focus_events() {
+        let ax_window = WindowId::new(7, 1);
+        let server_window = WindowId::new(7, 2);
+        let stale_window = WindowId::new(7, 3);
+        let mut tracker = MainWindowTracker::default();
+        tracker.global_frontmost = Some(7);
+        tracker.apps.insert(7, AppState {
+            is_frontmost: true,
+            frontmost_is_quiet: Quiet::No,
+            main_window: Some(ax_window),
+        });
+
+        assert_eq!(tracker.main_window(), Some(ax_window));
+        assert_eq!(
+            tracker.handle_event(&Event::WindowServerFocusChanged(server_window, SpaceId::new(1),)),
+            None
+        );
+        assert_eq!(tracker.main_window(), Some(server_window));
+
+        assert_eq!(
+            tracker.handle_event(&Event::ApplicationMainWindowChanged(
+                7,
+                Some(stale_window),
+                Quiet::No,
+            )),
+            None,
+            "AX must not drive focus after native authority is initialized"
+        );
+        assert_eq!(tracker.main_window(), Some(server_window));
+
+        let _ = tracker.handle_event(&Event::ApplicationMainWindowChanged(
+            7,
+            Some(ax_window),
+            Quiet::No,
+        ));
+
+        let _ = tracker.handle_event(&Event::WindowDestroyed(server_window));
+        assert_eq!(tracker.main_window(), Some(ax_window));
+    }
 
     #[test]
     fn it_tracks_frontmost_app_and_main_window_correctly() {

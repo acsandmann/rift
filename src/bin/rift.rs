@@ -278,6 +278,13 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
             CGSEventType::Known(KnownCGSEvent::SpaceWindowManagementCapabilitiesChanged),
             CGSEventType::Known(KnownCGSEvent::SpaceWindowDestroyed),
             CGSEventType::Known(KnownCGSEvent::SpaceWindowCreated),
+            // Native focus wakeups. Payload identities are racy, so adjacent
+            // events are coalesced before re-querying WindowServer key focus.
+            CGSEventType::Known(KnownCGSEvent::WindowReordered),
+            CGSEventType::Known(KnownCGSEvent::WindowUnhidden),
+            CGSEventType::Known(KnownCGSEvent::WindowHidden),
+            CGSEventType::Known(KnownCGSEvent::WindowManagerSpaceFrontConnectionChanged),
+            CGSEventType::Known(KnownCGSEvent::WindowManagerGlobalFrontConnectionChanged),
             CGSEventType::Known(KnownCGSEvent::SpaceCreated),
             CGSEventType::Known(KnownCGSEvent::SpaceDestroyed),
             //CGSEventType::Known(KnownCGSEvent::WindowMoved),

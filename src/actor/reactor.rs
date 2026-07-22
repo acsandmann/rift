@@ -187,6 +187,10 @@ pub enum Event {
     ApplicationGloballyActivated(pid_t),
     ApplicationGloballyDeactivated(pid_t),
     ApplicationMainWindowChanged(pid_t, Option<WindowId>, Quiet),
+    /// Authoritative focus resolved from WindowServer's key-focus process and
+    /// the z-ordered windows on the active native space.
+    #[serde(skip)]
+    WindowServerFocusChanged(WindowId, SpaceId),
 
     WindowsDiscovered {
         pid: pid_t,
@@ -1089,6 +1093,23 @@ impl Reactor {
                         );
                     }
                 }
+            }
+            Event::WindowServerFocusChanged(window, reported_space) => {
+                if self.layout_manager.layout_engine.focused_window() == Some(window) {
+                    return Ok(EventOutcome::default());
+                }
+                if !self.state.windows.contains_window(window) {
+                    if let Some(app) = self.app_manager.apps.get(&window.pid) {
+                        let _ = app.handle.send(Request::GetVisibleWindows);
+                    }
+                    return Ok(EventOutcome::default());
+                }
+                return Ok(if self.is_space_active(reported_space) {
+                    EventOutcome::default()
+                        .with_layout_event(LayoutEvent::WindowFocused(reported_space, window))
+                } else {
+                    EventOutcome::default()
+                });
             }
             Event::RegisterWmSender(sender) => {
                 return Ok(system_workflow::handle_register_wm_sender(

@@ -1,5 +1,6 @@
 use std::num::NonZeroU32;
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
+use std::time::{Duration, Instant};
 
 use tracing::{debug, trace};
 
@@ -11,7 +12,7 @@ use crate::common::collections::{HashMap, HashSet};
 use crate::model::tx_store::WindowTxStore;
 use crate::sys::screen::SpaceId;
 use crate::sys::skylight::{CGSEventType, KnownCGSEvent};
-use crate::sys::window_server::{WindowQuery, WindowServerId};
+use crate::sys::window_server::{self, WindowIterator, WindowServerId};
 use crate::sys::{event, window_notify};
 
 #[derive(Default)]
@@ -77,6 +78,17 @@ pub enum Request {
 pub type Sender = crate::actor::Sender<Request>;
 pub type Receiver = crate::actor::Receiver<Request>;
 
+const FOCUS_WAKE_DEBOUNCE: Duration = Duration::from_millis(1);
+
+#[derive(Clone)]
+struct FocusWakeSender {
+    wake: mpsc::SyncSender<()>,
+}
+
+impl FocusWakeSender {
+    fn notify(&self) { let _ = self.wake.try_send(()); }
+}
+
 pub struct WindowNotify {
     events_tx: reactor::Sender,
     spaces_tx: spaces::Sender,
@@ -84,6 +96,7 @@ pub struct WindowNotify {
     subscribed: HashSet<CGSEventType>,
     initial_events: Vec<CGSEventType>,
     tx_store: Option<WindowTxStore>,
+    focus_wake: FocusWakeSender,
 }
 
 impl WindowNotify {
@@ -94,6 +107,8 @@ impl WindowNotify {
         initial_events: &[CGSEventType],
         tx_store: Option<WindowTxStore>,
     ) -> Self {
+        let (focus_wake_tx, focus_wake_rx) = mpsc::sync_channel(1);
+        Self::spawn_focus_resolver(events_tx.clone(), focus_wake_rx);
         Self {
             events_tx,
             spaces_tx,
@@ -101,6 +116,7 @@ impl WindowNotify {
             subscribed: HashSet::default(),
             initial_events: initial_events.iter().copied().collect(),
             tx_store,
+            focus_wake: FocusWakeSender { wake: focus_wake_tx },
         }
     }
 
@@ -109,13 +125,13 @@ impl WindowNotify {
             Some(rx) => rx,
             None => return,
         };
-
         for event in self.initial_events.drain(..) {
             match Self::subscribe(
                 event,
                 self.events_tx.clone(),
                 self.spaces_tx.clone(),
                 self.tx_store.clone(),
+                self.focus_wake.clone(),
             ) {
                 Ok(()) => {
                     self.subscribed.insert(event);
@@ -151,6 +167,7 @@ impl WindowNotify {
                     self.events_tx.clone(),
                     self.spaces_tx.clone(),
                     self.tx_store.clone(),
+                    self.focus_wake.clone(),
                 ) {
                     Ok(()) => {
                         self.subscribed.insert(event);
@@ -174,6 +191,7 @@ impl WindowNotify {
         events_tx: reactor::Sender,
         spaces_tx: spaces::Sender,
         tx_store: Option<WindowTxStore>,
+        focus_wake: FocusWakeSender,
     ) -> Result<(), i32> {
         let res = window_notify::init(event);
         if res != 0 {
@@ -207,6 +225,7 @@ impl WindowNotify {
                         spaces_tx.send(spaces::Event::SpaceInventoryChanged);
                     }
                     CGSEventType::Known(KnownCGSEvent::SpaceWindowDestroyed) => {
+                        focus_wake.notify();
                         let (Some(window_id), Some(space_id)) = (evt.window_id, evt.space_id)
                         else {
                             continue;
@@ -220,6 +239,7 @@ impl WindowNotify {
                         ))
                     }
                     CGSEventType::Known(KnownCGSEvent::SpaceWindowCreated) => {
+                        focus_wake.notify();
                         let (Some(window_id), Some(space_id)) = (evt.window_id, evt.space_id)
                         else {
                             continue;
@@ -227,8 +247,17 @@ impl WindowNotify {
                         spaces_tx.send(spaces::Event::WindowServerAppeared(
                             WindowServerId::new(window_id),
                             SpaceId::new(space_id),
-                        ))
+                        ));
                     }
+                    CGSEventType::Known(KnownCGSEvent::WindowReordered)
+                    | CGSEventType::Known(KnownCGSEvent::WindowUnhidden)
+                    | CGSEventType::Known(KnownCGSEvent::WindowHidden)
+                    | CGSEventType::Known(
+                        KnownCGSEvent::WindowManagerSpaceFrontConnectionChanged,
+                    )
+                    | CGSEventType::Known(
+                        KnownCGSEvent::WindowManagerGlobalFrontConnectionChanged,
+                    ) => focus_wake.notify(),
                     CGSEventType::Known(KnownCGSEvent::WindowMoved)
                     | CGSEventType::Known(KnownCGSEvent::WindowResized) => {
                         // TODO: suppress move/resize while Mission Control is active
@@ -237,7 +266,7 @@ impl WindowNotify {
                             continue;
                         };
                         let wsid = WindowServerId::new(window_id);
-                        if let Some(query) = WindowQuery::new(&[wsid]) {
+                        if let Some(query) = WindowIterator::new(&[wsid]) {
                             if query.advance().is_none() {
                                 continue;
                             }
@@ -264,5 +293,65 @@ impl WindowNotify {
         });
 
         Ok(())
+    }
+
+    fn spawn_focus_resolver(events_tx: reactor::Sender, focus_wake_rx: mpsc::Receiver<()>) {
+        std::thread::Builder::new()
+            .name("window-focus-resolver".to_string())
+            .spawn(move || {
+                while focus_wake_rx.recv().is_ok() {
+                    let mut wake_count = 1;
+                    loop {
+                        // WindowServer commonly emits 808 and 815 back-to-back.
+                        // The bounded channel absorbs both into this one wake.
+                        std::thread::sleep(FOCUS_WAKE_DEBOUNCE);
+                        while focus_wake_rx.try_recv().is_ok() {
+                            wake_count += 1;
+                        }
+
+                        let query_started = Instant::now();
+                        let space = window_server::active_space();
+                        let window = window_server::key_focused_window(space);
+                        let query_elapsed = query_started.elapsed();
+
+                        // A wake queued during the SPI means this result may already
+                        // be stale. Resolve once more before publishing it.
+                        if focus_wake_rx.try_recv().is_ok() {
+                            wake_count += 1;
+                            continue;
+                        }
+
+                        trace!(
+                            wake_count,
+                            ?query_elapsed,
+                            ?space,
+                            ?window,
+                            "resolved coalesced WindowServer focus"
+                        );
+                        if let Some(window) = window {
+                            events_tx.send(Event::WindowServerFocusChanged(window, space));
+                        }
+                        break;
+                    }
+                }
+            })
+            .expect("failed to spawn WindowServer focus resolver");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FocusWakeSender;
+
+    #[test]
+    fn focus_wakes_coalesce_to_one_signal() {
+        let (wake, rx) = std::sync::mpsc::sync_channel(1);
+        let sender = FocusWakeSender { wake };
+
+        sender.notify();
+        sender.notify();
+        sender.notify();
+
+        assert_eq!(rx.try_iter().count(), 1);
     }
 }
