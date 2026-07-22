@@ -1278,4 +1278,17 @@ mod tests {
         assert!(state.clear_edge_hover_latch(valid_generation));
         assert!(state.edge_hover_latch.is_none());
     }
+
+    #[test]
+    fn tap_recovery_discards_cached_keys_and_uses_live_flags() {
+        let mut state = State::default();
+        state.pressed_keys.insert(KeyCode::ShiftLeft);
+        state.pressed_keys.insert(KeyCode::KeyA);
+
+        let live_flags = CGEventFlags::MaskShift | CGEventFlags::MaskCommand;
+        state.reconcile_after_event_tap_reenabled(live_flags);
+
+        assert!(state.pressed_keys.is_empty());
+        assert_eq!(state.current_flags, live_flags);
+    }
 }
