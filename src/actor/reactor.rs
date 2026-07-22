@@ -901,7 +901,6 @@ impl Reactor {
         matches!(
             event,
             Event::WindowCreated(..)
-                | Event::WindowDestroyed(..)
                 | Event::WindowServerDestroyed(..)
                 | Event::WindowServerAppeared(..)
                 | Event::WindowFrameChanged(..)
@@ -1134,7 +1133,12 @@ impl Reactor {
                     window_server::get_window(window_server_id)
                         .is_some_and(|info| info.pid == wid.pid)
                 });
-                let mut outcome = if platform_window_alive {
+                // While lifecycle/display refreshes are quarantined, a negative
+                // WindowServer lookup is not authoritative. Detach the dead AX state
+                // now so it cannot remain in layout, and let the stabilized native
+                // snapshot either rediscover or permanently retire the record.
+                let native_existence_uncertain = self.refreshes_blocked();
+                let mut outcome = if platform_window_alive || native_existence_uncertain {
                     window_workflow::handle_window_invalidated(
                         &mut self.state,
                         &self.transaction_manager,

@@ -335,13 +335,23 @@ impl Deref for AXUIElement {
 }
 
 impl PartialEq for AXUIElement {
-    fn eq(&self, other: &Self) -> bool { self.raw_ptr() == other.raw_ptr() }
+    fn eq(&self, other: &Self) -> bool {
+        // AX APIs may return a fresh retained wrapper for the same remote
+        // accessibility object. The generated Core Foundation type implements
+        // equality with CFEqual, which compares that remote identity; comparing
+        // allocation addresses makes AXWindows and AXMainWindow disagree after
+        // wake even when they refer to the same window.
+        self.deref().eq(other.deref())
+    }
 }
 
 impl Eq for AXUIElement {}
 
 impl Hash for AXUIElement {
-    fn hash<H: Hasher>(&self, state: &mut H) { self.raw_ptr().hash(state); }
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // Keep Hash consistent with the CFEqual-based PartialEq implementation.
+        self.deref().hash(state);
+    }
 }
 
 impl fmt::Debug for AXUIElement {
@@ -366,4 +376,23 @@ fn rect_from_axvalue(value: &AXValue) -> Result<CGRect> {
 fn make_axvalue<T>(ty: AXValueType, value: &mut T) -> Result<CFRetained<AXValue>> {
     let ptr = NonNull::new((value as *mut T).cast::<c_void>()).expect("value pointer");
     unsafe { AXValue::new(ty, ptr) }.ok_or(Error::Ax(AXError::Failure))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    #[test]
+    fn separately_retained_elements_share_logical_identity() {
+        let pid = std::process::id() as pid_t;
+        let first = AXUIElement::application(pid);
+        let second = AXUIElement::application(pid);
+
+        let mut by_element = HashMap::new();
+        by_element.insert(first, 1);
+
+        assert_eq!(by_element.get(&second), Some(&1));
+    }
 }

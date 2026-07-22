@@ -4229,6 +4229,8 @@ fn display_churn_quarantines_window_frame_and_membership_events() {
         space,
         SpaceEventKind::User,
     ));
+    let ax_invalidated = reactor
+        .should_quarantine_during_display_churn(&Event::WindowDestroyed(WindowId::new(99, 77)));
     let space_created = reactor.should_quarantine_during_display_churn(&Event::SpaceCreated(space));
     let space_destroyed =
         reactor.should_quarantine_during_display_churn(&Event::SpaceDestroyed(space));
@@ -4245,6 +4247,10 @@ fn display_churn_quarantines_window_frame_and_membership_events() {
     assert!(
         destroyed,
         "WindowServerDestroyed should be quarantined during churn"
+    );
+    assert!(
+        !ax_invalidated,
+        "AX invalidation must detach live state instead of being dropped during churn"
     );
     assert!(space_created, "SpaceCreated should be quarantined during churn");
     assert!(
@@ -5489,6 +5495,35 @@ fn ax_invalidation_after_quarantine_release_preserves_workspace_assignment() {
             .workspace_for_window(&reactor.state.windows, space, wid),
         Some(secondary_workspace),
         "rediscovery must restore the detached assignment instead of defaulting to WS1",
+    );
+}
+
+#[test]
+fn ax_invalidation_during_refresh_quarantine_detaches_live_state() {
+    let mut apps = Apps::new();
+    let mut reactor = Reactor::new_for_test(LayoutEngine::new(
+        &crate::common::config::VirtualWorkspaceSettings::default(),
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ));
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    reactor.handle_events(apps.make_app(1, make_windows(1)));
+    apps.simulate_until_quiet(&mut reactor);
+    reactor.refresh_quarantine_manager.display_churn_active = true;
+
+    reactor.handle_event(Event::WindowDestroyed(wid));
+
+    assert!(
+        reactor.state.windows.window(wid).is_none(),
+        "an invalid AX handle must leave live/layout state even while native evidence is unstable",
+    );
+    assert!(
+        reactor.state.windows.record(wid).is_some(),
+        "the unstable native snapshot must not erase recovery identity",
     );
 }
 
