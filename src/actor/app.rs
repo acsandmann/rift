@@ -1167,6 +1167,20 @@ impl State {
 
         let is_frontmost = trace("is_frontmost", &this.app, || this.app.frontmost())?;
 
+        // Focus-follows-mouse can enqueue a final hover transition while the
+        // pointer is moving off a window (for example, into the menu bar).
+        // Reissuing make-key/raise for the window that is already focused is
+        // not only redundant: it can visibly pulse focus and pull it back from
+        // transient system UI. Complete the request without touching focus.
+        //
+        // Only elide a single-window request. Multi-window batches still need
+        // their raises to establish the requested stacking order.
+        if is_frontmost && this.main_window == Some(first) && wids.len() == 1 {
+            trace!(?first, "Skipping raise for already focused window");
+            this.send_event(Event::RaiseCompleted { window_id: first, sequence_id });
+            return Ok(());
+        }
+
         let window_server_id = match WindowServerId::try_from(&this.window(first)?.elem) {
             Ok(wsid) => Some(wsid),
             Err(AxError::NotFound) => {
