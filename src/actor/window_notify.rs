@@ -197,8 +197,7 @@ impl WindowNotify {
                             spaces_tx.send(spaces::Event::SpaceCreated(SpaceId::new(space_id)));
                         }
                     }
-                    CGSEventType::Known(KnownCGSEvent::SpaceCurrentChanged)
-                    | CGSEventType::Known(KnownCGSEvent::WorkspaceDidChange) => {
+                    CGSEventType::Known(KnownCGSEvent::SpaceCurrentChanged) => {
                         spaces_tx.send(spaces::Event::ActiveSpaceChanged);
                     }
                     CGSEventType::Known(KnownCGSEvent::ManagedSpaceMembershipUpdated)
