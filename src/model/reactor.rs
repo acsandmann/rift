@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::actor::app::{AppInfo, AppThreadHandle, WindowId, pid_t};
 use crate::common::log::MetricsCommand;
-use crate::layout_engine::{Direction, LayoutCommand};
+use crate::layout_engine::{Direction, LayoutCommand, RestoreScope};
 use crate::model::WindowStore;
 use crate::sys::app::WindowInfo;
 use crate::sys::screen::SpaceId;
@@ -44,7 +44,14 @@ pub enum DisplaySelector {
 pub enum ReactorCommand {
     Debug,
     Serialize,
+    SaveLayout {
+        path: std::path::PathBuf,
+    },
     SaveAndExit,
+    RestoreLayout {
+        path: std::path::PathBuf,
+        scope: RestoreScope,
+    },
     SwitchSpace(Direction),
     ToggleSpaceActivated,
     FocusWindow {

@@ -182,6 +182,8 @@ active_label = "index"
 # when displaying workspaces, choose whether to draw the layout preview or a set of labels
 # options are "layout" or "label"
 display_style = "layout"
+# .ron files in this folder appear under Layout Files in the menu bar
+layout_folder = "~/.config/rift/layouts"
 
 [settings.ui.stack_line]
 # experimental stack line indicator (defaults to off)

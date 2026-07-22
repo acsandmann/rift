@@ -1481,8 +1481,37 @@ impl Reactor {
             }
             Event::Command(Command::Reactor(ReactorCommand::SaveAndExit)) => {
                 return command_workflow::handle_command_reactor_save_and_exit(
-                    &self.layout_manager,
+                    &self.state,
+                    &mut self.layout_manager,
                 );
+            }
+            Event::Command(Command::Reactor(ReactorCommand::SaveLayout { path })) => {
+                return command_workflow::handle_command_reactor_save_layout(
+                    &self.state,
+                    &mut self.layout_manager,
+                    path,
+                );
+            }
+            Event::Command(Command::Reactor(ReactorCommand::RestoreLayout { path, scope })) => {
+                let Some(active_space) = self.active_display_space() else {
+                    return Ok(EventOutcome::finalized_event(None, false, false, false));
+                };
+                match self.layout_manager.layout_engine.restore_saved_layout(
+                    path,
+                    scope,
+                    active_space,
+                    &mut self.state.windows,
+                    &self.config.virtual_workspaces,
+                    &self.config.settings.layout,
+                ) {
+                    Ok(matched) => {
+                        tracing::info!(?scope, matched, "Restored saved layout");
+                    }
+                    Err(error) => {
+                        tracing::error!(?scope, %error, "Could not restore saved layout");
+                    }
+                }
+                return Ok(EventOutcome::finalized_event(None, false, false, true));
             }
             Event::Command(Command::Reactor(ReactorCommand::Serialize)) => {
                 let serialized = self.serialize_state();

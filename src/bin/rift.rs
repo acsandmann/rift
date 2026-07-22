@@ -54,11 +54,11 @@ struct Cli {
     #[arg(long)]
     no_animate: bool,
 
-    /// No-op compatibility check for the deprecated restore file path.
+    /// Check whether the saved layout snapshot can be loaded.
     #[arg(long)]
     validate: bool,
 
-    /// Deprecated no-op flag retained for CLI compatibility.
+    /// Restore the master layout file saved at shutdown.
     #[arg(long)]
     restore: bool,
 
@@ -149,14 +149,45 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
     config.settings.default_disable |= opt.default_disable;
 
     if opt.validate {
-        return;
+        let path = restore_file();
+        match LayoutEngine::load(path.clone()) {
+            Ok(_) => println!("Master file is valid: {}", path.display()),
+            Err(error) => {
+                eprintln!("Could not load master file at {}: {error}", path.display());
+                process::exit(1);
+            }
+        }
+        process::exit(0);
     }
 
     execute_startup_commands(&config.settings.run_on_start);
 
     let (broadcast_tx, broadcast_rx) = rift_wm::actor::channel();
 
-    let layout = LayoutEngine::new(
+    let mut layout = if opt.restore {
+        let path = restore_file();
+        match LayoutEngine::load(path.clone()) {
+            Ok(layout) => layout,
+            Err(error) => {
+                eprintln!(
+                    "Could not restore master file at {}; starting with a fresh layout: {error}",
+                    path.display()
+                );
+                LayoutEngine::new(
+                    &config.virtual_workspaces,
+                    &config.settings.layout,
+                    Some(broadcast_tx.clone()),
+                )
+            }
+        }
+    } else {
+        LayoutEngine::new(
+            &config.virtual_workspaces,
+            &config.settings.layout,
+            Some(broadcast_tx.clone()),
+        )
+    };
+    layout.finish_loading(
         &config.virtual_workspaces,
         &config.settings.layout,
         Some(broadcast_tx.clone()),

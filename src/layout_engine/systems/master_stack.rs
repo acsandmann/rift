@@ -609,6 +609,10 @@ impl LayoutSystem for MasterStackLayoutSystem {
         self.enforce_master_count(layout, master, stack);
     }
 
+    fn replace_window(&mut self, from: WindowId, to: WindowId) {
+        self.inner.replace_window(from, to);
+    }
+
     fn remove_window(&mut self, wid: WindowId) {
         let layouts = self.inner.layouts_for_window(wid);
         self.inner.remove_window(wid);

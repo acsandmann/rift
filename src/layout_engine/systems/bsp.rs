@@ -1139,6 +1139,21 @@ impl LayoutSystem for BspLayoutSystem {
         }
     }
 
+    fn replace_window(&mut self, from: WindowId, to: WindowId) {
+        if from == to {
+            return;
+        }
+        let Some(node) = self.window_to_node.remove(&from) else {
+            return;
+        };
+        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(node)
+            && *window == Some(from)
+        {
+            *window = Some(to);
+            self.window_to_node.insert(to, node);
+        }
+    }
+
     fn remove_window(&mut self, wid: WindowId) {
         if let Some(node_id) = self.node_for_window_mut(wid) {
             let root = self.find_layout_root(node_id);

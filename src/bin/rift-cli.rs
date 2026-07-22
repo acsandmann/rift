@@ -1,7 +1,8 @@
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::process::{self};
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use rift_wm::actor::app::WindowId;
 use rift_wm::actor::reactor::{self, DisplaySelector};
 use rift_wm::common::config::LayoutMode;
@@ -124,8 +125,25 @@ enum ExecuteCommands {
         #[command(subcommand)]
         space_cmd: SpaceCommands,
     },
-    /// Save current state and exit rift
+    /// Save the master file and exit Rift
     SaveAndExit,
+    /// Save Rift's current layout state without exiting
+    ///
+    /// Use --master instead of PATH to update Rift's master file.
+    SaveLayout {
+        #[command(flatten)]
+        file: LayoutFileSelection,
+    },
+    /// Restore a layout file to the current workspace or macOS Space
+    ///
+    /// Use --master instead of PATH to load Rift's master file.
+    LoadLayout {
+        #[command(flatten)]
+        file: LayoutFileSelection,
+        /// Restore one workspace or all saved workspaces for the current macOS Space.
+        #[arg(long, value_enum, default_value_t = CliRestoreScope::Workspace)]
+        scope: CliRestoreScope,
+    },
     /// Print layout tree debugging output in the running rift instance
     Debug,
     /// Serialize and print runtime state
@@ -177,6 +195,23 @@ enum WindowCommands {
         #[arg(long, visible_alias = "window-server-id")]
         window_id: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliRestoreScope {
+    Workspace,
+    Space,
+}
+
+#[derive(Debug, Clone, Args)]
+#[group(required = true, multiple = false)]
+struct LayoutFileSelection {
+    /// Layout file path.
+    #[arg(value_name = "PATH")]
+    path: Option<PathBuf>,
+    /// Use Rift's master file (~/.rift/layout.ron).
+    #[arg(long)]
+    master: bool,
 }
 
 #[derive(Subcommand)]
@@ -535,6 +570,33 @@ fn build_execute_request(execute: ExecuteCommands) -> Result<RiftRequest, String
         ExecuteCommands::SaveAndExit => {
             RiftCommand::Reactor(reactor::Command::Reactor(reactor::ReactorCommand::SaveAndExit))
         }
+        ExecuteCommands::SaveLayout { file } => {
+            let path = if file.master {
+                rift_wm::common::config::restore_file()
+            } else {
+                absolute_layout_path(file.path.expect("clap requires either PATH or --master"))?
+            };
+            RiftCommand::Reactor(reactor::Command::Reactor(reactor::ReactorCommand::SaveLayout {
+                path,
+            }))
+        }
+        ExecuteCommands::LoadLayout { file, scope } => {
+            let path = if file.master {
+                rift_wm::common::config::restore_file()
+            } else {
+                absolute_layout_path(file.path.expect("clap requires either PATH or --master"))?
+            };
+            layout::LayoutEngine::load(path.clone()).map_err(|error| {
+                format!("could not load layout file at {}: {error}", path.display())
+            })?;
+            let scope = match scope {
+                CliRestoreScope::Workspace => layout::RestoreScope::Workspace,
+                CliRestoreScope::Space => layout::RestoreScope::Space,
+            };
+            RiftCommand::Reactor(reactor::Command::Reactor(
+                reactor::ReactorCommand::RestoreLayout { path, scope },
+            ))
+        }
         ExecuteCommands::Debug => {
             RiftCommand::Reactor(reactor::Command::Reactor(reactor::ReactorCommand::Debug))
         }
@@ -578,6 +640,16 @@ fn build_execute_request(execute: ExecuteCommands) -> Result<RiftRequest, String
             command: command_str,
             args: vec![],
         })
+    }
+}
+
+fn absolute_layout_path(path: PathBuf) -> Result<PathBuf, String> {
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        std::env::current_dir()
+            .map(|current_dir| current_dir.join(path))
+            .map_err(|error| format!("could not resolve layout path: {error}"))
     }
 }
 

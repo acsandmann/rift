@@ -509,7 +509,7 @@ pub enum WorkspaceDisplayStyle {
     Label,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct MenuBarSettings {
     #[serde(default = "no")]
@@ -522,6 +522,32 @@ pub struct MenuBarSettings {
     pub active_label: ActiveWorkspaceLabel,
     #[serde(default)]
     pub display_style: WorkspaceDisplayStyle,
+    #[serde(default = "default_layout_folder")]
+    pub layout_folder: PathBuf,
+}
+
+impl MenuBarSettings {
+    pub fn resolved_layout_folder(&self) -> PathBuf {
+        let Ok(relative) = self.layout_folder.strip_prefix("~") else {
+            return self.layout_folder.clone();
+        };
+        dirs::home_dir()
+            .map(|home| home.join(relative))
+            .unwrap_or_else(|| self.layout_folder.clone())
+    }
+}
+
+impl Default for MenuBarSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            show_empty: false,
+            mode: MenuBarDisplayMode::default(),
+            active_label: ActiveWorkspaceLabel::default(),
+            display_style: WorkspaceDisplayStyle::default(),
+            layout_folder: default_layout_folder(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
@@ -1134,6 +1160,8 @@ fn default_animation_fps() -> f64 { 100.0 }
 #[allow(dead_code)]
 fn no() -> bool { false }
 
+fn default_layout_folder() -> PathBuf { PathBuf::from("~/.config/rift/layouts") }
+
 fn default_workspace_count() -> usize { 4 }
 
 fn default_workspace_names() -> Vec<String> {
@@ -1475,6 +1503,28 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn menu_bar_layout_folder_defaults_and_expands_home() {
+        let settings: MenuBarSettings = toml::from_str("").unwrap();
+
+        assert_eq!(settings.layout_folder, PathBuf::from("~/.config/rift/layouts"));
+        assert_eq!(
+            settings.resolved_layout_folder(),
+            dirs::home_dir().unwrap().join(".config/rift/layouts")
+        );
+    }
+
+    #[test]
+    fn menu_bar_layout_folder_preserves_absolute_paths() {
+        let settings: MenuBarSettings =
+            toml::from_str("layout_folder = \"/tmp/rift-layouts\"").unwrap();
+
+        assert_eq!(
+            settings.resolved_layout_folder(),
+            PathBuf::from("/tmp/rift-layouts")
+        );
+    }
 
     #[test]
     fn test_normalize_hotkey_string() {

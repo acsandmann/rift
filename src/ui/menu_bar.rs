@@ -1,14 +1,16 @@
 // many ideas for how this works were taken from https://github.com/xiamaz/YabaiIndicator
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{ClassType, DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSColor, NSControlStateValueOff, NSControlStateValueOn, NSEventModifierFlags, NSFont,
+    NSAlert, NSColor, NSControlStateValueOff, NSControlStateValueOn, NSEventModifierFlags, NSFont,
     NSFontAttributeName, NSForegroundColorAttributeName, NSGraphicsContext, NSMenu, NSMenuItem,
-    NSStatusBar, NSStatusItem, NSVariableStatusItemLength, NSView,
+    NSModalResponseOK, NSOpenPanel, NSSavePanel, NSStatusBar, NSStatusItem,
+    NSVariableStatusItemLength, NSView,
 };
 use objc2_core_foundation::{
     CFAttributedString, CFDictionary, CFRetained, CFString, CGFloat, CGPoint, CGRect, CGSize,
@@ -16,8 +18,8 @@ use objc2_core_foundation::{
 use objc2_core_graphics::{CGBlendMode, CGContext};
 use objc2_core_text::CTLine;
 use objc2_foundation::{
-    MainThreadMarker, NSAttributedStringKey, NSDictionary, NSMutableDictionary, NSObject, NSRect,
-    NSSize, NSString,
+    MainThreadMarker, NSArray, NSAttributedStringKey, NSDictionary, NSMutableDictionary, NSObject,
+    NSRect, NSSize, NSString, NSURL,
 };
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::debug;
@@ -26,9 +28,9 @@ use crate::actor::reactor::{Command as ReactorTopCommand, ReactorCommand};
 use crate::actor::wm_controller::{WmCmd, WmCommand};
 use crate::common::config::{
     ActiveWorkspaceLabel, LayoutMode, MenuBarDisplayMode, MenuBarSettings, WorkspaceDisplayStyle,
-    WorkspaceSelector,
+    WorkspaceSelector, restore_file,
 };
-use crate::layout_engine::LayoutCommand;
+use crate::layout_engine::{LayoutCommand, LayoutEngine, RestoreScope};
 use crate::model::VirtualWorkspaceId;
 use crate::model::server::{WindowData, WorkspaceData};
 use crate::sys::hotkey::{Hotkey, KeyCode, Modifiers};
@@ -43,16 +45,22 @@ const BORDER_WIDTH: f64 = 1.0;
 const CONTENT_INSET: f64 = 2.0;
 const FONT_SIZE: f64 = 12.0;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum MenuAction {
     SetLayout(LayoutMode),
     ToggleSpaceActivated,
     NextWorkspace,
     PrevWorkspace,
     SwitchToWorkspace(usize),
+    SaveLayout(PathBuf),
+    SaveMasterFile,
+    RestoreLayout { path: PathBuf, scope: RestoreScope },
+    RestoreMasterFile(RestoreScope),
+    RefreshLayoutFiles,
     OpenGitHub,
     OpenDocumentation,
     OpenMatrix,
+    OpenSponsor,
     OpenConfig,
     ReloadConfig,
     QuitRift,
@@ -68,7 +76,11 @@ pub struct MenuIcon {
 }
 
 impl MenuIcon {
-    pub fn new(mtm: MainThreadMarker, action_tx: UnboundedSender<MenuAction>) -> Self {
+    pub fn new(
+        mtm: MainThreadMarker,
+        action_tx: UnboundedSender<MenuAction>,
+        layout_folder: &Path,
+    ) -> Self {
         let status_bar = NSStatusBar::systemStatusBar();
         let status_item = status_bar.statusItemWithLength(NSVariableStatusItemLength);
         let view = MenuIconView::new(mtm);
@@ -81,6 +93,7 @@ impl MenuIcon {
             true,
             &[],
             &MenuShortcuts::default(),
+            layout_folder,
         );
         status_item.setMenu(Some(&menu));
         if let Some(btn) = status_item.button(mtm) {
@@ -122,6 +135,7 @@ impl MenuIcon {
             active_space_is_activated,
             workspaces,
             &shortcuts,
+            &settings.resolved_layout_folder(),
         );
         self.status_item.setMenu(Some(&menu));
         self.menu = menu;
@@ -356,6 +370,38 @@ fn add_separator(menu: &NSMenu) {
     menu.addItem(&separator);
 }
 
+fn layout_file_title(path: &Path) -> Option<String> {
+    let file_name = path.file_name()?.to_str()?;
+    if file_name.starts_with('.') {
+        return None;
+    }
+    path.file_stem()?.to_str().map(str::to_owned)
+}
+
+fn layout_library_files_in(directory: &Path) -> Vec<(String, PathBuf)> {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    let mut layouts = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .filter(|path| {
+            path.extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("ron"))
+        })
+        .filter_map(|path| layout_file_title(&path).map(|title| (title, path)))
+        .collect::<Vec<_>>();
+    layouts.sort_by(|(title_a, path_a), (title_b, path_b)| {
+        title_a
+            .to_ascii_lowercase()
+            .cmp(&title_b.to_ascii_lowercase())
+            .then_with(|| path_a.cmp(path_b))
+    });
+    layouts
+}
+
 fn build_status_menu(
     mtm: MainThreadMarker,
     handler: &MenuActionHandler,
@@ -364,6 +410,7 @@ fn build_status_menu(
     active_space_is_activated: bool,
     workspaces: &[WorkspaceData],
     shortcuts: &MenuShortcuts,
+    layout_folder: &Path,
 ) -> Retained<NSMenu> {
     let title = NSString::from_str("Rift");
     let menu: Retained<NSMenu> = unsafe { msg_send![NSMenu::alloc(mtm), initWithTitle: &*title] };
@@ -454,6 +501,93 @@ fn build_status_menu(
     }
     menu.addItem(&workspace_item);
 
+    let layouts_item = make_menu_item(mtm, "Layout Files", None, None, None, None, None);
+    let layouts_title = NSString::from_str("Layout Files");
+    let layouts_submenu: Retained<NSMenu> =
+        unsafe { msg_send![NSMenu::alloc(mtm), initWithTitle: &*layouts_title] };
+    let library_files = layout_library_files_in(layout_folder);
+    handler.set_layout_folder(layout_folder.to_path_buf());
+    handler.set_layout_files(library_files.iter().map(|(_, path)| path.clone()).collect());
+
+    let save_item = make_menu_item(mtm, "Save Layout", None, None, None, None, None);
+    let save_title = NSString::from_str("Save Layout");
+    let save_submenu: Retained<NSMenu> =
+        unsafe { msg_send![NSMenu::alloc(mtm), initWithTitle: &*save_title] };
+    for (title, action) in [
+        ("Update Master File", sel!(onSaveMasterFile:)),
+        ("Save Layout File…", sel!(onSaveLayout:)),
+    ] {
+        save_submenu.addItem(&make_menu_item(
+            mtm,
+            title,
+            Some(action),
+            Some(handler),
+            None,
+            None,
+            None,
+        ));
+    }
+    save_item.setSubmenu(Some(&save_submenu));
+    layouts_submenu.addItem(&save_item);
+    add_separator(&layouts_submenu);
+
+    for (title, master_action, picker_action, library_action) in [
+        (
+            "Restore to Workspace",
+            sel!(onRestoreMasterFileWorkspace:),
+            sel!(onRestoreWorkspace:),
+            sel!(onRestoreLibraryWorkspace:),
+        ),
+        (
+            "Restore to Space",
+            sel!(onRestoreMasterFileSpace:),
+            sel!(onRestoreSpace:),
+            sel!(onRestoreLibrarySpace:),
+        ),
+    ] {
+        let restore_item = make_menu_item(mtm, title, None, None, None, None, None);
+        let restore_title = NSString::from_str(title);
+        let restore_submenu: Retained<NSMenu> =
+            unsafe { msg_send![NSMenu::alloc(mtm), initWithTitle: &*restore_title] };
+        for (source, action) in [
+            ("Master File", master_action),
+            ("Choose File…", picker_action),
+        ] {
+            restore_submenu.addItem(&make_menu_item(
+                mtm,
+                source,
+                Some(action),
+                Some(handler),
+                None,
+                None,
+                None,
+            ));
+        }
+        if !library_files.is_empty() {
+            add_separator(&restore_submenu);
+            let library_heading =
+                make_menu_item(mtm, "Saved Layouts", None, None, None, None, None);
+            library_heading.setEnabled(false);
+            restore_submenu.addItem(&library_heading);
+            for (index, (name, _)) in library_files.iter().enumerate() {
+                restore_submenu.addItem(&make_menu_item(
+                    mtm,
+                    name,
+                    Some(library_action),
+                    Some(handler),
+                    None,
+                    None,
+                    Some(index as isize),
+                ));
+            }
+        }
+        restore_item.setSubmenu(Some(&restore_submenu));
+        layouts_submenu.addItem(&restore_item);
+    }
+    layouts_item.setSubmenu(Some(&layouts_submenu));
+    menu.addItem(&layouts_item);
+
+    add_separator(&menu);
     menu.addItem(&make_menu_item(
         mtm,
         "Enable Tiling",
@@ -480,7 +614,7 @@ fn build_status_menu(
         Some(sel!(onReloadConfig:)),
         Some(handler),
         None,
-        None,
+        shortcuts.reload_config.as_ref(),
         None,
     ));
 
@@ -515,6 +649,17 @@ fn build_status_menu(
         None,
         None,
     ));
+    add_separator(&help_submenu);
+    help_submenu.addItem(&make_menu_item(
+        mtm,
+        "Sponsor Rift",
+        Some(sel!(onOpenSponsor:)),
+        Some(handler),
+        None,
+        None,
+        None,
+    ));
+
     help_item.setSubmenu(Some(&help_submenu));
     menu.addItem(&help_item);
 
@@ -540,6 +685,7 @@ struct MenuShortcuts {
     quit_rift: Option<Hotkey>,
     switch_workspace_by_index: HashMap<usize, Hotkey>,
     switch_workspace_by_name: HashMap<String, Hotkey>,
+    reload_config: Option<Hotkey>,
 }
 
 impl MenuShortcuts {
@@ -590,6 +736,10 @@ impl MenuShortcuts {
                 )) => {
                     out.quit_rift.get_or_insert_with(|| hotkey.clone());
                 }
+                WmCommand::Wm(WmCmd::ReloadConfig) => {
+                    out.reload_config.get_or_insert_with(|| hotkey.clone());
+                }
+
                 _ => {}
             }
         }
@@ -669,15 +819,95 @@ fn menu_hotkey_to_key_equivalent(hotkey: &Hotkey) -> Option<(&'static str, NSEve
 
 struct MenuActionHandlerIvars {
     action_tx: UnboundedSender<MenuAction>,
+    layout_files: RefCell<Vec<PathBuf>>,
+    layout_folder: RefCell<PathBuf>,
 }
 
 impl MenuActionHandler {
     fn new(mtm: MainThreadMarker, action_tx: UnboundedSender<MenuAction>) -> Retained<Self> {
-        let this = mtm.alloc().set_ivars(MenuActionHandlerIvars { action_tx });
+        let this = mtm.alloc().set_ivars(MenuActionHandlerIvars {
+            action_tx,
+            layout_files: RefCell::new(Vec::new()),
+            layout_folder: RefCell::new(PathBuf::new()),
+        });
         unsafe { msg_send![super(this), init] }
     }
 
     fn emit(&self, action: MenuAction) { let _ = self.ivars().action_tx.send(action); }
+
+    fn set_layout_files(&self, paths: Vec<PathBuf>) {
+        *self.ivars().layout_files.borrow_mut() = paths;
+    }
+
+    fn set_layout_folder(&self, path: PathBuf) { *self.ivars().layout_folder.borrow_mut() = path; }
+
+    fn layout_file_for_item(&self, item: Option<&NSMenuItem>) -> Option<PathBuf> {
+        let index = usize::try_from(item?.tag()).ok()?;
+        self.ivars().layout_files.borrow().get(index).cloned()
+    }
+
+    fn set_default_layout_directory(&self, panel: &NSSavePanel) {
+        let directory = self.ivars().layout_folder.borrow();
+        if std::fs::create_dir_all(&*directory).is_ok() {
+            let path = NSString::from_str(&directory.to_string_lossy());
+            let url = NSURL::fileURLWithPath_isDirectory(&path, true);
+            panel.setDirectoryURL(Some(&url));
+        }
+    }
+
+    #[allow(deprecated)]
+    fn restrict_to_layout_files(panel: &NSSavePanel) {
+        let extension = NSString::from_str("ron");
+        let extensions = NSArray::from_slice(&[&*extension]);
+        panel.setAllowedFileTypes(Some(&extensions));
+        panel.setAllowsOtherFileTypes(false);
+    }
+
+    fn choose_save_path(&self) -> Option<PathBuf> {
+        let mtm = MainThreadMarker::new()?;
+        let panel = NSSavePanel::savePanel(mtm);
+        self.set_default_layout_directory(&panel);
+        Self::restrict_to_layout_files(&panel);
+        panel.setCanCreateDirectories(true);
+        panel.setNameFieldStringValue(&NSString::from_str("layout.ron"));
+        (panel.runModal() == NSModalResponseOK)
+            .then(|| panel.URL())
+            .flatten()?
+            .path()
+            .map(|path| PathBuf::from(path.to_string()))
+    }
+
+    fn choose_layout_path(&self) -> Option<PathBuf> {
+        let mtm = MainThreadMarker::new()?;
+        let panel = NSOpenPanel::openPanel(mtm);
+        self.set_default_layout_directory(&panel);
+        Self::restrict_to_layout_files(&panel);
+        panel.setCanChooseFiles(true);
+        panel.setCanChooseDirectories(false);
+        panel.setAllowsMultipleSelection(false);
+        (panel.runModal() == NSModalResponseOK)
+            .then(|| panel.URL())
+            .flatten()?
+            .path()
+            .map(|path| PathBuf::from(path.to_string()))
+    }
+
+    fn validate_layout_path(path: PathBuf) -> Option<PathBuf> {
+        match LayoutEngine::load(path.clone()) {
+            Ok(_) => Some(path),
+            Err(error) => {
+                let mtm = MainThreadMarker::new()?;
+                let alert = NSAlert::new(mtm);
+                alert.setMessageText(&NSString::from_str("Couldn’t Load Layout"));
+                alert.setInformativeText(&NSString::from_str(&format!(
+                    "The layout file at “{}” could not be read.\n\n{error}",
+                    path.display()
+                )));
+                let _ = alert.runModal();
+                None
+            }
+        }
+    }
 }
 
 define_class!(
@@ -738,6 +968,78 @@ define_class!(
             }
         }
 
+        #[unsafe(method(onRestoreWorkspace:))]
+        fn on_restore_workspace(&self, _sender: Option<&AnyObject>) {
+            if let Some(path) = self.choose_layout_path().and_then(Self::validate_layout_path) {
+                self.emit(MenuAction::RestoreLayout {
+                    path,
+                    scope: RestoreScope::Workspace,
+                });
+            }
+        }
+
+        #[unsafe(method(onRestoreLibraryWorkspace:))]
+        fn on_restore_library_workspace(&self, sender: Option<&NSMenuItem>) {
+            if let Some(path) = self
+                .layout_file_for_item(sender)
+                .and_then(Self::validate_layout_path)
+            {
+                self.emit(MenuAction::RestoreLayout {
+                    path,
+                    scope: RestoreScope::Workspace,
+                });
+            }
+        }
+
+        #[unsafe(method(onSaveLayout:))]
+        fn on_save_layout(&self, _sender: Option<&AnyObject>) {
+            if let Some(path) = self.choose_save_path() {
+                self.emit(MenuAction::SaveLayout(path));
+            }
+        }
+
+        #[unsafe(method(onSaveMasterFile:))]
+        fn on_save_master_file(&self, _sender: Option<&AnyObject>) {
+            self.emit(MenuAction::SaveMasterFile);
+        }
+
+        #[unsafe(method(onRestoreMasterFileWorkspace:))]
+        fn on_restore_master_file_workspace(&self, _sender: Option<&AnyObject>) {
+            if Self::validate_layout_path(restore_file()).is_some() {
+                self.emit(MenuAction::RestoreMasterFile(RestoreScope::Workspace));
+            }
+        }
+
+        #[unsafe(method(onRestoreMasterFileSpace:))]
+        fn on_restore_master_file_space(&self, _sender: Option<&AnyObject>) {
+            if Self::validate_layout_path(restore_file()).is_some() {
+                self.emit(MenuAction::RestoreMasterFile(RestoreScope::Space));
+            }
+        }
+
+        #[unsafe(method(onRestoreSpace:))]
+        fn on_restore_space(&self, _sender: Option<&AnyObject>) {
+            if let Some(path) = self.choose_layout_path().and_then(Self::validate_layout_path) {
+                self.emit(MenuAction::RestoreLayout {
+                    path,
+                    scope: RestoreScope::Space,
+                });
+            }
+        }
+
+        #[unsafe(method(onRestoreLibrarySpace:))]
+        fn on_restore_library_space(&self, sender: Option<&NSMenuItem>) {
+            if let Some(path) = self
+                .layout_file_for_item(sender)
+                .and_then(Self::validate_layout_path)
+            {
+                self.emit(MenuAction::RestoreLayout {
+                    path,
+                    scope: RestoreScope::Space,
+                });
+            }
+        }
+
         #[unsafe(method(onOpenConfig:))]
         fn on_open_config(&self, _sender: Option<&AnyObject>) {
             self.emit(MenuAction::OpenConfig);
@@ -758,6 +1060,11 @@ define_class!(
             self.emit(MenuAction::OpenMatrix);
         }
 
+        #[unsafe(method(onOpenSponsor:))]
+        fn on_open_sponsor(&self, _sender: Option<&AnyObject>) {
+            self.emit(MenuAction::OpenSponsor);
+        }
+
         #[unsafe(method(onReloadConfig:))]
         fn on_reload_config(&self, _sender: Option<&AnyObject>) {
             self.emit(MenuAction::ReloadConfig);
@@ -769,6 +1076,26 @@ define_class!(
         }
     }
 );
+
+#[cfg(test)]
+mod layout_library_tests {
+    use super::*;
+
+    #[test]
+    fn layout_library_only_lists_visible_ron_files_in_name_order() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("Work.RON"), "").unwrap();
+        std::fs::write(directory.path().join("gaming.ron"), "").unwrap();
+        std::fs::write(directory.path().join("notes.txt"), "").unwrap();
+        std::fs::write(directory.path().join(".hidden.ron"), "").unwrap();
+        std::fs::create_dir(directory.path().join("nested.ron")).unwrap();
+
+        let layouts = layout_library_files_in(directory.path());
+        let names = layouts.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>();
+
+        assert_eq!(names, ["gaming", "Work"]);
+    }
+}
 
 fn build_text_attrs(
     font: &NSFont,

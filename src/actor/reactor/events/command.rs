@@ -202,15 +202,37 @@ pub fn handle_command_reactor_serialize(
 }
 
 pub fn handle_command_reactor_save_and_exit(
-    layout: &LayoutManager,
+    state: &RiftState,
+    layout: &mut LayoutManager,
 ) -> anyhow::Result<EventOutcome> {
-    match layout.layout_engine.save(config::restore_file()) {
-        Ok(()) => std::process::exit(0),
-        Err(e) => {
-            error!("Could not save layout: {e}");
-            std::process::exit(3);
-        }
+    if let Err(e) = save_layout(state, layout, config::restore_file()) {
+        error!("Could not save master file: {e}");
+        std::process::exit(3);
     }
+    std::process::exit(0);
+}
+
+fn save_layout(
+    state: &RiftState,
+    layout: &mut LayoutManager,
+    path: std::path::PathBuf,
+) -> std::io::Result<()> {
+    layout.layout_engine.refresh_window_fingerprints(&state.windows);
+    for space in layout.layout_engine.virtual_workspace_manager().initialized_spaces() {
+        store_current_floating_positions(state, layout, space);
+    }
+    layout.layout_engine.save(path)
+}
+
+pub fn handle_command_reactor_save_layout(
+    state: &RiftState,
+    layout: &mut LayoutManager,
+    path: std::path::PathBuf,
+) -> anyhow::Result<EventOutcome> {
+    save_layout(state, layout, path.clone())?;
+    info!(path = %path.display(), "Saved layout");
+    Ok(EventOutcome::finalized_event(None, false, false, false)
+        .with_stdout_line(format!("Saved layout to {}", path.display())))
 }
 
 #[derive(Debug, Clone)]
