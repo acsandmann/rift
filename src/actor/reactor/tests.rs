@@ -4,7 +4,7 @@ use test_log::test;
 use super::testing::*;
 use super::*;
 use crate::actor::app::{AppThreadHandle, Request, pid_t};
-use crate::common::config::OuterGaps;
+use crate::common::config::{OuterGaps, WorkspaceSelector};
 use crate::layout_engine::{Direction, LayoutCommand, LayoutEngine, LayoutEvent};
 use crate::model::window_store::NativeFullscreenTransition;
 use crate::sys::app::{AppInfo, WindowInfo};
@@ -2949,7 +2949,7 @@ fn workspace_switch_batches_all_windows_with_eui_enabled() {
 
     reactor.handle_event(Event::Command(Command::Layout(
         LayoutCommand::MoveWindowToWorkspace {
-            workspace: 1,
+            workspace: WorkspaceSelector::Index(1),
             window_id: Some(2),
         },
     )));
@@ -3118,13 +3118,19 @@ fn auto_workspace_switch_focuses_activated_window_not_stale_workspace_focus() {
 
     reactor.send_layout_event(LayoutEvent::WindowFocused(space, stale_focus));
     reactor.handle_event(Event::Command(Command::Layout(
-        LayoutCommand::MoveWindowToWorkspace { workspace: 1, window_id: None },
+        LayoutCommand::MoveWindowToWorkspace {
+            workspace: WorkspaceSelector::Index(1),
+            window_id: None,
+        },
     )));
     apps.simulate_until_quiet(&mut reactor);
 
     reactor.send_layout_event(LayoutEvent::WindowFocused(space, activated));
     reactor.handle_event(Event::Command(Command::Layout(
-        LayoutCommand::MoveWindowToWorkspace { workspace: 1, window_id: None },
+        LayoutCommand::MoveWindowToWorkspace {
+            workspace: WorkspaceSelector::Index(1),
+            window_id: None,
+        },
     )));
     apps.simulate_until_quiet(&mut reactor);
 
@@ -3166,7 +3172,7 @@ fn windows_discovered_does_not_reintroduce_inactive_workspace_window() {
 
     reactor.handle_event(Event::Command(Command::Layout(
         LayoutCommand::MoveWindowToWorkspace {
-            workspace: 1,
+            workspace: WorkspaceSelector::Index(1),
             window_id: Some(2),
         },
     )));
@@ -3211,7 +3217,7 @@ fn workspace_query_uses_authoritative_assignment_after_move() {
     reactor.handle_event(Event::Command(Command::Layout(LayoutCommand::CreateWorkspace)));
     reactor.handle_event(Event::Command(Command::Layout(
         LayoutCommand::MoveWindowToWorkspace {
-            workspace: 1,
+            workspace: WorkspaceSelector::Index(1),
             window_id: Some(wid.idx.get()),
         },
     )));
@@ -3361,7 +3367,7 @@ fn login_screen_refresh_preserves_manual_workspace_assignment() {
 
     reactor.handle_event(Event::Command(Command::Layout(
         LayoutCommand::MoveWindowToWorkspace {
-            workspace: 1,
+            workspace: WorkspaceSelector::Index(1),
             window_id: Some(2),
         },
     )));

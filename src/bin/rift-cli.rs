@@ -5,7 +5,7 @@ use std::process::{self};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use rift_wm::actor::app::WindowId;
 use rift_wm::actor::reactor::{self, DisplaySelector};
-use rift_wm::common::config::LayoutMode;
+use rift_wm::common::config::{LayoutMode, WorkspaceSelector};
 use rift_wm::ipc::{RiftCommand, RiftMachClient, RiftRequest, RiftResponse};
 use rift_wm::layout_engine as layout;
 use rift_wm::sys::window_server::WindowServerId;
@@ -790,7 +790,7 @@ fn map_workspace_command(cmd: WorkspaceCommands) -> Result<RiftCommand, String> 
         )),
         WorkspaceCommands::MoveWindow { workspace_id, window_id } => Ok(RiftCommand::Reactor(
             reactor::Command::Layout(LC::MoveWindowToWorkspace {
-                workspace: workspace_id,
+                workspace: WorkspaceSelector::Index(workspace_id),
                 window_id,
             }),
         )),

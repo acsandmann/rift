@@ -329,31 +329,10 @@ impl WmController {
                     );
                 }
             }
-            Command(Wm(MoveWindowToWorkspace(ws_sel))) => {
-                let maybe_index: Option<usize> = match &ws_sel {
-                    WorkspaceSelector::Index(i) => Some(*i),
-                    WorkspaceSelector::Name(name) => self
-                        .config
-                        .config
-                        .virtual_workspaces
-                        .workspace_names
-                        .iter()
-                        .position(|n| n == name),
-                };
-
-                if let Some(workspace_index) = maybe_index {
-                    self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
-                        layout::LayoutCommand::MoveWindowToWorkspace {
-                            workspace: workspace_index,
-                            window_id: None,
-                        },
-                    )));
-                } else {
-                    tracing::warn!(
-                        "Hotkey requested move window to workspace {:?} but it could not be resolved; ignoring",
-                        ws_sel
-                    );
-                }
+            Command(Wm(MoveWindowToWorkspace(workspace))) => {
+                self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
+                    layout::LayoutCommand::MoveWindowToWorkspace { workspace, window_id: None },
+                )));
             }
             Command(Wm(CreateWorkspace)) => {
                 self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(

@@ -9,7 +9,7 @@ use super::{
 };
 use crate::actor::app::{AppInfo, WindowId, pid_t};
 use crate::common::collections::{HashMap, HashSet};
-use crate::common::config::{LayoutMode, LayoutSettings};
+use crate::common::config::{LayoutMode, LayoutSettings, WorkspaceSelector};
 use crate::layout_engine::LayoutSystem;
 use crate::layout_engine::floating::FloatingFullscreenKind;
 use crate::layout_engine::systems::WindowLayoutConstraints;
@@ -81,7 +81,7 @@ pub enum LayoutCommand {
     PrevWorkspace(Option<bool>),
     SwitchToWorkspace(usize),
     MoveWindowToWorkspace {
-        workspace: usize,
+        workspace: WorkspaceSelector,
         window_id: Option<u32>,
     },
     SetWorkspaceLayout {
@@ -2380,10 +2380,7 @@ impl LayoutEngine {
             LayoutCommand::SwitchToWorkspace(workspace_index) => {
                 self.switch_to_workspace(window_store, space, *workspace_index, None)
             }
-            LayoutCommand::MoveWindowToWorkspace {
-                workspace: workspace_index,
-                window_id: maybe_id,
-            } => {
+            LayoutCommand::MoveWindowToWorkspace { workspace, window_id: maybe_id } => {
                 let focused_window = if let Some(spec_u32) = maybe_id {
                     match self.virtual_workspace_manager.find_window_by_idx(
                         window_store,
@@ -2408,15 +2405,25 @@ impl LayoutEngine {
                 };
 
                 let workspaces = self.virtual_workspace_manager_mut().list_workspaces(op_space);
-                let Some((target_workspace_id, _)) = workspaces.get(*workspace_index) else {
-                    return EventResponse::default();
-                };
-                let target_workspace_id = *target_workspace_id;
-
                 let Some(current_workspace_id) = self
                     .virtual_workspace_manager
                     .workspace_for_window(window_store, op_space, focused_window)
                 else {
+                    return EventResponse::default();
+                };
+                let target_workspace_id = match workspace {
+                    WorkspaceSelector::Index(index) => workspaces.get(*index).map(|(id, _)| *id),
+                    WorkspaceSelector::Name(name) if name == "next" => self
+                        .virtual_workspace_manager
+                        .next_workspace(window_store, op_space, current_workspace_id, None),
+                    WorkspaceSelector::Name(name) if name == "prev" => self
+                        .virtual_workspace_manager
+                        .prev_workspace(window_store, op_space, current_workspace_id, None),
+                    WorkspaceSelector::Name(name) => workspaces
+                        .iter()
+                        .find_map(|(id, workspace_name)| (workspace_name == name).then_some(*id)),
+                };
+                let Some(target_workspace_id) = target_workspace_id else {
                     return EventResponse::default();
                 };
 
@@ -3916,7 +3923,7 @@ mod tests {
             &mut window_store,
             space,
             &LayoutCommand::MoveWindowToWorkspace {
-                workspace: 1,
+                workspace: WorkspaceSelector::Index(1),
                 window_id: Some(wid2.idx.get()),
             },
         );
@@ -3983,7 +3990,7 @@ mod tests {
             &mut window_store,
             space,
             &LayoutCommand::MoveWindowToWorkspace {
-                workspace: 1,
+                workspace: WorkspaceSelector::Index(1),
                 window_id: Some(wid.idx.get()),
             },
         );
@@ -4003,5 +4010,20 @@ mod tests {
             engine.virtual_workspace_manager.workspace_windows(&window_store, space, ws2),
             vec![wid]
         );
+
+        for (target, expected) in [("next", workspaces[2].0), ("prev", ws2)] {
+            let _ = engine.handle_virtual_workspace_command(
+                &mut window_store,
+                space,
+                &LayoutCommand::MoveWindowToWorkspace {
+                    workspace: WorkspaceSelector::Name(target.into()),
+                    window_id: Some(wid.idx.get()),
+                },
+            );
+            assert_eq!(
+                engine.virtual_workspace_manager.workspace_for_window(&window_store, space, wid),
+                Some(expected)
+            );
+        }
     }
 }
