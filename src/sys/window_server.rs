@@ -28,9 +28,11 @@ use crate::common::collections::HashMap;
 use crate::sys::app::pid_t;
 use crate::sys::axuielement::{AXUIElement, Error as AxError};
 use crate::sys::cg_ok;
+#[cfg(not(test))]
+use crate::sys::geometry::CGRectExt;
 use crate::sys::mach::mach_get_window_sub_level;
 use crate::sys::process::ProcessSerialNumber;
-use crate::sys::screen::SpaceId;
+use crate::sys::screen::{ScreenInfo, SpaceId};
 use crate::sys::skylight::*;
 
 static G_CONNECTION: Lazy<i32> = Lazy::new(|| unsafe { SLSMainConnectionID() });
@@ -549,6 +551,36 @@ fn get_num(dict: &CFDictionary<CFString, CFType>, key: &'static CFString) -> Opt
 fn get_string(dict: &CFDictionary<CFString, CFType>, key: &'static CFString) -> Option<String> {
     Some(dict.get(key)?.downcast::<CFString>().ok()?.to_string())
 }
+
+#[cfg(not(test))]
+pub fn focus_desktop_window(screen: &ScreenInfo) -> bool {
+    let Some(display_uuid) = screen.display_uuid_opt() else {
+        return false;
+    };
+    let uuid = CFString::from_str(display_uuid);
+    let displays = CFArray::from_objects(&[&*uuid]);
+    let Some(windows) = NonNull::new(unsafe {
+        SLSManagedDisplaysCopyRoleWindows(*G_CONNECTION, CFRetained::as_ptr(&displays).as_ptr(), 1)
+    }) else {
+        return false;
+    };
+    let windows = unsafe { CFRetained::from_raw(windows) };
+    windows.iter().any(|number| {
+        let Some(id) = number.as_i64().and_then(|id| u32::try_from(id).ok()) else {
+            return false;
+        };
+        let wsid = WindowServerId::new(id);
+        let Some(info) = get_window(wsid) else {
+            return false;
+        };
+        info.layer < 0
+            && screen.frame.contains(info.frame.mid())
+            && make_key_window(info.pid, wsid).is_ok()
+    })
+}
+
+#[cfg(test)]
+pub fn focus_desktop_window(_screen: &ScreenInfo) -> bool { false }
 
 #[cfg_attr(test, allow(dead_code))]
 fn window_is_effectively_invisible(alpha: f32, layer: i32) -> bool {

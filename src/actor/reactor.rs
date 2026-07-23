@@ -2298,6 +2298,10 @@ impl Reactor {
         );
         self.check_for_new_windows();
 
+        if let Some(space) = self.workspace_command_space() {
+            self.focus_desktop_if_active_workspace_empty(space);
+        }
+
         if let Some(space) = self
             .workspace_command_space()
             .or_else(|| spaces.iter().copied().flatten().find(|space| self.is_space_active(*space)))
@@ -3228,11 +3232,19 @@ impl Reactor {
     }
 
     fn send_layout_event(&mut self, event: LayoutEvent) {
+        let focus_desktop = matches!(
+            event,
+            LayoutEvent::WindowRemoved(wid)
+                if self.layout_manager.layout_engine.focused_window() == Some(wid)
+        );
         let event_clone = event.clone();
         let response =
             self.layout_manager.layout_engine.handle_event(&mut self.state.windows, event);
         self.prepare_refocus_after_layout_event(&event_clone);
         self.handle_layout_response(response, None);
+        if focus_desktop && let Some(space) = self.workspace_command_space() {
+            self.focus_desktop_if_active_workspace_empty(space);
+        }
         for space in self.space_state.iter_known_spaces() {
             self.layout_manager.layout_engine.debug_tree_desc(space, "after event", false);
         }
@@ -3740,12 +3752,14 @@ impl Reactor {
                                 .is_empty()
                         })
                         .unwrap_or(false);
-                    let warp_space = if skip_center_warp {
-                        None
+                    if skip_center_warp {
+                        workspace_switch_space.is_some_and(|space| {
+                            self.focus_desktop_if_active_workspace_empty(space)
+                        })
                     } else {
-                        workspace_switch_space.or_else(|| self.command_context_space())
-                    };
-                    self.try_focus_or_warp_without_raise(warp_space, &mut focus_window)
+                        let space = workspace_switch_space.or_else(|| self.command_context_space());
+                        self.try_focus_or_warp_without_raise(space, &mut focus_window)
+                    }
                 }
             } else if let Some(space) = pending_refocus_space.take() {
                 if let Some(wid) = self.last_focused_window_in_space(space) {
@@ -4041,6 +4055,31 @@ impl Reactor {
 
         let Some(info) = window_info else { return false };
         window_server::make_key_window(info.pid, wsid).is_ok()
+    }
+
+    fn focus_desktop_if_active_workspace_empty(&mut self, space: SpaceId) -> bool {
+        if !self.is_space_active(space)
+            || !self
+                .layout_manager
+                .layout_engine
+                .windows_in_active_workspace(&self.state.windows, space)
+                .is_empty()
+        {
+            return false;
+        }
+        let Some(screen) = self.space_state.screen_by_space(space) else {
+            return false;
+        };
+        if !window_server::focus_desktop_window(screen) {
+            return false;
+        }
+
+        self.layout_manager.layout_engine.commit_workspace_focus(
+            &mut self.state.windows,
+            space,
+            None,
+        );
+        true
     }
 
     fn last_focused_window_in_space(&self, space: SpaceId) -> Option<WindowId> {
