@@ -1613,10 +1613,12 @@ impl Reactor {
                     .and_then(|screen| screen.space)
                     .is_none_or(|space| self.is_space_active(space));
                 return command_workflow::handle_move_mouse_to_display(
+                    &self.app_manager,
                     command_workflow::DisplayFocusPayload {
                         screen,
                         target_is_active,
                         focus_window,
+                        focus_window_center: None,
                     },
                 );
             }
@@ -1636,11 +1638,16 @@ impl Reactor {
                     .as_ref()
                     .and_then(|screen| screen.space)
                     .is_none_or(|space| self.is_space_active(space));
+                let focus_window_center = focus_window
+                    .and_then(|wid| self.state.windows.window(wid))
+                    .map(|window| window.frame_monotonic.mid());
                 return command_workflow::handle_focus_display(
+                    &self.app_manager,
                     command_workflow::DisplayFocusPayload {
                         screen,
                         target_is_active,
                         focus_window,
+                        focus_window_center,
                     },
                 );
             }
