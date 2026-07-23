@@ -157,6 +157,8 @@ pub struct WorkspaceStore {
     #[serde(skip)]
     pub workspace_auto_back_and_forth: bool,
     #[serde(skip)]
+    prevent_wrapping: bool,
+    #[serde(skip)]
     pub workspace_rules: Vec<crate::common::config::WorkspaceLayoutRule>,
     #[serde(skip)]
     pub default_layout_mode: LayoutMode,
@@ -192,6 +194,7 @@ impl WorkspaceStore {
             default_workspace_names: config.workspace_names.clone(),
             default_workspace,
             workspace_auto_back_and_forth: config.workspace_auto_back_and_forth,
+            prevent_wrapping: config.prevent_wrapping,
             workspace_rules: config.workspace_rules.clone(),
             default_layout_mode: layout_settings.mode,
             layout_settings: layout_settings.clone(),
@@ -214,6 +217,7 @@ impl WorkspaceStore {
         self.default_workspace_count = config.default_workspace_count;
         self.default_workspace_names = config.workspace_names.clone();
         self.workspace_auto_back_and_forth = config.workspace_auto_back_and_forth;
+        self.prevent_wrapping = config.prevent_wrapping;
 
         let target_count = self.default_workspace_count.max(1).min(self.max_workspaces);
         self.default_workspace = config.default_workspace.min(target_count - 1);
@@ -425,32 +429,6 @@ impl WorkspaceStore {
         })
     }
 
-    fn filtered_workspace_ids(
-        &self,
-        window_store: &WindowStore,
-        space: SpaceId,
-        skip_empty: Option<bool>,
-    ) -> Vec<VirtualWorkspaceId> {
-        let ids = match self.workspaces_by_space.get(&space) {
-            Some(v) => v,
-            None => return Vec::new(),
-        };
-
-        let require_non_empty = skip_empty == Some(true);
-
-        ids.iter()
-            .copied()
-            .filter(|id| {
-                if self.workspaces.contains_key(*id) {
-                    !(require_non_empty
-                        && self.workspace_windows(window_store, space, *id).is_empty())
-                } else {
-                    false
-                }
-            })
-            .collect()
-    }
-
     fn step_workspace(
         &self,
         window_store: &WindowStore,
@@ -459,39 +437,23 @@ impl WorkspaceStore {
         skip_empty: Option<bool>,
         dir: Direction,
     ) -> Option<VirtualWorkspaceId> {
-        let base_ids: Vec<VirtualWorkspaceId> = if skip_empty == Some(true) {
-            self.filtered_workspace_ids(window_store, space, Some(true))
-        } else {
-            self.workspaces_by_space.get(&space).cloned().unwrap_or_default()
-        };
-
-        if base_ids.is_empty() {
-            return None;
-        }
-
-        if let Some(pos) = base_ids.iter().position(|&id| id == current) {
-            let i = dir.step(pos, base_ids.len());
-            return Some(base_ids[i]);
-        }
-
-        let fallback_ids = self.filtered_workspace_ids(window_store, space, Some(false));
-        if fallback_ids.is_empty() {
-            return None;
-        }
-        let start = fallback_ids.iter().position(|&id| id == current)?;
+        let ids = self.workspaces_by_space.get(&space)?;
+        let mut index = ids.iter().position(|&id| id == current)?;
         let require_non_empty = skip_empty == Some(true);
 
-        let mut i = dir.step(start, fallback_ids.len());
-        if !require_non_empty {
-            return Some(fallback_ids[i]);
-        }
+        for _ in 0..ids.len() {
+            index = match dir {
+                Direction::Right if index + 1 < ids.len() => index + 1,
+                Direction::Left if index > 0 => index - 1,
+                Direction::Right if !self.prevent_wrapping => 0,
+                Direction::Left if !self.prevent_wrapping => ids.len() - 1,
+                _ => return None,
+            };
 
-        for _ in 0..fallback_ids.len() {
-            let id = fallback_ids[i];
-            if !self.workspace_windows(window_store, space, id).is_empty() {
+            let id = ids[index];
+            if !require_non_empty || !self.workspace_windows(window_store, space, id).is_empty() {
                 return Some(id);
             }
-            i = dir.step(i, fallback_ids.len());
         }
         None
     }
@@ -1622,6 +1584,89 @@ mod tests {
         assert_eq!(
             manager.prev_workspace(&window_store, space, ws3_id, None),
             Some(ws2_id)
+        );
+    }
+
+    #[test]
+    fn workspace_navigation_wraps_by_default() {
+        let window_store = WindowStore::default();
+        let settings = VirtualWorkspaceSettings {
+            default_workspace_count: 3,
+            ..VirtualWorkspaceSettings::default()
+        };
+        let mut manager = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
+        let space = SpaceId::new(1);
+        let workspaces = manager.list_workspaces(space).to_vec();
+
+        assert_eq!(
+            manager.next_workspace(&window_store, space, workspaces[2].0, None),
+            Some(workspaces[0].0)
+        );
+        assert_eq!(
+            manager.prev_workspace(&window_store, space, workspaces[0].0, None),
+            Some(workspaces[2].0)
+        );
+    }
+
+    #[test]
+    fn prevent_wrapping_stops_workspace_navigation_at_boundaries() {
+        let mut window_store = WindowStore::default();
+        let settings = VirtualWorkspaceSettings {
+            default_workspace_count: 4,
+            prevent_wrapping: true,
+            ..VirtualWorkspaceSettings::default()
+        };
+        let mut manager = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
+        let space = SpaceId::new(1);
+        let workspaces = manager.list_workspaces(space).to_vec();
+
+        assert_eq!(
+            manager.prev_workspace(&window_store, space, workspaces[0].0, None),
+            None
+        );
+        assert_eq!(
+            manager.next_workspace(&window_store, space, workspaces[3].0, None),
+            None
+        );
+
+        let window = WindowId::new(1, 1);
+        assert!(manager.assign_window_to_workspace(
+            &mut window_store,
+            space,
+            window,
+            workspaces[3].0
+        ));
+        assert_eq!(
+            manager.next_workspace(&window_store, space, workspaces[1].0, Some(true)),
+            Some(workspaces[3].0)
+        );
+        assert_eq!(
+            manager.next_workspace(&window_store, space, workspaces[3].0, Some(true)),
+            None
+        );
+    }
+
+    #[test]
+    fn prevent_wrapping_updates_on_config_reload() {
+        let window_store = WindowStore::default();
+        let mut settings = VirtualWorkspaceSettings {
+            default_workspace_count: 2,
+            ..VirtualWorkspaceSettings::default()
+        };
+        let mut manager = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
+        let space = SpaceId::new(1);
+        let workspaces = manager.list_workspaces(space).to_vec();
+
+        assert_eq!(
+            manager.next_workspace(&window_store, space, workspaces[1].0, None),
+            Some(workspaces[0].0)
+        );
+
+        settings.prevent_wrapping = true;
+        manager.update_settings(&settings, &LayoutSettings::default());
+        assert_eq!(
+            manager.next_workspace(&window_store, space, workspaces[1].0, None),
+            None
         );
     }
 

@@ -75,6 +75,8 @@ pub struct VirtualWorkspaceSettings {
     pub preserve_focus_per_workspace: bool,
     #[serde(default = "no")]
     pub workspace_auto_back_and_forth: bool,
+    #[serde(default, alias = "prevent_wrapping_around")]
+    pub prevent_wrapping: bool,
     #[serde(default = "default_workspace_names")]
     pub workspace_names: Vec<String>,
     #[serde(default)]
@@ -152,6 +154,7 @@ impl Default for VirtualWorkspaceSettings {
             auto_assign_windows: true,
             preserve_focus_per_workspace: true,
             workspace_auto_back_and_forth: false,
+            prevent_wrapping: false,
             workspace_names: default_workspace_names(),
             default_workspace: 0,
             reapply_app_rules_on_title_change: false,
@@ -1548,6 +1551,16 @@ mod tests {
     use super::*;
     use crate::actor::reactor;
     use crate::layout_engine::{LayoutCommand, ResizeOrientation};
+
+    #[test]
+    fn virtual_workspace_prevent_wrapping_defaults_to_false_and_accepts_suggested_alias() {
+        let defaults: VirtualWorkspaceSettings = toml::from_str("").unwrap();
+        assert!(!defaults.prevent_wrapping);
+
+        let settings: VirtualWorkspaceSettings =
+            toml::from_str("prevent_wrapping_around = true").unwrap();
+        assert!(settings.prevent_wrapping);
+    }
 
     #[test]
     fn resize_command_config_supports_legacy_and_oriented_forms() {
