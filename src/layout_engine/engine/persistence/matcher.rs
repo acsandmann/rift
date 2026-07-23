@@ -86,7 +86,7 @@ pub(super) fn choose_match(
         return None;
     }
 
-    let duplicate_identities = if direct.is_none() && server_id_match.is_some() {
+    let mut duplicate_identities = if direct.is_none() && server_id_match.is_some() {
         fingerprint.window_server_id.map_or_else(Vec::new, |window_server_id| {
             candidates
                 .iter()
@@ -100,6 +100,7 @@ pub(super) fn choose_match(
     } else {
         Vec::new()
     };
+    duplicate_identities.sort_unstable();
 
     Some(MatchDecision {
         selected,

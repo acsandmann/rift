@@ -4,7 +4,7 @@ use slotmap::{SlotMap, new_key_type};
 use tracing::{error, warn};
 
 use crate::actor::app::WindowId;
-use crate::common::collections::HashMap;
+use crate::common::collections::{HashMap, HashSet};
 #[cfg(test)]
 use crate::common::config::AppWorkspaceRule;
 use crate::common::config::{
@@ -224,6 +224,20 @@ impl WorkspaceStore {
 
         let spaces: Vec<SpaceId> = self.workspaces_by_space.keys().copied().collect();
         for space in spaces {
+            if let Some(workspaces) = self.workspaces_by_space.get_mut(&space) {
+                workspaces.sort_unstable();
+            }
+            // Persisted workspace names are historical display metadata. Explicit names in the
+            // current config remain authoritative after startup restore and config reload.
+            if let Some(workspaces) = self.workspaces_by_space.get(&space) {
+                for (index, &workspace) in workspaces.iter().enumerate() {
+                    if let Some(name) = self.default_workspace_names.get(index)
+                        && let Some(workspace) = self.workspaces.get_mut(workspace)
+                    {
+                        workspace.name = name.clone();
+                    }
+                }
+            }
             while self.workspaces_by_space.get(&space).unwrap().len() < target_count {
                 let idx = self.workspaces_by_space.get(&space).unwrap().len();
                 let name = if let Some(n) = self.default_workspace_names.get(idx) {
@@ -287,7 +301,74 @@ impl WorkspaceStore {
     }
 
     pub fn initialized_spaces(&self) -> Vec<SpaceId> {
-        self.workspaces_by_space.keys().copied().collect()
+        let mut spaces = self.workspaces_by_space.keys().copied().collect::<Vec<_>>();
+        spaces.sort_unstable();
+        spaces
+    }
+
+    /// Validate the serialized workspace graph before layout code indexes into slotmaps.
+    ///
+    /// Persistence files are user-visible and may be old, truncated, or manually edited. Loading
+    /// malformed topology must return a useful error instead of panicking later through indexing.
+    pub(crate) fn validate_persisted_topology(&self) -> Result<(), String> {
+        let mut indexed = HashSet::default();
+        for (&space, workspaces) in &self.workspaces_by_space {
+            if workspaces.is_empty() {
+                return Err(format!("native space {} has no virtual workspaces", space.get()));
+            }
+            for &workspace in workspaces {
+                let Some(entry) = self.workspaces.get(workspace) else {
+                    return Err(format!(
+                        "native space {} references missing workspace {workspace:?}",
+                        space.get()
+                    ));
+                };
+                if entry.space != space {
+                    return Err(format!(
+                        "workspace {workspace:?} belongs to space {} but is indexed under {}",
+                        entry.space.get(),
+                        space.get()
+                    ));
+                }
+                if !indexed.insert(workspace) {
+                    return Err(format!("workspace {workspace:?} is indexed more than once"));
+                }
+            }
+
+            let Some(&(previous, active)) = self.active_workspace_per_space.get(&space) else {
+                return Err(format!("native space {} has no active workspace", space.get()));
+            };
+            if !workspaces.contains(&active) {
+                return Err(format!(
+                    "native space {} has an invalid active workspace",
+                    space.get()
+                ));
+            }
+            if previous.is_some_and(|previous| !workspaces.contains(&previous)) {
+                return Err(format!(
+                    "native space {} has an invalid previous workspace",
+                    space.get()
+                ));
+            }
+        }
+
+        for (workspace, entry) in &self.workspaces {
+            if !indexed.contains(&workspace) {
+                return Err(format!(
+                    "workspace {workspace:?} for native space {} is not indexed",
+                    entry.space.get()
+                ));
+            }
+        }
+        for space in self.active_workspace_per_space.keys() {
+            if !self.workspaces_by_space.contains_key(space) {
+                return Err(format!(
+                    "active workspace state references unknown native space {}",
+                    space.get()
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub fn remap_space(
@@ -394,8 +475,7 @@ impl WorkspaceStore {
 
     pub fn active_workspace_idx(&self, space: SpaceId) -> Option<u64> {
         self.active_workspace(space).and_then(|active_ws_id| {
-            self.workspaces_by_space
-                .get(&space)?
+            self.ordered_workspace_ids(space)
                 .iter()
                 .position(|id| *id == active_ws_id)
                 .map(|idx| idx as u64)
@@ -437,7 +517,10 @@ impl WorkspaceStore {
         skip_empty: Option<bool>,
         dir: Direction,
     ) -> Option<VirtualWorkspaceId> {
-        let ids = self.workspaces_by_space.get(&space)?;
+        let ids = self.ordered_workspace_ids(space);
+        if ids.is_empty() {
+            return None;
+        }
         let mut index = ids.iter().position(|&id| id == current)?;
         let require_non_empty = skip_empty == Some(true);
 
@@ -530,11 +613,10 @@ impl WorkspaceStore {
         }
 
         let source_index = self
-            .workspaces_by_space
-            .get(&existing_assignment.space)?
+            .ordered_workspace_ids(existing_assignment.space)
             .iter()
             .position(|&workspace_id| workspace_id == existing_assignment.workspace_id)?;
-        let target_workspace_id = *self.workspaces_by_space.get(&space)?.get(source_index)?;
+        let target_workspace_id = *self.ordered_workspace_ids(space).get(source_index)?;
 
         self.assign_window_to_workspace(window_store, space, window_id, target_workspace_id)
             .then_some(target_workspace_id)
@@ -795,10 +877,20 @@ impl WorkspaceStore {
     /// Read workspace topology without creating missing state. Validation and restore planning
     /// must use this accessor so a failed transaction cannot initialize part of the live engine.
     pub(crate) fn existing_workspaces(&self, space: SpaceId) -> Vec<(VirtualWorkspaceId, String)> {
-        let ids = self.workspaces_by_space.get(&space).cloned().unwrap_or_default();
-        ids.into_iter()
+        self.ordered_workspace_ids(space)
+            .into_iter()
             .filter_map(|id| self.workspaces.get(id).map(|ws| (id, ws.name.clone())))
             .collect()
+    }
+
+    /// Workspace index is creation/configuration order, represented by the stable slot-map key.
+    /// Serialized vectors are historical implementation detail and may have been reordered by an
+    /// older restore. All ordinal behavior must go through this canonical view.
+    fn ordered_workspace_ids(&self, space: SpaceId) -> Vec<VirtualWorkspaceId> {
+        let mut ids = self.workspaces_by_space.get(&space).cloned().unwrap_or_default();
+        ids.retain(|id| self.workspaces.get(*id).is_some_and(|workspace| workspace.space == space));
+        ids.sort_unstable();
+        ids
     }
 
     pub fn rename_workspace(
@@ -866,11 +958,10 @@ impl WorkspaceStore {
         }
 
         let source_index = self
-            .workspaces_by_space
-            .get(&existing_assignment.space)?
+            .ordered_workspace_ids(existing_assignment.space)
             .iter()
             .position(|&workspace_id| workspace_id == existing_assignment.workspace_id)?;
-        let target_workspace_id = *self.workspaces_by_space.get(&space)?.get(source_index)?;
+        let target_workspace_id = *self.ordered_workspace_ids(space).get(source_index)?;
         Some(WindowWorkspaceInfo {
             space,
             workspace_id: target_workspace_id,
@@ -1072,13 +1163,9 @@ impl WorkspaceStore {
             }
         }
 
-        let first_id = self
-            .workspaces_by_space
-            .get(&space)
-            .and_then(|v: &Vec<VirtualWorkspaceId>| v.first().copied())
-            .ok_or_else(|| {
-                WorkspaceError::InconsistentState("No workspaces for space".to_string())
-            })?;
+        let first_id = self.ordered_workspace_ids(space).first().copied().ok_or_else(|| {
+            WorkspaceError::InconsistentState("No workspaces for space".to_string())
+        })?;
 
         if self.set_active_workspace(space, first_id) {
             Ok(first_id)
@@ -1584,6 +1671,37 @@ mod tests {
         assert_eq!(
             manager.prev_workspace(&window_store, space, ws3_id, None),
             Some(ws2_id)
+        );
+    }
+
+    #[test]
+    fn workspace_navigation_uses_stable_indexes_not_persisted_vector_order() {
+        let window_store = WindowStore::default();
+        let settings = VirtualWorkspaceSettings {
+            default_workspace_count: 3,
+            workspace_names: vec!["A".into(), "B".into(), "C".into()],
+            ..VirtualWorkspaceSettings::default()
+        };
+        let mut manager = WorkspaceStore::new_with_config(&settings, &LayoutSettings::default());
+        let space = SpaceId::new(2);
+        let indexed = manager.list_workspaces(space);
+        manager.workspaces_by_space.get_mut(&space).unwrap().reverse();
+
+        assert_eq!(
+            manager
+                .list_workspaces(space)
+                .iter()
+                .map(|(_, name)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["A", "B", "C"],
+        );
+        assert_eq!(
+            manager.next_workspace(&window_store, space, indexed[0].0, None),
+            Some(indexed[1].0),
+        );
+        assert_eq!(
+            manager.prev_workspace(&window_store, space, indexed[2].0, None),
+            Some(indexed[1].0),
         );
     }
 

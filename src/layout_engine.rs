@@ -7,7 +7,7 @@ mod workspaces;
 
 pub use engine::{
     EventResponse, LayoutCommand, LayoutEngine, LayoutEvent, RestoreReport, RestoreRequest,
-    RestoreScope, RestoreWarning,
+    RestoreScope, RestoreSource, RestoreWarning,
 };
 pub(crate) use floating::FloatingManager;
 pub use graph::{Direction, LayoutKind, Orientation, ResizeOrientation};

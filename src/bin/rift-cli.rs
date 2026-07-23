@@ -606,10 +606,18 @@ fn build_execute_request(execute: ExecuteCommands) -> Result<RiftRequest, String
             }))
         }
         ExecuteCommands::LoadLayout { file, scope } => {
-            let path = if file.master {
-                rift_wm::common::config::restore_file()
+            let (path, source) = if file.master {
+                (
+                    rift_wm::common::config::restore_file(),
+                    layout::RestoreSource::CurrentSpace,
+                )
             } else {
-                absolute_layout_path(file.path.expect("clap requires either PATH or --master"))?
+                (
+                    absolute_layout_path(
+                        file.path.expect("clap requires either PATH or --master"),
+                    )?,
+                    layout::RestoreSource::SavedActiveSpace,
+                )
             };
             layout::LayoutEngine::load(path.clone()).map_err(|error| {
                 format!("could not load layout file at {}: {error}", path.display())
@@ -619,7 +627,7 @@ fn build_execute_request(execute: ExecuteCommands) -> Result<RiftRequest, String
                 CliRestoreScope::Space => layout::RestoreScope::Space,
             };
             RiftCommand::Reactor(reactor::Command::Reactor(
-                reactor::ReactorCommand::RestoreLayout { path, scope },
+                reactor::ReactorCommand::RestoreLayout { path, scope, source },
             ))
         }
         ExecuteCommands::Debug => {

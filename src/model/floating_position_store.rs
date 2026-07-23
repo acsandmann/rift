@@ -4,7 +4,7 @@ use serde_with::serde_as;
 
 use crate::actor::app::WindowId;
 use crate::common::collections::HashMap;
-use crate::model::VirtualWorkspaceId;
+use crate::model::{VirtualWorkspaceId, WorkspaceStore};
 use crate::sys::app::pid_t;
 use crate::sys::geometry::CGRectDef;
 use crate::sys::screen::SpaceId;
@@ -20,6 +20,33 @@ pub struct FloatingPositionStore {
 }
 
 impl FloatingPositionStore {
+    pub(crate) fn validate_persisted(&self, workspaces: &WorkspaceStore) -> Result<(), String> {
+        for (&(space, workspace, window), frame) in &self.positions {
+            let Some(workspace_info) = workspaces.workspaces.get(workspace) else {
+                return Err(format!(
+                    "floating frame for window {window:?} references missing workspace {workspace:?}"
+                ));
+            };
+            if workspace_info.space != space {
+                return Err(format!(
+                    "floating frame for window {window:?} is stored under native space {} instead of {}",
+                    space.get(),
+                    workspace_info.space.get()
+                ));
+            }
+            if !frame.origin.x.is_finite()
+                || !frame.origin.y.is_finite()
+                || !frame.size.width.is_finite()
+                || !frame.size.height.is_finite()
+                || frame.size.width < 0.0
+                || frame.size.height < 0.0
+            {
+                return Err(format!("window {window:?} has an invalid floating frame"));
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn persisted_windows(&self) -> Vec<WindowId> {
         self.positions.keys().map(|(_, _, window)| *window).collect()
     }
@@ -78,16 +105,30 @@ impl FloatingPositionStore {
         space: SpaceId,
         workspace: VirtualWorkspaceId,
     ) -> Vec<(WindowId, CGRect)> {
-        self.positions
+        let mut positions = self
+            .positions
             .iter()
             .filter_map(|(&(stored_space, stored_workspace, window), &frame)| {
                 (stored_space == space && stored_workspace == workspace).then_some((window, frame))
             })
-            .collect()
+            .collect::<Vec<_>>();
+        positions.sort_unstable_by_key(|(window, _)| *window);
+        positions
     }
 
     pub fn remove_window(&mut self, window: WindowId) {
         self.positions.retain(|(_, _, stored_window), _| *stored_window != window);
+    }
+
+    pub(crate) fn remove_workspace_window(
+        &mut self,
+        space: SpaceId,
+        workspace: VirtualWorkspaceId,
+        window: WindowId,
+    ) {
+        self.positions.retain(|(stored_space, stored_workspace, stored_window), _| {
+            (*stored_space, *stored_workspace, *stored_window) != (space, workspace, window)
+        });
     }
 
     /// Keep at most one persisted location for a window identity.

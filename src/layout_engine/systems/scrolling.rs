@@ -578,6 +578,8 @@ impl LayoutSystem for ScrollingLayoutSystem {
         self.layouts.insert(LayoutState::new(self.settings.column_width_ratio))
     }
 
+    fn contains_layout(&self, layout: LayoutId) -> bool { self.layouts.contains_key(layout) }
+
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
         let cloned = self
             .layouts

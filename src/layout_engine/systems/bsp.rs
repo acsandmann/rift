@@ -970,6 +970,8 @@ impl LayoutSystem for BspLayoutSystem {
         self.layouts.insert(state)
     }
 
+    fn contains_layout(&self, layout: LayoutId) -> bool { self.layouts.contains_key(layout) }
+
     /// shallow
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
         let mut windows = Vec::new();

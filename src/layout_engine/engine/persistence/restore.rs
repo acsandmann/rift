@@ -34,21 +34,44 @@ struct RestorePlan {
 }
 
 impl RestorePlan {
+    fn source_space(snapshot: &LayoutEngine, request: RestoreRequest) -> anyhow::Result<SpaceId> {
+        let saved_spaces = snapshot.workspace_layouts.spaces();
+        let saved_active = snapshot
+            .persistence
+            .saved_active_space
+            .map(SpaceId::new)
+            .filter(|space| saved_spaces.contains(space));
+        let preferred = match request.source {
+            RestoreSource::SavedActiveSpace => saved_active.or_else(|| {
+                saved_spaces.contains(&request.active_space).then_some(request.active_space)
+            }),
+            RestoreSource::CurrentSpace => {
+                saved_spaces.contains(&request.active_space).then_some(request.active_space)
+            }
+        };
+
+        if let Some(space) = preferred {
+            return Ok(space);
+        }
+        if saved_spaces.is_empty() {
+            Err(anyhow::anyhow!("saved layout contains no macOS spaces"))
+        } else if saved_spaces.len() == 1 {
+            Ok(*saved_spaces.first().expect("one saved space"))
+        } else {
+            Err(anyhow::anyhow!(
+                "cannot choose a source from {} saved macOS spaces; save the layout again to record its active space",
+                saved_spaces.len()
+            ))
+        }
+    }
+
     fn build(
         mut snapshot: LayoutEngine,
         engine: &LayoutEngine,
+        window_store: &WindowStore,
         request: RestoreRequest,
     ) -> anyhow::Result<Self> {
-        let source_space = if snapshot.workspace_layouts.spaces().contains(&request.active_space) {
-            request.active_space
-        } else {
-            snapshot
-                .workspace_layouts
-                .spaces()
-                .into_iter()
-                .next()
-                .ok_or_else(|| anyhow::anyhow!("saved layout contains no macOS spaces"))?
-        };
+        let source_space = Self::source_space(&snapshot, request)?;
         let source_active = snapshot.virtual_workspace_manager.active_workspace(source_space);
         let mappings = match request.scope {
             RestoreScope::Space => {
@@ -76,12 +99,41 @@ impl RestorePlan {
                     .collect::<Vec<_>>()
             }
             RestoreScope::Workspace => {
-                let source_workspace = source_active
-                    .ok_or_else(|| anyhow::anyhow!("saved space has no active workspace"))?;
                 let target_workspace = engine
                     .virtual_workspace_manager
                     .active_workspace(request.active_space)
                     .ok_or_else(|| anyhow::anyhow!("current space has no active workspace"))?;
+                let source_workspace = match request.source {
+                    // A portable workspace file represents what was active when it was saved.
+                    RestoreSource::SavedActiveSpace => source_active
+                        .ok_or_else(|| anyhow::anyhow!("saved space has no active workspace"))?,
+                    // A master file represents the complete workspace catalog. Restoring S must
+                    // therefore read S's ordinal from the saved native space, regardless of which
+                    // workspace happened to be active when Rift last quit.
+                    RestoreSource::CurrentSpace => {
+                        let target_workspaces = engine
+                            .virtual_workspace_manager
+                            .existing_workspaces(request.active_space);
+                        let target_index = target_workspaces
+                            .iter()
+                            .position(|(workspace, _)| *workspace == target_workspace)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "current active workspace is missing from its native space"
+                                )
+                            })?;
+                        snapshot
+                            .virtual_workspace_manager
+                            .existing_workspaces(source_space)
+                            .get(target_index)
+                            .map(|(workspace, _)| *workspace)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "saved space has no workspace at target index {target_index}"
+                                )
+                            })?
+                    }
+                };
                 vec![WorkspaceMapping {
                     source_space,
                     source_workspace,
@@ -168,20 +220,32 @@ impl RestorePlan {
                 .into_iter()
                 .map(|(window, _)| window)
                 .collect();
-            if let Some(layout) =
-                engine.workspace_layouts.active(mapping.target_space, mapping.target_workspace)
-            {
-                replaced_windows.extend(
-                    engine
-                        .workspace_tree(mapping.target_workspace)
-                        .visible_windows_in_layout(layout),
-                );
+            for (space, workspace, layout) in engine.workspace_layouts.all_layouts() {
+                if (space, workspace) == (mapping.target_space, mapping.target_workspace) {
+                    replaced_windows.extend(
+                        engine
+                            .workspace_tree(mapping.target_workspace)
+                            .all_windows_in_layout(layout),
+                    );
+                }
             }
+            replaced_windows.extend(
+                window_store.workspace_windows(mapping.target_space, mapping.target_workspace),
+            );
             let mut workspace = snapshot
                 .virtual_workspace_manager
                 .workspaces
                 .remove(mapping.source_workspace)
                 .expect("workspace sources were validated before extraction");
+            // A restore replaces layout contents, not the target workspace's identity. Names are
+            // configured/current-session metadata and must not be copied from another workspace or
+            // from an old master snapshot.
+            workspace.name = engine
+                .virtual_workspace_manager
+                .workspace_info(mapping.target_space, mapping.target_workspace)
+                .expect("target workspace was validated before extraction")
+                .name
+                .clone();
             workspace.space = mapping.target_space;
             let layout = snapshot
                 .workspace_layouts
@@ -220,6 +284,11 @@ impl RestorePlan {
             .copied()
             .filter(|window| engine.floating.is_floating(*window))
             .collect();
+        let restored_targets = self
+            .workspaces
+            .iter()
+            .map(|workspace| (workspace.target_space, workspace.target_workspace))
+            .collect::<Vec<_>>();
         let workspaces_replaced = self.workspaces.len();
         for workspace in self.workspaces {
             engine.install_workspace_restore_state(workspace);
@@ -257,11 +326,48 @@ impl RestorePlan {
             .collect::<Vec<_>>();
         engine.persistence.replace_pending(pending);
 
+        // A scoped restore must not consume a live identity that currently belongs to another
+        // native space. WindowId values can be reused across sessions, and treating such a
+        // collision as an unmatched saved ghost would globally remove the unrelated live
+        // window's tree, floating, and focus state during candidate cleanup.
+        for (live, fingerprint) in &live_windows {
+            let live_space = window_store
+                .current_window_server_space_for_window(*live)
+                .or_else(|| window_store.workspace_info_for_window(*live).map(|w| w.space));
+            if live_space == Some(self.request.active_space)
+                || !engine.persistence.pending_windows.remove(live)
+            {
+                continue;
+            }
+            for &(space, workspace) in &restored_targets {
+                engine.workspace_tree_mut(workspace).remove_window(*live);
+                engine.floating_positions.remove_workspace_window(space, workspace, *live);
+                if engine.virtual_workspace_manager.last_focused_window(space, workspace)
+                    == Some(*live)
+                {
+                    engine
+                        .virtual_workspace_manager
+                        .set_last_focused_window(space, workspace, None);
+                }
+            }
+            if live_floating.contains(live) {
+                engine.floating.add_floating(*live);
+                if let Some(live_space) = live_space {
+                    engine.floating.add_active(live_space, live.pid, *live);
+                }
+            } else {
+                engine.floating.remove_floating(*live);
+            }
+            engine.persistence.record(*live, fingerprint.clone());
+        }
+
         let mut report = RestoreReport {
             workspaces_replaced,
             ..RestoreReport::default()
         };
-        for (live, fingerprint) in live_windows {
+        let mut ordered_live_windows = live_windows.into_iter().collect::<Vec<_>>();
+        ordered_live_windows.sort_unstable_by_key(|(window, _)| *window);
+        for (live, fingerprint) in ordered_live_windows {
             if !window_store.contains_window(live) {
                 continue;
             }
@@ -336,7 +442,7 @@ impl LayoutEngine {
         path: PathBuf,
         request: RestoreRequest,
         window_store: &mut WindowStore,
-        virtual_workspace_config: &VirtualWorkspaceSettings,
+        _virtual_workspace_config: &VirtualWorkspaceSettings,
         layout_settings: &LayoutSettings,
     ) -> anyhow::Result<RestoreReport> {
         let (mut snapshot, schema_version) = Self::load_with_schema_version(&path)?;
@@ -347,14 +453,13 @@ impl LayoutEngine {
             active_space = ?request.active_space,
             "Loading persisted layout for restore"
         );
-        snapshot.finish_loading(
-            virtual_workspace_config,
-            layout_settings,
-            self.broadcast_tx.clone(),
-        );
+        // The source topology is file data, not a live engine to be reconciled with the current
+        // workspace-count setting. Only refresh layout-system settings; the installed workspace
+        // inherits the already-hydrated target manager's runtime configuration.
+        snapshot.set_layout_settings(layout_settings);
         self.refresh_window_fingerprints(window_store);
         let live_windows = self.persistence.live_fingerprints();
-        let plan = RestorePlan::build(snapshot, self, request)?;
+        let plan = RestorePlan::build(snapshot, self, window_store, request)?;
         let report = plan.apply(self, window_store, live_windows);
         tracing::info!(
             path = %path.display(),
@@ -393,6 +498,7 @@ impl LayoutEngine {
     fn install_workspace_restore_state(&mut self, state: WorkspaceRestoreState) {
         for window in state.replaced_windows {
             self.floating.remove_floating(window);
+            self.persistence.forget_window(window);
         }
         self.virtual_workspace_manager.workspaces[state.target_workspace] = state.workspace;
         self.workspace_layouts.install_workspace_snapshot(

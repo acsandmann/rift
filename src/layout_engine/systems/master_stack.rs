@@ -483,6 +483,8 @@ impl LayoutSystem for MasterStackLayoutSystem {
         layout
     }
 
+    fn contains_layout(&self, layout: LayoutId) -> bool { self.inner.contains_layout(layout) }
+
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
         let cloned = self.inner.clone_layout(layout);
         let (_root, master, stack) = self.ensure_structure(cloned);

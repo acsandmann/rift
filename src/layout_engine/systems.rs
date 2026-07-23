@@ -90,6 +90,7 @@ impl WindowLayoutConstraints {
 #[enum_dispatch]
 pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     fn create_layout(&mut self) -> LayoutId;
+    fn contains_layout(&self, layout: LayoutId) -> bool;
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId;
     fn remove_layout(&mut self, layout: LayoutId);
 

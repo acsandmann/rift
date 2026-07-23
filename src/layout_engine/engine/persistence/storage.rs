@@ -10,6 +10,7 @@ impl LayoutEngine {
     /// Validation and menu previews continue to use `load` without emitting restore logs.
     pub fn load_for_startup_restore(path: PathBuf) -> anyhow::Result<Self> {
         let (mut engine, schema_version) = Self::load_with_schema_version(&path)?;
+        engine.startup_restore_pending = true;
         let unavailable_windows = engine.discard_unmatchable_startup_candidates(
             |window, id| {
                 crate::sys::window_server::get_window(
@@ -63,6 +64,19 @@ impl LayoutEngine {
                 CURRENT_SCHEMA_VERSION,
             ));
         }
+        persisted
+            .virtual_workspace_manager
+            .validate_persisted_topology()
+            .map_err(|error| anyhow::anyhow!("invalid workspace topology: {error}"))?;
+        persisted
+            .workspace_layouts
+            .validate_persisted(&persisted.virtual_workspace_manager)
+            .map_err(|error| anyhow::anyhow!("invalid workspace layouts: {error}"))?;
+        persisted
+            .floating_positions
+            .validate_persisted(&persisted.virtual_workspace_manager)
+            .map_err(|error| anyhow::anyhow!("invalid floating positions: {error}"))?;
+        persisted.persistence.validate()?;
         let schema_version = persisted.schema_version;
         let mut engine = persisted.into_engine();
         let fingerprinted: HashSet<_> = engine.persistence.windows.keys().copied().collect();
@@ -104,7 +118,23 @@ impl LayoutEngine {
     }
 
     pub fn save(&self, path: PathBuf) -> std::io::Result<()> {
-        if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        self.virtual_workspace_manager
+            .validate_persisted_topology()
+            .and_then(|_| {
+                self.workspace_layouts.validate_persisted(&self.virtual_workspace_manager)
+            })
+            .and_then(|_| {
+                self.floating_positions.validate_persisted(&self.virtual_workspace_manager)
+            })
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        self.persistence
+            .validate()
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(Path::to_path_buf);
+        if let Some(parent) = &parent {
             fs::create_dir_all(parent)?;
         }
         let serialized = self.serialize_to_string();
@@ -130,8 +160,19 @@ impl LayoutEngine {
         };
         let result = (|| {
             file.write_all(serialized.as_bytes())?;
+            // SaveAndExit terminates the process immediately after this returns. Flush the file
+            // itself before the atomic rename so a successful shutdown save means the complete
+            // snapshot has reached the filesystem, not merely userspace/kernel write buffers.
+            file.sync_all()?;
             drop(file);
-            fs::rename(&temporary, &path)
+            fs::rename(&temporary, &path)?;
+            // The rename is the commit point. Sync its directory as well so an immediate
+            // SaveAndExit cannot acknowledge a rename that is still only in filesystem metadata
+            // cache.
+            if let Some(parent) = &parent {
+                File::open(parent)?.sync_all()?;
+            }
+            Ok(())
         })();
         if result.is_err() {
             let _ = fs::remove_file(temporary);
@@ -145,15 +186,90 @@ impl LayoutEngine {
         &mut self,
         path: PathBuf,
         window_store: &WindowStore,
-        floating_positions: &[(SpaceId, WindowId, objc2_core_foundation::CGRect)],
+        active_space: Option<SpaceId>,
     ) -> std::io::Result<()> {
         self.refresh_window_fingerprints(window_store);
-        for &(space, window, frame) in floating_positions {
-            if let Some(workspace) = self.active_workspace(space) {
-                self.floating_positions.store(space, workspace, window, frame);
+        // Never write an origin hint that has no corresponding saved layout. A stale native-space
+        // observation is worse than no hint because it makes a portable file look unambiguous.
+        self.persistence.set_saved_active_space(
+            active_space.filter(|space| self.workspace_layouts.spaces().contains(space)),
+        );
+        for (window, state) in window_store.iter_windows() {
+            if self.floating.is_floating(window) {
+                let Some(assignment) = window_store.workspace_info_for_window(window) else {
+                    // An unassigned live window has no restorable location. Keep its fingerprint
+                    // for lifecycle continuity, but never serialize a stale frame from an older
+                    // assignment as if it were current.
+                    self.floating_positions.remove_window(window);
+                    continue;
+                };
+                self.floating_positions
+                    .retain_window_location(window, (assignment.space, assignment.workspace_id));
+                self.floating_positions.store(
+                    assignment.space,
+                    assignment.workspace_id,
+                    window,
+                    state.frame_monotonic,
+                );
+            } else {
+                // Floating frames are type-specific state. A tiled window retaining one creates a
+                // second persisted location and makes later reconciliation order-dependent.
+                self.floating_positions.remove_window(window);
             }
         }
         self.save(path)
+    }
+
+    /// Reconcile startup-only native SpaceId churn using the display identity saved in the master
+    /// file. Normal space switches must never call this path: a new current space on a display is
+    /// ordinarily a distinct layout, not a renamed old space.
+    pub fn reconcile_startup_spaces(
+        &mut self,
+        window_store: &mut WindowStore,
+        current_spaces: &[(SpaceId, String)],
+    ) {
+        if !self.startup_restore_pending {
+            return;
+        }
+        self.startup_restore_pending = false;
+
+        let saved_spaces = self.workspace_layouts.spaces();
+        let mut remaps = Vec::new();
+        for (current, display_uuid) in current_spaces {
+            if saved_spaces.contains(current) {
+                continue;
+            }
+            let Some(saved) = self.display_last_space.get(display_uuid).copied() else {
+                continue;
+            };
+            if saved != *current
+                && saved_spaces.contains(&saved)
+                && !remaps.iter().any(|(old, _)| *old == saved)
+            {
+                remaps.push((saved, *current));
+            }
+        }
+
+        // Stage through unused ids so a swap/cycle cannot overwrite another display's snapshot.
+        let mut next_temporary = saved_spaces
+            .iter()
+            .map(|space| space.get())
+            .chain(current_spaces.iter().map(|(space, _)| space.get()))
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let staged = remaps
+            .into_iter()
+            .map(|(old, new)| {
+                let temporary = SpaceId::new(next_temporary);
+                next_temporary = next_temporary.saturating_add(1);
+                self.remap_space(window_store, old, temporary);
+                (temporary, new)
+            })
+            .collect::<Vec<_>>();
+        for (temporary, new) in staged {
+            self.remap_space(window_store, temporary, new);
+        }
     }
 
     pub fn serialize_to_string(&self) -> String { PersistedLayout::serialize_engine(self) }

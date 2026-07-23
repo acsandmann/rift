@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub(super) const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 fn legacy_schema_version() -> u32 { 0 }
 
@@ -16,6 +16,10 @@ pub(super) struct PersistedLayout {
     pub(super) floating: FloatingManager,
     pub(super) floating_positions: FloatingPositionStore,
     pub(super) virtual_workspace_manager: WorkspaceStore,
+    #[serde(default)]
+    pub(super) space_display_map: HashMap<SpaceId, Option<String>>,
+    #[serde(default)]
+    pub(super) display_last_space: HashMap<String, SpaceId>,
     #[serde(flatten)]
     pub(super) persistence: PersistenceState,
 }
@@ -28,6 +32,8 @@ struct PersistedLayoutRef<'a> {
     floating: &'a FloatingManager,
     floating_positions: &'a FloatingPositionStore,
     virtual_workspace_manager: &'a WorkspaceStore,
+    space_display_map: &'a HashMap<SpaceId, Option<String>>,
+    display_last_space: &'a HashMap<String, SpaceId>,
     #[serde(flatten)]
     persistence: &'a PersistenceState,
 }
@@ -44,6 +50,8 @@ impl PersistedLayout {
             floating: &engine.floating,
             floating_positions: &engine.floating_positions,
             virtual_workspace_manager: &engine.virtual_workspace_manager,
+            space_display_map: &engine.space_display_map,
+            display_last_space: &engine.display_last_space,
             persistence: &engine.persistence,
         })
         .expect("persisted layout serialization must support all engine layout state")
@@ -60,9 +68,10 @@ impl PersistedLayout {
             virtual_workspace_manager: self.virtual_workspace_manager,
             layout_settings: LayoutSettings::default(),
             broadcast_tx: None,
-            space_display_map: HashMap::default(),
-            display_last_space: HashMap::default(),
+            space_display_map: self.space_display_map,
+            display_last_space: self.display_last_space,
             persistence: self.persistence,
+            startup_restore_pending: false,
         }
     }
 }

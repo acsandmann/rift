@@ -203,9 +203,9 @@ impl Menu {
             MenuAction::SwitchToWorkspace(workspace) => {
                 self.send_layout_command(LayoutCommand::SwitchToWorkspace(workspace));
             }
-            MenuAction::RestoreLayout { path, scope } => {
+            MenuAction::RestoreLayout { path, scope, source } => {
                 self.reactor_tx.send(reactor::Event::Command(reactor::Command::Reactor(
-                    reactor::ReactorCommand::RestoreLayout { path, scope },
+                    reactor::ReactorCommand::RestoreLayout { path, scope, source },
                 )));
             }
             MenuAction::RestoreMasterFile(scope) => {
@@ -213,6 +213,7 @@ impl Menu {
                     reactor::ReactorCommand::RestoreLayout {
                         path: common::config::restore_file(),
                         scope,
+                        source: crate::layout_engine::RestoreSource::CurrentSpace,
                     },
                 )));
             }

@@ -434,6 +434,8 @@ impl LayoutSystem for TraditionalLayoutSystem {
         self.layout_roots.insert(root)
     }
 
+    fn contains_layout(&self, layout: LayoutId) -> bool { self.layout_roots.contains_key(layout) }
+
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
         let source_root = self.layout_roots[layout].id();
         let cloned = source_root.deep_copy(&mut self.tree).make_root("layout_root");

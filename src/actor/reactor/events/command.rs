@@ -215,8 +215,9 @@ pub fn handle_command_reactor_serialize(
 pub fn handle_command_reactor_save_and_exit(
     state: &RiftState,
     layout: &mut LayoutManager,
+    active_space: Option<SpaceId>,
 ) -> anyhow::Result<EventOutcome> {
-    if let Err(e) = save_layout(state, layout, config::restore_file()) {
+    if let Err(e) = save_layout(state, layout, config::restore_file(), active_space) {
         error!("Could not save master file: {e}");
         std::process::exit(3);
     }
@@ -227,25 +228,18 @@ fn save_layout(
     state: &RiftState,
     layout: &mut LayoutManager,
     path: std::path::PathBuf,
+    active_space: Option<SpaceId>,
 ) -> std::io::Result<()> {
-    let floating_positions = layout
-        .layout_engine
-        .virtual_workspace_manager()
-        .initialized_spaces()
-        .into_iter()
-        .flat_map(|space| current_floating_positions(state, layout, space))
-        .collect::<Vec<_>>();
-    layout
-        .layout_engine
-        .save_current_layout(path, &state.windows, &floating_positions)
+    layout.layout_engine.save_current_layout(path, &state.windows, active_space)
 }
 
 pub fn handle_command_reactor_save_layout(
     state: &RiftState,
     layout: &mut LayoutManager,
     path: std::path::PathBuf,
+    active_space: Option<SpaceId>,
 ) -> anyhow::Result<EventOutcome> {
-    save_layout(state, layout, path.clone())?;
+    save_layout(state, layout, path.clone(), active_space)?;
     info!(path = %path.display(), "Saved layout");
     Ok(EventOutcome::finalized_event(None, false, false, false)
         .with_stdout_line(format!("Saved layout to {}", path.display())))

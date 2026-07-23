@@ -23,7 +23,7 @@ use crate::sys::screen::SpaceId;
 mod persistence;
 
 use persistence::PersistenceState;
-pub use persistence::{RestoreReport, RestoreRequest, RestoreScope, RestoreWarning};
+pub use persistence::{RestoreReport, RestoreRequest, RestoreScope, RestoreSource, RestoreWarning};
 
 #[derive(Debug, Clone)]
 pub struct GroupContainerInfo {
@@ -156,6 +156,8 @@ pub struct LayoutEngine {
     space_display_map: HashMap<SpaceId, Option<String>>,
     display_last_space: HashMap<String, SpaceId>,
     persistence: PersistenceState,
+    /// Set only while a master-file startup restore is waiting for the first display snapshot.
+    startup_restore_pending: bool,
 }
 
 impl LayoutEngine {
@@ -1288,6 +1290,7 @@ impl LayoutEngine {
             space_display_map: HashMap::default(),
             display_last_space: HashMap::default(),
             persistence: PersistenceState::default(),
+            startup_restore_pending: false,
         }
     }
 
