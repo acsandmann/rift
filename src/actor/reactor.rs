@@ -1663,6 +1663,16 @@ impl Reactor {
                 );
             }
             Event::Command(Command::Layout(command)) => {
+                // Moving a window doesn't change focus, so mouse_follows_focus
+                // never fires and the cursor gets left behind on the window's
+                // old position. Defer a warp to the moved window's post-layout
+                // frame, reusing the workspace-switch deferred-warp hook.
+                if matches!(command, layout::LayoutCommand::MoveNode(_))
+                    && self.config.settings.mouse_follows_focus
+                    && let Some(wid) = self.main_window()
+                {
+                    self.workspace_switch_manager.pending_workspace_mouse_warp = Some(wid);
+                }
                 let command_space = self.command_context_space();
                 let (visible_spaces, visible_space_centers) = self.visible_spaces_for_layout(false);
                 return command_workflow::handle_command_layout(
