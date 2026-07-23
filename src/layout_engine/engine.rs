@@ -82,6 +82,8 @@ pub enum LayoutCommand {
     SwitchToWorkspace(usize),
     MoveWindowToWorkspace {
         workspace: WorkspaceSelector,
+        #[serde(default = "crate::common::config::no")]
+        follow: bool,
         window_id: Option<u32>,
     },
     SetWorkspaceLayout {
@@ -2383,7 +2385,11 @@ impl LayoutEngine {
             LayoutCommand::SwitchToWorkspace(workspace_index) => {
                 self.switch_to_workspace(window_store, space, *workspace_index, None)
             }
-            LayoutCommand::MoveWindowToWorkspace { workspace, window_id: maybe_id } => {
+            LayoutCommand::MoveWindowToWorkspace {
+                workspace,
+                follow,
+                window_id: maybe_id,
+            } => {
                 let focused_window = if let Some(spec_u32) = maybe_id {
                     match self.virtual_workspace_manager.find_window_by_idx(
                         window_store,
@@ -2467,6 +2473,15 @@ impl LayoutEngine {
                         self.workspace_tree_mut(target_workspace_id)
                             .add_window_after_selection(target_layout, focused_window);
                     }
+                }
+
+                if *follow {
+                    return self.activate_workspace(
+                        window_store,
+                        op_space,
+                        target_workspace_id,
+                        Some(focused_window),
+                    );
                 }
 
                 let active_workspace = self.virtual_workspace_manager.active_workspace(op_space);
@@ -3927,6 +3942,7 @@ mod tests {
             space,
             &LayoutCommand::MoveWindowToWorkspace {
                 workspace: WorkspaceSelector::Index(1),
+                follow: false,
                 window_id: Some(wid2.idx.get()),
             },
         );
@@ -3994,6 +4010,7 @@ mod tests {
             space,
             &LayoutCommand::MoveWindowToWorkspace {
                 workspace: WorkspaceSelector::Index(1),
+                follow: false,
                 window_id: Some(wid.idx.get()),
             },
         );
@@ -4020,6 +4037,7 @@ mod tests {
                 space,
                 &LayoutCommand::MoveWindowToWorkspace {
                     workspace: WorkspaceSelector::Name(target.into()),
+                    follow: false,
                     window_id: Some(wid.idx.get()),
                 },
             );
@@ -4028,5 +4046,59 @@ mod tests {
                 Some(expected)
             );
         }
+    }
+
+    #[test]
+    fn move_window_to_workspace_can_follow_the_window() {
+        let mut window_store = WindowStore::default();
+        let mut engine = test_engine();
+        let space = SpaceId::new(96);
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 1000.0));
+        let pid: pid_t = 6002;
+        let wid = WindowId::new(pid, 1);
+
+        let _ =
+            engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen.size));
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::WindowsOnScreenUpdated(
+                space,
+                pid,
+                vec![(
+                    wid,
+                    None,
+                    None,
+                    None,
+                    true,
+                    CGSize::new(500.0, 500.0),
+                    None,
+                    None,
+                )],
+                None,
+            ),
+        );
+        let _ = engine.handle_virtual_workspace_command(
+            &mut window_store,
+            space,
+            &LayoutCommand::CreateWorkspace,
+        );
+        let target_workspace = engine.virtual_workspace_manager_mut().list_workspaces(space)[1].0;
+
+        let response = engine.handle_virtual_workspace_command(
+            &mut window_store,
+            space,
+            &LayoutCommand::MoveWindowToWorkspace {
+                workspace: WorkspaceSelector::Name("next".into()),
+                follow: true,
+                window_id: Some(wid.idx.get()),
+            },
+        );
+
+        assert_eq!(engine.active_workspace(space), Some(target_workspace));
+        assert_eq!(response.focus_window, Some(wid));
+        assert_eq!(
+            engine.virtual_workspace_manager.workspace_for_window(&window_store, space, wid),
+            Some(target_workspace)
+        );
     }
 }

@@ -46,6 +46,7 @@ pub fn handle_command_layout(
         LayoutCommand::NextWorkspace(_)
             | LayoutCommand::PrevWorkspace(_)
             | LayoutCommand::SwitchToWorkspace(_)
+            | LayoutCommand::MoveWindowToWorkspace { follow: true, .. }
             | LayoutCommand::SwitchToLastWorkspace
     );
     let requires_workspace_space = matches!(
@@ -53,6 +54,7 @@ pub fn handle_command_layout(
         LayoutCommand::NextWorkspace(_)
             | LayoutCommand::PrevWorkspace(_)
             | LayoutCommand::SwitchToWorkspace(_)
+            | LayoutCommand::MoveWindowToWorkspace { follow: true, .. }
             | LayoutCommand::SetWorkspaceLayout { .. }
             | LayoutCommand::CreateWorkspace
             | LayoutCommand::SwitchToLastWorkspace

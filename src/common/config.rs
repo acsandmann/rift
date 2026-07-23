@@ -1204,7 +1204,7 @@ fn default_animation_duration() -> f64 { 0.3 }
 fn default_animation_fps() -> f64 { 100.0 }
 
 #[allow(dead_code)]
-fn no() -> bool { false }
+pub fn no() -> bool { false }
 
 fn default_layout_folder() -> PathBuf { PathBuf::from("~/.config/rift/layouts") }
 

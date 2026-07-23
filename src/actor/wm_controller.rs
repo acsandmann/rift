@@ -331,7 +331,11 @@ impl WmController {
             }
             Command(Wm(MoveWindowToWorkspace(workspace))) => {
                 self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
-                    layout::LayoutCommand::MoveWindowToWorkspace { workspace, window_id: None },
+                    layout::LayoutCommand::MoveWindowToWorkspace {
+                        workspace,
+                        follow: false,
+                        window_id: None,
+                    },
                 )));
             }
             Command(Wm(CreateWorkspace)) => {
