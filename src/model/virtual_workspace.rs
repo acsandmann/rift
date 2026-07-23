@@ -857,6 +857,15 @@ impl WorkspaceStore {
         }
     }
 
+    pub(crate) fn persisted_focus_locations(&self) -> Vec<(SpaceId, VirtualWorkspaceId, WindowId)> {
+        self.workspaces
+            .iter()
+            .filter_map(|(workspace, info)| {
+                info.last_focused().map(|window| (info.space, workspace, window))
+            })
+            .collect()
+    }
+
     pub(crate) fn retain_window_focus_location(
         &mut self,
         window: WindowId,

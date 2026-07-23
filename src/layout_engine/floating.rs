@@ -146,6 +146,15 @@ impl FloatingManager {
 
     pub(crate) fn last_focus(&self) -> Option<WindowId> { self.last_floating_focus }
 
+    pub(crate) fn normalize_persisted_focus(&mut self) {
+        if self
+            .last_floating_focus
+            .is_some_and(|window| !self.floating_windows.contains(&window))
+        {
+            self.last_floating_focus = None;
+        }
+    }
+
     pub(crate) fn remove_all_for_pid(&mut self, pid: pid_t) {
         let _ = self.floating_windows.remove_all_for_pid(pid);
 

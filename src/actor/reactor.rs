@@ -1532,7 +1532,11 @@ impl Reactor {
                 source,
             })) => {
                 let Some(active_space) = self.active_display_space() else {
-                    return Ok(EventOutcome::finalized_event(None, false, false, false));
+                    return Ok(EventOutcome::finalized_event(None, false, false, false)
+                        .with_stdout_line(
+                            "Could not restore saved layout: no active macOS space is available"
+                                .into(),
+                        ));
                 };
                 let request = layout::RestoreRequest { scope, active_space, source };
                 let outcome = EventOutcome::finalized_event(None, false, false, true);
@@ -2428,9 +2432,11 @@ impl Reactor {
             .iter()
             .filter_map(|screen| screen.space.map(|space| (space, screen.display_uuid.clone())))
             .collect::<Vec<_>>();
-        self.layout_manager
-            .layout_engine
-            .reconcile_startup_spaces(&mut self.state.windows, &current_display_spaces);
+        self.layout_manager.layout_engine.reconcile_startup_spaces(
+            &mut self.state.windows,
+            &current_display_spaces,
+            screens.len(),
+        );
 
         self.space_state.has_seen_display_set = has_seen_display_set;
         self.space_state.fullscreen_spaces = fullscreen_spaces;

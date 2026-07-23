@@ -51,6 +51,29 @@ impl FloatingPositionStore {
         self.positions.keys().map(|(_, _, window)| *window).collect()
     }
 
+    pub(crate) fn positioned_windows(&self) -> Vec<WindowId> {
+        let mut windows = self.persisted_windows();
+        windows.sort_unstable();
+        windows.dedup();
+        windows
+    }
+
+    pub(crate) fn locations_for_window(
+        &self,
+        window: WindowId,
+    ) -> Vec<(SpaceId, VirtualWorkspaceId)> {
+        let mut locations = self
+            .positions
+            .keys()
+            .filter_map(|&(space, workspace, stored_window)| {
+                (stored_window == window).then_some((space, workspace))
+            })
+            .collect::<Vec<_>>();
+        locations.sort_unstable();
+        locations.dedup();
+        locations
+    }
+
     pub fn remap_space(&mut self, old_space: SpaceId, new_space: SpaceId) {
         if old_space == new_space {
             return;

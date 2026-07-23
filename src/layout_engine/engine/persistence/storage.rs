@@ -79,6 +79,8 @@ impl LayoutEngine {
         persisted.persistence.validate()?;
         let schema_version = persisted.schema_version;
         let mut engine = persisted.into_engine();
+        engine.normalize_loaded_floating_state();
+        engine.normalize_loaded_workspace_focus();
         let fingerprinted: HashSet<_> = engine.persistence.windows.keys().copied().collect();
         let mut unmatchable = HashSet::default();
         for (_, workspace, layout) in engine.workspace_layouts.all_layouts() {
@@ -196,6 +198,8 @@ impl LayoutEngine {
         );
         for (window, state) in window_store.iter_windows() {
             if self.floating.is_floating(window) {
+                // Floating and tiled are mutually exclusive persisted representations.
+                self.remove_window_from_all_tiling_trees(window);
                 let Some(assignment) = window_store.workspace_info_for_window(window) else {
                     // An unassigned live window has no restorable location. Keep its fingerprint
                     // for lifecycle continuity, but never serialize a stale frame from an older
@@ -215,9 +219,51 @@ impl LayoutEngine {
                 // Floating frames are type-specific state. A tiled window retaining one creates a
                 // second persisted location and makes later reconciliation order-dependent.
                 self.floating_positions.remove_window(window);
+                if let Some(assignment) = window_store.workspace_info_for_window(window) {
+                    self.remove_restored_tiling_duplicates(
+                        window,
+                        (assignment.space, assignment.workspace_id),
+                    );
+                } else {
+                    self.remove_window_from_all_tiling_trees(window);
+                }
             }
         }
         self.save(path)
+    }
+
+    /// Heal old snapshots that represent one window as both tiled and floating, or where a
+    /// floating marker and frame were only partially written. Agreement between the global
+    /// floating marker and at least one frame is required; otherwise tiled ownership wins.
+    fn normalize_loaded_floating_state(&mut self) {
+        let marked_floating = self.floating.persisted_windows();
+        for window in marked_floating {
+            let locations = self.floating_positions.locations_for_window(window);
+            let Some(&keep) = locations.first() else {
+                self.floating.remove_floating(window);
+                continue;
+            };
+            self.floating_positions.retain_window_location(window, keep);
+            self.remove_window_from_all_tiling_trees(window);
+        }
+
+        for window in self.floating_positions.positioned_windows() {
+            if !self.floating.is_floating(window) {
+                self.floating_positions.remove_window(window);
+            }
+        }
+        self.floating.normalize_persisted_focus();
+    }
+
+    fn normalize_loaded_workspace_focus(&mut self) {
+        for (space, workspace, window) in self.virtual_workspace_manager.persisted_focus_locations()
+        {
+            let valid = self.persistence.fingerprint(window).is_some()
+                && self.restored_locations_for_window(window).contains(&(space, workspace));
+            if !valid {
+                self.virtual_workspace_manager.set_last_focused_window(space, workspace, None);
+            }
+        }
     }
 
     /// Reconcile startup-only native SpaceId churn using the display identity saved in the master
@@ -227,8 +273,25 @@ impl LayoutEngine {
         &mut self,
         window_store: &mut WindowStore,
         current_spaces: &[(SpaceId, String)],
+        expected_display_count: usize,
     ) {
-        if !self.startup_restore_pending {
+        // The first forwarded snapshot can be empty or contain displays whose native space has
+        // not resolved yet. Consuming the one-shot restore in that state permanently strands the
+        // saved topology under obsolete SpaceIds.
+        if !self.startup_restore_pending
+            || expected_display_count == 0
+            || current_spaces.len() != expected_display_count
+        {
+            return;
+        }
+        let unique_spaces = current_spaces.iter().map(|(space, _)| *space).collect::<HashSet<_>>();
+        let unique_displays = current_spaces
+            .iter()
+            .map(|(_, display)| display.as_str())
+            .collect::<HashSet<_>>();
+        if unique_spaces.len() != current_spaces.len()
+            || unique_displays.len() != current_spaces.len()
+        {
             return;
         }
         self.startup_restore_pending = false;
@@ -236,9 +299,6 @@ impl LayoutEngine {
         let saved_spaces = self.workspace_layouts.spaces();
         let mut remaps = Vec::new();
         for (current, display_uuid) in current_spaces {
-            if saved_spaces.contains(current) {
-                continue;
-            }
             let Some(saved) = self.display_last_space.get(display_uuid).copied() else {
                 continue;
             };

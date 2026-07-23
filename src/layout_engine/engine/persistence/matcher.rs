@@ -30,7 +30,9 @@ pub(super) fn choose_match(
 ) -> Option<MatchDecision> {
     // A direct Rift window identity owns exactly one restoration candidate. Never let a reused
     // WindowServer id, title, or size score redirect it to another saved window's position.
-    let direct = candidates.iter().find(|candidate| candidate.window == live);
+    let direct = candidates.iter().find(|candidate| {
+        candidate.window == live && candidate.fingerprint.app_compatible_with(fingerprint)
+    });
     let server_id_match =
         direct.is_none().then(|| fingerprint.window_server_id).flatten().and_then(
             |window_server_id| {
@@ -38,6 +40,7 @@ pub(super) fn choose_match(
                     .iter()
                     .filter(|candidate| {
                         candidate.fingerprint.window_server_id == Some(window_server_id)
+                            && candidate.fingerprint.app_compatible_with(fingerprint)
                     })
                     .max_by(|a, b| {
                         let rank = |candidate: &RestoreCandidate<'_>| {
@@ -79,11 +82,22 @@ pub(super) fn choose_match(
         selected_fingerprint.title.is_some() && selected_fingerprint.title == fingerprint.title;
     let size_delta = (selected_fingerprint.width - fingerprint.width).abs()
         + (selected_fingerprint.height - fingerprint.height).abs();
+    let known_app_match =
+        selected_fingerprint.app_id.is_some() && selected_fingerprint.app_id == fingerprint.app_id;
+    let size_matches = size_delta <= 8.0;
     // Bundle identity narrows the search pool but does not identify a particular window. Require
     // window-specific evidence as well, otherwise the first new window from an application can
-    // consume any unrelated saved spot from that same application.
-    if !exact_identity && !title_matches && size_delta > 8.0 {
-        return None;
+    // consume any unrelated saved spot from that same application. If either side lacks bundle
+    // identity, require both title and size evidence rather than letting a common title such as
+    // "Untitled" steal a location across applications.
+    if !exact_identity {
+        if known_app_match {
+            if !title_matches && !size_matches {
+                return None;
+            }
+        } else if !title_matches || !size_matches {
+            return None;
+        }
     }
 
     let mut duplicate_identities = if direct.is_none() && server_id_match.is_some() {
@@ -115,16 +129,16 @@ fn compare_fallback(
     live: &WindowFingerprint,
 ) -> Ordering {
     let score = |saved: &WindowFingerprint| {
+        let app = (saved.app_id.is_some() && saved.app_id == live.app_id) as u8;
         let title = (saved.title.is_some() && saved.title == live.title) as u8;
         let size_delta = (saved.width - live.width).abs() + (saved.height - live.height).abs();
-        let app = (saved.app_id.is_some() && saved.app_id == live.app_id) as u8;
-        (title, size_delta, app)
+        (app, title, size_delta)
     };
-    let (title_a, size_a, app_a) = score(a.fingerprint);
-    let (title_b, size_b, app_b) = score(b.fingerprint);
-    title_a
-        .cmp(&title_b)
+    let (app_a, title_a, size_a) = score(a.fingerprint);
+    let (app_b, title_b, size_b) = score(b.fingerprint);
+    app_a
+        .cmp(&app_b)
+        .then_with(|| title_a.cmp(&title_b))
         .then_with(|| size_b.partial_cmp(&size_a).unwrap_or(Ordering::Equal))
-        .then_with(|| app_a.cmp(&app_b))
         .then_with(|| b.window.cmp(&a.window))
 }

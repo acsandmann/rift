@@ -34,7 +34,11 @@ struct RestorePlan {
 }
 
 impl RestorePlan {
-    fn source_space(snapshot: &LayoutEngine, request: RestoreRequest) -> anyhow::Result<SpaceId> {
+    fn source_space(
+        snapshot: &LayoutEngine,
+        engine: &LayoutEngine,
+        request: RestoreRequest,
+    ) -> anyhow::Result<SpaceId> {
         let saved_spaces = snapshot.workspace_layouts.spaces();
         let saved_active = snapshot
             .persistence
@@ -45,9 +49,18 @@ impl RestorePlan {
             RestoreSource::SavedActiveSpace => saved_active.or_else(|| {
                 saved_spaces.contains(&request.active_space).then_some(request.active_space)
             }),
-            RestoreSource::CurrentSpace => {
-                saved_spaces.contains(&request.active_space).then_some(request.active_space)
-            }
+            RestoreSource::CurrentSpace => saved_spaces
+                .contains(&request.active_space)
+                .then_some(request.active_space)
+                .or_else(|| {
+                    // The disk master can still contain the previous launch's SpaceIds even
+                    // though startup already repaired the live engine. Display identity bridges
+                    // that interval until the next master save.
+                    engine
+                        .display_uuid_for_space(request.active_space)
+                        .and_then(|display| snapshot.display_last_space.get(&display).copied())
+                        .filter(|space| saved_spaces.contains(space))
+                }),
         };
 
         if let Some(space) = preferred {
@@ -71,7 +84,7 @@ impl RestorePlan {
         window_store: &WindowStore,
         request: RestoreRequest,
     ) -> anyhow::Result<Self> {
-        let source_space = Self::source_space(&snapshot, request)?;
+        let source_space = Self::source_space(&snapshot, engine, request)?;
         let source_active = snapshot.virtual_workspace_manager.active_workspace(source_space);
         let mappings = match request.scope {
             RestoreScope::Space => {

@@ -105,13 +105,20 @@ impl LayoutEngine {
             // WindowInfo is authoritative for the live app identity. Reusing only the old
             // fingerprint silently drops app_id for newly tracked windows, weakening restore
             // matching and allowing similarly sized windows from different apps to cross-match.
+            let current_window_server_id = window.info.sys_id.map(|id| id.as_u32());
             let app_id = window.info.bundle_id.clone().or_else(|| {
-                self.persistence
-                    .fingerprint(window_id)
-                    .and_then(|fingerprint| fingerprint.app_id.clone())
+                // Only inherit identity through an unchanged WindowServer id. WindowId is
+                // process-local and can be reused; carrying an old bundle id through that reuse
+                // would turn a later fuzzy match into a false same-application match.
+                self.persistence.fingerprint(window_id).and_then(|fingerprint| {
+                    (current_window_server_id.is_some()
+                        && fingerprint.window_server_id == current_window_server_id)
+                        .then(|| fingerprint.app_id.clone())
+                        .flatten()
+                })
             });
             self.persistence.record(window_id, WindowFingerprint {
-                window_server_id: window.info.sys_id.map(|id| id.as_u32()),
+                window_server_id: current_window_server_id,
                 title: (!window.info.title.trim().is_empty()).then(|| window.info.title.clone()),
                 width: window.frame_monotonic.size.width,
                 height: window.frame_monotonic.size.height,
@@ -171,7 +178,7 @@ impl LayoutEngine {
             .or_else(|| locations.into_iter().next())
     }
 
-    fn remove_restored_tiling_duplicates(
+    pub(super) fn remove_restored_tiling_duplicates(
         &mut self,
         window: WindowId,
         keep: (SpaceId, VirtualWorkspaceId),
