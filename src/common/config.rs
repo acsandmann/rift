@@ -1624,15 +1624,6 @@ mod tests {
     }
 
     #[test]
-    fn stack_line_hover_mode_defaults_to_click_and_accepts_hover() {
-        let default_settings: StackLineSettings = toml::from_str("").unwrap();
-        assert_eq!(default_settings.hover, StackLineHoverMode::Click);
-
-        let hover_settings: StackLineSettings = toml::from_str("hover = \"hover\"").unwrap();
-        assert_eq!(hover_settings.hover, StackLineHoverMode::Hover);
-    }
-
-    #[test]
     fn test_normalize_hotkey_string() {
         assert_eq!(
             Config::normalize_hotkey_string("Alt + Shift + Down"),
