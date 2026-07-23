@@ -7,6 +7,19 @@ pub enum Orientation {
     Vertical,
 }
 
+impl Default for Orientation {
+    fn default() -> Self { Self::Horizontal }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResizeOrientation {
+    #[default]
+    Horizontal,
+    Vertical,
+    Smart,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {

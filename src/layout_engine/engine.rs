@@ -4,7 +4,9 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-use super::{Direction, FloatingManager, LayoutId, LayoutSystemKind, WorkspaceLayouts};
+use super::{
+    Direction, FloatingManager, LayoutId, LayoutSystemKind, ResizeOrientation, WorkspaceLayouts,
+};
 use crate::actor::app::{AppInfo, WindowId, pid_t};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{LayoutMode, LayoutSettings};
@@ -59,8 +61,8 @@ pub enum LayoutCommand {
     ToggleFullscreen,
     ToggleFullscreenWithinGaps,
 
-    ResizeWindowGrow,
-    ResizeWindowShrink,
+    ResizeWindowGrow(ResizeOrientation),
+    ResizeWindowShrink(ResizeOrientation),
     ResizeWindowBy {
         amount: f64,
     },
@@ -670,7 +672,11 @@ impl LayoutEngine {
         layout: LayoutId,
         resize_amount: f64,
     ) {
-        self.workspace_tree_mut(ws_id).resize_selection_by(layout, resize_amount);
+        self.workspace_tree_mut(ws_id).resize_selection_by(
+            layout,
+            resize_amount,
+            ResizeOrientation::Horizontal,
+        );
     }
 
     fn apply_focus_response(
@@ -1898,24 +1904,32 @@ impl LayoutEngine {
                     }
                 }
             }
-            LayoutCommand::ResizeWindowGrow => {
+            LayoutCommand::ResizeWindowGrow(orientation) => {
                 if is_floating {
                     return EventResponse::default();
                 }
 
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
                 let resize_amount = 0.05;
-                self.workspace_tree_mut(workspace_id).resize_selection_by(layout, resize_amount);
+                self.workspace_tree_mut(workspace_id).resize_selection_by(
+                    layout,
+                    resize_amount,
+                    orientation,
+                );
                 EventResponse::default()
             }
-            LayoutCommand::ResizeWindowShrink => {
+            LayoutCommand::ResizeWindowShrink(orientation) => {
                 if is_floating {
                     return EventResponse::default();
                 }
 
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
                 let resize_amount = -0.05;
-                self.workspace_tree_mut(workspace_id).resize_selection_by(layout, resize_amount);
+                self.workspace_tree_mut(workspace_id).resize_selection_by(
+                    layout,
+                    resize_amount,
+                    orientation,
+                );
                 EventResponse::default()
             }
             LayoutCommand::ResizeWindowBy { amount } => {
@@ -1924,7 +1938,11 @@ impl LayoutEngine {
                 }
 
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);
-                self.workspace_tree_mut(workspace_id).resize_selection_by(layout, amount);
+                self.workspace_tree_mut(workspace_id).resize_selection_by(
+                    layout,
+                    amount,
+                    ResizeOrientation::Horizontal,
+                );
                 EventResponse::default()
             }
             LayoutCommand::AdjustMasterRatio(delta) => {

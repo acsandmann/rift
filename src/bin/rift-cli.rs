@@ -179,9 +179,17 @@ enum WindowCommands {
     /// Toggle fullscreen within configured outer gaps (respects outer gaps / fills tiling area)
     ToggleFullscreenWithinGaps,
     /// Grow the current window size (increments by ~5%).
-    ResizeGrow,
+    ResizeGrow {
+        /// Axis to resize; smart chooses the nearest applicable split.
+        #[arg(long, value_enum, default_value_t = CliResizeOrientation::Horizontal)]
+        orientation: CliResizeOrientation,
+    },
     /// Shrink the current window size (decrements by ~5%).
-    ResizeShrink,
+    ResizeShrink {
+        /// Axis to resize; smart chooses the nearest applicable split.
+        #[arg(long, value_enum, default_value_t = CliResizeOrientation::Horizontal)]
+        orientation: CliResizeOrientation,
+    },
     /// Resize the selected window by a fractional amount.
     /// - Pass a signed floating value: positive to grow, negative to shrink.
     /// - The value is a fraction of the current size (e.g. `0.05` = 5%).
@@ -201,6 +209,23 @@ enum WindowCommands {
 enum CliRestoreScope {
     Workspace,
     Space,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliResizeOrientation {
+    Horizontal,
+    Vertical,
+    Smart,
+}
+
+impl From<CliResizeOrientation> for rift_wm::layout_engine::ResizeOrientation {
+    fn from(value: CliResizeOrientation) -> Self {
+        match value {
+            CliResizeOrientation::Horizontal => Self::Horizontal,
+            CliResizeOrientation::Vertical => Self::Vertical,
+            CliResizeOrientation::Smart => Self::Smart,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Args)]
@@ -689,12 +714,12 @@ fn map_window_command(cmd: WindowCommands) -> Result<RiftCommand, String> {
         WindowCommands::ToggleFullscreenWithinGaps => Ok(RiftCommand::Reactor(
             reactor::Command::Layout(LC::ToggleFullscreenWithinGaps),
         )),
-        WindowCommands::ResizeGrow => Ok(RiftCommand::Reactor(reactor::Command::Layout(
-            LC::ResizeWindowGrow,
-        ))),
-        WindowCommands::ResizeShrink => Ok(RiftCommand::Reactor(reactor::Command::Layout(
-            LC::ResizeWindowShrink,
-        ))),
+        WindowCommands::ResizeGrow { orientation } => Ok(RiftCommand::Reactor(
+            reactor::Command::Layout(LC::ResizeWindowGrow(orientation.into())),
+        )),
+        WindowCommands::ResizeShrink { orientation } => Ok(RiftCommand::Reactor(
+            reactor::Command::Layout(LC::ResizeWindowShrink(orientation.into())),
+        )),
         WindowCommands::ResizeBy { amount } => Ok(RiftCommand::Reactor(reactor::Command::Layout(
             LC::ResizeWindowBy { amount },
         ))),

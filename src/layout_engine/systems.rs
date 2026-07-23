@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
-use crate::layout_engine::{Direction, LayoutKind};
+use crate::layout_engine::{Direction, LayoutKind, ResizeOrientation};
 
 slotmap::new_key_type! { pub struct LayoutId; }
 
@@ -173,7 +173,12 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     ) -> Vec<WindowId>;
     fn parent_of_selection_is_stacked(&self, layout: LayoutId) -> bool;
     fn unjoin_selection(&mut self, _layout: LayoutId);
-    fn resize_selection_by(&mut self, layout: LayoutId, amount: f64);
+    fn resize_selection_by(
+        &mut self,
+        layout: LayoutId,
+        amount: f64,
+        orientation: ResizeOrientation,
+    );
     fn rebalance(&mut self, layout: LayoutId);
     fn toggle_tile_orientation(&mut self, layout: LayoutId);
 }

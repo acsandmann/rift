@@ -10,7 +10,7 @@ pub use engine::{
     RestoreScope, RestoreWarning,
 };
 pub(crate) use floating::FloatingManager;
-pub use graph::{Direction, LayoutKind, Orientation};
+pub use graph::{Direction, LayoutKind, Orientation, ResizeOrientation};
 pub(crate) use systems::LayoutId;
 pub use systems::{
     BspLayoutSystem, LayoutSystem, LayoutSystemKind, MasterStackLayoutSystem,

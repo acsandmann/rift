@@ -7,7 +7,7 @@ use crate::common::collections::HashMap;
 use crate::layout_engine::systems::constraints::{AxisConstraints, solve_axis_lengths};
 use crate::layout_engine::systems::{LayoutSystem, WindowLayoutConstraints};
 use crate::layout_engine::utils::compute_tiling_area;
-use crate::layout_engine::{Direction, LayoutId, LayoutKind, Orientation};
+use crate::layout_engine::{Direction, LayoutId, LayoutKind, Orientation, ResizeOrientation};
 use crate::model::selection::*;
 use crate::model::tree::{self, NodeId, NodeMap, OwnedNode, Tree};
 use crate::sys::geometry::Round;
@@ -1062,7 +1062,12 @@ impl LayoutSystem for TraditionalLayoutSystem {
         }
     }
 
-    fn resize_selection_by(&mut self, layout: LayoutId, amount: f64) {
+    fn resize_selection_by(
+        &mut self,
+        layout: LayoutId,
+        amount: f64,
+        orientation: ResizeOrientation,
+    ) {
         if amount == 0.0 {
             return;
         }
@@ -1079,14 +1084,33 @@ impl LayoutSystem for TraditionalLayoutSystem {
                 })
                 .collect::<Vec<_>>();
 
-            for direction in [
-                crate::layout_engine::Direction::Right,
-                crate::layout_engine::Direction::Down,
-                crate::layout_engine::Direction::Left,
-                crate::layout_engine::Direction::Up,
-            ] {
-                if candidates.iter().any(|&node| self.resize_internal(node, amount, direction)) {
-                    break;
+            if orientation == ResizeOrientation::Smart {
+                for &node in &candidates {
+                    let Some(parent) = node.parent(self.map()) else {
+                        continue;
+                    };
+                    let directions: &[Direction] = match self.layout(parent).orientation() {
+                        Orientation::Horizontal => &[Direction::Right, Direction::Left],
+                        Orientation::Vertical => &[Direction::Down, Direction::Up],
+                    };
+                    if directions
+                        .iter()
+                        .any(|&direction| self.resize_internal(node, amount, direction))
+                    {
+                        break;
+                    }
+                }
+            } else {
+                let directions: &[Direction] = match orientation {
+                    ResizeOrientation::Horizontal => &[Direction::Right, Direction::Left],
+                    ResizeOrientation::Vertical => &[Direction::Down, Direction::Up],
+                    ResizeOrientation::Smart => unreachable!(),
+                };
+                for &direction in directions {
+                    if candidates.iter().any(|&node| self.resize_internal(node, amount, direction))
+                    {
+                        break;
+                    }
                 }
             }
         }
@@ -5351,7 +5375,7 @@ mod tests {
             .proportion(&system.tree.map, right_node)
             .expect("right node proportion missing");
 
-        system.resize_selection_by(layout, 0.10);
+        system.resize_selection_by(layout, 0.10, ResizeOrientation::Horizontal);
 
         let after = system
             .tree

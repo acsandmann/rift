@@ -375,7 +375,9 @@ comb1 = "Alt + Shift"
 # - consume_or_expel_window = "left"|"right"|"up"|"down"
 # - toggle_stack / toggle_orientation / unjoin_windows
 # - toggle_focus_floating / toggle_window_floating / toggle_fullscreen / toggle_fullscreen_within_gaps
-# - resize_window_grow / resize_window_shrink / resize_window_by = 0.05
+# - resize_window_grow / resize_window_shrink (without param, horizontal is default)
+# - resize_window_grow = "horizontal"|"vertical"|"smart"
+# - resize_window_shrink = "horizontal"|"vertical"|"smart"
 # - swap_windows = [123, 456]
 # - exec = "command" | exec = ["cmd", "arg1", "..."]
 # - move_mouse_to_display = "left"|"right"|"up"|"down"|N|"<display_uuid>"
@@ -438,6 +440,10 @@ comb1 = "Alt + Shift"
 # smartly resize windows
 "Alt + Shift + Equal" = "resize_window_grow"
 "Alt + Shift + Minus" = "resize_window_shrink"
+# Example vertical bindings for windows stacked in a scrolling-layout column:
+# "Alt + Ctrl + Equal" = { resize_window_grow = "vertical" }
+# "Alt + Ctrl + Minus" = { resize_window_shrink = "vertical" }
+# Use "smart" to resize the nearest applicable split automatically.
 
 # Move mouse cursor to display by index (0-based) or UUID
 # Examples:
