@@ -423,13 +423,37 @@ pub fn handle_window_frame_changed(
             }
             outcome = outcome.with_arrange_passes(2);
         } else if !old_frame.size.same_as(new_frame.size) && old_space_active {
-            outcome.arrange.is_resize = true;
-            outcome = outcome.with_layout_event(LayoutEvent::WindowResized {
-                wid,
-                old_frame,
-                new_frame,
-                screens,
-            });
+            // Apps implementing non-native fullscreen (Firefox with
+            // full-screen-api.macos-native-full-screen=false, etc.) resize
+            // their own window to cover the screen with no mouse involved.
+            // Folding that transient frame into the layout rewrites the
+            // split ratios and wrecks the workspace arrangement. Like
+            // AeroSpace, never incorporate a programmatic full-screen-sized
+            // resize: leave the tree untouched while it covers the screen,
+            // and re-assert the stored layout once it shrinks back.
+            let covers = |frame: &objc2_core_foundation::CGRect| {
+                screens.iter().any(|(_, screen_frame, _)| {
+                    frame.origin.x <= screen_frame.origin.x + 1.0
+                        && frame.origin.y <= screen_frame.origin.y + 1.0
+                        && frame.size.width >= screen_frame.size.width - 2.0
+                        && frame.size.height >= screen_frame.size.height - 2.0
+                })
+            };
+            if covers(&new_frame) {
+                // Entering self-fullscreen: keep layout state pristine.
+            } else if covers(&old_frame) {
+                // Leaving self-fullscreen: snap the window back into its
+                // slot instead of deriving new ratios from the restored frame.
+                outcome = outcome.with_arrange_passes(1);
+            } else {
+                outcome.arrange.is_resize = true;
+                outcome = outcome.with_layout_event(LayoutEvent::WindowResized {
+                    wid,
+                    old_frame,
+                    new_frame,
+                    screens,
+                });
+            }
         }
     }
 
