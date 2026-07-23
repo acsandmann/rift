@@ -34,7 +34,7 @@ use crate::actor;
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::wm_controller::{self, WmCommand, WmEvent};
 use crate::common::collections::{HashMap, HashSet};
-use crate::common::config::{Config, LayoutMode};
+use crate::common::config::{Config, LayoutMode, StackLineHoverMode};
 use crate::sys::event::{self, Hotkey, KeyCode, MouseState, set_mouse_state};
 use crate::sys::hotkey::{
     Modifiers, is_modifier_key, key_code_from_event, modifier_key_is_active,
@@ -95,6 +95,7 @@ struct State {
     event_processing_enabled: bool,
     focus_follows_mouse_enabled: bool,
     stack_line_enabled: bool,
+    stack_line_hover_mode: StackLineHoverMode,
     disable_hotkey_active: bool,
     low_power_mode: bool,
     pressed_keys: HashSet<KeyCode>,
@@ -123,6 +124,7 @@ impl Default for State {
             event_processing_enabled: false,
             focus_follows_mouse_enabled: true,
             stack_line_enabled: false,
+            stack_line_hover_mode: StackLineHoverMode::default(),
             disable_hotkey_active: false,
             low_power_mode: power::is_low_power_mode_enabled(),
             pressed_keys: HashSet::default(),
@@ -232,6 +234,7 @@ impl EventTap {
         state.mouse_hides_on_focus = config.settings.mouse_hides_on_focus;
         state.focus_follows_mouse_config_enabled = config.settings.focus_follows_mouse;
         state.stack_line_enabled = config.settings.ui.stack_line.enabled;
+        state.stack_line_hover_mode = config.settings.ui.stack_line.hover;
         state.default_layout_mode = config.settings.layout.mode;
         state.disable_hotkey_active = disable_hotkey
             .as_ref()
@@ -353,6 +356,7 @@ impl EventTap {
                 let mouse_hides_on_focus = new_config.settings.mouse_hides_on_focus;
                 let focus_follows_mouse_config_enabled = new_config.settings.focus_follows_mouse;
                 let stack_line_enabled = new_config.settings.ui.stack_line.enabled;
+                let stack_line_hover_mode = new_config.settings.ui.stack_line.hover;
                 let default_layout_mode = new_config.settings.layout.mode;
                 let disable_hotkey = new_config
                     .settings
@@ -365,9 +369,11 @@ impl EventTap {
                     let prev_focus_follows_mouse_config_enabled =
                         state.focus_follows_mouse_config_enabled;
                     let prev_stack_line_enabled = state.stack_line_enabled;
+                    let prev_stack_line_hover_mode = state.stack_line_hover_mode;
                     state.mouse_hides_on_focus = mouse_hides_on_focus;
                     state.focus_follows_mouse_config_enabled = focus_follows_mouse_config_enabled;
                     state.stack_line_enabled = stack_line_enabled;
+                    state.stack_line_hover_mode = stack_line_hover_mode;
                     state.default_layout_mode = default_layout_mode;
                     let prev_active = state.disable_hotkey_active;
                     state.disable_hotkey_active = self
@@ -384,6 +390,7 @@ impl EventTap {
                     if prev_focus_follows_mouse_config_enabled
                         != state.focus_follows_mouse_config_enabled
                         || prev_stack_line_enabled != state.stack_line_enabled
+                        || prev_stack_line_hover_mode != state.stack_line_hover_mode
                     {
                         state.reset_mouse_sampling();
                         self.reset_mouse_move_sample_gate();
@@ -569,8 +576,8 @@ impl EventTap {
             }
         }
 
-        // Stack-line hover feedback only changes the cursor when the hit-test
-        // result changes. Avoid queueing a message for every sampled point.
+        // Click mode only needs hit-test transitions for cursor feedback.
+        // Hover mode forwards samples so the actor can detect segment changes.
         if state.stack_line_enabled {
             let hits = self
                 .stack_line_hit_rects
@@ -579,7 +586,9 @@ impl EventTap {
                 .copied()
                 .any(|frame| point_hits_indicator_frame(loc, frame))
                 && !window_server::is_point_occluded_by_external_window(loc);
-            if state.last_stack_line_hit != Some(hits) {
+            if state.stack_line_hover_mode == StackLineHoverMode::Hover
+                || state.last_stack_line_hit != Some(hits)
+            {
                 state.last_stack_line_hit = Some(hits);
                 let _ = self.stack_line_tx.try_send(stack_line::Event::MouseMoved {
                     point: loc,

@@ -188,6 +188,8 @@ layout_folder = "~/.config/rift/layouts"
 [settings.ui.stack_line]
 # experimental stack line indicator (defaults to off)
 enabled = false
+# action on hover: "click" or "hover" (defaults to "hover" which is just a visual indicator)
+hover = "hover"
 # in a horizontal stack where the line will be (top/bottom)
 horiz_placement = "top"
 # in a vertical stack where the line will be (left/right)

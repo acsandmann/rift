@@ -588,6 +588,8 @@ impl Default for MenuBarSettings {
 pub struct StackLineSettings {
     #[serde(default = "no")]
     pub enabled: bool,
+    #[serde(default)]
+    pub hover: StackLineHoverMode,
     #[serde(default = "default_stack_line_thickness")]
     pub thickness: f64,
     #[serde(default)]
@@ -598,6 +600,14 @@ pub struct StackLineSettings {
     /// This creates spacing between the window and the stack line
     #[serde(default = "default_stack_line_spacing")]
     pub spacing: f64,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StackLineHoverMode {
+    Click,
+    #[default]
+    Hover,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
@@ -1598,6 +1608,15 @@ mod tests {
             settings.resolved_layout_folder(),
             PathBuf::from("/tmp/rift-layouts")
         );
+    }
+
+    #[test]
+    fn stack_line_hover_mode_defaults_to_click_and_accepts_hover() {
+        let default_settings: StackLineSettings = toml::from_str("").unwrap();
+        assert_eq!(default_settings.hover, StackLineHoverMode::Click);
+
+        let hover_settings: StackLineSettings = toml::from_str("hover = \"hover\"").unwrap();
+        assert_eq!(hover_settings.hover, StackLineHoverMode::Hover);
     }
 
     #[test]
