@@ -638,6 +638,8 @@ fn default_scrolling_min_column_width_ratio() -> f64 { 0.3 }
 
 fn default_scrolling_max_column_width_ratio() -> f64 { 0.9 }
 
+fn default_scrolling_neighbor_peek_rearm_distance() -> f64 { 20.0 }
+
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum HorizontalPlacement {
@@ -730,6 +732,12 @@ pub struct ScrollingLayoutSettings {
     /// - anchored: always align focused column to `alignment`.
     #[serde(default)]
     pub focus_navigation_style: ScrollingFocusNavigationStyle,
+    /// Width in pixels of each immediate neighboring column kept visible in niri mode.
+    #[serde(default)]
+    pub neighbor_peek_width: f64,
+    /// Horizontal pointer travel required to re-arm neighbor peek focus.
+    #[serde(default = "default_scrolling_neighbor_peek_rearm_distance")]
+    pub neighbor_peek_rearm_distance: f64,
     /// Trackpad gestures for scrolling layout
     #[serde(default)]
     pub gestures: ScrollingGestureSettings,
@@ -744,6 +752,8 @@ impl Default for ScrollingLayoutSettings {
             max_column_width_ratio: default_scrolling_max_column_width_ratio(),
             alignment: ScrollingAlignment::default(),
             focus_navigation_style: ScrollingFocusNavigationStyle::default(),
+            neighbor_peek_width: 0.0,
+            neighbor_peek_rearm_distance: default_scrolling_neighbor_peek_rearm_distance(),
             gestures: ScrollingGestureSettings::default(),
         }
     }
@@ -1039,6 +1049,22 @@ impl ScrollingLayoutSettings {
             issues.push(format!(
                 "layout.scrolling.column_width_ratio ({}) must be within min/max bounds",
                 self.column_width_ratio
+            ));
+        }
+
+        if !self.neighbor_peek_width.is_finite() || self.neighbor_peek_width < 0.0 {
+            issues.push(format!(
+                "layout.scrolling.neighbor_peek_width must be a non-negative finite number, got {}",
+                self.neighbor_peek_width
+            ));
+        }
+
+        if !self.neighbor_peek_rearm_distance.is_finite()
+            || self.neighbor_peek_rearm_distance <= 0.0
+        {
+            issues.push(format!(
+                "layout.scrolling.neighbor_peek_rearm_distance must be a positive finite number, got {}",
+                self.neighbor_peek_rearm_distance
             ));
         }
 
@@ -1682,6 +1708,44 @@ mod tests {
 
         assert_eq!(round_tripped.key_specs.len(), round_tripped.keys.len());
         assert!(!round_tripped.key_specs.is_empty());
+    }
+
+    #[test]
+    fn scrolling_neighbor_peek_is_opt_in_and_non_negative() {
+        let settings = ScrollingLayoutSettings::default();
+        assert_eq!(settings.neighbor_peek_width, 0.0);
+        assert_eq!(settings.neighbor_peek_rearm_distance, 20.0);
+
+        let mut invalid = settings;
+        invalid.neighbor_peek_width = -1.0;
+        assert!(invalid.validate().iter().any(|issue| issue.contains("neighbor_peek_width")));
+
+        invalid.neighbor_peek_width = 0.0;
+        invalid.neighbor_peek_rearm_distance = 0.0;
+        assert!(
+            invalid
+                .validate()
+                .iter()
+                .any(|issue| issue.contains("neighbor_peek_rearm_distance"))
+        );
+    }
+
+    #[test]
+    fn scrolling_neighbor_peek_rearm_distance_defaults_when_omitted() {
+        let config = Config::parse(
+            r#"
+                [settings.layout.scrolling]
+                neighbor_peek_width = 24
+
+                [keys]
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.settings.layout.scrolling.neighbor_peek_rearm_distance,
+            20.0
+        );
     }
 
     #[test]

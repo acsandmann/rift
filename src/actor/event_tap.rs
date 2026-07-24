@@ -34,8 +34,13 @@ use crate::actor;
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::wm_controller::{self, WmCommand, WmEvent};
 use crate::common::collections::{HashMap, HashSet};
-use crate::common::config::{Config, LayoutMode, StackLineHoverMode};
+use crate::common::config::{
+    Config, LayoutMode, LayoutSettings, ScrollingFocusNavigationStyle, StackLineHoverMode,
+};
+use crate::layout_engine::Direction;
+use crate::layout_engine::utils::compute_tiling_area;
 use crate::sys::event::{self, Hotkey, KeyCode, MouseState, set_mouse_state};
+use crate::sys::geometry::CGRectExt;
 use crate::sys::hotkey::{
     Modifiers, is_modifier_key, key_code_from_event, modifier_key_is_active,
     modifiers_from_flags_with_keys,
@@ -47,6 +52,13 @@ use crate::ui::stack_line::point_hits_indicator_frame;
 
 const MOUSE_MOVE_MIN_INTERVAL_NS_NORMAL: u64 = 8_000_000; // 8ms ~= 125 Hz
 const MOUSE_MOVE_MIN_INTERVAL_NS_LOW_POWER: u64 = 16_000_000; // 16ms ~= 62 Hz
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct EdgeHoverLatch {
+    space: SpaceId,
+    direction: Direction,
+    activation_x: f64,
+    confirmed: bool,
+}
 
 #[derive(Debug)]
 pub enum Request {
@@ -59,6 +71,14 @@ pub enum Request {
     KeyboardLayoutChanged,
     ConfigUpdated(Config),
     LayoutModesChanged(Vec<(SpaceId, crate::common::config::LayoutMode)>),
+    SetEdgeHoverLatch {
+        generation: u64,
+        space: SpaceId,
+        direction: Direction,
+    },
+    ClearEdgeHoverLatch {
+        generation: u64,
+    },
     SetLowPowerMode(bool),
 }
 
@@ -91,7 +111,7 @@ struct State {
     focus_follows_mouse_config_enabled: bool,
     default_layout_mode: LayoutMode,
     converter: CoordinateConverter,
-    screens: Vec<CGRect>,
+    screen_displays: Vec<(CGRect, SpaceId, String)>,
     event_processing_enabled: bool,
     focus_follows_mouse_enabled: bool,
     stack_line_enabled: bool,
@@ -102,6 +122,9 @@ struct State {
     current_flags: CGEventFlags,
     screen_spaces: Vec<(CGRect, SpaceId)>,
     layout_mode_by_space: HashMap<SpaceId, crate::common::config::LayoutMode>,
+    layout_settings: LayoutSettings,
+    edge_hover_latch: Option<EdgeHoverLatch>,
+    edge_hover_generation: u64,
     last_stack_line_hit: Option<bool>,
 }
 
@@ -120,7 +143,7 @@ impl Default for State {
             focus_follows_mouse_config_enabled: false,
             default_layout_mode: LayoutMode::Traditional,
             converter: CoordinateConverter::default(),
-            screens: Vec::new(),
+            screen_displays: Vec::new(),
             event_processing_enabled: false,
             focus_follows_mouse_enabled: true,
             stack_line_enabled: false,
@@ -131,6 +154,9 @@ impl Default for State {
             current_flags: CGEventFlags::empty(),
             screen_spaces: Vec::new(),
             layout_mode_by_space: HashMap::default(),
+            layout_settings: LayoutSettings::default(),
+            edge_hover_latch: None,
+            edge_hover_generation: 0,
             last_stack_line_hit: None,
         }
     }
@@ -236,6 +262,7 @@ impl EventTap {
         state.stack_line_enabled = config.settings.ui.stack_line.enabled;
         state.stack_line_hover_mode = config.settings.ui.stack_line.hover;
         state.default_layout_mode = config.settings.layout.mode;
+        state.layout_settings = config.settings.layout.clone();
         state.disable_hotkey_active = disable_hotkey
             .as_ref()
             .map(|target| state.compute_disable_hotkey_active(target))
@@ -295,6 +322,7 @@ impl EventTap {
 
     fn on_request(self: &Arc<Self>, request: Request) {
         let mut should_rebuild_mask = false;
+        let mut should_reset_mouse_window = false;
         let mut state = self.state.borrow_mut();
         match request {
             Request::Warp(point) => {
@@ -313,13 +341,20 @@ impl EventTap {
                 }
             }
             Request::SpaceStateUpdated(space_state, converter) => {
-                state.screens = space_state.screens.iter().map(|screen| screen.frame).collect();
+                state.screen_displays = space_state
+                    .screens
+                    .iter()
+                    .filter_map(|screen| {
+                        screen.space.map(|space| (screen.frame, space, screen.display_uuid.clone()))
+                    })
+                    .collect();
                 state.screen_spaces = space_state
                     .screens
                     .into_iter()
                     .filter_map(|screen| screen.space.map(|space| (screen.frame, space)))
                     .collect();
                 state.converter = converter;
+                state.invalidate_edge_hover_latch();
             }
             Request::SetEventProcessing(enabled) => {
                 state.event_processing_enabled = enabled;
@@ -375,6 +410,9 @@ impl EventTap {
                     state.stack_line_enabled = stack_line_enabled;
                     state.stack_line_hover_mode = stack_line_hover_mode;
                     state.default_layout_mode = default_layout_mode;
+                    state.layout_settings = new_config.settings.layout.clone();
+                    state.invalidate_edge_hover_latch();
+                    should_reset_mouse_window = true;
                     let prev_active = state.disable_hotkey_active;
                     state.disable_hotkey_active = self
                         .disable_hotkey
@@ -415,6 +453,13 @@ impl EventTap {
                     "Updated layout modes for {} spaces",
                     state.layout_mode_by_space.len()
                 );
+                state.invalidate_edge_hover_latch();
+            }
+            Request::SetEdgeHoverLatch { generation, space, direction } => {
+                state.confirm_edge_hover_latch(generation, space, direction);
+            }
+            Request::ClearEdgeHoverLatch { generation } => {
+                should_reset_mouse_window |= state.clear_edge_hover_latch(generation);
             }
             Request::SetLowPowerMode(enabled) => {
                 if state.low_power_mode != enabled {
@@ -427,6 +472,11 @@ impl EventTap {
             }
         }
         drop(state);
+
+        if should_reset_mouse_window {
+            self.reset_mouse_move_sample_gate();
+            self.reset_mouse_window();
+        }
 
         if should_rebuild_mask {
             self.rebuild_event_tap_mask_if_needed();
@@ -489,6 +539,7 @@ impl EventTap {
 
         match event_type {
             CGEventType::LeftMouseDown | CGEventType::RightMouseDown => {
+                state.invalidate_edge_hover_latch();
                 set_mouse_state(MouseState::Down);
 
                 let loc = CGEvent::location(Some(event));
@@ -509,9 +560,13 @@ impl EventTap {
                 }
             }
             CGEventType::LeftMouseDragged | CGEventType::RightMouseDragged => {
+                state.invalidate_edge_hover_latch();
                 set_mouse_state(MouseState::Down);
             }
-            CGEventType::LeftMouseUp | CGEventType::RightMouseUp => set_mouse_state(MouseState::Up),
+            CGEventType::LeftMouseUp | CGEventType::RightMouseUp => {
+                state.invalidate_edge_hover_latch();
+                set_mouse_state(MouseState::Up);
+            }
             _ => {}
         }
 
@@ -604,6 +659,10 @@ impl EventTap {
             && state.focus_follows_mouse_enabled
             && !state.disable_hotkey_active
         {
+            let latch_held = state.edge_hover_latch_holds(loc);
+            if state.edge_hover_latch.is_some() && !latch_held {
+                state.invalidate_edge_hover_latch();
+            }
             let hint = mouse_window_hint(event);
             let previous = self.mouse_window.get();
             let window = Self::resolve_mouse_window(hint, loc, previous);
@@ -624,8 +683,28 @@ impl EventTap {
                 valid: true,
             });
             if let Some(window) = window {
+                let confirmed_latch =
+                    latch_held && state.edge_hover_latch.is_some_and(|latch| latch.confirmed);
+                let latched_direction = confirmed_latch
+                    .then(|| state.edge_hover_latch.map(|latch| latch.direction))
+                    .flatten();
+                let edge_hover =
+                    (!confirmed_latch).then(|| state.edge_hover_candidate_at_point(loc)).flatten();
+                if let Some((space, direction)) = edge_hover {
+                    state.start_edge_hover_latch(EdgeHoverLatch {
+                        space,
+                        direction,
+                        activation_x: loc.x,
+                        confirmed: false,
+                    });
+                }
                 window_server::note_windowserver_activity(window.as_u32());
-                _ = self.events_tx.send(Event::MouseMoved(window));
+                _ = self.events_tx.send(Event::MouseMoved(
+                    window,
+                    edge_hover.map(|(_, direction)| direction),
+                    latched_direction,
+                    state.edge_hover_generation,
+                ));
             }
         }
 
@@ -796,6 +875,92 @@ unsafe extern "C-unwind" fn event_tap_reenabled(user_info: *mut std::ffi::c_void
 }
 
 impl State {
+    fn invalidate_edge_hover_latch(&mut self) {
+        self.edge_hover_latch = None;
+        self.edge_hover_generation = self.edge_hover_generation.wrapping_add(1);
+    }
+
+    fn start_edge_hover_latch(&mut self, latch: EdgeHoverLatch) {
+        self.edge_hover_generation = self.edge_hover_generation.wrapping_add(1);
+        self.edge_hover_latch = Some(latch);
+    }
+
+    fn confirm_edge_hover_latch(&mut self, generation: u64, space: SpaceId, direction: Direction) {
+        if generation == self.edge_hover_generation {
+            if let Some(latch) = self.edge_hover_latch.as_mut() {
+                latch.space = space;
+                latch.direction = direction;
+                latch.confirmed = true;
+            }
+        }
+    }
+
+    fn clear_edge_hover_latch(&mut self, generation: u64) -> bool {
+        if generation == self.edge_hover_generation {
+            let was_confirmed = self.edge_hover_latch.is_some_and(|latch| latch.confirmed);
+            self.invalidate_edge_hover_latch();
+            was_confirmed
+        } else {
+            false
+        }
+    }
+
+    fn edge_hover_latch_holds(&self, point: CGPoint) -> bool {
+        let Some(latch) = self.edge_hover_latch else {
+            return false;
+        };
+        let same_scrolling_space = self.screen_displays.iter().any(|(frame, space, _)| {
+            *space == latch.space
+                && frame.contains(point)
+                && self
+                    .layout_mode_by_space
+                    .get(space)
+                    .copied()
+                    .unwrap_or(self.default_layout_mode)
+                    == LayoutMode::Scrolling
+        });
+        if !same_scrolling_space {
+            return false;
+        }
+        match latch.direction {
+            Direction::Left | Direction::Right => {
+                (point.x - latch.activation_x).abs()
+                    < self.layout_settings.scrolling.neighbor_peek_rearm_distance
+            }
+            _ => false,
+        }
+    }
+
+    fn edge_hover_candidate_at_point(&self, point: CGPoint) -> Option<(SpaceId, Direction)> {
+        let scrolling = &self.layout_settings.scrolling;
+        if scrolling.neighbor_peek_width <= 0.0
+            || scrolling.focus_navigation_style != ScrollingFocusNavigationStyle::Niri
+        {
+            return None;
+        }
+        let (frame, space, display_uuid) =
+            self.screen_displays.iter().find(|(frame, _, _)| frame.contains(point))?;
+        let mode = self
+            .layout_mode_by_space
+            .get(space)
+            .copied()
+            .unwrap_or(self.default_layout_mode);
+        if mode != LayoutMode::Scrolling {
+            return None;
+        }
+
+        let gaps = self.layout_settings.gaps.effective_for_display(Some(display_uuid));
+        let tiling = compute_tiling_area(*frame, &gaps);
+        let midpoint = tiling.origin.x + tiling.size.width / 2.0;
+        if point.x < midpoint {
+            Some((*space, Direction::Left))
+        } else if point.x > midpoint {
+            Some((*space, Direction::Right))
+        } else {
+            None
+        }
+    }
+
     fn hide_mouse(&mut self) {
         if let Err(e) = event::hide_mouse() {
             warn!("Failed to hide mouse: {e:?}");
@@ -896,6 +1061,7 @@ impl State {
     }
 
     fn reset(&mut self, enabled: bool) {
+        self.invalidate_edge_hover_latch();
         if enabled {
             self.reset_mouse_sampling();
         }
@@ -984,6 +1150,156 @@ mod tests {
             state.layout_mode_at_point(CGPoint::new(150.0, 50.0)),
             Some(crate::common::config::LayoutMode::Scrolling)
         );
+    }
+
+    #[test]
+    fn edge_hover_latch_rearms_after_horizontal_displacement() {
+        let mut state = State::default();
+        let frame = CGRect::new(
+            CGPoint::new(0.0, 0.0),
+            objc2_core_foundation::CGSize::new(1000.0, 800.0),
+        );
+        let space = SpaceId::new(1);
+        state.screen_displays = vec![(frame, space, "display".to_string())];
+        state.layout_mode_by_space.insert(space, LayoutMode::Scrolling);
+        state.layout_settings.scrolling.focus_navigation_style =
+            ScrollingFocusNavigationStyle::Niri;
+        state.layout_settings.scrolling.neighbor_peek_width = 24.0;
+        state.layout_settings.gaps.outer.left = 20.0;
+        state.layout_settings.gaps.outer.right = 30.0;
+        state.layout_settings.gaps.inner.horizontal = 10.0;
+        assert_eq!(
+            state.edge_hover_candidate_at_point(CGPoint::new(250.0, 400.0)),
+            Some((space, Direction::Left))
+        );
+        assert_eq!(
+            state.edge_hover_candidate_at_point(CGPoint::new(750.0, 400.0)),
+            Some((space, Direction::Right))
+        );
+        state.edge_hover_latch = Some(EdgeHoverLatch {
+            space,
+            direction: Direction::Left,
+            activation_x: 44.0,
+            confirmed: true,
+        });
+
+        assert!(state.edge_hover_latch_holds(CGPoint::new(44.0, 400.0)));
+        assert!(state.edge_hover_latch_holds(CGPoint::new(63.0, 400.0)));
+        assert!(state.edge_hover_latch_holds(CGPoint::new(25.0, 400.0)));
+        assert!(!state.edge_hover_latch_holds(CGPoint::new(64.0, 400.0)));
+        assert!(!state.edge_hover_latch_holds(CGPoint::new(24.0, 400.0)));
+
+        state.layout_settings.scrolling.neighbor_peek_rearm_distance = 8.0;
+        assert!(!state.edge_hover_latch_holds(CGPoint::new(55.0, 400.0)));
+        state.layout_settings.scrolling.neighbor_peek_rearm_distance = 20.0;
+
+        state.edge_hover_latch = Some(EdgeHoverLatch {
+            space,
+            direction: Direction::Right,
+            activation_x: 950.0,
+            confirmed: true,
+        });
+        assert!(state.edge_hover_latch_holds(CGPoint::new(969.0, 400.0)));
+        assert!(state.edge_hover_latch_holds(CGPoint::new(931.0, 400.0)));
+        assert!(!state.edge_hover_latch_holds(CGPoint::new(970.0, 400.0)));
+        assert!(!state.edge_hover_latch_holds(CGPoint::new(930.0, 400.0)));
+    }
+
+    #[test]
+    fn edge_hover_is_disabled_outside_niri_scrolling_mode() {
+        let mut state = State::default();
+        let frame = CGRect::new(
+            CGPoint::new(0.0, 0.0),
+            objc2_core_foundation::CGSize::new(1000.0, 800.0),
+        );
+        let space = SpaceId::new(1);
+        state.screen_displays = vec![(frame, space, "display".to_string())];
+        state.layout_settings.scrolling.neighbor_peek_width = 24.0;
+        state.layout_mode_by_space.insert(space, LayoutMode::Traditional);
+        assert_eq!(
+            state.edge_hover_candidate_at_point(CGPoint::new(1.0, 400.0)),
+            None
+        );
+
+        state.layout_mode_by_space.insert(space, LayoutMode::Scrolling);
+        state.layout_settings.scrolling.focus_navigation_style =
+            ScrollingFocusNavigationStyle::Anchored;
+        assert_eq!(
+            state.edge_hover_candidate_at_point(CGPoint::new(1.0, 400.0)),
+            None
+        );
+    }
+
+    #[test]
+    fn stale_edge_hover_confirmation_cannot_restore_or_clear_a_newer_latch() {
+        let mut state = State::default();
+        let space = SpaceId::new(1);
+        let old_latch = EdgeHoverLatch {
+            space,
+            direction: Direction::Right,
+            activation_x: 900.0,
+            confirmed: false,
+        };
+        state.start_edge_hover_latch(old_latch);
+        let old_generation = state.edge_hover_generation;
+        state.invalidate_edge_hover_latch();
+
+        state.confirm_edge_hover_latch(old_generation, space, Direction::Right);
+        assert!(state.edge_hover_latch.is_none());
+
+        let new_latch = EdgeHoverLatch {
+            space,
+            direction: Direction::Left,
+            activation_x: 100.0,
+            confirmed: false,
+        };
+        state.start_edge_hover_latch(new_latch);
+        assert!(!state.clear_edge_hover_latch(old_generation));
+        assert_eq!(state.edge_hover_latch, Some(new_latch));
+    }
+
+    #[test]
+    fn rejected_provisional_latch_does_not_request_mouse_window_reset() {
+        let mut state = State::default();
+        state.start_edge_hover_latch(EdgeHoverLatch {
+            space: SpaceId::new(1),
+            direction: Direction::Right,
+            activation_x: 900.0,
+            confirmed: false,
+        });
+        let generation = state.edge_hover_generation;
+
+        assert!(!state.clear_edge_hover_latch(generation));
+        assert!(state.edge_hover_latch.is_none());
+    }
+
+    #[test]
+    fn newer_provisional_latch_supersedes_a_rejected_candidate() {
+        let mut state = State::default();
+        let space = SpaceId::new(1);
+        state.start_edge_hover_latch(EdgeHoverLatch {
+            space,
+            direction: Direction::Right,
+            activation_x: 900.0,
+            confirmed: false,
+        });
+        let rejected_generation = state.edge_hover_generation;
+
+        let valid_latch = EdgeHoverLatch {
+            space,
+            direction: Direction::Right,
+            activation_x: 700.0,
+            confirmed: false,
+        };
+        state.start_edge_hover_latch(valid_latch);
+        let valid_generation = state.edge_hover_generation;
+        assert!(!state.clear_edge_hover_latch(rejected_generation));
+        assert_eq!(state.edge_hover_latch, Some(valid_latch));
+
+        state.confirm_edge_hover_latch(valid_generation, space, Direction::Right);
+        assert!(state.edge_hover_latch.is_some_and(|latch| latch.confirmed));
+        assert!(state.clear_edge_hover_latch(valid_generation));
+        assert!(state.edge_hover_latch.is_none());
     }
 
     #[test]

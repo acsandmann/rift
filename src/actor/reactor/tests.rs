@@ -12,6 +12,40 @@ use crate::sys::geometry::SameAs;
 use crate::sys::window_server::WindowServerId;
 
 #[test]
+fn neighbor_peek_latch_requires_a_clipped_window() {
+    let tiling = CGRect::new(CGPoint::new(20.0, 0.0), CGSize::new(960.0, 800.0));
+    let left = CGRect::new(CGPoint::new(-656.0, 0.0), CGSize::new(700.0, 800.0));
+    let right = CGRect::new(CGPoint::new(956.0, 0.0), CGSize::new(700.0, 800.0));
+    let fully_visible = CGRect::new(CGPoint::new(100.0, 0.0), CGSize::new(700.0, 800.0));
+
+    assert!(is_clipped_neighbor(Direction::Left, left, tiling));
+    assert!(is_clipped_neighbor(Direction::Right, right, tiling));
+    assert!(!is_clipped_neighbor(Direction::Left, fully_visible, tiling));
+    assert!(!is_clipped_neighbor(Direction::Right, fully_visible, tiling));
+}
+
+#[test]
+fn edge_hover_latch_only_suppresses_further_columns_in_its_direction() {
+    assert!(should_suppress_latched_column(
+        Direction::Right,
+        Some(std::cmp::Ordering::Greater)
+    ));
+    assert!(should_suppress_latched_column(
+        Direction::Left,
+        Some(std::cmp::Ordering::Less)
+    ));
+    assert!(!should_suppress_latched_column(
+        Direction::Right,
+        Some(std::cmp::Ordering::Equal)
+    ));
+    assert!(!should_suppress_latched_column(
+        Direction::Right,
+        Some(std::cmp::Ordering::Less)
+    ));
+    assert!(!should_suppress_latched_column(Direction::Right, None));
+}
+
+#[test]
 fn it_ignores_stale_resize_events() {
     let mut apps = Apps::new();
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(
