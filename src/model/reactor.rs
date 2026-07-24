@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::actor::app::{AppInfo, AppThreadHandle, WindowId, pid_t};
 use crate::common::log::MetricsCommand;
-use crate::layout_engine::{Direction, LayoutCommand, RestoreScope};
+use crate::layout_engine::{Direction, LayoutCommand, RestoreScope, RestoreSource};
 use crate::model::WindowStore;
 use crate::sys::app::WindowInfo;
 use crate::sys::screen::SpaceId;
@@ -51,6 +51,8 @@ pub enum ReactorCommand {
     RestoreLayout {
         path: std::path::PathBuf,
         scope: RestoreScope,
+        #[serde(default)]
+        source: RestoreSource,
     },
     SwitchSpace(Direction),
     ToggleSpaceActivated,
@@ -193,4 +195,32 @@ pub enum ReactorError {
     RaiseManagerCommunicationFailed(
         #[from] tokio::sync::mpsc::error::SendError<crate::actor::raise_manager::Event>,
     ),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_restore_command_defaults_to_portable_source_policy() {
+        let mut serialized = serde_json::to_value(ReactorCommand::RestoreLayout {
+            path: "layout.ron".into(),
+            scope: RestoreScope::Workspace,
+            source: RestoreSource::CurrentSpace,
+        })
+        .unwrap();
+        serialized
+            .get_mut("restore_layout")
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap()
+            .remove("source");
+
+        let restored: ReactorCommand = serde_json::from_value(serialized).unwrap();
+
+        assert_eq!(restored, ReactorCommand::RestoreLayout {
+            path: "layout.ron".into(),
+            scope: RestoreScope::Workspace,
+            source: RestoreSource::SavedActiveSpace,
+        });
+    }
 }

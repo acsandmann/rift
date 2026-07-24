@@ -34,7 +34,9 @@ use crate::actor;
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::wm_controller::{self, WmCommand, WmEvent};
 use crate::common::collections::{HashMap, HashSet};
-use crate::common::config::{Config, LayoutMode, LayoutSettings, ScrollingFocusNavigationStyle};
+use crate::common::config::{
+    Config, LayoutMode, LayoutSettings, ScrollingFocusNavigationStyle, StackLineHoverMode,
+};
 use crate::layout_engine::Direction;
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::sys::event::{self, Hotkey, KeyCode, MouseState, set_mouse_state};
@@ -113,6 +115,7 @@ struct State {
     event_processing_enabled: bool,
     focus_follows_mouse_enabled: bool,
     stack_line_enabled: bool,
+    stack_line_hover_mode: StackLineHoverMode,
     disable_hotkey_active: bool,
     low_power_mode: bool,
     pressed_keys: HashSet<KeyCode>,
@@ -144,6 +147,7 @@ impl Default for State {
             event_processing_enabled: false,
             focus_follows_mouse_enabled: true,
             stack_line_enabled: false,
+            stack_line_hover_mode: StackLineHoverMode::default(),
             disable_hotkey_active: false,
             low_power_mode: power::is_low_power_mode_enabled(),
             pressed_keys: HashSet::default(),
@@ -256,6 +260,7 @@ impl EventTap {
         state.mouse_hides_on_focus = config.settings.mouse_hides_on_focus;
         state.focus_follows_mouse_config_enabled = config.settings.focus_follows_mouse;
         state.stack_line_enabled = config.settings.ui.stack_line.enabled;
+        state.stack_line_hover_mode = config.settings.ui.stack_line.hover;
         state.default_layout_mode = config.settings.layout.mode;
         state.layout_settings = config.settings.layout.clone();
         state.disable_hotkey_active = disable_hotkey
@@ -340,9 +345,7 @@ impl EventTap {
                     .screens
                     .iter()
                     .filter_map(|screen| {
-                        screen
-                            .space
-                            .map(|space| (screen.frame, space, screen.display_uuid.clone()))
+                        screen.space.map(|space| (screen.frame, space, screen.display_uuid.clone()))
                     })
                     .collect();
                 state.screen_spaces = space_state
@@ -388,6 +391,7 @@ impl EventTap {
                 let mouse_hides_on_focus = new_config.settings.mouse_hides_on_focus;
                 let focus_follows_mouse_config_enabled = new_config.settings.focus_follows_mouse;
                 let stack_line_enabled = new_config.settings.ui.stack_line.enabled;
+                let stack_line_hover_mode = new_config.settings.ui.stack_line.hover;
                 let default_layout_mode = new_config.settings.layout.mode;
                 let disable_hotkey = new_config
                     .settings
@@ -400,9 +404,11 @@ impl EventTap {
                     let prev_focus_follows_mouse_config_enabled =
                         state.focus_follows_mouse_config_enabled;
                     let prev_stack_line_enabled = state.stack_line_enabled;
+                    let prev_stack_line_hover_mode = state.stack_line_hover_mode;
                     state.mouse_hides_on_focus = mouse_hides_on_focus;
                     state.focus_follows_mouse_config_enabled = focus_follows_mouse_config_enabled;
                     state.stack_line_enabled = stack_line_enabled;
+                    state.stack_line_hover_mode = stack_line_hover_mode;
                     state.default_layout_mode = default_layout_mode;
                     state.layout_settings = new_config.settings.layout.clone();
                     state.invalidate_edge_hover_latch();
@@ -422,6 +428,7 @@ impl EventTap {
                     if prev_focus_follows_mouse_config_enabled
                         != state.focus_follows_mouse_config_enabled
                         || prev_stack_line_enabled != state.stack_line_enabled
+                        || prev_stack_line_hover_mode != state.stack_line_hover_mode
                     {
                         state.reset_mouse_sampling();
                         self.reset_mouse_move_sample_gate();
@@ -624,8 +631,8 @@ impl EventTap {
             }
         }
 
-        // Stack-line hover feedback only changes the cursor when the hit-test
-        // result changes. Avoid queueing a message for every sampled point.
+        // Click mode only needs hit-test transitions for cursor feedback.
+        // Hover mode forwards samples so the actor can detect segment changes.
         if state.stack_line_enabled {
             let hits = self
                 .stack_line_hit_rects
@@ -634,7 +641,9 @@ impl EventTap {
                 .copied()
                 .any(|frame| point_hits_indicator_frame(loc, frame))
                 && !window_server::is_point_occluded_by_external_window(loc);
-            if state.last_stack_line_hit != Some(hits) {
+            if state.stack_line_hover_mode == StackLineHoverMode::Hover
+                || state.last_stack_line_hit != Some(hits)
+            {
                 state.last_stack_line_hit = Some(hits);
                 let _ = self.stack_line_tx.try_send(stack_line::Event::MouseMoved {
                     point: loc,
@@ -674,14 +683,13 @@ impl EventTap {
                 valid: true,
             });
             if let Some(window) = window {
-                let confirmed_latch = latch_held
-                    && state.edge_hover_latch.is_some_and(|latch| latch.confirmed);
+                let confirmed_latch =
+                    latch_held && state.edge_hover_latch.is_some_and(|latch| latch.confirmed);
                 let latched_direction = confirmed_latch
                     .then(|| state.edge_hover_latch.map(|latch| latch.direction))
                     .flatten();
-                let edge_hover = (!confirmed_latch)
-                    .then(|| state.edge_hover_candidate_at_point(loc))
-                    .flatten();
+                let edge_hover =
+                    (!confirmed_latch).then(|| state.edge_hover_candidate_at_point(loc)).flatten();
                 if let Some((space, direction)) = edge_hover {
                     state.start_edge_hover_latch(EdgeHoverLatch {
                         space,
@@ -877,12 +885,7 @@ impl State {
         self.edge_hover_latch = Some(latch);
     }
 
-    fn confirm_edge_hover_latch(
-        &mut self,
-        generation: u64,
-        space: SpaceId,
-        direction: Direction,
-    ) {
+    fn confirm_edge_hover_latch(&mut self, generation: u64, space: SpaceId, direction: Direction) {
         if generation == self.edge_hover_generation {
             if let Some(latch) = self.edge_hover_latch.as_mut() {
                 latch.space = space;
@@ -894,8 +897,9 @@ impl State {
 
     fn clear_edge_hover_latch(&mut self, generation: u64) -> bool {
         if generation == self.edge_hover_generation {
+            let was_confirmed = self.edge_hover_latch.is_some_and(|latch| latch.confirmed);
             self.invalidate_edge_hover_latch();
-            true
+            was_confirmed
         } else {
             false
         }
@@ -934,10 +938,8 @@ impl State {
         {
             return None;
         }
-        let (frame, space, display_uuid) = self
-            .screen_displays
-            .iter()
-            .find(|(frame, _, _)| frame.contains(point))?;
+        let (frame, space, display_uuid) =
+            self.screen_displays.iter().find(|(frame, _, _)| frame.contains(point))?;
         let mode = self
             .layout_mode_by_space
             .get(space)
@@ -1214,12 +1216,18 @@ mod tests {
         state.screen_displays = vec![(frame, space, "display".to_string())];
         state.layout_settings.scrolling.neighbor_peek_width = 24.0;
         state.layout_mode_by_space.insert(space, LayoutMode::Traditional);
-        assert_eq!(state.edge_hover_candidate_at_point(CGPoint::new(1.0, 400.0)), None);
+        assert_eq!(
+            state.edge_hover_candidate_at_point(CGPoint::new(1.0, 400.0)),
+            None
+        );
 
         state.layout_mode_by_space.insert(space, LayoutMode::Scrolling);
         state.layout_settings.scrolling.focus_navigation_style =
             ScrollingFocusNavigationStyle::Anchored;
-        assert_eq!(state.edge_hover_candidate_at_point(CGPoint::new(1.0, 400.0)), None);
+        assert_eq!(
+            state.edge_hover_candidate_at_point(CGPoint::new(1.0, 400.0)),
+            None
+        );
     }
 
     #[test]
@@ -1248,6 +1256,21 @@ mod tests {
         state.start_edge_hover_latch(new_latch);
         assert!(!state.clear_edge_hover_latch(old_generation));
         assert_eq!(state.edge_hover_latch, Some(new_latch));
+    }
+
+    #[test]
+    fn rejected_provisional_latch_does_not_request_mouse_window_reset() {
+        let mut state = State::default();
+        state.start_edge_hover_latch(EdgeHoverLatch {
+            space: SpaceId::new(1),
+            direction: Direction::Right,
+            activation_x: 900.0,
+            confirmed: false,
+        });
+        let generation = state.edge_hover_generation;
+
+        assert!(!state.clear_edge_hover_latch(generation));
+        assert!(state.edge_hover_latch.is_none());
     }
 
     #[test]

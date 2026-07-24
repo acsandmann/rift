@@ -6,7 +6,7 @@ use crate::common::collections::{HashMap, HashSet};
 use crate::layout_engine::systems::constraints::{AxisConstraints, solve_axis_lengths};
 use crate::layout_engine::systems::{LayoutSystem, WindowLayoutConstraints};
 use crate::layout_engine::utils::compute_tiling_area;
-use crate::layout_engine::{Direction, LayoutId, LayoutKind, Orientation};
+use crate::layout_engine::{Direction, LayoutId, LayoutKind, Orientation, ResizeOrientation};
 use crate::model::selection::*;
 use crate::model::tree::{NodeId, NodeMap, Tree};
 
@@ -970,6 +970,8 @@ impl LayoutSystem for BspLayoutSystem {
         self.layouts.insert(state)
     }
 
+    fn contains_layout(&self, layout: LayoutId) -> bool { self.layouts.contains_key(layout) }
+
     /// shallow
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
         let mut windows = Vec::new();
@@ -1050,6 +1052,14 @@ impl LayoutSystem for BspLayoutSystem {
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
         self.layouts.get(layout).and_then(|s| self.selection_window(s))
+    }
+
+    fn all_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
+        let mut out = Vec::new();
+        if let Some(state) = self.layouts.get(layout).copied() {
+            self.collect_windows_under(state.root, &mut out);
+        }
+        out
     }
 
     fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
@@ -1638,14 +1648,28 @@ impl LayoutSystem for BspLayoutSystem {
         }
     }
 
-    fn resize_selection_by(&mut self, layout: LayoutId, amount: f64) {
+    fn resize_selection_by(
+        &mut self,
+        layout: LayoutId,
+        amount: f64,
+        orientation: ResizeOrientation,
+    ) {
         let sel_snapshot = self.selection_of_layout(layout);
         let Some(mut node) = sel_snapshot else {
             return;
         };
 
         while let Some(parent) = node.parent(&self.tree.map) {
-            if let Some(NodeKind::Split { ratio, .. }) = self.kind.get_mut(parent) {
+            if let Some(NodeKind::Split {
+                orientation: split_orientation,
+                ratio,
+            }) = self.kind.get_mut(parent)
+                && match orientation {
+                    ResizeOrientation::Horizontal => *split_orientation == Orientation::Horizontal,
+                    ResizeOrientation::Vertical => *split_orientation == Orientation::Vertical,
+                    ResizeOrientation::Smart => true,
+                }
+            {
                 let is_first = Some(node) == parent.first_child(&self.tree.map);
                 let delta = (amount as f32) * 0.5;
                 if is_first {

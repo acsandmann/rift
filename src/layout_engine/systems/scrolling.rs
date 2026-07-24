@@ -9,7 +9,7 @@ use crate::common::config::{ScrollingFocusNavigationStyle, ScrollingLayoutSettin
 use crate::layout_engine::systems::constraints::{AxisConstraints, solve_axis_lengths};
 use crate::layout_engine::systems::{LayoutSystem, WindowLayoutConstraints};
 use crate::layout_engine::utils::compute_tiling_area;
-use crate::layout_engine::{Direction, LayoutId, LayoutKind};
+use crate::layout_engine::{Direction, LayoutId, LayoutKind, ResizeOrientation};
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 struct Column {
@@ -608,6 +608,8 @@ impl LayoutSystem for ScrollingLayoutSystem {
         self.layouts.insert(LayoutState::new(self.settings.column_width_ratio))
     }
 
+    fn contains_layout(&self, layout: LayoutId) -> bool { self.layouts.contains_key(layout) }
+
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
         let cloned = self
             .layouts
@@ -872,18 +874,12 @@ impl LayoutSystem for ScrollingLayoutSystem {
                     && left_margin > 0.0
                     && selected_width + left_margin <= tiling.size.width
                 {
-                    selected_x.clamp(
-                        visible_left + left_margin,
-                        visible_right - selected_width,
-                    )
+                    selected_x.clamp(visible_left + left_margin, visible_right - selected_width)
                 } else if reveal_direction == 1
                     && right_margin > 0.0
                     && selected_width + right_margin <= tiling.size.width
                 {
-                    selected_x.clamp(
-                        visible_left,
-                        visible_right - right_margin - selected_width,
-                    )
+                    selected_x.clamp(visible_left, visible_right - right_margin - selected_width)
                 } else {
                     selected_x
                 };
@@ -1009,6 +1005,10 @@ impl LayoutSystem for ScrollingLayoutSystem {
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
         self.layout_state(layout).and_then(|state| state.selected_or_first())
+    }
+
+    fn all_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
+        self.layout_state(layout).map(Self::all_windows).unwrap_or_default()
     }
 
     fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
@@ -1662,7 +1662,12 @@ impl LayoutSystem for ScrollingLayoutSystem {
         state.clamp_scroll_offset();
     }
 
-    fn resize_selection_by(&mut self, layout: LayoutId, amount: f64) {
+    fn resize_selection_by(
+        &mut self,
+        layout: LayoutId,
+        amount: f64,
+        orientation: ResizeOrientation,
+    ) {
         let min_ratio = self.settings.min_column_width_ratio;
         let max_ratio = self.settings.max_column_width_ratio;
         let niri_navigation = matches!(
@@ -1674,11 +1679,41 @@ impl LayoutSystem for ScrollingLayoutSystem {
         };
         let base_ratio = state.column_width_ratio;
 
-        let Some((col_idx, _)) = state.selected_location() else {
+        let Some((col_idx, row_idx)) = state.selected_location() else {
+            if orientation == ResizeOrientation::Vertical {
+                return;
+            }
             let ratio = base_ratio + amount;
             state.column_width_ratio = ratio.clamp(min_ratio, max_ratio).max(0.05);
             return;
         };
+
+        let resize_vertically = orientation == ResizeOrientation::Vertical
+            || (orientation == ResizeOrientation::Smart
+                && state.columns[col_idx].windows.len() > 1);
+        if resize_vertically {
+            let column = &mut state.columns[col_idx];
+            if column.windows.len() < 2 {
+                return;
+            }
+            column.ensure_height_weights();
+            let total: f64 = column.height_weights.iter().sum();
+            if total <= f64::EPSILON {
+                return;
+            }
+            let current_share = column.height_weights[row_idx] / total;
+            let next_share = (current_share + amount).clamp(0.05, 0.95);
+            let other_total = (total - column.height_weights[row_idx]).max(f64::EPSILON);
+            let scale = total.max(10_000.0);
+            for (idx, weight) in column.height_weights.iter_mut().enumerate() {
+                if idx == row_idx {
+                    *weight = next_share * scale;
+                } else {
+                    *weight = (1.0 - next_share) * scale * (*weight / other_total);
+                }
+            }
+            return;
+        }
 
         let current = base_ratio + state.columns[col_idx].width_offset;
         let next = current + amount;
@@ -1708,7 +1743,7 @@ mod tests {
     use crate::common::config::{GapSettings, ScrollingLayoutSettings};
     use crate::layout_engine::systems::{LayoutSystem, WindowLayoutConstraints};
     use crate::layout_engine::utils::compute_tiling_area;
-    use crate::layout_engine::{Direction, LayoutId};
+    use crate::layout_engine::{Direction, LayoutId, ResizeOrientation};
 
     fn wid(pid: pid_t, idx: u32) -> WindowId {
         WindowId {
@@ -2193,9 +2228,7 @@ mod tests {
         assert!(left_visible >= 23.0, "left peek was {left_visible}px");
         assert!(right_visible >= 23.0, "right peek was {right_visible}px");
         assert!(focused.origin.x >= tiling.origin.x);
-        assert!(
-            focused.origin.x + focused.size.width <= tiling.origin.x + tiling.size.width
-        );
+        assert!(focused.origin.x + focused.size.width <= tiling.origin.x + tiling.size.width);
     }
 
     #[test]
@@ -2220,7 +2253,10 @@ mod tests {
         let left_visible = left_neighbor.origin.x + left_neighbor.size.width;
         let right_visible = screen.size.width - right_neighbor.origin.x;
         assert!(left_visible >= 23.0, "left peek was {left_visible}px");
-        assert!(right_visible < 23.0, "unexpected right peek was {right_visible}px");
+        assert!(
+            right_visible < 23.0,
+            "unexpected right peek was {right_visible}px"
+        );
         assert!(focused.origin.x >= 0.0 && focused.origin.x + focused.size.width <= 1000.0);
 
         let _ = system.move_focus(layout, Direction::Left);
@@ -2274,16 +2310,24 @@ mod tests {
 
     #[test]
     fn neighbor_direction_only_matches_immediate_adjacent_columns() {
-        let (system, layout, w1, w2, w3) =
-            setup_three_windows(ScrollingLayoutSettings::default());
+        let (system, layout, w1, w2, w3) = setup_three_windows(ScrollingLayoutSettings::default());
 
         assert_eq!(system.neighbor_direction(layout, w2, w1), Some(Direction::Left));
         assert_eq!(system.neighbor_direction(layout, w2, w3), Some(Direction::Right));
         assert_eq!(system.neighbor_direction(layout, w1, w3), None);
         assert_eq!(system.neighbor_direction(layout, w2, w2), None);
-        assert_eq!(system.column_order(layout, w2, w1), Some(std::cmp::Ordering::Less));
-        assert_eq!(system.column_order(layout, w2, w3), Some(std::cmp::Ordering::Greater));
-        assert_eq!(system.column_order(layout, w2, w2), Some(std::cmp::Ordering::Equal));
+        assert_eq!(
+            system.column_order(layout, w2, w1),
+            Some(std::cmp::Ordering::Less)
+        );
+        assert_eq!(
+            system.column_order(layout, w2, w3),
+            Some(std::cmp::Ordering::Greater)
+        );
+        assert_eq!(
+            system.column_order(layout, w2, w2),
+            Some(std::cmp::Ordering::Equal)
+        );
     }
 
     #[test]
@@ -2325,7 +2369,7 @@ mod tests {
             crate::common::config::ScrollingFocusNavigationStyle::Anchored;
         let (mut system, layout, w1, w2) = setup_two_windows(settings);
         let _ = system.move_focus(layout, Direction::Left);
-        system.resize_selection_by(layout, 0.12);
+        system.resize_selection_by(layout, 0.12, ResizeOrientation::Horizontal);
 
         let gaps = GapSettings::default();
         let frames = render(&system, layout, screen(1000.0, 800.0), &gaps);
@@ -2382,7 +2426,7 @@ mod tests {
 
         // Make focused-left column wider so selected widths differ across focus moves.
         let _ = system.move_focus(layout, Direction::Left);
-        system.resize_selection_by(layout, 0.15);
+        system.resize_selection_by(layout, 0.15, ResizeOrientation::Horizontal);
 
         let screen = screen(1200.0, 800.0);
         let gaps = GapSettings::default();
@@ -2475,7 +2519,7 @@ mod tests {
         let before = render(&system, layout, screen, &gaps);
         let before_frame = frame_for(&before, w2);
 
-        system.resize_selection_by(layout, 0.08);
+        system.resize_selection_by(layout, 0.08, ResizeOrientation::Horizontal);
 
         let after = render(&system, layout, screen, &gaps);
         let after_frame = frame_for(&after, w2);
@@ -2564,6 +2608,49 @@ mod tests {
                 .abs()
                 < 2.0
         );
+    }
+
+    #[test]
+    fn vertical_resize_command_changes_row_height_without_changing_column_width() {
+        let mut system = ScrollingLayoutSystem::new(&ScrollingLayoutSettings::default());
+        let layout = system.create_layout();
+        let w1 = wid(1, 1);
+        let w2 = wid(1, 2);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+        system.join_selection_with_direction(layout, Direction::Left);
+        assert!(system.select_window(layout, w1));
+
+        let screen = screen(1000.0, 800.0);
+        let gaps = GapSettings::default();
+        let before = frame_for(&render(&system, layout, screen, &gaps), w1);
+
+        system.resize_selection_by(layout, 0.05, ResizeOrientation::Vertical);
+
+        let after = frame_for(&render(&system, layout, screen, &gaps), w1);
+        assert!(after.size.height > before.size.height);
+        assert!((after.size.width - before.size.width).abs() < 1.0);
+    }
+
+    #[test]
+    fn smart_resize_uses_row_height_for_a_stacked_column() {
+        let mut system = ScrollingLayoutSystem::new(&ScrollingLayoutSettings::default());
+        let layout = system.create_layout();
+        let w1 = wid(1, 1);
+        let w2 = wid(1, 2);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+        system.join_selection_with_direction(layout, Direction::Left);
+        assert!(system.select_window(layout, w1));
+
+        let screen = screen(1000.0, 800.0);
+        let gaps = GapSettings::default();
+        let before = frame_for(&render(&system, layout, screen, &gaps), w1);
+        system.resize_selection_by(layout, 0.05, ResizeOrientation::Smart);
+        let after = frame_for(&render(&system, layout, screen, &gaps), w1);
+
+        assert!(after.size.height > before.size.height);
+        assert!((after.size.width - before.size.width).abs() < 1.0);
     }
 
     #[test]

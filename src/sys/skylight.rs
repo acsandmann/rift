@@ -420,6 +420,11 @@ unsafe extern "C" {
         set_tags: *mut u64,
         clear_tags: *mut u64,
     ) -> *mut CFArray<CFNumber>;
+    pub fn SLSManagedDisplaysCopyRoleWindows(
+        cid: c_int,
+        display_uuids: *mut CFArray<CFString>,
+        role: u64,
+    ) -> *mut CFArray<CFNumber>;
     pub fn SLSCopyAssociatedWindows(cid: cid_t, wid: u32) -> *mut CFArray<CFNumber>;
     pub fn SLSManagedDisplayGetCurrentSpace(cid: cid_t, uuid: *mut CFString) -> u64;
     pub fn SLSCopyActiveMenuBarDisplayIdentifier(cid: cid_t) -> *mut CFString;

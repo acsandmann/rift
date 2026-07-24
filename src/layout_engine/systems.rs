@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
-use crate::layout_engine::{Direction, LayoutKind};
+use crate::layout_engine::{Direction, LayoutKind, ResizeOrientation};
 
 slotmap::new_key_type! { pub struct LayoutId; }
 
@@ -90,6 +90,7 @@ impl WindowLayoutConstraints {
 #[enum_dispatch]
 pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     fn create_layout(&mut self) -> LayoutId;
+    fn contains_layout(&self, layout: LayoutId) -> bool;
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId;
     fn remove_layout(&mut self, layout: LayoutId);
 
@@ -108,6 +109,10 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     ) -> Vec<(WindowId, CGRect)>;
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId>;
+    /// Return every window stored in this layout, including members hidden by a stack.
+    /// Persistence validation must not confuse "currently visible" with "serialized" or an
+    /// unmatchable hidden member can survive forever as a ghost.
+    fn all_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId>;
     fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId>;
     fn visible_windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId>;
     fn ascend_selection(&mut self, layout: LayoutId) -> bool;
@@ -169,7 +174,12 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     ) -> Vec<WindowId>;
     fn parent_of_selection_is_stacked(&self, layout: LayoutId) -> bool;
     fn unjoin_selection(&mut self, _layout: LayoutId);
-    fn resize_selection_by(&mut self, layout: LayoutId, amount: f64);
+    fn resize_selection_by(
+        &mut self,
+        layout: LayoutId,
+        amount: f64,
+        orientation: ResizeOrientation,
+    );
     fn rebalance(&mut self, layout: LayoutId);
     fn toggle_tile_orientation(&mut self, layout: LayoutId);
 }

@@ -193,6 +193,8 @@ layout_folder = "~/.config/rift/layouts"
 [settings.ui.stack_line]
 # experimental stack line indicator (defaults to off)
 enabled = false
+# action on hover: "click" or "hover" (defaults to "hover" which is just a visual indicator)
+hover = "hover"
 # in a horizontal stack where the line will be (top/bottom)
 horiz_placement = "top"
 # in a vertical stack where the line will be (left/right)
@@ -249,12 +251,15 @@ drag_swap_fraction = 0.3
 # - preserve_focus_per_workspace: remember last focused window per workspace
 # - workspace_auto_back_and_forth: when enabled, if you try to switch to the same workspace
 #   that's already active, it will switch to the last workspace instead
+# - prevent_wrapping: when true, next/previous workspace switching stops at the first/last
+#   workspace instead of wrapping around
 # - reapply_app_rules_on_title_change: if true, app rules are re-evaluated when a window's title changes
 enabled = true
 default_workspace_count = 4
 auto_assign_windows = true
 preserve_focus_per_workspace = true
 workspace_auto_back_and_forth = false
+prevent_wrapping = false
 reapply_app_rules_on_title_change = false
 
 # Workspace-specific rules
@@ -367,7 +372,9 @@ comb1 = "Alt + Shift"
 # - next_workspace = true|false (optional skip-empty override)
 # - prev_workspace = true|false (optional skip-empty override)
 # - switch_to_workspace = N
-# - move_window_to_workspace = N / move_window_to_workspace = { workspace = N, window_id = 123 } (optional window id)
+# - move_window_to_workspace = N|"next"|"prev"
+# - move_window_to_workspace = { workspace = N|"next"|"prev", follow = true|false, window_id = 123 }
+#   (follow and window_id are optional)
 # - create_workspace
 # - switch_to_last_workspace
 # - set_workspace_layout = { mode = "traditional"|"bsp"|"stack"|"master_stack"|"scrolling" } (active workspace)
@@ -380,7 +387,9 @@ comb1 = "Alt + Shift"
 # - consume_or_expel_window = "left"|"right"|"up"|"down"
 # - toggle_stack / toggle_orientation / unjoin_windows
 # - toggle_focus_floating / toggle_window_floating / toggle_fullscreen / toggle_fullscreen_within_gaps
-# - resize_window_grow / resize_window_shrink / resize_window_by = 0.05
+# - resize_window_grow / resize_window_shrink (without param, horizontal is default)
+# - resize_window_grow = "horizontal"|"vertical"|"smart"
+# - resize_window_shrink = "horizontal"|"vertical"|"smart"
 # - swap_windows = [123, 456]
 # - exec = "command" | exec = ["cmd", "arg1", "..."]
 # - move_mouse_to_display = "left"|"right"|"up"|"down"|N|"<display_uuid>"
@@ -443,6 +452,10 @@ comb1 = "Alt + Shift"
 # smartly resize windows
 "Alt + Shift + Equal" = "resize_window_grow"
 "Alt + Shift + Minus" = "resize_window_shrink"
+# Example vertical bindings for windows stacked in a scrolling-layout column:
+# "Alt + Ctrl + Equal" = { resize_window_grow = "vertical" }
+# "Alt + Ctrl + Minus" = { resize_window_shrink = "vertical" }
+# Use "smart" to resize the nearest applicable split automatically.
 
 # Move mouse cursor to display by index (0-based) or UUID
 # Examples:

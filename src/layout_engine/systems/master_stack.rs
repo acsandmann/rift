@@ -9,7 +9,8 @@ use crate::common::config::{MasterStackNewWindowPlacement, MasterStackSettings, 
 use crate::layout_engine::systems::WindowLayoutConstraints;
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{
-    Direction, LayoutId, LayoutKind, LayoutSystem, Orientation, TraditionalLayoutSystem,
+    Direction, LayoutId, LayoutKind, LayoutSystem, Orientation, ResizeOrientation,
+    TraditionalLayoutSystem,
 };
 use crate::model::tree::NodeId;
 
@@ -482,6 +483,8 @@ impl LayoutSystem for MasterStackLayoutSystem {
         layout
     }
 
+    fn contains_layout(&self, layout: LayoutId) -> bool { self.inner.contains_layout(layout) }
+
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
         let cloned = self.inner.clone_layout(layout);
         let (_root, master, stack) = self.ensure_structure(cloned);
@@ -559,6 +562,10 @@ impl LayoutSystem for MasterStackLayoutSystem {
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
         self.inner.selected_window(layout)
+    }
+
+    fn all_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
+        MasterStackLayoutSystem::all_windows_in_layout(self, layout)
     }
 
     fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
@@ -887,9 +894,14 @@ impl LayoutSystem for MasterStackLayoutSystem {
 
     fn unjoin_selection(&mut self, layout: LayoutId) { self.normalize_layout(layout); }
 
-    fn resize_selection_by(&mut self, layout: LayoutId, amount: f64) {
-        let _ = amount;
-        self.normalize_layout(layout);
+    fn resize_selection_by(
+        &mut self,
+        layout: LayoutId,
+        amount: f64,
+        orientation: ResizeOrientation,
+    ) {
+        let _ = self.ensure_structure(layout);
+        self.inner.resize_selection_by(layout, amount, orientation);
     }
 
     fn rebalance(&mut self, layout: LayoutId) { self.normalize_layout(layout); }
@@ -925,6 +937,23 @@ mod tests {
         // When w2 is added: master=[w2], stack=[w1]
         // When w3 is added: master=[w3], stack=[w2, w1] (since w2 was at index 0 and got pushed to stack, w1 was pushed next)
         assert_eq!(windows, vec![w(3), w(2), w(1)]);
+    }
+
+    #[test]
+    fn resize_selection_respects_the_requested_axis() {
+        let mut system = MasterStackLayoutSystem::default();
+        let layout = system.create_layout();
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+        let (_root, master, stack) = system.ensure_structure(layout);
+        assert!(system.select_window(layout, w(1)));
+        let before = system.inner.tree.data.layout.info[stack].size;
+
+        system.resize_selection_by(layout, 0.1, ResizeOrientation::Horizontal);
+
+        let after = system.inner.tree.data.layout.info[stack].size;
+        assert_ne!(after, before);
+        assert_ne!(master, stack);
     }
 
     #[test]

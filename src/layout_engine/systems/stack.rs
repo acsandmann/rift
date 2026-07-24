@@ -6,7 +6,9 @@ use crate::actor::app::WindowId;
 use crate::common::collections::HashMap;
 use crate::common::config::{StackDefaultOrientation, default_stack_orientation};
 use crate::layout_engine::systems::{LayoutSystem, WindowLayoutConstraints};
-use crate::layout_engine::{Direction, LayoutId, LayoutKind, TraditionalLayoutSystem};
+use crate::layout_engine::{
+    Direction, LayoutId, LayoutKind, ResizeOrientation, TraditionalLayoutSystem,
+};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct StackLayoutSystem {
@@ -147,6 +149,8 @@ impl LayoutSystem for StackLayoutSystem {
         layout
     }
 
+    fn contains_layout(&self, layout: LayoutId) -> bool { self.inner.contains_layout(layout) }
+
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
         let cloned = self.inner.clone_layout(layout);
         self.normalize_layout(cloned);
@@ -182,6 +186,10 @@ impl LayoutSystem for StackLayoutSystem {
 
     fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
         self.inner.selected_window(layout)
+    }
+
+    fn all_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
+        self.windows_in_layout_preorder(layout)
     }
 
     fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
@@ -340,7 +348,13 @@ impl LayoutSystem for StackLayoutSystem {
 
     fn unjoin_selection(&mut self, _layout: LayoutId) {}
 
-    fn resize_selection_by(&mut self, _layout: LayoutId, _amount: f64) {}
+    fn resize_selection_by(
+        &mut self,
+        _layout: LayoutId,
+        _amount: f64,
+        _orientation: ResizeOrientation,
+    ) {
+    }
 
     fn rebalance(&mut self, _layout: LayoutId) {}
 
@@ -421,7 +435,7 @@ mod tests {
     #[test]
     fn resize_selection_noop_keeps_fullscreen_state() {
         let (mut system, layout) = setup_fullscreen_stack_system();
-        system.resize_selection_by(layout, 0.1);
+        system.resize_selection_by(layout, 0.1, ResizeOrientation::Horizontal);
         assert!(system.has_any_fullscreen_node(layout));
     }
 

@@ -30,7 +30,7 @@ use crate::common::config::{
     ActiveWorkspaceLabel, LayoutMode, MenuBarDisplayMode, MenuBarSettings, WorkspaceDisplayStyle,
     WorkspaceSelector, restore_file,
 };
-use crate::layout_engine::{LayoutCommand, LayoutEngine, RestoreScope};
+use crate::layout_engine::{LayoutCommand, LayoutEngine, RestoreScope, RestoreSource};
 use crate::model::VirtualWorkspaceId;
 use crate::model::server::{WindowData, WorkspaceData};
 use crate::sys::hotkey::{Hotkey, KeyCode, Modifiers};
@@ -54,7 +54,11 @@ pub enum MenuAction {
     SwitchToWorkspace(usize),
     SaveLayout(PathBuf),
     SaveMasterFile,
-    RestoreLayout { path: PathBuf, scope: RestoreScope },
+    RestoreLayout {
+        path: PathBuf,
+        scope: RestoreScope,
+        source: RestoreSource,
+    },
     RestoreMasterFile(RestoreScope),
     RefreshLayoutFiles,
     OpenGitHub,
@@ -974,6 +978,7 @@ define_class!(
                 self.emit(MenuAction::RestoreLayout {
                     path,
                     scope: RestoreScope::Workspace,
+                    source: RestoreSource::SavedActiveSpace,
                 });
             }
         }
@@ -987,6 +992,7 @@ define_class!(
                 self.emit(MenuAction::RestoreLayout {
                     path,
                     scope: RestoreScope::Workspace,
+                    source: RestoreSource::SavedActiveSpace,
                 });
             }
         }
@@ -1023,6 +1029,7 @@ define_class!(
                 self.emit(MenuAction::RestoreLayout {
                     path,
                     scope: RestoreScope::Space,
+                    source: RestoreSource::SavedActiveSpace,
                 });
             }
         }
@@ -1036,6 +1043,7 @@ define_class!(
                 self.emit(MenuAction::RestoreLayout {
                     path,
                     scope: RestoreScope::Space,
+                    source: RestoreSource::SavedActiveSpace,
                 });
             }
         }

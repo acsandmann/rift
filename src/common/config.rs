@@ -75,6 +75,8 @@ pub struct VirtualWorkspaceSettings {
     pub preserve_focus_per_workspace: bool,
     #[serde(default = "no")]
     pub workspace_auto_back_and_forth: bool,
+    #[serde(default, alias = "prevent_wrapping_around")]
+    pub prevent_wrapping: bool,
     #[serde(default = "default_workspace_names")]
     pub workspace_names: Vec<String>,
     #[serde(default)]
@@ -152,6 +154,7 @@ impl Default for VirtualWorkspaceSettings {
             auto_assign_windows: true,
             preserve_focus_per_workspace: true,
             workspace_auto_back_and_forth: false,
+            prevent_wrapping: false,
             workspace_names: default_workspace_names(),
             default_workspace: 0,
             reapply_app_rules_on_title_change: false,
@@ -295,6 +298,39 @@ struct ConfigFile {
     /// e.g., "comb1" = "Alt + Shift" allows using "comb1 + C" in keys
     #[serde(default)]
     modifier_combinations: HashMap<String, String>,
+}
+
+fn migrate_legacy_resize_bindings(document: &mut toml::Value) -> bool {
+    let Some(keys) = document.get_mut("keys").and_then(toml::Value::as_table_mut) else {
+        return false;
+    };
+
+    let mut migrated = false;
+    for (_, command) in keys.iter_mut() {
+        let legacy_name = match command.as_str() {
+            Some("resize_window_grow") => "resize_window_grow",
+            Some("resize_window_shrink") => "resize_window_shrink",
+            _ => continue,
+        };
+        *command = toml::Value::Table(toml::map::Map::from_iter([(
+            legacy_name.to_string(),
+            toml::Value::String("horizontal".to_string()),
+        )]));
+        migrated = true;
+    }
+    migrated
+}
+
+fn parse_config_file(buf: &str) -> Result<ConfigFile, toml::de::Error> {
+    toml::from_str(buf).or_else(|original_error| {
+        let Ok(mut document) = toml::from_str::<toml::Value>(buf) else {
+            return Err(original_error);
+        };
+        if !migrate_legacy_resize_bindings(&mut document) {
+            return Err(original_error);
+        }
+        document.try_into()
+    })
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -555,6 +591,8 @@ impl Default for MenuBarSettings {
 pub struct StackLineSettings {
     #[serde(default = "no")]
     pub enabled: bool,
+    #[serde(default)]
+    pub hover: StackLineHoverMode,
     #[serde(default = "default_stack_line_thickness")]
     pub thickness: f64,
     #[serde(default)]
@@ -565,6 +603,14 @@ pub struct StackLineSettings {
     /// This creates spacing between the window and the stack line
     #[serde(default = "default_stack_line_spacing")]
     pub spacing: f64,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StackLineHoverMode {
+    Click,
+    #[default]
+    Hover,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
@@ -1184,7 +1230,7 @@ fn default_animation_duration() -> f64 { 0.3 }
 fn default_animation_fps() -> f64 { 100.0 }
 
 #[allow(dead_code)]
-fn no() -> bool { false }
+pub fn no() -> bool { false }
 
 fn default_layout_folder() -> PathBuf { PathBuf::from("~/.config/rift/layouts") }
 
@@ -1478,7 +1524,7 @@ impl Config {
     fn parse(buf: &str) -> anyhow::Result<Config> {
         // Attempt to deserialize. If it fails, and the error indicates an unknown enum
         // variant, attempt to provide a helpful suggestion.
-        match toml::from_str::<ConfigFile>(&buf) {
+        match parse_config_file(buf) {
             Ok(c) => {
                 let mut keys = Vec::new();
                 let mut key_specs = Vec::new();
@@ -1529,6 +1575,57 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::actor::reactor;
+    use crate::layout_engine::{LayoutCommand, ResizeOrientation};
+
+    #[test]
+    fn virtual_workspace_prevent_wrapping_defaults_to_false_and_accepts_suggested_alias() {
+        let defaults: VirtualWorkspaceSettings = toml::from_str("").unwrap();
+        assert!(!defaults.prevent_wrapping);
+
+        let settings: VirtualWorkspaceSettings =
+            toml::from_str("prevent_wrapping_around = true").unwrap();
+        assert!(settings.prevent_wrapping);
+    }
+
+    #[test]
+    fn resize_command_config_supports_legacy_and_oriented_forms() {
+        #[derive(Deserialize)]
+        struct TestConfig {
+            keys: HashMap<String, WmCommand>,
+        }
+
+        let mut document: toml::Value = toml::from_str(
+            r#"
+            [keys]
+            legacy = "resize_window_grow"
+            vertical = { resize_window_shrink = "vertical" }
+            smart = { resize_window_grow = "smart" }
+            "#,
+        )
+        .unwrap();
+        assert!(migrate_legacy_resize_bindings(&mut document));
+        let config: TestConfig = document.try_into().unwrap();
+
+        assert_eq!(
+            config.keys["legacy"],
+            WmCommand::ReactorCommand(reactor::Command::Layout(LayoutCommand::ResizeWindowGrow(
+                ResizeOrientation::Horizontal
+            )))
+        );
+        assert_eq!(
+            config.keys["vertical"],
+            WmCommand::ReactorCommand(reactor::Command::Layout(LayoutCommand::ResizeWindowShrink(
+                ResizeOrientation::Vertical
+            )))
+        );
+        assert_eq!(
+            config.keys["smart"],
+            WmCommand::ReactorCommand(reactor::Command::Layout(LayoutCommand::ResizeWindowGrow(
+                ResizeOrientation::Smart
+            )))
+        );
+    }
 
     #[test]
     fn menu_bar_layout_folder_defaults_and_expands_home() {
@@ -1621,12 +1718,7 @@ mod tests {
 
         let mut invalid = settings;
         invalid.neighbor_peek_width = -1.0;
-        assert!(
-            invalid
-                .validate()
-                .iter()
-                .any(|issue| issue.contains("neighbor_peek_width"))
-        );
+        assert!(invalid.validate().iter().any(|issue| issue.contains("neighbor_peek_width")));
 
         invalid.neighbor_peek_width = 0.0;
         invalid.neighbor_peek_rearm_distance = 0.0;
@@ -1650,7 +1742,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(config.settings.layout.scrolling.neighbor_peek_rearm_distance, 20.0);
+        assert_eq!(
+            config.settings.layout.scrolling.neighbor_peek_rearm_distance,
+            20.0
+        );
     }
 
     #[test]

@@ -46,6 +46,7 @@ pub fn handle_command_layout(
         LayoutCommand::NextWorkspace(_)
             | LayoutCommand::PrevWorkspace(_)
             | LayoutCommand::SwitchToWorkspace(_)
+            | LayoutCommand::MoveWindowToWorkspace { follow: true, .. }
             | LayoutCommand::SwitchToLastWorkspace
     );
     let requires_workspace_space = matches!(
@@ -53,6 +54,7 @@ pub fn handle_command_layout(
         LayoutCommand::NextWorkspace(_)
             | LayoutCommand::PrevWorkspace(_)
             | LayoutCommand::SwitchToWorkspace(_)
+            | LayoutCommand::MoveWindowToWorkspace { follow: true, .. }
             | LayoutCommand::SetWorkspaceLayout { .. }
             | LayoutCommand::CreateWorkspace
             | LayoutCommand::SwitchToLastWorkspace
@@ -118,15 +120,26 @@ pub fn handle_command_layout(
         .with_layout_response(response, workspace_space))
 }
 
-fn store_current_floating_positions(state: &RiftState, layout: &mut LayoutManager, space: SpaceId) {
-    let positions = layout
+fn current_floating_positions(
+    state: &RiftState,
+    layout: &LayoutManager,
+    space: SpaceId,
+) -> Vec<(SpaceId, WindowId, objc2_core_foundation::CGRect)> {
+    layout
         .layout_engine
         .windows_in_active_workspace(&state.windows, space)
         .into_iter()
         .filter(|window| layout.layout_engine.is_window_floating(*window))
         .filter_map(|window| {
-            state.windows.window(window).map(|state| (window, state.frame_monotonic))
+            state.windows.window(window).map(|state| (space, window, state.frame_monotonic))
         })
+        .collect()
+}
+
+fn store_current_floating_positions(state: &RiftState, layout: &mut LayoutManager, space: SpaceId) {
+    let positions = current_floating_positions(state, layout, space)
+        .into_iter()
+        .map(|(_, window, frame)| (window, frame))
         .collect::<Vec<_>>();
     if !positions.is_empty() {
         layout.layout_engine.store_floating_window_positions(space, &positions);
@@ -204,10 +217,15 @@ pub fn handle_command_reactor_serialize(
 pub fn handle_command_reactor_save_and_exit(
     state: &RiftState,
     layout: &mut LayoutManager,
+    active_space: Option<SpaceId>,
 ) -> anyhow::Result<EventOutcome> {
-    if let Err(e) = save_layout(state, layout, config::restore_file()) {
+    if let Err(e) = save_layout(state, layout, config::restore_file(), active_space) {
         error!("Could not save master file: {e}");
-        std::process::exit(3);
+        // A quit request is conditional on a durable master save. Keep Rift running when the
+        // snapshot cannot be committed so the user can fix the filesystem problem or retry
+        // without losing the only complete in-memory layout.
+        return Ok(EventOutcome::finalized_event(None, false, false, false)
+            .with_stdout_line(format!("Could not save master file; Rift is still running: {e}")));
     }
     std::process::exit(0);
 }
@@ -216,20 +234,18 @@ fn save_layout(
     state: &RiftState,
     layout: &mut LayoutManager,
     path: std::path::PathBuf,
+    active_space: Option<SpaceId>,
 ) -> std::io::Result<()> {
-    layout.layout_engine.refresh_window_fingerprints(&state.windows);
-    for space in layout.layout_engine.virtual_workspace_manager().initialized_spaces() {
-        store_current_floating_positions(state, layout, space);
-    }
-    layout.layout_engine.save(path)
+    layout.layout_engine.save_current_layout(path, &state.windows, active_space)
 }
 
 pub fn handle_command_reactor_save_layout(
     state: &RiftState,
     layout: &mut LayoutManager,
     path: std::path::PathBuf,
+    active_space: Option<SpaceId>,
 ) -> anyhow::Result<EventOutcome> {
-    save_layout(state, layout, path.clone())?;
+    save_layout(state, layout, path.clone(), active_space)?;
     info!(path = %path.display(), "Saved layout");
     Ok(EventOutcome::finalized_event(None, false, false, false)
         .with_stdout_line(format!("Saved layout to {}", path.display())))
