@@ -314,44 +314,46 @@ impl RestorePlan {
                 .active_workspace_per_space
                 .insert(self.request.active_space, (None, target_active));
         }
+        // Only identities imported by this transaction are restoration candidates. Deriving this
+        // set from the whole live persistence map can arm unrelated windows which merely happen
+        // to already occupy the target workspace.
+        let restored_candidates =
+            self.fingerprints.iter().map(|(window, _)| *window).collect::<Vec<_>>();
         for (window, fingerprint) in self.fingerprints {
             engine.persistence.record(window, fingerprint);
         }
+        engine.persistence.replace_pending(restored_candidates);
 
-        let pending = engine
-            .persistence
-            .windows
-            .keys()
-            .copied()
-            .filter(|window| {
-                match (self.request.scope, engine.restored_location_for_window(*window)) {
-                    (RestoreScope::Space, Some((space, _))) => space == self.request.active_space,
-                    (RestoreScope::Workspace, Some((space, workspace))) => {
-                        space == self.request.active_space
-                            && engine
-                                .virtual_workspace_manager
-                                .active_workspace(self.request.active_space)
-                                == Some(workspace)
-                    }
-                    _ => false,
-                }
-            })
-            .collect::<Vec<_>>();
-        engine.persistence.replace_pending(pending);
-
-        // A scoped restore must not consume a live identity that currently belongs to another
-        // native space. WindowId values can be reused across sessions, and treating such a
-        // collision as an unmatched saved ghost would globally remove the unrelated live
-        // window's tree, floating, and focus state during candidate cleanup.
+        // A scoped restore must not consume a live identity outside its exact target. WindowId is
+        // explicitly process-local and can be reused across sessions. Detach an imported
+        // placeholder before matching when it collides with an out-of-scope live window or with a
+        // live window whose stronger app/WindowServer identity proves it is a different window.
+        // Doing this before reconciliation also allows another genuine candidate to match the live
+        // window without the colliding placeholder later deleting that match during cleanup.
+        let mut preempted_candidates = 0;
         for (live, fingerprint) in &live_windows {
-            let live_space = window_store
-                .current_window_server_space_for_window(*live)
-                .or_else(|| window_store.workspace_info_for_window(*live).map(|w| w.space));
-            if live_space == Some(self.request.active_space)
-                || !engine.persistence.pending_windows.remove(live)
-            {
+            if !engine.persistence.pending_windows.contains(live) {
                 continue;
             }
+            let live_assignment = window_store.workspace_info_for_window(*live);
+            let live_space = window_store
+                .current_window_server_space_for_window(*live)
+                .or_else(|| live_assignment.map(|assignment| assignment.space));
+            let live_is_in_scope = match self.request.scope {
+                RestoreScope::Space => live_space == Some(self.request.active_space),
+                RestoreScope::Workspace => live_assignment.is_some_and(|assignment| {
+                    restored_targets.contains(&(assignment.space, assignment.workspace_id))
+                }),
+            };
+            let identity_is_compatible = engine
+                .persistence
+                .fingerprint(*live)
+                .is_some_and(|saved| saved.direct_identity_compatible_with(fingerprint));
+            if live_is_in_scope && identity_is_compatible {
+                continue;
+            }
+            engine.persistence.pending_windows.remove(live);
+            preempted_candidates += 1;
             for &(space, workspace) in &restored_targets {
                 engine.workspace_tree_mut(workspace).remove_window(*live);
                 engine.floating_positions.remove_workspace_window(space, workspace, *live);
@@ -376,6 +378,7 @@ impl RestorePlan {
 
         let mut report = RestoreReport {
             workspaces_replaced,
+            unmatched: preempted_candidates,
             ..RestoreReport::default()
         };
         let mut ordered_live_windows = live_windows.into_iter().collect::<Vec<_>>();
@@ -384,11 +387,18 @@ impl RestorePlan {
             if !window_store.contains_window(live) {
                 continue;
             }
+            let live_assignment = window_store.workspace_info_for_window(live);
             let live_space = window_store
                 .current_window_server_space_for_window(live)
-                .or_else(|| window_store.workspace_info_for_window(live).map(|w| w.space))
+                .or_else(|| live_assignment.map(|assignment| assignment.space))
                 .unwrap_or(self.request.active_space);
-            if live_space != self.request.active_space {
+            let live_is_in_scope = match self.request.scope {
+                RestoreScope::Space => live_space == self.request.active_space,
+                RestoreScope::Workspace => live_assignment.is_some_and(|assignment| {
+                    restored_targets.contains(&(assignment.space, assignment.workspace_id))
+                }),
+            };
+            if !live_is_in_scope {
                 continue;
             }
             let ReconcileOutcome { matched, duplicates_removed } =
@@ -439,9 +449,10 @@ impl RestorePlan {
             }
             engine.persistence.record(live, fingerprint);
         }
-        report.unmatched = engine.persistence.pending_len();
+        let still_pending = engine.persistence.pending_len();
+        report.unmatched += still_pending;
         let ignored = engine.discard_all_unmatched_candidates();
-        debug_assert_eq!(ignored, report.unmatched);
+        debug_assert_eq!(ignored, still_pending);
         if report.unmatched > 0 {
             report.warnings.push(RestoreWarning::UnmatchedWindows(report.unmatched));
         }

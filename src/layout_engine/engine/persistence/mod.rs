@@ -119,6 +119,35 @@ impl WindowFingerprint {
             .zip(live.app_id.as_ref())
             .is_none_or(|(saved, current)| saved == current)
     }
+
+    fn direct_identity_compatible_with(&self, live: &Self) -> bool {
+        if !self.app_compatible_with(live) {
+            return false;
+        }
+        match self.window_server_id.zip(live.window_server_id) {
+            Some((saved, current)) => {
+                saved == current && (self.same_known_app(live) || self.same_title_and_size(live))
+            }
+            None => self.same_known_app(live) && self.same_title_and_size(live),
+        }
+    }
+
+    fn server_identity_compatible_with(&self, live: &Self) -> bool {
+        self.window_server_id.is_some()
+            && self.window_server_id == live.window_server_id
+            && self.app_compatible_with(live)
+            && (self.same_known_app(live) || self.same_title_and_size(live))
+    }
+
+    fn same_known_app(&self, live: &Self) -> bool {
+        self.app_id.is_some() && self.app_id == live.app_id
+    }
+
+    fn same_title_and_size(&self, live: &Self) -> bool {
+        self.title.is_some()
+            && self.title == live.title
+            && (self.width - live.width).abs() + (self.height - live.height).abs() <= 8.0
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

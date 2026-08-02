@@ -28,10 +28,12 @@ pub(super) fn choose_match(
     preferred_location: Option<WorkspaceLocation>,
     candidates: &[RestoreCandidate<'_>],
 ) -> Option<MatchDecision> {
-    // A direct Rift window identity owns exactly one restoration candidate. Never let a reused
-    // WindowServer id, title, or size score redirect it to another saved window's position.
+    // WindowId is process-local, so it is direct evidence only while stronger saved identity does
+    // not contradict it. If WindowServer identity disagrees, let the genuine server-id candidate
+    // win rather than trusting an id that may have been reused since the file was written.
     let direct = candidates.iter().find(|candidate| {
-        candidate.window == live && candidate.fingerprint.app_compatible_with(fingerprint)
+        candidate.window == live
+            && candidate.fingerprint.direct_identity_compatible_with(fingerprint)
     });
     let server_id_match =
         direct.is_none().then(|| fingerprint.window_server_id).flatten().and_then(
@@ -40,7 +42,7 @@ pub(super) fn choose_match(
                     .iter()
                     .filter(|candidate| {
                         candidate.fingerprint.window_server_id == Some(window_server_id)
-                            && candidate.fingerprint.app_compatible_with(fingerprint)
+                            && candidate.fingerprint.server_identity_compatible_with(fingerprint)
                     })
                     .max_by(|a, b| {
                         let rank = |candidate: &RestoreCandidate<'_>| {
@@ -86,16 +88,11 @@ pub(super) fn choose_match(
         selected_fingerprint.app_id.is_some() && selected_fingerprint.app_id == fingerprint.app_id;
     let size_matches = size_delta <= 8.0;
     // Bundle identity narrows the search pool but does not identify a particular window. Require
-    // window-specific evidence as well, otherwise the first new window from an application can
-    // consume any unrelated saved spot from that same application. If either side lacks bundle
-    // identity, require both title and size evidence rather than letting a common title such as
-    // "Untitled" steal a location across applications.
+    // both available window-specific signals, otherwise identical default sizes or common titles
+    // let one window from an application consume another window's saved slot. This deliberately
+    // prefers leaving a saved slot empty over manufacturing a convincing ghost match.
     if !exact_identity {
-        if known_app_match {
-            if !title_matches && !size_matches {
-                return None;
-            }
-        } else if !title_matches || !size_matches {
+        if !known_app_match || !title_matches || !size_matches {
             return None;
         }
     }

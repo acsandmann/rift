@@ -216,7 +216,8 @@ impl LayoutEngine {
                 self.persistence.fingerprint(*window).map(|saved| RestoreCandidate {
                     window: *window,
                     fingerprint: saved,
-                    location: self.restored_location_for_window(*window),
+                    location: self
+                        .restored_location_for_window_preferring(*window, preferred_location),
                 })
             })
             .collect();

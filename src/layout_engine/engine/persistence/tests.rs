@@ -640,6 +640,194 @@ fn scoped_restore_does_not_consume_same_id_live_window_on_another_space() {
 }
 
 #[test]
+fn workspace_restore_does_not_consume_live_window_from_sibling_workspace() {
+    let space = SpaceId::new(132);
+    let size = CGSize::new(1200.0, 800.0);
+    let frame = objc2_core_foundation::CGRect::new(
+        objc2_core_foundation::CGPoint::new(10.0, 20.0),
+        CGSize::new(700.0, 500.0),
+    );
+    let saved = WindowId::new(74, 1);
+    let live = WindowId::new(75, 1);
+
+    let mut snapshot = test_engine();
+    let mut snapshot_store = WindowStore::default();
+    let _ = snapshot.handle_event(&mut snapshot_store, LayoutEvent::SpaceExposed(space, size));
+    let source_workspace = snapshot.active_workspace(space).unwrap();
+    let source_layout = snapshot.workspace_layouts.active(space, source_workspace).unwrap();
+    snapshot
+        .workspace_tree_mut(source_workspace)
+        .add_window_after_selection(source_layout, saved);
+    snapshot.persistence.windows.insert(saved, WindowFingerprint {
+        window_server_id: Some(7400),
+        title: Some("Shared editor".into()),
+        width: 700.0,
+        height: 500.0,
+        app_id: Some("com.example.editor".into()),
+    });
+    let path = std::env::temp_dir().join(format!(
+        "rift-sibling-workspace-restore-test-{}-{}.ron",
+        std::process::id(),
+        space.get(),
+    ));
+    snapshot.save(path.clone()).unwrap();
+
+    let mut engine = test_engine();
+    let mut window_store = WindowStore::default();
+    let _ = engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, size));
+    let target_workspace = engine.active_workspace(space).unwrap();
+    let sibling_workspace = engine
+        .virtual_workspace_manager
+        .existing_workspaces(space)
+        .into_iter()
+        .map(|(workspace, _)| workspace)
+        .find(|workspace| *workspace != target_workspace)
+        .unwrap();
+    let sibling_layout = engine.workspace_layouts.active(space, sibling_workspace).unwrap();
+    window_store.insert_window(live, WindowState {
+        info: WindowInfo {
+            is_standard: true,
+            is_root: true,
+            is_minimized: false,
+            is_resizable: true,
+            min_size: None,
+            max_size: None,
+            title: "Shared editor".into(),
+            frame,
+            sys_id: Some(WindowServerId::new(7400)),
+            bundle_id: Some("com.example.editor".into()),
+            path: None,
+            ax_role: None,
+            ax_subrole: None,
+        },
+        frame_monotonic: frame,
+        is_manageable: true,
+        ignore_app_rule: false,
+    });
+    assert!(engine.virtual_workspace_manager.assign_window_to_workspace(
+        &mut window_store,
+        space,
+        live,
+        sibling_workspace,
+    ));
+    engine
+        .workspace_tree_mut(sibling_workspace)
+        .add_window_after_selection(sibling_layout, live);
+
+    let report = engine
+        .restore_layout(
+            path.clone(),
+            RestoreRequest::new(RestoreScope::Workspace, space),
+            &mut window_store,
+            &VirtualWorkspaceSettings::default(),
+            &LayoutSettings::default(),
+        )
+        .unwrap();
+    let _ = std::fs::remove_file(path);
+
+    let target_layout = engine.workspace_layouts.active(space, target_workspace).unwrap();
+    assert_eq!(report.matched, 0);
+    assert_eq!(report.unmatched, 1);
+    assert_eq!(
+        window_store.workspace_for_window(space, live),
+        Some(sibling_workspace)
+    );
+    assert!(engine.workspace_tree(sibling_workspace).contains_window(sibling_layout, live));
+    assert!(!engine.workspace_tree(target_workspace).contains_window(target_layout, live));
+    assert!(!engine.workspace_tree(target_workspace).contains_window(target_layout, saved));
+}
+
+#[test]
+fn workspace_restore_preserves_live_window_when_saved_process_local_id_is_reused() {
+    let space = SpaceId::new(133);
+    let size = CGSize::new(1200.0, 800.0);
+    let frame = objc2_core_foundation::CGRect::new(
+        objc2_core_foundation::CGPoint::new(10.0, 20.0),
+        CGSize::new(700.0, 500.0),
+    );
+    let reused = WindowId::new(76, 1);
+
+    let mut snapshot = test_engine();
+    let mut snapshot_store = WindowStore::default();
+    let _ = snapshot.handle_event(&mut snapshot_store, LayoutEvent::SpaceExposed(space, size));
+    let source_workspace = snapshot.active_workspace(space).unwrap();
+    let source_layout = snapshot.workspace_layouts.active(space, source_workspace).unwrap();
+    snapshot
+        .workspace_tree_mut(source_workspace)
+        .add_window_after_selection(source_layout, reused);
+    snapshot.persistence.windows.insert(reused, WindowFingerprint {
+        window_server_id: Some(7600),
+        title: Some("Old window".into()),
+        width: 700.0,
+        height: 500.0,
+        app_id: Some("com.example.old".into()),
+    });
+    let path = std::env::temp_dir().join(format!(
+        "rift-reused-id-workspace-restore-test-{}-{}.ron",
+        std::process::id(),
+        space.get(),
+    ));
+    snapshot.save(path.clone()).unwrap();
+
+    let mut engine = test_engine();
+    let mut window_store = WindowStore::default();
+    let _ = engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, size));
+    let target_workspace = engine.active_workspace(space).unwrap();
+    window_store.insert_window(reused, WindowState {
+        info: WindowInfo {
+            is_standard: true,
+            is_root: true,
+            is_minimized: false,
+            is_resizable: true,
+            min_size: None,
+            max_size: None,
+            title: "Current window".into(),
+            frame,
+            sys_id: Some(WindowServerId::new(7601)),
+            bundle_id: Some("com.example.current".into()),
+            path: None,
+            ax_role: None,
+            ax_subrole: None,
+        },
+        frame_monotonic: frame,
+        is_manageable: true,
+        ignore_app_rule: false,
+    });
+    assert!(engine.virtual_workspace_manager.assign_window_to_workspace(
+        &mut window_store,
+        space,
+        reused,
+        target_workspace,
+    ));
+    engine.add_window_to_layout(&mut window_store, space, reused);
+
+    let report = engine
+        .restore_layout(
+            path.clone(),
+            RestoreRequest::new(RestoreScope::Workspace, space),
+            &mut window_store,
+            &VirtualWorkspaceSettings::default(),
+            &LayoutSettings::default(),
+        )
+        .unwrap();
+    let _ = std::fs::remove_file(path);
+
+    let target_layout = engine.workspace_layouts.active(space, target_workspace).unwrap();
+    assert_eq!(report.matched, 0);
+    assert_eq!(report.unmatched, 1);
+    assert!(engine.workspace_tree(target_workspace).contains_window(target_layout, reused));
+    assert_eq!(
+        window_store.workspace_for_window(space, reused),
+        Some(target_workspace)
+    );
+    assert_eq!(engine.persistence.windows[&reused].window_server_id, Some(7601));
+    assert_eq!(
+        engine.persistence.windows[&reused].app_id.as_deref(),
+        Some("com.example.current")
+    );
+}
+
+#[test]
 fn completed_app_discovery_discards_unmatched_startup_ghosts() {
     let mut engine = test_engine();
     let mut window_store = WindowStore::default();
@@ -1212,7 +1400,7 @@ fn pure_matcher_reports_duplicate_identities_without_mutating_candidates() {
 }
 
 #[test]
-fn direct_window_identity_never_consumes_another_candidate() {
+fn reused_process_local_identity_defers_to_window_server_identity() {
     use super::matcher::{RestoreCandidate, choose_match};
 
     let live = WindowId::new(42, 7);
@@ -1255,7 +1443,7 @@ fn direct_window_identity_never_consumes_another_candidate() {
 
     let decision = choose_match(live, space, &live_fingerprint, None, &candidates).unwrap();
 
-    assert_eq!(decision.selected, live);
+    assert_eq!(decision.selected, other);
     assert!(decision.exact_identity);
     assert!(decision.duplicate_identities.is_empty());
 }
@@ -1330,12 +1518,20 @@ fn fuzzy_match_requires_window_specific_evidence() {
 
     assert!(choose_match(live, space, &unrelated_live, None, &candidate).is_none());
 
-    let title_match = WindowFingerprint {
+    let title_only_match = WindowFingerprint {
         title: Some("Music".into()),
         ..unrelated_live
     };
+    assert!(choose_match(live, space, &title_only_match, None, &candidate).is_none());
+
+    let title_and_size_match = WindowFingerprint {
+        width: 500.0,
+        height: 500.0,
+        ..title_only_match
+    };
     assert_eq!(
-        choose_match(live, space, &title_match, None, &candidate).map(|decision| decision.selected),
+        choose_match(live, space, &title_and_size_match, None, &candidate)
+            .map(|decision| decision.selected),
         Some(saved)
     );
 
@@ -1725,7 +1921,7 @@ fn duplicate_restored_identity_prefers_live_workspace_assignment() {
 }
 
 #[test]
-fn restore_fallback_never_crosses_known_app_identity() {
+fn restore_fallback_requires_title_and_size_within_known_app() {
     let mut window_store = WindowStore::default();
     let mut engine = test_engine();
     let space = SpaceId::new(89);
@@ -1769,8 +1965,8 @@ fn restore_fallback_never_crosses_known_app_identity() {
     let layout = engine.workspace_layouts.active(space, workspace).unwrap();
     let windows = engine.workspace_tree(workspace).visible_windows_in_layout(layout);
     assert!(windows.contains(&title_match));
-    assert!(windows.contains(&live));
-    assert!(!windows.contains(&size_and_app_match));
+    assert!(!windows.contains(&live));
+    assert!(windows.contains(&size_and_app_match));
 }
 
 #[test]
