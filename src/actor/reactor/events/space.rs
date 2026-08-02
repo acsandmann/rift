@@ -413,7 +413,7 @@ pub fn handle_mission_control_native_entered(
         MissionControlState::Active
     );
     mission_control.mission_control_state = MissionControlState::Active;
-    let outcome = EventOutcome::finalized_event(None, false, false, false);
+    let outcome = EventOutcome::focus_changed(None, false);
     Ok(if changed {
         outcome.with_focus_follows_mouse_refresh()
     } else {
@@ -429,8 +429,7 @@ pub fn handle_mission_control_native_exited(
         MissionControlState::Active
     );
     mission_control.mission_control_state = MissionControlState::Inactive;
-    let outcome =
-        EventOutcome::finalized_event(None, false, false, false).with_mission_control_recovery();
+    let outcome = EventOutcome::layout_changed(false).with_mission_control_recovery();
     Ok(if changed {
         outcome.with_focus_follows_mouse_refresh()
     } else {
@@ -453,7 +452,7 @@ pub fn handle_space_lifecycle(
     } else {
         policy.on_space_destroyed(payload.space);
     }
-    Ok(EventOutcome::finalized_event(None, false, false, false).with_active_space_recompute())
+    Ok(EventOutcome::layout_changed(false).with_active_space_recompute())
 }
 pub(crate) fn resolve_last_known_user_space(
     window_space: Option<SpaceId>,

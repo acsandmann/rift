@@ -1636,6 +1636,151 @@ fn genuine_external_frame_changes_invalidate_layout() {
 }
 
 #[test]
+fn stale_and_inactive_frame_events_request_no_arrange_passes() {
+    let (mut reactor, wid, wsid, _space1, _space2, frame) = reactor_with_window_on_space1();
+    let target_frame = CGRect::new(
+        CGPoint::new(frame.origin.x + 40.0, frame.origin.y + 25.0),
+        frame.size,
+    );
+    let txid = reactor.transaction_manager.generate_next_txid(wsid);
+    reactor.transaction_manager.store_txid(wsid, txid, target_frame);
+    let acknowledgement = reactor
+        .dispatch_workflow(Event::WindowFrameChanged(
+            wid,
+            target_frame,
+            Some(txid),
+            Requested(true),
+            Some(MouseState::Up),
+        ))
+        .unwrap();
+    assert!(!acknowledgement.arrange.requested);
+
+    let duplicate = reactor
+        .dispatch_workflow(Event::WindowFrameChanged(
+            wid,
+            target_frame,
+            None,
+            Requested(false),
+            Some(MouseState::Up),
+        ))
+        .unwrap();
+    assert!(!duplicate.arrange.requested);
+
+    // Stale transaction notification while a newer target is pending.
+    let current_txid = reactor.transaction_manager.generate_next_txid(wsid);
+    reactor.transaction_manager.store_txid(wsid, current_txid, target_frame);
+    let stale = reactor
+        .dispatch_workflow(Event::WindowFrameChanged(
+            wid,
+            CGRect::new(
+                CGPoint::new(target_frame.origin.x + 20.0, target_frame.origin.y),
+                target_frame.size,
+            ),
+            Some(current_txid.next()),
+            Requested(false),
+            Some(MouseState::Up),
+        ))
+        .unwrap();
+    assert!(!stale.arrange.requested);
+
+    // Geometry on an inactive native space.
+    reactor.transaction_manager.clear_target_for_window(wsid);
+    reactor.set_active_spaces(&[]);
+    let inactive = reactor
+        .dispatch_workflow(Event::WindowFrameChanged(
+            wid,
+            CGRect::new(
+                CGPoint::new(target_frame.origin.x + 30.0, target_frame.origin.y),
+                target_frame.size,
+            ),
+            None,
+            Requested(false),
+            Some(MouseState::Up),
+        ))
+        .unwrap();
+    assert!(!inactive.arrange.requested);
+}
+
+#[test]
+fn external_resize_requests_one_arrange_pass() {
+    let (mut reactor, wid, _wsid, _space1, _space2, frame) = reactor_with_window_on_space1();
+    let resized = CGRect::new(
+        frame.origin,
+        CGSize::new(frame.size.width + 80.0, frame.size.height + 40.0),
+    );
+
+    let outcome = reactor
+        .dispatch_workflow(Event::WindowFrameChanged(
+            wid,
+            resized,
+            None,
+            Requested(false),
+            Some(MouseState::Up),
+        ))
+        .unwrap();
+
+    assert!(outcome.arrange.requested);
+    assert_eq!(outcome.arrange.passes, 1);
+    assert!(outcome.arrange.is_resize);
+}
+
+#[test]
+fn crossing_native_spaces_reconciles_membership_with_one_arrange_pass() {
+    let (mut reactor, wid, wsid, _space1, space2, frame, screen2) =
+        reactor_with_window_on_space1_two_displays();
+    let moved = CGRect::new(
+        CGPoint::new(screen2.origin.x + 100.0, frame.origin.y),
+        frame.size,
+    );
+
+    let outcome = reactor
+        .dispatch_workflow(Event::WindowFrameChanged(
+            wid,
+            moved,
+            None,
+            Requested(false),
+            Some(MouseState::Up),
+        ))
+        .unwrap();
+
+    assert_eq!(reactor.assigned_space_for_window_id(wid), Some(space2));
+    assert_eq!(reactor.state.windows.window_server_space(wsid), Some(space2));
+    assert!(outcome.arrange.requested);
+    assert_eq!(outcome.arrange.passes, 1);
+}
+
+#[test]
+fn duplicate_minimize_deminimize_and_unknown_window_events_do_not_arrange() {
+    let (mut reactor, wid, _wsid, _space1, _space2, _frame) = reactor_with_window_on_space1();
+
+    reactor.dispatch_workflow(Event::WindowMinimized(wid)).unwrap();
+    let duplicate_minimize = reactor.dispatch_workflow(Event::WindowMinimized(wid)).unwrap();
+    assert!(!duplicate_minimize.arrange.requested);
+
+    reactor.dispatch_workflow(Event::WindowDeminiaturized(wid)).unwrap();
+    let duplicate_deminimize = reactor.dispatch_workflow(Event::WindowDeminiaturized(wid)).unwrap();
+    assert!(!duplicate_deminimize.arrange.requested);
+
+    let unknown = WindowId::new(wid.pid + 100, wid.idx.get());
+    let unknown_minimize = reactor.dispatch_workflow(Event::WindowMinimized(unknown)).unwrap();
+    let unknown_deminimize =
+        reactor.dispatch_workflow(Event::WindowDeminiaturized(unknown)).unwrap();
+    let unknown_frame = reactor
+        .dispatch_workflow(Event::WindowFrameChanged(
+            unknown,
+            CGRect::default(),
+            None,
+            Requested(false),
+            Some(MouseState::Up),
+        ))
+        .unwrap();
+
+    assert!(!unknown_minimize.arrange.requested);
+    assert!(!unknown_deminimize.arrange.requested);
+    assert!(!unknown_frame.arrange.requested);
+}
+
+#[test]
 fn cross_display_drag_clears_source_floating_position() {
     let (mut reactor, wid, _wsid, space1, space2, initial_frame, screen2) =
         reactor_with_window_on_space1_two_displays();

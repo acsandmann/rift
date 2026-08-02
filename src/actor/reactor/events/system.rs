@@ -32,7 +32,7 @@ pub fn handle_menu_opened(
             MenuState::Open(pid)
         }
     };
-    Ok(EventOutcome::finalized_event(None, false, false, false).with_focus_follows_mouse_refresh())
+    Ok(EventOutcome::focus_changed(None, false).with_focus_follows_mouse_refresh())
 }
 
 pub fn handle_menu_closed(
@@ -57,7 +57,7 @@ pub fn handle_menu_closed(
             false
         }
     };
-    let outcome = EventOutcome::finalized_event(None, false, false, false);
+    let outcome = EventOutcome::focus_changed(None, false);
     if refresh {
         Ok(outcome.with_focus_follows_mouse_refresh())
     } else {
@@ -82,14 +82,14 @@ pub fn handle_raise_completed(
         window: window_id,
         sequence: sequence_id,
     } = payload;
-    Ok(EventOutcome::finalized_event(None, false, false, false)
+    Ok(EventOutcome::no_change()
         .with_raise_request(raise_manager::Event::RaiseCompleted { window_id, sequence_id }))
 }
 
 pub fn handle_raise_timeout(
     sequence_id: u64,
 ) -> Result<EventOutcome, crate::model::reactor::ReactorError> {
-    Ok(EventOutcome::finalized_event(None, false, false, false)
+    Ok(EventOutcome::no_change()
         .with_raise_request(raise_manager::Event::RaiseTimeout { sequence_id }))
 }
 
@@ -98,5 +98,5 @@ pub fn handle_register_wm_sender(
     sender: WmSender,
 ) -> Result<EventOutcome, crate::model::reactor::ReactorError> {
     communication.wm_sender = Some(sender);
-    Ok(EventOutcome::finalized_event(None, false, false, false))
+    Ok(EventOutcome::no_change())
 }

@@ -29,7 +29,7 @@ pub fn handle_application_launched(
         window_server_info,
     } = payload;
     apps.apps.insert(pid, AppState { info: info.clone(), handle });
-    Ok(EventOutcome::finalized_event(None, false, false, true)
+    Ok(EventOutcome::window_membership_changed(false, true)
         .with_window_server_updates(window_server_info)
         .with_discovery(WindowDiscoveryRequest {
             pid,
@@ -40,8 +40,7 @@ pub fn handle_application_launched(
 }
 
 pub fn handle_application_terminated(pid: i32) -> anyhow::Result<EventOutcome> {
-    Ok(EventOutcome::finalized_event(None, false, false, true)
-        .with_app_request(pid, crate::actor::app::Request::Terminate))
+    Ok(EventOutcome::no_change().with_app_request(pid, crate::actor::app::Request::Terminate))
 }
 
 pub fn handle_application_thread_terminated(
@@ -49,7 +48,7 @@ pub fn handle_application_thread_terminated(
     pid: i32,
 ) -> anyhow::Result<EventOutcome> {
     apps.apps.remove(&pid);
-    Ok(EventOutcome::finalized_event(None, false, false, true)
+    Ok(EventOutcome::window_membership_changed(false, true)
         .with_layout_event(LayoutEvent::AppClosed(pid)))
 }
 
@@ -68,10 +67,10 @@ pub fn handle_application_activated(
             pid,
             "Skipping auto workspace switch for quiet app activation (initiated by Rift)"
         );
-        return Ok(EventOutcome::finalized_event(None, false, false, false));
+        return Ok(EventOutcome::no_change());
     }
 
-    Ok(EventOutcome::finalized_event(None, false, false, false).with_application_activation(pid))
+    Ok(EventOutcome::focus_changed(None, false).with_application_activation(pid))
 }
 
 #[derive(Debug)]
@@ -86,7 +85,7 @@ pub fn handle_windows_discovered(
 ) -> anyhow::Result<EventOutcome> {
     let WindowsDiscoveredPayload { pid, new, known_visible } = payload;
     Ok(
-        EventOutcome::finalized_event(None, false, false, true).with_discovery(
+        EventOutcome::window_membership_changed(false, true).with_discovery(
             WindowDiscoveryRequest {
                 pid,
                 new,

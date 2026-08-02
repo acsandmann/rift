@@ -25,7 +25,7 @@ pub fn handle_mouse_up(
     drag: &mut DragManager,
     payload: MouseUpPayload,
 ) -> anyhow::Result<EventOutcome> {
-    let mut outcome = EventOutcome::finalized_event(None, false, false, false);
+    let mut outcome = EventOutcome::layout_changed(false);
     let mut needs_layout = false;
 
     if let Some((dragged, target)) = payload.pending_swap {
@@ -108,7 +108,7 @@ pub fn handle_mouse_up(
     let passes = if needs_layout {
         if skipped { 3 } else { 2 }
     } else {
-        1
+        0
     };
     Ok(outcome.with_arrange_passes(passes))
 }

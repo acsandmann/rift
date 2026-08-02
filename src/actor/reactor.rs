@@ -1347,10 +1347,10 @@ impl Reactor {
                 // early from the reducer. Mouse release still has to terminate
                 // an existing drag session in those cases.
                 if effective_mouse_state == Some(crate::sys::event::MouseState::Up)
-                    && (matches!(
+                    && matches!(
                         self.drag_manager.drag_state,
                         DragState::Active { .. } | DragState::PendingSwap { .. }
-                    ) || self.drag_manager.skip_layout_for_window.is_some())
+                    )
                 {
                     outcome.dispatch_mouse_up = true;
                 }
@@ -1532,14 +1532,12 @@ impl Reactor {
                 source,
             })) => {
                 let Some(active_space) = self.active_display_space() else {
-                    return Ok(EventOutcome::finalized_event(None, false, false, false)
-                        .with_stdout_line(
-                            "Could not restore saved layout: no active macOS space is available"
-                                .into(),
-                        ));
+                    return Ok(EventOutcome::no_change().with_stdout_line(
+                        "Could not restore saved layout: no active macOS space is available".into(),
+                    ));
                 };
                 let request = layout::RestoreRequest { scope, active_space, source };
-                let outcome = EventOutcome::finalized_event(None, false, false, true);
+                let outcome = EventOutcome::window_membership_changed(false, true);
                 let report = self.layout_manager.layout_engine.restore_layout(
                     path,
                     request,
@@ -1683,7 +1681,7 @@ impl Reactor {
             })) => {
                 if self.is_in_drag() {
                     warn!("Ignoring move-window-to-display while a drag is active");
-                    return Ok(EventOutcome::finalized_event(None, false, false, false));
+                    return Ok(EventOutcome::no_change());
                 }
                 let command_space = self.workspace_command_space();
                 let resolved_window = {
@@ -1710,11 +1708,11 @@ impl Reactor {
                 };
                 let Some(window) = resolved_window else {
                     warn!("Move window to display ignored because no target window was resolved");
-                    return Ok(EventOutcome::finalized_event(None, false, false, false));
+                    return Ok(EventOutcome::no_change());
                 };
                 let Some(window_state) = self.state.windows.window(window) else {
                     warn!(?window, "Move window to display ignored: unknown window");
-                    return Ok(EventOutcome::finalized_event(None, false, false, false));
+                    return Ok(EventOutcome::no_change());
                 };
                 let window_server_id = window_state.info.sys_id;
                 let window_frame = window_state.frame_monotonic;
@@ -1728,7 +1726,7 @@ impl Reactor {
                         ?window,
                         "Move window to display ignored: source space unavailable"
                     );
-                    return Ok(EventOutcome::finalized_event(None, false, false, false));
+                    return Ok(EventOutcome::no_change());
                 };
                 let origin = self
                     .space_state
@@ -1741,7 +1739,7 @@ impl Reactor {
                         ?selector,
                         "Move window to display ignored: target display not found"
                     );
-                    return Ok(EventOutcome::finalized_event(None, false, false, false));
+                    return Ok(EventOutcome::no_change());
                 };
                 let Some(target_space) =
                     target_screen.space.filter(|space| self.is_space_active(*space))
@@ -1750,10 +1748,10 @@ impl Reactor {
                         ?selector,
                         "Move window to display ignored: target space unavailable"
                     );
-                    return Ok(EventOutcome::finalized_event(None, false, false, false));
+                    return Ok(EventOutcome::no_change());
                 };
                 if source_space == target_space {
-                    return Ok(EventOutcome::finalized_event(None, false, false, false));
+                    return Ok(EventOutcome::no_change());
                 }
                 let mut target_frame = window_frame;
                 let mut origin = target_screen.frame.mid();
@@ -1780,10 +1778,8 @@ impl Reactor {
             _ => (),
         }
 
-        Ok(EventOutcome::finalized_event(
+        Ok(EventOutcome::focus_changed(
             raised_window,
-            false,
-            false,
             should_update_notifications,
         ))
     }
@@ -2396,7 +2392,7 @@ impl Reactor {
         &mut self,
         space_state: ForwardedSpaceState,
     ) -> anyhow::Result<EventOutcome> {
-        let mut outcome = EventOutcome::finalized_event(None, false, false, true);
+        let mut outcome = EventOutcome::window_membership_changed(false, true);
         let analysis = topology_workflow::analyze_space_snapshot(
             &self.space_state,
             &self.active_spaces,

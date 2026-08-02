@@ -59,7 +59,7 @@ pub fn handle_window_created(
 
     state.windows.insert_window(wid, window_state);
 
-    let outcome = EventOutcome::finalized_event(None, false, false, true);
+    let outcome = EventOutcome::window_membership_changed(false, true);
     Ok(if is_manageable {
         outcome.with_created_window_finalization(wid)
     } else {
@@ -117,7 +117,7 @@ pub fn handle_window_invalidated(
         drag.skip_layout_for_window = None;
     }
 
-    Ok(EventOutcome::finalized_event(None, false, true, true)
+    Ok(EventOutcome::window_membership_changed(true, true)
         .with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid))
         .with_app_request(wid.pid, Request::GetVisibleWindows))
 }
@@ -131,7 +131,7 @@ pub fn handle_window_destroyed(
     let wid = payload.window;
     let window_server_id = match state.windows.record(wid) {
         Some(record) => record.window_server_id(),
-        None => return Ok(EventOutcome::finalized_event(None, false, false, false)),
+        None => return Ok(EventOutcome::no_change()),
     };
 
     if let Some(ws_id) = window_server_id {
@@ -164,7 +164,7 @@ pub fn handle_window_destroyed(
     if drag.skip_layout_for_window == Some(wid) {
         drag.skip_layout_for_window = None;
     }
-    Ok(EventOutcome::finalized_event(None, false, true, false)
+    Ok(EventOutcome::window_membership_changed(true, false)
         .with_layout_event(LayoutEvent::WindowRemoved(wid)))
 }
 
@@ -174,25 +174,21 @@ pub fn handle_window_minimized(
 ) -> anyhow::Result<crate::actor::reactor::events::EventOutcome> {
     let server_id = if let Some(window) = state.windows.window_mut(wid) {
         if window.info.is_minimized {
-            return Ok(crate::actor::reactor::events::EventOutcome::finalized_event(
-                None, false, false, false,
-            ));
+            return Ok(crate::actor::reactor::events::EventOutcome::no_change());
         }
         window.info.is_minimized = true;
         window.is_manageable = false;
         window.info.sys_id
     } else {
         debug!(?wid, "Received WindowMinimized for unknown window - ignoring");
-        return Ok(crate::actor::reactor::events::EventOutcome::finalized_event(
-            None, false, false, false,
-        ));
+        return Ok(crate::actor::reactor::events::EventOutcome::no_change());
     };
     if let Some(ws_id) = server_id {
         state.windows.mark_window_hidden(ws_id);
     }
     state.windows.set_visibility(wid, WindowVisibility::Minimized);
     Ok(
-        crate::actor::reactor::events::EventOutcome::finalized_event(None, false, false, false)
+        crate::actor::reactor::events::EventOutcome::window_membership_changed(false, false)
             .with_layout_event(LayoutEvent::WindowRemoved(wid)),
     )
 }
@@ -211,9 +207,7 @@ pub fn handle_window_deminiaturized(
     let (server_id, is_ax_standard, is_ax_root) = match state.windows.window_mut(wid) {
         Some(window) => {
             if !window.info.is_minimized {
-                return Ok(crate::actor::reactor::events::EventOutcome::finalized_event(
-                    None, false, false, false,
-                ));
+                return Ok(crate::actor::reactor::events::EventOutcome::no_change());
             }
             window.info.is_minimized = false;
             (window.info.sys_id, window.info.is_standard, window.info.is_root)
@@ -223,9 +217,7 @@ pub fn handle_window_deminiaturized(
                 ?wid,
                 "Received WindowDeminiaturized for unknown window - ignoring"
             );
-            return Ok(crate::actor::reactor::events::EventOutcome::finalized_event(
-                None, false, false, false,
-            ));
+            return Ok(crate::actor::reactor::events::EventOutcome::no_change());
         }
     };
     let is_manageable =
@@ -237,10 +229,11 @@ pub fn handle_window_deminiaturized(
     }
     state.windows.set_visibility(wid, WindowVisibility::Visible);
 
-    let mut outcome =
-        crate::actor::reactor::events::EventOutcome::finalized_event(None, false, false, false);
+    let mut outcome = crate::actor::reactor::events::EventOutcome::no_change();
     if is_manageable && let Some(space) = active_space {
-        outcome = outcome.with_layout_event(LayoutEvent::WindowAdded(space, wid));
+        outcome =
+            crate::actor::reactor::events::EventOutcome::window_membership_changed(false, false)
+                .with_layout_event(LayoutEvent::WindowAdded(space, wid));
     }
     Ok(outcome)
 }
@@ -348,7 +341,7 @@ pub fn handle_window_frame_changed(
     if let Some(window) = state.windows.window_mut(wid) {
         window.frame_monotonic = new_frame;
     }
-    outcome = EventOutcome::layout_invalidating_event(None, false, false, false);
+    outcome = EventOutcome::layout_changed(false);
 
     let dragging = mouse_state == Some(MouseState::Down)
         || matches!(
@@ -422,7 +415,6 @@ pub fn handle_window_frame_changed(
             } else if let Some(server) = server_id {
                 state.windows.set_window_server_space(server, None);
             }
-            outcome = outcome.with_arrange_passes(2);
         } else if !old_frame.size.same_as(new_frame.size) && old_space_active {
             outcome.arrange.is_resize = true;
             outcome = outcome.with_layout_event(LayoutEvent::WindowResized {
@@ -454,20 +446,14 @@ pub fn handle_window_title_changed(
     if let Some(window) = state.windows.window_mut(wid) {
         let previous_title = window.info.title.clone();
         if previous_title == new_title {
-            return Ok(crate::actor::reactor::events::EventOutcome::finalized_event(
-                None, false, false, false,
-            ));
+            return Ok(crate::actor::reactor::events::EventOutcome::no_change());
         }
         window.info.title = new_title.clone();
-        return Ok(crate::actor::reactor::events::EventOutcome::finalized_event(
-            None, false, false, false,
-        )
-        .with_app_rule_reapply(wid)
-        .with_window_title_broadcast(wid, previous_title, new_title));
+        return Ok(crate::actor::reactor::events::EventOutcome::no_change()
+            .with_app_rule_reapply(wid)
+            .with_window_title_broadcast(wid, previous_title, new_title));
     }
-    Ok(crate::actor::reactor::events::EventOutcome::finalized_event(
-        None, false, false, false,
-    ))
+    Ok(crate::actor::reactor::events::EventOutcome::no_change())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -523,10 +509,10 @@ fn handle_mouse_up_if_needed(
     }
 
     if mouse_state == Some(MouseState::Up)
-        && (matches!(
+        && matches!(
             drag.drag_state,
             DragState::Active { .. } | DragState::PendingSwap { .. }
-        ) || drag.skip_layout_for_window.is_some())
+        )
     {
         return true;
     }
