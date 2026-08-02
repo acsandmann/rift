@@ -134,7 +134,9 @@ impl EventOutcome {
         self.refresh_layout_mode |= other.refresh_layout_mode;
     }
 
-    pub(crate) fn finalized_event(
+    /// Requests the legacy follow-up work required after an event invalidates
+    /// the active layout.
+    pub(crate) fn layout_invalidating_event(
         focused_window: Option<WindowId>,
         is_resize: bool,
         window_was_destroyed: bool,
@@ -180,6 +182,22 @@ impl EventOutcome {
             refresh_focus_follows_mouse: false,
             refresh_layout_mode: true,
         }
+    }
+
+    // Kept while the remaining reducers are migrated to explicitly distinguish
+    // layout invalidation from an otherwise completed event.
+    pub(crate) fn finalized_event(
+        focused_window: Option<WindowId>,
+        is_resize: bool,
+        window_was_destroyed: bool,
+        refresh_window_notifications: bool,
+    ) -> Self {
+        Self::layout_invalidating_event(
+            focused_window,
+            is_resize,
+            window_was_destroyed,
+            refresh_window_notifications,
+        )
     }
 
     pub(crate) fn with_focus_follows_mouse_refresh(mut self) -> Self {
@@ -382,8 +400,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn finalized_events_explicitly_request_all_legacy_follow_up_work() {
-        let outcome = EventOutcome::finalized_event(None, true, false, true);
+    fn layout_invalidating_events_explicitly_request_all_legacy_follow_up_work() {
+        let outcome = EventOutcome::layout_invalidating_event(None, true, false, true);
 
         assert!(outcome.arrange.requested);
         assert!(outcome.arrange.is_resize);

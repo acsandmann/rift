@@ -288,7 +288,7 @@ pub fn handle_window_frame_changed(
         keep_assigned_for_scrolling,
         screens,
     } = payload;
-    let mut outcome = EventOutcome::finalized_event(None, false, false, false);
+    let mut outcome = EventOutcome::default();
     let Some(window) = state.windows.window(wid) else {
         return Ok(outcome);
     };
@@ -348,6 +348,7 @@ pub fn handle_window_frame_changed(
     if let Some(window) = state.windows.window_mut(wid) {
         window.frame_monotonic = new_frame;
     }
+    outcome = EventOutcome::layout_invalidating_event(None, false, false, false);
 
     let dragging = mouse_state == Some(MouseState::Down)
         || matches!(

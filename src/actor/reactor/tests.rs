@@ -1562,6 +1562,80 @@ fn matching_rift_frame_clears_pending_target() {
 }
 
 #[test]
+fn frame_acknowledgements_and_unchanged_frames_do_not_invalidate_layout() {
+    let (mut reactor, wid, wsid, _space1, _space2, frame) = reactor_with_window_on_space1();
+    let target_frame = CGRect::new(
+        CGPoint::new(frame.origin.x + 40.0, frame.origin.y + 25.0),
+        frame.size,
+    );
+    let txid = reactor.transaction_manager.generate_next_txid(wsid);
+    reactor.transaction_manager.store_txid(wsid, txid, target_frame);
+
+    let acknowledgement = reactor
+        .dispatch_workflow(Event::WindowFrameChanged(
+            wid,
+            target_frame,
+            Some(txid),
+            Requested(true),
+            Some(MouseState::Up),
+        ))
+        .unwrap();
+    assert!(!acknowledgement.arrange.requested);
+    assert!(!acknowledgement.refresh_layout_mode);
+
+    let unchanged = reactor
+        .dispatch_workflow(Event::WindowFrameChanged(
+            wid,
+            target_frame,
+            None,
+            Requested(false),
+            Some(MouseState::Up),
+        ))
+        .unwrap();
+    assert!(!unchanged.arrange.requested);
+    assert!(!unchanged.refresh_layout_mode);
+
+    let explicitly_requested_frame = CGRect::new(
+        CGPoint::new(target_frame.origin.x + 10.0, target_frame.origin.y),
+        target_frame.size,
+    );
+    let requested = reactor
+        .dispatch_workflow(Event::WindowFrameChanged(
+            wid,
+            explicitly_requested_frame,
+            None,
+            Requested(true),
+            Some(MouseState::Up),
+        ))
+        .unwrap();
+    assert!(!requested.arrange.requested);
+    assert!(!requested.refresh_layout_mode);
+}
+
+#[test]
+fn genuine_external_frame_changes_invalidate_layout() {
+    let (mut reactor, wid, _wsid, _space1, _space2, frame) = reactor_with_window_on_space1();
+    let moved_frame = CGRect::new(
+        CGPoint::new(frame.origin.x + 40.0, frame.origin.y + 25.0),
+        frame.size,
+    );
+
+    let outcome = reactor
+        .dispatch_workflow(Event::WindowFrameChanged(
+            wid,
+            moved_frame,
+            None,
+            Requested(false),
+            Some(MouseState::Up),
+        ))
+        .unwrap();
+
+    assert!(outcome.arrange.requested);
+    assert_eq!(outcome.arrange.passes, 1);
+    assert!(outcome.refresh_layout_mode);
+}
+
+#[test]
 fn cross_display_drag_clears_source_floating_position() {
     let (mut reactor, wid, _wsid, space1, space2, initial_frame, screen2) =
         reactor_with_window_on_space1_two_displays();
