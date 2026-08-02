@@ -71,6 +71,7 @@ pub struct EventTap {
     mouse_move_min_interval_ns: Cell<u64>,
     mouse_window: Cell<MouseWindow>,
     tap: RefCell<Option<crate::sys::event_tap::EventTap>>,
+    tap_generation: Cell<u64>,
     disable_hotkey: RefCell<Option<Hotkey>>,
     hotkey_specs: RefCell<Vec<(String, WmCommand)>>,
     hotkeys: SharedHotkeyTable,
@@ -143,6 +144,13 @@ pub type SharedHotkeyTable = Arc<ArcSwap<HashMap<Hotkey, Vec<WmCommand>>>>;
 
 struct CallbackCtx {
     this: Arc<EventTap>,
+    recovery_tx: tokio::sync::mpsc::UnboundedSender<Recovery>,
+    tap_generation: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Recovery {
+    TapInvalidated(u64),
 }
 
 unsafe fn drop_mouse_ctx(ptr: *mut std::ffi::c_void) {
@@ -179,18 +187,25 @@ impl EventTap {
     fn create_tap_with_mask(
         self: &Arc<Self>,
         mask: CGEventMask,
+        recovery_tx: tokio::sync::mpsc::UnboundedSender<Recovery>,
     ) -> Option<crate::sys::event_tap::EventTap> {
-        let ctx = Box::new(CallbackCtx { this: Arc::clone(self) });
+        let tap_generation = self.tap_generation.get().wrapping_add(1);
+        let ctx = Box::new(CallbackCtx {
+            this: Arc::clone(self),
+            recovery_tx,
+            tap_generation,
+        });
         let ctx_ptr = Box::into_raw(ctx) as *mut std::ffi::c_void;
 
         let tap = unsafe {
-            crate::sys::event_tap::EventTap::new_with_options_and_reenabled_callback(
+            crate::sys::event_tap::EventTap::new_with_options_and_recovery_callbacks(
                 CGTapOpt::Default,
                 mask,
                 Some(mouse_callback),
                 ctx_ptr,
                 Some(drop_mouse_ctx),
                 Some(event_tap_reenabled),
+                Some(event_tap_invalidated),
             )
         };
 
@@ -198,16 +213,22 @@ impl EventTap {
             unsafe { drop(Box::from_raw(ctx_ptr as *mut CallbackCtx)) };
         }
 
+        if tap.is_some() {
+            self.tap_generation.set(tap_generation);
+        }
         tap
     }
 
-    fn rebuild_event_tap_mask_if_needed(self: &Arc<Self>) {
+    fn rebuild_event_tap_mask_if_needed(
+        self: &Arc<Self>,
+        recovery_tx: &tokio::sync::mpsc::UnboundedSender<Recovery>,
+    ) {
         let next_mask = self.desired_event_mask();
         if next_mask == self.event_mask.get() {
             return;
         }
 
-        let Some(new_tap) = self.create_tap_with_mask(next_mask) else {
+        let Some(new_tap) = self.create_tap_with_mask(next_mask, recovery_tx.clone()) else {
             warn!("Failed to rebuild event tap with updated mask");
             return;
         };
@@ -215,6 +236,28 @@ impl EventTap {
         let old_tap = self.tap.borrow_mut().replace(new_tap);
         drop(old_tap);
         self.event_mask.set(next_mask);
+    }
+
+    fn rebuild_invalidated_event_tap(
+        self: &Arc<Self>,
+        generation: u64,
+        recovery_tx: &tokio::sync::mpsc::UnboundedSender<Recovery>,
+    ) {
+        if generation != self.tap_generation.get() {
+            debug!(generation, "Ignoring invalidation from a replaced event tap");
+            return;
+        }
+
+        let mask = self.event_mask.get();
+        let Some(new_tap) = self.create_tap_with_mask(mask, recovery_tx.clone()) else {
+            error!(generation, "Failed to recreate invalidated event tap");
+            return;
+        };
+
+        let old_tap = self.tap.borrow_mut().replace(new_tap);
+        drop(old_tap);
+        self.reconcile_after_tap_reenabled();
+        warn!(generation, "Recreated invalidated event tap");
     }
 
     pub fn new(
@@ -255,6 +298,7 @@ impl EventTap {
             mouse_move_min_interval_ns: Cell::new(mouse_move_min_interval_ns),
             mouse_window: Cell::new(MouseWindow::default()),
             tap: RefCell::new(None),
+            tap_generation: Cell::new(0),
             disable_hotkey: RefCell::new(disable_hotkey),
             hotkey_specs: RefCell::new(Vec::new()),
             hotkeys: Arc::new(ArcSwap::from_pointee(HashMap::default())),
@@ -266,11 +310,12 @@ impl EventTap {
 
     pub async fn run(mut self) {
         let mut requests_rx = self.requests_rx.take().unwrap();
+        let (recovery_tx, mut recovery_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let this = Arc::new(self);
 
         let mask = this.event_mask.get();
-        let tap = this.create_tap_with_mask(mask);
+        let tap = this.create_tap_with_mask(mask, recovery_tx.clone());
 
         if let Some(tap) = tap {
             *this.tap.borrow_mut() = Some(tap);
@@ -287,13 +332,30 @@ impl EventTap {
             }
         }
 
-        while let Some((span, request)) = requests_rx.recv().await {
-            let _guard = span.enter();
-            this.on_request(request);
+        loop {
+            tokio::select! {
+                maybe_recovery = recovery_rx.recv() => {
+                    let Some(recovery) = maybe_recovery else { break };
+                    match recovery {
+                        Recovery::TapInvalidated(generation) => {
+                            this.rebuild_invalidated_event_tap(generation, &recovery_tx);
+                        }
+                    }
+                }
+                maybe_request = requests_rx.recv() => {
+                    let Some((span, request)) = maybe_request else { break };
+                    let _guard = span.enter();
+                    this.on_request(request, &recovery_tx);
+                }
+            }
         }
     }
 
-    fn on_request(self: &Arc<Self>, request: Request) {
+    fn on_request(
+        self: &Arc<Self>,
+        request: Request,
+        recovery_tx: &tokio::sync::mpsc::UnboundedSender<Recovery>,
+    ) {
         let mut should_rebuild_mask = false;
         let mut state = self.state.borrow_mut();
         match request {
@@ -429,7 +491,7 @@ impl EventTap {
         drop(state);
 
         if should_rebuild_mask {
-            self.rebuild_event_tap_mask_if_needed();
+            self.rebuild_event_tap_mask_if_needed(recovery_tx);
         }
     }
 
@@ -793,6 +855,14 @@ unsafe extern "C-unwind" fn event_tap_reenabled(user_info: *mut std::ffi::c_void
     {
         error!("Panic while reconciling input state after event tap recovery");
     }
+}
+
+unsafe extern "C-unwind" fn event_tap_invalidated(user_info: *mut std::ffi::c_void) {
+    if user_info.is_null() {
+        return;
+    }
+    let ctx = unsafe { &*(user_info as *const CallbackCtx) };
+    let _ = ctx.recovery_tx.send(Recovery::TapInvalidated(ctx.tap_generation));
 }
 
 impl State {
