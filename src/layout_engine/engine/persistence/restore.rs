@@ -292,6 +292,7 @@ impl RestorePlan {
         window_store: &mut WindowStore,
         live_windows: HashMap<WindowId, WindowFingerprint>,
     ) -> RestoreReport {
+        let live_ids = live_windows.keys().copied().collect::<HashSet<_>>();
         let live_floating: HashSet<_> = live_windows
             .keys()
             .copied()
@@ -339,12 +340,12 @@ impl RestorePlan {
             let live_space = window_store
                 .current_window_server_space_for_window(*live)
                 .or_else(|| live_assignment.map(|assignment| assignment.space));
-            let live_is_in_scope = match self.request.scope {
-                RestoreScope::Space => live_space == Some(self.request.active_space),
-                RestoreScope::Workspace => live_assignment.is_some_and(|assignment| {
-                    restored_targets.contains(&(assignment.space, assignment.workspace_id))
-                }),
-            };
+            // WorkspaceStore is the authoritative Rift ownership record. WindowServer space can
+            // briefly lag or lead during native-space transitions, so it must not make an
+            // externally assigned window eligible for a restore transaction.
+            let live_is_in_scope = live_assignment.is_some_and(|assignment| {
+                restored_targets.contains(&(assignment.space, assignment.workspace_id))
+            });
             let identity_is_compatible = engine
                 .persistence
                 .fingerprint(*live)
@@ -392,12 +393,9 @@ impl RestorePlan {
                 .current_window_server_space_for_window(live)
                 .or_else(|| live_assignment.map(|assignment| assignment.space))
                 .unwrap_or(self.request.active_space);
-            let live_is_in_scope = match self.request.scope {
-                RestoreScope::Space => live_space == self.request.active_space,
-                RestoreScope::Workspace => live_assignment.is_some_and(|assignment| {
-                    restored_targets.contains(&(assignment.space, assignment.workspace_id))
-                }),
-            };
+            let live_is_in_scope = live_assignment.is_some_and(|assignment| {
+                restored_targets.contains(&(assignment.space, assignment.workspace_id))
+            });
             if !live_is_in_scope {
                 continue;
             }
@@ -453,6 +451,7 @@ impl RestorePlan {
         report.unmatched += still_pending;
         let ignored = engine.discard_all_unmatched_candidates();
         debug_assert_eq!(ignored, still_pending);
+        engine.normalize_restored_targets(window_store, &live_ids, &restored_targets);
         if report.unmatched > 0 {
             report.warnings.push(RestoreWarning::UnmatchedWindows(report.unmatched));
         }
@@ -461,6 +460,85 @@ impl RestorePlan {
 }
 
 impl LayoutEngine {
+    /// Enforce the post-restore ownership boundary independently of matcher behavior. Every
+    /// projection in a replaced workspace must represent a currently live window assigned to
+    /// that exact workspace, and its tiled/floating representation must agree with runtime state.
+    fn normalize_restored_targets(
+        &mut self,
+        window_store: &WindowStore,
+        live_windows: &HashSet<WindowId>,
+        targets: &[(SpaceId, VirtualWorkspaceId)],
+    ) {
+        for &(space, workspace) in targets {
+            let expected_assignment =
+                crate::model::window_store::WindowWorkspaceInfo { space, workspace_id: workspace };
+            let tiled_windows = self
+                .workspace_layouts
+                .all_layouts()
+                .into_iter()
+                .filter(|(candidate_space, candidate_workspace, _)| {
+                    (*candidate_space, *candidate_workspace) == (space, workspace)
+                })
+                .flat_map(|(_, _, layout)| {
+                    self.workspace_tree(workspace).all_windows_in_layout(layout)
+                })
+                .collect::<HashSet<_>>();
+            for window in tiled_windows {
+                let valid = live_windows.contains(&window)
+                    && window_store.workspace_info_for_window(window) == Some(expected_assignment)
+                    && !self.floating.is_floating(window);
+                if !valid {
+                    self.workspace_tree_mut(workspace).remove_window(window);
+                }
+            }
+
+            let positioned_windows = self
+                .floating_positions
+                .workspace_positions(space, workspace)
+                .into_iter()
+                .map(|(window, _)| window)
+                .collect::<Vec<_>>();
+            for window in positioned_windows {
+                let valid = live_windows.contains(&window)
+                    && window_store.workspace_info_for_window(window) == Some(expected_assignment)
+                    && self.floating.is_floating(window);
+                if !valid {
+                    self.floating_positions.remove_workspace_window(space, workspace, window);
+                }
+            }
+
+            if self
+                .virtual_workspace_manager
+                .last_focused_window(space, workspace)
+                .is_some_and(|window| {
+                    !live_windows.contains(&window)
+                        || window_store.workspace_info_for_window(window)
+                            != Some(expected_assignment)
+                })
+            {
+                self.virtual_workspace_manager.set_last_focused_window(space, workspace, None);
+            }
+        }
+
+        // Remove identity-only residue after all target projections have been normalized. A live
+        // window may legitimately remain floating in an out-of-scope workspace, so global state
+        // is touched only for identities which have neither a live window nor any saved location.
+        let locationless = self
+            .persistence
+            .windows
+            .keys()
+            .copied()
+            .filter(|window| {
+                !live_windows.contains(window)
+                    && self.restored_locations_for_window(*window).is_empty()
+            })
+            .collect::<Vec<_>>();
+        for window in locationless {
+            self.floating.remove_floating(window);
+            self.persistence.forget_window(window);
+        }
+    }
+
     pub fn restore_layout(
         &mut self,
         path: PathBuf,

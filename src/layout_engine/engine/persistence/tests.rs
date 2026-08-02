@@ -640,6 +640,108 @@ fn scoped_restore_does_not_consume_same_id_live_window_on_another_space() {
 }
 
 #[test]
+fn space_restore_uses_workspace_assignment_over_stale_window_server_space() {
+    let target_space = SpaceId::new(134);
+    let external_space = SpaceId::new(135);
+    let size = CGSize::new(1200.0, 800.0);
+    let frame = objc2_core_foundation::CGRect::new(
+        objc2_core_foundation::CGPoint::new(10.0, 20.0),
+        CGSize::new(700.0, 500.0),
+    );
+    let saved = WindowId::new(77, 1);
+    let live = WindowId::new(78, 1);
+    let window_server_id = WindowServerId::new(7700);
+
+    let mut snapshot = test_engine();
+    let mut snapshot_store = WindowStore::default();
+    let _ = snapshot.handle_event(
+        &mut snapshot_store,
+        LayoutEvent::SpaceExposed(target_space, size),
+    );
+    let source_workspace = snapshot.active_workspace(target_space).unwrap();
+    let source_layout = snapshot.workspace_layouts.active(target_space, source_workspace).unwrap();
+    snapshot
+        .workspace_tree_mut(source_workspace)
+        .add_window_after_selection(source_layout, saved);
+    snapshot.persistence.windows.insert(saved, WindowFingerprint {
+        window_server_id: Some(window_server_id.as_u32()),
+        title: Some("External editor".into()),
+        width: 700.0,
+        height: 500.0,
+        app_id: Some("com.example.editor".into()),
+    });
+    let path = std::env::temp_dir().join(format!(
+        "rift-stale-server-space-restore-test-{}-{}.ron",
+        std::process::id(),
+        target_space.get(),
+    ));
+    snapshot.save(path.clone()).unwrap();
+
+    let mut engine = test_engine();
+    let mut window_store = WindowStore::default();
+    for space in [target_space, external_space] {
+        let _ = engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, size));
+    }
+    let external_workspace = engine.active_workspace(external_space).unwrap();
+    let external_layout =
+        engine.workspace_layouts.active(external_space, external_workspace).unwrap();
+    window_store.insert_window(live, WindowState {
+        info: WindowInfo {
+            is_standard: true,
+            is_root: true,
+            is_minimized: false,
+            is_resizable: true,
+            min_size: None,
+            max_size: None,
+            title: "External editor".into(),
+            frame,
+            sys_id: Some(window_server_id),
+            bundle_id: Some("com.example.editor".into()),
+            path: None,
+            ax_role: None,
+            ax_subrole: None,
+        },
+        frame_monotonic: frame,
+        is_manageable: true,
+        ignore_app_rule: false,
+    });
+    assert!(engine.virtual_workspace_manager.assign_window_to_workspace(
+        &mut window_store,
+        external_space,
+        live,
+        external_workspace,
+    ));
+    engine
+        .workspace_tree_mut(external_workspace)
+        .add_window_after_selection(external_layout, live);
+    // Model the transient that used to make space restore consume the external window.
+    window_store.set_window_server_space(window_server_id, Some(target_space));
+
+    let report = engine
+        .restore_layout(
+            path.clone(),
+            RestoreRequest::new(RestoreScope::Space, target_space),
+            &mut window_store,
+            &VirtualWorkspaceSettings::default(),
+            &LayoutSettings::default(),
+        )
+        .unwrap();
+    let _ = std::fs::remove_file(path);
+
+    let target_workspace = engine.active_workspace(target_space).unwrap();
+    let target_layout = engine.workspace_layouts.active(target_space, target_workspace).unwrap();
+    assert_eq!(report.matched, 0);
+    assert_eq!(report.unmatched, 1);
+    assert_eq!(
+        window_store.workspace_for_window(external_space, live),
+        Some(external_workspace)
+    );
+    assert!(engine.workspace_tree(external_workspace).contains_window(external_layout, live));
+    assert!(!engine.workspace_tree(target_workspace).contains_window(target_layout, live));
+    assert!(!engine.workspace_tree(target_workspace).contains_window(target_layout, saved));
+}
+
+#[test]
 fn workspace_restore_does_not_consume_live_window_from_sibling_workspace() {
     let space = SpaceId::new(132);
     let size = CGSize::new(1200.0, 800.0);
