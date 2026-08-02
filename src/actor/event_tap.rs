@@ -586,7 +586,7 @@ impl EventTap {
                 .copied()
                 .any(|frame| point_hits_indicator_frame(loc, frame))
                 && !window_server::is_point_occluded_by_external_window(loc);
-            if state.stack_line_hover_mode == StackLineHoverMode::Hover
+            if state.stack_line_hover_mode == StackLineHoverMode::Click
                 || state.last_stack_line_hit != Some(hits)
             {
                 state.last_stack_line_hit = Some(hits);
