@@ -3,7 +3,7 @@
 //! This actor runs on the main thread and handles trackpad swipe/scroll
 //! gestures for workspace switching.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::panic::AssertUnwindSafe;
 use std::rc::Rc;
 
@@ -49,6 +49,7 @@ pub struct GestureTap {
     swipe: RefCell<Option<SwipeHandler>>,
     scroll: RefCell<Option<ScrollHandler>>,
     tap: RefCell<Option<crate::sys::event_tap::EventTap>>,
+    tap_generation: Cell<u64>,
     screen_spaces: RefCell<Vec<(CGRect, SpaceId)>>,
     layout_mode_by_space: RefCell<HashMap<SpaceId, LayoutMode>>,
     default_layout_mode: RefCell<LayoutMode>,
@@ -97,6 +98,7 @@ struct SwipeState {
     phase: GesturePhase,
     start_x: f64,
     start_y: f64,
+    consuming: bool,
 }
 
 impl SwipeState {
@@ -104,6 +106,7 @@ impl SwipeState {
         self.phase = GesturePhase::Idle;
         self.start_x = 0.0;
         self.start_y = 0.0;
+        self.consuming = false;
     }
 }
 
@@ -159,6 +162,7 @@ struct ScrollState {
     last_x: f64,
     last_y: f64,
     accum_dx: f64,
+    consuming: bool,
 }
 
 impl ScrollState {
@@ -169,6 +173,7 @@ impl ScrollState {
         self.last_x = 0.0;
         self.last_y = 0.0;
         self.accum_dx = 0.0;
+        self.consuming = false;
     }
 }
 
@@ -180,6 +185,13 @@ struct ScrollHandler {
 struct CallbackCtx {
     this: Rc<GestureTap>,
     consumes: bool,
+    recovery_tx: tokio::sync::mpsc::UnboundedSender<Recovery>,
+    tap_generation: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Recovery {
+    TapInvalidated(u64),
 }
 
 unsafe fn drop_gesture_ctx(ptr: *mut std::ffi::c_void) {
@@ -196,6 +208,7 @@ impl GestureTap {
             swipe: RefCell::new(swipe),
             scroll: RefCell::new(scroll),
             tap: RefCell::new(None),
+            tap_generation: Cell::new(0),
             screen_spaces: RefCell::new(Vec::new()),
             layout_mode_by_space: RefCell::new(HashMap::default()),
             default_layout_mode: RefCell::new(default_layout_mode),
@@ -205,25 +218,43 @@ impl GestureTap {
 
     pub async fn run(mut self) {
         let mut requests_rx = self.requests_rx.take().unwrap();
+        let (recovery_tx, mut recovery_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let this = Rc::new(self);
 
         if this.gesture_handlers_enabled() {
-            this.create_and_install_tap();
+            this.create_and_install_tap(&recovery_tx);
         }
 
-        while let Some((span, request)) = requests_rx.recv().await {
-            let _guard = span.enter();
-            this.on_request(request);
+        loop {
+            tokio::select! {
+                maybe_recovery = recovery_rx.recv() => {
+                    let Some(recovery) = maybe_recovery else { break };
+                    match recovery {
+                        Recovery::TapInvalidated(generation) => {
+                            this.rebuild_invalidated_tap(generation, &recovery_tx);
+                        }
+                    }
+                }
+                maybe_request = requests_rx.recv() => {
+                    let Some((span, request)) = maybe_request else { break };
+                    let _guard = span.enter();
+                    this.on_request(request, &recovery_tx);
+                }
+            }
         }
     }
 
-    fn on_request(self: &Rc<Self>, request: GestureRequest) {
+    fn on_request(
+        self: &Rc<Self>,
+        request: GestureRequest,
+        recovery_tx: &tokio::sync::mpsc::UnboundedSender<Recovery>,
+    ) {
         match request {
             GestureRequest::ConfigUpdated(new_config) => {
                 *self.default_layout_mode.borrow_mut() = new_config.settings.layout.mode;
                 *self.config.borrow_mut() = new_config;
-                self.update_gesture_handlers();
+                self.update_gesture_handlers(recovery_tx);
             }
             GestureRequest::LayoutModesChanged(modes) => {
                 let mut map = self.layout_mode_by_space.borrow_mut();
@@ -266,7 +297,10 @@ impl GestureTap {
         (swipe, scroll)
     }
 
-    fn update_gesture_handlers(self: &Rc<Self>) {
+    fn update_gesture_handlers(
+        self: &Rc<Self>,
+        recovery_tx: &tokio::sync::mpsc::UnboundedSender<Recovery>,
+    ) {
         let config = self.config.borrow();
         let (swipe, scroll) = Self::build_gesture_handlers(&config);
         let was_enabled = self.gesture_handlers_enabled();
@@ -275,7 +309,7 @@ impl GestureTap {
         let is_enabled = self.gesture_handlers_enabled();
 
         if !was_enabled && is_enabled {
-            self.create_and_install_tap();
+            self.create_and_install_tap(recovery_tx);
         } else if was_enabled && !is_enabled {
             *self.tap.borrow_mut() = None;
         }
@@ -285,21 +319,29 @@ impl GestureTap {
         self.swipe.borrow().is_some() || self.scroll.borrow().is_some()
     }
 
-    fn create_and_install_tap(self: &Rc<Self>) {
+    fn create_and_install_tap(
+        self: &Rc<Self>,
+        recovery_tx: &tokio::sync::mpsc::UnboundedSender<Recovery>,
+    ) {
         let mask = gesture_event_mask();
         let tap_location = CGTapLoc::HIDEventTap;
+        let tap_generation = self.tap_generation.get().wrapping_add(1);
         let tap = unsafe {
             let ctx_ptr = Box::into_raw(Box::new(CallbackCtx {
                 this: Rc::clone(self),
                 consumes: true,
+                recovery_tx: recovery_tx.clone(),
+                tap_generation,
             })) as *mut std::ffi::c_void;
-            match crate::sys::event_tap::EventTap::new_at_location_with_options(
+            match crate::sys::event_tap::EventTap::new_at_location_with_options_and_recovery_callbacks(
                 tap_location,
                 CGTapOpt::Default,
                 mask,
                 Some(gesture_callback),
                 ctx_ptr,
                 Some(drop_gesture_ctx),
+                Some(gesture_tap_reenabled),
+                Some(gesture_tap_invalidated),
             ) {
                 Some(tap) => Some(tap),
                 None => {
@@ -307,13 +349,18 @@ impl GestureTap {
                     let ctx_ptr = Box::into_raw(Box::new(CallbackCtx {
                         this: Rc::clone(self),
                         consumes: false,
+                        recovery_tx: recovery_tx.clone(),
+                        tap_generation,
                     })) as *mut std::ffi::c_void;
-                    match crate::sys::event_tap::EventTap::new_at_location_listen_only(
+                    match crate::sys::event_tap::EventTap::new_at_location_with_options_and_recovery_callbacks(
                         tap_location,
+                        CGTapOpt::ListenOnly,
                         mask,
                         Some(gesture_callback),
                         ctx_ptr,
                         Some(drop_gesture_ctx),
+                        Some(gesture_tap_reenabled),
+                        Some(gesture_tap_invalidated),
                     ) {
                         Some(tap) => {
                             warn!(
@@ -331,9 +378,34 @@ impl GestureTap {
         };
 
         if let Some(tap) = tap {
+            self.tap_generation.set(tap_generation);
             *self.tap.borrow_mut() = Some(tap);
         } else {
             tracing::warn!("Failed to create gesture event tap");
+        }
+    }
+
+    fn rebuild_invalidated_tap(
+        self: &Rc<Self>,
+        generation: u64,
+        recovery_tx: &tokio::sync::mpsc::UnboundedSender<Recovery>,
+    ) {
+        if generation != self.tap_generation.get() || !self.gesture_handlers_enabled() {
+            trace!(generation, "Ignoring invalidation from a replaced gesture tap");
+            return;
+        }
+
+        self.reset_gesture_state();
+        self.create_and_install_tap(recovery_tx);
+        warn!(generation, "Recreated invalidated gesture event tap");
+    }
+
+    fn reset_gesture_state(&self) {
+        if let Some(handler) = self.swipe.borrow().as_ref() {
+            handler.state.borrow_mut().reset();
+        }
+        if let Some(handler) = self.scroll.borrow().as_ref() {
+            handler.state.borrow_mut().reset();
         }
     }
 
@@ -367,9 +439,9 @@ impl GestureTap {
             && nsevent.r#type() == NSEventType::Gesture
         {
             if is_scrolling_mode && let Some(handler) = scroll_handler.as_ref() {
-                self.handle_scroll_gesture_event(handler, &nsevent);
+                return !self.handle_scroll_gesture_event(handler, &nsevent);
             } else if let Some(handler) = swipe_handler.as_ref() {
-                self.handle_gesture_event(handler, &nsevent);
+                return !self.handle_gesture_event(handler, &nsevent);
             }
         }
 
@@ -403,7 +475,9 @@ impl GestureTap {
             .and_then(|(_, space)| layout_modes.get(space).copied())
     }
 
-    fn handle_gesture_event(&self, handler: &SwipeHandler, nsevent: &NSEvent) {
+    /// Returns whether this event belongs to a horizontal swipe Rift owns and
+    /// should therefore be suppressed at the event tap.
+    fn handle_gesture_event(&self, handler: &SwipeHandler, nsevent: &NSEvent) -> bool {
         let cfg = &handler.cfg;
         let state = &handler.state;
 
@@ -411,8 +485,9 @@ impl GestureTap {
 
         let phase = nsevent.phase();
         if matches!(phase, NSEventPhase::Ended | NSEventPhase::Cancelled) {
+            let consuming = st.consuming;
             st.reset();
-            return;
+            return cfg.consume_dock_swipe && consuming;
         }
         if matches!(phase, NSEventPhase::Began) {
             st.reset();
@@ -444,8 +519,9 @@ impl GestureTap {
         }
 
         if too_many_touches || touch_count != cfg.fingers || active_count == 0 {
+            let consuming = st.consuming;
             st.reset();
-            return;
+            return cfg.consume_dock_swipe && consuming;
         }
 
         let avg_x = sum_x / active_count as f64;
@@ -466,6 +542,10 @@ impl GestureTap {
                 let dy = avg_y - st.start_y;
                 let horizontal = dx.abs();
                 let vertical = dy.abs();
+
+                if horizontal > vertical && vertical <= cfg.vertical_tolerance {
+                    st.consuming = true;
+                }
 
                 if horizontal >= cfg.distance_pct && vertical <= cfg.vertical_tolerance {
                     let mut dir_left = dx < 0.0;
@@ -493,9 +573,13 @@ impl GestureTap {
                 }
             }
         }
+
+        cfg.consume_dock_swipe && st.consuming
     }
 
-    fn handle_scroll_gesture_event(&self, handler: &ScrollHandler, nsevent: &NSEvent) {
+    /// Returns whether this event belongs to a horizontal scrolling gesture
+    /// Rift owns and should therefore be suppressed at the event tap.
+    fn handle_scroll_gesture_event(&self, handler: &ScrollHandler, nsevent: &NSEvent) -> bool {
         let cfg = &handler.cfg;
         let state = &handler.state;
 
@@ -503,8 +587,9 @@ impl GestureTap {
 
         let phase = nsevent.phase();
         if matches!(phase, NSEventPhase::Ended | NSEventPhase::Cancelled) {
+            let consuming = st.consuming;
             st.reset();
-            return;
+            return cfg.consume_dock_swipe && consuming;
         }
         if matches!(phase, NSEventPhase::Began) {
             st.reset();
@@ -546,8 +631,9 @@ impl GestureTap {
         }
 
         if too_many_touches || touch_count != cfg.fingers || active_count == 0 {
+            let consuming = st.consuming;
             st.reset();
-            return;
+            return cfg.consume_dock_swipe && consuming;
         }
 
         let avg_x = sum_x / active_count as f64;
@@ -570,7 +656,7 @@ impl GestureTap {
                 if !all_moved {
                     st.last_x = avg_x;
                     st.last_y = avg_y;
-                    return;
+                    return cfg.consume_dock_swipe && st.consuming;
                 }
 
                 let dx = avg_x - st.last_x;
@@ -582,8 +668,10 @@ impl GestureTap {
                 st.last_y = avg_y;
 
                 if vertical > cfg.vertical_tolerance || vertical >= horizontal {
-                    return;
+                    return cfg.consume_dock_swipe && st.consuming;
                 }
+
+                st.consuming = true;
 
                 st.accum_dx += dx;
                 let step = cfg.distance_pct;
@@ -605,8 +693,9 @@ impl GestureTap {
             }
             GesturePhase::Committed => {
                 if active_count == 0 {
+                    let consuming = st.consuming;
                     st.reset();
-                    return;
+                    return cfg.consume_dock_swipe && consuming;
                 } else if all_moved {
                     let dx = avg_x - st.last_x;
                     let dy = avg_y - st.last_y;
@@ -615,8 +704,9 @@ impl GestureTap {
                     st.last_x = avg_x;
                     st.last_y = avg_y;
                     if vertical > cfg.vertical_tolerance || vertical >= horizontal {
-                        return;
+                        return cfg.consume_dock_swipe && st.consuming;
                     }
+                    st.consuming = true;
                     st.accum_dx += dx;
                     let step = cfg.distance_pct;
                     if st.accum_dx.abs() >= step {
@@ -636,6 +726,8 @@ impl GestureTap {
                 }
             }
         }
+
+        cfg.consume_dock_swipe && st.consuming
     }
 }
 
@@ -687,4 +779,22 @@ unsafe extern "C-unwind" fn gesture_callback(
         Ok((false, false)) => event_ref.as_ptr(),
         Err(_) => event_ref.as_ptr(),
     }
+}
+
+unsafe extern "C-unwind" fn gesture_tap_reenabled(user_info: *mut std::ffi::c_void) {
+    if user_info.is_null() {
+        return;
+    }
+    let ctx = unsafe { &*(user_info as *const CallbackCtx) };
+    if std::panic::catch_unwind(AssertUnwindSafe(|| ctx.this.reset_gesture_state())).is_err() {
+        warn!("Panic while resetting gesture state after event tap recovery");
+    }
+}
+
+unsafe extern "C-unwind" fn gesture_tap_invalidated(user_info: *mut std::ffi::c_void) {
+    if user_info.is_null() {
+        return;
+    }
+    let ctx = unsafe { &*(user_info as *const CallbackCtx) };
+    let _ = ctx.recovery_tx.send(Recovery::TapInvalidated(ctx.tap_generation));
 }

@@ -183,6 +183,32 @@ impl EventTap {
         }
     }
 
+    /// Creates an event tap at `location` and reports both successful
+    /// re-enables and failures that require the owner to recreate the tap.
+    pub unsafe fn new_at_location_with_options_and_recovery_callbacks(
+        location: CGTapLoc,
+        options: CGTapOpt,
+        mask: CGEventMask,
+        callback: TapCallback,
+        user_info: *mut c_void,
+        drop_ctx: Option<unsafe fn(*mut c_void)>,
+        reenabled_callback: TapReenabledCallback,
+        invalidated_callback: TapInvalidatedCallback,
+    ) -> Option<Self> {
+        unsafe {
+            Self::create(
+                location,
+                options,
+                mask,
+                callback,
+                user_info,
+                drop_ctx,
+                reenabled_callback,
+                invalidated_callback,
+            )
+        }
+    }
+
     pub unsafe fn new_with_options(
         options: CGTapOpt,
         mask: CGEventMask,
@@ -214,7 +240,7 @@ impl EventTap {
         invalidated_callback: TapInvalidatedCallback,
     ) -> Option<Self> {
         unsafe {
-            Self::create(
+            Self::new_at_location_with_options_and_recovery_callbacks(
                 CGTapLoc::SessionEventTap,
                 options,
                 mask,
