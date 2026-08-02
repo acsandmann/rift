@@ -338,6 +338,9 @@ impl SpacesActor {
             Event::ScreenRefreshRequested => {
                 // Preference/system-driven screen changes can transiently report stale
                 // geometry; keep using the default delayed refresh path.
+                if let Some(screen_cache) = self.state.screen_cache.as_mut() {
+                    screen_cache.mark_dirty();
+                }
                 self.schedule_screen_refresh();
             }
             Event::DisplayReconfigured { display_id, flags } => {

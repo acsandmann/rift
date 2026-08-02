@@ -258,6 +258,18 @@ fn menu_bar_height(did: u32) -> f64 {
     height as f64
 }
 
+fn menu_bar_inset(hidden: bool, height: f64, notch_height: f64) -> f64 {
+    if hidden {
+        // An auto-hidden menu bar does not reserve space on displays without a notch.
+        // Notched built-in displays must retain their safe-area inset.
+        notch_height
+    } else {
+        // macOS reports the menubar height without the topmost usable pixel; add 1 to
+        // avoid leaving a dead strip or placing windows under the bar.
+        height + 1.0
+    }
+}
+
 fn dock_hidden() -> bool { unsafe { CoreDockGetAutoHideEnabled() } }
 
 fn dock_orientation() -> i32 {
@@ -312,17 +324,10 @@ fn rects_intersect(a: &CGRect, b: &CGRect) -> bool {
 fn constrain_display_bounds(did: u32, raw: CGRect, notch_height: f64) -> CGRect {
     let mut frame = raw;
 
-    if !menu_bar_hidden() {
-        // macOS reports the menubar height without the topmost usable pixel; add 1 to avoid
-        // leaving a dead strip or placing windows under the bar.
-        let h = menu_bar_height(did) + 1.0;
-        if h > 0.0 {
-            frame.origin.y += h;
-            frame.size.height = (frame.size.height - h).max(0.0);
-        }
-    } else if notch_height > 0.0 {
-        frame.origin.y += notch_height;
-        frame.size.height = (frame.size.height - notch_height).max(0.0);
+    let menu_bar_inset = menu_bar_inset(menu_bar_hidden(), menu_bar_height(did), notch_height);
+    if menu_bar_inset > 0.0 {
+        frame.origin.y += menu_bar_inset;
+        frame.size.height = (frame.size.height - menu_bar_inset).max(0.0);
     }
 
     let auto_hide = dock_hidden();
@@ -725,6 +730,21 @@ mod test {
 
     use super::{CGScreenInfo, NSScreenInfo, ScreenCache, ScreenId, System};
     use crate::sys::screen::{SpaceId, order_visible_spaces_by_position};
+
+    #[test]
+    fn auto_hidden_menu_bar_does_not_inset_a_display_without_a_notch() {
+        assert_eq!(super::menu_bar_inset(true, 24.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn auto_hidden_menu_bar_preserves_the_notch_safe_area() {
+        assert_eq!(super::menu_bar_inset(true, 37.0, 32.0), 32.0);
+    }
+
+    #[test]
+    fn visible_menu_bar_reserves_its_reported_height() {
+        assert_eq!(super::menu_bar_inset(false, 24.0, 0.0), 25.0);
+    }
 
     struct Stub {
         cg_screens: Vec<CGScreenInfo>,
