@@ -411,6 +411,7 @@ impl LayoutEngine {
             match &mut ws.layout_system {
                 LayoutSystemKind::Traditional(system) => {
                     system.set_window_insertion_point(insertion_point);
+                    system.set_equalize_nodes(settings.traditional.equalize_nodes);
                 }
                 LayoutSystemKind::Bsp(system) => {
                     system.set_window_insertion_point(insertion_point);

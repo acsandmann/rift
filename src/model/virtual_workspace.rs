@@ -103,6 +103,7 @@ impl VirtualWorkspace {
             LayoutMode::Traditional => LayoutSystemKind::Traditional(
                 crate::layout_engine::systems::TraditionalLayoutSystem::new(
                     settings.window_insertion_point_for(mode),
+                    settings.traditional.equalize_nodes,
                 ),
             ),
             LayoutMode::Bsp => {

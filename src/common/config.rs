@@ -686,6 +686,10 @@ pub struct BaseLayoutSettings {
 pub struct TraditionalLayoutSettings {
     #[serde(flatten)]
     pub base: BaseLayoutSettings,
+    /// Use Sway-style sibling normalization when inserting nodes. New nodes receive the
+    /// average sibling weight instead of splitting the selected node's share.
+    #[serde(default)]
+    pub equalize_nodes: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
@@ -1638,6 +1642,7 @@ mod tests {
 
                 [traditional]
                 window_insertion_point = "next_to_selection"
+                equalize_nodes = true
 
                 [scrolling]
                 animate = false
@@ -1653,6 +1658,7 @@ mod tests {
             settings.window_insertion_point_for(LayoutMode::Bsp),
             WindowInsertionPoint::EndOfTree
         );
+        assert!(settings.traditional.equalize_nodes);
         assert_eq!(settings.scrolling.animate, Some(false));
     }
 

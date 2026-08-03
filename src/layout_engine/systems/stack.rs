@@ -35,7 +35,7 @@ impl StackLayoutSystem {
         window_insertion_point: WindowInsertionPoint,
     ) -> Self {
         Self {
-            inner: TraditionalLayoutSystem::new(window_insertion_point),
+            inner: TraditionalLayoutSystem::new(window_insertion_point, false),
             default_orientation,
             window_insertion_point,
         }

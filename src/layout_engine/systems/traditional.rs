@@ -19,6 +19,8 @@ pub struct TraditionalLayoutSystem {
     pub(crate) layout_roots: slotmap::SlotMap<LayoutId, OwnedNode>,
     #[serde(skip, default)]
     window_insertion_point: WindowInsertionPoint,
+    #[serde(skip, default)]
+    equalize_nodes: bool,
 }
 
 impl Default for TraditionalLayoutSystem {
@@ -27,22 +29,26 @@ impl Default for TraditionalLayoutSystem {
             tree: Tree::with_observer(Components::default()),
             layout_roots: Default::default(),
             window_insertion_point: WindowInsertionPoint::default(),
+            equalize_nodes: false,
         }
     }
 }
 
 impl TraditionalLayoutSystem {
-    pub fn new(window_insertion_point: WindowInsertionPoint) -> Self {
+    pub fn new(window_insertion_point: WindowInsertionPoint, equalize_nodes: bool) -> Self {
         Self {
             tree: Tree::with_observer(Components::default()),
             layout_roots: Default::default(),
             window_insertion_point,
+            equalize_nodes,
         }
     }
 
     pub fn set_window_insertion_point(&mut self, value: WindowInsertionPoint) {
         self.window_insertion_point = value;
     }
+
+    pub fn set_equalize_nodes(&mut self, value: bool) { self.equalize_nodes = value; }
 
     fn find_best_focus_target(&self, node: NodeId) -> Option<(NodeId, WindowId)> {
         if let Some(wid) = self.tree.data.window.at(node) {
@@ -1232,6 +1238,15 @@ impl TraditionalLayoutSystem {
             return;
         };
         if new_sibling.parent(map) != Some(parent) {
+            return;
+        }
+
+        if self.equalize_nodes {
+            // Sway initializes a new node to the average weight of the existing siblings,
+            // then normalizes the sibling weights. Rift keeps every sibling set normalized
+            // to its child count, so that average is 1.0. Leaving the observer-initialized
+            // weight intact gives identical proportions while preserving manual resizes.
+            self.tree.data.layout.recompute_total(map, parent);
             return;
         }
 
@@ -4889,6 +4904,36 @@ mod tests {
         assert!((size2 - 0.5).abs() < 0.0001, "selected child should be halved");
         assert!((size4 - 0.5).abs() < 0.0001, "new sibling should get half");
         assert!((total - 5.0).abs() < 0.0001, "parent total should be preserved");
+    }
+
+    #[test]
+    fn equalize_nodes_gives_new_window_average_sibling_share() {
+        let mut system = TraditionalLayoutSystem::default();
+        system.set_equalize_nodes(true);
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.set_layout(root, LayoutKind::Horizontal);
+
+        let first = w(301);
+        let second = w(302);
+        let third = w(303);
+        system.add_window_after_selection(layout, first);
+        system.add_window_after_selection(layout, second);
+
+        let first_node = system.tree.data.window.node_for(layout, first).unwrap();
+        let second_node = system.tree.data.window.node_for(layout, second).unwrap();
+        system.tree.data.layout.info[first_node].size = 1.5;
+        system.tree.data.layout.info[second_node].size = 0.5;
+        system.tree.data.layout.info[root].total = 2.0;
+        system.select(first_node);
+
+        system.add_window_after_selection(layout, third);
+
+        let third_node = system.tree.data.window.node_for(layout, third).unwrap();
+        assert_eq!(system.tree.data.layout.info[first_node].size, 1.5);
+        assert_eq!(system.tree.data.layout.info[second_node].size, 0.5);
+        assert_eq!(system.tree.data.layout.info[third_node].size, 1.0);
+        assert_eq!(system.tree.data.layout.info[root].total, 3.0);
     }
 
     #[test]

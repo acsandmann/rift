@@ -206,7 +206,7 @@ mod tests {
 
     #[test]
     fn common_insertion_point_controls_tree_and_linear_layouts() {
-        let mut traditional = TraditionalLayoutSystem::new(WindowInsertionPoint::EndOfTree);
+        let mut traditional = TraditionalLayoutSystem::new(WindowInsertionPoint::EndOfTree, false);
         let traditional_layout = traditional.create_layout();
         traditional.add_window_after_selection(traditional_layout, w(1));
         traditional.add_window_after_selection(traditional_layout, w(2));
