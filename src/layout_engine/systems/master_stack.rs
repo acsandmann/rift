@@ -5,7 +5,9 @@ use objc2_core_foundation::CGRect;
 use serde::{Deserialize, Serialize};
 
 use crate::actor::app::WindowId;
-use crate::common::config::{MasterStackNewWindowPlacement, MasterStackSettings, MasterStackSide};
+use crate::common::config::{
+    MasterStackNewWindowPlacement, MasterStackSettings, MasterStackSide, WindowInsertionPoint,
+};
 use crate::layout_engine::systems::WindowLayoutConstraints;
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{
@@ -17,8 +19,11 @@ use crate::model::tree::NodeId;
 #[derive(Serialize, Deserialize, Debug)]
 pub struct MasterStackLayoutSystem {
     inner: TraditionalLayoutSystem,
+    #[serde(skip, default = "default_master_stack_settings")]
     settings: MasterStackSettings,
 }
+
+fn default_master_stack_settings() -> MasterStackSettings { MasterStackSettings::default() }
 
 impl Default for MasterStackLayoutSystem {
     fn default() -> Self { Self::new(MasterStackSettings::default()) }
@@ -34,6 +39,12 @@ impl MasterStackLayoutSystem {
 
     pub fn update_settings(&mut self, settings: MasterStackSettings) {
         if self.settings == settings {
+            return;
+        }
+        let mut old_with_new_base = self.settings.clone();
+        old_with_new_base.base = settings.base.clone();
+        if old_with_new_base == settings {
+            self.settings = settings;
             return;
         }
         let old_master_first = self.master_first();
@@ -321,7 +332,17 @@ impl MasterStackLayoutSystem {
         Some(node.detach(&mut self.inner.tree).push_back(container).finish())
     }
 
-    fn add_window_to_container_front(
+    fn move_window_to_end_of_current_container(
+        &mut self,
+        layout: LayoutId,
+        wid: WindowId,
+    ) -> Option<NodeId> {
+        let node = self.inner.tree.data.window.node_for(layout, wid)?;
+        let parent = node.parent(self.inner.map())?;
+        Some(node.detach(&mut self.inner.tree).push_back(parent).finish())
+    }
+
+    fn add_window_to_container(
         &mut self,
         layout: LayoutId,
         container: NodeId,
@@ -331,9 +352,22 @@ impl MasterStackLayoutSystem {
             return None;
         }
         let first_child = container.children(self.inner.map()).next();
-        let node = match first_child {
-            Some(first_child) => self.inner.tree.mk_node().insert_before(first_child),
-            None => self.inner.tree.mk_node().push_back(container),
+        let node = match self.settings.base.window_insertion_point {
+            Some(WindowInsertionPoint::NextToSelection) => {
+                let selection = self.inner.selection(layout);
+                if selection.parent(self.inner.map()) == Some(container) {
+                    self.inner.tree.mk_node().insert_after(selection)
+                } else {
+                    self.inner.tree.mk_node().push_back(container)
+                }
+            }
+            Some(WindowInsertionPoint::EndOfTree) => self.inner.tree.mk_node().push_back(container),
+            // Preserve the pre-base-settings behavior for old snapshots and direct
+            // construction. Config-created systems always receive a resolved value.
+            None => match first_child {
+                Some(first_child) => self.inner.tree.mk_node().insert_before(first_child),
+                None => self.inner.tree.mk_node().push_back(container),
+            },
         };
         self.inner.tree.data.window.set_window(layout, node, wid);
         Some(node)
@@ -610,10 +644,15 @@ impl LayoutSystem for MasterStackLayoutSystem {
             }
         };
         let node = self
-            .add_window_to_container_front(layout, target, wid)
+            .add_window_to_container(layout, target, wid)
             .unwrap_or_else(|| self.inner.add_window_under(layout, target, wid));
         self.inner.select(node);
         self.enforce_master_count(layout, master, stack);
+        if self.settings.base.window_insertion_point == Some(WindowInsertionPoint::EndOfTree)
+            && let Some(node) = self.move_window_to_end_of_current_container(layout, wid)
+        {
+            self.inner.select(node);
+        }
     }
 
     fn replace_window(&mut self, from: WindowId, to: WindowId) {
@@ -937,6 +976,24 @@ mod tests {
         // When w2 is added: master=[w2], stack=[w1]
         // When w3 is added: master=[w3], stack=[w2, w1] (since w2 was at index 0 and got pushed to stack, w1 was pushed next)
         assert_eq!(windows, vec![w(3), w(2), w(1)]);
+    }
+
+    #[test]
+    fn end_of_tree_keeps_new_windows_after_master_overflow() {
+        let mut settings = MasterStackSettings::default();
+        settings.base.window_insertion_point = Some(WindowInsertionPoint::EndOfTree);
+        let mut system = MasterStackLayoutSystem::new(settings);
+        let layout = system.create_layout();
+
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+        system.add_window_after_selection(layout, w(3));
+
+        assert_eq!(system.windows_in_layout_by_container(layout), vec![
+            w(1),
+            w(2),
+            w(3)
+        ]);
     }
 
     #[test]

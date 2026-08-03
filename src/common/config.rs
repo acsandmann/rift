@@ -659,12 +659,57 @@ impl StackLineSettings {
     pub fn thickness(&self) -> f64 { if self.enabled { self.thickness } else { 0.0 } }
 }
 
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowInsertionPoint {
+    /// Insert a new window immediately after the current selection.
+    #[default]
+    NextToSelection,
+    /// Append a new window at the end of the layout tree.
+    EndOfTree,
+}
+
+/// Options understood by every layout system.
+///
+/// These fields are flattened into both `[settings.layout]` and every
+/// per-layout table. A per-layout value overrides the layout-wide value.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct BaseLayoutSettings {
+    /// Where newly managed windows are inserted.
+    #[serde(default)]
+    pub window_insertion_point: Option<WindowInsertionPoint>,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct TraditionalLayoutSettings {
+    #[serde(flatten)]
+    pub base: BaseLayoutSettings,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct BspLayoutSettings {
+    #[serde(flatten)]
+    pub base: BaseLayoutSettings,
+}
+
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct LayoutSettings {
+    /// Settings inherited by every layout type unless overridden by its table.
+    #[serde(flatten)]
+    pub base: BaseLayoutSettings,
     /// Layout mode: "traditional", "bsp", "stack", "master_stack", or "scrolling"
     #[serde(default)]
     pub mode: LayoutMode,
+    /// Traditional layout configuration
+    #[serde(default)]
+    pub traditional: TraditionalLayoutSettings,
+    /// BSP layout configuration
+    #[serde(default)]
+    pub bsp: BspLayoutSettings,
     /// Stack system configuration
     #[serde(default)]
     pub stack: StackSettings,
@@ -711,6 +756,8 @@ impl ToString for LayoutMode {
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ScrollingLayoutSettings {
+    #[serde(flatten)]
+    pub base: BaseLayoutSettings,
     /// Whether to animate window transitions in this layout.
     #[serde(default)]
     pub animate: Option<bool>,
@@ -739,6 +786,7 @@ pub struct ScrollingLayoutSettings {
 impl Default for ScrollingLayoutSettings {
     fn default() -> Self {
         Self {
+            base: BaseLayoutSettings::default(),
             animate: None,
             column_width_ratio: default_scrolling_column_width_ratio(),
             min_column_width_ratio: default_scrolling_min_column_width_ratio(),
@@ -780,6 +828,8 @@ pub enum ScrollingFocusNavigationStyle {
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct MasterStackSettings {
+    #[serde(flatten)]
+    pub base: BaseLayoutSettings,
     /// Fraction of space reserved for the master area (0.05..0.95)
     #[serde(default = "default_master_stack_ratio")]
     pub master_ratio: f64,
@@ -860,6 +910,8 @@ pub enum StackDefaultOrientation {
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct StackSettings {
+    #[serde(flatten)]
+    pub base: BaseLayoutSettings,
     /// Stack offset - how much each stacked window is offset (in pixels)
     /// With the enhanced stacking system, this creates meaningful visible edges
     /// for each window in the stack while the focused window remains fully visible.
@@ -936,6 +988,7 @@ pub struct GapOverride {
 impl Default for StackSettings {
     fn default() -> Self {
         Self {
+            base: BaseLayoutSettings::default(),
             stack_offset: default_stack_offset(),
             default_orientation: default_stack_orientation(),
         }
@@ -945,6 +998,7 @@ impl Default for StackSettings {
 impl Default for MasterStackSettings {
     fn default() -> Self {
         Self {
+            base: BaseLayoutSettings::default(),
             master_ratio: default_master_stack_ratio(),
             master_count: default_master_stack_count(),
             master_side: MasterStackSide::Left,
@@ -987,6 +1041,29 @@ impl Settings {
 }
 
 impl LayoutSettings {
+    pub fn base_for(&self, mode: LayoutMode) -> &BaseLayoutSettings {
+        match mode {
+            LayoutMode::Traditional => &self.traditional.base,
+            LayoutMode::Bsp => &self.bsp.base,
+            LayoutMode::Stack => &self.stack.base,
+            LayoutMode::MasterStack => &self.master_stack.base,
+            LayoutMode::Scrolling => &self.scrolling.base,
+        }
+    }
+
+    pub fn window_insertion_point_for(&self, mode: LayoutMode) -> WindowInsertionPoint {
+        self.base_for(mode)
+            .window_insertion_point
+            .or(self.base.window_insertion_point)
+            .unwrap_or_default()
+    }
+
+    pub fn resolved_base_for(&self, mode: LayoutMode) -> BaseLayoutSettings {
+        BaseLayoutSettings {
+            window_insertion_point: Some(self.window_insertion_point_for(mode)),
+        }
+    }
+
     pub fn validate(&self) -> Vec<String> {
         let mut issues = Vec::new();
 
@@ -1552,6 +1629,32 @@ mod tests {
     use super::*;
     use crate::actor::reactor;
     use crate::layout_engine::{LayoutCommand, ResizeOrientation};
+
+    #[test]
+    fn layout_insertion_point_supports_global_default_and_per_mode_override() {
+        let settings: LayoutSettings = toml::from_str(
+            r#"
+                window_insertion_point = "end_of_tree"
+
+                [traditional]
+                window_insertion_point = "next_to_selection"
+
+                [scrolling]
+                animate = false
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            settings.window_insertion_point_for(LayoutMode::Traditional),
+            WindowInsertionPoint::NextToSelection
+        );
+        assert_eq!(
+            settings.window_insertion_point_for(LayoutMode::Bsp),
+            WindowInsertionPoint::EndOfTree
+        );
+        assert_eq!(settings.scrolling.animate, Some(false));
+    }
 
     #[test]
     fn virtual_workspace_prevent_wrapping_defaults_to_false_and_accepts_suggested_alias() {

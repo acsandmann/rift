@@ -78,6 +78,12 @@ hot_reload = true
 # You can set different layouts per workspace using `workspace_rules`.
 mode = "traditional"
 
+# Where new windows are inserted by default for every layout:
+# - "next_to_selection": immediately after the selected window
+# - "end_of_tree": at the end of the layout
+# This can be overridden per-layout in each layouts respective section.
+window_insertion_point = "next_to_selection"
+
 # these settings only apply when layout mode == "master_stack"
 [settings.layout.master_stack]
 # Fraction of space reserved for the master area (0.05..0.95)

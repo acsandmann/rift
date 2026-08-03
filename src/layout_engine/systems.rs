@@ -196,7 +196,42 @@ pub use scrolling::ScrollingLayoutSystem;
 
 #[cfg(test)]
 mod tests {
-    use super::WindowLayoutConstraints;
+    use super::{
+        LayoutSystem, ScrollingLayoutSystem, TraditionalLayoutSystem, WindowLayoutConstraints,
+    };
+    use crate::actor::app::WindowId;
+    use crate::common::config::{ScrollingLayoutSettings, WindowInsertionPoint};
+
+    fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
+
+    #[test]
+    fn common_insertion_point_controls_tree_and_linear_layouts() {
+        let mut traditional = TraditionalLayoutSystem::new(WindowInsertionPoint::EndOfTree);
+        let traditional_layout = traditional.create_layout();
+        traditional.add_window_after_selection(traditional_layout, w(1));
+        traditional.add_window_after_selection(traditional_layout, w(2));
+        traditional.select_window(traditional_layout, w(1));
+        traditional.add_window_after_selection(traditional_layout, w(3));
+        assert_eq!(traditional.all_windows_in_layout(traditional_layout), vec![
+            w(1),
+            w(2),
+            w(3)
+        ]);
+
+        let mut scrolling_settings = ScrollingLayoutSettings::default();
+        scrolling_settings.base.window_insertion_point = Some(WindowInsertionPoint::EndOfTree);
+        let mut scrolling = ScrollingLayoutSystem::new(&scrolling_settings);
+        let scrolling_layout = scrolling.create_layout();
+        scrolling.add_window_after_selection(scrolling_layout, w(1));
+        scrolling.add_window_after_selection(scrolling_layout, w(2));
+        scrolling.select_window(scrolling_layout, w(1));
+        scrolling.add_window_after_selection(scrolling_layout, w(3));
+        assert_eq!(scrolling.all_windows_in_layout(scrolling_layout), vec![
+            w(1),
+            w(2),
+            w(3)
+        ]);
+    }
 
     #[test]
     fn axis_specific_fixed_detection_supports_one_axis_locked_other_resizable() {

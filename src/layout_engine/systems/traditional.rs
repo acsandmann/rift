@@ -4,6 +4,7 @@ use tracing::warn;
 
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
+use crate::common::config::WindowInsertionPoint;
 use crate::layout_engine::systems::constraints::{AxisConstraints, solve_axis_lengths};
 use crate::layout_engine::systems::{LayoutSystem, WindowLayoutConstraints};
 use crate::layout_engine::utils::compute_tiling_area;
@@ -16,6 +17,8 @@ use crate::sys::geometry::Round;
 pub struct TraditionalLayoutSystem {
     pub(crate) tree: Tree<Components>,
     pub(crate) layout_roots: slotmap::SlotMap<LayoutId, OwnedNode>,
+    #[serde(skip, default)]
+    window_insertion_point: WindowInsertionPoint,
 }
 
 impl Default for TraditionalLayoutSystem {
@@ -23,11 +26,24 @@ impl Default for TraditionalLayoutSystem {
         Self {
             tree: Tree::with_observer(Components::default()),
             layout_roots: Default::default(),
+            window_insertion_point: WindowInsertionPoint::default(),
         }
     }
 }
 
 impl TraditionalLayoutSystem {
+    pub fn new(window_insertion_point: WindowInsertionPoint) -> Self {
+        Self {
+            tree: Tree::with_observer(Components::default()),
+            layout_roots: Default::default(),
+            window_insertion_point,
+        }
+    }
+
+    pub fn set_window_insertion_point(&mut self, value: WindowInsertionPoint) {
+        self.window_insertion_point = value;
+    }
+
     fn find_best_focus_target(&self, node: NodeId) -> Option<(NodeId, WindowId)> {
         if let Some(wid) = self.tree.data.window.at(node) {
             return Some((node, wid));
@@ -116,7 +132,7 @@ impl TraditionalLayoutSystem {
 
     pub(crate) fn root(&self, layout: LayoutId) -> NodeId { self.layout_roots[layout].id() }
 
-    fn selection(&self, layout: LayoutId) -> NodeId {
+    pub(crate) fn selection(&self, layout: LayoutId) -> NodeId {
         self.tree.data.selection.current_selection(self.root(layout))
     }
 
@@ -573,6 +589,12 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 
     fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId) {
+        if self.window_insertion_point == WindowInsertionPoint::EndOfTree {
+            let root = self.root(layout);
+            let node = self.add_window_under(layout, root, wid);
+            self.select(node);
+            return;
+        }
         let selection = self.selection(layout);
         let node = if selection.parent(self.map()).is_none() {
             // If the root is selected but it already has children, split relative to the

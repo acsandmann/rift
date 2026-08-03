@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::actor::app::WindowId;
 use crate::common::collections::HashMap;
-use crate::common::config::{StackDefaultOrientation, default_stack_orientation};
+use crate::common::config::{
+    StackDefaultOrientation, WindowInsertionPoint, default_stack_orientation,
+};
 use crate::layout_engine::systems::{LayoutSystem, WindowLayoutConstraints};
 use crate::layout_engine::{
     Direction, LayoutId, LayoutKind, ResizeOrientation, TraditionalLayoutSystem,
@@ -15,6 +17,8 @@ pub struct StackLayoutSystem {
     inner: TraditionalLayoutSystem,
     #[serde(default = "default_stack_orientation")]
     default_orientation: StackDefaultOrientation,
+    #[serde(skip, default)]
+    window_insertion_point: WindowInsertionPoint,
 }
 
 impl Default for StackLayoutSystem {
@@ -23,14 +27,28 @@ impl Default for StackLayoutSystem {
 
 impl StackLayoutSystem {
     pub fn new(default_orientation: StackDefaultOrientation) -> Self {
+        Self::new_with_insertion_point(default_orientation, WindowInsertionPoint::default())
+    }
+
+    pub fn new_with_insertion_point(
+        default_orientation: StackDefaultOrientation,
+        window_insertion_point: WindowInsertionPoint,
+    ) -> Self {
         Self {
-            inner: TraditionalLayoutSystem::default(),
+            inner: TraditionalLayoutSystem::new(window_insertion_point),
             default_orientation,
+            window_insertion_point,
         }
     }
 
-    pub fn update_settings(&mut self, default_orientation: StackDefaultOrientation) {
+    pub fn update_settings(
+        &mut self,
+        default_orientation: StackDefaultOrientation,
+        window_insertion_point: WindowInsertionPoint,
+    ) {
         self.default_orientation = default_orientation;
+        self.window_insertion_point = window_insertion_point;
+        self.inner.set_window_insertion_point(window_insertion_point);
     }
 
     fn initial_stack_kind(&self) -> LayoutKind {
@@ -220,6 +238,10 @@ impl LayoutSystem for StackLayoutSystem {
 
     fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId) {
         self.normalize_layout(layout);
+        if self.window_insertion_point == WindowInsertionPoint::NextToSelection {
+            self.inner.add_window_after_selection(layout, wid);
+            return;
+        }
         let node = self.inner.add_window_under(layout, self.inner.root(layout), wid);
         self.inner.select(node);
     }
@@ -420,6 +442,23 @@ mod tests {
         system.set_windows_for_app(layout, 1, vec![w(1), w(2)]);
 
         assert!(system.has_any_fullscreen_node(layout));
+    }
+
+    #[test]
+    fn set_windows_for_app_honors_updated_end_of_tree_policy() {
+        let mut system = StackLayoutSystem::new(StackDefaultOrientation::Perpendicular);
+        let layout = system.create_layout();
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+        system.select_window(layout, w(1));
+
+        system.update_settings(
+            StackDefaultOrientation::Perpendicular,
+            WindowInsertionPoint::EndOfTree,
+        );
+        system.set_windows_for_app(layout, 1, vec![w(1), w(2), w(3)]);
+
+        assert_eq!(system.all_windows_in_layout(layout), vec![w(1), w(2), w(3)]);
     }
 
     fn setup_fullscreen_stack_system() -> (StackLayoutSystem, LayoutId) {

@@ -406,17 +406,28 @@ impl LayoutEngine {
         self.layout_settings = settings.clone();
 
         for (_, ws) in self.virtual_workspace_manager.workspaces.iter_mut() {
+            let mode = ws.layout_mode;
+            let insertion_point = settings.window_insertion_point_for(mode);
             match &mut ws.layout_system {
+                LayoutSystemKind::Traditional(system) => {
+                    system.set_window_insertion_point(insertion_point);
+                }
+                LayoutSystemKind::Bsp(system) => {
+                    system.set_window_insertion_point(insertion_point);
+                }
                 LayoutSystemKind::Stack(system) => {
-                    system.update_settings(settings.stack.default_orientation);
+                    system.update_settings(settings.stack.default_orientation, insertion_point);
                 }
                 LayoutSystemKind::MasterStack(system) => {
-                    system.update_settings(settings.master_stack.clone());
+                    let mut mode_settings = settings.master_stack.clone();
+                    mode_settings.base = settings.resolved_base_for(mode);
+                    system.update_settings(mode_settings);
                 }
                 LayoutSystemKind::Scrolling(system) => {
-                    system.update_settings(&settings.scrolling);
+                    let mut mode_settings = settings.scrolling.clone();
+                    mode_settings.base = settings.resolved_base_for(mode);
+                    system.update_settings(&mode_settings);
                 }
-                _ => {}
             }
         }
     }

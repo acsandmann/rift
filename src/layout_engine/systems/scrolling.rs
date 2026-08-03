@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::{HashMap, HashSet};
-use crate::common::config::{ScrollingFocusNavigationStyle, ScrollingLayoutSettings};
+use crate::common::config::{
+    ScrollingFocusNavigationStyle, ScrollingLayoutSettings, WindowInsertionPoint,
+};
 use crate::layout_engine::systems::constraints::{AxisConstraints, solve_axis_lengths};
 use crate::layout_engine::systems::{LayoutSystem, WindowLayoutConstraints};
 use crate::layout_engine::utils::compute_tiling_area;
@@ -1018,10 +1020,14 @@ impl LayoutSystem for ScrollingLayoutSystem {
             self.settings.focus_navigation_style,
             ScrollingFocusNavigationStyle::Niri
         );
+        let insert_at_end =
+            self.settings.base.window_insertion_point == Some(WindowInsertionPoint::EndOfTree);
         let Some(state) = self.layout_state_mut(layout) else {
             return;
         };
-        if let Some((col_idx, _)) = state.selected_location() {
+        if insert_at_end {
+            state.insert_column_at_end(wid);
+        } else if let Some((col_idx, _)) = state.selected_location() {
             state.insert_column_after(col_idx, wid);
         } else if !state.columns.is_empty() {
             state.insert_column_after(0, wid);

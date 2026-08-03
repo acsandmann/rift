@@ -101,24 +101,35 @@ impl VirtualWorkspace {
     pub fn create_layout_system(mode: LayoutMode, settings: &LayoutSettings) -> LayoutSystemKind {
         match mode {
             LayoutMode::Traditional => LayoutSystemKind::Traditional(
-                crate::layout_engine::systems::TraditionalLayoutSystem::default(),
-            ),
-            LayoutMode::Bsp => {
-                LayoutSystemKind::Bsp(crate::layout_engine::systems::BspLayoutSystem::default())
-            }
-            LayoutMode::Stack => {
-                LayoutSystemKind::Stack(crate::layout_engine::systems::StackLayoutSystem::new(
-                    settings.stack.default_orientation,
-                ))
-            }
-            LayoutMode::MasterStack => LayoutSystemKind::MasterStack(
-                crate::layout_engine::systems::MasterStackLayoutSystem::new(
-                    settings.master_stack.clone(),
+                crate::layout_engine::systems::TraditionalLayoutSystem::new(
+                    settings.window_insertion_point_for(mode),
                 ),
             ),
-            LayoutMode::Scrolling => LayoutSystemKind::Scrolling(
-                crate::layout_engine::systems::ScrollingLayoutSystem::new(&settings.scrolling),
+            LayoutMode::Bsp => {
+                LayoutSystemKind::Bsp(crate::layout_engine::systems::BspLayoutSystem::new(
+                    settings.window_insertion_point_for(mode),
+                ))
+            }
+            LayoutMode::Stack => LayoutSystemKind::Stack(
+                crate::layout_engine::systems::StackLayoutSystem::new_with_insertion_point(
+                    settings.stack.default_orientation,
+                    settings.window_insertion_point_for(mode),
+                ),
             ),
+            LayoutMode::MasterStack => {
+                let mut mode_settings = settings.master_stack.clone();
+                mode_settings.base = settings.resolved_base_for(mode);
+                LayoutSystemKind::MasterStack(
+                    crate::layout_engine::systems::MasterStackLayoutSystem::new(mode_settings),
+                )
+            }
+            LayoutMode::Scrolling => {
+                let mut mode_settings = settings.scrolling.clone();
+                mode_settings.base = settings.resolved_base_for(mode);
+                LayoutSystemKind::Scrolling(
+                    crate::layout_engine::systems::ScrollingLayoutSystem::new(&mode_settings),
+                )
+            }
         }
     }
 
