@@ -3316,7 +3316,7 @@ fn topology_change_clears_stale_pending_hide_target_before_next_workspace_layout
 }
 
 #[test]
-fn auto_workspace_switch_focuses_activated_window_not_stale_workspace_focus() {
+fn auto_workspace_switch_follows_activated_window_when_same_app_is_visible_elsewhere() {
     let mut apps = Apps::new();
     let mut reactor = Reactor::new_for_test(LayoutEngine::new(
         &crate::common::config::VirtualWorkspaceSettings::default(),
@@ -3330,10 +3330,11 @@ fn auto_workspace_switch_focuses_activated_window_not_stale_workspace_focus() {
     let space = SpaceId::new(1);
     let stale_focus = WindowId::new(1, 1);
     let activated = WindowId::new(2, 1);
+    let same_app_visible = WindowId::new(2, 2);
 
     reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
     reactor.handle_events(apps.make_app(1, make_windows(1)));
-    reactor.handle_events(apps.make_app(2, make_windows(1)));
+    reactor.handle_events(apps.make_app(2, make_windows(2)));
     apps.simulate_until_quiet(&mut reactor);
 
     reactor.send_layout_event(LayoutEvent::WindowFocused(space, stale_focus));
@@ -3363,9 +3364,43 @@ fn auto_workspace_switch_focuses_activated_window_not_stale_workspace_focus() {
     reactor.handle_event(Event::Command(Command::Layout(
         LayoutCommand::SwitchToWorkspace(0),
     )));
+    apps.simulate_until_quiet(&mut reactor);
     while raise_manager_rx.try_recv().is_ok() {}
 
-    reactor.maybe_auto_switch_to_window_workspace(activated.pid, activated, space);
+    assert!(
+        reactor.layout_manager.layout_engine.is_window_in_active_workspace(
+            &reactor.state.windows,
+            space,
+            same_app_visible
+        ),
+        "another window from the activated app should remain visible on the current workspace"
+    );
+    let _ = reactor
+        .main_window_tracker
+        .handle_event(&Event::ApplicationGloballyActivated(activated.pid));
+    assert_eq!(reactor.main_window(), Some(activated));
+
+    let outcome = reactor.handle_app_activation_workspace_switch(activated.pid);
+    assert!(outcome.arrange.requested);
+    assert_eq!(outcome.layout_responses.len(), 1);
+    assert!(
+        apps.requests().is_empty(),
+        "auto workspace switch effects should be deferred to the outcome pipeline"
+    );
+    assert!(raise_manager_rx.try_recv().is_err());
+    reactor.apply_event_outcome(outcome);
+
+    let requests = apps.requests();
+    assert!(
+        requests.iter().any(|request| match request {
+            Request::SetWindowFrame(wid, _, _, _) => *wid == activated,
+            Request::SetBatchWindowFrame(frames, _, _) => {
+                frames.iter().any(|(wid, _)| *wid == activated)
+            }
+            _ => false,
+        }),
+        "auto workspace switch should arrange the activated window immediately: {requests:?}"
+    );
 
     let msg = raise_manager_rx.try_recv().expect("Should have sent an event").1;
     match msg {

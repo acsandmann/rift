@@ -70,7 +70,7 @@ pub fn handle_application_activated(
         return Ok(EventOutcome::no_change());
     }
 
-    Ok(EventOutcome::focus_changed(None, false).with_application_activation(pid))
+    Ok(EventOutcome::focus_changed(None, false))
 }
 
 #[derive(Debug)]

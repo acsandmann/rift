@@ -47,7 +47,6 @@ pub(crate) struct TopologyReassignment {
 pub(crate) struct EventOutcome {
     pub(crate) window_server_updates: Vec<WindowServerInfo>,
     pub(crate) discoveries: Vec<WindowDiscoveryRequest>,
-    pub(crate) activate_application: Option<pid_t>,
     pub(crate) recompute_active_spaces: bool,
     pub(crate) repair_spaces_after_mission_control: bool,
     pub(crate) refresh_after_mission_control: bool,
@@ -97,7 +96,6 @@ impl EventOutcome {
     pub(crate) fn absorb(&mut self, mut other: Self) {
         self.window_server_updates.append(&mut other.window_server_updates);
         self.discoveries.append(&mut other.discoveries);
-        self.activate_application = other.activate_application.or(self.activate_application);
         self.recompute_active_spaces |= other.recompute_active_spaces;
         self.repair_spaces_after_mission_control |= other.repair_spaces_after_mission_control;
         self.refresh_after_mission_control |= other.refresh_after_mission_control;
@@ -142,7 +140,6 @@ impl EventOutcome {
         Self {
             window_server_updates: Vec::new(),
             discoveries: Vec::new(),
-            activate_application: None,
             recompute_active_spaces: false,
             repair_spaces_after_mission_control: false,
             refresh_after_mission_control: false,
@@ -227,11 +224,6 @@ impl EventOutcome {
         workspace_switch_space: Option<SpaceId>,
     ) -> Self {
         self.layout_responses.push((response, workspace_switch_space));
-        self
-    }
-
-    pub(crate) fn with_application_activation(mut self, pid: pid_t) -> Self {
-        self.activate_application = Some(pid);
         self
     }
 

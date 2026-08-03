@@ -1070,6 +1070,9 @@ impl Reactor {
                 let mut outcome = application_workflow::handle_application_activated(
                     application_workflow::ApplicationActivatedPayload { pid, quiet },
                 )?;
+                if quiet == Quiet::No {
+                    outcome.absorb(self.handle_app_activation_workspace_switch(pid));
+                }
                 outcome.focused_window = raised_window;
                 return Ok(outcome);
             }
@@ -1084,7 +1087,10 @@ impl Reactor {
                 if !self.is_login_window_pid(pid) {
                     self.request_visible_windows_for_pid(pid, false);
                     if self.main_window_tracker.take_global_activation_quiet(pid) == Quiet::No {
-                        self.handle_app_activation_workspace_switch(pid);
+                        let mut outcome = self.handle_app_activation_workspace_switch(pid);
+                        outcome.focused_window = raised_window;
+                        outcome.refresh_window_notifications = should_update_notifications;
+                        return Ok(outcome);
                     } else {
                         debug!(
                             pid,
@@ -1817,10 +1823,6 @@ impl Reactor {
                 discovery.app_info,
             );
         }
-        if let Some(pid) = outcome.activate_application {
-            self.handle_app_activation_workspace_switch(pid);
-        }
-
         for window in outcome.reapply_app_rules {
             self.maybe_reapply_app_rules_for_window(window);
         }
@@ -3487,17 +3489,13 @@ impl Reactor {
         }
     }
 
-    fn handle_app_activation_workspace_switch(&mut self, pid: pid_t) {
-        use objc2_app_kit::NSRunningApplication;
-
-        use crate::sys::app::NSRunningApplicationExt;
-
+    fn handle_app_activation_workspace_switch(&mut self, pid: pid_t) -> EventOutcome {
         if self.workspace_switch_manager.active_workspace_switch.is_some() {
             trace!(
                 "Skipping auto workspace switch for pid {} because a workspace switch is in progress",
                 pid
             );
-            return;
+            return EventOutcome::no_change();
         }
 
         if self.workspace_switch_manager.manual_switch_in_progress() {
@@ -3505,7 +3503,7 @@ impl Reactor {
                 "Skipping auto workspace switch for pid {} because a manual switch is in progress",
                 pid
             );
-            return;
+            return EventOutcome::no_change();
         }
 
         if let Some(active_space) = self.raw_command_space()
@@ -3515,7 +3513,7 @@ impl Reactor {
                 "Skipping auto workspace switch for pid {} because the active space is fullscreen",
                 pid
             );
-            return;
+            return EventOutcome::no_change();
         }
 
         if let Some(wsid) = self.activation_from_unmanageable_window(pid) {
@@ -3524,52 +3522,21 @@ impl Reactor {
                 "Skipping auto workspace switch for pid {} because the activated window is not manageable",
                 pid
             );
-            return;
+            return EventOutcome::no_change();
         }
 
-        let visible_spaces: HashSet<SpaceId> = self.iter_active_spaces().collect();
-        let app_is_on_visible_workspace =
-            self.state.windows.iter_windows().any(|(wid, _window_state)| {
-                if wid.pid != pid {
-                    return false;
-                }
-                let Some(space) = self.best_space_for_window_id(wid) else {
-                    return false;
-                };
-                if !visible_spaces.contains(&space) {
-                    return false;
-                }
-                let Some(active_workspace) =
-                    self.layout_manager.layout_engine.active_workspace(space)
-                else {
-                    return false;
-                };
-                self.layout_manager
-                    .layout_engine
-                    .virtual_workspace_manager()
-                    .workspace_for_window(&self.state.windows, space, wid)
-                    .is_some_and(|window_workspace| window_workspace == active_workspace)
-            });
-
-        if app_is_on_visible_workspace {
-            debug!("App {} is already on a visible workspace, not switching.", pid);
-            return;
-        }
-
-        let Some(app) = NSRunningApplication::with_process_id(pid) else {
-            return;
+        let Some(bundle_id_str) =
+            self.app_manager.apps.get(&pid).and_then(|app| app.info.bundle_id.clone())
+        else {
+            return EventOutcome::no_change();
         };
-        let Some(bundle_id) = app.bundle_id() else {
-            return;
-        };
-        let bundle_id_str = bundle_id.to_string();
 
         if self.config.settings.auto_focus_blacklist.contains(&bundle_id_str) {
             debug!(
                 "App {} is blacklisted for auto-focus workspace switching, ignoring activation",
                 bundle_id_str
             );
-            return;
+            return EventOutcome::no_change();
         }
 
         debug!(
@@ -3588,14 +3555,14 @@ impl Reactor {
             });
 
         let Some(app_window_id) = app_window else {
-            return;
+            return EventOutcome::no_change();
         };
 
         let Some(window_space) = self.best_space_for_window_id(app_window_id) else {
-            return;
+            return EventOutcome::no_change();
         };
 
-        self.maybe_auto_switch_to_window_workspace(pid, app_window_id, window_space);
+        self.maybe_auto_switch_to_window_workspace(pid, app_window_id, window_space)
     }
 
     fn maybe_auto_switch_to_window_workspace(
@@ -3603,18 +3570,18 @@ impl Reactor {
         pid: pid_t,
         app_window_id: WindowId,
         window_space: SpaceId,
-    ) {
+    ) -> EventOutcome {
         let workspace_state = self.layout_manager.layout_engine.virtual_workspace_manager();
         let Some(window_workspace) =
             workspace_state.workspace_for_window(&self.state.windows, window_space, app_window_id)
         else {
-            return;
+            return EventOutcome::no_change();
         };
 
         let Some(current_workspace) =
             self.layout_manager.layout_engine.active_workspace(window_space)
         else {
-            return;
+            return EventOutcome::no_change();
         };
 
         if window_workspace != current_workspace {
@@ -3641,10 +3608,12 @@ impl Reactor {
                     workspace_index,
                     app_window_id,
                 );
-                self.handle_layout_response(response, Some(window_space));
-                self.update_event_tap_layout_mode();
+                return EventOutcome::layout_changed(false)
+                    .with_layout_response(response, Some(window_space));
             }
         }
+
+        EventOutcome::no_change()
     }
 
     fn handle_layout_response(
