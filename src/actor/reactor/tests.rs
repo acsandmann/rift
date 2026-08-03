@@ -2072,7 +2072,7 @@ fn handle_layout_response_includes_handles_for_raise_and_focus_windows() {
 }
 
 #[test]
-fn workspace_switch_batches_all_windows_with_eui_enabled() {
+fn workspace_switch_batches_all_window_positions_with_eui_enabled() {
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
     let space = SpaceId::new(1);
@@ -2095,12 +2095,81 @@ fn workspace_switch_batches_all_windows_with_eui_enabled() {
         requests.iter().any(|req| {
             matches!(
                 req,
-                Request::SetBatchWindowFrame(frames, _, true)
-                    if frames.iter().any(|(wid, _)| *wid == WindowId::new(1, 1))
-                        && frames.iter().any(|(wid, _)| *wid == WindowId::new(1, 2))
+                Request::SetWorkspaceSwitchPositions(positions, _, true)
+                    if positions.iter().any(|(wid, _)| *wid == WindowId::new(1, 1))
             )
         }),
-        "expected workspace-switch batch to disable eui for both hidden and visible windows: {requests:?}"
+        "expected a position-only workspace-switch batch with eui enabled: {requests:?}"
+    );
+}
+
+#[test]
+fn non_workspace_instant_layout_keeps_full_frame_batch() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+    let _ = apps.requests();
+
+    let target = CGRect::new(CGPoint::new(25., 30.), CGSize::new(700., 650.));
+    assert!(super::animation::AnimationManager::instant_layout(
+        &mut reactor,
+        space,
+        &[(wid, target)],
+        None,
+    ));
+
+    let requests = apps.requests();
+    assert!(
+        requests.iter().any(|request| matches!(
+            request,
+            Request::SetBatchWindowFrame(frames, _, true)
+                if frames.as_slice() == [(wid, target)]
+        )),
+        "ordinary instant layouts must retain full-frame writes: {requests:?}"
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|request| !matches!(request, Request::SetWorkspaceSwitchPositions(..))),
+        "the workspace-switch-only request escaped into an ordinary instant layout: {requests:?}"
+    );
+}
+
+#[test]
+fn workspace_switch_layout_falls_back_to_full_frames_for_size_changes() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+    let _ = apps.requests();
+
+    let target = CGRect::new(CGPoint::new(25., 30.), CGSize::new(700., 650.));
+    assert!(super::animation::AnimationManager::workspace_switch_layout(
+        &mut reactor,
+        space,
+        &[(wid, target)],
+        None,
+    ));
+
+    let requests = apps.requests();
+    assert!(
+        requests.iter().any(|request| matches!(
+            request,
+            Request::SetBatchWindowFrame(frames, _, true)
+                if frames.as_slice() == [(wid, target)]
+        )),
+        "workspace layouts with size changes must retain full-frame writes: {requests:?}"
+    );
+    assert!(
+        requests
+            .iter()
+            .all(|request| !matches!(request, Request::SetWorkspaceSwitchPositions(..))),
+        "a size-changing workspace layout must not use position-only writes: {requests:?}"
     );
 }
 
@@ -2259,6 +2328,9 @@ fn auto_workspace_switch_follows_activated_window_when_same_app_is_visible_elsew
             Request::SetWindowFrame(wid, _, _, _) => *wid == activated,
             Request::SetBatchWindowFrame(frames, _, _) => {
                 frames.iter().any(|(wid, _)| *wid == activated)
+            }
+            Request::SetWorkspaceSwitchPositions(positions, _, _) => {
+                positions.iter().any(|(wid, _)| *wid == activated)
             }
             _ => false,
         }),

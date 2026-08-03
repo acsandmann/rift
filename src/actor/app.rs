@@ -331,6 +331,8 @@ pub enum Request {
 
     SetWindowFrame(WindowId, CGRect, TransactionId, bool),
     SetBatchWindowFrame(Vec<(WindowId, CGRect)>, TransactionId, bool),
+    /// Position-only batch reserved for virtual workspace switches.
+    SetWorkspaceSwitchPositions(Vec<(WindowId, CGPoint)>, TransactionId, bool),
     SetWindowPos(WindowId, CGPoint, TransactionId, bool),
     AnimationFrame {
         wid: WindowId,
@@ -889,6 +891,63 @@ impl State {
 
                     self.send_event(Event::WindowFrameChanged(
                         *wid,
+                        frame,
+                        Some(txid),
+                        Requested(true),
+                        None,
+                    ));
+                }
+                if disable_eui_for_batch {
+                    let _ = self.app.set_bool_attribute("AXEnhancedUserInterface", true);
+                }
+            }
+            Request::SetWorkspaceSwitchPositions(positions, txid, eui) => {
+                let disable_eui_for_batch = eui
+                    && positions.iter().any(|(wid, _)| {
+                        self.windows.get(wid).is_some_and(|window| !window.is_animating)
+                    });
+
+                if disable_eui_for_batch {
+                    let _ = self.app.set_bool_attribute("AXEnhancedUserInterface", false);
+                }
+
+                for (wid, position) in positions {
+                    let (elem, is_animating) = match self.window_mut(wid) {
+                        Ok(window) => {
+                            window.last_seen_txid = txid;
+                            (window.elem.clone(), window.is_animating)
+                        }
+                        Err(err) => match err {
+                            AxError::Ax(code) => {
+                                if self.handle_ax_error(wid, &code) {
+                                    continue;
+                                }
+                                return Err(AxError::Ax(code));
+                            }
+                            AxError::NotFound => continue,
+                        },
+                    };
+
+                    if disable_eui_for_batch {
+                        let _ = elem.set_position(position);
+                    } else if eui && !is_animating {
+                        let _ =
+                            with_enhanced_ui_disabled(&self.app, || elem.set_position(position));
+                    } else {
+                        let _ = elem.set_position(position);
+                    }
+
+                    // Preserve the existing per-window acknowledgement semantics. In
+                    // particular, report the frame AX actually accepted rather than the
+                    // requested position combined with a cached size.
+                    let frame =
+                        match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
+                            Some(frame) => frame,
+                            None => continue,
+                        };
+
+                    self.send_event(Event::WindowFrameChanged(
+                        wid,
                         frame,
                         Some(txid),
                         Requested(true),

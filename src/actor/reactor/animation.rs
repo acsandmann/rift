@@ -273,7 +273,31 @@ impl AnimationManager {
         layout: &[(WindowId, CGRect)],
         skip_wid: Option<WindowId>,
     ) -> bool {
-        let mut per_app: HashMap<pid_t, Vec<(WindowId, CGRect)>> = HashMap::default();
+        Self::instant_layout_inner(reactor, space, layout, skip_wid, false)
+    }
+
+    /// Apply the position-only layout used while switching virtual workspaces.
+    ///
+    /// Keep this entry point separate from `instant_layout`: layouts merely suppressed
+    /// while a switch is in progress may still change window sizes and must use the
+    /// full-frame request.
+    pub fn workspace_switch_layout(
+        reactor: &mut Reactor,
+        space: SpaceId,
+        layout: &[(WindowId, CGRect)],
+        skip_wid: Option<WindowId>,
+    ) -> bool {
+        Self::instant_layout_inner(reactor, space, layout, skip_wid, true)
+    }
+
+    fn instant_layout_inner(
+        reactor: &mut Reactor,
+        space: SpaceId,
+        layout: &[(WindowId, CGRect)],
+        skip_wid: Option<WindowId>,
+        position_only: bool,
+    ) -> bool {
+        let mut per_app: HashMap<pid_t, Vec<(WindowId, CGRect, bool)>> = HashMap::default();
         let mut any_frame_changed = false;
 
         for &(wid, target_frame) in layout {
@@ -316,7 +340,8 @@ impl AnimationManager {
                 "Instant workspace positioning"
             );
 
-            per_app.entry(wid.pid).or_default().push((wid, target_frame));
+            let size_unchanged = current_frame.size.same_as(target_frame.size);
+            per_app.entry(wid.pid).or_default().push((wid, target_frame, size_unchanged));
             window.frame_monotonic = target_frame;
         }
 
@@ -332,7 +357,7 @@ impl AnimationManager {
 
             let handle = app_state.handle.clone();
 
-            let (first_wid, first_target) = frames[0];
+            let (first_wid, first_target, _) = frames[0];
             let mut txid = TransactionId::default();
             let mut has_txid = false;
             let mut txid_entries: Vec<(WindowServerId, TransactionId, CGRect)> = Vec::new();
@@ -345,7 +370,7 @@ impl AnimationManager {
             }
 
             if has_txid {
-                for (wid, frame) in frames.iter().skip(1) {
+                for (wid, frame, _) in frames.iter().skip(1) {
                     if let Some(w) = reactor.state.windows.window_mut(*wid)
                         && let Some(wsid) = w.info.sys_id
                     {
@@ -356,14 +381,41 @@ impl AnimationManager {
                 reactor.transaction_manager.update_txid_entries(txid_entries);
             }
 
-            let frames_to_send = frames.clone();
-            if let Err(e) = handle.send(Request::SetBatchWindowFrame(frames_to_send, txid, true)) {
-                debug!(
-                    ?pid,
-                    ?e,
-                    "Failed to send batch frame request - app may have quit"
-                );
-                continue;
+            let requests = if position_only {
+                let mut positions = Vec::new();
+                let mut full_frames = Vec::new();
+                for (wid, frame, size_unchanged) in frames {
+                    if size_unchanged {
+                        positions.push((wid, frame.origin));
+                    } else {
+                        full_frames.push((wid, frame));
+                    }
+                }
+
+                let mut requests = Vec::with_capacity(2);
+                if !positions.is_empty() {
+                    requests.push(Request::SetWorkspaceSwitchPositions(positions, txid, true));
+                }
+                if !full_frames.is_empty() {
+                    requests.push(Request::SetBatchWindowFrame(full_frames, txid, true));
+                }
+                requests
+            } else {
+                vec![Request::SetBatchWindowFrame(
+                    frames.into_iter().map(|(wid, frame, _)| (wid, frame)).collect(),
+                    txid,
+                    true,
+                )]
+            };
+            for request in requests {
+                if let Err(e) = handle.send(request) {
+                    debug!(
+                        ?pid,
+                        ?e,
+                        "Failed to send instant layout request - app may have quit"
+                    );
+                    break;
+                }
             }
         }
 
