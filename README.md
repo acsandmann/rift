@@ -54,7 +54,7 @@ Get up and running via the wiki:
 <br>
 
 ## Status
-Rift is in active development but is still generally stable. There is no official release yet; expect ongoing changes.
+Rift is a stable, reliable, and performant window manager used by many. It is still in development and thus new features, optimizations, and general improvements are regularly released, but is more than good enough for daily use.
 
 > Issues and PRs are very welcome.
 
