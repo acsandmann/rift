@@ -8,6 +8,7 @@ use super::TransactionId;
 use crate::actor::app::{AppThreadHandle, Request, WindowId, pid_t};
 use crate::actor::reactor::Reactor;
 use crate::common::collections::HashMap;
+use crate::common::config::Config;
 use crate::sys::geometry::{Round, SameAs};
 use crate::sys::power;
 use crate::sys::screen::SpaceId;
@@ -148,7 +149,7 @@ impl AnimationManager {
         let Some(active_ws) = reactor.layout_manager.layout_engine.active_workspace(space) else {
             return false;
         };
-        let mut anim = Animation::new();
+        let mut anim = Animation::new(reactor.config.clone());
         let mut animated_count = 0;
         let mut any_frame_changed = false;
 
@@ -458,13 +459,14 @@ impl ActiveAnimation {
 }
 
 impl Animation {
-    pub fn new() -> Self {
-        const FPS: f64 = 100.0;
-        const DURATION: f64 = 0.30;
-        let interval = Duration::from_secs_f64(1.0 / FPS);
+    pub fn new(config: Config) -> Self {
+        //const FPS: f64 = 100.0;
+        //const DURATION: f64 = 0.30;
+        let interval = Duration::from_secs_f64(1.0 / config.settings.animation_fps);
         Self {
             interval,
-            frames: (DURATION * FPS).round() as u32,
+            frames: (config.settings.animation_duration * config.settings.animation_fps).round()
+                as u32,
             windows: vec![],
             handled_windows: vec![],
         }
@@ -633,8 +635,10 @@ mod tests {
         CGRect::new(CGPoint::new(origin_x, origin_y), CGSize::new(width, height))
     }
 
+    fn config() -> Config { Config::default() }
+
     fn animation(handle: &AppThreadHandle, wid: WindowId, from: CGRect, to: CGRect) -> Animation {
-        let mut animation = Animation::new();
+        let mut animation = Animation::new(config());
         animation.add_window(handle, wid, from, to, false, TransactionId::default());
         animation
     }
@@ -747,7 +751,7 @@ mod tests {
         let wid1 = WindowId::new(1, 1);
         let wid2 = WindowId::new(1, 2);
         let wid3 = WindowId::new(1, 3);
-        let mut first = Animation::new();
+        let mut first = Animation::new(config());
         first.add_window(
             &handle,
             wid1,
@@ -764,7 +768,7 @@ mod tests {
             false,
             TransactionId::default(),
         );
-        let mut second = Animation::new();
+        let mut second = Animation::new(config());
         second.add_window(
             &handle,
             wid1,
@@ -810,7 +814,7 @@ mod tests {
         let handle = AppThreadHandle::new_for_test(tx);
         let wid1 = WindowId::new(1, 1);
         let wid2 = WindowId::new(1, 2);
-        let mut first = Animation::new();
+        let mut first = Animation::new(config());
         first.add_window(
             &handle,
             wid1,
@@ -827,7 +831,7 @@ mod tests {
             false,
             TransactionId::default(),
         );
-        let mut second = Animation::new();
+        let mut second = Animation::new(config());
         second.add_window(
             &handle,
             wid1,
