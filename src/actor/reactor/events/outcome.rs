@@ -65,7 +65,7 @@ pub(crate) struct EventOutcome {
     pub(crate) drag_swap_evaluations: Vec<(WindowId, CGRect)>,
     pub(crate) dispatch_mouse_up: bool,
     pub(crate) close_window: Option<Option<WindowServerId>>,
-    pub(crate) service_config_update: Option<(Config, bool)>,
+    pub(crate) service_config_update: Option<Config>,
     pub(crate) stdout_lines: Vec<String>,
     pub(crate) reapply_app_rules: Vec<WindowId>,
     pub(crate) finalize_created_windows: Vec<WindowId>,
@@ -375,8 +375,8 @@ impl EventOutcome {
         self
     }
 
-    pub(crate) fn with_service_config_update(mut self, config: Config, keys_changed: bool) -> Self {
-        self.service_config_update = Some((config, keys_changed));
+    pub(crate) fn with_service_config_update(mut self, config: Config) -> Self {
+        self.service_config_update = Some(config);
         self
     }
 

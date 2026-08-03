@@ -4,12 +4,44 @@ use test_log::test;
 use super::testing::*;
 use super::*;
 use crate::actor::app::{AppThreadHandle, Request, pid_t};
+use crate::actor::wm_controller::WmEvent;
 use crate::common::config::{LayoutMode, OuterGaps, WorkspaceSelector};
 use crate::layout_engine::{Direction, LayoutCommand, LayoutEvent};
 use crate::model::window_store::NativeFullscreenTransition;
 use crate::sys::app::{AppInfo, WindowInfo};
 use crate::sys::geometry::SameAs;
 use crate::sys::window_server::WindowServerId;
+
+#[test]
+fn config_reload_propagates_non_keybinding_changes_to_wm_controller() {
+    let mut reactor = test_reactor();
+    let (wm_tx, mut wm_rx) = actor::channel();
+    reactor.communication_manager.wm_sender = Some(wm_tx);
+
+    let mut updated = reactor.config.clone();
+    updated.settings.focus_follows_mouse = !updated.settings.focus_follows_mouse;
+    updated.settings.mouse_follows_focus = !updated.settings.mouse_follows_focus;
+    updated.settings.mouse_hides_on_focus = !updated.settings.mouse_hides_on_focus;
+
+    reactor.handle_event(Event::ConfigUpdated(updated.clone()));
+
+    let (_, event) = wm_rx.try_recv().expect("config update should reach wm controller");
+    let WmEvent::ConfigUpdated(actual) = event else {
+        panic!("expected config update, got {event:?}");
+    };
+    assert_eq!(
+        actual.settings.focus_follows_mouse,
+        updated.settings.focus_follows_mouse
+    );
+    assert_eq!(
+        actual.settings.mouse_follows_focus,
+        updated.settings.mouse_follows_focus
+    );
+    assert_eq!(
+        actual.settings.mouse_hides_on_focus,
+        updated.settings.mouse_hides_on_focus
+    );
+}
 
 #[test]
 fn it_ignores_stale_resize_events() {

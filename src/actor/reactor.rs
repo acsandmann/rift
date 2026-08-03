@@ -2028,7 +2028,7 @@ impl Reactor {
             }
         }
 
-        if let Some((config, keys_changed)) = outcome.service_config_update {
+        if let Some(config) = outcome.service_config_update {
             if let Some(tx) = &self.communication_manager.stack_line_tx
                 && let Err(error) = tx.try_send(stack_line::Event::ConfigUpdated(config.clone()))
             {
@@ -2039,7 +2039,7 @@ impl Reactor {
             {
                 warn!(%error, "failed to update menu bar config");
             }
-            if keys_changed && let Some(wm) = &self.communication_manager.wm_sender {
+            if let Some(wm) = &self.communication_manager.wm_sender {
                 wm.send(crate::actor::wm_controller::WmEvent::ConfigUpdated(config));
             }
         }

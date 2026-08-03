@@ -192,7 +192,6 @@ pub fn handle_config_updated(
     drag: &mut DragManager,
     new_config: Config,
 ) -> anyhow::Result<EventOutcome> {
-    let keys_changed = config.keys != new_config.keys;
     *config = new_config;
     layout.layout_engine.set_layout_settings(&config.settings.layout);
 
@@ -202,10 +201,7 @@ pub fn handle_config_updated(
 
     drag.update_config(config.settings.window_snapping);
 
-    Ok(
-        EventOutcome::layout_changed(false)
-            .with_service_config_update(config.clone(), keys_changed),
-    )
+    Ok(EventOutcome::layout_changed(false).with_service_config_update(config.clone()))
 }
 
 pub fn handle_command_reactor_debug(
