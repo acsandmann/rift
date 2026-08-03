@@ -124,4 +124,31 @@ mod tests {
 
         assert_eq!(response.into_result().unwrap()[0].name, "main");
     }
+
+    #[test]
+    fn legacy_stringified_reactor_commands_still_decode() {
+        let request: RiftRequest = serde_json::from_value(serde_json::json!({
+            "execute_command": {
+                "command": "{\"Reactor\":{\"switch_to_workspace\":5}}",
+                "args": []
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(request, RiftRequest::ExecuteCommand {
+            command: RiftCommand::Layout(LayoutCommand::SwitchToWorkspace(5)),
+        });
+    }
+
+    #[test]
+    fn legacy_window_id_strings_still_decode() {
+        let request: RiftRequest = serde_json::from_value(serde_json::json!({
+            "get_window_info": { "window_id": "WindowId { pid: 42, idx: 7 }" }
+        }))
+        .unwrap();
+
+        assert_eq!(request, RiftRequest::GetWindowInfo {
+            window_id: WindowId::new(42, 7).unwrap(),
+        });
+    }
 }

@@ -1,9 +1,74 @@
-use serde::{Deserialize, Serialize};
+use std::fmt;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+use serde::de::{self, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize)]
 pub struct WindowId {
     pub pid: i32,
     pub idx: u32,
+}
+
+impl<'de> Deserialize<'de> for WindowId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: Deserializer<'de> {
+        struct WindowIdVisitor;
+
+        impl<'de> Visitor<'de> for WindowIdVisitor {
+            type Value = WindowId;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str(
+                    "a window id object, tuple, or debug string like `WindowId { pid: 123, idx: 456 }`",
+                )
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where E: de::Error {
+                let value = value
+                    .strip_prefix("WindowId { pid: ")
+                    .and_then(|value| value.strip_suffix(" }"))
+                    .ok_or_else(|| E::custom("invalid WindowId debug string"))?;
+                let (pid, idx) = value
+                    .split_once(", idx: ")
+                    .ok_or_else(|| E::custom("invalid WindowId debug string"))?;
+                let pid = pid.parse().map_err(|_| E::custom("invalid WindowId pid"))?;
+                let idx = idx.parse().map_err(|_| E::custom("invalid WindowId idx"))?;
+                WindowId::new(pid, idx).ok_or_else(|| E::custom("window id index must be non-zero"))
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where A: SeqAccess<'de> {
+                let pid =
+                    sequence.next_element()?.ok_or_else(|| de::Error::invalid_length(0, &self))?;
+                let idx =
+                    sequence.next_element()?.ok_or_else(|| de::Error::invalid_length(1, &self))?;
+                WindowId::new(pid, idx)
+                    .ok_or_else(|| de::Error::custom("window id index must be non-zero"))
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where A: MapAccess<'de> {
+                let mut pid = None;
+                let mut idx = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "pid" => pid = Some(map.next_value()?),
+                        "idx" => idx = Some(map.next_value()?),
+                        _ => {
+                            let _: de::IgnoredAny = map.next_value()?;
+                        }
+                    }
+                }
+                let pid = pid.ok_or_else(|| de::Error::missing_field("pid"))?;
+                let idx = idx.ok_or_else(|| de::Error::missing_field("idx"))?;
+                WindowId::new(pid, idx)
+                    .ok_or_else(|| de::Error::custom("window id index must be non-zero"))
+            }
+        }
+
+        deserializer.deserialize_any(WindowIdVisitor)
+    }
 }
 
 impl WindowId {

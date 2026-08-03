@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
+use serde::de::Error as DeError;
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 use crate::WindowId;
@@ -68,7 +69,7 @@ pub enum DisplaySelector {
 pub enum LayoutCommand {
     NextWindow,
     PrevWindow,
-    MoveFocus(Direction),
+    MoveFocus(#[serde(rename = "direction")] Direction),
     Ascend,
     Descend,
     MoveNode(Direction),
@@ -214,11 +215,82 @@ pub enum AnimationEasing {
     EaseInOutCirc,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RiftCommand {
     Layout(LayoutCommand),
     Metrics(MetricsCommand),
     Reactor(ReactorCommand),
     Config(ConfigCommand),
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TypedRiftCommand {
+    Layout(LayoutCommand),
+    Metrics(MetricsCommand),
+    Reactor(ReactorCommand),
+    Config(ConfigCommand),
+}
+
+#[derive(Deserialize)]
+enum LegacyCommand {
+    #[serde(alias = "reactor")]
+    Reactor(LegacyReactorCommand),
+    #[serde(alias = "config")]
+    Config(ConfigCommand),
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum LegacyReactorCommand {
+    Layout(LayoutCommand),
+    Metrics(MetricsCommand),
+    Reactor(ReactorCommand),
+}
+
+impl From<TypedRiftCommand> for RiftCommand {
+    fn from(command: TypedRiftCommand) -> Self {
+        match command {
+            TypedRiftCommand::Layout(command) => Self::Layout(command),
+            TypedRiftCommand::Metrics(command) => Self::Metrics(command),
+            TypedRiftCommand::Reactor(command) => Self::Reactor(command),
+            TypedRiftCommand::Config(command) => Self::Config(command),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RiftCommand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: Deserializer<'de> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum CommandInput {
+            Typed(TypedRiftCommand),
+            LegacyJson(String),
+        }
+
+        match CommandInput::deserialize(deserializer)? {
+            CommandInput::Typed(command) => Ok(command.into()),
+            CommandInput::LegacyJson(command) => decode_legacy_command(&command),
+        }
+    }
+}
+
+fn decode_legacy_command<E>(command: &str) -> Result<RiftCommand, E>
+where E: DeError {
+    match serde_json::from_str::<LegacyCommand>(command)
+        .map_err(|error| E::custom(format!("invalid legacy command JSON: {error}")))?
+    {
+        LegacyCommand::Config(command) => Ok(RiftCommand::Config(command)),
+        LegacyCommand::Reactor(LegacyReactorCommand::Layout(command)) => {
+            Ok(RiftCommand::Layout(command))
+        }
+        LegacyCommand::Reactor(LegacyReactorCommand::Metrics(command)) => {
+            Ok(RiftCommand::Metrics(command))
+        }
+        LegacyCommand::Reactor(LegacyReactorCommand::Reactor(command)) => {
+            Ok(RiftCommand::Reactor(command))
+        }
+    }
 }
