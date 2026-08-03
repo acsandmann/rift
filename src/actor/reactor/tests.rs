@@ -359,6 +359,24 @@ fn workspace_switch_arrange_is_scoped_to_its_command_space() {
 }
 
 #[test]
+fn no_op_workspace_switch_does_not_request_arrangement() {
+    let mut reactor = test_reactor();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1440., 900.));
+    let space = SpaceId::new(1);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+
+    let already_active = reactor.dispatch_test_layout_command(LayoutCommand::SwitchToWorkspace(0));
+    assert!(!already_active.arrange.requested);
+    assert!(already_active.layout_responses.is_empty());
+
+    let missing =
+        reactor.dispatch_test_layout_command(LayoutCommand::SwitchToWorkspace(usize::MAX));
+    assert!(!missing.arrange.requested);
+    assert!(missing.layout_responses.is_empty());
+}
+
+#[test]
 fn command_space_only_snapshot_does_not_trigger_full_space_reconcile() {
     let (mut apps, mut reactor) = test_context();
     let left = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
@@ -1991,6 +2009,7 @@ fn handle_layout_response_groups_windows_by_app_and_screen() {
 
     reactor.handle_layout_response(
         layout::EventResponse {
+            changed: true,
             raise_windows: vec![
                 WindowId::new(1, 1),
                 WindowId::new(1, 2),
@@ -2035,6 +2054,7 @@ fn handle_layout_response_includes_handles_for_raise_and_focus_windows() {
     while raise_manager_rx.try_recv().is_ok() {}
     reactor.handle_layout_response(
         layout::EventResponse {
+            changed: true,
             raise_windows: vec![WindowId::new(1, 1)],
             focus_window: Some(WindowId::new(2, 1)),
             boundary_hit: None,

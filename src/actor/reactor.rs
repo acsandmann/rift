@@ -3629,6 +3629,7 @@ impl Reactor {
                 RefocusState::None => None,
             };
         let layout::EventResponse {
+            changed: _,
             raise_windows,
             mut focus_window,
             boundary_hit,
