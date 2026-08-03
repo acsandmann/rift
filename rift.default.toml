@@ -22,6 +22,7 @@ animation_fps = 100.0
 # - focus_follows_mouse: moving the mouse into a window focuses it
 # - mouse_follows_focus: when focus changes, move the mouse to the focused window
 # - mouse_hides_on_focus: hide the mouse cursor after focusing a window
+# 	(this only works with mouse_follows_focus=true)
 focus_follows_mouse = true
 mouse_follows_focus = true
 mouse_hides_on_focus = true

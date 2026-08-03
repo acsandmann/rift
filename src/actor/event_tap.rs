@@ -51,6 +51,7 @@ const MOUSE_MOVE_MIN_INTERVAL_NS_LOW_POWER: u64 = 16_000_000; // 16ms ~= 62 Hz
 #[derive(Debug)]
 pub enum Request {
     Warp(CGPoint),
+    HideOnFocus,
     EnforceHidden,
     SpaceStateUpdated(ForwardedSpaceState, CoordinateConverter),
     SetEventProcessing(bool),
@@ -366,6 +367,12 @@ impl EventTap {
                 }
                 if state.mouse_hides_on_focus && state.hide_count == 0 {
                     debug!("Hiding mouse");
+                    state.hide_mouse();
+                }
+            }
+            Request::HideOnFocus => {
+                if state.mouse_hides_on_focus && state.hide_count == 0 {
+                    debug!("Hiding mouse after window focus changed");
                     state.hide_mouse();
                 }
             }

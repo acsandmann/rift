@@ -1117,6 +1117,9 @@ impl Reactor {
             }
             Event::WindowServerFocusChanged(window, reported_space) => {
                 if self.layout_manager.layout_engine.focused_window() == Some(window) {
+                    if let Some(event_tap_tx) = &self.communication_manager.event_tap_tx {
+                        _ = event_tap_tx.send(crate::actor::event_tap::Request::EnforceHidden);
+                    }
                     return Ok(EventOutcome::default());
                 }
                 if !self.state.windows.contains_window(window) {
@@ -3265,6 +3268,11 @@ impl Reactor {
     }
 
     fn send_layout_event(&mut self, event: LayoutEvent) {
+        let focus_changed = matches!(
+            &event,
+            LayoutEvent::WindowFocused(_, window)
+                if self.layout_manager.layout_engine.focused_window() != Some(*window)
+        );
         let event_space = match &event {
             LayoutEvent::WindowFocused(space, _) => Some(*space),
             _ => None,
@@ -3277,6 +3285,9 @@ impl Reactor {
         let event_clone = event.clone();
         let response =
             self.layout_manager.layout_engine.handle_event(&mut self.state.windows, event);
+        if focus_changed && let Some(event_tap_tx) = &self.communication_manager.event_tap_tx {
+            _ = event_tap_tx.send(crate::actor::event_tap::Request::HideOnFocus);
+        }
         let geometry_changed = response.changed;
         self.prepare_refocus_after_layout_event(&event_clone);
         self.handle_layout_response(response, None);

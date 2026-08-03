@@ -2749,6 +2749,39 @@ fn stale_menu_open_state_is_cleared_when_other_app_activates() {
 }
 
 #[test]
+fn same_app_focus_change_hides_mouse_and_window_server_confirmation_reasserts_it() {
+    let (mut apps, mut reactor) = test_context();
+    let (event_tap_tx, mut event_tap_rx) = actor::channel();
+    reactor.communication_manager.event_tap_tx = Some(event_tap_tx);
+
+    let space = SpaceId::new(1);
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let first = WindowId::new(1, 1);
+    let second = WindowId::new(1, 2);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    apps.make_app_and_settle(&mut reactor, 1, make_windows(2));
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, first));
+    while event_tap_rx.try_recv().is_ok() {}
+
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, second));
+
+    let request = event_tap_rx.try_recv().expect("same-app focus change should hide mouse").1;
+    assert!(matches!(request, crate::actor::event_tap::Request::HideOnFocus));
+
+    reactor.handle_event(Event::WindowServerFocusChanged(second, space));
+
+    let request = event_tap_rx
+        .try_recv()
+        .expect("WindowServer focus confirmation should reassert hidden mouse")
+        .1;
+    assert!(matches!(
+        request,
+        crate::actor::event_tap::Request::EnforceHidden
+    ));
+}
+
+#[test]
 fn it_retains_windows_without_server_ids_after_login_visibility_failure() {
     let (mut apps, mut reactor) = test_context();
     let space = SpaceId::new(1);
