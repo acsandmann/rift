@@ -1,6 +1,6 @@
 #[cfg(test)]
 use std::cell::RefCell;
-use std::ffi::{CStr, c_int, c_void};
+use std::ffi::{CStr, c_int};
 use std::num::NonZeroU32;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,9 +14,8 @@ use objc2_core_foundation::{
     CGSize, Type, kCFBooleanTrue,
 };
 use objc2_core_graphics::{
-    CGBitmapInfo, CGColorSpace, CGContext, CGError, CGImage, CGInterpolationQuality, CGWindowID,
-    CGWindowListCopyWindowInfo, CGWindowListOption, kCGNullWindowID, kCGWindowLayer, kCGWindowName,
-    kCGWindowOwnerName,
+    CGError, CGWindowID, CGWindowListCopyWindowInfo, CGWindowListOption, kCGNullWindowID,
+    kCGWindowLayer, kCGWindowName, kCGWindowOwnerName,
 };
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -885,106 +884,6 @@ pub fn app_window_suitable(id: WindowServerId) -> bool {
 
 pub fn space_is_user(sid: u64) -> bool { unsafe { SLSSpaceGetType(*G_CONNECTION, sid) == 0 } }
 pub fn space_is_fullscreen(sid: u64) -> bool { unsafe { SLSSpaceGetType(*G_CONNECTION, sid) == 4 } }
-
-#[derive(Clone)]
-pub struct CapturedWindowImage(CFRetained<CGImage>);
-
-impl CapturedWindowImage {
-    #[inline]
-    pub fn as_ptr(&self) -> *mut CGImage { CFRetained::as_ptr(&self.0).as_ptr() }
-
-    #[inline]
-    pub fn cg_image(&self) -> &CGImage { self.0.as_ref() }
-}
-
-#[link(name = "CoreGraphics", kind = "framework")]
-unsafe extern "C" {
-    pub fn CGBitmapContextCreate(
-        data: *mut c_void,
-        width: usize,
-        height: usize,
-        bits_per_component: usize,
-        bytes_per_row: usize,
-        space: *mut CGColorSpace,
-        bitmap_info: CGBitmapInfo,
-    ) -> *mut CGContext;
-
-    pub fn CGBitmapContextCreateImage(c: *mut CGContext) -> *mut CGImage;
-}
-
-fn capture_window(id: WindowServerId) -> Option<CapturedWindowImage> {
-    unsafe {
-        let imgs_ref = SLSHWCaptureWindowList(
-            *G_CONNECTION,
-            &id.as_u32() as *const u32,
-            1,
-            (1 << 11) | (1 << 9) | (1 << 19),
-        );
-        if imgs_ref.is_null() {
-            return None;
-        }
-
-        let imgs = CFRetained::from_raw(NonNull::new_unchecked(imgs_ref));
-        if let Some(img) = imgs.get(0) {
-            return Some(CapturedWindowImage(img));
-        }
-
-        None
-    }
-}
-
-pub fn capture_window_image(
-    id: WindowServerId,
-    target_w: usize,
-    target_h: usize,
-) -> Option<CapturedWindowImage> {
-    let img = capture_window(id)?;
-    resize_cgimage_fit(img.cg_image(), target_w, target_h)
-}
-
-pub fn resize_cgimage_fit(
-    src: &CGImage,
-    target_w: usize,
-    target_h: usize,
-) -> Option<CapturedWindowImage> {
-    unsafe {
-        let src_w = CGImage::width(Some(src)) as f64;
-        let src_h = CGImage::height(Some(src)) as f64;
-        if src_w <= 0.0 || src_h <= 0.0 {
-            return None;
-        }
-
-        let mut max_w = target_w.max(1) as f64;
-        let mut max_h = target_h.max(1) as f64;
-        max_w = max_w.min(src_w);
-        max_h = max_h.min(src_h);
-
-        let scale = (max_w / src_w).min(max_h / src_h);
-        let dst_w = (src_w * scale).round().max(1.0) as usize;
-        let dst_h = (src_h * scale).round().max(1.0) as usize;
-
-        let cs = CGColorSpace::new_device_rgb()?;
-        let ctx = CFRetained::from_raw(NonNull::new_unchecked(CGBitmapContextCreate(
-            std::ptr::null_mut(),
-            dst_w,
-            dst_h,
-            8,
-            0,
-            CFRetained::as_ptr(&cs).as_ptr(),
-            // kCGImageAlphaPremultipliedFirst = 2
-            // kCGBitmapByteOrder32Little = 2 << 12
-            CGBitmapInfo(2u32 | 2 << 12),
-        )));
-
-        CGContext::set_interpolation_quality(Some(ctx.as_ref()), CGInterpolationQuality::None);
-
-        let dst = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(dst_w as f64, dst_h as f64));
-        CGContext::draw_image(Some(ctx.as_ref()), dst, Some(src));
-
-        let out = CGBitmapContextCreateImage(CFRetained::as_ptr(&ctx).as_ptr());
-        NonNull::new(out as *mut CGImage).map(|p| CapturedWindowImage(CFRetained::from_raw(p)))
-    }
-}
 
 // credit: https://github.com/Hammerspoon/hammerspoon/issues/370#issuecomment-545545468
 pub fn make_key_window(pid: pid_t, wsid: WindowServerId) -> Result<(), CGError> {

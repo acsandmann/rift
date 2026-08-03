@@ -1,7 +1,9 @@
+use core::ffi::c_void;
 use std::fmt;
 use std::ptr::{self, NonNull};
 
-use objc2_core_foundation::{CFNumber, CFRetained, CFString, CFType, CGPoint, CGRect, Type};
+use nix::libc;
+use objc2_core_foundation::{CFRetained, CFString, CFType, CGPoint, CGRect, Type};
 use objc2_core_graphics::CGError;
 
 use super::skylight::{
@@ -219,18 +221,21 @@ impl CgsWindow {
     }
 
     #[inline]
-    pub fn bind_to_context(&self, context_id: u32) -> Result<(), CgsWindowError> {
-        let key = CFString::from_str("CAContextID");
-        let value = CFNumber::new_i32(context_id as i32);
-        unsafe {
-            cg_ok(SLSSetWindowProperty(
-                self.connection,
-                self.id,
-                CFRetained::<CFString>::as_ptr(&key).as_ptr(),
-                CFRetained::<CFNumber>::as_ptr(&value).as_ptr() as *mut CFType,
-            ))
-            .map_err(CgsWindowError::Property)
+    /// Bind a private `CAContext` to this raw WindowServer window.
+    ///
+    /// # Safety
+    /// `context` must point to a live `CAContext` for the duration of the binding.
+    pub unsafe fn bind_layer_context(&self, context: *mut c_void) -> Result<(), CgsWindowError> {
+        type BindLayerContext = unsafe extern "C" fn(cid_t, u32, *mut c_void) -> CGError;
+
+        let symbol =
+            unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"SLSSetWindowLayerContext".as_ptr()) };
+        if symbol.is_null() {
+            return Err(CgsWindowError::Property(CGError(1000)));
         }
+
+        let bind: BindLayerContext = unsafe { std::mem::transmute(symbol) };
+        unsafe { cg_ok(bind(self.connection, self.id, context)) }.map_err(CgsWindowError::Property)
     }
 
     #[inline]
