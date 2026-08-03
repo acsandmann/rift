@@ -15,7 +15,7 @@ use std::vec::Vec;
 
 use tracing::{debug, error, info};
 
-const MAX_MESSAGE_SIZE: u32 = 16_384;
+const MAX_MESSAGE_SIZE: u32 = 262_144;
 const MACH_BS_NAME_FMT_PREFIX: &str = "git.";
 static G_NAME: &str = "acsandmann.rift";
 
