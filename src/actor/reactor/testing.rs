@@ -28,6 +28,118 @@ impl Reactor {
             self.handle_event(event);
         }
     }
+
+    pub fn add_test_app(&mut self, pid: pid_t) {
+        self.add_test_app_with_info(pid, "com.test.app", "Test App");
+    }
+
+    pub fn add_test_app_with_info(&mut self, pid: pid_t, bundle_id: &str, name: &str) {
+        let (app_tx, _app_rx) = actor::channel();
+        self.app_manager.apps.insert(pid, super::AppState {
+            info: AppInfo {
+                bundle_id: Some(bundle_id.to_string()),
+                localized_name: Some(name.to_string()),
+            },
+            handle: AppThreadHandle::new_for_test(app_tx),
+        });
+    }
+
+    pub fn add_test_window(
+        &mut self,
+        wid: WindowId,
+        wsid: WindowServerId,
+        space: Option<SpaceId>,
+        frame: CGRect,
+    ) {
+        self.add_test_window_with_manageability(wid, wsid, space, frame, true);
+    }
+
+    pub fn add_test_window_with_manageability(
+        &mut self,
+        wid: WindowId,
+        wsid: WindowServerId,
+        space: Option<SpaceId>,
+        frame: CGRect,
+        is_manageable: bool,
+    ) {
+        self.track_test_window_server_info(wsid, wid.pid, frame);
+        self.state.windows.mark_window_visible(wsid);
+        self.insert_test_window(wid, wsid, space, frame, is_manageable);
+    }
+
+    pub fn track_test_window_server_info(
+        &mut self,
+        wsid: WindowServerId,
+        pid: pid_t,
+        frame: CGRect,
+    ) {
+        self.state.windows.track_window_server_info(WindowServerInfo {
+            id: wsid,
+            pid,
+            layer: 0,
+            frame,
+            min_frame: frame.size,
+            max_frame: frame.size,
+        });
+    }
+
+    pub fn insert_test_window(
+        &mut self,
+        wid: WindowId,
+        wsid: WindowServerId,
+        space: Option<SpaceId>,
+        frame: CGRect,
+        is_manageable: bool,
+    ) {
+        self.state.windows.track_window_server_id(wsid, wid);
+        self.state.windows.set_window_server_space(wsid, space);
+        self.insert_test_window_state(wid, frame, Some(wsid), is_manageable);
+    }
+
+    pub fn insert_test_window_state(
+        &mut self,
+        wid: WindowId,
+        frame: CGRect,
+        sys_id: Option<WindowServerId>,
+        is_manageable: bool,
+    ) {
+        self.state.windows.insert_window(wid, super::WindowState {
+            info: WindowInfo {
+                is_standard: true,
+                is_root: true,
+                is_minimized: false,
+                is_resizable: true,
+                min_size: None,
+                max_size: None,
+                title: format!("Window {wid:?}"),
+                frame,
+                sys_id,
+                bundle_id: None,
+                path: None,
+                ax_role: None,
+                ax_subrole: None,
+            },
+            frame_monotonic: frame,
+            is_manageable,
+            ignore_app_rule: false,
+        });
+    }
+}
+
+/// The default reactor used by the tests. Keep the individual tests focused on
+/// the behavior they exercise instead of repeating the production wiring.
+pub fn test_reactor() -> Reactor {
+    test_reactor_with_workspace_settings(&crate::common::config::VirtualWorkspaceSettings::default())
+}
+
+pub fn test_reactor_with_workspace_settings(
+    workspace_settings: &crate::common::config::VirtualWorkspaceSettings,
+) -> Reactor {
+    Reactor::new_for_test(LayoutEngine::new(
+        workspace_settings,
+        &crate::common::config::LayoutSettings::default(),
+        None,
+    ))
 }
 
 pub fn make_screen_snapshots(frames: Vec<CGRect>, spaces: Vec<Option<SpaceId>>) -> Vec<ScreenInfo> {
@@ -50,10 +162,24 @@ pub fn space_state_event(frames: Vec<CGRect>, spaces: Vec<Option<SpaceId>>) -> E
     space_state_event_from_screens(make_screen_snapshots(frames, spaces))
 }
 
+pub fn space_state_event_with(
+    frames: Vec<CGRect>,
+    spaces: Vec<Option<SpaceId>>,
+    update: impl FnOnce(&mut ForwardedSpaceState),
+) -> Event {
+    let mut state = forwarded_space_state(make_screen_snapshots(frames, spaces));
+    update(&mut state);
+    Event::SpaceStateChanged(state)
+}
+
 pub fn space_state_event_from_screens(screens: Vec<ScreenInfo>) -> Event {
+    Event::SpaceStateChanged(forwarded_space_state(screens))
+}
+
+pub fn forwarded_space_state(screens: Vec<ScreenInfo>) -> ForwardedSpaceState {
     let command_space = screens.iter().find_map(|screen| screen.space);
     let active_spaces = screens.iter().filter_map(|screen| screen.space).collect();
-    Event::SpaceStateChanged(ForwardedSpaceState {
+    ForwardedSpaceState {
         screens,
         fullscreen_spaces: Default::default(),
         has_seen_display_set: false,
@@ -72,7 +198,31 @@ pub fn space_state_event_from_screens(screens: Vec<ScreenInfo>) -> Event {
         resized_spaces: Vec::new(),
         topology_window_delta: None,
         active_window_spaces: Default::default(),
-    })
+    }
+}
+
+pub fn fullscreen_startup_space_state(
+    screen: CGRect,
+    display_uuid: String,
+    user_space: SpaceId,
+    fullscreen_space: SpaceId,
+) -> Event {
+    let mut state = forwarded_space_state(vec![ScreenInfo {
+        id: crate::sys::screen::ScreenId::new(0),
+        frame: screen,
+        space: None,
+        display_uuid,
+        name: None,
+    }]);
+    state.fullscreen_spaces.insert(fullscreen_space);
+    state.has_seen_display_set = true;
+    state.active_spaces.clear();
+    state.menu_bar_space = None;
+    state.command_space = None;
+    state
+        .last_user_space_by_display
+        .insert(state.screens[0].display_uuid.clone(), user_space);
+    Event::SpaceStateChanged(state)
 }
 
 /*impl Drop for Reactor {
@@ -98,6 +248,24 @@ pub fn space_state_event_from_screens(screens: Vec<ScreenInfo>) -> Event {
 }*/
 
 pub fn make_window(idx: usize) -> WindowInfo {
+    let window = make_window_info(
+        CGRect::new(
+            CGPoint::new(100.0 * f64::from(idx as u32), 100.0),
+            CGSize::new(50.0, 50.0),
+        ),
+        Some(WindowServerId::new(idx as u32)),
+        &format!("Window{idx}"),
+        None,
+    );
+    window
+}
+
+pub fn make_window_info(
+    frame: CGRect,
+    sys_id: Option<WindowServerId>,
+    title: &str,
+    bundle_id: Option<&str>,
+) -> WindowInfo {
     WindowInfo {
         is_standard: true,
         is_root: true,
@@ -105,14 +273,10 @@ pub fn make_window(idx: usize) -> WindowInfo {
         is_resizable: true,
         min_size: None,
         max_size: None,
-        title: format!("Window{idx}"),
-        frame: CGRect::new(
-            CGPoint::new(100.0 * f64::from(idx as u32), 100.0),
-            CGSize::new(50.0, 50.0),
-        ),
-        // TODO: This is wrong and conflicts with windows from other apps.
-        sys_id: Some(WindowServerId::new(idx as u32)),
-        bundle_id: None,
+        title: title.to_string(),
+        frame,
+        sys_id,
+        bundle_id: bundle_id.map(str::to_string),
         path: None,
         ax_role: None,
         ax_subrole: None,
@@ -222,6 +386,16 @@ impl Apps {
             }
             requests = self.requests();
         }
+    }
+
+    pub fn make_app_and_settle(
+        &mut self,
+        reactor: &mut Reactor,
+        pid: pid_t,
+        windows: Vec<WindowInfo>,
+    ) {
+        reactor.handle_events(self.make_app(pid, windows));
+        self.simulate_until_quiet(reactor);
     }
 
     pub fn simulate_events(&mut self) -> Vec<Event> {
@@ -342,3 +516,5 @@ impl Apps {
         events
     }
 }
+
+pub fn test_context() -> (Apps, Reactor) { (Apps::new(), test_reactor()) }
