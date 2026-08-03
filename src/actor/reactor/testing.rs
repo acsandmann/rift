@@ -7,7 +7,7 @@ use crate::actor::app::{AppThreadHandle, Request, WindowId};
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::common::collections::BTreeMap;
 use crate::common::config::Config;
-use crate::layout_engine::LayoutEngine;
+use crate::layout_engine::{LayoutCommand, LayoutEngine};
 use crate::sys::app::{AppInfo, WindowInfo, pid_t};
 use crate::sys::geometry::SameAs;
 use crate::sys::screen::SpaceId;
@@ -27,6 +27,113 @@ impl Reactor {
         for event in events {
             self.handle_event(event);
         }
+    }
+
+    pub fn test_workspace_ids(
+        &mut self,
+        space: crate::sys::screen::SpaceId,
+    ) -> Vec<crate::model::virtual_workspace::VirtualWorkspaceId> {
+        self.layout_manager
+            .layout_engine
+            .virtual_workspace_manager_mut()
+            .list_workspaces(space)
+            .iter()
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    pub fn test_workspace(
+        &mut self,
+        space: crate::sys::screen::SpaceId,
+        index: usize,
+    ) -> crate::model::virtual_workspace::VirtualWorkspaceId {
+        self.test_workspace_ids(space)[index]
+    }
+
+    pub fn test_workspace_for_window(
+        &self,
+        space: crate::sys::screen::SpaceId,
+        wid: WindowId,
+    ) -> Option<crate::model::virtual_workspace::VirtualWorkspaceId> {
+        self.layout_manager
+            .layout_engine
+            .virtual_workspace_manager()
+            .workspace_for_window(&self.state.windows, space, wid)
+    }
+
+    pub fn test_window_server_id(&self, wid: WindowId) -> WindowServerId {
+        self.state
+            .windows
+            .window(wid)
+            .and_then(|window| window.info.sys_id)
+            .expect("test window should have a WindowServer identity")
+    }
+
+    pub fn test_active_workspace_windows(&self, space: SpaceId) -> Vec<WindowId> {
+        self.layout_manager
+            .layout_engine
+            .windows_in_active_workspace(&self.state.windows, space)
+    }
+
+    pub fn test_workspace_windows(
+        &self,
+        space: SpaceId,
+        workspace: crate::model::virtual_workspace::VirtualWorkspaceId,
+    ) -> Vec<WindowId> {
+        self.layout_manager.layout_engine.virtual_workspace_manager().workspace_windows(
+            &self.state.windows,
+            space,
+            workspace,
+        )
+    }
+
+    pub fn assign_test_window_to_workspace(
+        &mut self,
+        space: SpaceId,
+        wid: WindowId,
+        workspace: crate::model::virtual_workspace::VirtualWorkspaceId,
+    ) -> bool {
+        self.layout_manager
+            .layout_engine
+            .virtual_workspace_manager_mut()
+            .assign_window_to_workspace(&mut self.state.windows, space, wid, workspace)
+    }
+
+    pub fn set_test_active_workspace(
+        &mut self,
+        space: SpaceId,
+        workspace: crate::model::virtual_workspace::VirtualWorkspaceId,
+    ) -> bool {
+        self.layout_manager
+            .layout_engine
+            .virtual_workspace_manager_mut()
+            .set_active_workspace(space, workspace)
+    }
+
+    pub fn handle_test_workspace_command(&mut self, space: SpaceId, command: &LayoutCommand) {
+        let _ = self.layout_manager.layout_engine.handle_virtual_workspace_command(
+            &mut self.state.windows,
+            space,
+            command,
+        );
+    }
+
+    pub fn handle_test_layout_command(&mut self, command: LayoutCommand) {
+        self.handle_event(Event::Command(crate::model::reactor::Command::Layout(command)));
+    }
+
+    pub fn mark_test_window_visible_in_space(&mut self, wsid: WindowServerId, space: SpaceId) {
+        self.state.windows.set_window_server_space(wsid, Some(space));
+        self.state.windows.mark_window_visible(wsid);
+    }
+
+    pub fn discover_test_windows(
+        &mut self,
+        pid: pid_t,
+        new: Vec<(WindowId, WindowInfo)>,
+        known_visible: Vec<WindowId>,
+    ) {
+        self.handle_event(Event::WindowsDiscovered { pid, new, known_visible });
     }
 
     pub fn add_test_app(&mut self, pid: pid_t) {
@@ -140,6 +247,12 @@ pub fn test_reactor_with_workspace_settings(
         &crate::common::config::LayoutSettings::default(),
         None,
     ))
+}
+
+pub fn test_reactor_with_workspace_count(count: usize) -> Reactor {
+    let mut settings = crate::common::config::VirtualWorkspaceSettings::default();
+    settings.default_workspace_count = count;
+    test_reactor_with_workspace_settings(&settings)
 }
 
 pub fn make_screen_snapshots(frames: Vec<CGRect>, spaces: Vec<Option<SpaceId>>) -> Vec<ScreenInfo> {
@@ -398,6 +511,18 @@ impl Apps {
         self.simulate_until_quiet(reactor);
     }
 
+    pub fn make_app_and_settle_on_screen(
+        &mut self,
+        reactor: &mut Reactor,
+        screen: CGRect,
+        space: SpaceId,
+        pid: pid_t,
+        windows: Vec<WindowInfo>,
+    ) {
+        reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+        self.make_app_and_settle(reactor, pid, windows);
+    }
+
     pub fn simulate_events(&mut self) -> Vec<Event> {
         let requests = self.requests();
         self.simulate_events_for_requests(requests)
@@ -518,3 +643,9 @@ impl Apps {
 }
 
 pub fn test_context() -> (Apps, Reactor) { (Apps::new(), test_reactor()) }
+
+pub fn test_context_with_workspace_count(count: usize) -> (Apps, Reactor) {
+    let mut settings = crate::common::config::VirtualWorkspaceSettings::default();
+    settings.default_workspace_count = count;
+    (Apps::new(), test_reactor_with_workspace_settings(&settings))
+}
