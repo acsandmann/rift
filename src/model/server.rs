@@ -1,3 +1,4 @@
+use rift_protocol as protocol;
 use serde::de::Deserializer;
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
@@ -67,6 +68,118 @@ pub struct DisplayData {
     pub active_space_ids: Vec<u64>,
     /// Inactive space ids for this display (empty if none).
     pub inactive_space_ids: Vec<u64>,
+}
+
+impl From<WindowData> for protocol::WindowData {
+    fn from(value: WindowData) -> Self {
+        Self {
+            id: protocol::WindowId {
+                pid: value.id.pid,
+                idx: value.id.idx.get(),
+            },
+            title: value.info.title,
+            frame: protocol::Rect {
+                origin: protocol::Point {
+                    x: value.info.frame.origin.x,
+                    y: value.info.frame.origin.y,
+                },
+                size: protocol::Size {
+                    width: value.info.frame.size.width,
+                    height: value.info.frame.size.height,
+                },
+            },
+            is_floating: value.is_floating,
+            is_focused: value.is_focused,
+            bundle_id: value.info.bundle_id,
+            app_name: value.app_name,
+            window_server_id: value.info.sys_id.map(|id| id.as_u32()),
+        }
+    }
+}
+
+impl From<WorkspaceData> for protocol::WorkspaceData {
+    fn from(value: WorkspaceData) -> Self {
+        Self {
+            id: value.id,
+            index: value.index,
+            name: value.name,
+            layout_mode: value.layout_mode,
+            is_active: value.is_active,
+            window_count: value.window_count,
+            windows: value.windows.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<WorkspaceLayoutData> for protocol::WorkspaceLayoutData {
+    fn from(value: WorkspaceLayoutData) -> Self {
+        Self {
+            id: value.id,
+            index: value.index,
+            name: value.name,
+            layout_mode: value.layout_mode,
+            is_active: value.is_active,
+        }
+    }
+}
+
+impl From<ApplicationData> for protocol::ApplicationData {
+    fn from(value: ApplicationData) -> Self {
+        Self {
+            pid: value.pid,
+            bundle_id: value.bundle_id,
+            name: value.name,
+            is_frontmost: value.is_frontmost,
+            window_count: value.window_count,
+        }
+    }
+}
+
+impl From<LayoutStateData> for protocol::LayoutStateData {
+    fn from(value: LayoutStateData) -> Self {
+        Self {
+            space_id: value.space_id,
+            mode: value.mode,
+            floating_windows: value
+                .floating_windows
+                .into_iter()
+                .map(|id| protocol::WindowId { pid: id.pid, idx: id.idx.get() })
+                .collect(),
+            tiled_windows: value
+                .tiled_windows
+                .into_iter()
+                .map(|id| protocol::WindowId { pid: id.pid, idx: id.idx.get() })
+                .collect(),
+            focused_window: value
+                .focused_window
+                .map(|id| protocol::WindowId { pid: id.pid, idx: id.idx.get() }),
+        }
+    }
+}
+
+impl From<DisplayData> for protocol::DisplayData {
+    fn from(value: DisplayData) -> Self {
+        Self {
+            uuid: value.info.display_uuid,
+            name: value.info.name,
+            screen_id: value.info.id.as_u32(),
+            frame: protocol::Rect {
+                origin: protocol::Point {
+                    x: value.info.frame.origin.x,
+                    y: value.info.frame.origin.y,
+                },
+                size: protocol::Size {
+                    width: value.info.frame.size.width,
+                    height: value.info.frame.size.height,
+                },
+            },
+            space: value.info.space.map(|space| space.get()),
+            is_active_space: value.is_active_space,
+            is_active_context: value.is_active_context,
+            active_space_ids: value.active_space_ids,
+            inactive_space_ids: value.inactive_space_ids,
+        }
+    }
 }
 
 impl Serialize for WindowData {

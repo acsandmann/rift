@@ -6,8 +6,9 @@ description = "Rust client for Rift's Mach IPC API"
 license = "Apache-2.0"
 
 [dependencies]
-serde = { version = "1.0.201", features = ["derive"] }
+serde = "1.0.201"
 serde_json = "1.0.145"
+rift-protocol = { path = "../rift-protocol" }
 thiserror = "2.0.17"
 
 [dev-dependencies]

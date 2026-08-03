@@ -5,7 +5,7 @@ edition = "2024"
 build = "build.rs"
 
 [workspace]
-members = [".", "crates/rift-client"]
+members = [".", "crates/rift-client", "crates/rift-protocol"]
 resolver = "3"
 
 [[bin]]
@@ -208,6 +208,7 @@ sigpipe = "0.1.3"
 embed_plist = "1.2.2"
 rustc-hash = "2.1.1"
 rift-client = { path = "crates/rift-client" }
+rift-protocol = { path = "crates/rift-protocol" }
 
 [dev-dependencies]
 pretty_assertions = "1.4.0"

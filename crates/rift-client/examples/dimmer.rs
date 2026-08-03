@@ -6,7 +6,7 @@ use std::ffi::c_float;
 use std::io;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use rift_client::{RiftMachClient, RiftRequest, RiftResponse};
+use rift_client::{EventKind, RiftMachClient};
 use serde_json::Value;
 
 type ConnID = i32;
@@ -49,18 +49,16 @@ impl Dimmer {
     }
 
     fn initialize(&mut self) -> Result<()> {
-        let displays = self.query(RiftRequest::GetDisplays)?;
+        let displays = self.client.get_displays()?;
 
-        for display in displays.as_array().into_iter().flatten() {
-            let Some(space_id) = display.get("space").and_then(Value::as_u64) else {
+        for display in displays {
+            let Some(space_id) = display.space else {
                 continue;
             };
 
-            if let Some(uuid) = display.get("uuid").and_then(Value::as_str) {
-                self.space_by_display.insert(uuid.into(), space_id);
-            }
+            self.space_by_display.insert(display.uuid, space_id);
 
-            if display.get("is_active_space").and_then(Value::as_bool) == Some(true) {
+            if display.is_active_space {
                 self.refresh(space_id)?;
             }
         }
@@ -100,18 +98,15 @@ impl Dimmer {
     }
 
     fn refresh(&self, space_id: u64) -> Result<()> {
-        let workspaces = self.query(RiftRequest::GetWorkspaces { space_id: Some(space_id) })?;
+        let workspaces = self.client.get_workspaces(Some(space_id))?;
 
         let desired: HashSet<WinID> = workspaces
-            .as_array()
             .into_iter()
-            .flatten()
-            .find(|workspace| workspace.get("is_active").and_then(Value::as_bool) == Some(true))
-            .and_then(|workspace| workspace.get("windows").and_then(Value::as_array))
+            .find(|workspace| workspace.is_active)
             .into_iter()
-            .flatten()
-            .filter(|window| window.get("is_focused").and_then(Value::as_bool) != Some(true))
-            .filter_map(|window| window.get("window_server_id")?.as_u64()?.try_into().ok())
+            .flat_map(|workspace| workspace.windows)
+            .filter(|window| !window.is_focused)
+            .filter_map(|window| window.window_server_id.and_then(|id| id.try_into().ok()))
             .collect();
 
         let mut dimmed = lock(&self.dimmed);
@@ -143,16 +138,6 @@ impl Dimmer {
         };
 
         set_brightness(self.cid, windows.into_iter().map(|id| (id, NORMAL)))
-    }
-
-    fn query(&self, request: RiftRequest) -> Result<Value> {
-        match self.client.send_request(&request)? {
-            RiftResponse::Success { data } => Ok(data),
-            RiftResponse::Error { error } => {
-                Err(io::Error::other(format!("Rift query failed: {error}")).into())
-            }
-            _ => Err(io::Error::other("unexpected Rift response").into()),
-        }
     }
 }
 
@@ -192,7 +177,7 @@ fn set_brightness(cid: ConnID, changes: impl IntoIterator<Item = (WinID, f32)>) 
 
 fn main() -> Result<()> {
     let client = RiftMachClient::connect()?;
-    let events = client.subscribe("*")?;
+    let events = client.subscribe(EventKind::All)?;
     let mut dimmer = Dimmer::new(client);
 
     let cid = dimmer.cid;

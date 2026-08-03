@@ -14,76 +14,13 @@ use std::ptr::copy_nonoverlapping;
 use std::thread;
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+pub use rift_protocol::*;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use thiserror::Error;
 
 const MAX_MESSAGE_SIZE: usize = 262_144;
 const DEFAULT_SERVICE_NAME: &str = "git.acsandmann.rift";
-
-/// A request accepted by Rift's Mach IPC server.
-#[non_exhaustive]
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RiftRequest {
-    GetWorkspaces {
-        space_id: Option<u64>,
-    },
-    GetDisplays,
-    GetWindows {
-        space_id: Option<u64>,
-    },
-    GetWindowInfo {
-        window_id: String,
-    },
-    GetLayoutState {
-        space_id: u64,
-    },
-    GetWorkspaceLayouts {
-        space_id: Option<u64>,
-        workspace_id: Option<usize>,
-    },
-    GetApplications,
-    GetMetrics,
-    GetConfig,
-    ExecuteCommand {
-        command: String,
-        args: Vec<String>,
-    },
-    Subscribe {
-        event: String,
-    },
-    Unsubscribe {
-        event: String,
-    },
-    SubscribeCli {
-        event: String,
-        command: String,
-        args: Vec<String>,
-    },
-    UnsubscribeCli {
-        event: String,
-    },
-    ListCliSubscriptions,
-}
-
-/// A response returned by Rift's Mach IPC server.
-#[non_exhaustive]
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum RiftResponse {
-    Success { data: Value },
-    Error { error: Value },
-}
-
-impl RiftResponse {
-    pub fn into_result(self) -> Result<Value, Value> {
-        match self {
-            Self::Success { data } => Ok(data),
-            Self::Error { error } => Err(error),
-        }
-    }
-}
 
 type KernReturn = c_int;
 type MachPort = u32;
@@ -128,6 +65,10 @@ pub enum ClientError {
     },
     #[error("Rift rejected the subscription: {0}")]
     SubscriptionRejected(Value),
+    #[error("Rift returned an error: {0}")]
+    Server(Value),
+    #[error("Rift returned an unknown response shape")]
+    UnknownResponse,
 }
 
 /// A handle for issuing synchronous requests to the running Rift process.
@@ -151,22 +92,100 @@ impl RiftMachClient {
     }
 
     /// Sends one request and blocks until Rift responds.
-    pub fn send_request(&self, request: &RiftRequest) -> Result<RiftResponse, ClientError> {
+    pub fn send_request(&self, request: &RiftRequest) -> Result<JsonRiftResponse, ClientError> {
+        self.send_typed_request(request)
+    }
+
+    /// Sends one request and decodes its response payload into caller-provided
+    /// types.
+    pub fn send_typed_request<T: DeserializeOwned>(
+        &self,
+        request: &RiftRequest,
+    ) -> Result<RiftResponse<T>, ClientError> {
         let request_json = serde_json::to_vec(request).map_err(ClientError::Encode)?;
         let response = unsafe { send_request(&request_json, None)? };
         parse_json_payload(&response, "response")
     }
 
+    /// Lists virtual workspaces, optionally for a specific macOS space.
+    pub fn get_workspaces(&self, space_id: Option<u64>) -> Result<Vec<WorkspaceData>, ClientError> {
+        self.request(RiftRequest::GetWorkspaces { space_id })
+    }
+
+    /// Lists managed windows, optionally filtered by a macOS space.
+    pub fn get_windows(&self, space_id: Option<u64>) -> Result<Vec<WindowData>, ClientError> {
+        self.request(RiftRequest::GetWindows { space_id })
+    }
+
+    /// Lists connected displays.
+    pub fn get_displays(&self) -> Result<Vec<DisplayData>, ClientError> {
+        self.request(RiftRequest::GetDisplays)
+    }
+
+    /// Returns information about a managed window.
+    pub fn get_window_info(&self, window_id: WindowId) -> Result<WindowData, ClientError> {
+        self.request(RiftRequest::GetWindowInfo { window_id })
+    }
+
+    /// Returns the layout state for a macOS space.
+    pub fn get_layout_state(&self, space_id: u64) -> Result<LayoutStateData, ClientError> {
+        self.request(RiftRequest::GetLayoutState { space_id })
+    }
+
+    /// Returns layout modes for workspaces in a macOS space.
+    pub fn get_workspace_layouts(
+        &self,
+        space_id: Option<u64>,
+        workspace_id: Option<usize>,
+    ) -> Result<Vec<WorkspaceLayoutData>, ClientError> {
+        self.request(RiftRequest::GetWorkspaceLayouts { space_id, workspace_id })
+    }
+
+    /// Lists running applications known to Rift.
+    pub fn get_applications(&self) -> Result<Vec<ApplicationData>, ClientError> {
+        self.request(RiftRequest::GetApplications)
+    }
+
+    /// Returns the current metrics payload.
+    pub fn get_metrics(&self) -> Result<Value, ClientError> {
+        self.request(RiftRequest::GetMetrics)
+    }
+
+    /// Returns the current configuration as JSON until the config model is
+    /// moved into `rift-protocol`.
+    pub fn get_config(&self) -> Result<Value, ClientError> { self.request(RiftRequest::GetConfig) }
+
+    /// Executes a typed Rift command.
+    pub fn execute(&self, command: RiftCommand) -> Result<Value, ClientError> {
+        self.request(RiftRequest::ExecuteCommand { command })
+    }
+
+    /// Executes a typed Rift command.
+    pub fn execute_command(&self, command: RiftCommand) -> Result<Value, ClientError> {
+        self.execute(command)
+    }
+
     /// Subscribes to an event and returns a handle that blocks for future events.
-    pub fn subscribe(&self, event: impl Into<String>) -> Result<RiftMachSubscription, ClientError> {
+    pub fn subscribe(&self, event: EventKind) -> Result<RiftMachSubscription, ClientError> {
         let reply_port = ReplyPort::allocate(MACH_PORT_QLIMIT_LARGE)?;
-        let request = RiftRequest::Subscribe { event: event.into() };
+        let request = RiftRequest::Subscribe { event };
         let request_json = serde_json::to_vec(&request).map_err(ClientError::Encode)?;
         let response = unsafe { send_request(&request_json, Some(reply_port.name))? };
 
         match parse_json_payload::<RiftResponse>(&response, "response")? {
             RiftResponse::Success { .. } => Ok(RiftMachSubscription { reply_port }),
             RiftResponse::Error { error } => Err(ClientError::SubscriptionRejected(error)),
+            _ => Err(ClientError::SubscriptionRejected(Value::String(
+                "Rift returned an unknown response shape".to_owned(),
+            ))),
+        }
+    }
+
+    fn request<T: DeserializeOwned>(&self, request: RiftRequest) -> Result<T, ClientError> {
+        match self.send_typed_request(&request)? {
+            RiftResponse::Success { data } => Ok(data),
+            RiftResponse::Error { error } => Err(ClientError::Server(error)),
+            _ => Err(ClientError::UnknownResponse),
         }
     }
 }
@@ -179,13 +198,17 @@ pub struct RiftMachSubscription {
 
 impl RiftMachSubscription {
     /// Blocks until the next event arrives on this subscription.
-    pub fn recv_event(&self) -> Result<Value, ClientError> {
+    pub fn recv_event(&self) -> Result<Value, ClientError> { self.recv_event_as() }
+
+    /// Blocks until the next event arrives and decodes it into the requested
+    /// type.
+    pub fn recv_event_as<T: DeserializeOwned>(&self) -> Result<T, ClientError> {
         let payload = unsafe { receive_message(self.reply_port.name)? };
         parse_json_payload(&payload, "event")
     }
 }
 
-fn parse_json_payload<T: serde::de::DeserializeOwned>(
+fn parse_json_payload<T: DeserializeOwned>(
     payload: &[u8],
     kind: &'static str,
 ) -> Result<T, ClientError> {

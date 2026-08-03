@@ -1391,9 +1391,18 @@ name = "rift-client"
 version = "0.1.0"
 dependencies = [
  "ctrlc",
+ "rift-protocol",
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "rift-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1435,6 +1444,7 @@ dependencies = [
  "pretty_assertions",
  "regex",
  "rift-client",
+ "rift-protocol",
  "ron",
  "rustc-hash",
  "serde",

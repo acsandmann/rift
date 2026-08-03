@@ -7,12 +7,12 @@ command, or subscribe to Rift events without depending on the window manager.
 ## Query Rift
 
 ```rust
-use rift_client::{RiftMachClient, RiftRequest};
+use rift_client::RiftMachClient;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = RiftMachClient::connect()?;
-    let response = client.send_request(&RiftRequest::GetWorkspaces { space_id: None })?;
-    println!("{response:#?}");
+    let workspaces = client.get_workspaces(None)?;
+    println!("{workspaces:#?}");
     Ok(())
 }
 ```
@@ -29,11 +29,11 @@ cargo run -p rift-client --example query
 Rift publishes the next matching event:
 
 ```rust
-use rift_client::RiftMachClient;
+use rift_client::{EventKind, RiftMachClient};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = RiftMachClient::connect()?;
-    let subscription = client.subscribe("workspace_changed")?;
+    let subscription = client.subscribe(EventKind::WorkspaceChanged)?;
 
     loop {
         let event = subscription.recv_event()?;
