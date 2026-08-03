@@ -653,19 +653,20 @@ fn build_status_menu(
         None,
         None,
     ));
-    add_separator(&help_submenu);
-    help_submenu.addItem(&make_menu_item(
+
+    help_item.setSubmenu(Some(&help_submenu));
+    menu.addItem(&help_item);
+
+    add_separator(&menu);
+    menu.addItem(&make_menu_item(
         mtm,
-        "Sponsor Rift",
+        "Support Rift",
         Some(sel!(onOpenSponsor:)),
         Some(handler),
         None,
         None,
         None,
     ));
-
-    help_item.setSubmenu(Some(&help_submenu));
-    menu.addItem(&help_item);
 
     add_separator(&menu);
     menu.addItem(&make_menu_item(
