@@ -462,6 +462,7 @@ pub struct MouseMovedPayload {
     pub should_sync: bool,
     pub is_main: bool,
     pub needs_layout_sync: bool,
+    pub arrange_after_layout_sync: bool,
     pub active_space: Option<SpaceId>,
 }
 
@@ -493,6 +494,9 @@ pub fn handle_mouse_moved_over_window(
     }
     if let Some(space) = payload.active_space {
         outcome = outcome.with_layout_event(LayoutEvent::WindowFocused(space, window));
+        if payload.arrange_after_layout_sync {
+            outcome = outcome.with_arrange_passes(1);
+        }
     }
     Ok(outcome)
 }

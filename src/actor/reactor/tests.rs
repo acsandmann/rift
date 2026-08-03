@@ -2187,20 +2187,31 @@ fn auto_workspace_switch_follows_activated_window_when_same_app_is_visible_elsew
         ),
         "another window from the activated app should remain visible on the current workspace"
     );
-    let _ = reactor
-        .main_window_tracker
-        .handle_event(&Event::ApplicationGloballyActivated(activated.pid));
+    reactor.handle_event(Event::ApplicationGloballyActivated(activated.pid));
     assert_eq!(reactor.main_window(), Some(activated));
-
-    let outcome = reactor.handle_app_activation_workspace_switch(activated.pid);
-    assert!(outcome.arrange.requested);
-    assert_eq!(outcome.layout_responses.len(), 1);
+    assert_eq!(
+        reactor.layout_manager.layout_engine.active_workspace_idx(space),
+        Some(0),
+        "Carbon activation must wait for the app thread to resolve its AX focus"
+    );
+    let activation_requests = apps.requests();
     assert!(
-        apps.requests().is_empty(),
-        "auto workspace switch effects should be deferred to the outcome pipeline"
+        activation_requests
+            .iter()
+            .all(|request| !matches!(request, Request::GetVisibleWindows)),
+        "Carbon activation should not enumerate every AX window: {activation_requests:?}"
+    );
+    assert!(
+        activation_requests
+            .iter()
+            .any(|request| matches!(request, Request::ApplicationGloballyActivated(pid) if *pid == activated.pid)),
+        "Carbon activation should be reconciled on the app thread: {activation_requests:?}"
     );
     assert!(raise_manager_rx.try_recv().is_err());
-    reactor.apply_event_outcome(outcome);
+
+    // This is the resolved event emitted by the app thread after it refreshes
+    // the current main window and applies quiet-activation bookkeeping.
+    reactor.handle_event(Event::ApplicationActivated(activated.pid, Quiet::No));
 
     let requests = apps.requests();
     assert!(
@@ -2222,6 +2233,124 @@ fn auto_workspace_switch_follows_activated_window_when_same_app_is_visible_elsew
         }
         _ => panic!("Unexpected event: {msg:?}"),
     }
+}
+
+#[test]
+fn carbon_activation_is_replayed_when_it_arrives_before_app_registration() {
+    let (mut apps, mut reactor) = test_context();
+    let pid = 7;
+
+    reactor.handle_event(Event::ApplicationGloballyActivated(pid));
+    assert!(apps.requests().is_empty());
+
+    reactor.handle_events(apps.make_app_with_opts(
+        pid,
+        make_windows(1),
+        Some(WindowId::new(pid, 1)),
+        true,
+        true,
+    ));
+
+    let requests = apps.requests();
+    assert!(
+        requests
+            .iter()
+            .any(|request| matches!(request, Request::ApplicationGloballyActivated(request_pid) if *request_pid == pid)),
+        "launching the current Carbon-frontmost app must replay activation on its app thread: {requests:?}"
+    );
+}
+
+#[test]
+fn duplicate_carbon_activation_is_forwarded_to_app_thread_once() {
+    let (mut apps, mut reactor) = test_context();
+    let pid = 7;
+
+    reactor.handle_events(apps.make_app(pid, make_windows(1)));
+    let _ = apps.requests();
+
+    reactor.handle_event(Event::ApplicationGloballyActivated(pid));
+    reactor.handle_event(Event::ApplicationGloballyActivated(pid));
+
+    let activation_count = apps
+        .requests()
+        .iter()
+        .filter(|request| {
+            matches!(request, Request::ApplicationGloballyActivated(request_pid) if *request_pid == pid)
+        })
+        .count();
+    assert_eq!(activation_count, 1);
+}
+
+#[test]
+fn carbon_activation_is_forwarded_during_refresh_quarantine() {
+    let (mut apps, mut reactor) = test_context();
+    let pid = 7;
+
+    reactor.handle_events(apps.make_app(pid, make_windows(1)));
+    let _ = apps.requests();
+    reactor.refresh_quarantine_manager.sleeping = true;
+
+    reactor.handle_event(Event::ApplicationGloballyActivated(pid));
+    assert!(
+        apps.requests()
+            .iter()
+            .any(|request| matches!(request, Request::ApplicationGloballyActivated(request_pid) if *request_pid == pid))
+    );
+}
+
+#[test]
+fn focus_follows_mouse_requests_arrange_for_scrolling_reveal() {
+    let reactor = test_reactor();
+    let space = SpaceId::new(1);
+    let window = WindowId::new(7, 1);
+
+    let outcome = window_workflow::handle_mouse_moved_over_window(
+        &reactor.app_manager,
+        window_workflow::MouseMovedPayload {
+            window: Some(window),
+            should_sync: true,
+            is_main: true,
+            needs_layout_sync: true,
+            arrange_after_layout_sync: true,
+            active_space: Some(space),
+        },
+    )
+    .expect("mouse focus workflow");
+
+    assert!(outcome.arrange.requested);
+    assert_eq!(outcome.arrange.passes, 1);
+    assert!(matches!(
+        outcome.layout_events.as_slice(),
+        [LayoutEvent::WindowFocused(event_space, event_window)]
+            if *event_space == space && *event_window == window
+    ));
+}
+
+#[test]
+fn resolved_activation_without_main_window_does_not_choose_arbitrary_app_window() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let pid = 2;
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    apps.make_app_and_settle(&mut reactor, pid, make_windows(2));
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, WindowId::new(pid, 1)));
+    reactor.handle_test_layout_command(LayoutCommand::MoveWindowToWorkspace {
+        workspace: WorkspaceSelector::Index(1),
+        follow: false,
+        window_id: None,
+    });
+    apps.simulate_until_quiet(&mut reactor);
+
+    reactor.handle_event(Event::ApplicationGloballyActivated(pid));
+    reactor.handle_event(Event::ApplicationMainWindowChanged(pid, None, Quiet::No));
+    reactor.handle_event(Event::ApplicationActivated(pid, Quiet::No));
+
+    assert_eq!(
+        reactor.layout_manager.layout_engine.active_workspace_idx(space),
+        Some(0)
+    );
 }
 
 #[test]
@@ -3635,9 +3764,16 @@ fn session_gate_ignores_discovery_and_replays_one_refresh_after_unlock() {
     reactor.discover_test_windows(1, vec![], vec![]);
     reactor.handle_event(Event::ApplicationGloballyActivated(1));
 
+    let requests = apps.requests();
     assert!(
-        apps.requests().is_empty(),
-        "locked-session discovery and activation should defer refreshes instead of querying apps"
+        requests.iter().all(|request| !matches!(request, Request::GetVisibleWindows)),
+        "locked-session discovery should defer visible-window enumeration: {requests:?}"
+    );
+    assert!(
+        requests.iter().any(
+            |request| matches!(request, Request::ApplicationGloballyActivated(pid) if *pid == 1)
+        ),
+        "Carbon activation should still be reconciled by the app thread: {requests:?}"
     );
     assert_eq!(
         reactor.test_workspace_for_window(space, wid),
@@ -3686,9 +3822,16 @@ fn wake_gate_waits_for_fresh_space_snapshot_before_refresh() {
     reactor.handle_event(Event::SystemWoke);
     reactor.handle_event(Event::ApplicationGloballyActivated(1));
 
+    let requests = apps.requests();
     assert!(
-        apps.requests().is_empty(),
-        "wake should remain quarantined until the spaces actor publishes a fresh post-wake snapshot"
+        requests.iter().all(|request| !matches!(request, Request::GetVisibleWindows)),
+        "wake should quarantine visible-window enumeration until a fresh space snapshot: {requests:?}"
+    );
+    assert!(
+        requests.iter().any(
+            |request| matches!(request, Request::ApplicationGloballyActivated(pid) if *pid == 1)
+        ),
+        "Carbon activation should still be reconciled by the app thread: {requests:?}"
     );
 
     let stale_snapshot = space_state_event(vec![screen], vec![Some(space)]);

@@ -3,7 +3,7 @@ use tracing::debug;
 
 use super::{Event, Reactor, Record, Requested, ScreenInfo, TransactionId};
 use crate::actor;
-use crate::actor::app::{AppThreadHandle, Request, WindowId};
+use crate::actor::app::{AppThreadHandle, Quiet, Request, WindowId};
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::common::collections::BTreeMap;
 use crate::common::config::Config;
@@ -552,6 +552,9 @@ impl Apps {
                             known_visible: windows,
                         });
                     }
+                }
+                Request::ApplicationGloballyActivated(pid) => {
+                    events.push(Event::ApplicationActivated(pid, Quiet::No));
                 }
                 Request::SetWindowFrame(wid, frame, txid, _) => {
                     let window = self.windows.entry(wid).or_default();

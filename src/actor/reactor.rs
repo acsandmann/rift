@@ -939,15 +939,17 @@ impl Reactor {
     }
 
     fn flush_deferred_visible_refresh(&mut self) {
-        if self.refreshes_blocked() || !self.refresh_quarantine_manager.pending_visible_refresh {
+        if self.refreshes_blocked() {
             return;
         }
 
-        let track_mission_control_refresh =
-            self.refresh_quarantine_manager.deferred_refresh_tracks_mission_control;
-        self.refresh_quarantine_manager.pending_visible_refresh = false;
-        self.refresh_quarantine_manager.deferred_refresh_tracks_mission_control = false;
-        self.request_visible_windows_for_apps(track_mission_control_refresh);
+        if self.refresh_quarantine_manager.pending_visible_refresh {
+            let track_mission_control_refresh =
+                self.refresh_quarantine_manager.deferred_refresh_tracks_mission_control;
+            self.refresh_quarantine_manager.pending_visible_refresh = false;
+            self.refresh_quarantine_manager.deferred_refresh_tracks_mission_control = false;
+            self.request_visible_windows_for_apps(track_mission_control_refresh);
+        }
     }
 
     // All lifecycle churn is upstreamed through the spaces actor. The reactor
@@ -1029,6 +1031,11 @@ impl Reactor {
         }
 
         let should_update_notifications = Self::should_update_notifications(&event);
+        let duplicate_global_activation = matches!(
+            &event,
+            Event::ApplicationGloballyActivated(pid)
+                if self.main_window_tracker.is_globally_frontmost(*pid)
+        );
 
         let raised_window = self.main_window_tracker.handle_event(&event);
         match event {
@@ -1052,6 +1059,9 @@ impl Reactor {
                         window_server_info,
                     },
                 )?;
+                if self.main_window_tracker.is_globally_frontmost(pid) {
+                    outcome.app_requests.push((pid, Request::ApplicationGloballyActivated(pid)));
+                }
                 outcome.focused_window = raised_window;
                 return Ok(outcome);
             }
@@ -1083,21 +1093,19 @@ impl Reactor {
                 self.clear_menu_state_for_pid(pid);
             }
             Event::ApplicationGloballyActivated(pid) => {
+                if duplicate_global_activation {
+                    trace!(pid, "Ignoring duplicate global application activation");
+                    return Ok(EventOutcome::focus_changed(None, should_update_notifications));
+                }
                 self.clear_menu_state_for_non_owner(pid);
                 if !self.is_login_window_pid(pid) {
-                    self.request_visible_windows_for_pid(pid, false);
-                    if self.main_window_tracker.take_global_activation_quiet(pid) == Quiet::No {
-                        let mut outcome = self.handle_app_activation_workspace_switch(pid);
-                        outcome.focused_window = raised_window;
-                        outcome.refresh_window_notifications = should_update_notifications;
-                        return Ok(outcome);
-                    } else {
-                        debug!(
-                            pid,
-                            "Skipping auto workspace switch for quiet global activation (initiated by Rift)"
-                        );
+                    if let Some(app) = self.app_manager.apps.get(&pid) {
+                        let _ = app.handle.send(Request::ApplicationGloballyActivated(pid));
                     }
                 }
+                // The app thread will resolve the current AX main window and
+                // emit ApplicationActivated. Do not replay cached focus here.
+                return Ok(EventOutcome::focus_changed(None, should_update_notifications));
             }
             Event::WindowServerFocusChanged(window, reported_space) => {
                 if self.layout_manager.layout_engine.focused_window() == Some(window) {
@@ -1461,6 +1469,14 @@ impl Reactor {
                             })
                     })
                 });
+                let needs_layout_sync = window.is_some_and(|window| {
+                    self.layout_manager.layout_engine.focused_window() != Some(window)
+                });
+                let arrange_after_layout_sync = needs_layout_sync
+                    && active_space.is_some_and(|space| {
+                        self.layout_manager.layout_engine.active_layout_mode_at(space)
+                            == crate::common::config::LayoutMode::Scrolling
+                    });
                 return window_workflow::handle_mouse_moved_over_window(
                     &self.app_manager,
                     window_workflow::MouseMovedPayload {
@@ -1468,9 +1484,8 @@ impl Reactor {
                         should_sync: window
                             .is_some_and(|window| self.should_raise_on_mouse_over(window)),
                         is_main: window.is_some_and(|window| self.main_window() == Some(window)),
-                        needs_layout_sync: window.is_some_and(|window| {
-                            self.layout_manager.layout_engine.focused_window() != Some(window)
-                        }),
+                        needs_layout_sync,
+                        arrange_after_layout_sync,
                         active_space,
                     },
                 );
@@ -2149,22 +2164,6 @@ impl Reactor {
         // Native-space membership/visibility is supplied separately by the spaces
         // actor; do not replace this with the global CG on-screen window list.
         self.request_visible_windows_for_apps(false);
-    }
-
-    fn request_visible_windows_for_pid(&mut self, pid: pid_t, track_mission_control_refresh: bool) {
-        if self.refreshes_blocked() {
-            self.defer_visible_refresh(track_mission_control_refresh);
-            return;
-        }
-
-        let sent = self
-            .app_manager
-            .apps
-            .get(&pid)
-            .is_some_and(|app| app.handle.send(Request::GetVisibleWindows).is_ok());
-        if sent && track_mission_control_refresh {
-            self.mission_control_manager.pending_mission_control_refresh.insert(pid);
-        }
     }
 
     fn request_visible_windows_for_apps(&mut self, track_mission_control_refresh: bool) {
@@ -3544,15 +3543,12 @@ impl Reactor {
             bundle_id_str, pid
         );
 
-        let app_window = self
-            .main_window()
-            .filter(|wid| wid.pid == pid && self.window_is_standard(*wid))
-            .or_else(|| {
-                self.state
-                    .windows
-                    .window_ids_for_pid(pid)
-                    .find(|wid| self.window_is_standard(*wid))
-            });
+        // Carbon activation is reconciled by the app thread before this runs,
+        // so a missing main window means there is no authoritative switch
+        // target. Picking an arbitrary window for the process is especially
+        // unsafe for apps whose windows span multiple virtual workspaces.
+        let app_window =
+            self.main_window().filter(|wid| wid.pid == pid && self.window_is_standard(*wid));
 
         let Some(app_window_id) = app_window else {
             return EventOutcome::no_change();
