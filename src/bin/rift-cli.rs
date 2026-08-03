@@ -1075,11 +1075,11 @@ fn write_json(value: &Value, pretty: bool) -> Result<(), String> {
 
 fn run_mach_subscription(event: String) -> Result<(), String> {
     let pretty = std::env::var("RIFT_CLI_PRETTY").map(|v| v != "0").unwrap_or(false);
-    let client = RiftMachClient::connect()?;
-    let subscription = client.subscribe(event)?;
+    let client = RiftMachClient::connect().map_err(|e| e.to_string())?;
+    let subscription = client.subscribe(event).map_err(|e| e.to_string())?;
 
     loop {
-        let event_payload = subscription.recv_event()?;
+        let event_payload = subscription.recv_event().map_err(|e| e.to_string())?;
         // Exit cleanly when output is closed by the consumer.
         if let Err(e) = write_json(&event_payload, pretty) {
             if e.contains("Broken pipe") {

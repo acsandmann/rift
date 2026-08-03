@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 build = "build.rs"
 
+[workspace]
+members = [".", "crates/rift-client"]
+resolver = "3"
+
 [[bin]]
 name = "rift"
 test = false
@@ -203,6 +207,7 @@ dashmap = "6.1.0"
 sigpipe = "0.1.3"
 embed_plist = "1.2.2"
 rustc-hash = "2.1.1"
+rift-client = { path = "crates/rift-client" }
 
 [dev-dependencies]
 pretty_assertions = "1.4.0"
