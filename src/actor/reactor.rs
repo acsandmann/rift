@@ -1956,6 +1956,7 @@ impl Reactor {
                         self.workspace_switch_manager.workspace_switch_state,
                         WorkspaceSwitchState::Active
                     ),
+                    outcome.arrange.space_scope,
                 );
             }
             self.maybe_send_menu_update();
@@ -2263,7 +2264,7 @@ impl Reactor {
             }
 
             self.refocus_manager.refocus_state = RefocusState::Pending(space);
-            self.update_layout_or_warn(false, false);
+            self.update_layout_or_warn(false, false, None);
             self.update_focus_follows_mouse_state();
         }
     }
@@ -4251,7 +4252,7 @@ impl Reactor {
         self.mission_control_manager.pending_mission_control_refresh.clear();
         self.force_refresh_all_windows();
         self.check_for_new_windows();
-        self.update_layout_or_warn(false, false);
+        self.update_layout_or_warn(false, false, None);
         self.maybe_send_menu_update();
     }
 
@@ -4469,19 +4470,27 @@ impl Reactor {
         &mut self,
         is_resize: bool,
         is_workspace_switch: bool,
+        space_scope: Option<SpaceId>,
     ) -> bool {
-        self.update_layout_or_warn_with(is_resize, is_workspace_switch, "Layout update failed")
+        self.update_layout_or_warn_with(
+            is_resize,
+            is_workspace_switch,
+            space_scope,
+            "Layout update failed",
+        )
     }
 
     pub(crate) fn update_layout_or_warn_with(
         &mut self,
         is_resize: bool,
         is_workspace_switch: bool,
+        space_scope: Option<SpaceId>,
         context: &'static str,
     ) -> bool {
-        LayoutManager::update_layout(self, is_resize, is_workspace_switch).unwrap_or_else(|e| {
-            warn!(error = ?e, "{}", context);
-            false
-        })
+        LayoutManager::update_layout(self, is_resize, is_workspace_switch, space_scope)
+            .unwrap_or_else(|e| {
+                warn!(error = ?e, "{}", context);
+                false
+            })
     }
 }

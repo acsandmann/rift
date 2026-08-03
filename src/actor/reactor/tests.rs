@@ -339,6 +339,26 @@ fn workspace_commands_follow_active_display_space_across_active_displays() {
 }
 
 #[test]
+fn workspace_switch_arrange_is_scoped_to_its_command_space() {
+    let mut reactor = test_reactor();
+    let left = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1440., 900.));
+    let right = CGRect::new(CGPoint::new(1440., 0.), CGSize::new(1440., 900.));
+    let left_space = SpaceId::new(1);
+    let right_space = SpaceId::new(2);
+
+    reactor.handle_event(space_state_event(vec![left, right], vec![
+        Some(left_space),
+        Some(right_space),
+    ]));
+
+    let switch = reactor.dispatch_test_layout_command(LayoutCommand::NextWorkspace(None));
+    assert_eq!(switch.arrange.space_scope, Some(left_space));
+
+    let ordinary = reactor.dispatch_test_layout_command(LayoutCommand::NextWindow);
+    assert_eq!(ordinary.arrange.space_scope, None);
+}
+
+#[test]
 fn command_space_only_snapshot_does_not_trigger_full_space_reconcile() {
     let (mut apps, mut reactor) = test_context();
     let left = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
@@ -2111,7 +2131,7 @@ fn topology_change_clears_stale_pending_hide_target_before_next_workspace_layout
     let txid = reactor.transaction_manager.generate_next_txid(wsid);
     reactor.transaction_manager.store_txid(wsid, txid, hidden_target);
 
-    assert!(!reactor.update_layout_or_warn(false, true));
+    assert!(!reactor.update_layout_or_warn(false, true, None));
     assert!(
         apps.requests().is_empty(),
         "a stale pending target suppresses the hide write before topology invalidation"

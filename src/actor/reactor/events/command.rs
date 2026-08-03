@@ -116,7 +116,10 @@ pub fn handle_command_layout(
         }
     };
 
-    Ok(EventOutcome::layout_changed(false).with_layout_response(response, workspace_space))
+    let arrange_space_scope = is_workspace_switch.then_some(workspace_space).flatten();
+    Ok(EventOutcome::layout_changed(false)
+        .with_layout_response(response, workspace_space)
+        .with_arrange_space_scope(arrange_space_scope))
 }
 
 fn current_floating_positions(

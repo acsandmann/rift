@@ -201,12 +201,13 @@ impl LayoutManager {
         reactor: &mut Reactor,
         is_resize: bool,
         is_workspace_switch: bool,
+        space_scope: Option<SpaceId>,
     ) -> Result<bool, crate::model::reactor::ReactorError> {
-        let layout_result = Self::calculate_layout(reactor);
+        let layout_result = Self::calculate_layout(reactor, space_scope);
         Self::apply_layout(reactor, layout_result, is_resize, is_workspace_switch)
     }
 
-    fn calculate_layout(reactor: &mut Reactor) -> LayoutResult {
+    fn calculate_layout(reactor: &mut Reactor, space_scope: Option<SpaceId>) -> LayoutResult {
         if reactor.state.windows.tracked_window_count() == 0 {
             return LayoutResult::new();
         }
@@ -223,6 +224,9 @@ impl LayoutManager {
             let Some(space) = screen.space else {
                 continue;
             };
+            if space_scope.is_some_and(|scope| scope != space) {
+                continue;
+            }
             if !reactor.is_space_active(space) {
                 continue;
             }

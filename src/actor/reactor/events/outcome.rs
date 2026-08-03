@@ -85,6 +85,7 @@ pub(crate) struct ArrangeRequest {
     pub(crate) passes: u8,
     pub(crate) is_resize: bool,
     pub(crate) window_was_destroyed: bool,
+    pub(crate) space_scope: Option<SpaceId>,
 }
 
 impl EventOutcome {
@@ -124,6 +125,14 @@ impl EventOutcome {
         self.layout_events.append(&mut other.layout_events);
         self.layout_responses.append(&mut other.layout_responses);
         if other.arrange.requested {
+            self.arrange.space_scope = if self.arrange.requested {
+                match (self.arrange.space_scope, other.arrange.space_scope) {
+                    (Some(existing), Some(other)) if existing == other => Some(existing),
+                    _ => None,
+                }
+            } else {
+                other.arrange.space_scope
+            };
             self.arrange.requested = true;
             self.arrange.passes = self.arrange.passes.saturating_add(other.arrange.passes).max(1);
             self.arrange.is_resize |= other.arrange.is_resize;
@@ -170,6 +179,7 @@ impl EventOutcome {
                 passes: 1,
                 is_resize,
                 window_was_destroyed: false,
+                space_scope: None,
             },
             focused_window: None,
             refresh_window_notifications: false,
@@ -246,6 +256,11 @@ impl EventOutcome {
     pub(crate) fn with_arrange_passes(mut self, passes: u8) -> Self {
         self.arrange.requested = passes > 0;
         self.arrange.passes = passes;
+        self
+    }
+
+    pub(crate) fn with_arrange_space_scope(mut self, space_scope: Option<SpaceId>) -> Self {
+        self.arrange.space_scope = space_scope;
         self
     }
 
@@ -425,5 +440,23 @@ mod tests {
         let outcome = EventOutcome::focus_changed(Some(focused), false);
         assert!(!outcome.arrange.requested);
         assert_eq!(outcome.focused_window, Some(focused));
+    }
+
+    #[test]
+    fn absorbed_arrange_requests_keep_only_a_common_space_scope() {
+        let first_space = SpaceId::new(1);
+        let second_space = SpaceId::new(2);
+        let mut outcome =
+            EventOutcome::layout_changed(false).with_arrange_space_scope(Some(first_space));
+
+        outcome.absorb(
+            EventOutcome::layout_changed(false).with_arrange_space_scope(Some(first_space)),
+        );
+        assert_eq!(outcome.arrange.space_scope, Some(first_space));
+
+        outcome.absorb(
+            EventOutcome::layout_changed(false).with_arrange_space_scope(Some(second_space)),
+        );
+        assert_eq!(outcome.arrange.space_scope, None);
     }
 }
