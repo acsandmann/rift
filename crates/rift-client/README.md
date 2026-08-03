@@ -54,5 +54,12 @@ Supported event names are `workspace_changed`, `windows_changed`,
 `window_title_changed`, `focused_window_changed`, and `stacks_changed`. Use `*`
 to listen for all events.
 
+For a more complete example, see the [dimmer example](examples/dimmer.rs),
+which dims unfocused windows and updates them as Rift events arrive:
+
+```sh
+cargo run -p rift-client --example dimmer
+```
+
 Set `RIFT_BS_NAME` to use a non-default Rift bootstrap service (for example,
 when running multiple instances).
