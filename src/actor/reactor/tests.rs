@@ -4,7 +4,7 @@ use test_log::test;
 use super::testing::*;
 use super::*;
 use crate::actor::app::{AppThreadHandle, Request, pid_t};
-use crate::common::config::{OuterGaps, WorkspaceSelector};
+use crate::common::config::{LayoutMode, OuterGaps, WorkspaceSelector};
 use crate::layout_engine::{Direction, LayoutCommand, LayoutEvent};
 use crate::model::window_store::NativeFullscreenTransition;
 use crate::sys::app::{AppInfo, WindowInfo};
@@ -2348,6 +2348,51 @@ fn auto_workspace_switch_follows_activated_window_when_same_app_is_visible_elsew
 }
 
 #[test]
+fn dock_activation_reveals_window_in_active_scrolling_workspace() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(600., 600.));
+    let space = SpaceId::new(1);
+    let pid = 2;
+    let activated = WindowId::new(pid, 3);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    apps.make_app_and_settle(&mut reactor, pid, make_windows(3));
+    reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+        workspace: None,
+        mode: LayoutMode::Scrolling,
+    });
+    apps.simulate_until_quiet(&mut reactor);
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, WindowId::new(pid, 1)));
+    apps.simulate_until_quiet(&mut reactor);
+    let _ = apps.requests();
+
+    reactor.handle_event(Event::ApplicationGloballyActivated(pid));
+    let _ = apps.requests();
+    reactor.handle_event(Event::ApplicationMainWindowChanged(
+        pid,
+        Some(activated),
+        Quiet::No,
+    ));
+
+    let outcome = reactor
+        .dispatch_workflow(Event::ApplicationActivated(pid, Quiet::No))
+        .expect("resolved Dock activation");
+    assert!(!outcome.arrange.requested);
+    assert!(outcome.layout_events.is_empty());
+    assert_eq!(outcome.focused_window, Some(activated));
+
+    reactor.apply_event_outcome(outcome);
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        Some(activated)
+    );
+    assert!(
+        !apps.requests().is_empty(),
+        "revealing the activated scrolling window should write the adjusted strip layout"
+    );
+}
+
+#[test]
 fn carbon_activation_is_replayed_when_it_arrives_before_app_registration() {
     let (mut apps, mut reactor) = test_context();
     let pid = 7;
@@ -2411,7 +2456,7 @@ fn carbon_activation_is_forwarded_during_refresh_quarantine() {
 }
 
 #[test]
-fn focus_follows_mouse_requests_arrange_for_scrolling_reveal() {
+fn focus_follows_mouse_emits_focus_without_explicit_arrange() {
     let reactor = test_reactor();
     let space = SpaceId::new(1);
     let window = WindowId::new(7, 1);
@@ -2423,14 +2468,12 @@ fn focus_follows_mouse_requests_arrange_for_scrolling_reveal() {
             should_sync: true,
             is_main: true,
             needs_layout_sync: true,
-            arrange_after_layout_sync: true,
             active_space: Some(space),
         },
     )
     .expect("mouse focus workflow");
 
-    assert!(outcome.arrange.requested);
-    assert_eq!(outcome.arrange.passes, 1);
+    assert!(!outcome.arrange.requested);
     assert!(matches!(
         outcome.layout_events.as_slice(),
         [LayoutEvent::WindowFocused(event_space, event_window)]

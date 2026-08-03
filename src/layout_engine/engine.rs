@@ -1476,6 +1476,10 @@ impl LayoutEngine {
                     self.focused_window = Some(wid);
                     let _ = self.workspace_tree_mut(ws_id).select_window(layout, wid);
                     self.virtual_workspace_manager.set_last_focused_window(space, ws_id, Some(wid));
+                    return EventResponse {
+                        changed: self.active_layout_mode_at(space) == LayoutMode::Scrolling,
+                        ..EventResponse::default()
+                    };
                 } else {
                     warn!(
                         "No active workspace/layout for focused window {:?} on space {:?}",

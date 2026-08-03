@@ -1480,11 +1480,6 @@ impl Reactor {
                 let needs_layout_sync = window.is_some_and(|window| {
                     self.layout_manager.layout_engine.focused_window() != Some(window)
                 });
-                let arrange_after_layout_sync = needs_layout_sync
-                    && active_space.is_some_and(|space| {
-                        self.layout_manager.layout_engine.active_layout_mode_at(space)
-                            == crate::common::config::LayoutMode::Scrolling
-                    });
                 return window_workflow::handle_mouse_moved_over_window(
                     &self.app_manager,
                     window_workflow::MouseMovedPayload {
@@ -1493,7 +1488,6 @@ impl Reactor {
                             .is_some_and(|window| self.should_raise_on_mouse_over(window)),
                         is_main: window.is_some_and(|window| self.main_window() == Some(window)),
                         needs_layout_sync,
-                        arrange_after_layout_sync,
                         active_space,
                     },
                 );
@@ -3271,6 +3265,10 @@ impl Reactor {
     }
 
     fn send_layout_event(&mut self, event: LayoutEvent) {
+        let event_space = match &event {
+            LayoutEvent::WindowFocused(space, _) => Some(*space),
+            _ => None,
+        };
         let focus_desktop = matches!(
             event,
             LayoutEvent::WindowRemoved(wid)
@@ -3279,8 +3277,12 @@ impl Reactor {
         let event_clone = event.clone();
         let response =
             self.layout_manager.layout_engine.handle_event(&mut self.state.windows, event);
+        let geometry_changed = response.changed;
         self.prepare_refocus_after_layout_event(&event_clone);
         self.handle_layout_response(response, None);
+        if geometry_changed {
+            self.update_layout_or_warn(false, false, event_space);
+        }
         if focus_desktop && let Some(space) = self.workspace_command_space() {
             self.focus_desktop_if_active_workspace_empty(space);
         }
