@@ -6,8 +6,7 @@ use std::ffi::c_float;
 use std::io;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use rift_client::{EventKind, RiftMachClient};
-use serde_json::Value;
+use rift_client::{EventKind, RiftEvent, RiftMachClient};
 
 type ConnID = i32;
 type WinID = u32;
@@ -66,18 +65,12 @@ impl Dimmer {
         Ok(())
     }
 
-    fn handle_event(&mut self, event: &Value) -> Result<()> {
-        let Some(kind) = event.get("type").and_then(Value::as_str) else {
-            return Ok(());
-        };
+    fn handle_event(&mut self, event: &RiftEvent) -> Result<()> {
+        let space_id = event.space_id();
 
-        let Some(space_id) = event.get("space_id").and_then(Value::as_u64) else {
-            return Ok(());
-        };
-
-        match kind {
-            "workspace_changed" => {
-                if let Some(display) = event.get("display_uuid").and_then(Value::as_str)
+        match event {
+            RiftEvent::WorkspaceChanged { display_uuid, .. } => {
+                if let Some(display) = display_uuid.as_deref()
                     && let Some(old_space) = self.space_by_display.insert(display.into(), space_id)
                     && old_space != space_id
                 {
@@ -87,7 +80,7 @@ impl Dimmer {
                 self.refresh(space_id)?;
             }
 
-            "focused_window_changed" | "windows_changed" => {
+            RiftEvent::FocusedWindowChanged { .. } | RiftEvent::WindowsChanged { .. } => {
                 self.refresh(space_id)?;
             }
 

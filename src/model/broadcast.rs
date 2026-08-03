@@ -1,63 +1,21 @@
-use serde::{Deserialize, Serialize};
+/// The actor broadcast channel uses the protocol event directly. This keeps
+/// the server and client on one event definition instead of maintaining a
+/// runtime copy that must be translated before IPC.
+pub use rift_protocol::RiftEvent as BroadcastEvent;
+use slotmap::Key;
 
 use crate::actor::app::WindowId;
-use crate::layout_engine::{LayoutKind, VirtualWorkspaceId};
-use crate::sys::screen::SpaceId;
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(rename_all = "snake_case")]
-pub struct StackInfo {
-    pub container_kind: LayoutKind,
-    pub total_count: usize,
-    pub selected_index: usize,
-    pub windows: Vec<String>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(rename_all = "snake_case")]
-#[serde(tag = "type")]
-pub enum BroadcastEvent {
-    WorkspaceChanged {
-        space_id: SpaceId,
-        workspace_id: VirtualWorkspaceId,
-        workspace_name: String,
-        display_uuid: Option<String>,
-    },
-    WindowsChanged {
-        workspace_id: VirtualWorkspaceId,
-        workspace_name: String,
-        windows: Vec<String>,
-        space_id: SpaceId,
-        display_uuid: Option<String>,
-    },
-    WindowTitleChanged {
-        window_id: WindowId,
-        workspace_id: VirtualWorkspaceId,
-        workspace_index: Option<u64>,
-        workspace_name: String,
-        previous_title: String,
-        new_title: String,
-        space_id: SpaceId,
-        display_uuid: Option<String>,
-    },
-    FocusedWindowChanged {
-        window_id: WindowId,
-        workspace_id: VirtualWorkspaceId,
-        workspace_index: Option<u64>,
-        workspace_name: String,
-        space_id: SpaceId,
-        display_uuid: Option<String>,
-    },
-    StacksChanged {
-        workspace_id: VirtualWorkspaceId,
-        workspace_index: Option<u64>,
-        workspace_name: String,
-        stacks: Vec<StackInfo>,
-        active_workspace_has_fullscreen: bool,
-        space_id: SpaceId,
-        display_uuid: Option<String>,
-    },
-}
+use crate::model::virtual_workspace::VirtualWorkspaceId;
 
 pub type BroadcastSender = crate::actor::Sender<BroadcastEvent>;
 pub type BroadcastReceiver = crate::actor::Receiver<BroadcastEvent>;
+
+pub fn protocol_workspace_id(id: VirtualWorkspaceId) -> rift_protocol::WorkspaceId {
+    let value = id.data().as_ffi();
+    rift_protocol::WorkspaceId {
+        idx: value as u32,
+        version: (value >> 32) as u32,
+    }
+}
+
+pub fn protocol_window_id(id: WindowId) -> rift_protocol::WindowId { id.into() }

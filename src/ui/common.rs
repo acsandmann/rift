@@ -4,7 +4,7 @@ use objc2_core_foundation::{CFType, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::CGContext;
 use objc2_quartz_core::{CALayer, CATransaction};
 
-use crate::model::server::WindowData;
+use crate::model::server::RuntimeWindowData;
 use crate::sys::skylight::{
     CFRelease, G_CONNECTION, SLSFlushWindowContentRegion, SLWindowContextCreate,
 };
@@ -50,7 +50,7 @@ pub struct WindowLayoutMetrics {
 }
 
 impl WindowLayoutMetrics {
-    pub fn rect_for(&self, window: &WindowData, min_size: f64, gap: f64) -> CGRect {
+    pub fn rect_for(&self, window: &RuntimeWindowData, min_size: f64, gap: f64) -> CGRect {
         let wx = window.info.frame.origin.x - self.min_x;
         let wy_top = window.info.frame.origin.y - self.min_y + window.info.frame.size.height;
         let wy = self.disp_h - wy_top;
@@ -76,7 +76,7 @@ impl WindowLayoutMetrics {
 }
 
 pub fn compute_window_layout_metrics(
-    windows: &[WindowData],
+    windows: &[RuntimeWindowData],
     bounds: CGRect,
     inset: f64,
     scale_factor: f64,

@@ -91,7 +91,9 @@ use crate::common::collections::{BTreeMap, HashMap, HashSet};
 use crate::common::config::Config;
 use crate::layout_engine::{self as layout, Direction, LayoutEngine, LayoutEvent};
 use crate::model::RiftState;
-use crate::model::broadcast::{BroadcastEvent, BroadcastSender};
+use crate::model::broadcast::{
+    BroadcastEvent, BroadcastSender, protocol_window_id, protocol_workspace_id,
+};
 use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy};
 use crate::model::tx_store::WindowTxStore;
 use crate::model::virtual_workspace::AppRuleResult;
@@ -143,7 +145,7 @@ impl std::ops::Deref for ReactorHandle {
     fn deref(&self) -> &Self::Target { &self.queries }
 }
 
-use crate::model::server::WindowData;
+use crate::model::server::RuntimeWindowData;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpaceEventKind {
@@ -1616,12 +1618,16 @@ impl Reactor {
                 );
             }
             Event::Command(Command::Reactor(ReactorCommand::CloseWindow { window_server_id })) => {
-                return command_workflow::handle_close_window(window_server_id);
+                return command_workflow::handle_close_window(
+                    window_server_id.map(WindowServerId::new),
+                );
             }
             Event::Command(Command::Reactor(ReactorCommand::FocusWindow {
                 window_id,
                 window_server_id,
             })) => {
+                let window_id = WindowId::new(window_id.pid, window_id.idx);
+                let window_server_id = window_server_id.map(WindowServerId::new);
                 let resolved_space = self.best_space_for_window_id(window_id).or_else(|| {
                     self.state.windows.window(window_id).and_then(|window| {
                         self.best_space_for_window(&window.frame_monotonic, window.info.sys_id)
@@ -2098,7 +2104,7 @@ impl Reactor {
         }
     }
 
-    fn create_window_data(&self, window_id: WindowId) -> Option<WindowData> {
+    fn create_window_data(&self, window_id: WindowId) -> Option<RuntimeWindowData> {
         let window_state = self.state.windows.window(window_id)?;
         if !window_state.matches_filter(WindowFilter::EffectivelyManageable) {
             return None;
@@ -2108,7 +2114,7 @@ impl Reactor {
         let app_name = app.info.localized_name.clone();
         let bundle_id = app.info.bundle_id.clone();
 
-        Some(WindowData {
+        Some(RuntimeWindowData {
             id: window_id,
             is_floating: self.layout_manager.layout_engine.is_window_floating(window_id),
             is_focused: self.main_window() == Some(window_id),
@@ -2319,9 +2325,9 @@ impl Reactor {
             {
                 let display_uuid = self.display_uuid_for_space(space);
                 let broadcast_event = BroadcastEvent::WorkspaceChanged {
-                    workspace_id,
+                    workspace_id: protocol_workspace_id(workspace_id),
                     workspace_name,
-                    space_id: space,
+                    space_id: space.get(),
                     display_uuid,
                 };
                 _ = self.communication_manager.event_broadcaster.send(broadcast_event);
@@ -2351,13 +2357,13 @@ impl Reactor {
             let display_uuid = self.display_uuid_for_space(space);
 
             let event = BroadcastEvent::WindowTitleChanged {
-                window_id,
-                workspace_id,
+                window_id: protocol_window_id(window_id),
+                workspace_id: protocol_workspace_id(workspace_id),
                 workspace_index,
                 workspace_name,
                 previous_title,
                 new_title,
-                space_id: space,
+                space_id: space.get(),
                 display_uuid,
             };
             let _ = self.communication_manager.event_broadcaster.send(event);
@@ -2378,11 +2384,11 @@ impl Reactor {
             let display_uuid = self.display_uuid_for_space(space);
 
             let event = BroadcastEvent::FocusedWindowChanged {
-                window_id,
-                workspace_id,
+                window_id: protocol_window_id(window_id),
+                workspace_id: protocol_workspace_id(workspace_id),
                 workspace_index,
                 workspace_name,
-                space_id: space,
+                space_id: space.get(),
                 display_uuid,
             };
             let _ = self.communication_manager.event_broadcaster.send(event);

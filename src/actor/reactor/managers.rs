@@ -1,4 +1,5 @@
 use objc2_core_foundation::{CGPoint, CGRect};
+use rift_protocol::StackInfo;
 use tracing::trace;
 
 use super::replay::Record;
@@ -15,7 +16,7 @@ use crate::actor::{
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{LayoutMode, WindowSnappingSettings};
 use crate::layout_engine::LayoutEngine;
-use crate::model::broadcast::{BroadcastEvent, BroadcastSender, StackInfo};
+use crate::model::broadcast::{BroadcastEvent, BroadcastSender, protocol_workspace_id};
 use crate::sys::screen::SpaceId;
 
 /// Manages application state and rules
@@ -359,7 +360,20 @@ impl LayoutManager {
                     let stacks: Vec<StackInfo> = group_infos
                         .iter()
                         .map(|g| StackInfo {
-                            container_kind: g.container_kind,
+                            container_kind: match g.container_kind {
+                                crate::layout_engine::LayoutKind::Horizontal => {
+                                    rift_protocol::LayoutKind::Horizontal
+                                }
+                                crate::layout_engine::LayoutKind::Vertical => {
+                                    rift_protocol::LayoutKind::Vertical
+                                }
+                                crate::layout_engine::LayoutKind::HorizontalStack => {
+                                    rift_protocol::LayoutKind::HorizontalStack
+                                }
+                                crate::layout_engine::LayoutKind::VerticalStack => {
+                                    rift_protocol::LayoutKind::VerticalStack
+                                }
+                            },
                             total_count: g.total_count,
                             selected_index: g.selected_index,
                             windows: g.window_ids.iter().map(WindowId::to_debug_string).collect(),
@@ -368,13 +382,13 @@ impl LayoutManager {
 
                     if stacks.len() > 0 {
                         let event = BroadcastEvent::StacksChanged {
-                            workspace_id,
+                            workspace_id: protocol_workspace_id(workspace_id),
                             workspace_index,
                             workspace_name,
                             stacks,
                             active_workspace_has_fullscreen:
                                 active_workspace_for_space_has_fullscreen,
-                            space_id: space,
+                            space_id: space.get(),
                             display_uuid,
                         };
                         let _ = reactor.communication_manager.event_broadcaster.send(event);

@@ -728,10 +728,11 @@ fn map_window_command(cmd: WindowCommands) -> Result<CliCommand, String> {
             ))),
             (None, Some(window_id)) => Ok(CliCommand::Reactor(reactor::Command::Reactor(
                 reactor::ReactorCommand::FocusWindow {
-                    window_id: parse_window_id(&window_id)?,
+                    window_id: parse_window_id(&window_id)?.into(),
                     window_server_id: window_server_id
                         .as_deref()
                         .map(parse_window_server_id)
+                        .map(|result| result.map(|id| id.as_u32()))
                         .transpose()?,
                 },
             ))),
@@ -761,7 +762,9 @@ fn map_window_command(cmd: WindowCommands) -> Result<CliCommand, String> {
         WindowCommands::Close { window_id } => {
             let window_server_id = window_id.as_deref().map(parse_window_server_id).transpose()?;
             Ok(CliCommand::Reactor(reactor::Command::Reactor(
-                reactor::ReactorCommand::CloseWindow { window_server_id },
+                reactor::ReactorCommand::CloseWindow {
+                    window_server_id: window_server_id.map(|id| id.as_u32()),
+                },
             )))
         }
     }
@@ -908,7 +911,7 @@ fn map_layout_command(cmd: LayoutCommands) -> Result<CliCommand, String> {
             LC::SwapMasterStack,
         ))),
         LayoutCommands::SwapWindows { a, b } => Ok(CliCommand::Reactor(reactor::Command::Layout(
-            LC::SwapWindows(parse_window_id(&a)?, parse_window_id(&b)?),
+            LC::SwapWindows(parse_window_id(&a)?.into(), parse_window_id(&b)?.into()),
         ))),
         LayoutCommands::ScrollStrip { delta } => {
             Ok(CliCommand::Reactor(reactor::Command::Layout(LC::ScrollStrip {
@@ -1103,7 +1106,7 @@ fn parse_focus_direction(value: &str) -> Result<layout::Direction, String> {
     }
 }
 
-fn write_json(value: &Value, pretty: bool) -> Result<(), String> {
+fn write_json<T: Serialize>(value: &T, pretty: bool) -> Result<(), String> {
     let stdout = io::stdout();
     let mut handle = stdout.lock();
     let mut writer = io::BufWriter::new(&mut handle);

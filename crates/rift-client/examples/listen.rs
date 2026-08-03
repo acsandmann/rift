@@ -18,7 +18,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     eprintln!("Listening for Rift event '{event}'. Press Ctrl-C to stop.");
     loop {
-        let payload = subscription.recv_event()?;
-        println!("{}", serde_json::to_string_pretty(&payload)?);
+        let event = subscription.recv_event()?;
+        println!("{}", serde_json::to_string_pretty(&event)?);
     }
 }

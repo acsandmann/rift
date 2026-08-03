@@ -198,7 +198,13 @@ pub struct RiftMachSubscription {
 
 impl RiftMachSubscription {
     /// Blocks until the next event arrives on this subscription.
-    pub fn recv_event(&self) -> Result<Value, ClientError> { self.recv_event_as() }
+    pub fn recv_event(&self) -> Result<RiftEvent, ClientError> { self.recv_event_as() }
+
+    /// Blocks until the next event arrives and returns its raw JSON payload.
+    ///
+    /// This is useful for compatibility with clients that intentionally handle
+    /// newer event variants without upgrading their protocol types.
+    pub fn recv_event_value(&self) -> Result<Value, ClientError> { self.recv_event_as() }
 
     /// Blocks until the next event arrives and decodes it into the requested
     /// type.

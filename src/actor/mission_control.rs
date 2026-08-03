@@ -6,7 +6,7 @@ use tracing::instrument;
 
 use crate::actor::{self, reactor};
 use crate::common::config::Config;
-use crate::model::server::WorkspaceData;
+use crate::model::server::RuntimeWorkspaceData;
 use crate::ui::mission_control::{MissionControlAction, MissionControlMode, MissionControlOverlay};
 
 #[derive(Debug)]
@@ -37,7 +37,7 @@ pub struct MissionControlActor {
     mtm: MainThreadMarker,
     mission_control_active: bool,
     current_view_mode: Option<MissionControlViewMode>,
-    workspaces: Vec<WorkspaceData>,
+    workspaces: Vec<RuntimeWorkspaceData>,
 }
 
 impl MissionControlActor {
@@ -114,7 +114,10 @@ impl MissionControlActor {
             }
             MissionControlAction::FocusWindow { window_id, window_server_id } => {
                 let _ = self.reactor.try_send(reactor::Event::Command(reactor::Command::Reactor(
-                    reactor::ReactorCommand::FocusWindow { window_id, window_server_id },
+                    reactor::ReactorCommand::FocusWindow {
+                        window_id: window_id.into(),
+                        window_server_id: window_server_id.map(Into::into),
+                    },
                 )));
                 self.dispose_overlay();
             }

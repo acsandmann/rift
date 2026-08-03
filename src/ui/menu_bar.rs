@@ -32,7 +32,7 @@ use crate::common::config::{
 };
 use crate::layout_engine::{LayoutCommand, LayoutEngine, RestoreScope, RestoreSource};
 use crate::model::VirtualWorkspaceId;
-use crate::model::server::{WindowData, WorkspaceData};
+use crate::model::server::{RuntimeWindowData, RuntimeWorkspaceData};
 use crate::sys::hotkey::{Hotkey, KeyCode, Modifiers};
 use crate::sys::screen::SpaceId;
 use crate::ui::common::compute_window_layout_metrics;
@@ -120,9 +120,9 @@ impl MenuIcon {
         &mut self,
         active_space: SpaceId,
         active_space_is_activated: bool,
-        workspaces: &[WorkspaceData],
+        workspaces: &[RuntimeWorkspaceData],
         _active_workspace: Option<VirtualWorkspaceId>,
-        _windows: &[WindowData],
+        _windows: &[RuntimeWindowData],
         settings: &MenuBarSettings,
         hotkeys: &[(Hotkey, WmCommand)],
     ) {
@@ -146,7 +146,7 @@ impl MenuIcon {
 
         let mode = settings.mode;
         let style = settings.display_style;
-        let label_for = |workspace: &WorkspaceData| match settings.active_label {
+        let label_for = |workspace: &RuntimeWorkspaceData| match settings.active_label {
             ActiveWorkspaceLabel::Index => format!("{}", workspace.index + 1),
             ActiveWorkspaceLabel::Name => {
                 if workspace.name.is_empty() {
@@ -287,7 +287,7 @@ struct WorkspaceRenderData {
 }
 
 struct WorkspaceRenderInput {
-    workspace: WorkspaceData,
+    workspace: RuntimeWorkspaceData,
     label: String,
     show_windows: bool,
 }
@@ -412,7 +412,7 @@ fn build_status_menu(
     active_layout: Option<LayoutMode>,
     _active_space: SpaceId,
     active_space_is_activated: bool,
-    workspaces: &[WorkspaceData],
+    workspaces: &[RuntimeWorkspaceData],
     shortcuts: &MenuShortcuts,
     layout_folder: &Path,
 ) -> Retained<NSMenu> {

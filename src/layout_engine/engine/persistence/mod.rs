@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use objc2_core_foundation::CGSize;
+pub use rift_protocol::{RestoreScope, RestoreSource};
 use serde::{Deserialize, Serialize};
 
 use super::{FloatingManager, LayoutEngine, WorkspaceLayouts};
@@ -19,23 +20,6 @@ use crate::model::{
 use crate::sys::screen::SpaceId;
 
 static SAVE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RestoreScope {
-    Workspace,
-    Space,
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RestoreSource {
-    /// Portable layout files restore the native space that was active when the file was saved.
-    #[default]
-    SavedActiveSpace,
-    /// The master file is a complete Rift snapshot and restores the current native-space entry.
-    CurrentSpace,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RestoreRequest {

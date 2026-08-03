@@ -182,13 +182,7 @@ impl ServerState {
     }
 
     fn forward_event_to_subscribers(&self, event: BroadcastEvent) {
-        let event_name = match &event {
-            BroadcastEvent::WorkspaceChanged { .. } => "workspace_changed",
-            BroadcastEvent::WindowsChanged { .. } => "windows_changed",
-            BroadcastEvent::WindowTitleChanged { .. } => "window_title_changed",
-            BroadcastEvent::FocusedWindowChanged { .. } => "focused_window_changed",
-            BroadcastEvent::StacksChanged { .. } => "stacks_changed",
-        };
+        let event_name = event.kind().as_str();
 
         let mut targets: HashSet<ClientPort> = HashSet::default();
         if let Some(clients) = self.subscriptions_by_event.get(event_name) {
@@ -231,13 +225,7 @@ impl ServerState {
     }
 
     fn forward_event_to_cli_subscribers(&self, event: BroadcastEvent) {
-        let event_name = match &event {
-            BroadcastEvent::WorkspaceChanged { .. } => "workspace_changed",
-            BroadcastEvent::WindowsChanged { .. } => "windows_changed",
-            BroadcastEvent::WindowTitleChanged { .. } => "window_title_changed",
-            BroadcastEvent::FocusedWindowChanged { .. } => "focused_window_changed",
-            BroadcastEvent::StacksChanged { .. } => "stacks_changed",
-        };
+        let event_name = event.kind().as_str();
 
         // Collect relevant subscriptions without full HashMap clone
         let mut relevant: Vec<CliSubscription> = Vec::new();

@@ -368,7 +368,7 @@ impl StackLine {
                 );
                 let _ = self.reactor_tx.send(reactor::Event::Command(Command::Reactor(
                     ReactorCommand::FocusWindow {
-                        window_id: *window_id,
+                        window_id: (*window_id).into(),
                         window_server_id: None,
                     },
                 )));

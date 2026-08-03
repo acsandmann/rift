@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::bail;
+pub use rift_protocol::{AnimationEasing, ConfigCommand, LayoutMode, WorkspaceSelector};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use super::collections::HashMap;
 use crate::actor::wm_controller::WmCommand;
@@ -17,44 +17,6 @@ const DEPRECATED_MAP: &[(&str, &str)] = &[
     ("unstack_windows", "toggle_stack"),
     ("toggle_tile_orientation", "toggle_orientation"),
 ];
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(rename_all = "snake_case")]
-pub enum ConfigCommand {
-    SetAnimate(bool),
-    SetAnimationDuration(f64),
-    SetAnimationFps(f64),
-    SetAnimationEasing(AnimationEasing),
-
-    SetMouseFollowsFocus(bool),
-    SetMouseHidesOnFocus(bool),
-    SetFocusFollowsMouse(bool),
-
-    SetStackOffset(f64),
-    SetOuterGaps {
-        top: f64,
-        left: f64,
-        bottom: f64,
-        right: f64,
-    },
-    SetInnerGaps {
-        horizontal: f64,
-        vertical: f64,
-    },
-
-    SetWorkspaceNames(Vec<String>),
-
-    /// Generic setter for arbitrary config paths using dot-separated keys.
-    /// Example: key = "settings.animate", value = true
-    Set {
-        key: String,
-        value: Value,
-    },
-
-    GetConfig,
-    SaveConfig,
-    ReloadConfig,
-}
 
 pub fn data_dir() -> PathBuf { dirs::home_dir().unwrap().join(".rift") }
 pub fn restore_file() -> PathBuf { data_dir().join("layout.ron") }
@@ -100,13 +62,6 @@ pub struct WorkspaceLayoutRule {
 
 // Allow specifying a workspace by numeric index or by name in the config.
 // This supports both `workspace = 2` and `workspace = "coding"` in app rules.
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Eq)]
-#[serde(untagged)]
-pub enum WorkspaceSelector {
-    Index(usize),
-    Name(String),
-}
-
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct AppWorkspaceRule {
@@ -426,35 +381,6 @@ pub struct Settings {
     pub hot_reload: bool,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default, Copy)]
-#[serde(rename_all = "snake_case")]
-pub enum AnimationEasing {
-    #[default]
-    EaseInOut,
-    Linear,
-    EaseInSine,
-    EaseOutSine,
-    EaseInOutSine,
-    EaseInQuad,
-    EaseOutQuad,
-    EaseInOutQuad,
-    EaseInCubic,
-    EaseOutCubic,
-    EaseInOutCubic,
-    EaseInQuart,
-    EaseOutQuart,
-    EaseInOutQuart,
-    EaseInQuint,
-    EaseOutQuint,
-    EaseInOutQuint,
-    EaseInExpo,
-    EaseOutExpo,
-    EaseInOutExpo,
-    EaseInCirc,
-    EaseOutCirc,
-    EaseInOutCirc,
-}
-
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct UiSettings {
@@ -735,35 +661,6 @@ pub struct LayoutSettings {
     /// Scrolling layout configuration (niri-style columns)
     #[serde(default)]
     pub scrolling: ScrollingLayoutSettings,
-}
-
-/// Layout mode enum
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum LayoutMode {
-    /// Traditional container-based tiling (i3/sway style)
-    #[default]
-    Traditional,
-    /// Binary space partitioning tiling
-    Bsp,
-    /// Dedicated stacked layout (single stack container)
-    Stack,
-    /// Master/stack layout (master area + stack area)
-    MasterStack,
-    /// Scrolling column layout (niri-style)
-    Scrolling,
-}
-
-impl ToString for LayoutMode {
-    fn to_string(&self) -> String {
-        match self {
-            LayoutMode::Traditional => "traditional".to_string(),
-            LayoutMode::Bsp => "bsp".to_string(),
-            LayoutMode::Stack => "stack".to_string(),
-            LayoutMode::MasterStack => "master_stack".to_string(),
-            LayoutMode::Scrolling => "scrolling".to_string(),
-        }
-    }
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]

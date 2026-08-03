@@ -33,7 +33,7 @@ use tracing::info;
 use crate::actor::app::WindowId;
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::Config;
-use crate::model::server::{WindowData, WorkspaceData};
+use crate::model::server::{RuntimeWindowData, RuntimeWorkspaceData};
 use crate::sys::cgs_window::CgsWindow;
 use crate::sys::dispatch::DispatchExt;
 use crate::sys::event::current_cursor_location;
@@ -332,8 +332,8 @@ static OVERLAY_BACKGROUND_COLOR: Lazy<Retained<CGColor>> =
 
 #[derive(Debug, Clone)]
 pub enum MissionControlMode {
-    AllWorkspaces(Vec<WorkspaceData>),
-    CurrentWorkspace(Vec<WindowData>),
+    AllWorkspaces(Vec<RuntimeWorkspaceData>),
+    CurrentWorkspace(Vec<RuntimeWindowData>),
 }
 
 #[derive(Debug, Clone)]
@@ -581,7 +581,7 @@ impl MissionControlOverlay {
     }
 
     fn workspace_index_at_point(
-        workspaces: &[WorkspaceData],
+        workspaces: &[RuntimeWorkspaceData],
         point: CGPoint,
         bounds: CGRect,
     ) -> Option<(usize, usize)> {
@@ -600,7 +600,7 @@ impl MissionControlOverlay {
     }
 
     fn window_at_point(
-        windows: &[WindowData],
+        windows: &[RuntimeWindowData],
         point: CGPoint,
         bounds: CGRect,
         layout: WindowLayoutKind,
@@ -620,7 +620,10 @@ impl MissionControlOverlay {
         None
     }
 
-    fn compute_exploded_layout(windows: &[WindowData], bounds: CGRect) -> Option<Vec<CGRect>> {
+    fn compute_exploded_layout(
+        windows: &[RuntimeWindowData],
+        bounds: CGRect,
+    ) -> Option<Vec<CGRect>> {
         if windows.is_empty() {
             return None;
         }
@@ -666,7 +669,7 @@ impl MissionControlOverlay {
     }
 
     fn compute_window_rects(
-        windows: &[WindowData],
+        windows: &[RuntimeWindowData],
         bounds: CGRect,
         kind: WindowLayoutKind,
     ) -> Option<Vec<CGRect>> {
@@ -691,7 +694,7 @@ impl MissionControlOverlay {
     }
 
     fn navigate_workspaces(
-        visible: &[(usize, &WorkspaceData)],
+        visible: &[(usize, &RuntimeWorkspaceData)],
         current: usize,
         direction: NavDirection,
     ) -> Option<usize> {
@@ -888,7 +891,9 @@ impl MissionControlOverlay {
         }
     }
 
-    fn visible_workspaces(workspaces: &[WorkspaceData]) -> Vec<(usize, &WorkspaceData)> {
+    fn visible_workspaces(
+        workspaces: &[RuntimeWorkspaceData],
+    ) -> Vec<(usize, &RuntimeWorkspaceData)> {
         workspaces.iter().enumerate().filter(|(_, ws)| !ws.windows.is_empty()).collect()
     }
 
@@ -896,7 +901,7 @@ impl MissionControlOverlay {
         &self,
         state: &RefCell<MissionControlState>,
         parent_layer: &CALayer,
-        workspaces: &[WorkspaceData],
+        workspaces: &[RuntimeWorkspaceData],
         bounds: CGRect,
         selected: Option<usize>,
     ) {
@@ -1006,7 +1011,7 @@ impl MissionControlOverlay {
         &self,
         state: &RefCell<MissionControlState>,
         parent_layer: &CALayer,
-        windows: &[WindowData],
+        windows: &[RuntimeWindowData],
         tile: CGRect,
         selected: Option<usize>,
         layout: WindowLayoutKind,
@@ -1060,7 +1065,7 @@ impl MissionControlOverlay {
         let bounds = Self::content_bounds(CGRect::new(CGPoint::new(0.0, 0.0), self.frame.size));
         let mut targets = Vec::<CaptureTarget>::new();
         let mut target_indices: HashMap<WindowId, usize> = HashMap::default();
-        let mut add = |window: &WindowData, rect: CGRect| {
+        let mut add = |window: &RuntimeWindowData, rect: CGRect| {
             let Some(window_server_id) = window.info.sys_id else {
                 return;
             };

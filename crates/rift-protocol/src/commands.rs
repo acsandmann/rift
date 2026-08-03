@@ -4,65 +4,10 @@ use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-use crate::WindowId;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Direction {
-    Left,
-    Right,
-    Up,
-    Down,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ResizeOrientation {
-    #[default]
-    Horizontal,
-    Vertical,
-    Smart,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LayoutMode {
-    Traditional,
-    Bsp,
-    Stack,
-    MasterStack,
-    Scrolling,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum WorkspaceSelector {
-    Index(usize),
-    Name(String),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RestoreScope {
-    Workspace,
-    Space,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RestoreSource {
-    #[default]
-    SavedActiveSpace,
-    CurrentSpace,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum DisplaySelector {
-    Direction(Direction),
-    Index(usize),
-    Uuid(String),
-}
+use crate::{
+    Direction, DisplaySelector, LayoutMode, ResizeOrientation, RestoreScope, RestoreSource,
+    WindowId, WorkspaceSelector,
+};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -187,9 +132,10 @@ pub enum ConfigCommand {
     ReloadConfig,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AnimationEasing {
+    #[default]
     EaseInOut,
     Linear,
     EaseInSine,

@@ -37,7 +37,7 @@ pub fn handle_mouse_up(
                 payload.swap_space,
                 &payload.visible_spaces,
                 &payload.visible_space_centers,
-                LayoutCommand::SwapWindows(dragged, target),
+                LayoutCommand::SwapWindows(dragged.into(), target.into()),
             );
             outcome = outcome.with_layout_response(response, None);
         }

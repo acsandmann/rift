@@ -10,7 +10,7 @@ use crate::actor::{config, reactor};
 use crate::common::config::{Config, ConfigCommand};
 use crate::layout_engine::LayoutCommand;
 use crate::model::VirtualWorkspaceId;
-use crate::model::server::{WindowData, WorkspaceData};
+use crate::model::server::{RuntimeWindowData, RuntimeWorkspaceData};
 use crate::sys::screen::SpaceId;
 use crate::ui::menu_bar::{MenuAction, MenuIcon};
 use crate::{actor, common};
@@ -19,10 +19,10 @@ use crate::{actor, common};
 pub struct Update {
     pub active_space: SpaceId,
     pub active_space_is_activated: bool,
-    pub workspaces: Vec<WorkspaceData>,
+    pub workspaces: Vec<RuntimeWorkspaceData>,
     pub active_workspace_idx: Option<u64>,
     pub active_workspace: Option<VirtualWorkspaceId>,
-    pub windows: Vec<WindowData>,
+    pub windows: Vec<RuntimeWindowData>,
 }
 
 pub enum Event {
@@ -330,8 +330,8 @@ fn sig(
     active_space: u64,
     active_space_is_activated: bool,
     active_workspace: Option<u64>,
-    workspaces: &[WorkspaceData],
-    windows: &[WindowData],
+    workspaces: &[RuntimeWorkspaceData],
+    windows: &[RuntimeWindowData],
 ) -> u64 {
     let mut x = active_space
         ^ (windows.len() as u64).rotate_left(7)
@@ -366,7 +366,7 @@ fn sig(
 }
 
 #[inline(always)]
-fn workspace_sig(ws: &WorkspaceData) -> u64 {
+fn workspace_sig(ws: &RuntimeWorkspaceData) -> u64 {
     let mut x = (ws.index as u64).rotate_left(3)
         ^ (ws.window_count as u64).rotate_left(19)
         ^ hash_str(&ws.id).rotate_left(11)
@@ -385,7 +385,7 @@ fn workspace_sig(ws: &WorkspaceData) -> u64 {
 }
 
 #[inline(always)]
-fn window_sig(w: &WindowData) -> u64 {
+fn window_sig(w: &RuntimeWindowData) -> u64 {
     (w.id.idx.get() as u64)
         ^ w.info.frame.origin.x.to_bits().rotate_left(11)
         ^ w.info.frame.origin.y.to_bits().rotate_left(23)
@@ -406,10 +406,10 @@ fn hash_str(s: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::sig;
-    use crate::model::server::WorkspaceData;
+    use crate::model::server::RuntimeWorkspaceData;
 
-    fn workspace(layout_mode: &str) -> WorkspaceData {
-        WorkspaceData {
+    fn workspace(layout_mode: &str) -> RuntimeWorkspaceData {
+        RuntimeWorkspaceData {
             id: "VirtualWorkspaceId(1v1)".to_string(),
             index: 0,
             name: "main".to_string(),

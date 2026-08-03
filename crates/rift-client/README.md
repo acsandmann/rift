@@ -26,7 +26,7 @@ cargo run -p rift-client --example query
 ## Listen for events
 
 `subscribe` returns a subscription handle whose `recv_event` method blocks until
-Rift publishes the next matching event:
+Rift publishes the next matching, typed `RiftEvent`:
 
 ```rust
 use rift_client::{EventKind, RiftMachClient};
