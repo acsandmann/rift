@@ -681,15 +681,24 @@ pub struct BaseLayoutSettings {
     pub window_insertion_point: Option<WindowInsertionPoint>,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct TraditionalLayoutSettings {
     #[serde(flatten)]
     pub base: BaseLayoutSettings,
     /// Use Sway-style sibling normalization when inserting nodes. New nodes receive the
     /// average sibling weight instead of splitting the selected node's share.
-    #[serde(default)]
+    #[serde(default = "yes")]
     pub equalize_nodes: bool,
+}
+
+impl Default for TraditionalLayoutSettings {
+    fn default() -> Self {
+        Self {
+            base: BaseLayoutSettings::default(),
+            equalize_nodes: true,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]

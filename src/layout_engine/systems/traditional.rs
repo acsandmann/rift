@@ -29,7 +29,7 @@ impl Default for TraditionalLayoutSystem {
             tree: Tree::with_observer(Components::default()),
             layout_roots: Default::default(),
             window_insertion_point: WindowInsertionPoint::default(),
-            equalize_nodes: false,
+            equalize_nodes: true,
         }
     }
 }

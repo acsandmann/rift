@@ -88,7 +88,7 @@ window_insertion_point = "next_to_selection"
 [settings.layout.traditional]
 # Use Sway-style node normalization when adding windows. This gives a new node the
 # average sibling share while preserving the relative proportions of resized nodes.
-equalize_nodes = false
+equalize_nodes = true
 
 # these settings only apply when layout mode == "master_stack"
 [settings.layout.master_stack]
