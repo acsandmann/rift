@@ -40,6 +40,14 @@ pub enum BroadcastEvent {
         space_id: SpaceId,
         display_uuid: Option<String>,
     },
+    FocusedWindowChanged {
+        window_id: WindowId,
+        workspace_id: VirtualWorkspaceId,
+        workspace_index: Option<u64>,
+        workspace_name: String,
+        space_id: SpaceId,
+        display_uuid: Option<String>,
+    },
     StacksChanged {
         workspace_id: VirtualWorkspaceId,
         workspace_index: Option<u64>,

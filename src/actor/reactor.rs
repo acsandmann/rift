@@ -981,15 +981,21 @@ impl Reactor {
 
     #[instrument(name = "reactor::handle_event", skip(self), fields(event=?event))]
     fn handle_event(&mut self, event: Event) {
+        let previously_focused_window = self.main_window();
         match self.dispatch_workflow(event) {
-            Ok(outcome) => self.apply_event_outcome(outcome),
+            Ok(mut outcome) => {
+                let focused_window = self.main_window();
+                if focused_window != previously_focused_window
+                    && let Some(focused_window) = focused_window
+                {
+                    outcome = outcome.with_focused_window_broadcast(focused_window);
+                }
+                self.apply_event_outcome(outcome);
+            }
             Err(error) => warn!(%error, "reactor workflow failed"),
         }
     }
 
-    /// Dispatches one event and returns all ordered follow-up work without
-    /// applying it. This is the migration boundary used by the individual
-    /// workflow modules.
     fn dispatch_workflow(&mut self, event: Event) -> anyhow::Result<EventOutcome> {
         self.log_event(&event);
         self.recording_manager.record.on_event(&event);
@@ -2078,6 +2084,9 @@ impl Reactor {
                 broadcast.new_title,
             );
         }
+        if let Some(window) = outcome.focused_window_broadcast {
+            self.broadcast_focused_window_changed(window);
+        }
         // Requests which schedule fresh discovery are last so observers see
         // the fully reconciled model, layout, UI, and broadcasts.
         for (pid, request) in outcome.app_requests {
@@ -2348,6 +2357,31 @@ impl Reactor {
                 workspace_name,
                 previous_title,
                 new_title,
+                space_id: space,
+                display_uuid,
+            };
+            let _ = self.communication_manager.event_broadcaster.send(event);
+        }
+    }
+
+    fn broadcast_focused_window_changed(&self, window_id: WindowId) {
+        if let Some(space) = self.best_space_for_window_id(window_id)
+            && self.is_space_active(space)
+            && let Some(workspace_id) = self.layout_manager.layout_engine.active_workspace(space)
+        {
+            let workspace_index = self.layout_manager.layout_engine.active_workspace_idx(space);
+            let workspace_name = self
+                .layout_manager
+                .layout_engine
+                .workspace_name(space, workspace_id)
+                .unwrap_or_else(|| format!("Workspace {:?}", workspace_id));
+            let display_uuid = self.display_uuid_for_space(space);
+
+            let event = BroadcastEvent::FocusedWindowChanged {
+                window_id,
+                workspace_id,
+                workspace_index,
+                workspace_name,
                 space_id: space,
                 display_uuid,
             };

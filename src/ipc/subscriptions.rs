@@ -186,6 +186,7 @@ impl ServerState {
             BroadcastEvent::WorkspaceChanged { .. } => "workspace_changed",
             BroadcastEvent::WindowsChanged { .. } => "windows_changed",
             BroadcastEvent::WindowTitleChanged { .. } => "window_title_changed",
+            BroadcastEvent::FocusedWindowChanged { .. } => "focused_window_changed",
             BroadcastEvent::StacksChanged { .. } => "stacks_changed",
         };
 
@@ -234,6 +235,7 @@ impl ServerState {
             BroadcastEvent::WorkspaceChanged { .. } => "workspace_changed",
             BroadcastEvent::WindowsChanged { .. } => "windows_changed",
             BroadcastEvent::WindowTitleChanged { .. } => "window_title_changed",
+            BroadcastEvent::FocusedWindowChanged { .. } => "focused_window_changed",
             BroadcastEvent::StacksChanged { .. } => "stacks_changed",
         };
 

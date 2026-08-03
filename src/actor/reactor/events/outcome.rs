@@ -70,6 +70,7 @@ pub(crate) struct EventOutcome {
     pub(crate) reapply_app_rules: Vec<WindowId>,
     pub(crate) finalize_created_windows: Vec<WindowId>,
     pub(crate) window_title_broadcasts: Vec<WindowTitleBroadcast>,
+    pub(crate) focused_window_broadcast: Option<WindowId>,
     pub(crate) layout_events: Vec<LayoutEvent>,
     pub(crate) layout_responses: Vec<(EventResponse, Option<SpaceId>)>,
     pub(crate) arrange: ArrangeRequest,
@@ -122,6 +123,8 @@ impl EventOutcome {
         self.reapply_app_rules.append(&mut other.reapply_app_rules);
         self.finalize_created_windows.append(&mut other.finalize_created_windows);
         self.window_title_broadcasts.append(&mut other.window_title_broadcasts);
+        self.focused_window_broadcast =
+            other.focused_window_broadcast.or(self.focused_window_broadcast);
         self.layout_events.append(&mut other.layout_events);
         self.layout_responses.append(&mut other.layout_responses);
         if other.arrange.requested {
@@ -172,6 +175,7 @@ impl EventOutcome {
             reapply_app_rules: Vec::new(),
             finalize_created_windows: Vec::new(),
             window_title_broadcasts: Vec::new(),
+            focused_window_broadcast: None,
             layout_events: Vec::new(),
             layout_responses: Vec::new(),
             arrange: ArrangeRequest {
@@ -404,6 +408,11 @@ impl EventOutcome {
         });
         self
     }
+
+    pub(crate) fn with_focused_window_broadcast(mut self, window: WindowId) -> Self {
+        self.focused_window_broadcast = Some(window);
+        self
+    }
 }
 
 #[cfg(test)]
@@ -440,6 +449,9 @@ mod tests {
         let outcome = EventOutcome::focus_changed(Some(focused), false);
         assert!(!outcome.arrange.requested);
         assert_eq!(outcome.focused_window, Some(focused));
+
+        let outcome = EventOutcome::no_change().with_focused_window_broadcast(focused);
+        assert_eq!(outcome.focused_window_broadcast, Some(focused));
     }
 
     #[test]
