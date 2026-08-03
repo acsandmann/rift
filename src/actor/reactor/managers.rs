@@ -393,7 +393,6 @@ impl LayoutManager {
             }
         }
 
-        reactor.maybe_send_menu_update();
         Ok(any_frame_changed)
     }
 }

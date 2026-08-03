@@ -1959,6 +1959,7 @@ impl Reactor {
                     outcome.arrange.space_scope,
                 );
             }
+            // Publish the menu state once after all arrange passes have completed.
             self.maybe_send_menu_update();
         }
 
