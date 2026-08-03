@@ -4871,6 +4871,7 @@ mod tests {
     #[test]
     fn adding_window_after_selection_splits_selected_share() {
         let mut system = TraditionalLayoutSystem::default();
+        system.set_equalize_nodes(false);
         let layout = system.create_layout();
         let root = system.root(layout);
         system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
@@ -5038,6 +5039,7 @@ mod tests {
     #[test]
     fn adding_with_root_selected_splits_active_child_share() {
         let mut system = TraditionalLayoutSystem::default();
+        system.set_equalize_nodes(false);
         let layout = system.create_layout();
         let root = system.root(layout);
         system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
@@ -5066,6 +5068,7 @@ mod tests {
     #[test]
     fn adding_second_window_forces_even_split_when_selected_size_is_zero() {
         let mut system = TraditionalLayoutSystem::default();
+        system.set_equalize_nodes(false);
         let layout = system.create_layout();
         let root = system.root(layout);
         system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
