@@ -4,7 +4,8 @@ use super::window;
 use crate::actor::app::{AppInfo, WindowId, WindowInfo, pid_t};
 use crate::actor::reactor::{LayoutEvent, WindowFilter, WindowState, utils};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
-use crate::model::virtual_workspace::{AppRuleResult, WorkspaceError};
+use crate::model::AppRuleResult;
+use crate::model::virtual_workspace::WorkspaceError;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::WindowServerId;
 

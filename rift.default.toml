@@ -307,6 +307,11 @@ workspace_names = [
 #   - workspace (integer, 0-based): target workspace index. If omitted or invalid, uses the active workspace.
 #     Alternatively, `workspace` may be a workspace name string to target by name.
 #   - floating (boolean): whether matched windows should float by default.
+#   - position ({ x, y }): initial normalized position for floating windows. Values range from
+#     0.0 (top/left) to 1.0 (bottom/right); the window remains freely movable afterward.
+#   - size ({ w, h }): initial size in logical pixels. Either dimension may be omitted. Floating
+#     windows are initially resized; tiled windows receive a one-time resize after insertion.
+#   - focus (boolean): focus the window after applying the rule, switching to its virtual workspace.
 #   - manage (boolean): whether Rift should manage the matching window. Set to false to ignore the window completely (default = true).
 #
 # Matching behavior (summary):
@@ -348,6 +353,11 @@ workspace_names = [
 #   - Match by app name substring and workspace:
 #       app_rules = [
 #         { app_name = "Calendar", workspace = 2, floating = true },
+#       ]
+#
+#   - Float, place, resize, and focus a window:
+#       app_rules = [
+#         { app_id = "com.example.X", floating = true, position = { x = 0.4, y = 0.7 }, size = { w = 640, h = 480 }, focus = true },
 #       ]
 #
 #   - Accessibility example: float dialog windows for a specific app:

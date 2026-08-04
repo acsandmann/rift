@@ -13,7 +13,7 @@ use crate::common::config::{
 use crate::common::log::trace_misc;
 use crate::layout_engine::Direction;
 use crate::layout_engine::systems::LayoutSystemKind;
-use crate::model::app_rules::AppRuleDecision;
+use crate::model::app_rules::{AppRuleDecision, AppRuleEffects, AppRuleResult};
 use crate::model::hidden_window_placement::{HiddenWindowPlacement, HideCorner};
 use crate::model::{WindowStore, WindowWorkspaceInfo};
 use crate::sys::app::pid_t;
@@ -42,21 +42,6 @@ pub enum WorkspaceError {
     InvalidWorkspaceId(VirtualWorkspaceId),
     InvalidWorkspaceIndex(usize),
     InconsistentState(String),
-}
-
-/// Details about an app rule assignment when Rift will manage the window.
-#[derive(Debug, Clone, Copy)]
-pub struct AppRuleAssignment {
-    pub workspace_id: VirtualWorkspaceId,
-    pub floating: bool,
-    pub prev_rule_decision: bool,
-}
-
-/// Result of evaluating app rules for a window.
-#[derive(Debug, Clone, Copy)]
-pub enum AppRuleResult {
-    Managed(AppRuleAssignment),
-    Unmanaged,
 }
 
 /// Workspace-local configuration and layout state.
@@ -1034,7 +1019,14 @@ impl WorkspaceStore {
             return Ok(AppRuleResult::Unmanaged);
         }
 
-        if let AppRuleDecision::Managed { workspace, floating } = rule_decision {
+        if let AppRuleDecision::Managed {
+            workspace,
+            floating,
+            position,
+            size,
+            focus,
+        } = rule_decision
+        {
             let target_workspace_id = if let Some(ref ws_sel) = workspace {
                 let maybe_idx: Option<usize> = match ws_sel {
                     WorkspaceSelector::Index(i) => Some(*i),
@@ -1097,9 +1089,12 @@ impl WorkspaceStore {
                     return Err(WorkspaceError::AssignmentFailed);
                 }
                 window_store.set_rule_floating(window_id, floating);
-                return Ok(AppRuleResult::Managed(AppRuleAssignment {
+                return Ok(AppRuleResult::Managed(AppRuleEffects {
                     workspace_id: existing_assignment.workspace_id,
                     floating,
+                    position,
+                    size,
+                    focus,
                     prev_rule_decision,
                 }));
             }
@@ -1107,9 +1102,12 @@ impl WorkspaceStore {
             if self.assign_window_to_workspace(window_store, space, window_id, target_workspace_id)
             {
                 window_store.set_rule_floating(window_id, floating);
-                return Ok(AppRuleResult::Managed(AppRuleAssignment {
+                return Ok(AppRuleResult::Managed(AppRuleEffects {
                     workspace_id: target_workspace_id,
                     floating,
+                    position,
+                    size,
+                    focus,
                     prev_rule_decision,
                 }));
             } else {
@@ -1127,9 +1125,12 @@ impl WorkspaceStore {
                 return Err(WorkspaceError::AssignmentFailed);
             }
             window_store.clear_rule_floating(window_id);
-            return Ok(AppRuleResult::Managed(AppRuleAssignment {
+            return Ok(AppRuleResult::Managed(AppRuleEffects {
                 workspace_id: existing_assignment.workspace_id,
                 floating: false,
+                position: None,
+                size: None,
+                focus: false,
                 prev_rule_decision,
             }));
         }
@@ -1137,9 +1138,12 @@ impl WorkspaceStore {
         let default_workspace_id = self.get_default_workspace(space)?;
         if self.assign_window_to_workspace(window_store, space, window_id, default_workspace_id) {
             window_store.clear_rule_floating(window_id);
-            Ok(AppRuleResult::Managed(AppRuleAssignment {
+            Ok(AppRuleResult::Managed(AppRuleEffects {
                 workspace_id: default_workspace_id,
                 floating: false,
+                position: None,
+                size: None,
+                focus: false,
                 prev_rule_decision,
             }))
         } else {
@@ -1232,7 +1236,7 @@ mod tests {
     use crate::actor::app::WindowId;
     use crate::sys::screen::SpaceId;
 
-    fn expect_managed(result: Result<AppRuleResult, WorkspaceError>) -> AppRuleAssignment {
+    fn expect_managed(result: Result<AppRuleResult, WorkspaceError>) -> AppRuleEffects {
         match result {
             Ok(AppRuleResult::Managed(decision)) => decision,
             Ok(AppRuleResult::Unmanaged) => {
@@ -1252,7 +1256,7 @@ mod tests {
         window_title: Option<&str>,
         ax_role: Option<&str>,
         ax_subrole: Option<&str>,
-    ) -> AppRuleAssignment {
+    ) -> AppRuleEffects {
         expect_managed(manager.assign_window_with_app_info(
             window_store,
             window_id,
@@ -1556,6 +1560,9 @@ mod tests {
             app_id: Some("com.example.unmanaged".into()),
             workspace: None,
             floating: false,
+            position: None,
+            size: None,
+            focus: false,
             manage: false,
             app_name: None,
             title_regex: None,
@@ -1832,6 +1839,9 @@ mod tests {
                 app_id: Some("com.example.test".into()),
                 workspace: None,
                 floating: true,
+                position: None,
+                size: None,
+                focus: false,
                 manage: true,
                 app_name: None,
                 title_regex: None,
@@ -1844,6 +1854,9 @@ mod tests {
                 app_id: None,
                 workspace: Some(WorkspaceSelector::Index(1)),
                 floating: false,
+                position: None,
+                size: None,
+                focus: false,
                 manage: true,
                 app_name: Some("Calendar".into()),
                 title_regex: None,
@@ -1856,6 +1869,9 @@ mod tests {
                 app_id: Some("com.example.foo".into()),
                 workspace: Some(WorkspaceSelector::Index(0)),
                 floating: false,
+                position: None,
+                size: None,
+                focus: false,
                 manage: true,
                 app_name: None,
                 title_regex: None,
@@ -1868,6 +1884,9 @@ mod tests {
                 app_id: Some("com.example.foo".into()),
                 workspace: Some(WorkspaceSelector::Index(2)),
                 floating: false,
+                position: None,
+                size: None,
+                focus: false,
                 manage: true,
                 app_name: None,
                 title_regex: Some(r"Dialog\s+\d+".into()),
@@ -1880,6 +1899,9 @@ mod tests {
                 app_id: Some("com.example.special".into()),
                 workspace: None,
                 floating: true,
+                position: None,
+                size: None,
+                focus: false,
                 manage: true,
                 app_name: None,
                 title_regex: None,
@@ -1892,6 +1914,9 @@ mod tests {
                 app_id: Some("com.example.name".into()),
                 workspace: Some(WorkspaceSelector::Name("coding".into())),
                 floating: false,
+                position: None,
+                size: None,
+                focus: false,
                 manage: true,
                 app_name: None,
                 title_regex: None,
@@ -1904,6 +1929,9 @@ mod tests {
                 app_id: Some("com.example.tie".into()),
                 workspace: Some(WorkspaceSelector::Index(0)),
                 floating: false,
+                position: None,
+                size: None,
+                focus: false,
                 manage: true,
                 app_name: None,
                 title_regex: None,
@@ -1915,6 +1943,9 @@ mod tests {
                 app_id: Some("com.example.tie".into()),
                 workspace: Some(WorkspaceSelector::Index(2)),
                 floating: false,
+                position: None,
+                size: None,
+                focus: false,
                 manage: true,
                 app_name: None,
                 title_regex: None,
@@ -1927,6 +1958,9 @@ mod tests {
                 app_id: Some("app.zen-browser.zen".into()),
                 workspace: None,
                 floating: true,
+                position: None,
+                size: None,
+                focus: false,
                 manage: true,
                 app_name: None,
                 title_regex: None,
@@ -1938,6 +1972,9 @@ mod tests {
                 app_id: Some("app.zen-browser.zen".into()),
                 workspace: Some(WorkspaceSelector::Index(2)),
                 floating: false,
+                position: None,
+                size: None,
+                focus: false,
                 manage: true,
                 app_name: None,
                 title_regex: None,
@@ -1950,6 +1987,9 @@ mod tests {
                 app_id: Some("app.zen-browser.zen".into()),
                 workspace: Some(WorkspaceSelector::Index(1)),
                 floating: false,
+                position: None,
+                size: None,
+                focus: false,
                 manage: true,
                 app_name: None,
                 title_regex: None,
@@ -1961,6 +2001,9 @@ mod tests {
                 app_id: Some("app.zen-browser.zen".into()),
                 workspace: Some(WorkspaceSelector::Index(3)),
                 floating: true,
+                position: None,
+                size: None,
+                focus: false,
                 manage: true,
                 app_name: None,
                 title_regex: None,

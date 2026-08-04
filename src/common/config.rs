@@ -72,6 +72,14 @@ pub struct AppWorkspaceRule {
     /// Whether windows should be floating in this workspace
     #[serde(default)]
     pub floating: bool,
+    /// Initial normalized position for a floating window. `(0, 0)` is the top-left
+    /// and `(1, 1)` is the bottom-right of the available screen area.
+    pub position: Option<AppRulePosition>,
+    /// Preferred window size in logical pixels.
+    pub size: Option<AppRuleSize>,
+    /// Focus the window after applying this rule, switching virtual workspaces if needed.
+    #[serde(default)]
+    pub focus: bool,
     /// Whether Rift should manage matching windows (defaults to true). `false` makes the
     /// window invisible to Rift (no tiling, floating, or assignments).
     #[serde(default = "yes")]
@@ -99,6 +107,20 @@ pub struct AppWorkspaceRule {
     /// non-empty string and will be compared against the accessibility subrole
     /// reported by the AX APIs for a window (exact string match).
     pub ax_subrole: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
+#[serde(deny_unknown_fields)]
+pub struct AppRulePosition {
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
+#[serde(deny_unknown_fields)]
+pub struct AppRuleSize {
+    pub w: Option<f64>,
+    pub h: Option<f64>,
 }
 
 impl Default for VirtualWorkspaceSettings {
@@ -175,6 +197,42 @@ impl VirtualWorkspaceSettings {
                             index, idx, self.default_workspace_count
                         ));
                     }
+                }
+            }
+
+            if let Some(position) = rule.position {
+                if !position.x.is_finite()
+                    || !position.y.is_finite()
+                    || !(0.0..=1.0).contains(&position.x)
+                    || !(0.0..=1.0).contains(&position.y)
+                {
+                    issues.push(format!(
+                        "App rule {} position x and y must be finite values between 0 and 1",
+                        index
+                    ));
+                }
+                if !rule.floating {
+                    issues.push(format!(
+                        "App rule {} specifies position, but position only applies when floating = true",
+                        index
+                    ));
+                }
+            }
+
+            if let Some(size) = rule.size {
+                if size.w.is_none() && size.h.is_none() {
+                    issues.push(format!(
+                        "App rule {} size must specify at least one of w or h",
+                        index
+                    ));
+                }
+                if size.w.is_some_and(|value| !value.is_finite() || value <= 0.0)
+                    || size.h.is_some_and(|value| !value.is_finite() || value <= 0.0)
+                {
+                    issues.push(format!(
+                        "App rule {} size dimensions must be finite positive values",
+                        index
+                    ));
                 }
             }
 
@@ -1576,6 +1634,70 @@ mod tests {
         let settings: VirtualWorkspaceSettings =
             toml::from_str("prevent_wrapping_around = true").unwrap();
         assert!(settings.prevent_wrapping);
+    }
+
+    #[test]
+    fn app_rules_parse_placement_size_and_focus() {
+        let settings: VirtualWorkspaceSettings = toml::from_str(
+            r#"
+                app_rules = [{
+                    app_id = "com.example.Tool",
+                    floating = true,
+                    position = { x = 0.4, y = 0.7 },
+                    size = { w = 640, h = 480 },
+                    focus = true
+                }]
+            "#,
+        )
+        .unwrap();
+
+        let rule = &settings.app_rules[0];
+        assert_eq!(rule.position, Some(AppRulePosition { x: 0.4, y: 0.7 }));
+        assert_eq!(rule.size, Some(AppRuleSize { w: Some(640.0), h: Some(480.0) }));
+        assert!(rule.focus);
+        assert!(settings.validate().is_empty());
+
+        let height_only: VirtualWorkspaceSettings = toml::from_str(
+            r#"
+                app_rules = [{
+                    app_id = "com.example.Panel",
+                    size = { h = 320 }
+                }]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            height_only.app_rules[0].size,
+            Some(AppRuleSize { w: None, h: Some(320.0) })
+        );
+        assert!(height_only.validate().is_empty());
+    }
+
+    #[test]
+    fn app_rule_geometry_validation_rejects_invalid_values() {
+        let mut settings = VirtualWorkspaceSettings::default();
+        settings.app_rules.push(AppWorkspaceRule {
+            app_id: Some("com.example.Tool".into()),
+            workspace: None,
+            floating: false,
+            position: Some(AppRulePosition { x: -0.1, y: 1.1 }),
+            size: Some(AppRuleSize {
+                w: Some(0.0),
+                h: Some(f64::NAN),
+            }),
+            focus: false,
+            manage: true,
+            app_name: None,
+            title_regex: None,
+            title_substring: None,
+            ax_role: None,
+            ax_subrole: None,
+        });
+
+        let issues = settings.validate();
+        assert!(issues.iter().any(|issue| issue.contains("between 0 and 1")));
+        assert!(issues.iter().any(|issue| issue.contains("only applies")));
+        assert!(issues.iter().any(|issue| issue.contains("finite positive")));
     }
 
     #[test]

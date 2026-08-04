@@ -18,6 +18,8 @@ struct Column {
     windows: Vec<WindowId>,
     width_offset: f64,
     #[serde(default)]
+    width_overridden: bool,
+    #[serde(default)]
     height_weights: Vec<f64>,
 }
 
@@ -210,6 +212,7 @@ impl LayoutState {
         let column = Column {
             windows: vec![wid],
             width_offset: 0.0,
+            width_overridden: false,
             height_weights: vec![1.0],
         };
         let insert_at = (index + 1).min(self.columns.len());
@@ -222,6 +225,7 @@ impl LayoutState {
         self.columns.push(Column {
             windows: vec![wid],
             width_offset: 0.0,
+            width_overridden: false,
             height_weights: vec![1.0],
         });
         self.selected = Some(wid);
@@ -249,6 +253,7 @@ impl LayoutState {
                 self.columns.push(Column {
                     windows: vec![window],
                     width_offset: 0.0,
+                    width_overridden: false,
                     height_weights: vec![1.0],
                 });
             } else {
@@ -568,6 +573,7 @@ impl ScrollingLayoutSystem {
             state.columns.insert(insert_at, Column {
                 windows: vec![wid],
                 width_offset: 0.0,
+                width_overridden: false,
                 height_weights: vec![weight],
             });
             state.selected = Some(wid);
@@ -650,7 +656,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
         let mut column_widths = Vec::with_capacity(state.columns.len());
         let mut column_ratios = Vec::with_capacity(state.columns.len());
         for col in state.columns.iter() {
-            let ratio = if state.columns.len() == 1 {
+            let ratio = if state.columns.len() == 1 && !col.width_overridden {
                 1.0
             } else {
                 self.clamp_ratio(base_ratio + col.width_offset)
@@ -1224,6 +1230,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
             return;
         };
         state.columns[col_idx].width_offset = clamped - base_ratio;
+        state.columns[col_idx].width_overridden = true;
 
         // Handle vertical resizing within columns
         let col = &mut state.columns[col_idx];
@@ -1466,6 +1473,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
         state.columns.insert(insert_at, Column {
             windows: vec![wid],
             width_offset: 0.0,
+            width_overridden: false,
             height_weights: vec![weight],
         });
         state.selected = Some(wid);
@@ -1545,6 +1553,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
             state.columns.insert(insert_at, Column {
                 windows: vec![wid],
                 width_offset: 0.0,
+                width_overridden: false,
                 height_weights: vec![moved_weights[idx]],
             });
             insert_at += 1;
@@ -1584,6 +1593,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
         state.columns.insert(insert_at, Column {
             windows: vec![wid],
             width_offset: 0.0,
+            width_overridden: false,
             height_weights: vec![weight],
         });
         state.selected = Some(wid);
@@ -1652,6 +1662,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
         let next = current + amount;
         let clamped = next.clamp(min_ratio, max_ratio).max(0.05);
         state.columns[col_idx].width_offset = clamped - base_ratio;
+        state.columns[col_idx].width_overridden = true;
         if niri_navigation {
             state.reveal_selected_without_direction();
         } else {
@@ -1789,6 +1800,7 @@ mod tests {
         state.columns = vec![Column {
             windows: vec![w1, w2],
             width_offset: 0.0,
+            width_overridden: false,
             height_weights: vec![1.0, 1.0],
         }];
         state.selected = Some(w1);
@@ -1872,6 +1884,7 @@ mod tests {
         state.columns = vec![Column {
             windows: vec![locked, capped],
             width_offset: 0.0,
+            width_overridden: false,
             height_weights: vec![1.0, 1.0],
         }];
         state.selected = Some(locked);
