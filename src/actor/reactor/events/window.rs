@@ -129,16 +129,21 @@ pub fn handle_window_destroyed(
     payload: WindowDestroyedPayload,
 ) -> anyhow::Result<EventOutcome> {
     let wid = payload.window;
-    let window_server_id = match state.windows.record(wid) {
-        Some(record) => record.window_server_id(),
-        None => return Ok(EventOutcome::no_change()),
-    };
+    let record_exists = state.windows.record(wid).is_some();
+    let window_server_id =
+        state.windows.record(wid).and_then(|record| record.window_server_id());
 
     if let Some(ws_id) = window_server_id {
         transactions.remove_for_window(ws_id);
         state.windows.remove_window_server_state(ws_id);
+    } else if record_exists {
+        debug!(?wid, "Received WindowDestroyed without a WindowServer identity");
     } else {
-        debug!(?wid, "Received WindowDestroyed for unknown window - ignoring");
+        // Destruction can race with discovery or native-window cleanup. The store is
+        // authoritative, but layout membership is only a projection and may still contain
+        // this id. Always emit the idempotent removal event so a late notification repairs
+        // any stale tile instead of preserving a focusable ghost.
+        debug!(?wid, "Scrubbing layout state for an untracked destroyed window");
     }
     state.windows.remove_window(wid);
 
