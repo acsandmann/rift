@@ -20,8 +20,7 @@ fn is_tiny_window_server_frame(size: CGSize) -> bool {
     // discovery pass can reconcile the real frame instead of permanently losing the window.
     width > 0.0
         && height > 0.0
-        && (width < MIN_MANAGEABLE_WINDOW_DIMENSION
-            || height < MIN_MANAGEABLE_WINDOW_DIMENSION)
+        && (width < MIN_MANAGEABLE_WINDOW_DIMENSION || height < MIN_MANAGEABLE_WINDOW_DIMENSION)
 }
 
 /// Computes whether a window is manageable based on its properties and window server information.
