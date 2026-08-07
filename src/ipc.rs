@@ -20,6 +20,7 @@ use crate::sys::dispatch::block_on;
 use crate::sys::mach::{
     is_mach_server_registered, mach_msg_header_t, mach_server_run, send_mach_reply,
 };
+use crate::sys::window_server::WindowServerId;
 
 type ClientPort = u32;
 
@@ -192,6 +193,26 @@ impl MachHandler {
                 let window_id = crate::actor::app::WindowId::new(window_id.pid, window_id.idx);
 
                 match self.reactor.query_window_info(window_id) {
+                    Some(window) => RiftResponse::Success {
+                        data: serde_json::to_value(rift_protocol::WindowData::from(window))
+                            .unwrap(),
+                    },
+                    None => RiftResponse::Error {
+                        error: serde_json::json!({ "message": "Window not found" }),
+                    },
+                }
+            }
+
+            RiftRequest::GetWindowInfoByServerId { window_server_id } => {
+                if window_server_id == 0 {
+                    error!("Invalid window_server_id: {}", window_server_id);
+                    return RiftResponse::Error {
+                        error: serde_json::json!({ "message": "Invalid window_id" }),
+                    };
+                }
+                let wsid = WindowServerId::new(window_server_id);
+
+                match self.reactor.query_window_info_by_server_id(wsid) {
                     Some(window) => RiftResponse::Success {
                         data: serde_json::to_value(rift_protocol::WindowData::from(window))
                             .unwrap(),

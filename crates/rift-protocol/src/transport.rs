@@ -18,6 +18,9 @@ pub enum RiftRequest {
     GetWindowInfo {
         window_id: WindowId,
     },
+    GetWindowInfoByServerId {
+        window_server_id: u32,
+    },
     GetLayoutState {
         space_id: u64,
     },
