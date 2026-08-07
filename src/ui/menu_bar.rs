@@ -8,8 +8,8 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{ClassType, DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAlert, NSColor, NSControlStateValueOff, NSControlStateValueOn, NSEventModifierFlags, NSFont,
-    NSFontAttributeName, NSForegroundColorAttributeName, NSGraphicsContext, NSMenu, NSMenuItem,
-    NSModalResponseOK, NSOpenPanel, NSSavePanel, NSStatusBar, NSStatusItem,
+    NSFontAttributeName, NSForegroundColorAttributeName, NSGraphicsContext, NSImage, NSMenu,
+    NSMenuItem, NSModalResponseOK, NSOpenPanel, NSSavePanel, NSStatusBar, NSStatusItem,
     NSVariableStatusItemLength, NSView,
 };
 use objc2_core_foundation::{
@@ -320,7 +320,7 @@ fn parse_layout_mode(layout_mode: &str) -> Option<LayoutMode> {
     }
 }
 
-fn layout_title(mode: LayoutMode) -> &'static str {
+fn layout_title(mode: &LayoutMode) -> &'static str {
     match mode {
         LayoutMode::Traditional => "Traditional",
         LayoutMode::Bsp => "BSP",
@@ -338,6 +338,7 @@ fn make_menu_item(
     checked: Option<bool>,
     key_equivalent: Option<&Hotkey>,
     tag: Option<isize>,
+    image: Option<Retained<NSImage>>,
 ) -> Retained<NSMenuItem> {
     let ns_title = NSString::from_str(title);
     let key_equivalent_empty = NSString::from_str("");
@@ -365,13 +366,44 @@ fn make_menu_item(
     if let Some(tag) = tag {
         item.setTag(tag);
     }
+    item.setImage(image.as_deref());
+
+    if image.is_some() {
+        force_menu_item_image_visible(&item);
+    }
 
     item
+}
+
+fn menu_image(symbol_name: &str, accessibility_description: &str) -> Option<Retained<NSImage>> {
+    let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+        &NSString::from_str(symbol_name),
+        Some(&NSString::from_str(accessibility_description)),
+    )?;
+    image.setTemplate(true);
+    Some(image)
 }
 
 fn add_separator(menu: &NSMenu) {
     let separator: Retained<NSMenuItem> = unsafe { msg_send![NSMenuItem::class(), separatorItem] };
     menu.addItem(&separator);
+}
+
+const NS_MENU_ITEM_IMAGE_VISIBILITY_VISIBLE: isize = 1;
+
+fn force_menu_item_image_visible(item: &NSMenuItem) {
+    let selector = sel!(setPreferredImageVisibility:);
+
+    let responds: bool = unsafe { msg_send![item, respondsToSelector: selector] };
+
+    if responds {
+        let _: () = unsafe {
+            msg_send![
+                item,
+                setPreferredImageVisibility: NS_MENU_ITEM_IMAGE_VISIBILITY_VISIBLE
+            ]
+        };
+    }
 }
 
 fn layout_file_title(path: &Path) -> Option<String> {
@@ -419,7 +451,8 @@ fn build_status_menu(
     let title = NSString::from_str("Rift");
     let menu: Retained<NSMenu> = unsafe { msg_send![NSMenu::alloc(mtm), initWithTitle: &*title] };
 
-    let layout_item = make_menu_item(mtm, "Layout", None, None, None, None, None);
+    let layout_item = make_menu_item(mtm, "Layout", None, None, None, None, None, None);
+
     let layout_submenu_title = NSString::from_str("Layout");
     let layout_submenu: Retained<NSMenu> =
         unsafe { msg_send![NSMenu::alloc(mtm), initWithTitle: &*layout_submenu_title] };
@@ -440,10 +473,11 @@ fn build_status_menu(
         };
         let item = make_menu_item(
             mtm,
-            layout_title(mode),
+            layout_title(&mode),
             Some(action),
             Some(handler),
             Some(active_layout == Some(mode)),
+            None,
             None,
             None,
         );
@@ -452,7 +486,8 @@ fn build_status_menu(
     layout_item.setSubmenu(Some(&layout_submenu));
     menu.addItem(&layout_item);
 
-    let workspace_item = make_menu_item(mtm, "Workspaces", None, None, None, None, None);
+    let workspace_item = make_menu_item(mtm, "Workspaces", None, None, None, None, None, None);
+
     let ws_submenu_title = NSString::from_str("Workspace");
     let ws_submenu: Retained<NSMenu> =
         unsafe { msg_send![NSMenu::alloc(mtm), initWithTitle: &*ws_submenu_title] };
@@ -465,6 +500,7 @@ fn build_status_menu(
         None,
         shortcuts.next_workspace.as_ref(),
         None,
+        None,
     ));
     ws_submenu.addItem(&make_menu_item(
         mtm,
@@ -473,6 +509,7 @@ fn build_status_menu(
         Some(handler),
         None,
         shortcuts.prev_workspace.as_ref(),
+        None,
         None,
     ));
     add_separator(&ws_submenu);
@@ -495,6 +532,7 @@ fn build_status_menu(
             Some(ws.is_active),
             ws_shortcut,
             Some(ws.index as isize),
+            None,
         );
         ws_submenu.addItem(&ws_item);
     }
@@ -505,15 +543,15 @@ fn build_status_menu(
     }
     menu.addItem(&workspace_item);
 
-    let layouts_item = make_menu_item(mtm, "Layout Files", None, None, None, None, None);
-    let layouts_title = NSString::from_str("Layout Files");
+    let layouts_item = make_menu_item(mtm, "Layout Presets", None, None, None, None, None, None);
+    let layouts_title = NSString::from_str("Layout Presets");
     let layouts_submenu: Retained<NSMenu> =
         unsafe { msg_send![NSMenu::alloc(mtm), initWithTitle: &*layouts_title] };
     let library_files = layout_library_files_in(layout_folder);
     handler.set_layout_folder(layout_folder.to_path_buf());
     handler.set_layout_files(library_files.iter().map(|(_, path)| path.clone()).collect());
 
-    let save_item = make_menu_item(mtm, "Save Layout", None, None, None, None, None);
+    let save_item = make_menu_item(mtm, "Save Layout", None, None, None, None, None, None);
     let save_title = NSString::from_str("Save Layout");
     let save_submenu: Retained<NSMenu> =
         unsafe { msg_send![NSMenu::alloc(mtm), initWithTitle: &*save_title] };
@@ -526,6 +564,7 @@ fn build_status_menu(
             title,
             Some(action),
             Some(handler),
+            None,
             None,
             None,
             None,
@@ -549,7 +588,7 @@ fn build_status_menu(
             sel!(onRestoreLibrarySpace:),
         ),
     ] {
-        let restore_item = make_menu_item(mtm, title, None, None, None, None, None);
+        let restore_item = make_menu_item(mtm, title, None, None, None, None, None, None);
         let restore_title = NSString::from_str(title);
         let restore_submenu: Retained<NSMenu> =
             unsafe { msg_send![NSMenu::alloc(mtm), initWithTitle: &*restore_title] };
@@ -565,12 +604,13 @@ fn build_status_menu(
                 None,
                 None,
                 None,
+                None,
             ));
         }
         if !library_files.is_empty() {
             add_separator(&restore_submenu);
             let library_heading =
-                make_menu_item(mtm, "Saved Layouts", None, None, None, None, None);
+                make_menu_item(mtm, "Saved Layouts", None, None, None, None, None, None);
             library_heading.setEnabled(false);
             restore_submenu.addItem(&library_heading);
             for (index, (name, _)) in library_files.iter().enumerate() {
@@ -582,6 +622,7 @@ fn build_status_menu(
                     None,
                     None,
                     Some(index as isize),
+                    None,
                 ));
             }
         }
@@ -600,6 +641,7 @@ fn build_status_menu(
         Some(active_space_is_activated),
         shortcuts.toggle_space_activation.as_ref(),
         None,
+        None,
     ));
 
     add_separator(&menu);
@@ -608,6 +650,7 @@ fn build_status_menu(
         "Settings…",
         Some(sel!(onOpenConfig:)),
         Some(handler),
+        None,
         None,
         None,
         None,
@@ -620,9 +663,10 @@ fn build_status_menu(
         None,
         shortcuts.reload_config.as_ref(),
         None,
+        None,
     ));
 
-    let help_item = make_menu_item(mtm, "Help / Documentation", None, None, None, None, None);
+    let help_item = make_menu_item(mtm, "Help / Documentation", None, None, None, None, None, None);
     let help_submenu_title = NSString::from_str("Help / Documentation");
     let help_submenu: Retained<NSMenu> =
         unsafe { msg_send![NSMenu::alloc(mtm), initWithTitle: &*help_submenu_title] };
@@ -631,6 +675,7 @@ fn build_status_menu(
         "Documentation",
         Some(sel!(onOpenDocumentation:)),
         Some(handler),
+        None,
         None,
         None,
         None,
@@ -643,12 +688,14 @@ fn build_status_menu(
         None,
         None,
         None,
+        None,
     ));
     help_submenu.addItem(&make_menu_item(
         mtm,
         "Matrix",
         Some(sel!(onOpenMatrix:)),
         Some(handler),
+        None,
         None,
         None,
         None,
@@ -660,12 +707,13 @@ fn build_status_menu(
     add_separator(&menu);
     menu.addItem(&make_menu_item(
         mtm,
-        "Support Rift",
+        "Support Rift…",
         Some(sel!(onOpenSponsor:)),
         Some(handler),
         None,
         None,
         None,
+        menu_image("heart", "Support Rift"),
     ));
 
     add_separator(&menu);
@@ -676,6 +724,7 @@ fn build_status_menu(
         Some(handler),
         None,
         shortcuts.quit_rift.as_ref(),
+        None,
         None,
     ));
 
