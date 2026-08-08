@@ -124,7 +124,11 @@ pub struct WorkspaceId {
 
 impl fmt::Display for WorkspaceId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:08}", format!("{}{}", self.idx, self.version))
+        // Reconstruct the original 64-bit slotmap key (idx = low 32 bits,
+        // version = high 32 bits, see `protocol_workspace_id`) so the string
+        // is a stable, collision-free key instead of two decimal forms glued
+        // together (`{1,23}` and `{12,3}` used to render identically).
+        write!(f, "{:08}", ((self.version as u64) << 32) | (self.idx as u64))
     }
 }
 
@@ -160,5 +164,45 @@ mod tests {
                 "display_uuid": "display"
             })
         );
+    }
+
+    #[test]
+    fn workspace_id_display_is_collision_free() {
+        // `idx` is the low 32 bits and `version` the high 32 bits of the
+        // original slotmap key (see `protocol_workspace_id`). Concatenating
+        // their decimal forms drops positional info, so `{ idx: 1, version: 23 }`
+        // and `{ idx: 12, version: 3 }` both used to render as "00000123".
+        assert_ne!(
+            WorkspaceId { idx: 1, version: 23 }.to_string(),
+            WorkspaceId { idx: 12, version: 3 }.to_string()
+        );
+    }
+
+    #[test]
+    fn workspace_id_display_round_trips_the_reconstructed_key() {
+        // Concrete oracles for the previously-colliding pair: `idx` is the low
+        // 32 bits, `version` the high 32 bits of the original slotmap key.
+        assert_eq!(WorkspaceId { idx: 1, version: 23 }.to_string(), "98784247809");
+        assert_eq!(WorkspaceId { idx: 12, version: 3 }.to_string(), "12884901900");
+        assert_eq!(WorkspaceId { idx: 0, version: 0 }.to_string(), "00000000");
+
+        // Round-trip the documented formula across edge values. This also pins
+        // the `as u64` casts (a bare `version << 32` would overflow at u32).
+        for (idx, version) in [
+            (0u32, 0u32),
+            (1u32, 0u32),
+            (0u32, 1u32),
+            (1u32, 23u32),
+            (12u32, 3u32),
+            (u32::MAX, 0u32),
+            (0u32, u32::MAX),
+            (u32::MAX, u32::MAX),
+        ] {
+            let wid = WorkspaceId { idx, version };
+            assert_eq!(
+                wid.to_string(),
+                format!("{:08}", (wid.version as u64) << 32 | wid.idx as u64)
+            );
+        }
     }
 }
