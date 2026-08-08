@@ -35,7 +35,6 @@ use crate::sys::event;
 use crate::sys::executor::Executor;
 use crate::sys::observer::Observer;
 use crate::sys::process::ProcessInfo;
-use crate::sys::skylight::{G_CONNECTION, SLSDisableUpdate, SLSReenableUpdate};
 use crate::sys::timer::Timer;
 use crate::sys::window_server::{self, WindowServerId, WindowServerInfo};
 
@@ -972,8 +971,6 @@ impl State {
                     let _ = self.app.set_bool_attribute("AXEnhancedUserInterface", false);
                 }
                 self.stop_notifications_for_animation(&elem);
-
-                SLSDisableUpdate(*G_CONNECTION);
             }
             Request::EndWindowAnimation(wid) => {
                 if let Err(err) = self.flush_frames(wid) {
@@ -1029,7 +1026,6 @@ impl State {
                     Requested(true),
                     None,
                 ));
-                SLSReenableUpdate(*G_CONNECTION);
             }
             Request::Raise(wids, token, sequence_id, quiet) => {
                 self.raises_tx.send(RaiseRequest(wids, token, sequence_id, quiet));
