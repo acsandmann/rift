@@ -39,6 +39,10 @@ incremental = true
 lto = "off"
 strip = false
 
+[profile.profiling]
+inherits = "release"
+strip = false
+
 [lib]
 doctest = false
 
