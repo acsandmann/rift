@@ -252,23 +252,6 @@ impl WindowStore {
         }
     }
 
-    /// Drop an invalid AX-backed state without discarding recoverable identity metadata.
-    ///
-    /// The workspace index contains only live windows, so detached records cannot leak into
-    /// workspace queries or layout projections. `insert_window` restores the index if this AX
-    /// identity is reacquired; a real destruction removes the retained record normally.
-    pub(crate) fn detach_window_state(&mut self, window_id: WindowId) {
-        let workspace = self.windows.get(&window_id).and_then(|record| record.workspace);
-        if let Some(workspace) = workspace {
-            self.remove_window_from_workspace_index(window_id, workspace);
-        }
-        if let Some(record) = self.windows.get_mut(&window_id) {
-            record.state = None;
-            record.pending_operation = None;
-        }
-        self.prune_window_record(window_id);
-    }
-
     pub fn record(&self, window_id: WindowId) -> Option<&WindowRecord> {
         self.windows.get(&window_id)
     }
@@ -1103,20 +1086,6 @@ impl WindowStore {
 mod tests {
     use super::*;
     use crate::model::virtual_workspace::WorkspaceStore;
-
-    #[test]
-    fn detached_unassigned_window_keeps_native_identity_for_recovery() {
-        let mut window_store = WindowStore::default();
-        let wid = WindowId::new(42, 7);
-        let wsid = WindowServerId::new(7);
-
-        window_store.track_window_server_id(wsid, wid);
-        window_store.detach_window_state(wid);
-
-        assert!(window_store.record(wid).is_some());
-        assert_eq!(window_store.tracked_window_id(wsid), Some(wid));
-        window_store.debug_assert_invariants();
-    }
 
     #[test]
     fn authoritative_space_only_record_is_not_pruned() {

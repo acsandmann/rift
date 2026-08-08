@@ -91,17 +91,15 @@ pub fn handle_window_invalidated(
         });
     };
 
-    // AX identity and native-window identity have different lifetimes. Detach the dead AX
-    // state so it cannot remain in layouts or queries as a ghost, but retain its assignment
-    // off-index until the same WindowServer identity is rediscovered. A later AX loss with no
-    // native peer, or an authoritative WindowServer disappearance, takes the permanent-removal
-    // path below.
+    // WindowState is Rift's logical/native snapshot, not the AXUIElement itself. If the
+    // WindowServer identity is still alive, removing this state would destroy layout topology
+    // (parent containers, sibling order, stack state and split ratios) that rediscovery cannot
+    // reconstruct. Drop only interaction state tied to the stale AX handle and reacquire AX.
     transactions.remove_for_window(window_server_id);
-    state.windows.detach_window_state(wid);
     debug!(
         ?wid,
         ?window_server_id,
-        "Detached invalid AX identity for later reacquisition"
+        "AX identity invalidated; preserving logical window and layout for reacquisition"
     );
 
     if let DragState::PendingSwap { session, target } = &drag.drag_state
@@ -117,8 +115,7 @@ pub fn handle_window_invalidated(
         drag.skip_layout_for_window = None;
     }
 
-    Ok(EventOutcome::window_membership_changed(true, true)
-        .with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid))
+    Ok(EventOutcome::window_notification_refresh()
         .with_app_request(wid.pid, Request::GetVisibleWindows))
 }
 

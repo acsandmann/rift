@@ -3312,8 +3312,8 @@ fn display_churn_quarantines_window_frame_and_membership_events() {
         "WindowServerDestroyed should be quarantined during churn"
     );
     assert!(
-        !ax_invalidated,
-        "AX invalidation must detach live state instead of being dropped during churn"
+        ax_invalidated,
+        "AX invalidation must be quarantined during display churn"
     );
     assert!(space_created, "SpaceCreated should be quarantined during churn");
     assert!(
@@ -4120,7 +4120,7 @@ fn partial_post_wake_snapshot_preserves_manual_workspace_assignment() {
 }
 
 #[test]
-fn ax_invalidation_after_quarantine_release_preserves_workspace_assignment() {
+fn ax_invalidation_after_quarantine_release_preserves_live_layout_state() {
     let (mut apps, mut reactor) = test_context_with_workspace_count(2);
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
     let space = SpaceId::new(1);
@@ -4152,25 +4152,25 @@ fn ax_invalidation_after_quarantine_release_preserves_workspace_assignment() {
     reactor.apply_event_outcome(outcome);
 
     assert!(
-        reactor.state.windows.window(wid).is_none(),
-        "the invalid AX-backed state must not remain as a live ghost",
+        reactor.state.windows.window(wid).is_some(),
+        "AX invalidation must preserve the reactor's logical window snapshot",
     );
     assert_eq!(
-        reactor
-            .state
-            .windows
-            .workspace_info_for_window(wid)
-            .map(|info| info.workspace_id),
+        reactor.test_workspace_for_window(space, wid),
         Some(secondary_workspace),
-        "detached recovery metadata must retain the virtual-workspace assignment",
+        "AX invalidation must retain virtual-workspace ownership",
     );
     assert!(
-        !reactor
+        reactor
             .state
             .windows
             .workspace_windows(space, secondary_workspace)
             .contains(&wid),
-        "detached metadata must not appear in live workspace membership",
+        "the logical window must remain in live workspace membership",
+    );
+    assert!(
+        has_window_in_layout(&mut reactor, space, screen, wid),
+        "AX invalidation must not remove or rebalance the layout node",
     );
     let requests = apps.requests();
     assert!(
@@ -4186,29 +4186,38 @@ fn ax_invalidation_after_quarantine_release_preserves_workspace_assignment() {
     assert_eq!(
         reactor.test_workspace_for_window(space, wid),
         Some(secondary_workspace),
-        "rediscovery must restore the detached assignment instead of defaulting to WS1",
+        "rediscovery must preserve the existing assignment",
+    );
+    assert!(
+        has_window_in_layout(&mut reactor, space, screen, wid),
+        "rediscovery must not reinsert the window at a new tree position",
     );
 }
 
 #[test]
-fn ax_invalidation_during_refresh_quarantine_detaches_live_state() {
+fn ax_invalidation_during_refresh_quarantine_is_deferred_without_layout_mutation() {
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
     let space = SpaceId::new(1);
     let wid = WindowId::new(1, 1);
 
     apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+    assert!(has_window_in_layout(&mut reactor, space, screen, wid));
     reactor.refresh_quarantine_manager.display_churn_active = true;
 
     reactor.handle_event(Event::WindowDestroyed(wid));
 
     assert!(
-        reactor.state.windows.window(wid).is_none(),
-        "an invalid AX handle must leave live/layout state even while native evidence is unstable",
+        reactor.state.windows.window(wid).is_some(),
+        "unstable AX invalidation must not discard logical window state",
     );
     assert!(
-        reactor.state.windows.record(wid).is_some(),
-        "the unstable native snapshot must not erase recovery identity",
+        has_window_in_layout(&mut reactor, space, screen, wid),
+        "unstable AX invalidation must not mutate layout topology",
+    );
+    assert!(
+        reactor.refresh_quarantine_manager.pending_visible_refresh,
+        "recovery should be deferred until native topology stabilizes",
     );
 }
 
@@ -4237,7 +4246,7 @@ fn authoritative_destruction_removes_window_server_backed_state() {
 }
 
 #[test]
-fn window_server_disappearance_retires_detached_ax_recovery_state() {
+fn window_server_disappearance_retires_window_after_ax_invalidation() {
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
     let space = SpaceId::new(1);
@@ -4254,7 +4263,7 @@ fn window_server_disappearance_retires_detached_ax_recovery_state() {
     )
     .expect("AX invalidation should be handled");
     reactor.apply_event_outcome(invalidated);
-    assert!(reactor.state.windows.window(wid).is_none());
+    assert!(reactor.state.windows.window(wid).is_some());
     assert!(reactor.state.windows.record(wid).is_some());
 
     let disappeared = topology_workflow::handle_window_server_destroyed(
@@ -4270,7 +4279,7 @@ fn window_server_disappearance_retires_detached_ax_recovery_state() {
             resolved_space: Some(space),
             active_spaces: [space].into_iter().collect(),
             mission_control_active: false,
-            ordered_in: true,
+            ordered_in: false,
             assigned_space: Some(space),
             last_known_user_space: Some(space),
         },
