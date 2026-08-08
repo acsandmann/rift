@@ -571,6 +571,11 @@ fn build_query_request(query: QueryCommands) -> Result<RiftRequest, String> {
         QueryCommands::Windows { space_id } => Ok(RiftRequest::GetWindows { space_id }),
         QueryCommands::Displays => Ok(RiftRequest::GetDisplays),
         QueryCommands::Window { window_id } => {
+            if let Ok(wsid) = parse_window_server_id(&window_id) {
+                return Ok(RiftRequest::GetWindowInfoByServerId {
+                    window_server_id: wsid.as_u32(),
+                });
+            }
             let window_id = protocol_window_id(&parse_window_id(&window_id)?)?;
             Ok(RiftRequest::GetWindowInfo { window_id })
         }
@@ -1169,6 +1174,48 @@ mod tests {
             serde_json::json!({
                 "execute_command": { "command": { "config": { "set_animate": true } } }
             })
+        );
+    }
+
+    #[test]
+    fn query_window_numeric_id_builds_by_server_id_request() {
+        let request =
+            build_query_request(QueryCommands::Window { window_id: "6923".to_string() }).unwrap();
+
+        assert_eq!(request, RiftRequest::GetWindowInfoByServerId {
+            window_server_id: 6923
+        });
+    }
+
+    #[test]
+    fn query_window_json_form_still_uses_window_id() {
+        let request = build_query_request(QueryCommands::Window {
+            window_id: r#"{"pid":123,"idx":456}"#.to_string(),
+        })
+        .unwrap();
+
+        assert_eq!(request, RiftRequest::GetWindowInfo {
+            window_id: rift_protocol::WindowId::new(123, 456).unwrap(),
+        });
+    }
+
+    #[test]
+    fn query_window_hex_and_invalid() {
+        let hex = build_query_request(QueryCommands::Window {
+            window_id: "0x1b1b".to_string(),
+        })
+        .unwrap();
+        assert_eq!(hex, RiftRequest::GetWindowInfoByServerId {
+            window_server_id: 6939
+        });
+
+        let invalid = build_query_request(QueryCommands::Window { window_id: "foo".to_string() });
+        assert!(invalid.is_err());
+        assert!(
+            invalid
+                .unwrap_err()
+                .to_string()
+                .starts_with("Invalid window id 'foo'; expected")
         );
     }
 }
