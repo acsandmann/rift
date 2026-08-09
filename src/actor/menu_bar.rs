@@ -61,13 +61,17 @@ impl Menu {
     ) -> Self {
         let (action_tx, action_rx) = tokio::sync::mpsc::unbounded_channel();
         let layout_folder = config.settings.ui.menu_bar.resolved_layout_folder();
+        let mut icon = config
+            .settings
+            .ui
+            .menu_bar
+            .enabled
+            .then(|| MenuIcon::new(mtm, action_tx.clone(), &layout_folder));
+        if let Some(icon) = &mut icon {
+            icon.update_config(&config.settings.ui.menu_bar, &config.keys);
+        }
         Self {
-            icon: config
-                .settings
-                .ui
-                .menu_bar
-                .enabled
-                .then(|| MenuIcon::new(mtm, action_tx.clone(), &layout_folder)),
+            icon,
             config,
             rx,
             reactor_tx,
@@ -160,16 +164,9 @@ impl Menu {
         }
         self.last_signature = Some(sig);
 
-        let menu_bar_settings = &self.config.settings.ui.menu_bar;
-        icon.update(
-            update.active_space,
-            update.active_space_is_activated,
-            &update.workspaces,
-            update.active_workspace,
-            &update.windows,
-            menu_bar_settings,
-            &self.config.keys,
-        );
+        icon.sync_workspace_topology(&update.workspaces, &self.config.keys);
+        icon.update_menu_state(update.active_space_is_activated, &update.workspaces);
+        icon.update_status_icon(&update.workspaces, &self.config.settings.ui.menu_bar);
     }
 
     fn handle_config_updated(&mut self, new_config: Config) {
@@ -182,6 +179,10 @@ impl Menu {
             self.icon = Some(MenuIcon::new(self.mtm, self.action_tx.clone(), &layout_folder));
         } else if !should_enable && self.icon.is_some() {
             self.icon = None;
+        }
+
+        if let Some(icon) = &mut self.icon {
+            icon.update_config(&self.config.settings.ui.menu_bar, &self.config.keys);
         }
 
         self.last_signature = None;
@@ -256,9 +257,8 @@ impl Menu {
             }
             MenuAction::ReloadConfig => self.reload_config(),
             MenuAction::RefreshLayoutFiles => {
-                self.last_signature = None;
-                if let Some(update) = self.last_update.clone() {
-                    self.apply_update(&update);
+                if let Some(icon) = &mut self.icon {
+                    icon.refresh_layout_library();
                 }
             }
             MenuAction::QuitRift => {
