@@ -973,6 +973,37 @@ fn matching_rift_frame_clears_pending_target() {
             .frame_monotonic
             .same_as(target_frame)
     );
+
+    // AX may adjust a requested frame; cache the accepted geometry but keep the target pending.
+    let adjusted_target = CGRect::new(CGPoint::new(80.0, 40.0), frame.size);
+    let accepted = CGRect::new(CGPoint::new(81.0, 40.0), frame.size);
+    let txid = reactor.transaction_manager.generate_next_txid(wsid);
+    reactor.transaction_manager.store_txid(wsid, txid, adjusted_target);
+    let outcome = reactor
+        .dispatch_workflow(Event::WindowFrameChanged(
+            wid,
+            accepted,
+            Some(txid),
+            Requested(true),
+            Some(MouseState::Up),
+        ))
+        .unwrap();
+    assert!(reactor.state.windows.window(wid).unwrap().frame_monotonic.same_as(accepted));
+    assert_eq!(
+        reactor.transaction_manager.get_target_frame(wsid),
+        Some(adjusted_target)
+    );
+    assert!(!outcome.arrange.requested && !outcome.refresh_layout_mode);
+
+    // A user drag beginning during the transaction clears it instead of accepting it blindly.
+    reactor.handle_event(Event::WindowFrameChanged(
+        wid,
+        accepted,
+        Some(txid),
+        Requested(true),
+        Some(MouseState::Down),
+    ));
+    assert_eq!(reactor.transaction_manager.get_target_frame(wsid), None);
 }
 
 #[test]
