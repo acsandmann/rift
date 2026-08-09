@@ -1,12 +1,77 @@
-use crate::sys::axuielement::AXUIElement;
+use objc2_application_services::AXError;
 
-const K_AX_ENHANCED_USER_INTERFACE: &str = "AXEnhancedUserInterface";
+use crate::sys::axuielement::{AXUIElement, Error as AxError};
 
-pub fn with_enhanced_ui_disabled<F, R>(element: &AXUIElement, f: F) -> R
-where F: FnOnce() -> R {
-    let _ = element.set_bool_attribute(K_AX_ENHANCED_USER_INTERFACE, false);
-    let result = f();
-    let _ = element.set_bool_attribute(K_AX_ENHANCED_USER_INTERFACE, true);
+const ATTRIBUTE: &str = "AXEnhancedUserInterface";
 
-    result
+#[derive(Debug, Default)]
+pub struct EnhancedUi {
+    depth: usize,
+    restore: bool,
+    absent: bool,
+}
+
+impl EnhancedUi {
+    pub fn acquire(&mut self, app: &AXUIElement) {
+        if self.depth > 0 {
+            self.depth += 1;
+            return;
+        }
+
+        self.depth = 1;
+
+        if self.restore || self.absent {
+            return;
+        }
+
+        match app.bool_attribute(ATTRIBUTE) {
+            Ok(true) => match app.set_bool_attribute(ATTRIBUTE, false) {
+                Ok(()) => self.restore = true,
+                Err(err) if is_absent(&err) => self.absent = true,
+                Err(_) => {}
+            },
+            Ok(false) => {}
+            Err(err) if is_absent(&err) => self.absent = true,
+            Err(_) => {}
+        }
+    }
+
+    pub fn release(&mut self, app: &AXUIElement) {
+        if self.depth == 0 {
+            return;
+        }
+
+        self.depth -= 1;
+        if self.depth == 0 {
+            self.try_restore(app);
+        }
+    }
+
+    pub fn restore_if_needed(&mut self, app: &AXUIElement) {
+        self.depth = 0;
+        self.try_restore(app);
+    }
+
+    fn try_restore(&mut self, app: &AXUIElement) {
+        if !self.restore {
+            return;
+        }
+
+        match app.set_bool_attribute(ATTRIBUTE, true) {
+            Ok(()) => self.restore = false,
+            Err(err) if is_absent(&err) => {
+                self.restore = false;
+                self.absent = true;
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+#[inline]
+fn is_absent(err: &AxError) -> bool {
+    match err {
+        AxError::NotFound => true,
+        AxError::Ax(code) => *code == AXError::AttributeUnsupported,
+    }
 }
