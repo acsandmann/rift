@@ -45,8 +45,10 @@ use crate::sys::window_server::WindowServerId;
 use crate::sys::{power, window_server};
 use crate::ui::stack_line::point_hits_indicator_frame;
 
-const MOUSE_MOVE_MIN_INTERVAL_NS_NORMAL: u64 = 8_000_000; // 8ms ~= 125 Hz
-const MOUSE_MOVE_MIN_INTERVAL_NS_LOW_POWER: u64 = 16_000_000; // 16ms ~= 62 Hz
+const MOUSE_MOVE_INTERVAL_FOCUS_NS: u64 = 16_000_000; // 16ms ~= 62 Hz
+const MOUSE_MOVE_INTERVAL_HOVER_NS: u64 = 8_000_000; // 8ms ~= 125 Hz
+const MOUSE_MOVE_INTERVAL_FOCUS_LOW_POWER_NS: u64 = 24_000_000; // 24ms ~= 42 Hz
+const MOUSE_MOVE_INTERVAL_HOVER_LOW_POWER_NS: u64 = 16_000_000; // 16ms ~= 62 Hz
 
 #[derive(Debug)]
 pub enum Request {
@@ -289,7 +291,7 @@ impl EventTap {
             state.event_processing_enabled
                 && (state.stack_line_enabled || Self::focus_follows_mouse_handler_enabled(&state)),
         );
-        let mouse_move_min_interval_ns = mouse_move_sampling_profile(state.low_power_mode);
+        let mouse_move_min_interval_ns = mouse_move_sampling_profile(&state);
         EventTap {
             events_tx,
             requests_rx: Some(requests_rx),
@@ -490,11 +492,11 @@ impl EventTap {
                     debug!("low_power_mode changed in event tap: {}", enabled);
                     state.low_power_mode = enabled;
                     state.reset_mouse_sampling();
-                    self.mouse_move_min_interval_ns.set(mouse_move_sampling_profile(enabled));
                     self.reset_mouse_move_sample_gate();
                 }
             }
         }
+        self.mouse_move_min_interval_ns.set(mouse_move_sampling_profile(&state));
         drop(state);
 
         if should_rebuild_mask {
@@ -693,7 +695,6 @@ impl EventTap {
                 valid: true,
             });
             if let Some(window) = window {
-                window_server::note_windowserver_activity(window.as_u32());
                 _ = self.events_tx.send(Event::MouseMoved(window));
             }
         }
@@ -707,15 +708,30 @@ impl EventTap {
         point: CGPoint,
         previous: MouseWindow,
     ) -> Option<WindowServerId> {
+        Self::resolve_mouse_window_with(hint, previous, || {
+            window_server::get_window_at_point(point)
+        })
+    }
+
+    #[inline]
+    fn resolve_mouse_window_with<F>(
+        hint: Option<WindowServerId>,
+        previous: MouseWindow,
+        fallback: F,
+    ) -> Option<WindowServerId>
+    where
+        F: FnOnce() -> Option<WindowServerId>,
+    {
         // A non-empty CGEvent hint is stable while the pointer remains in the
         // same window. Reuse the scalar result in that common case. When the
-        // hint is absent, the pointer can cross windows without changing it,
-        // so retain the fallback lookup for correctness.
+        // hint changes or is absent, retain authoritative hit-testing. In
+        // particular, do not trust a new hint directly: it may identify a
+        // Rift stack-line overlay rather than the external window beneath it.
         if previous.valid && hint.is_some() && previous.hint == hint {
             return previous.resolved;
         }
 
-        window_server::get_window_at_point(point)
+        fallback()
     }
 
     /// Admit a mouse move for full processing. This deliberately contains
@@ -983,11 +999,17 @@ impl State {
 }
 
 #[inline]
-fn mouse_move_sampling_profile(low_power_mode: bool) -> u64 {
-    if low_power_mode {
-        MOUSE_MOVE_MIN_INTERVAL_NS_LOW_POWER
+fn mouse_move_sampling_profile(state: &State) -> u64 {
+    if state.stack_line_enabled {
+        if state.low_power_mode {
+            MOUSE_MOVE_INTERVAL_HOVER_LOW_POWER_NS
+        } else {
+            MOUSE_MOVE_INTERVAL_HOVER_NS
+        }
+    } else if state.low_power_mode {
+        MOUSE_MOVE_INTERVAL_FOCUS_LOW_POWER_NS
     } else {
-        MOUSE_MOVE_MIN_INTERVAL_NS_NORMAL
+        MOUSE_MOVE_INTERVAL_FOCUS_NS
     }
 }
 
@@ -1074,5 +1096,78 @@ mod tests {
 
         assert!(state.pressed_keys.is_empty());
         assert_eq!(state.current_flags, live_flags);
+    }
+
+    #[test]
+    fn sampling_keeps_stack_line_hover_at_the_responsive_rate() {
+        let mut state = State {
+            event_processing_enabled: true,
+            focus_follows_mouse_config_enabled: true,
+            stack_line_enabled: true,
+            ..State::default()
+        };
+        assert_eq!(mouse_move_sampling_profile(&state), MOUSE_MOVE_INTERVAL_HOVER_NS);
+
+        state.low_power_mode = true;
+        assert_eq!(
+            mouse_move_sampling_profile(&state),
+            MOUSE_MOVE_INTERVAL_HOVER_LOW_POWER_NS
+        );
+    }
+
+    #[test]
+    fn sampling_reduces_focus_only_mouse_moves() {
+        let mut state = State {
+            event_processing_enabled: true,
+            focus_follows_mouse_config_enabled: true,
+            stack_line_enabled: false,
+            ..State::default()
+        };
+        assert_eq!(mouse_move_sampling_profile(&state), MOUSE_MOVE_INTERVAL_FOCUS_NS);
+
+        state.low_power_mode = true;
+        assert_eq!(
+            mouse_move_sampling_profile(&state),
+            MOUSE_MOVE_INTERVAL_FOCUS_LOW_POWER_NS
+        );
+    }
+
+    #[test]
+    fn stack_line_click_and_hover_keep_mouse_events_in_the_tap_mask() {
+        let mask = build_event_mask(false, true);
+        assert_ne!(mask & (1u64 << CGEventType::MouseMoved.0), 0);
+        assert_ne!(mask & (1u64 << CGEventType::LeftMouseDown.0), 0);
+        assert_ne!(mask & (1u64 << CGEventType::RightMouseDown.0), 0);
+    }
+
+    #[test]
+    fn unchanged_nonzero_window_hint_reuses_authoritative_result() {
+        let hint = Some(WindowServerId::new(41));
+        let resolved = Some(WindowServerId::new(7));
+        let previous = MouseWindow { hint, resolved, valid: true };
+
+        let result = EventTap::resolve_mouse_window_with(hint, previous, || {
+            panic!("unchanged hints must not synchronously hit-test")
+        });
+        assert_eq!(result, resolved);
+    }
+
+    #[test]
+    fn changed_window_hint_uses_authoritative_fallback_for_overlays() {
+        let previous = MouseWindow {
+            hint: Some(WindowServerId::new(41)),
+            resolved: Some(WindowServerId::new(7)),
+            valid: true,
+        };
+        let external_window = Some(WindowServerId::new(8));
+        let mut fallback_calls = 0;
+
+        let result =
+            EventTap::resolve_mouse_window_with(Some(WindowServerId::new(42)), previous, || {
+                fallback_calls += 1;
+                external_window
+            });
+        assert_eq!(result, external_window);
+        assert_eq!(fallback_calls, 1);
     }
 }
