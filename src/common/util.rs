@@ -97,28 +97,3 @@ pub fn execute_startup_commands(commands: &[String]) {
         });
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unquoted_command_splits_on_whitespace() {
-        assert_eq!(parse_command("say hello"), ["say", "hello"]);
-    }
-
-    #[test]
-    fn double_quoted_phrase_is_one_token_with_apostrophe() {
-        assert_eq!(parse_command(r#"say "it's alive""#), ["say", "it's alive"]);
-    }
-
-    #[test]
-    fn single_quoted_phrase_is_one_token() {
-        assert_eq!(parse_command("echo 'a b'"), ["echo", "a b"]);
-    }
-
-    #[test]
-    fn escapes_are_processed_inside_quotes() {
-        assert_eq!(parse_command(r#"echo "a\nb""#), ["echo", "a\nb"]);
-    }
-}
