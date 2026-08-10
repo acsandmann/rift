@@ -3,7 +3,7 @@ use test_log::test;
 
 use super::testing::*;
 use super::*;
-use crate::actor::app::{AppThreadHandle, FocusConfirmation, Request, pid_t};
+use crate::actor::app::{AppThreadHandle, Request, pid_t};
 use crate::actor::wm_controller::WmEvent;
 use crate::common::config::{LayoutMode, OuterGaps, WorkspaceSelector};
 use crate::layout_engine::{Direction, LayoutCommand, LayoutEvent};
@@ -2542,93 +2542,6 @@ fn focus_follows_mouse_emits_focus_without_explicit_arrange() {
         [LayoutEvent::WindowFocused(event_space, event_window)]
             if *event_space == space && *event_window == window
     ));
-}
-
-#[test]
-fn focus_follows_mouse_defers_ax_main_window_confirmation() {
-    let reactor = test_reactor();
-    let window = WindowId::new(7, 1);
-    let outcome = window_workflow::handle_mouse_moved_over_window(
-        &reactor.app_manager,
-        window_workflow::MouseMovedPayload {
-            window: Some(window),
-            should_sync: true,
-            is_main: false,
-            needs_layout_sync: false,
-            active_space: Some(SpaceId::new(1)),
-        },
-    )
-    .expect("mouse focus workflow");
-
-    assert!(matches!(outcome.raise_requests.as_slice(), [
-        raise_manager::Event::RaiseRequest(RaiseRequest {
-            focus_confirmation: FocusConfirmation::NativeEvent,
-            ..
-        })
-    ]));
-}
-
-#[test]
-fn explicit_focus_keeps_immediate_ax_confirmation() {
-    let (mut apps, mut reactor) = test_context();
-    let space = SpaceId::new(1);
-    reactor.handle_event(space_state_event(
-        vec![CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.))],
-        vec![Some(space)],
-    ));
-    apps.make_app_and_settle(&mut reactor, 7, make_windows(1));
-    let window = WindowId::new(7, 1);
-
-    let outcome = command_workflow::handle_command_reactor_focus_window(
-        &reactor.state,
-        &reactor.app_manager,
-        command_workflow::FocusWindowPayload {
-            window_id: window,
-            window_server_id: None,
-            resolved_space: Some(space),
-            space_is_active: true,
-        },
-    )
-    .expect("explicit focus workflow");
-
-    assert!(matches!(outcome.raise_requests.as_slice(), [
-        raise_manager::Event::RaiseRequest(RaiseRequest {
-            focus_confirmation: FocusConfirmation::AxImmediate,
-            ..
-        })
-    ]));
-}
-
-#[test]
-fn stack_line_republishes_selected_segment_after_focus_only_change() {
-    let (mut apps, mut reactor) = test_context();
-    reactor.config.settings.ui.stack_line.enabled = true;
-    let (stack_line_tx, mut stack_line_rx) = actor::channel();
-    reactor.communication_manager.stack_line_tx = Some(stack_line_tx);
-
-    let space = SpaceId::new(1);
-    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
-    let first = WindowId::new(7, 1);
-    let second = WindowId::new(7, 2);
-    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
-    apps.make_app_and_settle(&mut reactor, 7, make_windows(2));
-    reactor.send_layout_event(LayoutEvent::WindowFocused(space, first));
-    reactor.handle_test_layout_command(LayoutCommand::ToggleStack);
-    while stack_line_rx.try_recv().is_ok() {}
-
-    reactor.send_layout_event(LayoutEvent::WindowFocused(space, second));
-
-    let (_, event) = stack_line_rx
-        .try_recv()
-        .expect("focus-only stack selection should publish a stack-line snapshot");
-    let stack_line::Event::GroupsUpdated { groups, .. } = event else {
-        panic!("expected stack-line groups update, got {event:?}");
-    };
-    let group = groups
-        .iter()
-        .find(|group| group.window_ids.contains(&first) && group.window_ids.contains(&second))
-        .expect("expected both windows in a stack-line group");
-    assert_eq!(group.window_ids.get(group.selected_index), Some(&second));
 }
 
 #[test]

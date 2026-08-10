@@ -349,7 +349,7 @@ pub enum Request {
     /// Events attributed to this request will use the provided [`Quiet`]
     /// parameter for the last window only. Events for other windows will be
     /// marked `Quiet::Yes` automatically.
-    Raise(Vec<WindowId>, CancellationToken, u64, Quiet, FocusConfirmation),
+    Raise(Vec<WindowId>, CancellationToken, u64, Quiet),
 }
 
 impl Request {
@@ -365,15 +365,7 @@ impl Request {
     }
 }
 
-struct RaiseRequest(Vec<WindowId>, CancellationToken, u64, Quiet, FocusConfirmation);
-
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum FocusConfirmation {
-    /// Let WindowServer and normal AX notifications confirm focus.
-    NativeEvent,
-    /// Immediately read AXMainWindow after the final raise.
-    AxImmediate,
-}
+struct RaiseRequest(Vec<WindowId>, CancellationToken, u64, Quiet);
 
 #[derive(Debug, Copy, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub enum Quiet {
@@ -647,11 +639,10 @@ impl State {
 
     async fn handle_raises(this: &RefCell<Self>, mut rx: actor::Receiver<RaiseRequest>) {
         while let Some((span, raise)) = rx.recv().await {
-            let RaiseRequest(wids, token, sequence_id, quiet, confirmation) = raise;
-            if let Err(e) =
-                Self::handle_raise_request(this, wids, &token, sequence_id, quiet, confirmation)
-                    .instrument(span)
-                    .await
+            let RaiseRequest(wids, token, sequence_id, quiet) = raise;
+            if let Err(e) = Self::handle_raise_request(this, wids, &token, sequence_id, quiet)
+                .instrument(span)
+                .await
             {
                 debug!("Raise request failed: {e:?}");
             }
@@ -1011,8 +1002,8 @@ impl State {
                     None,
                 ));
             }
-            Request::Raise(wids, token, sequence_id, quiet, confirmation) => {
-                self.raises_tx.send(RaiseRequest(wids, token, sequence_id, quiet, confirmation));
+            Request::Raise(wids, token, sequence_id, quiet) => {
+                self.raises_tx.send(RaiseRequest(wids, token, sequence_id, quiet));
             }
         }
         Ok(false)
@@ -1186,7 +1177,6 @@ impl State {
         token: &CancellationToken,
         sequence_id: u64,
         quiet: Quiet,
-        confirmation: FocusConfirmation,
     ) -> Result<(), RaiseError> {
         let check_cancel = || {
             if token.is_cancelled() {
@@ -1302,7 +1292,7 @@ impl State {
                 None
             };
 
-            if is_last && confirmation == FocusConfirmation::AxImmediate {
+            if is_last {
                 let main_window = this.on_main_window_changed(quiet_if, true);
                 if main_window != Some(wid) {
                     warn!(

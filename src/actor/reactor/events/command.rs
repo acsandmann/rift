@@ -356,7 +356,6 @@ pub fn handle_command_reactor_focus_window(
             focus_window: Some((window_id, None)),
             app_handles,
             focus_quiet: Quiet::No,
-            focus_confirmation: crate::actor::app::FocusConfirmation::AxImmediate,
         });
         outcome = outcome.with_raise_request(request);
     } else if let Some(wsid) = window_server_id {

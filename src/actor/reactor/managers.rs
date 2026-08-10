@@ -208,79 +208,6 @@ impl LayoutManager {
         Self::apply_layout(reactor, layout_result, is_resize, is_workspace_switch)
     }
 
-    /// Publish stack selection state when focus changed without requiring a
-    /// geometry pass. Traditional stack focus updates do not move frames, but
-    /// the indicator's selected segment still needs a fresh snapshot.
-    pub(crate) fn publish_stack_line_for_space(reactor: &mut Reactor, space: SpaceId) {
-        if !reactor.config.settings.ui.stack_line.enabled {
-            return;
-        }
-        let Some(screen) = reactor.space_state.screen_by_space(space) else {
-            return;
-        };
-        let display_uuid = screen.display_uuid_owned();
-        let gaps = reactor
-            .config
-            .settings
-            .layout
-            .gaps
-            .effective_for_display(display_uuid.as_deref());
-        let group_infos = reactor.layout_manager.layout_engine.collect_group_containers(
-            space,
-            screen.frame,
-            &gaps,
-            reactor.config.settings.ui.stack_line.thickness(),
-            reactor.config.settings.ui.stack_line.horiz_placement,
-            reactor.config.settings.ui.stack_line.vert_placement,
-        );
-        let active_workspace_for_space_has_fullscreen = reactor.workspace_command_space()
-            == Some(space)
-            && reactor
-                .layout_manager
-                .layout_engine
-                .active_workspace_for_space_has_fullscreen(space);
-        Self::publish_stack_line_snapshot(
-            reactor,
-            space,
-            &group_infos,
-            active_workspace_for_space_has_fullscreen,
-        );
-    }
-
-    fn publish_stack_line_snapshot(
-        reactor: &Reactor,
-        space: SpaceId,
-        group_infos: &[crate::layout_engine::engine::GroupContainerInfo],
-        active_workspace_for_space_has_fullscreen: bool,
-    ) {
-        let Some(tx) = &reactor.communication_manager.stack_line_tx else {
-            return;
-        };
-        let groups: Vec<crate::actor::stack_line::GroupInfo> = group_infos
-            .iter()
-            .map(|g| crate::actor::stack_line::GroupInfo {
-                node_id: g.node_id,
-                space_id: space,
-                container_kind: g.container_kind,
-                frame: g.frame,
-                total_count: g.total_count,
-                selected_index: g.selected_index,
-                window_ids: g.window_ids.clone(),
-            })
-            .collect();
-        let active_space_ids: Vec<crate::sys::screen::SpaceId> =
-            reactor.iter_active_spaces().collect();
-
-        if let Err(e) = tx.try_send(crate::actor::stack_line::Event::GroupsUpdated {
-            active_space_ids,
-            space_id: space,
-            groups,
-            active_workspace_for_space_has_fullscreen,
-        }) {
-            tracing::warn!("Failed to send groups update to stack_line: {}", e);
-        }
-    }
-
     fn calculate_layout(reactor: &mut Reactor, space_scope: Option<SpaceId>) -> LayoutResult {
         if reactor.state.windows.tracked_window_count() == 0 {
             return LayoutResult::new();
@@ -391,13 +318,32 @@ impl LayoutManager {
                 );
 
                 // Keep internal stack-line UI actor fed from the same group snapshot.
-                if reactor.config.settings.ui.stack_line.enabled {
-                    Self::publish_stack_line_snapshot(
-                        reactor,
-                        space,
-                        &group_infos,
+                if reactor.config.settings.ui.stack_line.enabled
+                    && let Some(tx) = &reactor.communication_manager.stack_line_tx
+                {
+                    let groups: Vec<crate::actor::stack_line::GroupInfo> = group_infos
+                        .iter()
+                        .map(|g| crate::actor::stack_line::GroupInfo {
+                            node_id: g.node_id,
+                            space_id: space,
+                            container_kind: g.container_kind,
+                            frame: g.frame,
+                            total_count: g.total_count,
+                            selected_index: g.selected_index,
+                            window_ids: g.window_ids.clone(),
+                        })
+                        .collect();
+                    let active_space_ids: Vec<crate::sys::screen::SpaceId> =
+                        reactor.iter_active_spaces().collect();
+
+                    if let Err(e) = tx.try_send(crate::actor::stack_line::Event::GroupsUpdated {
+                        active_space_ids,
+                        space_id: space,
+                        groups,
                         active_workspace_for_space_has_fullscreen,
-                    );
+                    }) {
+                        tracing::warn!("Failed to send groups update to stack_line: {}", e);
+                    }
                 }
 
                 if let Some(workspace_id) =

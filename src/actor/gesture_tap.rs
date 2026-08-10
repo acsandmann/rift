@@ -416,8 +416,11 @@ impl GestureTap {
             return true;
         }
 
+        let cursor = CGEvent::location(Some(event));
+        let mode = self.layout_mode_at_point(cursor).unwrap_or(*self.default_layout_mode.borrow());
+        let is_scrolling_mode = matches!(mode, LayoutMode::Scrolling);
+
         if is_physical_horizontal_dock_swipe(event_type, event) {
-            let is_scrolling_mode = self.is_scrolling_mode_at_event(event);
             if self.should_consume_physical_dock_swipe(
                 is_scrolling_mode,
                 scroll_handler.as_ref(),
@@ -432,33 +435,17 @@ impl GestureTap {
             return true;
         }
 
-        let is_scrolling_mode = self.is_scrolling_mode_at_event(event);
         if let Some(nsevent) = NSEvent::eventWithCGEvent(event)
             && nsevent.r#type() == NSEventType::Gesture
         {
-            // AppKit touch access can raise an Objective-C exception for a
-            // stale NSTouch. Install one catcher for the complete gesture
-            // sample instead of one for every touch coordinate read.
-            return exception::catch(AssertUnwindSafe(|| {
-                if is_scrolling_mode && let Some(handler) = scroll_handler.as_ref() {
-                    !self.handle_scroll_gesture_event(handler, &nsevent)
-                } else if let Some(handler) = swipe_handler.as_ref() {
-                    !self.handle_gesture_event(handler, &nsevent)
-                } else {
-                    true
-                }
-            }))
-            .unwrap_or(true);
+            if is_scrolling_mode && let Some(handler) = scroll_handler.as_ref() {
+                return !self.handle_scroll_gesture_event(handler, &nsevent);
+            } else if let Some(handler) = swipe_handler.as_ref() {
+                return !self.handle_gesture_event(handler, &nsevent);
+            }
         }
 
         true
-    }
-
-    #[inline]
-    fn is_scrolling_mode_at_event(&self, event: &CGEvent) -> bool {
-        let cursor = CGEvent::location(Some(event));
-        let mode = self.layout_mode_at_point(cursor).unwrap_or(*self.default_layout_mode.borrow());
-        matches!(mode, LayoutMode::Scrolling)
     }
 
     fn should_consume_physical_dock_swipe(
@@ -671,7 +658,36 @@ impl GestureTap {
                     st.last_y = avg_y;
                     return cfg.consume_dock_swipe && st.consuming;
                 }
-                if self.apply_scroll_motion(cfg, &mut st, avg_x, avg_y) {
+
+                let dx = avg_x - st.last_x;
+                let dy = avg_y - st.last_y;
+                let horizontal = dx.abs();
+                let vertical = dy.abs();
+
+                st.last_x = avg_x;
+                st.last_y = avg_y;
+
+                if vertical > cfg.vertical_tolerance || vertical >= horizontal {
+                    return cfg.consume_dock_swipe && st.consuming;
+                }
+
+                st.consuming = true;
+
+                st.accum_dx += dx;
+                let step = cfg.distance_pct;
+                if st.accum_dx.abs() >= step {
+                    let delta = if cfg.invert_horizontal {
+                        -st.accum_dx
+                    } else {
+                        st.accum_dx
+                    };
+                    let cmd = LC::ScrollStrip { delta };
+
+                    self.wm_sender.send(WmEvent::Command(WmCommand::ReactorCommand(
+                        reactor::Command::Layout(cmd),
+                    )));
+
+                    st.accum_dx = 0.0;
                     st.phase = GesturePhase::Committed;
                 }
             }
@@ -681,48 +697,37 @@ impl GestureTap {
                     st.reset();
                     return cfg.consume_dock_swipe && consuming;
                 } else if all_moved {
-                    self.apply_scroll_motion(cfg, &mut st, avg_x, avg_y);
+                    let dx = avg_x - st.last_x;
+                    let dy = avg_y - st.last_y;
+                    let horizontal = dx.abs();
+                    let vertical = dy.abs();
+                    st.last_x = avg_x;
+                    st.last_y = avg_y;
+                    if vertical > cfg.vertical_tolerance || vertical >= horizontal {
+                        return cfg.consume_dock_swipe && st.consuming;
+                    }
+                    st.consuming = true;
+                    st.accum_dx += dx;
+                    let step = cfg.distance_pct;
+                    if st.accum_dx.abs() >= step {
+                        let delta = if cfg.invert_horizontal {
+                            -st.accum_dx
+                        } else {
+                            st.accum_dx
+                        };
+                        let cmd = LC::ScrollStrip { delta };
+
+                        self.wm_sender.send(WmEvent::Command(WmCommand::ReactorCommand(
+                            reactor::Command::Layout(cmd),
+                        )));
+
+                        st.accum_dx = 0.0;
+                    }
                 }
             }
         }
 
         cfg.consume_dock_swipe && st.consuming
-    }
-
-    /// Apply one horizontal scrolling sample. Returns whether the configured
-    /// dispatch threshold was crossed.
-    fn apply_scroll_motion(
-        &self,
-        cfg: &ScrollConfig,
-        st: &mut ScrollState,
-        avg_x: f64,
-        avg_y: f64,
-    ) -> bool {
-        let dx = avg_x - st.last_x;
-        let dy = avg_y - st.last_y;
-        st.last_x = avg_x;
-        st.last_y = avg_y;
-
-        if dy.abs() > cfg.vertical_tolerance || dy.abs() >= dx.abs() {
-            return false;
-        }
-
-        st.consuming = true;
-        st.accum_dx += dx;
-        if st.accum_dx.abs() < cfg.distance_pct {
-            return false;
-        }
-
-        let delta = if cfg.invert_horizontal {
-            -st.accum_dx
-        } else {
-            st.accum_dx
-        };
-        self.wm_sender.send(WmEvent::Command(WmCommand::ReactorCommand(
-            reactor::Command::Layout(LC::ScrollStrip { delta }),
-        )));
-        st.accum_dx = 0.0;
-        true
     }
 }
 
@@ -731,19 +736,13 @@ fn gesture_event_mask() -> CGEventMask {
 }
 
 fn is_physical_horizontal_dock_swipe(event_type: CGEventType, event: &CGEvent) -> bool {
-    let is_dock_control = event_type.0 as i64 == K_CGS_EVENT_DOCK_CONTROL
-        || CGEvent::integer_value_field(Some(event), K_CGS_EVENT_TYPE_FIELD)
-            == K_CGS_EVENT_DOCK_CONTROL;
-    if !is_dock_control {
-        return false;
-    }
-    if CGEvent::integer_value_field(Some(event), K_GESTURE_HID_TYPE_FIELD)
-        != K_IOHID_EVENT_TYPE_DOCK_SWIPE
-    {
-        return false;
-    }
-    CGEvent::integer_value_field(Some(event), K_GESTURE_SWIPE_MOTION_FIELD)
-        == K_CG_GESTURE_MOTION_HORIZONTAL
+    let cgs_type = CGEvent::integer_value_field(Some(event), K_CGS_EVENT_TYPE_FIELD);
+    let hid_type = CGEvent::integer_value_field(Some(event), K_GESTURE_HID_TYPE_FIELD);
+    let motion = CGEvent::integer_value_field(Some(event), K_GESTURE_SWIPE_MOTION_FIELD);
+
+    (event_type.0 as i64 == K_CGS_EVENT_DOCK_CONTROL || cgs_type == K_CGS_EVENT_DOCK_CONTROL)
+        && hid_type == K_IOHID_EVENT_TYPE_DOCK_SWIPE
+        && motion == K_CG_GESTURE_MOTION_HORIZONTAL
 }
 
 #[inline]
@@ -752,7 +751,11 @@ fn touch_normalized_position(touch: &objc2_app_kit::NSTouch) -> Option<(f64, f64
         return None;
     }
 
-    let position = touch.normalizedPosition();
+    let position = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        exception::catch(AssertUnwindSafe(|| touch.normalizedPosition())).ok()
+    }))
+    .ok()
+    .flatten()?;
     let x = position.x.clamp(0.0, 1.0) as f64;
     let y = position.y.clamp(0.0, 1.0) as f64;
     Some((x, y))

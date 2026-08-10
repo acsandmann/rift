@@ -3340,11 +3340,6 @@ impl Reactor {
                 workspace_switch_space.is_some(),
                 workspace_switch_space.or(event_space),
             );
-        } else if let Some(space) = event_space {
-            // Selecting another child in a traditional stack changes no
-            // frames, so no layout pass follows. Publish the new selected
-            // segment explicitly for stack-line click/hover focus.
-            LayoutManager::publish_stack_line_for_space(self, space);
         }
         if focus_desktop && let Some(space) = self.workspace_command_space() {
             self.focus_desktop_if_active_workspace_empty(space);
@@ -4009,7 +4004,6 @@ impl Reactor {
             focus_window: focus_window_with_warp,
             app_handles,
             focus_quiet,
-            focus_confirmation: crate::actor::app::FocusConfirmation::AxImmediate,
         });
 
         if let Err(e) = self.communication_manager.raise_manager_tx.try_send(msg) {

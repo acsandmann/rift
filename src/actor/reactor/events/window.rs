@@ -1,7 +1,7 @@
 use objc2_core_foundation::CGRect;
 use tracing::{debug, trace};
 
-use crate::actor::app::{FocusConfirmation, Request, WindowId};
+use crate::actor::app::{Request, WindowId};
 use crate::actor::reactor::events::EventOutcome;
 use crate::actor::reactor::managers::DragManager;
 use crate::actor::reactor::transaction_manager::TransactionManager;
@@ -514,7 +514,6 @@ pub fn handle_mouse_moved_over_window(
                 focus_window: Some((window, None)),
                 app_handles,
                 focus_quiet: Quiet::No,
-                focus_confirmation: FocusConfirmation::NativeEvent,
             },
         ));
     }
