@@ -1270,7 +1270,7 @@ fn default_workspace_names() -> Vec<String> {
 fn default_swipe_vertical_tolerance() -> f64 { 0.4 }
 fn default_swipe_fingers() -> usize { 3 }
 fn default_distance_pct() -> f64 { 0.08 }
-fn default_overscroll_threshold() -> f64 { 0.625 }
+fn default_overscroll_threshold() -> f64 { 0.15 }
 
 fn default_stack_line_spacing() -> f64 { 1.0 }
 fn default_stack_line_thickness() -> f64 { 20.0 }
