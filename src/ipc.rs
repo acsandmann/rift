@@ -202,8 +202,8 @@ impl MachHandler {
                 }
             }
 
-            RiftRequest::GetLayoutState { space_id } => {
-                match self.reactor.query_layout_state(space_id) {
+            RiftRequest::GetLayoutState { space_id, workspace_id } => {
+                match self.reactor.query_layout_state(space_id, workspace_id) {
                     Some(layout_state) => RiftResponse::Success {
                         data: serde_json::to_value(rift_protocol::LayoutStateData::from(
                             layout_state,
@@ -211,7 +211,7 @@ impl MachHandler {
                         .unwrap(),
                     },
                     None => RiftResponse::Error {
-                        error: serde_json::json!({ "message": "Space not found or inactive" }),
+                        error: serde_json::json!({ "message": "Space or workspace not found" }),
                     },
                 }
             }

@@ -95,6 +95,8 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     fn remove_layout(&mut self, layout: LayoutId);
 
     fn draw_tree(&self, layout: LayoutId) -> String;
+    /// Return a stable, platform-neutral view of the layout topology for IPC consumers.
+    fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode;
 
     fn calculate_layout(
         &self,
@@ -197,7 +199,8 @@ pub use scrolling::ScrollingLayoutSystem;
 #[cfg(test)]
 mod tests {
     use super::{
-        LayoutSystem, ScrollingLayoutSystem, TraditionalLayoutSystem, WindowLayoutConstraints,
+        BspLayoutSystem, LayoutSystem, MasterStackLayoutSystem, ScrollingLayoutSystem,
+        TraditionalLayoutSystem, WindowLayoutConstraints,
     };
     use crate::actor::app::WindowId;
     use crate::common::config::{ScrollingLayoutSettings, WindowInsertionPoint};
@@ -311,6 +314,60 @@ mod tests {
         assert_eq!(c.max_for_axis(false), 480.0);
         assert!(c.resizable_for_axis(true));
         assert!(c.resizable_for_axis(false));
+    }
+
+    fn window_nodes(
+        tree: &rift_protocol::ContainerTreeNode,
+    ) -> Vec<&rift_protocol::ContainerTreeNode> {
+        let mut windows = Vec::new();
+        if tree.node_type == rift_protocol::ContainerNodeType::Window {
+            windows.push(tree);
+        }
+        for child in &tree.children {
+            windows.extend(window_nodes(child));
+        }
+        windows
+    }
+
+    #[test]
+    fn normalized_container_trees_expose_layout_topology() {
+        let mut traditional = TraditionalLayoutSystem::default();
+        let layout = traditional.create_layout();
+        traditional.add_window_after_selection(layout, w(1));
+        traditional.add_window_after_selection(layout, w(2));
+        let tree = traditional.container_tree(layout);
+        assert_eq!(tree.node_type, rift_protocol::ContainerNodeType::Container);
+        assert_eq!(window_nodes(&tree).len(), 2);
+        assert_eq!(
+            window_nodes(&tree).iter().filter(|node| node.is_selected).count(),
+            1
+        );
+
+        let mut bsp = BspLayoutSystem::default();
+        let layout = bsp.create_layout();
+        bsp.add_window_after_selection(layout, w(1));
+        bsp.add_window_after_selection(layout, w(2));
+        let tree = bsp.container_tree(layout);
+        assert_eq!(tree.children.len(), 2);
+        let total_weight: f64 = tree.children.iter().filter_map(|node| node.weight).sum();
+        assert!((total_weight - 1.0).abs() < f64::EPSILON);
+
+        let mut master_stack = MasterStackLayoutSystem::default();
+        let layout = master_stack.create_layout();
+        master_stack.add_window_after_selection(layout, w(1));
+        master_stack.add_window_after_selection(layout, w(2));
+        let tree = master_stack.container_tree(layout);
+        let roles: Vec<_> = tree.children.iter().filter_map(|node| node.role.as_deref()).collect();
+        assert!(roles.contains(&"master"), "{tree:#?}");
+        assert!(roles.contains(&"stack"), "{tree:#?}");
+
+        let mut scrolling = ScrollingLayoutSystem::default();
+        let layout = scrolling.create_layout();
+        scrolling.add_window_after_selection(layout, w(1));
+        scrolling.add_window_after_selection(layout, w(2));
+        let tree = scrolling.container_tree(layout);
+        assert!(tree.children.iter().all(|node| node.role.as_deref() == Some("column")));
+        assert_eq!(window_nodes(&tree).len(), 2);
     }
 }
 mod stack;

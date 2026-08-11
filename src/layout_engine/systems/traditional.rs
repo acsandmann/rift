@@ -487,6 +487,10 @@ impl LayoutSystem for TraditionalLayoutSystem {
         out
     }
 
+    fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
+        self.container_tree_with_roles(layout, &HashMap::default())
+    }
+
     fn calculate_layout(
         &self,
         layout: LayoutId,
@@ -1558,7 +1562,7 @@ impl TraditionalLayoutSystem {
     fn get_ascii_tree_with_labels(
         &self,
         node: NodeId,
-        labels: Option<&std::collections::HashMap<NodeId, &'static str>>,
+        labels: Option<&HashMap<NodeId, &'static str>>,
     ) -> ascii_tree::Tree {
         let status = match node.parent(&self.tree.map) {
             None => "",
@@ -1606,6 +1610,43 @@ impl TraditionalLayoutSystem {
         self.tree.data.window.at(node)
     }
 
+    pub(crate) fn container_tree_with_roles(
+        &self,
+        layout: LayoutId,
+        roles: &HashMap<NodeId, &'static str>,
+    ) -> rift_protocol::ContainerTreeNode {
+        fn snapshot(
+            system: &TraditionalLayoutSystem,
+            node: NodeId,
+            selected: NodeId,
+            roles: &HashMap<NodeId, &'static str>,
+        ) -> rift_protocol::ContainerTreeNode {
+            let window = system.window_at(node);
+            let info = system.tree.data.layout.info[node];
+            rift_protocol::ContainerTreeNode {
+                node_type: if window.is_some() {
+                    rift_protocol::ContainerNodeType::Window
+                } else {
+                    rift_protocol::ContainerNodeType::Container
+                },
+                layout_kind: window.is_none().then_some(info.kind),
+                weight: node.parent(system.map()).map(|_| f64::from(info.size)),
+                window_id: window.map(Into::into),
+                is_selected: node == selected,
+                is_fullscreen: info.is_fullscreen,
+                is_fullscreen_within_gaps: info.is_fullscreen_within_gaps,
+                role: roles.get(&node).map(|role| (*role).to_owned()),
+                pending_split: None,
+                children: node
+                    .children(system.map())
+                    .map(|child| snapshot(system, child, selected, roles))
+                    .collect(),
+            }
+        }
+
+        snapshot(self, self.root(layout), self.selection(layout), roles)
+    }
+
     pub(crate) fn visible_windows_in_subtree(&self, node: NodeId) -> Vec<WindowId> {
         self.visible_windows_under_internal(node)
     }
@@ -1613,7 +1654,7 @@ impl TraditionalLayoutSystem {
     pub(crate) fn draw_tree_with_labels(
         &self,
         layout: LayoutId,
-        labels: &std::collections::HashMap<NodeId, &'static str>,
+        labels: &HashMap<NodeId, &'static str>,
     ) -> String {
         let tree = self.get_ascii_tree_with_labels(self.root(layout), Some(labels));
         let mut out = String::new();

@@ -179,6 +179,10 @@ impl LayoutSystem for StackLayoutSystem {
 
     fn draw_tree(&self, layout: LayoutId) -> String { self.inner.draw_tree(layout) }
 
+    fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
+        self.inner.container_tree(layout)
+    }
+
     fn calculate_layout(
         &self,
         layout: LayoutId,

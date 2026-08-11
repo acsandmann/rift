@@ -117,8 +117,44 @@ pub struct LayoutEngine {
     startup_restore_pending: bool,
 }
 
+pub(crate) struct WorkspaceLayoutQuerySnapshot {
+    pub workspace_id: VirtualWorkspaceId,
+    pub workspace_index: usize,
+    pub is_active: bool,
+    pub mode: LayoutMode,
+    pub selected_window: Option<WindowId>,
+    pub container_tree: rift_protocol::ContainerTreeNode,
+}
+
 impl LayoutEngine {
     pub fn focused_window(&self) -> Option<WindowId> { self.focused_window }
+
+    /// Resolve an optional workspace index and snapshot its layout for read-only consumers.
+    pub(crate) fn query_workspace_layout(
+        &self,
+        space: SpaceId,
+        workspace_index: Option<usize>,
+    ) -> Option<WorkspaceLayoutQuerySnapshot> {
+        let workspaces = self.virtual_workspace_manager.existing_workspaces(space);
+        let active = self.virtual_workspace_manager.active_workspace(space)?;
+        let (workspace_index, workspace_id) = match workspace_index {
+            Some(index) => (index, workspaces.get(index)?.0),
+            None => (workspaces.iter().position(|(id, _)| *id == active)?, active),
+        };
+        let layout = self.workspace_layouts.active(space, workspace_id)?;
+        let workspace = self.virtual_workspace_manager.workspace_info(space, workspace_id)?;
+        let selected_window = workspace.layout_system.selected_window(layout);
+        let container_tree = workspace.layout_system.container_tree(layout);
+
+        Some(WorkspaceLayoutQuerySnapshot {
+            workspace_id,
+            workspace_index,
+            is_active: workspace_id == active,
+            mode: workspace.layout_mode,
+            selected_window,
+            container_tree,
+        })
+    }
 
     /// Get the active workspace ID for a space, ensuring initialization.
     fn active_workspace_id(&self, space: SpaceId) -> Option<VirtualWorkspaceId> {

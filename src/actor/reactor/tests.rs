@@ -13,6 +13,45 @@ use crate::sys::geometry::SameAs;
 use crate::sys::window_server::WindowServerId;
 
 #[test]
+fn layout_query_exposes_active_and_inactive_workspace_container_trees() {
+    let mut reactor = test_reactor();
+    let space = SpaceId::new(1);
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    reactor.send_layout_event(LayoutEvent::SpaceExposed(space, screen.size));
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space, WindowId::new(42, 1)));
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space, WindowId::new(42, 2)));
+
+    let state = reactor.query_layout_state(None, None).expect("layout state");
+    assert_eq!(state.space_id, space.get());
+    assert!(state.is_active_workspace);
+    assert_eq!(state.selected_window, state.container_tree.children[1].window_id);
+    assert_eq!(
+        state.container_tree.node_type,
+        rift_protocol::ContainerNodeType::Container
+    );
+    assert_eq!(state.container_tree.children.len(), 2);
+    assert_eq!(
+        state
+            .container_tree
+            .children
+            .iter()
+            .filter(|node| node.window_id.is_some())
+            .count(),
+        2
+    );
+
+    let original_workspace = state.workspace_id;
+    reactor.handle_test_layout_command(LayoutCommand::NextWorkspace(Some(false)));
+    let inactive = reactor
+        .query_layout_state(Some(space.get()), Some(original_workspace))
+        .expect("inactive workspace layout state");
+    assert!(!inactive.is_active_workspace);
+    assert_eq!(inactive.workspace_id, original_workspace);
+    assert!(reactor.query_layout_state(Some(space.get()), Some(usize::MAX)).is_none());
+}
+
+#[test]
 fn config_reload_propagates_non_keybinding_changes_to_wm_controller() {
     let mut reactor = test_reactor();
     let (wm_tx, mut wm_rx) = actor::channel();

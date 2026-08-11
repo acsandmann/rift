@@ -19,7 +19,8 @@ pub enum RiftRequest {
         window_id: WindowId,
     },
     GetLayoutState {
-        space_id: u64,
+        space_id: Option<u64>,
+        workspace_id: Option<usize>,
     },
     GetWorkspaceLayouts {
         space_id: Option<u64>,
@@ -85,6 +86,28 @@ mod tests {
             serde_json::json!({
                 "execute_command": { "command": { "layout": "next_window" } }
             })
+        );
+    }
+
+    #[test]
+    fn layout_query_allows_the_server_to_select_the_active_space() {
+        let request = RiftRequest::GetLayoutState {
+            space_id: None,
+            workspace_id: None,
+        };
+        assert_eq!(
+            serde_json::to_value(request).unwrap(),
+            serde_json::json!({
+                "get_layout_state": { "space_id": null, "workspace_id": null }
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<RiftRequest>(serde_json::json!({ "get_layout_state": {} }))
+                .unwrap(),
+            RiftRequest::GetLayoutState {
+                space_id: None,
+                workspace_id: None,
+            }
         );
     }
 

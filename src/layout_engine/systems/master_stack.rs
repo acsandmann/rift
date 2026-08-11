@@ -1,10 +1,9 @@
-use std::collections::HashMap as StdHashMap;
-
 use nix::libc::pid_t;
 use objc2_core_foundation::CGRect;
 use serde::{Deserialize, Serialize};
 
 use crate::actor::app::WindowId;
+use crate::common::collections::HashMap;
 use crate::common::config::{
     MasterStackNewWindowPlacement, MasterStackSettings, MasterStackSide, WindowInsertionPoint,
 };
@@ -542,10 +541,26 @@ impl LayoutSystem for MasterStackLayoutSystem {
         } else {
             (children[1], children[0])
         };
-        let mut labels = StdHashMap::new();
+        let mut labels = HashMap::default();
         labels.insert(master, "master");
         labels.insert(stack, "stack");
         self.inner.draw_tree_with_labels(layout, &labels)
+    }
+
+    fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
+        let root = self.inner.root(layout);
+        let children: Vec<_> = root.children(self.inner.map()).collect();
+        let mut roles = HashMap::default();
+        if children.len() == 2 {
+            let (master, stack) = if self.master_first() {
+                (children[0], children[1])
+            } else {
+                (children[1], children[0])
+            };
+            roles.insert(master, "master");
+            roles.insert(stack, "stack");
+        }
+        self.inner.container_tree_with_roles(layout, &roles)
     }
 
     fn calculate_layout(

@@ -83,8 +83,15 @@ enum QueryCommands {
     Window { window_id: String },
     /// List running applications
     Applications,
-    /// Get layout state for a space
-    Layout { space_id: u64 },
+    /// Get layout state and normalized container tree for a space
+    Layout {
+        /// macOS space ID; defaults to the active display space
+        #[arg(long)]
+        space_id: Option<u64>,
+        /// Virtual workspace index; defaults to the active workspace
+        #[arg(long)]
+        workspace_id: Option<usize>,
+    },
     /// Get workspace layout-engine mode(s)
     WorkspaceLayout {
         #[arg(long)]
@@ -575,7 +582,9 @@ fn build_query_request(query: QueryCommands) -> Result<RiftRequest, String> {
             Ok(RiftRequest::GetWindowInfo { window_id })
         }
         QueryCommands::Applications => Ok(RiftRequest::GetApplications),
-        QueryCommands::Layout { space_id } => Ok(RiftRequest::GetLayoutState { space_id }),
+        QueryCommands::Layout { space_id, workspace_id } => {
+            Ok(RiftRequest::GetLayoutState { space_id, workspace_id })
+        }
         QueryCommands::WorkspaceLayout { space_id, workspace_id } => {
             Ok(RiftRequest::GetWorkspaceLayouts { space_id, workspace_id })
         }

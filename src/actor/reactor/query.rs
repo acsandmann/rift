@@ -69,8 +69,12 @@ impl ReactorQueryHandle {
         self.send_query(QueryRequest::Applications).unwrap_or_default()
     }
 
-    pub fn query_layout_state(&self, space_id: u64) -> Option<LayoutStateData> {
-        self.send_query(|resp| QueryRequest::LayoutState { space_id, resp })
+    pub fn query_layout_state(
+        &self,
+        space_id: Option<u64>,
+        workspace_id: Option<usize>,
+    ) -> Option<LayoutStateData> {
+        self.send_query(|resp| QueryRequest::LayoutState { space_id, workspace_id, resp })
             .ok()
             .flatten()
     }
@@ -106,7 +110,8 @@ pub enum QueryRequest {
     },
     Applications(SyncSender<Vec<ApplicationData>>),
     LayoutState {
-        space_id: u64,
+        space_id: Option<u64>,
+        workspace_id: Option<usize>,
         resp: SyncSender<Option<LayoutStateData>>,
     },
     Metrics(SyncSender<serde_json::Value>),
@@ -136,8 +141,8 @@ impl Reactor {
             QueryRequest::Applications(resp) => {
                 let _ = resp.send(self.query_applications());
             }
-            QueryRequest::LayoutState { space_id, resp } => {
-                let _ = resp.send(self.query_layout_state(space_id));
+            QueryRequest::LayoutState { space_id, workspace_id, resp } => {
+                let _ = resp.send(self.query_layout_state(space_id, workspace_id));
             }
             QueryRequest::Metrics(resp) => {
                 let _ = resp.send(self.query_metrics());
@@ -182,8 +187,12 @@ impl Reactor {
 
     pub fn query_applications(&self) -> Vec<ApplicationData> { self.handle_applications_query() }
 
-    pub fn query_layout_state(&self, space_id: u64) -> Option<LayoutStateData> {
-        self.handle_layout_state_query(space_id)
+    pub fn query_layout_state(
+        &self,
+        space_id: Option<u64>,
+        workspace_id: Option<usize>,
+    ) -> Option<LayoutStateData> {
+        self.handle_layout_state_query(space_id, workspace_id)
     }
 
     pub fn query_metrics(&self) -> serde_json::Value { self.handle_metrics_query() }
@@ -489,41 +498,52 @@ impl Reactor {
             .collect()
     }
 
-    fn handle_layout_state_query(&self, space_id_u64: u64) -> Option<LayoutStateData> {
-        if space_id_u64 == 0 {
-            return None;
-        }
-        let space_id = SpaceId::new(space_id_u64);
+    fn handle_layout_state_query(
+        &self,
+        space_id_u64: Option<u64>,
+        workspace_id: Option<usize>,
+    ) -> Option<LayoutStateData> {
+        let space_id = match space_id_u64 {
+            Some(space_id) => SpaceId::new(space_id),
+            None => self.default_query_space()?,
+        };
         if !self.space_state.iter_known_spaces().any(|space| space == space_id) {
             return None;
         }
 
-        let _active_workspace = self.layout_manager.layout_engine.active_workspace(space_id)?;
-
-        let active_windows = self
+        let snapshot = self
             .layout_manager
             .layout_engine
-            .windows_in_active_workspace(&self.state.windows, space_id);
-        let floating_windows: Vec<WindowId> = active_windows
+            .query_workspace_layout(space_id, workspace_id)?;
+        let workspace_windows = self
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager()
+            .workspace_windows(&self.state.windows, space_id, snapshot.workspace_id);
+        let floating_windows: Vec<WindowId> = workspace_windows
             .iter()
             .filter(|&&wid| self.layout_manager.layout_engine.is_window_floating(wid))
             .copied()
             .collect();
 
-        let tiled_windows: Vec<WindowId> = active_windows
+        let tiled_windows: Vec<WindowId> = workspace_windows
             .iter()
             .filter(|&&wid| !self.layout_manager.layout_engine.is_window_floating(wid))
             .copied()
             .collect();
 
-        let focused_window = self.main_window();
+        let focused_window = self.main_window().filter(|wid| workspace_windows.contains(wid));
 
         Some(LayoutStateData {
-            space_id: space_id_u64,
-            mode: self.layout_manager.layout_engine.layout_mode_at(space_id).to_string(),
+            space_id: space_id.get(),
+            workspace_id: snapshot.workspace_index,
+            is_active_workspace: snapshot.is_active,
+            mode: snapshot.mode.to_string(),
             floating_windows: floating_windows.into_iter().map(Into::into).collect(),
             tiled_windows: tiled_windows.into_iter().map(Into::into).collect(),
             focused_window: focused_window.map(Into::into),
+            selected_window: snapshot.selected_window.map(Into::into),
+            container_tree: snapshot.container_tree,
         })
     }
 

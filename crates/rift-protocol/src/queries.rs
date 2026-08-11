@@ -3,6 +3,8 @@ use std::fmt;
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::{Direction, LayoutKind};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize)]
 pub struct WindowId {
     pub pid: i32,
@@ -147,10 +149,49 @@ pub struct ApplicationData {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LayoutStateData {
     pub space_id: u64,
+    pub workspace_id: usize,
+    pub is_active_workspace: bool,
     pub mode: String,
     pub floating_windows: Vec<WindowId>,
     pub tiled_windows: Vec<WindowId>,
     pub focused_window: Option<WindowId>,
+    /// The layout engine's selected window in the queried workspace.
+    pub selected_window: Option<WindowId>,
+    /// Normalized topology for the queried workspace's tiled layout.
+    ///
+    /// Internal node IDs are intentionally omitted because they are not stable across layout
+    /// mutations. Consumers can identify leaves by `window_id` and other nodes by their path.
+    pub container_tree: ContainerTreeNode,
+}
+
+/// The type of a node in Rift's normalized layout topology.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContainerNodeType {
+    Container,
+    Window,
+    /// An empty slot retained by a layout engine, such as an empty BSP root.
+    Placeholder,
+}
+
+/// A platform-neutral view of one node in a tiled layout.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ContainerTreeNode {
+    pub node_type: ContainerNodeType,
+    /// Split/stack behavior for a container. Window and placeholder nodes use `None`.
+    pub layout_kind: Option<LayoutKind>,
+    /// This node's relative share within its parent, when the layout engine has one.
+    pub weight: Option<f64>,
+    pub window_id: Option<WindowId>,
+    /// Layout-engine selection, which is distinct from OS window focus.
+    pub is_selected: bool,
+    pub is_fullscreen: bool,
+    pub is_fullscreen_within_gaps: bool,
+    /// Semantic role when the mode defines one, such as `master`, `stack`, or `column`.
+    pub role: Option<String>,
+    /// Pending BSP split direction, if this leaf is preselected for insertion.
+    pub pending_split: Option<Direction>,
+    pub children: Vec<ContainerTreeNode>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

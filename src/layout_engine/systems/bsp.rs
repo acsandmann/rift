@@ -1046,6 +1046,70 @@ impl LayoutSystem for BspLayoutSystem {
         }
     }
 
+    fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
+        fn snapshot(
+            system: &BspLayoutSystem,
+            node: NodeId,
+            selected: NodeId,
+        ) -> rift_protocol::ContainerTreeNode {
+            let weight = node.parent(&system.tree.map).and_then(|parent| {
+                let NodeKind::Split { ratio, .. } = system.kind.get(parent)? else {
+                    return None;
+                };
+                let first = parent.first_child(&system.tree.map);
+                Some(if first == Some(node) {
+                    f64::from(*ratio)
+                } else {
+                    1.0 - f64::from(*ratio)
+                })
+            });
+
+            match system.kind.get(node) {
+                Some(NodeKind::Split { orientation, .. }) => rift_protocol::ContainerTreeNode {
+                    node_type: rift_protocol::ContainerNodeType::Container,
+                    layout_kind: Some(rift_protocol::LayoutKind::from(*orientation)),
+                    weight,
+                    window_id: None,
+                    is_selected: node == selected,
+                    is_fullscreen: false,
+                    is_fullscreen_within_gaps: false,
+                    role: None,
+                    pending_split: None,
+                    children: node
+                        .children(&system.tree.map)
+                        .map(|child| snapshot(system, child, selected))
+                        .collect(),
+                },
+                Some(NodeKind::Leaf {
+                    window,
+                    fullscreen,
+                    fullscreen_within_gaps,
+                    preselected,
+                }) => rift_protocol::ContainerTreeNode {
+                    node_type: if window.is_some() {
+                        rift_protocol::ContainerNodeType::Window
+                    } else {
+                        rift_protocol::ContainerNodeType::Placeholder
+                    },
+                    layout_kind: None,
+                    weight,
+                    window_id: window.map(Into::into),
+                    is_selected: node == selected,
+                    is_fullscreen: *fullscreen,
+                    is_fullscreen_within_gaps: *fullscreen_within_gaps,
+                    role: None,
+                    pending_split: preselected.map(Into::into),
+                    children: Vec::new(),
+                },
+                None => unreachable!("BSP layout contains a node without metadata"),
+            }
+        }
+
+        let state = self.layouts.get(layout).expect("unknown BSP layout");
+        let selected = self.tree.data.selection.current_selection(state.root);
+        snapshot(self, state.root, selected)
+    }
+
     fn calculate_layout(
         &self,
         layout: LayoutId,

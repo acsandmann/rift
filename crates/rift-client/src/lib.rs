@@ -128,8 +128,18 @@ impl RiftMachClient {
     }
 
     /// Returns the layout state for a macOS space.
-    pub fn get_layout_state(&self, space_id: u64) -> Result<LayoutStateData, ClientError> {
-        self.request(RiftRequest::GetLayoutState { space_id })
+    pub fn get_layout_state(&self, space_id: Option<u64>) -> Result<LayoutStateData, ClientError> {
+        self.get_workspace_layout_state(space_id, None)
+    }
+
+    /// Returns layout state for an optional macOS space and workspace index.
+    /// Omitted selectors independently default to the active space/workspace.
+    pub fn get_workspace_layout_state(
+        &self,
+        space_id: Option<u64>,
+        workspace_id: Option<usize>,
+    ) -> Result<LayoutStateData, ClientError> {
+        self.request(RiftRequest::GetLayoutState { space_id, workspace_id })
     }
 
     /// Returns layout modes for workspaces in a macOS space.

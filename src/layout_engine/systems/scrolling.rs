@@ -634,6 +634,58 @@ impl LayoutSystem for ScrollingLayoutSystem {
         out
     }
 
+    fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
+        let state = self.layouts.get(layout).expect("unknown scrolling layout");
+        let children = state
+            .columns
+            .iter()
+            .map(|column| {
+                let windows = column
+                    .windows
+                    .iter()
+                    .enumerate()
+                    .map(|(index, &window)| rift_protocol::ContainerTreeNode {
+                        node_type: rift_protocol::ContainerNodeType::Window,
+                        layout_kind: None,
+                        weight: Some(column.height_weights.get(index).copied().unwrap_or(1.0)),
+                        window_id: Some(window.into()),
+                        is_selected: state.selected == Some(window),
+                        is_fullscreen: state.fullscreen.contains(&window),
+                        is_fullscreen_within_gaps: state.fullscreen_within_gaps.contains(&window),
+                        role: None,
+                        pending_split: None,
+                        children: Vec::new(),
+                    })
+                    .collect();
+                rift_protocol::ContainerTreeNode {
+                    node_type: rift_protocol::ContainerNodeType::Container,
+                    layout_kind: Some(rift_protocol::LayoutKind::Vertical),
+                    weight: Some((state.column_width_ratio + column.width_offset).max(0.0)),
+                    window_id: None,
+                    is_selected: false,
+                    is_fullscreen: false,
+                    is_fullscreen_within_gaps: false,
+                    role: Some("column".to_owned()),
+                    pending_split: None,
+                    children: windows,
+                }
+            })
+            .collect();
+
+        rift_protocol::ContainerTreeNode {
+            node_type: rift_protocol::ContainerNodeType::Container,
+            layout_kind: Some(rift_protocol::LayoutKind::Horizontal),
+            weight: None,
+            window_id: None,
+            is_selected: false,
+            is_fullscreen: false,
+            is_fullscreen_within_gaps: false,
+            role: None,
+            pending_split: None,
+            children,
+        }
+    }
+
     fn calculate_layout(
         &self,
         layout: LayoutId,
