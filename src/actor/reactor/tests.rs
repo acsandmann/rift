@@ -4171,6 +4171,49 @@ fn current_ax_destruction_after_quarantine_release_removes_window() {
 }
 
 #[test]
+fn ordered_out_ax_invalidation_preserves_window_on_known_inactive_space() {
+    let (mut reactor, wid, wsid, active_space, inactive_space, _frame) =
+        reactor_with_window_on_space1();
+    let inactive_workspace = reactor.test_workspace(inactive_space, 0);
+    assert!(reactor.assign_test_window_to_workspace(inactive_space, wid, inactive_workspace));
+    reactor.state.windows.set_window_server_space(wsid, Some(inactive_space));
+    reactor.state.windows.mark_window_hidden(wsid);
+    assert!(reactor.is_window_on_known_inactive_space(wid));
+
+    crate::sys::window_server::set_window_ordered_in_override(wsid, Some(false));
+    reactor.handle_event(Event::WindowDestroyed(wid));
+    crate::sys::window_server::set_window_ordered_in_override(wsid, None);
+
+    assert!(reactor.state.windows.contains_window(wid));
+    assert_eq!(
+        reactor.test_workspace_for_window(inactive_space, wid),
+        Some(inactive_workspace)
+    );
+    assert_eq!(reactor.test_workspace_for_window(active_space, wid), None);
+}
+
+#[test]
+fn ordered_out_ax_invalidation_preserves_already_minimized_window_identity() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+    let wsid = reactor.test_window_server_id(wid);
+    reactor.handle_event(Event::WindowMinimized(wid));
+    assert!(reactor.state.windows.window(wid).unwrap().info.is_minimized);
+
+    crate::sys::window_server::set_window_ordered_in_override(wsid, Some(false));
+    reactor.handle_event(Event::WindowDestroyed(wid));
+    crate::sys::window_server::set_window_ordered_in_override(wsid, None);
+
+    assert!(reactor.state.windows.contains_window(wid));
+    assert!(reactor.state.windows.window(wid).unwrap().info.is_minimized);
+    assert!(!has_window_in_layout(&mut reactor, space, screen, wid));
+}
+
+#[test]
 fn repeated_ordered_out_ax_replacement_does_not_accumulate_layout_ghosts() {
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
@@ -4252,7 +4295,7 @@ fn stale_cleanup_uses_ordered_state_instead_of_cached_visibility() {
         .expect("test window should have native metadata");
     assert!(reactor.state.windows.is_window_visible(wsid));
 
-    let snapshot = |ordered_in| window_discovery::StaleCleanupSnapshot {
+    let snapshot = |suitable, ordered_in| window_discovery::StaleCleanupSnapshot {
         pending_refresh: false,
         suppressed: false,
         mission_control_active: false,
@@ -4260,26 +4303,56 @@ fn stale_cleanup_uses_ordered_state_instead_of_cached_visibility() {
         inactive_windows: Default::default(),
         server_observations: [(wsid, window_discovery::StaleWindowObservation {
             info: Some(info),
-            suitable: true,
+            suitable,
             ordered_in,
         })]
         .into_iter()
         .collect(),
     };
 
-    let (ordered_stale, _) =
-        window_discovery::identify_stale_windows(&reactor.state, wid.pid, &[], &snapshot(true));
+    let (ordered_stale, _) = window_discovery::identify_stale_windows(
+        &reactor.state,
+        wid.pid,
+        &[],
+        &snapshot(Some(true), Some(true)),
+    );
     assert!(
         ordered_stale.is_empty(),
         "temporary AX omission must preserve an ordered-in window"
     );
 
-    let (closed_stale, _) =
-        window_discovery::identify_stale_windows(&reactor.state, wid.pid, &[], &snapshot(false));
+    let (closed_stale, _) = window_discovery::identify_stale_windows(
+        &reactor.state,
+        wid.pid,
+        &[],
+        &snapshot(Some(true), Some(false)),
+    );
     assert_eq!(
         closed_stale,
         vec![wid],
         "an ordered-out window must be retired even when cached visibility is stale",
+    );
+
+    let (unknown_stale, _) = window_discovery::identify_stale_windows(
+        &reactor.state,
+        wid.pid,
+        &[],
+        &snapshot(Some(true), None),
+    );
+    assert!(
+        unknown_stale.is_empty(),
+        "an unavailable ordered-state query must not remove a valid layout node",
+    );
+
+    let (unknown_suitability_stale, _) = window_discovery::identify_stale_windows(
+        &reactor.state,
+        wid.pid,
+        &[],
+        &snapshot(None, Some(true)),
+    );
+    assert!(
+        unknown_suitability_stale.is_empty(),
+        "an unavailable suitability query must not remove a valid layout node",
     );
 }
 

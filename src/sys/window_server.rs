@@ -872,16 +872,18 @@ pub fn set_window_ordered_in_override(id: WindowServerId, ordered: Option<bool>)
     });
 }
 
-pub fn app_window_suitable(id: WindowServerId) -> bool {
-    let Some(query) = WindowIterator::new(&[id]) else {
-        return false;
-    };
+pub fn app_window_suitability(id: WindowServerId) -> Option<bool> {
+    let query = WindowIterator::new(&[id])?;
 
     if query.count() > 0 && query.advance().is_some() {
-        iterator_window_suitable(query.iter)
+        Some(iterator_window_suitable(query.iter))
     } else {
-        false
+        Some(false)
     }
+}
+
+pub fn app_window_suitable(id: WindowServerId) -> bool {
+    app_window_suitability(id).unwrap_or(false)
 }
 
 pub fn space_is_user(sid: u64) -> bool { unsafe { SLSSpaceGetType(*G_CONNECTION, sid) == 0 } }

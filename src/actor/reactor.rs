@@ -33,7 +33,7 @@ mod SpaceEventHandler {
             resolved_space: reactor.resolve_native_space(wsid, None),
             active_spaces: reactor.active_spaces.clone(),
             mission_control_active: reactor.is_mission_control_active(),
-            ordered_in: crate::sys::window_server::window_is_ordered_in(wsid),
+            ordered_in: crate::sys::window_server::window_ordered_in(wsid),
             assigned_space,
             last_known_user_space: super::events::space::resolve_last_known_user_space(
                 tracked_window.and_then(|window| reactor.best_space_for_window_id(window)),
@@ -1181,12 +1181,18 @@ impl Reactor {
                 let window_server_id =
                     self.state.windows.record(wid).and_then(|record| record.window_server_id());
                 let ordered_in = window_server_id.and_then(window_server::window_ordered_in);
+                let known_inactive = self.is_window_on_known_inactive_space(wid);
+                let already_minimized =
+                    self.state.windows.window(wid).is_some_and(|window| window.info.is_minimized);
 
                 // AX replacement may finish after lifecycle quarantine is released. A native
-                // window that is still ordered in must keep its exact logical tree node. An
-                // explicit ordered-out observation is authoritative for an ordinary close.
-                let mut outcome = if window_server_id.is_none() || matches!(ordered_in, Some(false))
-                {
+                // window on an inactive Space or already known to be minimized is legitimately
+                // ordered out and must retain its logical identity. For an active, non-minimized
+                // window, an explicit ordered-out observation is authoritative for close or
+                // minimize-time AX replacement and prevents stale layout slots.
+                let should_destroy = window_server_id.is_none()
+                    || (matches!(ordered_in, Some(false)) && !known_inactive && !already_minimized);
+                let mut outcome = if should_destroy {
                     window_workflow::handle_window_destroyed(
                         &mut self.state,
                         &self.transaction_manager,
@@ -1216,7 +1222,7 @@ impl Reactor {
                     resolved_space: self.resolve_native_space(wsid, None),
                     active_spaces: self.active_spaces.clone(),
                     mission_control_active: self.is_mission_control_active(),
-                    ordered_in: window_server::window_is_ordered_in(wsid),
+                    ordered_in: window_server::window_ordered_in(wsid),
                     assigned_space,
                     last_known_user_space,
                 };
@@ -2629,8 +2635,8 @@ impl Reactor {
                     .or_else(|| window_server::get_window(wsid));
                 (wsid, window_discovery::StaleWindowObservation {
                     info,
-                    suitable: window_server::app_window_suitable(wsid),
-                    ordered_in: window_server::window_is_ordered_in(wsid),
+                    suitable: window_server::app_window_suitability(wsid),
+                    ordered_in: window_server::window_ordered_in(wsid),
                 })
             })
             .collect();

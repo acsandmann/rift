@@ -159,8 +159,8 @@ pub(crate) struct StaleCleanupSnapshot {
 #[derive(Debug)]
 pub(crate) struct StaleWindowObservation {
     pub(crate) info: Option<crate::sys::window_server::WindowServerInfo>,
-    pub(crate) suitable: bool,
-    pub(crate) ordered_in: bool,
+    pub(crate) suitable: Option<bool>,
+    pub(crate) ordered_in: Option<bool>,
 }
 
 pub(crate) fn identify_stale_windows(
@@ -234,11 +234,13 @@ pub(crate) fn identify_stale_windows(
             let width = info.frame.size.width.abs();
             let height = info.frame.size.height.abs();
 
-            let unsuitable = !observation.suitable;
+            // A failed private WindowServer query is not evidence that a window died.
+            // Only explicit negative observations may retire an AX-omitted window.
+            let unsuitable = matches!(observation.suitable, Some(false));
             let invalid_layer = info.layer != 0;
             let too_small = width < MIN_REAL_WINDOW_DIMENSION || height < MIN_REAL_WINDOW_DIMENSION;
-            let ordered_in = observation.ordered_in;
-            if unsuitable || invalid_layer || too_small || !ordered_in {
+            let ordered_out = matches!(observation.ordered_in, Some(false));
+            if unsuitable || invalid_layer || too_small || ordered_out {
                 Some(wid)
             } else {
                 None

@@ -83,7 +83,7 @@ pub struct WindowServerDestroyedObservations {
     pub resolved_space: Option<SpaceId>,
     pub active_spaces: HashSet<SpaceId>,
     pub mission_control_active: bool,
-    pub ordered_in: bool,
+    pub ordered_in: Option<bool>,
     pub assigned_space: Option<SpaceId>,
     pub last_known_user_space: Option<SpaceId>,
 }
@@ -179,7 +179,7 @@ pub fn handle_window_server_destroyed(
         }
 
         if let Some(wid) = state.windows.tracked_window_id(wsid) {
-            if !ordered_in {
+            if matches!(ordered_in, Some(false)) {
                 // since the connection has dropped it wont be shown in space_windows_list
                 // so ordered in can be authorative because it doesnt consider
                 // ghost windows that sometimes remain

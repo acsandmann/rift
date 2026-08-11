@@ -1057,7 +1057,7 @@ impl State {
                 // WindowId. Removing by the callback's encoded wid would then let a late
                 // destroy notification for the superseded element tear down the replacement.
                 // Only the element currently bound to this wid owns its lifetime.
-                if self.windows.get(&wid).is_some_and(|window| window.elem != elem) {
+                if !self.is_current_window_element(wid, &elem) {
                     trace!(?wid, "Ignoring destroy notification for superseded AX element");
                     return;
                 }
@@ -1072,6 +1072,10 @@ impl State {
                 let Ok(wid) = self.wid_for_notification(&elem, hinted_wid) else {
                     return;
                 };
+                if !self.is_current_window_element(wid, &elem) {
+                    trace!(?wid, ?notif, "Ignoring notification for superseded AX element");
+                    return;
+                }
 
                 let txid = match self.window(wid) {
                     Ok(window) => {
@@ -1127,24 +1131,34 @@ impl State {
                 let Ok(wid) = self.wid_for_notification(&elem, hinted_wid) else {
                     return;
                 };
-                if let Some(window) = self.windows.get_mut(&wid) {
-                    window.hidden_by_app = false;
-                }
+                let Some(window) = self.windows.get_mut(&wid).filter(|window| window.elem == elem)
+                else {
+                    trace!(?wid, "Ignoring miniaturize for superseded AX element");
+                    return;
+                };
+                window.hidden_by_app = false;
                 self.send_event(Event::WindowMinimized(wid));
             }
             AxNotificationKind::WindowDeminiaturized => {
                 let Ok(wid) = self.wid_for_notification(&elem, hinted_wid) else {
                     return;
                 };
-                if let Some(window) = self.windows.get_mut(&wid) {
-                    window.hidden_by_app = false;
-                }
+                let Some(window) = self.windows.get_mut(&wid).filter(|window| window.elem == elem)
+                else {
+                    trace!(?wid, "Ignoring deminiaturize for superseded AX element");
+                    return;
+                };
+                window.hidden_by_app = false;
                 self.send_event(Event::WindowDeminiaturized(wid));
             }
             AxNotificationKind::TitleChanged => {
                 let Ok(wid) = self.wid_for_notification(&elem, hinted_wid) else {
                     return;
                 };
+                if !self.is_current_window_element(wid, &elem) {
+                    trace!(?wid, "Ignoring title change for superseded AX element");
+                    return;
+                }
                 match elem.title() {
                     Ok(title) => {
                         let Ok(window) = self.window_mut(wid) else {
@@ -1814,6 +1828,10 @@ impl State {
             .filter(|wid| wid.pid == self.pid)
             .or_else(|| self.id(elem).ok())
             .ok_or(AxError::NotFound)
+    }
+
+    fn is_current_window_element(&self, wid: WindowId, elem: &AXUIElement) -> bool {
+        self.windows.get(&wid).is_some_and(|window| window.elem == *elem)
     }
 
     fn stop_notifications_for_animation(&self, elem: &AXUIElement) {
