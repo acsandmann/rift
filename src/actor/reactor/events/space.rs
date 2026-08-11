@@ -179,21 +179,6 @@ pub fn handle_window_server_destroyed(
         }
 
         if let Some(wid) = state.windows.tracked_window_id(wsid) {
-            // An AX-invalidated window has already been removed from every live layout and is
-            // retained only as recovery metadata. Once WindowServer reports that identity
-            // leaving its user space, there is nothing left to verify through the app actor;
-            // retire the detached record even if the ordered-in bit is briefly stale.
-            if state.windows.window(wid).is_none() {
-                debug!(?wid, ?wsid, reported_space = ?sid, "Retiring detached window after WindowServer disappearance");
-                outcome.absorb(window::handle_window_destroyed(
-                    state,
-                    transactions,
-                    drag,
-                    window::WindowDestroyedPayload { window: wid },
-                )?);
-                return Ok(outcome);
-            }
-
             if !ordered_in {
                 // since the connection has dropped it wont be shown in space_windows_list
                 // so ordered in can be authorative because it doesnt consider

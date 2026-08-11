@@ -72,35 +72,17 @@ pub struct WindowDestroyedPayload {
     pub window: WindowId,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct WindowInvalidatedPayload {
-    pub window: WindowId,
-}
-
-pub fn handle_window_invalidated(
+pub fn handle_window_ax_invalidated(
     state: &mut crate::model::RiftState,
     transactions: &TransactionManager,
     drag: &mut DragManager,
-    payload: WindowInvalidatedPayload,
-) -> anyhow::Result<EventOutcome> {
-    let wid = payload.window;
-    let window_server_id = state.windows.record(wid).and_then(|record| record.window_server_id());
-    let Some(window_server_id) = window_server_id else {
-        return handle_window_destroyed(state, transactions, drag, WindowDestroyedPayload {
-            window: wid,
-        });
-    };
-
-    // WindowState is Rift's logical/native snapshot, not the AXUIElement itself. If the
-    // WindowServer identity is still alive, removing this state would destroy layout topology
-    // (parent containers, sibling order, stack state and split ratios) that rediscovery cannot
-    // reconstruct. Drop only interaction state tied to the stale AX handle and reacquire AX.
-    transactions.remove_for_window(window_server_id);
-    debug!(
-        ?wid,
-        ?window_server_id,
-        "AX identity invalidated; preserving logical window and layout for reacquisition"
-    );
+    wid: WindowId,
+) -> EventOutcome {
+    if let Some(window_server_id) =
+        state.windows.record(wid).and_then(|record| record.window_server_id())
+    {
+        transactions.remove_for_window(window_server_id);
+    }
 
     if let DragState::PendingSwap { session, target } = &drag.drag_state
         && (session.window == wid || *target == wid)
@@ -115,8 +97,8 @@ pub fn handle_window_invalidated(
         drag.skip_layout_for_window = None;
     }
 
-    Ok(EventOutcome::window_notification_refresh()
-        .with_app_request(wid.pid, Request::GetVisibleWindows))
+    EventOutcome::window_notification_refresh()
+        .with_app_request(wid.pid, Request::GetVisibleWindows)
 }
 
 pub fn handle_window_destroyed(

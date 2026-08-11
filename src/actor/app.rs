@@ -1053,6 +1053,14 @@ impl State {
                 let Ok(wid) = self.wid_for_notification(&elem, hinted_wid) else {
                     return;
                 };
+                // A refreshed AXUIElement can reuse the same stable WindowServer-backed
+                // WindowId. Removing by the callback's encoded wid would then let a late
+                // destroy notification for the superseded element tear down the replacement.
+                // Only the element currently bound to this wid owns its lifetime.
+                if self.windows.get(&wid).is_some_and(|window| window.elem != elem) {
+                    trace!(?wid, "Ignoring destroy notification for superseded AX element");
+                    return;
+                }
                 if self.remove_window(wid).is_none() {
                     return;
                 }

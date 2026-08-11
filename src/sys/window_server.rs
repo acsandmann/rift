@@ -459,22 +459,24 @@ pub fn window_space(id: WindowServerId) -> Option<crate::sys::screen::SpaceId> {
         .or_else(|| spaces.into_iter().next())
 }
 
-pub fn window_is_ordered_in(id: WindowServerId) -> bool {
+pub fn window_ordered_in(id: WindowServerId) -> Option<bool> {
     #[cfg(test)]
     if let Some(ordered) = TEST_WINDOW_ORDERED_IN_OVERRIDE
         .with(|override_ordered| override_ordered.borrow().get(&id.as_u32()).copied())
     {
-        return ordered;
+        return Some(ordered);
     }
 
     let mut ordered: u8 = 0;
     if let Ok(_) = cg_ok(unsafe { SLSWindowIsOrderedIn(*G_CONNECTION, id.as_u32(), &mut ordered) })
     {
-        return ordered != 0;
+        return Some(ordered != 0);
     }
 
-    false
+    None
 }
+
+pub fn window_is_ordered_in(id: WindowServerId) -> bool { window_ordered_in(id).unwrap_or(false) }
 
 fn get_windows_raw<T: Type>(
     options: CGWindowListOption,

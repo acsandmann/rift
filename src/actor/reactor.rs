@@ -1172,43 +1172,34 @@ impl Reactor {
                 return Ok(outcome);
             }
             Event::WindowDestroyed(wid) => {
-                // AX destruction is not native window destruction. During sleep/unlock and
-                // display churn macOS can replace AXUIElements while the WindowServer window
-                // remains alive. Never let an unstable AX lifetime event mutate persistent
-                // workspace/layout topology.
+                // The lifecycle transition itself already guarantees one post-stability
+                // refresh. Ignore AX lifetime noise here without tracking individual windows.
                 if self.refreshes_blocked() {
-                    debug!(
-                        ?wid,
-                        state = ?self.refresh_quarantine_state(),
-                        "Deferring AX window invalidation until native state stabilizes"
-                    );
-                    self.defer_visible_refresh(true);
                     return Ok(EventOutcome::default());
                 }
 
                 let window_server_id =
                     self.state.windows.record(wid).and_then(|record| record.window_server_id());
-                let platform_window_alive = window_server_id.is_some_and(|window_server_id| {
-                    window_server::get_window(window_server_id)
-                        .is_some_and(|info| info.pid == wid.pid)
-                });
+                let ordered_in = window_server_id.and_then(window_server::window_ordered_in);
 
-                // A live native peer means only the AX handle died. Preserve the logical
-                // window and its exact tree position while the app actor reacquires AX.
-                let mut outcome = if platform_window_alive {
-                    window_workflow::handle_window_invalidated(
-                        &mut self.state,
-                        &self.transaction_manager,
-                        &mut self.drag_manager,
-                        window_workflow::WindowInvalidatedPayload { window: wid },
-                    )?
-                } else {
+                // AX replacement may finish after lifecycle quarantine is released. A native
+                // window that is still ordered in must keep its exact logical tree node. An
+                // explicit ordered-out observation is authoritative for an ordinary close.
+                let mut outcome = if window_server_id.is_none() || matches!(ordered_in, Some(false))
+                {
                     window_workflow::handle_window_destroyed(
                         &mut self.state,
                         &self.transaction_manager,
                         &mut self.drag_manager,
                         window_workflow::WindowDestroyedPayload { window: wid },
                     )?
+                } else {
+                    window_workflow::handle_window_ax_invalidated(
+                        &mut self.state,
+                        &self.transaction_manager,
+                        &mut self.drag_manager,
+                        wid,
+                    )
                 };
                 outcome.focused_window = raised_window;
                 return Ok(outcome);

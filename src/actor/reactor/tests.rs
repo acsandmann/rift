@@ -4151,77 +4151,135 @@ fn partial_post_wake_snapshot_preserves_manual_workspace_assignment() {
 }
 
 #[test]
-fn ax_invalidation_after_quarantine_release_preserves_live_layout_state() {
-    let (mut apps, mut reactor) = test_context_with_workspace_count(2);
+fn current_ax_destruction_after_quarantine_release_removes_window() {
+    let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
     let space = SpaceId::new(1);
     let wid = WindowId::new(1, 1);
 
     apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
-    let rediscovered_info = reactor
+    assert!(!reactor.refreshes_blocked());
+    assert!(has_window_in_layout(&mut reactor, space, screen, wid));
+    let wsid = reactor.test_window_server_id(wid);
+
+    crate::sys::window_server::set_window_ordered_in_override(wsid, Some(false));
+    reactor.handle_event(Event::WindowDestroyed(wid));
+    crate::sys::window_server::set_window_ordered_in_override(wsid, None);
+
+    assert!(reactor.state.windows.record(wid).is_none());
+    assert!(!has_window_in_layout(&mut reactor, space, screen, wid));
+}
+
+#[test]
+fn repeated_ordered_out_ax_replacement_does_not_accumulate_layout_ghosts() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let pid = 1;
+    let middle = WindowId::new(pid, 2);
+
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, pid, make_windows(3));
+    let middle_info = reactor.state.windows.window(middle).unwrap().info.clone();
+    let wsid = reactor.test_window_server_id(middle);
+    assert_eq!(test_layout(&mut reactor, space, screen).len(), 3);
+
+    for _ in 0..2 {
+        crate::sys::window_server::set_window_ordered_in_override(wsid, Some(false));
+        reactor.handle_event(Event::WindowDestroyed(middle));
+        crate::sys::window_server::set_window_ordered_in_override(wsid, None);
+
+        assert!(reactor.state.windows.record(middle).is_none());
+        assert_eq!(
+            test_layout(&mut reactor, space, screen).len(),
+            2,
+            "ordered-out AX destruction must remove its slot completely",
+        );
+
+        reactor.track_test_window_server_info(wsid, pid, middle_info.frame);
+        reactor.mark_test_window_visible_in_space(wsid, space);
+        reactor.discover_test_windows(pid, vec![(middle, middle_info.clone())], vec![
+            WindowId::new(pid, 1),
+            middle,
+            WindowId::new(pid, 3),
+        ]);
+        assert_eq!(
+            test_layout(&mut reactor, space, screen).len(),
+            3,
+            "rediscovery must restore exactly one slot",
+        );
+    }
+}
+
+#[test]
+fn late_ax_invalidation_with_ordered_native_window_preserves_layout() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+    let wsid = reactor.test_window_server_id(wid);
+    assert!(!reactor.refreshes_blocked());
+    assert!(has_window_in_layout(&mut reactor, space, screen, wid));
+
+    crate::sys::window_server::set_window_ordered_in_override(wsid, Some(true));
+    reactor.handle_event(Event::WindowDestroyed(wid));
+    crate::sys::window_server::set_window_ordered_in_override(wsid, None);
+
+    assert!(reactor.state.windows.contains_window(wid));
+    assert!(has_window_in_layout(&mut reactor, space, screen, wid));
+    assert!(
+        apps.requests()
+            .iter()
+            .any(|request| matches!(request, Request::GetVisibleWindows)),
+        "late AX invalidation should reacquire the replacement element",
+    );
+}
+
+#[test]
+fn stale_cleanup_uses_ordered_state_instead_of_cached_visibility() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+    let wsid = reactor.test_window_server_id(wid);
+    let info = reactor
         .state
         .windows
-        .window(wid)
-        .expect("window should initially be tracked")
-        .info
-        .clone();
+        .get_window_server_info(wsid)
+        .expect("test window should have native metadata");
+    assert!(reactor.state.windows.is_window_visible(wsid));
 
-    let secondary_workspace = reactor.test_workspace(space, 1);
-    assert!(reactor.assign_test_window_to_workspace(space, wid, secondary_workspace));
+    let snapshot = |ordered_in| window_discovery::StaleCleanupSnapshot {
+        pending_refresh: false,
+        suppressed: false,
+        mission_control_active: false,
+        drag_active: false,
+        inactive_windows: Default::default(),
+        server_observations: [(wsid, window_discovery::StaleWindowObservation {
+            info: Some(info),
+            suitable: true,
+            ordered_in,
+        })]
+        .into_iter()
+        .collect(),
+    };
 
-    // Reproduce the ordering from the dock-wake log: the topology snapshot has already
-    // released every timing-based quarantine, then the old AX element is invalidated while
-    // its WindowServer window remains alive.
-    assert!(!reactor.refreshes_blocked());
-    let outcome = window_workflow::handle_window_invalidated(
-        &mut reactor.state,
-        &reactor.transaction_manager,
-        &mut reactor.drag_manager,
-        window_workflow::WindowInvalidatedPayload { window: wid },
-    )
-    .expect("AX invalidation should be handled");
-    reactor.apply_event_outcome(outcome);
-
+    let (ordered_stale, _) =
+        window_discovery::identify_stale_windows(&reactor.state, wid.pid, &[], &snapshot(true));
     assert!(
-        reactor.state.windows.window(wid).is_some(),
-        "AX invalidation must preserve the reactor's logical window snapshot",
+        ordered_stale.is_empty(),
+        "temporary AX omission must preserve an ordered-in window"
     );
+
+    let (closed_stale, _) =
+        window_discovery::identify_stale_windows(&reactor.state, wid.pid, &[], &snapshot(false));
     assert_eq!(
-        reactor.test_workspace_for_window(space, wid),
-        Some(secondary_workspace),
-        "AX invalidation must retain virtual-workspace ownership",
-    );
-    assert!(
-        reactor
-            .state
-            .windows
-            .workspace_windows(space, secondary_workspace)
-            .contains(&wid),
-        "the logical window must remain in live workspace membership",
-    );
-    assert!(
-        has_window_in_layout(&mut reactor, space, screen, wid),
-        "AX invalidation must not remove or rebalance the layout node",
-    );
-    let requests = apps.requests();
-    assert!(
-        requests
-            .into_iter()
-            .any(|request| matches!(request, Request::GetVisibleWindows)),
-        "Rift should reacquire the replacement AX element after preserving model state",
-    );
-
-    reactor.discover_test_windows(wid.pid, vec![(wid, rediscovered_info)], vec![wid]);
-
-    assert!(reactor.state.windows.window(wid).is_some());
-    assert_eq!(
-        reactor.test_workspace_for_window(space, wid),
-        Some(secondary_workspace),
-        "rediscovery must preserve the existing assignment",
-    );
-    assert!(
-        has_window_in_layout(&mut reactor, space, screen, wid),
-        "rediscovery must not reinsert the window at a new tree position",
+        closed_stale,
+        vec![wid],
+        "an ordered-out window must be retired even when cached visibility is stale",
     );
 }
 
@@ -4246,9 +4304,54 @@ fn ax_invalidation_during_refresh_quarantine_is_deferred_without_layout_mutation
         has_window_in_layout(&mut reactor, space, screen, wid),
         "unstable AX invalidation must not mutate layout topology",
     );
-    assert!(
-        reactor.refresh_quarantine_manager.pending_visible_refresh,
-        "recovery should be deferred until native topology stabilizes",
+}
+
+#[test]
+fn sleep_ax_churn_preserves_modified_layout_through_recovery() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let windows = make_windows(4);
+    let window_ids: Vec<_> = (1..=4).map(|idx| WindowId::new(1, idx)).collect();
+    let rediscovered = window_ids.iter().copied().zip(windows.iter().cloned()).collect::<Vec<_>>();
+
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, windows);
+    let default_layout = test_layout(&mut reactor, space, screen);
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, window_ids[1]));
+    reactor.handle_test_layout_command(LayoutCommand::MoveNode(Direction::Up));
+    let modified_layout = test_layout(&mut reactor, space, screen);
+    assert_ne!(
+        modified_layout, default_layout,
+        "test setup must create a non-default layout"
+    );
+
+    reactor.handle_event(Event::SystemWillSleep);
+    reactor.handle_event(Event::SystemWoke);
+    reactor.handle_event(Event::SessionDidResignActive);
+    for wid in &window_ids {
+        reactor.handle_event(Event::WindowDestroyed(*wid));
+    }
+
+    assert_eq!(
+        test_layout(&mut reactor, space, screen),
+        modified_layout,
+        "sleep-time AX destruction must not alter layout topology or weights",
+    );
+
+    reactor.handle_event(Event::SessionDidBecomeActive);
+    let mut recovered =
+        forwarded_space_state(make_screen_snapshots(vec![screen], vec![Some(space)]));
+    recovered.releases_lifecycle_refresh_quarantine = true;
+    for wid in &window_ids {
+        recovered.active_window_spaces.insert(WindowServerId::new(wid.idx.get()), space);
+    }
+    reactor.handle_event(Event::SpaceStateChanged(recovered));
+    reactor.discover_test_windows(1, rediscovered, window_ids.clone());
+
+    assert_eq!(
+        test_layout(&mut reactor, space, screen),
+        modified_layout,
+        "authoritative recovery and AX rediscovery must update existing nodes in place",
     );
 }
 
@@ -4274,52 +4377,6 @@ fn authoritative_destruction_removes_window_server_backed_state() {
     assert!(reactor.state.windows.record(wid).is_none());
     assert_eq!(reactor.state.windows.tracked_window_id(wsid), None);
     assert_eq!(reactor.state.windows.workspace_info_for_window(wid), None);
-}
-
-#[test]
-fn window_server_disappearance_retires_window_after_ax_invalidation() {
-    let (mut apps, mut reactor) = test_context();
-    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
-    let space = SpaceId::new(1);
-    let wid = WindowId::new(1, 1);
-
-    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
-    let wsid = reactor.test_window_server_id(wid);
-
-    let invalidated = window_workflow::handle_window_invalidated(
-        &mut reactor.state,
-        &reactor.transaction_manager,
-        &mut reactor.drag_manager,
-        window_workflow::WindowInvalidatedPayload { window: wid },
-    )
-    .expect("AX invalidation should be handled");
-    reactor.apply_event_outcome(invalidated);
-    assert!(reactor.state.windows.window(wid).is_some());
-    assert!(reactor.state.windows.record(wid).is_some());
-
-    let disappeared = topology_workflow::handle_window_server_destroyed(
-        &mut reactor.state,
-        &reactor.transaction_manager,
-        &mut reactor.drag_manager,
-        topology_workflow::WindowServerLifecyclePayload {
-            window_server_id: wsid,
-            space,
-            kind: SpaceEventKind::User,
-        },
-        topology_workflow::WindowServerDestroyedObservations {
-            resolved_space: Some(space),
-            active_spaces: [space].into_iter().collect(),
-            mission_control_active: false,
-            ordered_in: false,
-            assigned_space: Some(space),
-            last_known_user_space: Some(space),
-        },
-    )
-    .expect("WindowServer disappearance should be handled");
-    reactor.apply_event_outcome(disappeared);
-
-    assert!(reactor.state.windows.record(wid).is_none());
-    assert_eq!(reactor.state.windows.tracked_window_id(wsid), None);
 }
 
 #[test]

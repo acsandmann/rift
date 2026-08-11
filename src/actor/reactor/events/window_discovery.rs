@@ -174,14 +174,6 @@ pub(crate) fn identify_stale_windows(
     let known_visible_set: HashSet<WindowId> = known_visible.iter().cloned().collect();
     let pending_refresh = snapshot.pending_refresh;
 
-    let has_window_server_visibles_without_ax = {
-        let known_visible_set = &known_visible_set;
-        state
-            .windows
-            .iter_visible_window_server_ids()
-            .filter_map(|wsid| state.windows.tracked_window_id(wsid))
-            .any(|wid| wid.pid == pid && !known_visible_set.contains(&wid))
-    };
     // TODO: Rewrite it
     let has_visible_window_server_ids = state
         .windows
@@ -191,8 +183,7 @@ pub(crate) fn identify_stale_windows(
         || pending_refresh
         || snapshot.mission_control_active
         || snapshot.drag_active
-        || (known_visible_set.is_empty() && !has_visible_window_server_ids)
-        || has_window_server_visibles_without_ax;
+        || (known_visible_set.is_empty() && !has_visible_window_server_ids);
 
     if skip_stale_cleanup {
         return (Vec::new(), false);
@@ -247,9 +238,7 @@ pub(crate) fn identify_stale_windows(
             let invalid_layer = info.layer != 0;
             let too_small = width < MIN_REAL_WINDOW_DIMENSION || height < MIN_REAL_WINDOW_DIMENSION;
             let ordered_in = observation.ordered_in;
-            let visible_in_snapshot = state.windows.is_window_visible(ws_id);
-
-            if unsuitable || invalid_layer || too_small || (!ordered_in && !visible_in_snapshot) {
+            if unsuitable || invalid_layer || too_small || !ordered_in {
                 Some(wid)
             } else {
                 None
