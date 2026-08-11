@@ -19,6 +19,7 @@ pub mod geometry;
 pub mod haptics;
 pub mod hotkey;
 pub mod mach;
+pub mod multitouch;
 pub mod observer;
 pub mod power;
 pub mod process;
