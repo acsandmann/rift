@@ -14,7 +14,7 @@ use objc2_core_graphics::{
     CGEvent, CGEventMask, CGEventTapLocation as CGTapLoc, CGEventTapOptions as CGTapOpt,
     CGEventTapProxy, CGEventType,
 };
-use tracing::{trace, warn};
+use tracing::warn;
 
 use crate::actor;
 use crate::actor::reactor;
@@ -23,9 +23,14 @@ use crate::actor::wm_controller::{self, WmCommand, WmEvent};
 use crate::common::collections::HashMap;
 use crate::common::config::{Config, HapticPattern, LayoutMode};
 use crate::layout_engine::LayoutCommand as LC;
-use crate::sys::gesture::{self, EventPhase, TouchFrame};
+use crate::sys::gesture::{
+    self, GesturePayload, ScrollGesturePayload, ScrollTouchFrame, TouchFrame, TouchPath,
+};
 use crate::sys::haptics;
 use crate::sys::screen::SpaceId;
+const SCROLL_MOVEMENT_EPSILON: f64 = 0.001;
+const SCROLL_EXTRA_ABSOLUTE_EPSILON: f64 = 0.003;
+const SCROLL_EXTRA_RELATIVE_THRESHOLD: f64 = 0.35;
 
 #[derive(Debug)]
 pub enum GestureRequest {
@@ -116,8 +121,9 @@ impl ScrollConfig {
 #[derive(Default, Debug)]
 struct ScrollState {
     phase: GestureState,
-    last_x: f64,
-    last_y: f64,
+    previous: Option<ScrollTouchFrame>,
+    cohort: [isize; 16],
+    cohort_len: usize,
     accum_dx: f64,
     consuming: bool,
 }
@@ -125,6 +131,31 @@ struct ScrollState {
 impl ScrollState {
     #[inline]
     fn reset(&mut self) { *self = Self::default(); }
+
+    #[inline]
+    fn finish_contacts(&mut self) {
+        self.previous = None;
+        self.cohort_len = 0;
+        self.consuming = false;
+    }
+
+    #[inline]
+    fn cancel_contacts(&mut self) {
+        self.finish_contacts();
+        self.accum_dx = 0.0;
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct PathDelta {
+    index: isize,
+    dx: f64,
+    dy: f64,
+}
+
+impl PathDelta {
+    #[inline(always)]
+    fn magnitude(self) -> f64 { self.dx.abs().max(self.dy.abs()) }
 }
 
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq)]
@@ -133,6 +164,45 @@ enum GestureState {
     Idle,
     Armed,
     Committed,
+    /// Contact topology changed after acquisition. Do not re-arm until every
+    /// finger has lifted, or removing one finger could start a new gesture in
+    /// the middle of the same physical interaction.
+    Rejected,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ContactDisposition {
+    Ended,
+    Waiting,
+    Ready,
+    Rejected,
+}
+
+#[inline(always)]
+fn classify_contacts(
+    phase: &mut GestureState,
+    contacts: usize,
+    expected: usize,
+) -> ContactDisposition {
+    if contacts == 0 {
+        return ContactDisposition::Ended;
+    }
+
+    if contacts != expected {
+        // Fewer contacts are normal while the user is placing fingers. Once
+        // acquired, or if the count overshoots, a topology change invalidates
+        // the rest of this physical session.
+        if *phase != GestureState::Idle || contacts > expected {
+            *phase = GestureState::Rejected;
+        }
+        return ContactDisposition::Waiting;
+    }
+
+    if *phase == GestureState::Rejected {
+        ContactDisposition::Rejected
+    } else {
+        ContactDisposition::Ready
+    }
 }
 
 struct SwipeHandler {
@@ -359,9 +429,13 @@ impl GestureTap {
 
         if gesture::is_physical_horizontal_dock_swipe(event_type, event) {
             let consume = if scrolling_mode {
-                scroll.as_ref().is_some_and(|handler| handler.cfg.consume)
+                scroll
+                    .as_ref()
+                    .is_some_and(|handler| handler.cfg.consume && handler.state.borrow().consuming)
             } else {
-                swipe.as_ref().is_some_and(|handler| handler.cfg.consume)
+                swipe
+                    .as_ref()
+                    .is_some_and(|handler| handler.cfg.consume && handler.state.borrow().consuming)
             };
             return !consume;
         }
@@ -370,13 +444,22 @@ impl GestureTap {
             return true;
         }
 
-        let phase = gesture::phase(event);
-        let frame = (!phase.terminal()).then(|| gesture::touch_frame(event)).flatten();
-
         let consume = if scrolling_mode {
-            scroll.as_ref().is_some_and(|handler| self.handle_scroll(handler, phase, frame))
+            let payload = gesture::scroll_payload(event);
+            scroll.as_ref().is_some_and(|handler| match payload {
+                Some(ScrollGesturePayload::Touch(frame)) => self.handle_scroll(handler, frame),
+                Some(ScrollGesturePayload::Processed) | None => {
+                    handler.cfg.consume && handler.state.borrow().consuming
+                }
+            })
         } else {
-            swipe.as_ref().is_some_and(|handler| self.handle_swipe(handler, phase, frame))
+            let payload = gesture::payload(event);
+            swipe.as_ref().is_some_and(|handler| match payload {
+                Some(GesturePayload::Touch(frame)) => self.handle_swipe(handler, frame),
+                Some(GesturePayload::Processed) | None => {
+                    handler.cfg.consume && handler.state.borrow().consuming
+                }
+            })
         };
 
         !consume
@@ -396,34 +479,20 @@ impl GestureTap {
             .and_then(|(_, space)| layout_modes.get(space).copied())
     }
 
-    fn handle_swipe(
-        &self,
-        handler: &SwipeHandler,
-        event_phase: EventPhase,
-        frame: Option<TouchFrame>,
-    ) -> bool {
+    fn handle_swipe(&self, handler: &SwipeHandler, touches: TouchFrame) -> bool {
         let cfg = &handler.cfg;
         let mut state = handler.state.borrow_mut();
 
-        if event_phase.terminal() {
-            let consuming = state.consuming;
-            state.reset();
-            return cfg.consume && consuming;
-        }
-        if event_phase.began() {
-            state.reset();
-        }
-
-        // If CoreGraphics ever hands us a transient type-29 event without the
-        // HID payload, never leak a gesture Rift has already claimed.
-        let Some(touches) = frame else {
-            return cfg.consume && state.consuming;
-        };
-
-        if touches.contacts != cfg.fingers || touches.contacts == 0 {
-            let consuming = state.consuming;
-            state.reset();
-            return cfg.consume && consuming;
+        match classify_contacts(&mut state.phase, touches.contacts, cfg.fingers) {
+            ContactDisposition::Ended => {
+                let consuming = state.consuming;
+                state.reset();
+                return cfg.consume && consuming;
+            }
+            ContactDisposition::Waiting | ContactDisposition::Rejected => {
+                return cfg.consume && state.consuming;
+            }
+            ContactDisposition::Ready => {}
         }
 
         match state.phase {
@@ -431,7 +500,6 @@ impl GestureTap {
                 state.start_x = touches.centroid_x;
                 state.start_y = touches.centroid_y;
                 state.phase = GestureState::Armed;
-                trace!(x = state.start_x, y = state.start_y, "Swipe armed");
             }
             GestureState::Armed => {
                 let dx = touches.centroid_x - state.start_x;
@@ -461,76 +529,100 @@ impl GestureTap {
                 }
             }
             GestureState::Committed => {}
+            GestureState::Rejected => {}
         }
 
         cfg.consume && state.consuming
     }
 
-    fn handle_scroll(
-        &self,
-        handler: &ScrollHandler,
-        event_phase: EventPhase,
-        frame: Option<TouchFrame>,
-    ) -> bool {
+    fn handle_scroll(&self, handler: &ScrollHandler, touches: ScrollTouchFrame) -> bool {
         let cfg = &handler.cfg;
         let mut state = handler.state.borrow_mut();
+        let was_consuming = state.consuming;
 
-        if event_phase.terminal() {
-            let consuming = state.consuming;
+        if touches.len == 0 {
+            state.phase = GestureState::Idle;
             state.reset();
-            return cfg.consume && consuming;
-        }
-        if event_phase.began() {
-            state.reset();
+            return cfg.consume && was_consuming;
         }
 
-        let Some(touches) = frame else {
-            return cfg.consume && state.consuming;
+        if state.phase == GestureState::Rejected {
+            state.previous = Some(touches);
+            return false;
+        }
+
+        if state.phase == GestureState::Idle && state.previous.is_none() {
+            state.accum_dx = 0.0;
+        }
+        let Some(previous) = state.previous.replace(touches) else {
+            return false;
+        };
+        let mut deltas = [PathDelta::default(); 16];
+        let delta_len = collect_path_deltas(&previous, &touches, &mut deltas);
+
+        if state.cohort_len == 0 {
+            let selection = select_moving_cohort(&mut deltas[..delta_len], cfg.fingers);
+            let Some(selected) = selection else {
+                return false;
+            };
+            if selected == 0 {
+                state.phase = GestureState::Rejected;
+                state.cancel_contacts();
+                return false;
+            }
+            for (dst, delta) in state.cohort.iter_mut().zip(&deltas[..selected]) {
+                *dst = delta.index;
+            }
+            state.cohort_len = selected;
+            state.phase = GestureState::Armed;
+        }
+
+        let Some((mut dx, dy, cohort_motion)) = cohort_delta(
+            &deltas[..delta_len],
+            &state.cohort[..state.cohort_len],
+            touches.paths(),
+        ) else {
+            // The selected fingers lifted while a stationary palm remains.
+            // Do not re-arm from a remaining palm until the physical session
+            // ends.
+            state.phase = GestureState::Rejected;
+            state.cancel_contacts();
+            return cfg.consume && was_consuming;
         };
 
-        if touches.contacts != cfg.fingers || touches.contacts == 0 {
-            let consuming = state.consuming;
-            state.reset();
-            return cfg.consume && consuming;
+        if has_intentional_extra(
+            &deltas[..delta_len],
+            &state.cohort[..state.cohort_len],
+            cohort_motion,
+        ) {
+            state.phase = GestureState::Rejected;
+            state.cancel_contacts();
+            return false;
         }
-
-        if state.phase == GestureState::Idle {
-            state.last_x = touches.centroid_x;
-            state.last_y = touches.centroid_y;
-            state.phase = GestureState::Armed;
-            trace!(x = state.last_x, y = state.last_y, "Scroll gesture armed");
-            return cfg.consume && state.consuming;
-        }
-
-        if !touches.all_moved {
-            state.last_x = touches.centroid_x;
-            state.last_y = touches.centroid_y;
-            return cfg.consume && state.consuming;
-        }
-
-        let dx = touches.centroid_x - state.last_x;
-        let dy = touches.centroid_y - state.last_y;
-        state.last_x = touches.centroid_x;
-        state.last_y = touches.centroid_y;
 
         let horizontal = dx.abs();
         let vertical = dy.abs();
-        if vertical > cfg.vertical_tolerance || vertical >= horizontal {
-            return cfg.consume && state.consuming;
+        if state.phase == GestureState::Armed {
+            if horizontal <= SCROLL_MOVEMENT_EPSILON && vertical <= SCROLL_MOVEMENT_EPSILON {
+                return false;
+            }
+            if vertical >= horizontal || vertical > cfg.vertical_tolerance {
+                state.phase = GestureState::Rejected;
+                state.cancel_contacts();
+                return false;
+            }
+            state.phase = GestureState::Committed;
+            state.consuming = true;
         }
 
-        state.consuming = true;
+        if cfg.invert_horizontal {
+            dx = -dx;
+        }
         state.accum_dx += dx;
-
         if state.accum_dx.abs() >= cfg.distance_pct {
-            let delta = if cfg.invert_horizontal {
-                -state.accum_dx
-            } else {
-                state.accum_dx
-            };
-            self.send_layout_command(LC::ScrollStrip { delta });
+            let delta = state.accum_dx;
             state.accum_dx = 0.0;
-            state.phase = GestureState::Committed;
+            self.send_layout_command(LC::ScrollStrip { delta });
         }
 
         cfg.consume && state.consuming
@@ -551,6 +643,90 @@ impl GestureTap {
             handler.state.borrow_mut().reset();
         }
     }
+}
+
+#[inline]
+fn find_path(frame: &ScrollTouchFrame, index: isize) -> Option<TouchPath> {
+    frame.paths().iter().copied().find(|path| path.index == index)
+}
+
+fn collect_path_deltas(
+    previous: &ScrollTouchFrame,
+    current: &ScrollTouchFrame,
+    output: &mut [PathDelta; 16],
+) -> usize {
+    let mut len = 0;
+    for path in current.paths() {
+        let Some(old) = find_path(previous, path.index) else {
+            continue;
+        };
+        output[len] = PathDelta {
+            index: path.index,
+            dx: path.x - old.x,
+            dy: path.y - old.y,
+        };
+        len += 1;
+    }
+    len
+}
+
+/// Sort moving paths by magnitude and select the configured finger cohort.
+/// `None` means not enough fingers have moved yet; `Some(0)` means an extra
+/// path is moving strongly enough to be intentional rather than a palm.
+fn select_moving_cohort(deltas: &mut [PathDelta], expected: usize) -> Option<usize> {
+    deltas.sort_unstable_by(|a, b| b.magnitude().total_cmp(&a.magnitude()));
+    let moving = deltas
+        .iter()
+        .take_while(|delta| delta.magnitude() >= SCROLL_MOVEMENT_EPSILON)
+        .count();
+    if expected == 0 || moving < expected {
+        return None;
+    }
+
+    if moving > expected {
+        let cohort_motion =
+            deltas[..expected].iter().map(|delta| delta.magnitude()).sum::<f64>() / expected as f64;
+        let extra = deltas[expected].magnitude();
+        if extra >= SCROLL_EXTRA_ABSOLUTE_EPSILON
+            && extra >= cohort_motion * SCROLL_EXTRA_RELATIVE_THRESHOLD
+        {
+            return Some(0);
+        }
+    }
+    Some(expected)
+}
+
+fn cohort_delta(
+    deltas: &[PathDelta],
+    cohort: &[isize],
+    current_paths: &[TouchPath],
+) -> Option<(f64, f64, f64)> {
+    if cohort.is_empty() {
+        return None;
+    }
+    let mut dx = 0.0;
+    let mut dy = 0.0;
+    let mut motion = 0.0;
+    for index in cohort {
+        // Requiring both entries distinguishes a stationary contact (zero
+        // delta, still present) from a lifted contact.
+        current_paths.iter().find(|path| path.index == *index)?;
+        let delta = deltas.iter().find(|delta| delta.index == *index)?;
+        dx += delta.dx;
+        dy += delta.dy;
+        motion += delta.magnitude();
+    }
+    let count = cohort.len() as f64;
+    Some((dx / count, dy / count, motion / count))
+}
+
+fn has_intentional_extra(deltas: &[PathDelta], cohort: &[isize], cohort_motion: f64) -> bool {
+    deltas.iter().any(|delta| {
+        !cohort.contains(&delta.index)
+            && delta.magnitude() >= SCROLL_EXTRA_ABSOLUTE_EPSILON
+            && delta.magnitude()
+                >= cohort_motion.max(SCROLL_MOVEMENT_EPSILON) * SCROLL_EXTRA_RELATIVE_THRESHOLD
+    })
 }
 
 #[inline]
@@ -599,4 +775,62 @@ unsafe extern "C-unwind" fn gesture_tap_invalidated(user_info: *mut std::ffi::c_
     }
     let ctx = unsafe { &*(user_info as *const CallbackCtx) };
     let _ = ctx.recovery_tx.send(Recovery::TapInvalidated(ctx.generation));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ContactDisposition, GestureState, PathDelta, classify_contacts, select_moving_cohort,
+    };
+
+    #[test]
+    fn finger_placement_waits_until_the_configured_count() {
+        let mut phase = GestureState::Idle;
+        assert_eq!(classify_contacts(&mut phase, 1, 3), ContactDisposition::Waiting);
+        assert_eq!(phase, GestureState::Idle);
+        assert_eq!(classify_contacts(&mut phase, 2, 3), ContactDisposition::Waiting);
+        assert_eq!(classify_contacts(&mut phase, 3, 3), ContactDisposition::Ready);
+    }
+
+    #[test]
+    fn topology_change_after_acquisition_rejects_until_lift() {
+        let mut phase = GestureState::Armed;
+        assert_eq!(classify_contacts(&mut phase, 4, 3), ContactDisposition::Waiting);
+        assert_eq!(phase, GestureState::Rejected);
+        assert_eq!(classify_contacts(&mut phase, 3, 3), ContactDisposition::Rejected);
+        assert_eq!(classify_contacts(&mut phase, 0, 3), ContactDisposition::Ended);
+    }
+
+    #[test]
+    fn overshooting_before_acquisition_cannot_arm_by_removing_a_finger() {
+        let mut phase = GestureState::Idle;
+        assert_eq!(classify_contacts(&mut phase, 4, 3), ContactDisposition::Waiting);
+        assert_eq!(phase, GestureState::Rejected);
+        assert_eq!(classify_contacts(&mut phase, 3, 3), ContactDisposition::Rejected);
+    }
+
+    #[test]
+    fn scrolling_selects_three_movers_and_ignores_stationary_palm() {
+        let mut deltas = [
+            PathDelta { index: 3, dx: 0.0002, dy: 0.0 },
+            PathDelta { index: 2, dx: 0.010, dy: 0.001 },
+            PathDelta { index: 6, dx: 0.009, dy: 0.001 },
+            PathDelta { index: 9, dx: 0.011, dy: 0.002 },
+        ];
+        assert_eq!(select_moving_cohort(&mut deltas, 3), Some(3));
+        let mut selected = [deltas[0].index, deltas[1].index, deltas[2].index];
+        selected.sort_unstable();
+        assert_eq!(selected, [2, 6, 9]);
+    }
+
+    #[test]
+    fn scrolling_rejects_four_intentionally_moving_fingers() {
+        let mut deltas = [
+            PathDelta { index: 2, dx: 0.010, dy: 0.001 },
+            PathDelta { index: 3, dx: 0.008, dy: 0.001 },
+            PathDelta { index: 6, dx: 0.009, dy: 0.001 },
+            PathDelta { index: 9, dx: 0.011, dy: 0.002 },
+        ];
+        assert_eq!(select_moving_cohort(&mut deltas, 3), Some(0));
+    }
 }

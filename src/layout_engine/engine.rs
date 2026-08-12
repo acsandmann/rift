@@ -2102,10 +2102,12 @@ impl LayoutEngine {
                 resp
             }
             LayoutCommand::SnapStrip => {
+                let mut response = EventResponse::default();
                 if let LayoutSystemKind::Scrolling(system) = self.workspace_tree_mut(workspace_id) {
-                    system.snap_to_nearest_column(layout);
+                    response.focus_window = system.snap_to_nearest_column(layout);
+                    response.changed = response.focus_window.is_some();
                 }
-                EventResponse::default()
+                response
             }
             LayoutCommand::CenterSelection => {
                 if let LayoutSystemKind::Scrolling(system) = self.workspace_tree_mut(workspace_id) {
