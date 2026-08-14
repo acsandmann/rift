@@ -10,6 +10,7 @@ use crate::common::collections::HashSet;
 use crate::model::server::{RuntimeDisplayData, RuntimeWindowData, RuntimeWorkspaceData};
 use crate::model::virtual_workspace::VirtualWorkspaceId;
 use crate::sys::screen::{ScreenInfo, SpaceId};
+use crate::sys::window_server::WindowServerId;
 
 #[derive(Clone)]
 pub struct ReactorQueryHandle {
@@ -65,6 +66,15 @@ impl ReactorQueryHandle {
             .flatten()
     }
 
+    pub fn query_window_info_by_server_id(
+        &self,
+        wsid: WindowServerId,
+    ) -> Option<RuntimeWindowData> {
+        self.send_query(|resp| QueryRequest::WindowInfoByServerId { wsid, resp })
+            .ok()
+            .flatten()
+    }
+
     pub fn query_applications(&self) -> Vec<ApplicationData> {
         self.send_query(QueryRequest::Applications).unwrap_or_default()
     }
@@ -108,6 +118,10 @@ pub enum QueryRequest {
         window_id: WindowId,
         resp: SyncSender<Option<RuntimeWindowData>>,
     },
+    WindowInfoByServerId {
+        wsid: WindowServerId,
+        resp: SyncSender<Option<RuntimeWindowData>>,
+    },
     Applications(SyncSender<Vec<ApplicationData>>),
     LayoutState {
         space_id: Option<u64>,
@@ -137,6 +151,9 @@ impl Reactor {
             }
             QueryRequest::WindowInfo { window_id, resp } => {
                 let _ = resp.send(self.query_window_info(window_id));
+            }
+            QueryRequest::WindowInfoByServerId { wsid, resp } => {
+                let _ = resp.send(self.query_window_info_by_server_id(wsid));
             }
             QueryRequest::Applications(resp) => {
                 let _ = resp.send(self.query_applications());
@@ -183,6 +200,13 @@ impl Reactor {
 
     pub fn query_window_info(&self, window_id: WindowId) -> Option<RuntimeWindowData> {
         self.handle_window_info_query(window_id)
+    }
+
+    pub fn query_window_info_by_server_id(
+        &self,
+        wsid: WindowServerId,
+    ) -> Option<RuntimeWindowData> {
+        self.handle_window_info_by_server_id_query(wsid)
     }
 
     pub fn query_applications(&self) -> Vec<ApplicationData> { self.handle_applications_query() }
@@ -472,6 +496,16 @@ impl Reactor {
 
     fn handle_window_info_query(&self, window_id: WindowId) -> Option<RuntimeWindowData> {
         self.create_window_data(window_id)
+    }
+
+    fn handle_window_info_by_server_id_query(
+        &self,
+        wsid: WindowServerId,
+    ) -> Option<RuntimeWindowData> {
+        self.state
+            .windows
+            .tracked_window_id(wsid)
+            .and_then(|wid| self.create_window_data(wid))
     }
 
     fn handle_applications_query(&self) -> Vec<ApplicationData> {
