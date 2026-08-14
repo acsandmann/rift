@@ -1,7 +1,7 @@
 use objc2_core_foundation::CGRect;
 use tracing::{debug, trace};
 
-use crate::actor::app::{Request, WindowId};
+use crate::actor::app::WindowId;
 use crate::actor::reactor::events::EventOutcome;
 use crate::actor::reactor::managers::DragManager;
 use crate::actor::reactor::transaction_manager::TransactionManager;
@@ -70,35 +70,6 @@ pub fn handle_window_created(
 #[derive(Debug, Clone, Copy)]
 pub struct WindowDestroyedPayload {
     pub window: WindowId,
-}
-
-pub fn handle_window_ax_invalidated(
-    state: &mut crate::model::RiftState,
-    transactions: &TransactionManager,
-    drag: &mut DragManager,
-    wid: WindowId,
-) -> EventOutcome {
-    if let Some(window_server_id) =
-        state.windows.record(wid).and_then(|record| record.window_server_id())
-    {
-        transactions.remove_for_window(window_server_id);
-    }
-
-    if let DragState::PendingSwap { session, target } = &drag.drag_state
-        && (session.window == wid || *target == wid)
-    {
-        drag.drag_state = DragState::Inactive;
-    }
-    if drag.dragged() == Some(wid) || drag.last_target() == Some(wid) {
-        drag.reset();
-        drag.drag_state = DragState::Inactive;
-    }
-    if drag.skip_layout_for_window == Some(wid) {
-        drag.skip_layout_for_window = None;
-    }
-
-    EventOutcome::window_notification_refresh()
-        .with_app_request(wid.pid, Request::GetVisibleWindows)
 }
 
 pub fn handle_window_destroyed(

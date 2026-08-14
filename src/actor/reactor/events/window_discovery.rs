@@ -180,7 +180,6 @@ pub(crate) fn identify_stale_windows(
         .iter_visible_window_server_ids()
         .any(|wsid| state.windows.tracked_window_id(wsid).is_some_and(|wid| wid.pid == pid));
     let skip_stale_cleanup = snapshot.suppressed
-        || pending_refresh
         || snapshot.mission_control_active
         || snapshot.drag_active
         || (known_visible_set.is_empty() && !has_visible_window_server_ids);
@@ -235,7 +234,9 @@ pub(crate) fn identify_stale_windows(
             let height = info.frame.size.height.abs();
 
             // A failed private WindowServer query is not evidence that a window died.
-            // Only explicit negative observations may retire an AX-omitted window.
+            // Only explicit negative observations may retire an AX-omitted window. This also
+            // applies to the first tracked recovery refresh: blanket suppression there leaves
+            // genuine closes that occurred during sleep/display churn as layout ghosts.
             let unsuitable = matches!(observation.suitable, Some(false));
             let invalid_layer = info.layer != 0;
             let too_small = width < MIN_REAL_WINDOW_DIMENSION || height < MIN_REAL_WINDOW_DIMENSION;

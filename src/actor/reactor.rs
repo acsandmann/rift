@@ -1172,41 +1172,20 @@ impl Reactor {
                 return Ok(outcome);
             }
             Event::WindowDestroyed(wid) => {
-                // The lifecycle transition itself already guarantees one post-stability
-                // refresh. Ignore AX lifetime noise here without tracking individual windows.
+                // macOS can replace AXUIElements during lifecycle/display churn while the
+                // native window remains alive. Recovery already schedules a stable refresh,
+                // so preserve topology until then. Outside churn, retain the original AX
+                // destruction behavior and remove the window immediately.
                 if self.refreshes_blocked() {
                     return Ok(EventOutcome::default());
                 }
 
-                let window_server_id =
-                    self.state.windows.record(wid).and_then(|record| record.window_server_id());
-                let ordered_in = window_server_id.and_then(window_server::window_ordered_in);
-                let known_inactive = self.is_window_on_known_inactive_space(wid);
-                let already_minimized =
-                    self.state.windows.window(wid).is_some_and(|window| window.info.is_minimized);
-
-                // AX replacement may finish after lifecycle quarantine is released. A native
-                // window on an inactive Space or already known to be minimized is legitimately
-                // ordered out and must retain its logical identity. For an active, non-minimized
-                // window, an explicit ordered-out observation is authoritative for close or
-                // minimize-time AX replacement and prevents stale layout slots.
-                let should_destroy = window_server_id.is_none()
-                    || (matches!(ordered_in, Some(false)) && !known_inactive && !already_minimized);
-                let mut outcome = if should_destroy {
-                    window_workflow::handle_window_destroyed(
-                        &mut self.state,
-                        &self.transaction_manager,
-                        &mut self.drag_manager,
-                        window_workflow::WindowDestroyedPayload { window: wid },
-                    )?
-                } else {
-                    window_workflow::handle_window_ax_invalidated(
-                        &mut self.state,
-                        &self.transaction_manager,
-                        &mut self.drag_manager,
-                        wid,
-                    )
-                };
+                let mut outcome = window_workflow::handle_window_destroyed(
+                    &mut self.state,
+                    &self.transaction_manager,
+                    &mut self.drag_manager,
+                    window_workflow::WindowDestroyedPayload { window: wid },
+                )?;
                 outcome.focused_window = raised_window;
                 return Ok(outcome);
             }

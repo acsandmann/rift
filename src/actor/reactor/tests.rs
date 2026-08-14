@@ -4210,7 +4210,7 @@ fn current_ax_destruction_after_quarantine_release_removes_window() {
 }
 
 #[test]
-fn ordered_out_ax_invalidation_preserves_window_on_known_inactive_space() {
+fn ax_destruction_removes_window_on_known_inactive_space_outside_churn() {
     let (mut reactor, wid, wsid, active_space, inactive_space, _frame) =
         reactor_with_window_on_space1();
     let inactive_workspace = reactor.test_workspace(inactive_space, 0);
@@ -4223,16 +4223,13 @@ fn ordered_out_ax_invalidation_preserves_window_on_known_inactive_space() {
     reactor.handle_event(Event::WindowDestroyed(wid));
     crate::sys::window_server::set_window_ordered_in_override(wsid, None);
 
-    assert!(reactor.state.windows.contains_window(wid));
-    assert_eq!(
-        reactor.test_workspace_for_window(inactive_space, wid),
-        Some(inactive_workspace)
-    );
+    assert!(reactor.state.windows.record(wid).is_none());
+    assert_eq!(reactor.test_workspace_for_window(inactive_space, wid), None);
     assert_eq!(reactor.test_workspace_for_window(active_space, wid), None);
 }
 
 #[test]
-fn ordered_out_ax_invalidation_preserves_already_minimized_window_identity() {
+fn ax_destruction_removes_already_minimized_window_outside_churn() {
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
     let space = SpaceId::new(1);
@@ -4247,8 +4244,7 @@ fn ordered_out_ax_invalidation_preserves_already_minimized_window_identity() {
     reactor.handle_event(Event::WindowDestroyed(wid));
     crate::sys::window_server::set_window_ordered_in_override(wsid, None);
 
-    assert!(reactor.state.windows.contains_window(wid));
-    assert!(reactor.state.windows.window(wid).unwrap().info.is_minimized);
+    assert!(reactor.state.windows.record(wid).is_none());
     assert!(!has_window_in_layout(&mut reactor, space, screen, wid));
 }
 
@@ -4293,7 +4289,7 @@ fn repeated_ordered_out_ax_replacement_does_not_accumulate_layout_ghosts() {
 }
 
 #[test]
-fn late_ax_invalidation_with_ordered_native_window_preserves_layout() {
+fn ax_destruction_removes_ordered_in_window_outside_churn() {
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
     let space = SpaceId::new(1);
@@ -4308,13 +4304,13 @@ fn late_ax_invalidation_with_ordered_native_window_preserves_layout() {
     reactor.handle_event(Event::WindowDestroyed(wid));
     crate::sys::window_server::set_window_ordered_in_override(wsid, None);
 
-    assert!(reactor.state.windows.contains_window(wid));
-    assert!(has_window_in_layout(&mut reactor, space, screen, wid));
+    assert!(reactor.state.windows.record(wid).is_none());
+    assert!(!has_window_in_layout(&mut reactor, space, screen, wid));
     assert!(
         apps.requests()
             .iter()
-            .any(|request| matches!(request, Request::GetVisibleWindows)),
-        "late AX invalidation should reacquire the replacement element",
+            .all(|request| !matches!(request, Request::GetVisibleWindows)),
+        "AX destruction outside churn should not trigger replacement-element polling",
     );
 }
 
@@ -4465,6 +4461,156 @@ fn sleep_ax_churn_preserves_modified_layout_through_recovery() {
         modified_layout,
         "authoritative recovery and AX rediscovery must update existing nodes in place",
     );
+}
+
+#[test]
+fn clamshell_sleep_preserves_nested_layout_across_display_replacement() {
+    let (mut apps, mut reactor) = test_context();
+    let external_screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(3440., 1409.));
+    let internal_screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1728., 1083.));
+    let space = SpaceId::new(1);
+    let windows = make_windows(4);
+    let window_ids: Vec<_> = (1..=4).map(|idx| WindowId::new(1, idx)).collect();
+    let rediscovered = window_ids.iter().copied().zip(windows.iter().cloned()).collect::<Vec<_>>();
+
+    apps.make_app_and_settle_on_screen(&mut reactor, external_screen, space, 1, windows);
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, window_ids[1]));
+    reactor.handle_test_layout_command(LayoutCommand::MoveNode(Direction::Up));
+
+    let topology_before = reactor
+        .query_layout_state(Some(space.get()), None)
+        .expect("external-display layout state")
+        .container_tree;
+    assert!(
+        topology_before.children.iter().any(|child| !child.children.is_empty()),
+        "test setup must reproduce the nested split/stack topology from the clamshell capture",
+    );
+
+    reactor.handle_event(Event::DisplayChurnBegin);
+    reactor.handle_event(Event::SystemWillSleep);
+    reactor.handle_event(Event::SessionDidResignActive);
+    for wid in &window_ids {
+        reactor.handle_event(Event::WindowDestroyed(*wid));
+    }
+
+    assert_eq!(
+        reactor
+            .query_layout_state(Some(space.get()), None)
+            .expect("quarantined layout state")
+            .container_tree,
+        topology_before,
+        "sleep-time AX destruction must not flatten the nested layout",
+    );
+
+    reactor.handle_event(Event::SystemWoke);
+    reactor.handle_event(Event::SessionDidBecomeActive);
+    let mut screens = make_screen_snapshots(vec![internal_screen], vec![Some(space)]);
+    screens[0].display_uuid = "internal-display".to_string();
+    let mut recovered = forwarded_space_state(screens);
+    recovered.display_set_changed = true;
+    recovered.topology_changed = true;
+    recovered.allow_space_remap = true;
+    recovered.should_force_refresh_layout = true;
+    recovered.releases_lifecycle_refresh_quarantine = true;
+    recovered.releases_display_churn_refresh_quarantine = true;
+    recovered.resized_spaces.push((space, internal_screen.size));
+    for wid in &window_ids {
+        recovered.active_window_spaces.insert(WindowServerId::new(wid.idx.get()), space);
+    }
+    reactor.handle_event(Event::SpaceStateChanged(recovered));
+    reactor.discover_test_windows(1, rediscovered, window_ids.clone());
+
+    assert_eq!(
+        reactor
+            .query_layout_state(Some(space.get()), None)
+            .expect("internal-display layout state")
+            .container_tree,
+        topology_before,
+        "clamshell recovery must preserve container nesting, order, selection, and weights",
+    );
+    assert_eq!(
+        test_layout(&mut reactor, space, internal_screen).len(),
+        window_ids.len(),
+        "every rediscovered window must occupy exactly one layout slot",
+    );
+}
+
+#[test]
+fn genuine_close_during_sleep_recovery_does_not_leave_layout_ghost() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let survivor = WindowId::new(1, 1);
+    let closed = WindowId::new(1, 2);
+
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(2));
+    let closed_wsid = reactor.test_window_server_id(closed);
+
+    reactor.handle_event(Event::SystemWillSleep);
+    reactor.handle_event(Event::SessionDidResignActive);
+    reactor.handle_event(Event::WindowDestroyed(closed));
+    assert!(
+        has_window_in_layout(&mut reactor, space, screen, closed),
+        "the ambiguous AX edge must be preserved while sleep quarantine is active",
+    );
+
+    reactor.handle_event(Event::SystemWoke);
+    reactor.handle_event(Event::SessionDidBecomeActive);
+    let mut recovered =
+        forwarded_space_state(make_screen_snapshots(vec![screen], vec![Some(space)]));
+    recovered.releases_lifecycle_refresh_quarantine = true;
+    recovered
+        .active_window_spaces
+        .insert(WindowServerId::new(survivor.idx.get()), space);
+
+    crate::sys::window_server::set_window_ordered_in_override(closed_wsid, Some(false));
+    reactor.handle_event(Event::SpaceStateChanged(recovered));
+    reactor.discover_test_windows(1, vec![], vec![survivor]);
+    crate::sys::window_server::set_window_ordered_in_override(closed_wsid, None);
+
+    assert!(reactor.state.windows.record(closed).is_none());
+    assert!(!has_window_in_layout(&mut reactor, space, screen, closed));
+    assert!(reactor.state.windows.contains_window(survivor));
+    assert!(has_window_in_layout(&mut reactor, space, screen, survivor));
+    assert_eq!(
+        test_layout(&mut reactor, space, screen).len(),
+        1,
+        "post-sleep discovery must not retain a stale layout slot for the closed window",
+    );
+}
+
+#[test]
+fn last_window_close_during_sleep_recovery_does_not_leave_layout_ghost() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let closed = WindowId::new(1, 1);
+
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+    let closed_wsid = reactor.test_window_server_id(closed);
+
+    reactor.handle_event(Event::SystemWillSleep);
+    reactor.handle_event(Event::SessionDidResignActive);
+    reactor.handle_event(Event::WindowDestroyed(closed));
+    assert!(
+        has_window_in_layout(&mut reactor, space, screen, closed),
+        "the ambiguous AX edge must be preserved while sleep quarantine is active",
+    );
+
+    reactor.handle_event(Event::SystemWoke);
+    reactor.handle_event(Event::SessionDidBecomeActive);
+    let mut recovered =
+        forwarded_space_state(make_screen_snapshots(vec![screen], vec![Some(space)]));
+    recovered.releases_lifecycle_refresh_quarantine = true;
+
+    crate::sys::window_server::set_window_ordered_in_override(closed_wsid, Some(false));
+    reactor.handle_event(Event::SpaceStateChanged(recovered));
+    reactor.discover_test_windows(1, vec![], vec![]);
+    crate::sys::window_server::set_window_ordered_in_override(closed_wsid, None);
+
+    assert!(reactor.state.windows.record(closed).is_none());
+    assert!(!has_window_in_layout(&mut reactor, space, screen, closed));
+    assert!(test_layout(&mut reactor, space, screen).is_empty());
 }
 
 #[test]
