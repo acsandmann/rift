@@ -30,11 +30,9 @@ const K_CG_GESTURE_MOTION_HORIZONTAL: i64 = 1;
 const K_IOHID_EVENT_FIELD_DIGITIZER_X: u32 = K_IOHID_EVENT_TYPE_DIGITIZER << 16;
 const K_IOHID_EVENT_FIELD_DIGITIZER_Y: u32 = K_IOHID_EVENT_FIELD_DIGITIZER_X + 1;
 const K_IOHID_EVENT_FIELD_DIGITIZER_EVENT_MASK: u32 = K_IOHID_EVENT_FIELD_DIGITIZER_X + 7;
-const K_IOHID_EVENT_FIELD_DIGITIZER_RANGE: u32 = K_IOHID_EVENT_FIELD_DIGITIZER_X + 8;
 const K_IOHID_EVENT_FIELD_DIGITIZER_TOUCH: u32 = K_IOHID_EVENT_FIELD_DIGITIZER_X + 9;
 const K_IOHID_EVENT_FIELD_DIGITIZER_INDEX: u32 = K_IOHID_EVENT_FIELD_DIGITIZER_X + 5;
 const K_IOHID_EVENT_FIELD_DIGITIZER_COLLECTION: u32 = K_IOHID_EVENT_FIELD_DIGITIZER_X + 22;
-const K_IOHID_DIGITIZER_EVENT_POSITION: isize = 1 << 2;
 // `_mthid_pathIsResting` extracts bit 9 from the digitizer event mask. AppKit
 // uses this to distinguish palm/resting paths from gesture participants.
 const K_IOHID_DIGITIZER_EVENT_RESTING: isize = 1 << 9;
@@ -68,10 +66,8 @@ unsafe extern "C" {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TouchFrame {
     pub contacts: usize,
-    pub in_range: usize,
     pub centroid_x: f64,
     pub centroid_y: f64,
-    pub all_moved: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -139,12 +135,22 @@ pub fn is_physical_horizontal_dock_swipe(event_type: CGEventType, event: &CGEven
 /// system). Processed events return immediately after the one type read. Raw
 /// frames use a fixed stack array and allocate nothing.
 #[inline]
-pub fn payload(event: &CGEvent) -> Option<GesturePayload> {
+pub fn payload(event: &CGEvent) -> Option<GesturePayload> { payload_with_centroid(event, true) }
+
+/// Decode only contact presence. This is sufficient after a workspace swipe
+/// has committed or been rejected, when the recognizer is waiting for lift.
+#[inline]
+pub fn contact_payload(event: &CGEvent) -> Option<GesturePayload> {
+    payload_with_centroid(event, false)
+}
+
+#[inline]
+fn payload_with_centroid(event: &CGEvent, centroid: bool) -> Option<GesturePayload> {
     let hid = HidEvent::copy_from(event)?;
     if !is_path_collection(hid.as_ptr()) {
         return Some(GesturePayload::Processed);
     }
-    unsafe { TouchFrame::from_digitizer(hid.as_ptr()).map(GesturePayload::Touch) }
+    unsafe { TouchFrame::from_digitizer(hid.as_ptr(), centroid).map(GesturePayload::Touch) }
 }
 
 /// Decode individual paths only for the scrolling layout. This is still one
@@ -156,6 +162,20 @@ pub fn scroll_payload(event: &CGEvent) -> Option<ScrollGesturePayload> {
         return Some(ScrollGesturePayload::Processed);
     }
     unsafe { ScrollTouchFrame::from_digitizer(hid.as_ptr()).map(ScrollGesturePayload::Touch) }
+}
+
+/// Decode only the number of active, non-resting paths. Rejected scroll
+/// gestures need this solely to detect that the physical session ended.
+#[inline]
+pub fn scroll_contact_payload(event: &CGEvent) -> Option<ScrollGesturePayload> {
+    let hid = HidEvent::copy_from(event)?;
+    if !is_path_collection(hid.as_ptr()) {
+        return Some(ScrollGesturePayload::Processed);
+    }
+    unsafe {
+        ScrollTouchFrame::contact_presence_from_digitizer(hid.as_ptr())
+            .map(ScrollGesturePayload::Touch)
+    }
 }
 
 #[inline(always)]
@@ -201,11 +221,9 @@ unsafe fn is_path(child: IOHIDEventRef) -> bool {
 
 impl TouchFrame {
     #[inline]
-    unsafe fn from_digitizer(hid: IOHIDEventRef) -> Option<Self> {
+    unsafe fn from_digitizer(hid: IOHIDEventRef, centroid: bool) -> Option<Self> {
         let (values, count) = unsafe { copy_children(hid) }?;
         let mut contacts = 0usize;
-        let mut in_range = 0usize;
-        let mut all_moved = true;
 
         for value in &values[..count] {
             let child = unsafe { value.assume_init() } as IOHIDEventRef;
@@ -213,29 +231,19 @@ impl TouchFrame {
                 continue;
             }
 
-            let range =
-                unsafe { IOHIDEventGetIntegerValue(child, K_IOHID_EVENT_FIELD_DIGITIZER_RANGE) }
-                    != 0;
             let touching =
                 unsafe { IOHIDEventGetIntegerValue(child, K_IOHID_EVENT_FIELD_DIGITIZER_TOUCH) }
                     != 0;
-            let mask = unsafe {
-                IOHIDEventGetIntegerValue(child, K_IOHID_EVENT_FIELD_DIGITIZER_EVENT_MASK)
-            };
-            if range {
-                in_range += 1;
-            }
 
             if !touching {
                 continue;
             }
 
             contacts += 1;
-            all_moved &= mask & K_IOHID_DIGITIZER_EVENT_POSITION != 0;
         }
 
-        if contacts == 0 {
-            return Some(Self { in_range, ..Self::default() });
+        if contacts == 0 || !centroid {
+            return Some(Self { contacts, ..Self::default() });
         }
 
         // Preserve the workspace-swipe path: AppKit uses the collection's
@@ -248,15 +256,36 @@ impl TouchFrame {
 
         Some(Self {
             contacts,
-            in_range,
             centroid_x: x.clamp(0.0, 1.0),
             centroid_y: y.clamp(0.0, 1.0),
-            all_moved,
         })
     }
 }
 
 impl ScrollTouchFrame {
+    #[inline]
+    unsafe fn contact_presence_from_digitizer(hid: IOHIDEventRef) -> Option<Self> {
+        let (values, count) = unsafe { copy_children(hid) }?;
+        let mut frame = Self::default();
+        for value in &values[..count] {
+            let child = unsafe { value.assume_init() } as IOHIDEventRef;
+            if !unsafe { is_path(child) } {
+                continue;
+            }
+            if unsafe { IOHIDEventGetIntegerValue(child, K_IOHID_EVENT_FIELD_DIGITIZER_TOUCH) } == 0
+            {
+                continue;
+            }
+            let mask = unsafe {
+                IOHIDEventGetIntegerValue(child, K_IOHID_EVENT_FIELD_DIGITIZER_EVENT_MASK)
+            };
+            if mask & K_IOHID_DIGITIZER_EVENT_RESTING == 0 {
+                frame.len += 1;
+            }
+        }
+        Some(frame)
+    }
+
     #[inline]
     unsafe fn from_digitizer(hid: IOHIDEventRef) -> Option<Self> {
         let (values, count) = unsafe { copy_children(hid) }?;
