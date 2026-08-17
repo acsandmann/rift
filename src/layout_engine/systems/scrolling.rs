@@ -360,6 +360,16 @@ impl ScrollingLayoutSystem {
         ratio.clamp(min_ratio, max_ratio).max(0.05)
     }
 
+    fn proportional_column_width(viewport_width: f64, gap_x: f64, ratio: f64) -> f64 {
+        // Ratios describe each column's share of the viewport after accounting
+        // for the gaps between columns. Thus ratios summing to 1.0 tile exactly.
+        ((viewport_width + gap_x) * ratio - gap_x).max(1.0)
+    }
+
+    fn ratio_for_column_width(viewport_width: f64, gap_x: f64, width: f64) -> f64 {
+        (width + gap_x) / (viewport_width + gap_x)
+    }
+
     fn column_widths_and_starts(
         state: &LayoutState,
         screen_width: f64,
@@ -376,7 +386,7 @@ impl ScrollingLayoutSystem {
             starts.push(cursor);
             let ratio =
                 Self::clamp_ratio_with_bounds(base_ratio + col.width_offset, min_ratio, max_ratio);
-            let width = (screen_width * ratio).max(1.0);
+            let width = Self::proportional_column_width(screen_width, gap_x, ratio);
             widths.push(width);
             cursor += width + gap_x;
         }
@@ -732,7 +742,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
             } else {
                 self.clamp_ratio(base_ratio + col.width_offset)
             };
-            let base_width = (tiling.size.width * ratio).max(1.0);
+            let base_width = Self::proportional_column_width(tiling.size.width, gap_x, ratio);
             let mut min_w: f64 = 1.0;
             let mut fixed_w: Option<f64> = None;
             let mut max_w: Option<f64> = None;
@@ -765,7 +775,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
             width = width.min(tiling.size.width.max(1.0));
             column_widths.push(width);
             column_ratios.push(if tiling.size.width > 0.0 {
-                (width / tiling.size.width).max(0.0)
+                Self::ratio_for_column_width(tiling.size.width, gap_x, width).max(0.0)
             } else {
                 0.0
             });
@@ -779,10 +789,9 @@ impl LayoutSystem for ScrollingLayoutSystem {
         }
         let strip_max_offset = column_starts.last().copied().unwrap_or(0.0);
         let selected_col_idx = state.selected_location().map(|(idx, _)| idx).unwrap_or(0);
-        let selected_width = column_widths
-            .get(selected_col_idx)
-            .copied()
-            .unwrap_or((tiling.size.width * base_ratio).max(1.0));
+        let selected_width = column_widths.get(selected_col_idx).copied().unwrap_or_else(|| {
+            Self::proportional_column_width(tiling.size.width, gap_x, base_ratio)
+        });
         let step = selected_width + gap_x;
         state.last_screen_width.store(tiling.size.width.to_bits(), Ordering::Relaxed);
         state.last_gap_x.store(gap_x.to_bits(), Ordering::Relaxed);
@@ -865,10 +874,10 @@ impl LayoutSystem for ScrollingLayoutSystem {
         let reveal_direction = state.pending_reveal_direction.swap(0, Ordering::Relaxed);
         if reveal_direction != 0 {
             if let Some((selected_col_idx, _)) = state.selected_location() {
-                let selected_width = column_widths
-                    .get(selected_col_idx)
-                    .copied()
-                    .unwrap_or((tiling.size.width * base_ratio).max(1.0));
+                let selected_width =
+                    column_widths.get(selected_col_idx).copied().unwrap_or_else(|| {
+                        Self::proportional_column_width(tiling.size.width, gap_x, base_ratio)
+                    });
                 let mut offset = f64::from_bits(state.scroll_offset_px.load(Ordering::Relaxed));
                 let selected_start = column_starts.get(selected_col_idx).copied().unwrap_or(0.0);
                 let selected_x = anchor_x + selected_start - offset;
@@ -916,10 +925,9 @@ impl LayoutSystem for ScrollingLayoutSystem {
         for (col_idx, col) in state.columns.iter().enumerate() {
             let offset = f64::from_bits(state.scroll_offset_px.load(Ordering::Relaxed));
             let ratio = column_ratios.get(col_idx).copied().unwrap_or(base_ratio);
-            let column_width = column_widths
-                .get(col_idx)
-                .copied()
-                .unwrap_or((tiling.size.width * ratio).max(1.0));
+            let column_width = column_widths.get(col_idx).copied().unwrap_or_else(|| {
+                Self::proportional_column_width(tiling.size.width, gap_x, ratio)
+            });
             let start = column_starts.get(col_idx).copied().unwrap_or(0.0);
             let x = anchor_x + start - offset;
             if col.windows.is_empty() {
@@ -1293,7 +1301,11 @@ impl LayoutSystem for ScrollingLayoutSystem {
         if tiling.size.width <= 0.0 {
             return;
         }
-        let ratio = new_frame.size.width / tiling.size.width;
+        let ratio = Self::ratio_for_column_width(
+            tiling.size.width,
+            gaps.inner.horizontal,
+            new_frame.size.width,
+        );
         let clamped = ratio.clamp(min_ratio, max_ratio).max(0.05);
 
         let base_ratio = state.column_width_ratio;
@@ -2231,6 +2243,48 @@ mod tests {
             w1_x_after_left,
             w2_x_after_right
         );
+    }
+
+    #[test]
+    fn niri_focus_does_not_shift_two_half_width_columns_with_inner_gap() {
+        let mut settings = ScrollingLayoutSettings::default();
+        settings.alignment = crate::common::config::ScrollingAlignment::Left;
+        settings.focus_navigation_style =
+            crate::common::config::ScrollingFocusNavigationStyle::Niri;
+        settings.column_width_ratio = 0.5;
+        settings.min_column_width_ratio = 0.2;
+        settings.max_column_width_ratio = 0.9;
+        let (mut system, layout, w1, w2) = setup_two_windows(settings);
+
+        let screen = screen(3360.0, 1387.0);
+        let mut gaps = GapSettings::default();
+        gaps.outer.left = 6.0;
+        gaps.outer.right = 6.0;
+        gaps.outer.top = 6.0;
+        gaps.outer.bottom = 6.0;
+        gaps.inner.horizontal = 6.0;
+
+        let initial = render(&system, layout, screen, &gaps);
+        let initial_w1 = frame_for(&initial, w1);
+        let initial_w2 = frame_for(&initial, w2);
+        assert_eq!(initial_w1.origin.x, 6.0);
+        assert_eq!(initial_w1.size.width, 1671.0);
+        assert_eq!(initial_w2.origin.x, 1683.0);
+        assert_eq!(initial_w2.origin.x + initial_w2.size.width, 3354.0);
+
+        assert!(system.move_focus(layout, Direction::Left).0.is_some());
+        let focused_left = render(&system, layout, screen, &gaps);
+        assert!(system.move_focus(layout, Direction::Right).0.is_some());
+        let focused_right = render(&system, layout, screen, &gaps);
+
+        for window in [w1, w2] {
+            assert_eq!(
+                frame_for(&focused_left, window).origin.x,
+                frame_for(&focused_right, window).origin.x,
+                "focus change shifted window {window:?}"
+            );
+        }
+        assert_eq!(scroll_offset(&system, layout), 0.0);
     }
 
     #[test]
