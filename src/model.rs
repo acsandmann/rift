@@ -8,7 +8,8 @@ pub mod tx_store;
 pub mod virtual_workspace;
 pub mod window_store;
 pub use app_rules::{
-    AppRuleDecision, AppRuleEffects, AppRuleEngine, AppRuleResult, WindowRuleContext,
+    AppRuleDecision, AppRuleEffects, AppRuleEngine, AppRuleRejection, AppRuleResult,
+    WindowRuleContext,
 };
 pub use floating_position_store::FloatingPositionStore;
 pub use hidden_window_placement::{HiddenWindowPlacement, HideCorner};

@@ -45,7 +45,6 @@ pub struct WindowRecord {
     pending_operation: Option<PendingWindowOperation>,
     operation_generation: u64,
     rule_floating: bool,
-    last_rule_decision: bool,
 }
 
 impl WindowRecord {
@@ -308,7 +307,6 @@ impl WindowStore {
                 && record.window_server_id.is_none()
                 && record.workspace.is_none()
                 && !record.rule_floating
-                && !record.last_rule_decision
         });
         if should_remove {
             self.windows.remove(&window_id);
@@ -751,26 +749,18 @@ impl WindowStore {
             return;
         }
 
-        let (
-            workspace,
-            rule_floating,
-            last_rule_decision,
-            placement,
-            visibility,
-            pending,
-            generation,
-        ) = match self.windows.get(&from) {
-            Some(record) => (
-                record.workspace,
-                record.rule_floating,
-                record.last_rule_decision,
-                record.placement,
-                record.visibility,
-                record.pending_operation,
-                record.operation_generation,
-            ),
-            None => return,
-        };
+        let (workspace, rule_floating, placement, visibility, pending, generation) =
+            match self.windows.get(&from) {
+                Some(record) => (
+                    record.workspace,
+                    record.rule_floating,
+                    record.placement,
+                    record.visibility,
+                    record.pending_operation,
+                    record.operation_generation,
+                ),
+                None => return,
+            };
 
         let target_workspace = self.windows.get(&to).and_then(|record| record.workspace);
 
@@ -787,7 +777,6 @@ impl WindowStore {
             target.workspace = workspace;
         }
         target.rule_floating |= rule_floating;
-        target.last_rule_decision |= last_rule_decision;
         target.placement = placement;
         target.visibility = visibility;
         target.pending_operation = pending;
@@ -797,7 +786,6 @@ impl WindowStore {
         if let Some(source) = self.windows.get_mut(&from) {
             source.workspace = None;
             source.rule_floating = false;
-            source.last_rule_decision = false;
             source.pending_operation = None;
         }
 
@@ -820,15 +808,16 @@ impl WindowStore {
         self.prune_window_record(from);
     }
 
-    pub fn set_rule_floating(&mut self, window_id: WindowId, value: bool) {
+    pub fn replace_rule_floating(&mut self, window_id: WindowId, value: bool) -> bool {
         let record = self.windows.entry(window_id).or_default();
-        record.rule_floating = value;
+        let previous = std::mem::replace(&mut record.rule_floating, value);
         record.placement = if value {
             WindowPlacement::Floating
         } else {
             WindowPlacement::Tiled
         };
         self.prune_window_record(window_id);
+        previous
     }
 
     pub fn clear_rule_floating(&mut self, window_id: WindowId) {
@@ -845,19 +834,9 @@ impl WindowStore {
         self.windows.get(&window_id).is_some_and(|record| record.rule_floating)
     }
 
-    pub fn set_last_rule_decision(&mut self, window_id: WindowId, value: bool) {
-        self.windows.entry(window_id).or_default().last_rule_decision = value;
-        self.app_windows.entry(window_id.pid).or_default().insert(window_id);
-    }
-
-    pub fn last_rule_decision(&self, window_id: WindowId) -> bool {
-        self.windows.get(&window_id).is_some_and(|record| record.last_rule_decision)
-    }
-
     pub fn clear_rule_metadata(&mut self, window_id: WindowId) {
         if let Some(record) = self.windows.get_mut(&window_id) {
             record.rule_floating = false;
-            record.last_rule_decision = false;
         }
         self.prune_window_record(window_id);
     }

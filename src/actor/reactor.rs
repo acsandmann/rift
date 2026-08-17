@@ -91,7 +91,7 @@ use crate::actor::spaces::{ForwardedSpaceState, TopologyWindowDelta};
 use crate::actor::{self, menu_bar, stack_line};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
 use crate::common::config::Config;
-use crate::layout_engine::{self as layout, Direction, LayoutEngine, LayoutEvent};
+use crate::layout_engine::{self as layout, Direction, LayoutEngine, LayoutEvent, ResolvedWindow};
 use crate::model::broadcast::{
     BroadcastEvent, BroadcastSender, protocol_window_id, protocol_workspace_id,
 };
@@ -586,7 +586,7 @@ impl Reactor {
                 continue;
             };
 
-            self.process_windows_for_app_rules(pid, window_ids, app_state.info.clone());
+            self.process_windows_for_app_rules(pid, window_ids, app_state.info.clone(), false);
         }
     }
 
@@ -1895,7 +1895,7 @@ impl Reactor {
                     {
                         self.state.windows.mark_wsids_recent(std::iter::once(window_server_id));
                     }
-                    self.process_windows_for_app_rules(window.pid, vec![window], app_info);
+                    self.process_windows_for_app_rules(window.pid, vec![window], app_info, false);
                 }
                 if self.state.windows.window(window).is_some_and(WindowState::is_admitted) {
                     self.send_layout_event(LayoutEvent::WindowAdded(space, window));
@@ -2425,7 +2425,7 @@ impl Reactor {
             self.state.windows.mark_wsids_recent(std::iter::once(window_server_id));
         }
 
-        self.process_windows_for_app_rules(window_id.pid, vec![window_id], app_info);
+        self.process_windows_for_app_rules(window_id.pid, vec![window_id], app_info, true);
     }
 
     fn handle_authoritative_space_snapshot(
@@ -3482,6 +3482,7 @@ impl Reactor {
         pid: pid_t,
         window_ids: Vec<WindowId>,
         app_info: AppInfo,
+        reapply_effects: bool,
     ) {
         if window_ids.is_empty() {
             return;
@@ -3508,13 +3509,14 @@ impl Reactor {
             let mut windows_needing_layout_refresh = Vec::new();
 
             for wid in &wids {
-                let (was_assigned, was_floating, was_ignored) = {
+                let (previous_workspace, was_floating, was_ignored) = {
                     let engine = &self.layout_manager.layout_engine;
                     (
-                        engine
-                            .virtual_workspace_manager()
-                            .workspace_for_window(&self.state.windows, space, *wid)
-                            .is_some(),
+                        engine.virtual_workspace_manager().workspace_for_window(
+                            &self.state.windows,
+                            space,
+                            *wid,
+                        ),
                         engine.is_window_floating(*wid),
                         self.state
                             .windows
@@ -3544,15 +3546,16 @@ impl Reactor {
 
                 match assign_result {
                     Ok(AppRuleResult::Managed(assignment)) => {
-                        let effective_floating =
-                            assignment.floating || (!assignment.prev_rule_decision && was_floating);
-                        let needs_layout_refresh =
-                            !was_assigned || was_floating != effective_floating || was_ignored;
+                        let effective_floating = assignment.should_float(was_floating);
+                        let needs_layout_refresh = reapply_effects
+                            || previous_workspace != Some(assignment.workspace_id)
+                            || was_floating != effective_floating
+                            || was_ignored;
                         if needs_layout_refresh {
                             windows_needing_layout_refresh.push((*wid, assignment));
                         }
                     }
-                    Ok(AppRuleResult::Unmanaged | AppRuleResult::HeuristicRejected) => {
+                    Ok(AppRuleResult::Rejected(_)) => {
                         if utils::rejection_needs_removal(
                             &self.state,
                             &self.layout_manager,
@@ -3573,20 +3576,21 @@ impl Reactor {
                 continue;
             }
 
-            let windows_with_titles = windows_needing_layout_refresh
-                .iter()
-                .filter_map(|&(wid, _)| {
-                    self.state.windows.window(wid).map(|window| window.layout_info(wid))
+            let windows = windows_needing_layout_refresh
+                .into_iter()
+                .filter_map(|(wid, effects)| {
+                    self.state.windows.window(wid).map(|window| ResolvedWindow {
+                        info: window.layout_info(wid),
+                        effects,
+                    })
                 })
                 .collect();
-            let resolved_app_rules = windows_needing_layout_refresh.into_iter().collect();
 
             self.send_layout_event(LayoutEvent::WindowsOnScreenUpdated(
                 space,
                 pid,
-                windows_with_titles,
+                windows,
                 Some(app_info.clone()),
-                resolved_app_rules,
             ));
         }
     }
@@ -4229,10 +4233,10 @@ impl Reactor {
             LayoutEvent::WindowAdded(space, wid) => {
                 self.request_refocus_if_hidden(*space, *wid);
             }
-            LayoutEvent::WindowsOnScreenUpdated(space, _, windows, ..) => {
-                let hidden_exists = windows.iter().any(|(wid, _, _, _, _, _, _, _)| {
-                    self.window_in_non_active_workspace(*space, *wid)
-                });
+            LayoutEvent::WindowsOnScreenUpdated(space, _, windows, _) => {
+                let hidden_exists = windows
+                    .iter()
+                    .any(|window| self.window_in_non_active_workspace(*space, window.info.0));
                 if hidden_exists {
                     self.refocus_manager.refocus_state = RefocusState::Pending(*space);
                 }

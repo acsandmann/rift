@@ -13,7 +13,7 @@ use crate::common::config::{
 use crate::common::log::trace_misc;
 use crate::layout_engine::Direction;
 use crate::layout_engine::systems::LayoutSystemKind;
-use crate::model::app_rules::{AppRuleDecision, AppRuleEffects, AppRuleResult};
+use crate::model::app_rules::{AppRuleDecision, AppRuleEffects, AppRuleRejection, AppRuleResult};
 use crate::model::hidden_window_placement::{HiddenWindowPlacement, HideCorner};
 use crate::model::{WindowStore, WindowWorkspaceInfo};
 use crate::sys::app::pid_t;
@@ -652,17 +652,6 @@ impl WorkspaceStore {
         window_store.workspaces_for_window(window_id)
     }
 
-    pub fn set_last_rule_decision(
-        &mut self,
-        window_store: &mut WindowStore,
-        space: SpaceId,
-        window_id: WindowId,
-        value: bool,
-    ) {
-        let _ = space;
-        window_store.set_last_rule_decision(window_id, value);
-    }
-
     pub fn remove_window(&mut self, window_store: &mut WindowStore, window_id: WindowId) {
         let _ = window_store.remove_window_assignment(window_id);
         window_store.clear_rule_metadata(window_id);
@@ -992,15 +981,41 @@ impl WorkspaceStore {
         }
     }
 
+    fn resolve_rule_workspace(
+        &mut self,
+        space: SpaceId,
+        selector: Option<&WorkspaceSelector>,
+        existing: Option<WindowWorkspaceInfo>,
+    ) -> Result<VirtualWorkspaceId, WorkspaceError> {
+        let selected = selector.and_then(|selector| {
+            let workspaces = self.list_workspaces(space);
+            match selector {
+                WorkspaceSelector::Index(index) => workspaces.get(*index).map(|(id, _)| *id),
+                WorkspaceSelector::Name(name) => {
+                    workspaces.iter().find(|(_, candidate)| candidate == name).map(|(id, _)| *id)
+                }
+            }
+        });
+        if selector.is_some() && selected.is_none() {
+            warn!(
+                ?space,
+                ?selector,
+                "App rule workspace was not found; preserving assignment"
+            );
+        }
+        selected
+            .or_else(|| existing.map(|assignment| assignment.workspace_id))
+            .map(Ok)
+            .unwrap_or_else(|| self.get_default_workspace(space))
+    }
+
     pub(crate) fn apply_app_rule_decision(
         &mut self,
         window_store: &mut WindowStore,
         window_id: WindowId,
         space: SpaceId,
-        rule_decision: AppRuleDecision,
+        rule_decision: Option<AppRuleDecision>,
     ) -> Result<AppRuleResult, WorkspaceError> {
-        let prev_rule_decision = window_store.last_rule_decision(window_id);
-
         self.ensure_space_initialized(space);
         if self
             .workspaces_by_space
@@ -1014,7 +1029,7 @@ impl WorkspaceStore {
         let existing_assignment =
             self.preserved_workspace_assignment(window_store, window_id, space);
 
-        let rule_override = rule_decision.management_override();
+        let rule_override = rule_decision.as_ref().and_then(AppRuleDecision::management_override);
         let admitted = window_store
             .record(window_id)
             .and_then(|record| record.is_admitted_with_rule_override(rule_override))
@@ -1026,145 +1041,41 @@ impl WorkspaceStore {
         }
         if !admitted {
             window_store.clear_rule_floating(window_id);
-            return Ok(if rule_override == Some(false) {
-                AppRuleResult::Unmanaged
+            return Ok(AppRuleResult::Rejected(if rule_override == Some(false) {
+                AppRuleRejection::ExplicitRule
             } else {
-                AppRuleResult::HeuristicRejected
-            });
+                AppRuleRejection::Heuristic
+            }));
         }
 
-        if let AppRuleDecision::Managed {
-            workspace,
+        let (workspace, floating, position, size, focus) =
+            rule_decision.map_or((None, false, None, None, false), |decision| {
+                (
+                    decision.workspace,
+                    decision.floating,
+                    decision.position,
+                    decision.size,
+                    decision.focus,
+                )
+            });
+        let workspace_id =
+            self.resolve_rule_workspace(space, workspace.as_ref(), existing_assignment)?;
+        if !self.ensure_window_assignment(window_store, window_id, WindowWorkspaceInfo {
+            space,
+            workspace_id,
+        }) {
+            error!("Failed to apply window workspace assignment");
+            return Err(WorkspaceError::AssignmentFailed);
+        }
+        let was_rule_floating = window_store.replace_rule_floating(window_id, floating);
+        Ok(AppRuleResult::Managed(AppRuleEffects {
+            workspace_id,
             floating,
             position,
             size,
             focus,
-            ..
-        } = rule_decision
-        {
-            let target_workspace_id = if let Some(ref ws_sel) = workspace {
-                let maybe_idx: Option<usize> = match ws_sel {
-                    WorkspaceSelector::Index(i) => Some(*i),
-                    WorkspaceSelector::Name(name) => {
-                        let workspaces = self.list_workspaces(space);
-                        match workspaces.iter().position(|(_, n)| n == name) {
-                            Some(idx) => Some(idx),
-                            None => {
-                                tracing::warn!(
-                                    "App rule references workspace name '{}' which could not be resolved for space {:?}; falling back to default workspace",
-                                    name,
-                                    space
-                                );
-                                None
-                            }
-                        }
-                    }
-                };
-
-                if let Some(workspace_idx) = maybe_idx {
-                    let len = self
-                        .workspaces_by_space
-                        .get(&space)
-                        .map(|v: &Vec<VirtualWorkspaceId>| v.len())
-                        .unwrap_or(0);
-                    if workspace_idx >= len {
-                        tracing::warn!(
-                            "App rule references non-existent workspace index {}, falling back to active workspace",
-                            workspace_idx
-                        );
-                        self.get_default_workspace(space)?
-                    } else {
-                        let workspaces = self.list_workspaces(space);
-                        if let Some((workspace_id, _)) = workspaces.get(workspace_idx) {
-                            *workspace_id
-                        } else {
-                            tracing::warn!(
-                                "App rule references invalid workspace index {}, falling back to active workspace",
-                                workspace_idx
-                            );
-                            self.get_default_workspace(space)?
-                        }
-                    }
-                } else if let Some(existing_assignment) = existing_assignment {
-                    existing_assignment.workspace_id
-                } else {
-                    self.get_default_workspace(space)?
-                }
-            } else {
-                if let Some(existing_assignment) = existing_assignment {
-                    existing_assignment.workspace_id
-                } else {
-                    self.get_default_workspace(space)?
-                }
-            };
-
-            if let Some(existing_assignment) = existing_assignment {
-                if !self.ensure_window_assignment(window_store, window_id, existing_assignment) {
-                    error!("Failed to preserve window workspace assignment from app rule");
-                    return Err(WorkspaceError::AssignmentFailed);
-                }
-                window_store.set_rule_floating(window_id, floating);
-                return Ok(AppRuleResult::Managed(AppRuleEffects {
-                    workspace_id: existing_assignment.workspace_id,
-                    floating,
-                    position,
-                    size,
-                    focus,
-                    prev_rule_decision,
-                }));
-            }
-
-            if self.assign_window_to_workspace(window_store, space, window_id, target_workspace_id)
-            {
-                window_store.set_rule_floating(window_id, floating);
-                return Ok(AppRuleResult::Managed(AppRuleEffects {
-                    workspace_id: target_workspace_id,
-                    floating,
-                    position,
-                    size,
-                    focus,
-                    prev_rule_decision,
-                }));
-            } else {
-                error!("Failed to assign window to workspace from app rule");
-            }
-        }
-
-        // No matching app rule: preserve the current workspace assignment if one
-        // already exists. Discovery/refresh passes must not silently fall back to
-        // the default workspace, or windows on non-default workspaces will appear
-        // to "reset" after sleep/display churn.
-        if let Some(existing_assignment) = existing_assignment {
-            if !self.ensure_window_assignment(window_store, window_id, existing_assignment) {
-                error!("Failed to preserve existing window workspace assignment");
-                return Err(WorkspaceError::AssignmentFailed);
-            }
-            window_store.clear_rule_floating(window_id);
-            return Ok(AppRuleResult::Managed(AppRuleEffects {
-                workspace_id: existing_assignment.workspace_id,
-                floating: false,
-                position: None,
-                size: None,
-                focus: false,
-                prev_rule_decision,
-            }));
-        }
-
-        let default_workspace_id = self.get_default_workspace(space)?;
-        if self.assign_window_to_workspace(window_store, space, window_id, default_workspace_id) {
-            window_store.clear_rule_floating(window_id);
-            Ok(AppRuleResult::Managed(AppRuleEffects {
-                workspace_id: default_workspace_id,
-                floating: false,
-                position: None,
-                size: None,
-                focus: false,
-                prev_rule_decision,
-            }))
-        } else {
-            error!("Failed to assign window to default workspace");
-            Err(WorkspaceError::AssignmentFailed)
-        }
+            was_rule_floating,
+        }))
     }
 
     #[cfg(test)]
@@ -1254,11 +1165,8 @@ mod tests {
     fn expect_managed(result: Result<AppRuleResult, WorkspaceError>) -> AppRuleEffects {
         match result {
             Ok(AppRuleResult::Managed(decision)) => decision,
-            Ok(AppRuleResult::Unmanaged) => {
-                panic!("App rule unexpectedly marked window as unmanaged")
-            }
-            Ok(AppRuleResult::HeuristicRejected) => {
-                panic!("Window was unexpectedly rejected by manageability heuristics")
+            Ok(AppRuleResult::Rejected(reason)) => {
+                panic!("Window was unexpectedly rejected: {reason:?}")
             }
             Err(e) => panic!("assign_window_with_app_info failed: {:?}", e),
         }
@@ -1616,7 +1524,10 @@ mod tests {
             None,
         );
 
-        assert!(matches!(result, Ok(AppRuleResult::Unmanaged)));
+        assert!(matches!(
+            result,
+            Ok(AppRuleResult::Rejected(AppRuleRejection::ExplicitRule))
+        ));
         assert_eq!(
             manager.workspace_for_window(&window_store, new_space, window),
             None
@@ -1855,179 +1766,63 @@ mod tests {
             // Floating by app_id
             AppWorkspaceRule {
                 app_id: Some("com.example.test".into()),
-                workspace: None,
                 floating: true,
-                position: None,
-                size: None,
-                focus: false,
                 manage: Some(true),
-                app_name: None,
-                title_regex: None,
-                title_substring: None,
-                ax_role: None,
-                ax_subrole: None,
+                ..Default::default()
             },
             // Match by app_name -> workspace 1
             AppWorkspaceRule {
-                app_id: None,
                 workspace: Some(WorkspaceSelector::Index(1)),
-                floating: false,
-                position: None,
-                size: None,
-                focus: false,
                 manage: Some(true),
                 app_name: Some("Calendar".into()),
-                title_regex: None,
-                title_substring: None,
-                ax_role: None,
-                ax_subrole: None,
+                ..Default::default()
             },
             // Title substring -> workspace 0
             AppWorkspaceRule {
                 app_id: Some("com.example.foo".into()),
                 workspace: Some(WorkspaceSelector::Index(0)),
-                floating: false,
-                position: None,
-                size: None,
-                focus: false,
                 manage: Some(true),
-                app_name: None,
-                title_regex: None,
                 title_substring: Some("Preferences".into()),
-                ax_role: None,
-                ax_subrole: None,
+                ..Default::default()
             },
             // Title regex -> workspace 2
             AppWorkspaceRule {
                 app_id: Some("com.example.foo".into()),
                 workspace: Some(WorkspaceSelector::Index(2)),
-                floating: false,
-                position: None,
-                size: None,
-                focus: false,
                 manage: Some(true),
-                app_name: None,
                 title_regex: Some(r"Dialog\s+\d+".into()),
-                title_substring: None,
-                ax_role: None,
-                ax_subrole: None,
+                ..Default::default()
             },
             // AX role + subrole floating
             AppWorkspaceRule {
                 app_id: Some("com.example.special".into()),
-                workspace: None,
                 floating: true,
-                position: None,
-                size: None,
-                focus: false,
                 manage: Some(true),
-                app_name: None,
-                title_regex: None,
-                title_substring: None,
                 ax_role: Some("AXWindow".into()),
                 ax_subrole: Some("AXDialog".into()),
+                ..Default::default()
             },
             // Workspace by name
             AppWorkspaceRule {
                 app_id: Some("com.example.name".into()),
                 workspace: Some(WorkspaceSelector::Name("coding".into())),
-                floating: false,
-                position: None,
-                size: None,
-                focus: false,
                 manage: Some(true),
-                app_name: None,
-                title_regex: None,
-                title_substring: None,
-                ax_role: None,
-                ax_subrole: None,
+                ..Default::default()
             },
-            // Specificity tie breaking generic vs substring (generic workspace 0, specific workspace 2)
-            AppWorkspaceRule {
-                app_id: Some("com.example.tie".into()),
-                workspace: Some(WorkspaceSelector::Index(0)),
-                floating: false,
-                position: None,
-                size: None,
-                focus: false,
-                manage: Some(true),
-                app_name: None,
-                title_regex: None,
-                title_substring: None,
-                ax_role: None,
-                ax_subrole: None,
-            },
-            AppWorkspaceRule {
-                app_id: Some("com.example.tie".into()),
-                workspace: Some(WorkspaceSelector::Index(2)),
-                floating: false,
-                position: None,
-                size: None,
-                focus: false,
-                manage: Some(true),
-                app_name: None,
-                title_regex: None,
-                title_substring: Some("Editor".into()),
-                ax_role: None,
-                ax_subrole: None,
-            },
-            // Reapplication: Bitwarden title becomes floating
-            AppWorkspaceRule {
-                app_id: Some("app.zen-browser.zen".into()),
-                workspace: None,
-                floating: true,
-                position: None,
-                size: None,
-                focus: false,
-                manage: Some(true),
-                app_name: None,
-                title_regex: None,
-                title_substring: Some("Bitwarden".into()),
-                ax_role: None,
-                ax_subrole: None,
-            },
+            // A title-specific rule can replace an existing assignment.
             AppWorkspaceRule {
                 app_id: Some("app.zen-browser.zen".into()),
                 workspace: Some(WorkspaceSelector::Index(2)),
-                floating: false,
-                position: None,
-                size: None,
-                focus: false,
                 manage: Some(true),
-                app_name: None,
-                title_regex: None,
-                title_substring: None,
-                ax_role: None,
-                ax_subrole: None,
-            },
-            // Workspace override when specific rule matches different workspace + floating
-            AppWorkspaceRule {
-                app_id: Some("app.zen-browser.zen".into()),
-                workspace: Some(WorkspaceSelector::Index(1)),
-                floating: false,
-                position: None,
-                size: None,
-                focus: false,
-                manage: Some(true),
-                app_name: None,
-                title_regex: None,
-                title_substring: None,
-                ax_role: None,
-                ax_subrole: None,
+                ..Default::default()
             },
             AppWorkspaceRule {
                 app_id: Some("app.zen-browser.zen".into()),
                 workspace: Some(WorkspaceSelector::Index(3)),
                 floating: true,
-                position: None,
-                size: None,
-                focus: false,
                 manage: Some(true),
-                app_name: None,
-                title_regex: None,
                 title_substring: Some("bitwarden".into()),
-                ax_role: None,
-                ax_subrole: None,
+                ..Default::default()
             },
         ];
 
@@ -2147,55 +1942,7 @@ mod tests {
             manager.list_workspaces(space1).iter().find(|(_, n)| n == "coding").unwrap().0;
         assert_eq!(ws_named, coding_ws);
 
-        // 6. Specificity tie-breaking (generic vs substring)
-        let w_tie = WindowId::new(60, 7);
-        let ws_tie = assign(
-            &mut manager,
-            &mut window_store,
-            w_tie,
-            space1,
-            Some("com.example.tie"),
-            None,
-            Some("Editor - Untitled"),
-            None,
-            None,
-        )
-        .workspace_id;
-        let expected_specific = manager.list_workspaces(space1).get(2).unwrap().0; // substring rule points to 2
-        assert_eq!(ws_tie, expected_specific);
-
-        // 7. Reapplication updates existing window to floating (Bitwarden title)
-        let w_bw = WindowId::new(70, 8);
-        let bw_initial_assignment = assign(
-            &mut manager,
-            &mut window_store,
-            w_bw,
-            space1,
-            Some("app.zen-browser.zen"),
-            None,
-            None,
-            None,
-            None,
-        );
-        assert!(!bw_initial_assignment.floating);
-        let bw_updated_assignment = assign(
-            &mut manager,
-            &mut window_store,
-            w_bw,
-            space1,
-            Some("app.zen-browser.zen"),
-            None,
-            Some("Bitwarden Login"),
-            None,
-            None,
-        );
-        assert_eq!(
-            bw_initial_assignment.workspace_id,
-            bw_updated_assignment.workspace_id
-        );
-        assert!(bw_updated_assignment.floating);
-
-        // 8. Workspace override + floating with specific substring on different space
+        // 6. Reapplication updates both workspace and floating state.
         let w_bw2 = WindowId::new(80, 9);
         let bw2_initial_assignment = assign(
             &mut manager,
@@ -2220,16 +1967,10 @@ mod tests {
             None,
             None,
         );
-        // The generic rule with workspace index 1 should apply first.
-        // When title matches, the specific rule (index 3, floating) should override.
         let expected_initial = manager.list_workspaces(space2).get(2).unwrap().0; // workspace index 1
-        let expected_updated = manager.list_workspaces(space2).get(3).unwrap().0; // workspace index 3
+        let expected_updated = manager.list_workspaces(space2).get(3).unwrap().0;
         assert_eq!(bw2_initial_assignment.workspace_id, expected_initial);
-        // Workspace may remain same depending on rule ordering; ensure floating toggled and workspace is one of the target candidates.
-        assert!(
-            bw2_updated_assignment.workspace_id == expected_initial
-                || bw2_updated_assignment.workspace_id == expected_updated
-        );
+        assert_eq!(bw2_updated_assignment.workspace_id, expected_updated);
         assert!(bw2_updated_assignment.floating);
     }
 

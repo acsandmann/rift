@@ -3,6 +3,7 @@ use regex::{Regex, RegexBuilder};
 use tracing::warn;
 
 use crate::actor::app::WindowId;
+use crate::common::collections::HashMap;
 use crate::common::config::{AppRulePosition, AppRuleSize, AppWorkspaceRule, WorkspaceSelector};
 use crate::model::VirtualWorkspaceId;
 use crate::sys::screen::SpaceId;
@@ -16,28 +17,18 @@ pub struct WindowRuleContext<'a> {
     pub ax_subrole: Option<&'a str>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum AppRuleDecision {
-    NoMatch,
-    Unmanaged,
-    Managed {
-        workspace: Option<WorkspaceSelector>,
-        floating: bool,
-        position: Option<AppRulePosition>,
-        size: Option<AppRuleSize>,
-        focus: bool,
-        force_manage: bool,
-    },
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AppRuleDecision {
+    pub manage: Option<bool>,
+    pub workspace: Option<WorkspaceSelector>,
+    pub floating: bool,
+    pub position: Option<AppRulePosition>,
+    pub size: Option<AppRuleSize>,
+    pub focus: bool,
 }
 
 impl AppRuleDecision {
-    pub(crate) fn management_override(&self) -> Option<bool> {
-        match self {
-            Self::Managed { force_manage: true, .. } => Some(true),
-            Self::Unmanaged => Some(false),
-            Self::NoMatch | Self::Managed { .. } => None,
-        }
-    }
+    pub(crate) fn management_override(&self) -> Option<bool> { self.manage }
 }
 
 /// Complete result of applying a managed app rule to workspace policy.
@@ -51,12 +42,12 @@ pub struct AppRuleEffects {
     pub position: Option<AppRulePosition>,
     pub size: Option<AppRuleSize>,
     pub focus: bool,
-    pub prev_rule_decision: bool,
+    pub was_rule_floating: bool,
 }
 
 impl AppRuleEffects {
     pub(crate) fn should_float(self, was_floating: bool) -> bool {
-        self.floating || (!self.prev_rule_decision && was_floating)
+        self.floating || (!self.was_rule_floating && was_floating)
     }
 
     pub(crate) fn floating_placement(
@@ -93,11 +84,13 @@ impl AppRuleEffects {
 #[derive(Debug, Clone, Copy)]
 pub enum AppRuleResult {
     Managed(AppRuleEffects),
-    /// A matching `manage = false` rule explicitly excluded the window.
-    Unmanaged,
-    /// No rule matched and Rift's normal manageability heuristic rejected the
-    /// window. The snapshot remains tracked and can become manageable later.
-    HeuristicRejected,
+    Rejected(AppRuleRejection),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppRuleRejection {
+    ExplicitRule,
+    Heuristic,
 }
 
 /// Follow-up integration work produced while applying a batch of app rules.
@@ -187,126 +180,165 @@ pub(crate) struct AppRuleWorkspaceFocus {
 
 #[derive(Debug, Clone)]
 struct CompiledRule {
-    rule: AppWorkspaceRule,
+    action: AppRuleDecision,
+    app_id: Option<String>,
+    app_name: Option<String>,
     title_regex: Option<Regex>,
+    title_substring: Option<String>,
+    ax_role: Option<String>,
+    ax_subrole: Option<String>,
+    specificity: usize,
+    index: usize,
 }
 
 /// Compiles and evaluates app policy without depending on workspaces, windows,
 /// the reactor, or the layout engine.
 #[derive(Debug, Clone, Default)]
 pub struct AppRuleEngine {
-    rules: Vec<CompiledRule>,
+    rules_by_app_id: HashMap<String, Vec<CompiledRule>>,
+    wildcard_rules: Vec<CompiledRule>,
 }
 
 impl AppRuleEngine {
     pub fn new(rules: &[AppWorkspaceRule]) -> Self {
-        let rules = rules
-            .iter()
-            .cloned()
-            .map(|rule| {
-                let title_regex =
-                    rule.title_regex.as_deref().filter(|value| !value.is_empty()).and_then(
-                        |value| {
-                            RegexBuilder::new(value)
-                            .case_insensitive(true)
-                            .build()
-                            .map_err(|error| {
-                                warn!(%error, pattern = value, "invalid title regex in app rule");
-                            })
-                            .ok()
-                        },
-                    );
-                CompiledRule { rule, title_regex }
-            })
-            .collect();
-        Self { rules }
-    }
-
-    pub fn evaluate(&self, context: WindowRuleContext<'_>) -> AppRuleDecision {
-        let best = self
-            .rules
-            .iter()
-            .enumerate()
-            .filter(|(_, rule)| rule.matches(context))
-            .max_by_key(|(index, rule)| (rule.specificity(), std::cmp::Reverse(*index)));
-        let Some((_, matched)) = best else {
-            return AppRuleDecision::NoMatch;
-        };
-        if matched.rule.manage == Some(false) {
-            AppRuleDecision::Unmanaged
-        } else {
-            AppRuleDecision::Managed {
-                workspace: matched.rule.workspace.clone(),
-                floating: matched.rule.floating,
-                position: matched.rule.position,
-                size: matched.rule.size,
-                focus: matched.rule.focus,
-                force_manage: matched.rule.manage == Some(true),
+        let mut engine = Self::default();
+        for (index, rule) in rules.iter().cloned().enumerate() {
+            let Some(rule) = CompiledRule::new(index, rule) else {
+                continue;
+            };
+            if let Some(app_id) = rule.app_id.clone() {
+                engine.rules_by_app_id.entry(app_id).or_default().push(rule);
+            } else {
+                engine.wildcard_rules.push(rule);
             }
         }
+        engine
+    }
+
+    pub fn evaluate(&self, context: WindowRuleContext<'_>) -> Option<AppRuleDecision> {
+        let app_id = context.app_bundle_id.map(str::to_ascii_lowercase);
+        let app_name = context.app_name.map(str::to_lowercase);
+        let title = context.window_title.map(str::to_lowercase);
+        self.wildcard_rules
+            .iter()
+            .chain(
+                app_id
+                    .as_ref()
+                    .and_then(|id| self.rules_by_app_id.get(id))
+                    .into_iter()
+                    .flatten(),
+            )
+            .filter(|rule| {
+                rule.matches(context, app_id.as_deref(), app_name.as_deref(), title.as_deref())
+            })
+            // More matcher fields win; configuration order is the deterministic tie-breaker.
+            .max_by_key(|rule| (rule.specificity, std::cmp::Reverse(rule.index)))
+            .map(|rule| rule.action.clone())
     }
 }
 
 impl CompiledRule {
-    fn matches(&self, context: WindowRuleContext<'_>) -> bool {
-        optional_eq_ignore_case(self.rule.app_id.as_deref(), context.app_bundle_id)
-            && optional_fuzzy_name(self.rule.app_name.as_deref(), context.app_name)
-            && optional_regex(
-                self.rule.title_regex.as_deref(),
-                self.title_regex.as_ref(),
-                context.window_title,
-            )
-            && optional_contains(self.rule.title_substring.as_deref(), context.window_title)
-            && optional_exact(self.rule.ax_role.as_deref(), context.ax_role)
-            && optional_exact(self.rule.ax_subrole.as_deref(), context.ax_subrole)
-    }
-
-    fn specificity(&self) -> usize {
-        [
-            self.rule.app_id.as_deref(),
-            self.rule.app_name.as_deref(),
-            self.rule.title_regex.as_deref(),
-            self.rule.title_substring.as_deref(),
-            self.rule.ax_role.as_deref(),
-            self.rule.ax_subrole.as_deref(),
+    fn new(index: usize, rule: AppWorkspaceRule) -> Option<Self> {
+        let AppWorkspaceRule {
+            app_id,
+            workspace,
+            floating,
+            position,
+            size,
+            focus,
+            manage,
+            app_name,
+            title_regex,
+            title_substring,
+            ax_role,
+            ax_subrole,
+        } = rule;
+        let app_id = nonempty(app_id).map(|value| value.to_ascii_lowercase());
+        let app_name = nonempty(app_name).map(|value| value.to_lowercase());
+        let title_substring = nonempty(title_substring).map(|value| value.to_lowercase());
+        let ax_role = nonempty(ax_role);
+        let ax_subrole = nonempty(ax_subrole);
+        let title_regex = match nonempty(title_regex) {
+            Some(pattern) => match RegexBuilder::new(&pattern).case_insensitive(true).build() {
+                Ok(regex) => Some(regex),
+                Err(error) => {
+                    warn!(%error, %pattern, index, "Ignoring app rule with invalid title regex");
+                    return None;
+                }
+            },
+            None => None,
+        };
+        let specificity = [
+            app_id.is_some(),
+            app_name.is_some(),
+            title_regex.is_some(),
+            title_substring.is_some(),
+            ax_role.is_some(),
+            ax_subrole.is_some(),
         ]
         .into_iter()
-        .flatten()
-        .filter(|value| !value.is_empty())
-        .count()
+        .filter(|present| *present)
+        .count();
+        if specificity == 0 {
+            warn!(index, "Ignoring app rule without a matcher");
+            return None;
+        }
+        Some(Self {
+            action: AppRuleDecision {
+                manage,
+                workspace,
+                floating,
+                position,
+                size,
+                focus,
+            },
+            app_id,
+            app_name,
+            title_regex,
+            title_substring,
+            ax_role,
+            ax_subrole,
+            specificity,
+            index,
+        })
+    }
+
+    fn matches(
+        &self,
+        context: WindowRuleContext<'_>,
+        app_id: Option<&str>,
+        app_name: Option<&str>,
+        title: Option<&str>,
+    ) -> bool {
+        self.app_id.as_deref().is_none_or(|rule| app_id == Some(rule))
+            && self.app_name.as_deref().is_none_or(|rule| {
+                app_name.is_some_and(|actual| rule.contains(actual) || actual.contains(rule))
+            })
+            && self.title_regex.as_ref().is_none_or(|regex| {
+                context.window_title.is_some_and(|actual| regex.is_match(actual))
+            })
+            && self
+                .title_substring
+                .as_deref()
+                .is_none_or(|rule| title.is_some_and(|actual| actual.contains(rule)))
+            && self.ax_role.as_deref().is_none_or(|rule| context.ax_role == Some(rule))
+            && self.ax_subrole.as_deref().is_none_or(|rule| context.ax_subrole == Some(rule))
     }
 }
 
-fn optional_eq_ignore_case(rule: Option<&str>, actual: Option<&str>) -> bool {
-    rule.is_none_or(|rule| actual.is_some_and(|actual| rule.eq_ignore_ascii_case(actual)))
-}
-fn optional_fuzzy_name(rule: Option<&str>, actual: Option<&str>) -> bool {
-    rule.is_none_or(|rule| {
-        actual.is_some_and(|actual| {
-            let (rule, actual) = (rule.to_lowercase(), actual.to_lowercase());
-            rule.contains(&actual) || actual.contains(&rule)
-        })
-    })
-}
-fn optional_regex(pattern: Option<&str>, regex: Option<&Regex>, actual: Option<&str>) -> bool {
-    pattern.is_none_or(|pattern| {
-        !pattern.is_empty()
-            && regex.is_some_and(|regex| actual.is_some_and(|actual| regex.is_match(actual)))
-    })
-}
-fn optional_contains(rule: Option<&str>, actual: Option<&str>) -> bool {
-    rule.is_none_or(|rule| {
-        !rule.is_empty()
-            && actual.is_some_and(|actual| actual.to_lowercase().contains(&rule.to_lowercase()))
-    })
-}
-fn optional_exact(rule: Option<&str>, actual: Option<&str>) -> bool {
-    rule.is_none_or(|rule| !rule.is_empty() && actual == Some(rule))
-}
+fn nonempty(value: Option<String>) -> Option<String> { value.filter(|value| !value.is_empty()) }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rule(app_id: &str, workspace: usize) -> AppWorkspaceRule {
+        AppWorkspaceRule {
+            app_id: Some(app_id.into()),
+            workspace: Some(WorkspaceSelector::Index(workspace)),
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn evaluates_without_workspace_or_layout_state() {
@@ -318,11 +350,8 @@ mod tests {
             size: Some(AppRuleSize { w: Some(640.0), h: Some(480.0) }),
             focus: true,
             manage: Some(true),
-            app_name: None,
             title_regex: Some("project \\d+".into()),
-            title_substring: None,
-            ax_role: None,
-            ax_subrole: None,
+            ..Default::default()
         };
         let engine = AppRuleEngine::new(&[rule]);
         assert_eq!(
@@ -331,14 +360,56 @@ mod tests {
                 window_title: Some("Project 42"),
                 ..Default::default()
             }),
-            AppRuleDecision::Managed {
+            Some(AppRuleDecision {
+                manage: Some(true),
                 workspace: None,
                 floating: true,
                 position: Some(AppRulePosition { x: 0.4, y: 0.7 }),
                 size: Some(AppRuleSize { w: Some(640.0), h: Some(480.0) }),
                 focus: true,
-                force_manage: true,
-            }
+            })
+        );
+    }
+
+    #[test]
+    fn specificity_wins_then_earlier_configuration_order_breaks_ties() {
+        let first = rule("com.example.Editor", 0);
+        let mut equally_specific = rule("com.example.Editor", 1);
+        equally_specific.title_substring = Some("project".into());
+        let mut most_specific = rule("com.example.Editor", 2);
+        most_specific.title_substring = Some("project".into());
+        most_specific.ax_role = Some("AXWindow".into());
+        let mut tied_later = most_specific.clone();
+        tied_later.workspace = Some(WorkspaceSelector::Index(3));
+        let engine = AppRuleEngine::new(&[first, equally_specific, most_specific, tied_later]);
+
+        let decision = engine
+            .evaluate(WindowRuleContext {
+                app_bundle_id: Some("com.example.editor"),
+                window_title: Some("Project notes"),
+                ax_role: Some("AXWindow"),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(decision.workspace, Some(WorkspaceSelector::Index(2)));
+    }
+
+    #[test]
+    fn invalid_or_empty_matchers_never_become_wildcards() {
+        let mut invalid_regex = rule("com.example.Editor", 1);
+        invalid_regex.title_regex = Some("[".into());
+        let mut empty = rule("", 2);
+        empty.app_id = Some(String::new());
+        let engine = AppRuleEngine::new(&[invalid_regex, empty]);
+
+        assert!(
+            engine
+                .evaluate(WindowRuleContext {
+                    app_bundle_id: Some("com.example.Editor"),
+                    window_title: Some("anything"),
+                    ..Default::default()
+                })
+                .is_none()
         );
     }
 }

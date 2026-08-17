@@ -4,6 +4,7 @@ use super::window;
 use crate::actor::app::{AppInfo, WindowId, WindowInfo, pid_t};
 use crate::actor::reactor::{LayoutEvent, WindowState, utils};
 use crate::common::collections::{BTreeMap, HashMap, HashSet};
+use crate::layout_engine::ResolvedWindow;
 use crate::model::virtual_workspace::WorkspaceError;
 use crate::model::{AppRuleEffects, AppRuleResult};
 use crate::sys::screen::SpaceId;
@@ -436,7 +437,7 @@ fn apply_assignment_result(
     let mut outcome = crate::actor::reactor::events::EventOutcome::default();
     let effects = match assign_result {
         Ok(AppRuleResult::Managed(effects)) => Some(effects),
-        Ok(AppRuleResult::Unmanaged | AppRuleResult::HeuristicRejected) => {
+        Ok(AppRuleResult::Rejected(_)) => {
             if utils::rejection_needs_removal(state, layout, wid, space) {
                 outcome = outcome.with_layout_event(LayoutEvent::WindowRemoved(wid));
             }
@@ -575,23 +576,26 @@ pub(crate) fn emit_layout_events(
             }
         }
 
-        let windows_with_titles: Vec<_> = windows_for_space
-            .iter()
-            .filter_map(|&wid| {
+        let windows: Vec<_> = windows_for_space
+            .into_iter()
+            .filter_map(|wid| {
+                let effects = resolved_app_rules.remove(&wid)?;
                 let window = state.windows.window(wid)?;
-                if !window.is_admitted() || !resolved_app_rules.contains_key(&wid) {
+                if !window.is_admitted() {
                     return None;
                 }
-                Some(window.layout_info(wid))
+                Some(ResolvedWindow {
+                    info: window.layout_info(wid),
+                    effects,
+                })
             })
             .collect();
 
         outcome = outcome.with_layout_event(LayoutEvent::WindowsOnScreenUpdated(
             space,
             pid,
-            windows_with_titles.clone(),
+            windows,
             app_info.clone(),
-            resolved_app_rules,
         ));
     }
 

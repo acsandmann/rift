@@ -218,7 +218,7 @@ impl LayoutEngine {
         title: Option<&str>,
         size: CGSize,
         app_id: Option<&str>,
-    ) {
+    ) -> bool {
         let fingerprint = WindowFingerprint {
             window_server_id: window_store
                 .window(window)
@@ -229,8 +229,9 @@ impl LayoutEngine {
             height: size.height,
             app_id: app_id.filter(|app_id| !app_id.trim().is_empty()).map(str::to_owned),
         };
-        self.reconcile_restored_window(window_store, space, window, &fingerprint);
+        let outcome = self.reconcile_restored_window(window_store, space, window, &fingerprint);
         self.persistence.record(window, fingerprint);
+        outcome.matched
     }
 
     pub(super) fn forget_persisted_window(&mut self, window: WindowId) {

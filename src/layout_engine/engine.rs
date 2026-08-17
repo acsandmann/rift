@@ -49,6 +49,12 @@ pub(crate) type WindowLayoutInfo = (
     Option<CGSize>,
 );
 
+#[derive(Debug, Clone)]
+pub struct ResolvedWindow {
+    pub(crate) info: WindowLayoutInfo,
+    pub(crate) effects: AppRuleEffects,
+}
+
 #[derive(Debug, Default)]
 struct WindowRemovalImpact {
     active_space: Option<SpaceId>,
@@ -57,13 +63,9 @@ struct WindowRemovalImpact {
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum LayoutEvent {
-    WindowsOnScreenUpdated(
-        SpaceId,
-        pid_t,
-        Vec<WindowLayoutInfo>,
-        Option<AppInfo>,
-        HashMap<WindowId, AppRuleEffects>,
-    ),
+    WindowsOnScreenUpdated(SpaceId, pid_t, Vec<ResolvedWindow>, Option<AppInfo>),
+    #[cfg(test)]
+    UnresolvedWindowsOnScreenUpdated(SpaceId, pid_t, Vec<WindowLayoutInfo>, Option<AppInfo>),
     /// The complete cross-space discovery batch for one application has been applied.
     WindowDiscoveryCompleted(pid_t, Option<String>, Vec<SpaceId>),
     AppClosed(pid_t),
@@ -88,7 +90,7 @@ impl LayoutEvent {
         windows: Vec<WindowLayoutInfo>,
         app: Option<AppInfo>,
     ) -> Self {
-        Self::WindowsOnScreenUpdated(space, pid, windows, app, HashMap::default())
+        Self::UnresolvedWindowsOnScreenUpdated(space, pid, windows, app)
     }
 }
 
@@ -1324,7 +1326,6 @@ impl LayoutEngine {
 
     fn apply_app_rule_outcome(
         &mut self,
-        window_store: &mut WindowStore,
         window: WindowId,
         space: SpaceId,
         was_floating: bool,
@@ -1352,13 +1353,6 @@ impl LayoutEngine {
         if !should_float {
             windows_by_workspace.entry(effects.workspace_id).or_default().push(window);
         }
-
-        self.virtual_workspace_manager_mut().set_last_rule_decision(
-            window_store,
-            space,
-            window,
-            effects.floating,
-        );
 
         effects.focus.then_some((window, effects.workspace_id))
     }
@@ -1438,13 +1432,51 @@ impl LayoutEngine {
                     self.workspace_layouts.ensure_active_for_workspace(space, size, id, tree);
                 }
             }
-            LayoutEvent::WindowsOnScreenUpdated(
-                space,
-                pid,
-                windows_with_titles,
-                app_info,
-                mut resolved_app_rules,
-            ) => {
+            #[cfg(test)]
+            LayoutEvent::UnresolvedWindowsOnScreenUpdated(space, pid, windows, app_info) => {
+                let (app_bundle_id, app_name) = app_info.as_ref().map_or((None, None), |app| {
+                    (app.bundle_id.as_deref(), app.localized_name.as_deref())
+                });
+                let resolved = windows
+                    .into_iter()
+                    .filter_map(|info| {
+                        let (wid, title, role, subrole, ..) = &info;
+                        if window_store.window(*wid).is_none() {
+                            let _ = self.observe_window_for_persistence(
+                                window_store,
+                                space,
+                                *wid,
+                                title.as_deref(),
+                                info.5,
+                                app_bundle_id,
+                            );
+                        }
+                        self.assign_window_with_app_info(
+                            window_store,
+                            *wid,
+                            space,
+                            app_bundle_id,
+                            app_name,
+                            title.as_deref(),
+                            role.as_deref(),
+                            subrole.as_deref(),
+                        )
+                        .ok()
+                        .and_then(|result| match result {
+                            AppRuleResult::Managed(effects) => {
+                                Some(ResolvedWindow { info, effects })
+                            }
+                            AppRuleResult::Rejected(_) => None,
+                        })
+                    })
+                    .collect();
+                return self.handle_event_inner(
+                    window_store,
+                    LayoutEvent::WindowsOnScreenUpdated(space, pid, resolved, app_info),
+                    app_rule_outcome,
+                );
+            }
+            LayoutEvent::WindowsOnScreenUpdated(space, pid, windows, _app_info) => {
                 self.debug_tree(space);
                 self.floating.clear_active_for_app(space, pid);
 
@@ -1453,32 +1485,19 @@ impl LayoutEngine {
                     Vec<WindowId>,
                 > = HashMap::default();
 
-                let (app_bundle_id, app_name) = match app_info.as_ref() {
-                    Some(info) => (info.bundle_id.as_deref(), info.localized_name.as_deref()),
-                    None => (None, None),
-                };
                 let mut focus_request = None;
 
-                for (
-                    wid,
-                    title_opt,
-                    ax_role_opt,
-                    ax_subrole_opt,
-                    is_resizable,
-                    size_hint,
-                    min_size,
-                    max_size,
-                ) in windows_with_titles
-                {
-                    self.observe_window_for_persistence(
-                        window_store,
-                        space,
+                for ResolvedWindow { info, effects } in windows {
+                    let (
                         wid,
-                        title_opt.as_deref(),
+                        _title_opt,
+                        _ax_role_opt,
+                        _ax_subrole_opt,
+                        is_resizable,
                         size_hint,
-                        app_bundle_id,
-                    );
-
+                        min_size,
+                        max_size,
+                    ) = info;
                     self.window_layout_constraints.insert(
                         wid,
                         WindowLayoutConstraints {
@@ -1493,58 +1512,12 @@ impl LayoutEngine {
                         .normalized(),
                     );
 
-                    let title_ref = title_opt.as_deref();
-                    let ax_role_ref = ax_role_opt.as_deref();
-                    let ax_subrole_ref = ax_subrole_opt.as_deref();
-
                     let was_floating = self.floating.is_floating(wid);
-                    let outcome = match resolved_app_rules.remove(&wid).map_or_else(
-                        || {
-                            self.assign_window_with_app_info(
-                                window_store,
-                                wid,
-                                space,
-                                app_bundle_id,
-                                app_name,
-                                title_ref,
-                                ax_role_ref,
-                                ax_subrole_ref,
-                            )
-                        },
-                        |effects| Ok(AppRuleResult::Managed(effects)),
-                    ) {
-                        Ok(outcome) => outcome,
-                        Err(_) => {
-                            match self.virtual_workspace_manager.auto_assign_window(
-                                window_store,
-                                wid,
-                                space,
-                            ) {
-                                Ok(ws) => AppRuleResult::Managed(AppRuleEffects {
-                                    workspace_id: ws,
-                                    floating: was_floating,
-                                    position: None,
-                                    size: None,
-                                    focus: false,
-                                    prev_rule_decision: false,
-                                }),
-                                Err(_) => {
-                                    warn!(
-                                        "Could not determine workspace for window {:?} on space {:?}; skipping assignment",
-                                        wid, space
-                                    );
-                                    continue;
-                                }
-                            }
-                        }
-                    };
-
                     if let Some(request) = self.apply_app_rule_outcome(
-                        window_store,
                         wid,
                         space,
                         was_floating,
-                        outcome,
+                        AppRuleResult::Managed(effects),
                         app_rule_outcome,
                         &mut windows_by_workspace,
                     ) {
@@ -1604,7 +1577,14 @@ impl LayoutEngine {
                         windows_ignored = ignored,
                         "Ignored unmatched persisted windows after application discovery"
                     );
+                    for space in discovered_spaces {
+                        self.broadcast_windows_changed(window_store, space);
+                    }
                 }
+                return EventResponse {
+                    changed: ignored > 0,
+                    ..EventResponse::default()
+                };
             }
             LayoutEvent::AppClosed(pid) => {
                 for (_, ws) in self.virtual_workspace_manager.workspaces.iter_mut() {
@@ -2761,13 +2741,37 @@ impl LayoutEngine {
         ax_role: Option<&str>,
         ax_subrole: Option<&str>,
     ) -> Result<AppRuleResult, crate::model::virtual_workspace::WorkspaceError> {
-        let decision = self.app_rules.evaluate(WindowRuleContext {
+        let observation = window_store.window(window_id).map(|window| {
+            (
+                window_title.unwrap_or(&window.info.title).to_owned(),
+                window.frame_monotonic.size,
+            )
+        });
+        let restored = if let Some((title, size)) = observation {
+            self.observe_window_for_persistence(
+                window_store,
+                space,
+                window_id,
+                Some(&title),
+                size,
+                app_bundle_id,
+            )
+        } else {
+            false
+        };
+        let mut decision = self.app_rules.evaluate(WindowRuleContext {
             app_bundle_id,
             app_name,
             window_title,
             ax_role,
             ax_subrole,
         });
+        // A persistence match is an explicit restoration of the user's previous
+        // workspace. App rules still control admission and other effects, but
+        // their default placement must not relocate the window during restore.
+        if restored && let Some(decision) = &mut decision {
+            decision.workspace = None;
+        }
         self.virtual_workspace_manager.apply_app_rule_decision(
             window_store,
             window_id,
