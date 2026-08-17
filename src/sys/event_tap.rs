@@ -4,8 +4,8 @@ use objc2_core_foundation::{
     CFMachPort, CFRetained, CFRunLoop, CFRunLoopMode, CFRunLoopSource, kCFRunLoopCommonModes,
 };
 use objc2_core_graphics::{
-    CGEvent, CGEventField, CGEventMask, CGEventTapLocation as CGTapLoc, CGEventTapOptions as CGTapOpt,
-    CGEventTapPlacement as CGTapPlace, CGEventTapProxy, CGEventType,
+    CGEvent, CGEventField, CGEventMask, CGEventTapLocation as CGTapLoc,
+    CGEventTapOptions as CGTapOpt, CGEventTapPlacement as CGTapPlace, CGEventTapProxy, CGEventType,
 };
 use tracing::{debug, error, warn};
 
