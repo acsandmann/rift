@@ -446,21 +446,23 @@ impl ScrollingLayoutSystem {
         }
     }
 
-    pub fn snap_to_nearest_column(&mut self, layout: LayoutId) {
+    /// Snap the strip and select a window in the column that lands on the
+    /// viewport anchor. The returned window is focused by the reactor.
+    pub fn snap_to_nearest_column(&mut self, layout: LayoutId) -> Option<WindowId> {
         let min_ratio = self.settings.min_column_width_ratio;
         let max_ratio = self.settings.max_column_width_ratio;
         let Some(state) = self.layout_state_mut(layout) else {
-            return;
+            return None;
         };
         let screen_width = f64::from_bits(state.last_screen_width.load(Ordering::Relaxed));
         let gap_x = f64::from_bits(state.last_gap_x.load(Ordering::Relaxed));
         if screen_width <= 0.0 {
-            return;
+            return None;
         }
         let (_widths, starts) =
             Self::column_widths_and_starts(state, screen_width, gap_x, min_ratio, max_ratio);
         if starts.is_empty() {
-            return;
+            return None;
         }
         let base_max_offset = starts.last().copied().unwrap_or(0.0);
         let center_offset_delta =
@@ -476,17 +478,34 @@ impl ScrollingLayoutSystem {
         };
         let current = f64::from_bits(state.scroll_offset_px.load(Ordering::Relaxed));
         let strip_offset = current - baseline;
-        let target = starts
+        let target_idx = starts
             .iter()
+            .enumerate()
             .min_by(|a, b| {
-                let da = (*a - strip_offset).abs();
-                let db = (*b - strip_offset).abs();
+                let da = (*a.1 - strip_offset).abs();
+                let db = (*b.1 - strip_offset).abs();
                 da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
             })
-            .copied()
-            .unwrap_or(0.0);
+            .map(|(idx, _)| idx)
+            .unwrap_or(0);
+        let target = starts[target_idx];
         let next = (baseline + target).clamp(min_offset, max_offset);
         state.scroll_offset_px.store(next.to_bits(), Ordering::Relaxed);
+
+        let preferred_row = state.selected_location().map_or(0, |(_, row)| row);
+        let target_window = state.columns[target_idx]
+            .windows
+            .get(preferred_row)
+            .or_else(|| state.columns[target_idx].windows.last())
+            .copied();
+        if let Some(window) = target_window {
+            state.selected = Some(window);
+            state.center_override_window = None;
+            state.pending_center_align.store(false, Ordering::Relaxed);
+            state.pending_align.store(false, Ordering::Relaxed);
+            state.pending_reveal_direction.store(0, Ordering::Relaxed);
+        }
+        target_window
     }
 
     pub fn center_selected_column(&mut self, layout: LayoutId) {
@@ -1796,6 +1815,27 @@ mod tests {
                 .scroll_offset_px
                 .load(Ordering::Relaxed),
         )
+    }
+
+    #[test]
+    fn snapping_selects_and_returns_the_window_in_the_landed_column() {
+        let mut system = ScrollingLayoutSystem::new(&ScrollingLayoutSettings::default());
+        let layout = system.create_layout();
+        let w1 = wid(1, 1);
+        let w2 = wid(1, 2);
+        let w3 = wid(1, 3);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+        system.add_window_after_selection(layout, w3);
+        let _ = render(&system, layout, screen(1000.0, 800.0), &GapSettings::default());
+
+        let state = system.layouts.get(layout).unwrap();
+        let step = f64::from_bits(state.last_step_px.load(Ordering::Relaxed));
+        state.scroll_offset_px.store((step * 0.7).to_bits(), Ordering::Relaxed);
+
+        assert_eq!(system.snap_to_nearest_column(layout), Some(w2));
+        assert_eq!(system.selected_window(layout), Some(w2));
+        assert!((scroll_offset(&system, layout) - step).abs() < 0.001);
     }
 
     fn setup_two_windows(
