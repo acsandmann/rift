@@ -182,7 +182,7 @@ impl AXUIElement {
         rect_from_axvalue(&ax_value)
     }
 
-    pub fn fast_frame(&self, wid: WindowId) -> Result<CGRect> {
+    pub fn fframe(&self, wid: WindowId) -> Result<CGRect> {
         let mut frame = CGRect::default();
         let result = unsafe { CGSGetWindowBounds(*G_CONNECTION, wid.idx.get(), &mut frame) };
         if result == 0 {
