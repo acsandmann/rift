@@ -112,7 +112,7 @@ type Receiver = actor::Receiver<Event>;
 use managers::RefreshQuarantineState;
 pub use query::ReactorQueryHandle;
 
-pub(crate) use crate::model::reactor::{AppState, WindowFilter, WindowState};
+pub(crate) use crate::model::reactor::{AppState, WindowState};
 pub use crate::model::reactor::{
     Command, DisplaySelector, DragSession, DragState, MenuState, MissionControlState,
     ReactorCommand, RefocusState, Requested, StaleCleanupState, WorkspaceSwitchOrigin,
@@ -567,7 +567,7 @@ impl Reactor {
         let mut windows_by_pid: HashMap<pid_t, Vec<WindowId>> = HashMap::default();
 
         for (wid, state) in self.state.windows.iter_windows() {
-            if !state.matches_filter(WindowFilter::Manageable) {
+            if !state.can_reconcile_admission() {
                 continue;
             }
             let Some(space) = self.best_space_for_window_id(wid) else {
@@ -888,7 +888,7 @@ impl Reactor {
             Event::WindowDestroyed(wid) => Some(wid.idx.get()),
             Event::WindowMinimized(wid) => Some(wid.idx.get()),
             Event::WindowDeminiaturized(wid) => Some(wid.idx.get()),
-            Event::MouseMoved(_) => None,
+            Event::MouseMoved(..) => None,
             Event::WindowServerDestroyed(wsid, ..) => Some(wsid.as_u32()),
             Event::WindowServerAppeared(wsid, ..) => Some(wsid.as_u32()),
             _ => None,
@@ -900,7 +900,7 @@ impl Reactor {
 
     fn log_event(&self, event: &Event) {
         match event {
-            Event::WindowFrameChanged(..) | Event::MouseUp | Event::MouseMoved(_) => {
+            Event::WindowFrameChanged(..) | Event::MouseUp | Event::MouseMoved(..) => {
                 trace!(?event, "Event")
             }
             _ => debug!(?event, "Event"),
@@ -1897,12 +1897,7 @@ impl Reactor {
                     }
                     self.process_windows_for_app_rules(window.pid, vec![window], app_info);
                 }
-                if self
-                    .state
-                    .windows
-                    .window(window)
-                    .is_some_and(|state| state.matches_filter(WindowFilter::EffectivelyManageable))
-                {
+                if self.state.windows.window(window).is_some_and(WindowState::is_admitted) {
                     self.send_layout_event(LayoutEvent::WindowAdded(space, window));
                 }
             }
@@ -2126,7 +2121,7 @@ impl Reactor {
 
     fn create_window_data(&self, window_id: WindowId) -> Option<RuntimeWindowData> {
         let window_state = self.state.windows.window(window_id)?;
-        if !window_state.matches_filter(WindowFilter::EffectivelyManageable) {
+        if !window_state.is_admitted() {
             return None;
         }
         let app = self.app_manager.apps.get(&window_id.pid)?;
@@ -2163,33 +2158,16 @@ impl Reactor {
             self.state.windows.track_window_server_info(*info);
 
             if let Some(wid) = self.state.windows.tracked_window_id(info.id) {
-                let (server_id, is_minimized, is_ax_standard, is_ax_root, was_manageable) =
-                    if let Some(window) = self.state.windows.window_mut(wid) {
-                        if info.layer == 0 {
-                            window.frame_monotonic = info.frame;
-                        }
-                        (
-                            window.info.sys_id,
-                            window.info.is_minimized,
-                            window.info.is_standard,
-                            window.info.is_root,
-                            window.matches_filter(WindowFilter::EffectivelyManageable),
-                        )
-                    } else {
-                        continue;
-                    };
-                let manageable = utils::compute_window_manageability(
-                    server_id,
-                    is_minimized,
-                    is_ax_standard,
-                    is_ax_root,
-                    |wsid| self.state.windows.get_window_server_info(wsid),
-                );
                 if let Some(window) = self.state.windows.window_mut(wid) {
-                    window.is_manageable = manageable;
+                    if info.layer == 0 {
+                        window.frame_monotonic = info.frame;
+                    }
+                } else {
+                    continue;
                 }
-
-                if was_manageable && !manageable {
+                if utils::refresh_heuristic(&mut self.state, wid)
+                    .is_some_and(|transition| transition.was_admitted && !transition.is_admitted)
+                {
                     self.send_layout_event(LayoutEvent::WindowRemoved(wid));
                 }
             }
@@ -2427,15 +2405,14 @@ impl Reactor {
             return;
         }
 
-        let (is_manageable, wsid) = match self.state.windows.window(window_id) {
-            Some(window_state) => (
-                window_state.matches_filter(WindowFilter::Manageable),
-                window_state.info.sys_id,
-            ),
+        let (is_rule_candidate, wsid) = match self.state.windows.window(window_id) {
+            Some(window_state) => {
+                (window_state.can_reconcile_admission(), window_state.info.sys_id)
+            }
             None => return,
         };
 
-        if !is_manageable {
+        if !is_rule_candidate {
             return;
         }
 
@@ -2653,10 +2630,17 @@ impl Reactor {
             inactive_windows,
             server_observations,
         };
+        // AX can replace a window's process-local identity while preserving its
+        // WindowServer id. Treat the currently tracked identity as visible for
+        // stale cleanup so the state survives long enough to be rekeyed below.
+        let mut cleanup_visible = known_visible.clone();
+        cleanup_visible.extend(new.iter().filter_map(|(_, info)| {
+            info.sys_id.and_then(|wsid| self.state.windows.tracked_window_id(wsid))
+        }));
         let (stale_windows, pending_refresh) = window_discovery::identify_stale_windows(
             &self.state,
             pid,
-            &known_visible,
+            &cleanup_visible,
             &stale_snapshot,
         );
         let mut outcome = match window_discovery::cleanup_stale_windows(
@@ -2977,12 +2961,7 @@ impl Reactor {
         // Treat this as the single gate for authoritative-space reconciliation:
         // if a window is not query-manageable, remove any stale layout/workspace
         // membership instead of re-assigning it from the WindowServer snapshot.
-        if !self
-            .state
-            .windows
-            .window(wid)
-            .is_some_and(|window| window.matches_filter(WindowFilter::EffectivelyManageable))
-        {
+        if !self.state.windows.window(wid).is_some_and(WindowState::is_admitted) {
             let changed_space = self.assigned_space_for_window_id(wid);
             self.send_layout_event(LayoutEvent::WindowRemoved(wid));
             return changed_space.is_some_and(|space| self.is_space_active(space));
@@ -3059,7 +3038,7 @@ impl Reactor {
         // Same invariant as `reassign_window_to_authoritative_space`: a visible
         // WindowServer id may be a transient fullscreen projection. Do not let
         // visibility alone add it back to the active layout.
-        if !window.matches_filter(WindowFilter::EffectivelyManageable) {
+        if !window.is_admitted() {
             self.send_layout_event(LayoutEvent::WindowRemoved(wid));
             return false;
         }
@@ -3257,10 +3236,7 @@ impl Reactor {
     }
 
     fn window_is_standard(&self, id: WindowId) -> bool {
-        self.state
-            .windows
-            .window(id)
-            .is_some_and(|window| window.matches_filter(WindowFilter::EffectivelyManageable))
+        self.state.windows.window(id).is_some_and(WindowState::is_admitted)
     }
 
     pub(crate) fn visible_spaces_for_layout(
@@ -3426,9 +3402,7 @@ impl Reactor {
             return false;
         };
 
-        if !window.matches_filter(WindowFilter::EffectivelyManageable)
-            && !self.layout_manager.layout_engine.is_window_floating(wid)
-        {
+        if !window.is_admitted() && !self.layout_manager.layout_engine.is_window_floating(wid) {
             return false;
         }
 
@@ -3518,7 +3492,7 @@ impl Reactor {
             let Some(state) = self.state.windows.window(wid) else {
                 continue;
             };
-            if !state.matches_filter(WindowFilter::Manageable) {
+            if !state.can_reconcile_admission() {
                 continue;
             }
             let Some(space) = self.best_space_for_window_id(wid) else {
@@ -3531,7 +3505,7 @@ impl Reactor {
             if !self.is_space_active(space) {
                 continue;
             }
-            let mut windows_needing_layout_refresh: Vec<WindowId> = Vec::new();
+            let mut windows_needing_layout_refresh = Vec::new();
 
             for wid in &wids {
                 let (was_assigned, was_floating, was_ignored) = {
@@ -3545,8 +3519,7 @@ impl Reactor {
                         self.state
                             .windows
                             .window(*wid)
-                            .map(|window| window.ignore_app_rule)
-                            .unwrap_or(false),
+                            .is_some_and(|window| window.manage_override == Some(false)),
                     )
                 };
                 let assign_result = {
@@ -3571,44 +3544,27 @@ impl Reactor {
 
                 match assign_result {
                     Ok(AppRuleResult::Managed(assignment)) => {
-                        if let Some(window) = self.state.windows.window_mut(*wid) {
-                            window.ignore_app_rule = false;
-                        }
-
                         let effective_floating =
                             assignment.floating || (!assignment.prev_rule_decision && was_floating);
                         let needs_layout_refresh =
                             !was_assigned || was_floating != effective_floating || was_ignored;
                         if needs_layout_refresh {
-                            windows_needing_layout_refresh.push(*wid);
+                            windows_needing_layout_refresh.push((*wid, assignment));
                         }
                     }
-                    Ok(AppRuleResult::Unmanaged) => {
-                        if let Some(window) = self.state.windows.window_mut(*wid) {
-                            window.ignore_app_rule = true;
-                        }
-
-                        let needs_removal = {
-                            let engine = &self.layout_manager.layout_engine;
-                            engine
-                                .virtual_workspace_manager()
-                                .workspace_for_window(&self.state.windows, space, *wid)
-                                .is_some()
-                                || engine.is_window_floating(*wid)
-                        };
-                        if needs_removal {
+                    Ok(AppRuleResult::Unmanaged | AppRuleResult::HeuristicRejected) => {
+                        if utils::rejection_needs_removal(
+                            &self.state,
+                            &self.layout_manager,
+                            *wid,
+                            space,
+                        ) {
                             self.send_layout_event(LayoutEvent::WindowRemoved(*wid));
                         }
                     }
                     Err(e) => {
                         warn!("Failed to assign window {:?} to workspace: {:?}", wid, e);
-                        if let Some(window) = self.state.windows.window_mut(*wid) {
-                            window.ignore_app_rule = false;
-                        }
-
-                        if !was_assigned || was_ignored {
-                            windows_needing_layout_refresh.push(*wid);
-                        }
+                        utils::clear_rule_admission(&mut self.state, *wid);
                     }
                 }
             }
@@ -3617,45 +3573,20 @@ impl Reactor {
                 continue;
             }
 
-            let windows_with_titles: Vec<(
-                WindowId,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                bool,
-                CGSize,
-                Option<CGSize>,
-                Option<CGSize>,
-            )> = windows_needing_layout_refresh
+            let windows_with_titles = windows_needing_layout_refresh
                 .iter()
-                .map(|&wid| {
-                    let window = self.state.windows.window(wid);
-                    let title_opt = window.map(|w| w.info.title.clone());
-                    let ax_role = window.and_then(|w| w.info.ax_role.clone());
-                    let ax_subrole = window.and_then(|w| w.info.ax_subrole.clone());
-                    let is_resizable = window.map_or(true, |w| w.info.is_resizable);
-                    let size_hint =
-                        window.map_or(CGSize::new(0.0, 0.0), |w| w.frame_monotonic.size);
-                    let min_size = window.and_then(|w| w.info.min_size);
-                    let max_size = window.and_then(|w| w.info.max_size);
-                    (
-                        wid,
-                        title_opt,
-                        ax_role,
-                        ax_subrole,
-                        is_resizable,
-                        size_hint,
-                        min_size,
-                        max_size,
-                    )
+                .filter_map(|&(wid, _)| {
+                    self.state.windows.window(wid).map(|window| window.layout_info(wid))
                 })
                 .collect();
+            let resolved_app_rules = windows_needing_layout_refresh.into_iter().collect();
 
             self.send_layout_event(LayoutEvent::WindowsOnScreenUpdated(
                 space,
                 pid,
                 windows_with_titles,
                 Some(app_info.clone()),
+                resolved_app_rules,
             ));
         }
     }
@@ -4169,8 +4100,7 @@ impl Reactor {
     fn activation_from_unmanageable_window(&self, pid: pid_t) -> Option<WindowServerId> {
         let (wsid, wid) = self.tracked_window_under_cursor()?;
         let window = self.state.windows.window(wid)?;
-        (wid.pid == pid && !window.matches_filter(WindowFilter::EffectivelyManageable))
-            .then_some(wsid)
+        (wid.pid == pid && !window.is_admitted()).then_some(wsid)
     }
 
     fn focus_untracked_window_under_cursor(&mut self) -> bool {
@@ -4299,7 +4229,7 @@ impl Reactor {
             LayoutEvent::WindowAdded(space, wid) => {
                 self.request_refocus_if_hidden(*space, *wid);
             }
-            LayoutEvent::WindowsOnScreenUpdated(space, _, windows, _) => {
+            LayoutEvent::WindowsOnScreenUpdated(space, _, windows, ..) => {
                 let hidden_exists = windows.iter().any(|(wid, _, _, _, _, _, _, _)| {
                     self.window_in_non_active_workspace(*space, *wid)
                 });

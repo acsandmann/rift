@@ -1,41 +1,55 @@
 use objc2_app_kit::NSNormalWindowLevel;
 
-use crate::sys::window_server::{WindowServerId, WindowServerInfo, window_is_sticky, window_level};
+use crate::actor::app::WindowId;
+use crate::actor::reactor::managers::LayoutManager;
+use crate::model::RiftState;
+use crate::sys::screen::SpaceId;
+use crate::sys::window_server::{window_is_sticky, window_level};
 
-/// Computes whether a window is manageable based on its properties and window server information.
-///
-/// A window is manageable if:
-/// - It is not minimized
-/// - Its layer is 0 (if info available)
-/// - It is not sticky
-/// - Its level is normal (if available)
-/// - It is AX standard and AX root
-pub fn compute_window_manageability(
-    window_server_id: Option<WindowServerId>,
-    is_minimized: bool,
-    is_ax_standard: bool,
-    is_ax_root: bool,
-    mut window_server_info: impl FnMut(WindowServerId) -> Option<WindowServerInfo>,
+pub(crate) struct AdmissionTransition {
+    pub(crate) was_admitted: bool,
+    pub(crate) is_admitted: bool,
+}
+
+pub(crate) fn refresh_heuristic(
+    state: &mut RiftState,
+    wid: WindowId,
+) -> Option<AdmissionTransition> {
+    let window = state.windows.window(wid)?;
+    let was_admitted = window.is_admitted();
+    let server_id = window.info.sys_id;
+    let manageable = !window.info.is_minimized
+        && window.info.is_standard
+        && window.info.is_root
+        && server_id.is_none_or(|wsid| {
+            !state.windows.get_window_server_info(wsid).is_some_and(|info| info.layer != 0)
+                && !window_is_sticky(wsid)
+                && window_level(wsid.0).is_none_or(|level| level == NSNormalWindowLevel)
+        });
+    let window = state.windows.window_mut(wid)?;
+    window.is_manageable = manageable;
+    Some(AdmissionTransition {
+        was_admitted,
+        is_admitted: window.is_admitted(),
+    })
+}
+
+pub(crate) fn rejection_needs_removal(
+    state: &RiftState,
+    layout: &LayoutManager,
+    wid: WindowId,
+    space: SpaceId,
 ) -> bool {
-    if is_minimized {
-        return false;
-    }
+    let engine = &layout.layout_engine;
+    engine
+        .virtual_workspace_manager()
+        .workspace_for_window(&state.windows, space, wid)
+        .is_some()
+        || engine.is_window_floating(wid)
+}
 
-    if let Some(wsid) = window_server_id {
-        if let Some(info) = window_server_info(wsid) {
-            if info.layer != 0 {
-                return false;
-            }
-        }
-        if window_is_sticky(wsid) {
-            return false;
-        }
-
-        if let Some(level) = window_level(wsid.0) {
-            if level != NSNormalWindowLevel {
-                return false;
-            }
-        }
+pub(crate) fn clear_rule_admission(state: &mut RiftState, wid: WindowId) {
+    if let Some(window) = state.windows.window_mut(wid) {
+        window.manage_override = None;
     }
-    is_ax_standard && is_ax_root
 }

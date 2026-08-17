@@ -151,7 +151,7 @@ fn full_save_records_floating_window_in_its_inactive_workspace() {
         },
         frame_monotonic: frame,
         is_manageable: true,
-        ignore_app_rule: false,
+        manage_override: None,
     });
     assert!(engine.virtual_workspace_manager.assign_window_to_workspace(
         &mut window_store,
@@ -212,7 +212,7 @@ fn full_save_removes_stale_floating_frame_from_a_tiled_window() {
         },
         frame_monotonic: frame,
         is_manageable: true,
-        ignore_app_rule: false,
+        manage_override: None,
     });
     assert!(engine.virtual_workspace_manager.assign_window_to_workspace(
         &mut window_store,
@@ -481,7 +481,7 @@ fn workspace_restore_keeps_current_windows_absent_from_snapshot() {
         },
         frame_monotonic: frame,
         is_manageable: true,
-        ignore_app_rule: false,
+        manage_override: None,
     };
     window_store.insert_window(live, live_state("Live", "com.example.live", 7101));
     window_store.insert_window(
@@ -594,7 +594,7 @@ fn scoped_restore_does_not_consume_same_id_live_window_on_another_space() {
         },
         frame_monotonic: frame,
         is_manageable: true,
-        ignore_app_rule: false,
+        manage_override: None,
     });
     assert!(engine.virtual_workspace_manager.assign_window_to_workspace(
         &mut window_store,
@@ -703,7 +703,7 @@ fn space_restore_uses_workspace_assignment_over_stale_window_server_space() {
         },
         frame_monotonic: frame,
         is_manageable: true,
-        ignore_app_rule: false,
+        manage_override: None,
     });
     assert!(engine.virtual_workspace_manager.assign_window_to_workspace(
         &mut window_store,
@@ -804,7 +804,7 @@ fn workspace_restore_does_not_consume_live_window_from_sibling_workspace() {
         },
         frame_monotonic: frame,
         is_manageable: true,
-        ignore_app_rule: false,
+        manage_override: None,
     });
     assert!(engine.virtual_workspace_manager.assign_window_to_workspace(
         &mut window_store,
@@ -893,7 +893,7 @@ fn workspace_restore_preserves_live_window_when_saved_process_local_id_is_reused
         },
         frame_monotonic: frame,
         is_manageable: true,
-        ignore_app_rule: false,
+        manage_override: None,
     });
     assert!(engine.virtual_workspace_manager.assign_window_to_workspace(
         &mut window_store,

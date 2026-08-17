@@ -1014,9 +1014,23 @@ impl WorkspaceStore {
         let existing_assignment =
             self.preserved_workspace_assignment(window_store, window_id, space);
 
-        if rule_decision == AppRuleDecision::Unmanaged {
+        let rule_override = rule_decision.management_override();
+        let admitted = window_store
+            .record(window_id)
+            .and_then(|record| record.is_admitted_with_rule_override(rule_override))
+            // Assignment tests and restore paths may not yet have an AX
+            // snapshot. In that case only an explicit rejection can deny it.
+            .unwrap_or(rule_override != Some(false));
+        if let Some(window) = window_store.window_mut(window_id) {
+            window.manage_override = rule_override;
+        }
+        if !admitted {
             window_store.clear_rule_floating(window_id);
-            return Ok(AppRuleResult::Unmanaged);
+            return Ok(if rule_override == Some(false) {
+                AppRuleResult::Unmanaged
+            } else {
+                AppRuleResult::HeuristicRejected
+            });
         }
 
         if let AppRuleDecision::Managed {
@@ -1025,6 +1039,7 @@ impl WorkspaceStore {
             position,
             size,
             focus,
+            ..
         } = rule_decision
         {
             let target_workspace_id = if let Some(ref ws_sel) = workspace {
@@ -1241,6 +1256,9 @@ mod tests {
             Ok(AppRuleResult::Managed(decision)) => decision,
             Ok(AppRuleResult::Unmanaged) => {
                 panic!("App rule unexpectedly marked window as unmanaged")
+            }
+            Ok(AppRuleResult::HeuristicRejected) => {
+                panic!("Window was unexpectedly rejected by manageability heuristics")
             }
             Err(e) => panic!("assign_window_with_app_info failed: {:?}", e),
         }
@@ -1563,7 +1581,7 @@ mod tests {
             position: None,
             size: None,
             focus: false,
-            manage: false,
+            manage: Some(false),
             app_name: None,
             title_regex: None,
             title_substring: None,
@@ -1842,7 +1860,7 @@ mod tests {
                 position: None,
                 size: None,
                 focus: false,
-                manage: true,
+                manage: Some(true),
                 app_name: None,
                 title_regex: None,
                 title_substring: None,
@@ -1857,7 +1875,7 @@ mod tests {
                 position: None,
                 size: None,
                 focus: false,
-                manage: true,
+                manage: Some(true),
                 app_name: Some("Calendar".into()),
                 title_regex: None,
                 title_substring: None,
@@ -1872,7 +1890,7 @@ mod tests {
                 position: None,
                 size: None,
                 focus: false,
-                manage: true,
+                manage: Some(true),
                 app_name: None,
                 title_regex: None,
                 title_substring: Some("Preferences".into()),
@@ -1887,7 +1905,7 @@ mod tests {
                 position: None,
                 size: None,
                 focus: false,
-                manage: true,
+                manage: Some(true),
                 app_name: None,
                 title_regex: Some(r"Dialog\s+\d+".into()),
                 title_substring: None,
@@ -1902,7 +1920,7 @@ mod tests {
                 position: None,
                 size: None,
                 focus: false,
-                manage: true,
+                manage: Some(true),
                 app_name: None,
                 title_regex: None,
                 title_substring: None,
@@ -1917,7 +1935,7 @@ mod tests {
                 position: None,
                 size: None,
                 focus: false,
-                manage: true,
+                manage: Some(true),
                 app_name: None,
                 title_regex: None,
                 title_substring: None,
@@ -1932,7 +1950,7 @@ mod tests {
                 position: None,
                 size: None,
                 focus: false,
-                manage: true,
+                manage: Some(true),
                 app_name: None,
                 title_regex: None,
                 title_substring: None,
@@ -1946,7 +1964,7 @@ mod tests {
                 position: None,
                 size: None,
                 focus: false,
-                manage: true,
+                manage: Some(true),
                 app_name: None,
                 title_regex: None,
                 title_substring: Some("Editor".into()),
@@ -1961,7 +1979,7 @@ mod tests {
                 position: None,
                 size: None,
                 focus: false,
-                manage: true,
+                manage: Some(true),
                 app_name: None,
                 title_regex: None,
                 title_substring: Some("Bitwarden".into()),
@@ -1975,7 +1993,7 @@ mod tests {
                 position: None,
                 size: None,
                 focus: false,
-                manage: true,
+                manage: Some(true),
                 app_name: None,
                 title_regex: None,
                 title_substring: None,
@@ -1990,7 +2008,7 @@ mod tests {
                 position: None,
                 size: None,
                 focus: false,
-                manage: true,
+                manage: Some(true),
                 app_name: None,
                 title_regex: None,
                 title_substring: None,
@@ -2004,7 +2022,7 @@ mod tests {
                 position: None,
                 size: None,
                 focus: false,
-                manage: true,
+                manage: Some(true),
                 app_name: None,
                 title_regex: None,
                 title_substring: Some("bitwarden".into()),

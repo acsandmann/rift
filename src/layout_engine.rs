@@ -5,6 +5,7 @@ pub mod systems;
 pub mod utils;
 mod workspaces;
 
+pub(crate) use engine::WindowLayoutInfo;
 pub use engine::{
     EventResponse, LayoutCommand, LayoutEngine, LayoutEvent, LayoutEventOutcome, RestoreReport,
     RestoreRequest, RestoreScope, RestoreSource, RestoreWarning,

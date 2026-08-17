@@ -26,7 +26,18 @@ pub enum AppRuleDecision {
         position: Option<AppRulePosition>,
         size: Option<AppRuleSize>,
         focus: bool,
+        force_manage: bool,
     },
+}
+
+impl AppRuleDecision {
+    pub(crate) fn management_override(&self) -> Option<bool> {
+        match self {
+            Self::Managed { force_manage: true, .. } => Some(true),
+            Self::Unmanaged => Some(false),
+            Self::NoMatch | Self::Managed { .. } => None,
+        }
+    }
 }
 
 /// Complete result of applying a managed app rule to workspace policy.
@@ -82,7 +93,11 @@ impl AppRuleEffects {
 #[derive(Debug, Clone, Copy)]
 pub enum AppRuleResult {
     Managed(AppRuleEffects),
+    /// A matching `manage = false` rule explicitly excluded the window.
     Unmanaged,
+    /// No rule matched and Rift's normal manageability heuristic rejected the
+    /// window. The snapshot remains tracked and can become manageable later.
+    HeuristicRejected,
 }
 
 /// Follow-up integration work produced while applying a batch of app rules.
@@ -217,7 +232,7 @@ impl AppRuleEngine {
         let Some((_, matched)) = best else {
             return AppRuleDecision::NoMatch;
         };
-        if !matched.rule.manage {
+        if matched.rule.manage == Some(false) {
             AppRuleDecision::Unmanaged
         } else {
             AppRuleDecision::Managed {
@@ -226,6 +241,7 @@ impl AppRuleEngine {
                 position: matched.rule.position,
                 size: matched.rule.size,
                 focus: matched.rule.focus,
+                force_manage: matched.rule.manage == Some(true),
             }
         }
     }
@@ -301,7 +317,7 @@ mod tests {
             position: Some(AppRulePosition { x: 0.4, y: 0.7 }),
             size: Some(AppRuleSize { w: Some(640.0), h: Some(480.0) }),
             focus: true,
-            manage: true,
+            manage: Some(true),
             app_name: None,
             title_regex: Some("project \\d+".into()),
             title_substring: None,
@@ -321,6 +337,7 @@ mod tests {
                 position: Some(AppRulePosition { x: 0.4, y: 0.7 }),
                 size: Some(AppRuleSize { w: Some(640.0), h: Some(480.0) }),
                 focus: true,
+                force_manage: true,
             }
         );
     }

@@ -38,6 +38,17 @@ pub struct GroupContainerInfo {
     pub window_ids: Vec<crate::actor::app::WindowId>,
 }
 
+pub(crate) type WindowLayoutInfo = (
+    WindowId,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    bool,
+    CGSize,
+    Option<CGSize>,
+    Option<CGSize>,
+);
+
 #[derive(Debug, Default)]
 struct WindowRemovalImpact {
     active_space: Option<SpaceId>,
@@ -49,17 +60,9 @@ pub enum LayoutEvent {
     WindowsOnScreenUpdated(
         SpaceId,
         pid_t,
-        Vec<(
-            WindowId,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            bool,
-            CGSize,
-            Option<CGSize>,
-            Option<CGSize>,
-        )>,
+        Vec<WindowLayoutInfo>,
         Option<AppInfo>,
+        HashMap<WindowId, AppRuleEffects>,
     ),
     /// The complete cross-space discovery batch for one application has been applied.
     WindowDiscoveryCompleted(pid_t, Option<String>, Vec<SpaceId>),
@@ -75,6 +78,18 @@ pub enum LayoutEvent {
         screens: Vec<(SpaceId, CGRect, Option<String>)>,
     },
     SpaceExposed(SpaceId, CGSize),
+}
+
+#[cfg(test)]
+impl LayoutEvent {
+    fn windows_on_screen_updated(
+        space: SpaceId,
+        pid: pid_t,
+        windows: Vec<WindowLayoutInfo>,
+        app: Option<AppInfo>,
+    ) -> Self {
+        Self::WindowsOnScreenUpdated(space, pid, windows, app, HashMap::default())
+    }
 }
 
 #[must_use]
@@ -1423,7 +1438,13 @@ impl LayoutEngine {
                     self.workspace_layouts.ensure_active_for_workspace(space, size, id, tree);
                 }
             }
-            LayoutEvent::WindowsOnScreenUpdated(space, pid, windows_with_titles, app_info) => {
+            LayoutEvent::WindowsOnScreenUpdated(
+                space,
+                pid,
+                windows_with_titles,
+                app_info,
+                mut resolved_app_rules,
+            ) => {
                 self.debug_tree(space);
                 self.floating.clear_active_for_app(space, pid);
 
@@ -1477,15 +1498,20 @@ impl LayoutEngine {
                     let ax_subrole_ref = ax_subrole_opt.as_deref();
 
                     let was_floating = self.floating.is_floating(wid);
-                    let outcome = match self.assign_window_with_app_info(
-                        window_store,
-                        wid,
-                        space,
-                        app_bundle_id,
-                        app_name,
-                        title_ref,
-                        ax_role_ref,
-                        ax_subrole_ref,
+                    let outcome = match resolved_app_rules.remove(&wid).map_or_else(
+                        || {
+                            self.assign_window_with_app_info(
+                                window_store,
+                                wid,
+                                space,
+                                app_bundle_id,
+                                app_name,
+                                title_ref,
+                                ax_role_ref,
+                                ax_subrole_ref,
+                            )
+                        },
+                        |effects| Ok(AppRuleResult::Managed(effects)),
                     ) {
                         Ok(outcome) => outcome,
                         Err(_) => {
@@ -3209,7 +3235,7 @@ mod tests {
             position: Some(AppRulePosition { x: 0.4, y: 0.7 }),
             size: Some(AppRuleSize { w: Some(640.0), h: Some(480.0) }),
             focus: true,
-            manage: true,
+            manage: Some(true),
             app_name: None,
             title_regex: None,
             title_substring: None,
@@ -3225,7 +3251,7 @@ mod tests {
 
         let layout_outcome = engine.handle_event(
             &mut window_store,
-            LayoutEvent::WindowsOnScreenUpdated(
+            LayoutEvent::windows_on_screen_updated(
                 space,
                 window.pid,
                 vec![(
@@ -3293,7 +3319,7 @@ mod tests {
             position: None,
             size: Some(AppRuleSize { w: Some(234.0), h: None }),
             focus: false,
-            manage: true,
+            manage: Some(true),
             app_name: None,
             title_regex: None,
             title_substring: None,
@@ -3311,7 +3337,7 @@ mod tests {
             engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen.size));
         let layout_outcome = engine.handle_event(
             &mut window_store,
-            LayoutEvent::WindowsOnScreenUpdated(
+            LayoutEvent::windows_on_screen_updated(
                 space,
                 window.pid,
                 vec![(
@@ -3391,7 +3417,7 @@ mod tests {
         );
         let _ = engine.handle_event(
             &mut window_store,
-            LayoutEvent::WindowsOnScreenUpdated(
+            LayoutEvent::windows_on_screen_updated(
                 space_a,
                 1,
                 vec![window_info(window_a), window_info(window_b)],
@@ -3421,7 +3447,7 @@ mod tests {
         );
         let _ = engine.handle_event(
             &mut window_store,
-            LayoutEvent::WindowsOnScreenUpdated(space_b, 2, vec![window_info(window_c)], None),
+            LayoutEvent::windows_on_screen_updated(space_b, 2, vec![window_info(window_c)], None),
         );
 
         let after_other_space_sync = engine.calculate_layout(
@@ -3452,7 +3478,7 @@ mod tests {
             engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen.size));
         let _ = engine.handle_event(
             &mut window_store,
-            LayoutEvent::WindowsOnScreenUpdated(space, pid, vec![window_info(wid)], None),
+            LayoutEvent::windows_on_screen_updated(space, pid, vec![window_info(wid)], None),
         );
 
         let assigned_workspace = engine
@@ -3507,7 +3533,7 @@ mod tests {
         );
         let _ = engine.handle_event(
             &mut window_store,
-            LayoutEvent::WindowsOnScreenUpdated(source_space, pid, vec![window_info(wid)], None),
+            LayoutEvent::windows_on_screen_updated(source_space, pid, vec![window_info(wid)], None),
         );
 
         let source_workspace = engine
@@ -3742,7 +3768,7 @@ mod tests {
             engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen.size));
         let _ = engine.handle_event(
             &mut window_store,
-            LayoutEvent::WindowsOnScreenUpdated(
+            LayoutEvent::windows_on_screen_updated(
                 space,
                 pid,
                 vec![
@@ -3855,7 +3881,7 @@ mod tests {
             engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen.size));
         let _ = engine.handle_event(
             &mut window_store,
-            LayoutEvent::WindowsOnScreenUpdated(space, pid, windows.clone(), None),
+            LayoutEvent::windows_on_screen_updated(space, pid, windows.clone(), None),
         );
         let _ = engine.handle_event(
             &mut window_store,
@@ -3892,7 +3918,7 @@ mod tests {
 
         let _ = engine.handle_event(
             &mut window_store,
-            LayoutEvent::WindowsOnScreenUpdated(space, pid, windows, None),
+            LayoutEvent::windows_on_screen_updated(space, pid, windows, None),
         );
 
         assert_eq!(
@@ -3934,7 +3960,7 @@ mod tests {
             engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen.size));
         let _ = engine.handle_event(
             &mut window_store,
-            LayoutEvent::WindowsOnScreenUpdated(space, pid, vec![info(w1), info(w2)], None),
+            LayoutEvent::windows_on_screen_updated(space, pid, vec![info(w1), info(w2)], None),
         );
         let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowFocused(space, w1));
         let _ = engine.handle_command(
@@ -3958,7 +3984,7 @@ mod tests {
         // Simulate a discovery snapshot that temporarily omitted w2.
         let _ = engine.handle_event(
             &mut window_store,
-            LayoutEvent::WindowsOnScreenUpdated(space, pid, vec![info(w1)], None),
+            LayoutEvent::windows_on_screen_updated(space, pid, vec![info(w1)], None),
         );
 
         assert_eq!(
@@ -4008,7 +4034,7 @@ mod tests {
         );
         let _ = engine.handle_event(
             &mut window_store,
-            LayoutEvent::WindowsOnScreenUpdated(space_a, a1.pid, vec![info(a1), info(a2)], None),
+            LayoutEvent::windows_on_screen_updated(space_a, a1.pid, vec![info(a1), info(a2)], None),
         );
         let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowFocused(space_a, a1));
         let _ = engine.handle_command(
@@ -4031,7 +4057,7 @@ mod tests {
 
         let _ = engine.handle_event(
             &mut window_store,
-            LayoutEvent::WindowsOnScreenUpdated(space_b, b1.pid, vec![info(b1)], None),
+            LayoutEvent::windows_on_screen_updated(space_b, b1.pid, vec![info(b1)], None),
         );
         let _ = window_store.remove_window_assignment(b1);
         let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowRemoved(b1));
@@ -4077,7 +4103,7 @@ mod tests {
             engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen.size));
         let _ = engine.handle_event(
             &mut window_store,
-            LayoutEvent::WindowsOnScreenUpdated(
+            LayoutEvent::windows_on_screen_updated(
                 space,
                 pid,
                 vec![info(w1), info(w2), info(w3)],
@@ -4161,7 +4187,7 @@ mod tests {
             engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen.size));
         let _ = engine.handle_event(
             &mut window_store,
-            LayoutEvent::WindowsOnScreenUpdated(space, pid, windows, None),
+            LayoutEvent::windows_on_screen_updated(space, pid, windows, None),
         );
         let _ = engine.handle_event(
             &mut window_store,
@@ -4217,7 +4243,7 @@ mod tests {
             engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen.size));
         let _ = engine.handle_event(
             &mut window_store,
-            LayoutEvent::WindowsOnScreenUpdated(
+            LayoutEvent::windows_on_screen_updated(
                 space,
                 pid,
                 vec![(
@@ -4271,7 +4297,7 @@ mod tests {
             engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen.size));
         let _ = engine.handle_event(
             &mut window_store,
-            LayoutEvent::WindowsOnScreenUpdated(
+            LayoutEvent::windows_on_screen_updated(
                 space,
                 pid,
                 vec![
@@ -4351,7 +4377,7 @@ mod tests {
             engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen.size));
         let _ = engine.handle_event(
             &mut window_store,
-            LayoutEvent::WindowsOnScreenUpdated(
+            LayoutEvent::windows_on_screen_updated(
                 space,
                 pid,
                 vec![(
@@ -4433,7 +4459,7 @@ mod tests {
             engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen.size));
         let _ = engine.handle_event(
             &mut window_store,
-            LayoutEvent::WindowsOnScreenUpdated(
+            LayoutEvent::windows_on_screen_updated(
                 space,
                 pid,
                 vec![(

@@ -27,9 +27,7 @@ use crate::common::collections::HashMap;
 use crate::model::tx_store::WindowTxStore;
 use crate::sys::app::NSRunningApplicationExt;
 pub use crate::sys::app::{AppInfo, WindowInfo, pid_t};
-use crate::sys::axuielement::{
-    AX_STANDARD_WINDOW_SUBROLE, AX_WINDOW_ROLE, AXUIElement, Error as AxError,
-};
+use crate::sys::axuielement::{AX_STANDARD_WINDOW_SUBROLE, AXUIElement, Error as AxError};
 use crate::sys::enhanced_ui::EnhancedUi;
 use crate::sys::event;
 use crate::sys::executor::Executor;
@@ -409,6 +407,7 @@ struct State {
 
 struct AppWindowState {
     pub elem: AXUIElement,
+    notifications_registered: bool,
     last_seen_txid: TransactionId,
     hidden_by_app: bool,
     window_server_id: Option<WindowServerId>,
@@ -1626,14 +1625,17 @@ impl State {
             return None;
         }
 
-        if !self.register_window_notifications(&elem, wid) {
-            return None;
-        }
+        // Some applications expose real WindowServer-backed windows through a
+        // non-AXWindow element (for example Emacs reports AXTextField). Keep
+        // those elements registered even when per-window AX notifications are
+        // unavailable; app-level discovery remains the lifecycle fallback.
+        let notifications_registered = self.register_window_notifications(&elem, wid);
         let hidden_by_app = self.is_hidden;
         let last_seen_txid = self.txid_from_store(window_server_id).unwrap_or_default();
 
         let old = self.windows.insert(wid, AppWindowState {
             elem: elem.clone(),
+            notifications_registered,
             last_seen_txid,
             hidden_by_app,
             window_server_id,
@@ -1650,10 +1652,7 @@ impl State {
     }
 
     fn register_window_notifications(&self, elem: &AXUIElement, wid: WindowId) -> bool {
-        match elem.role() {
-            Ok(role) if role == AX_WINDOW_ROLE => (),
-            _ => return false,
-        }
+        let mut registered_all = true;
         for &(kind, notif) in WINDOW_NOTIFICATIONS {
             let res = self.observer.add_notification_with_data(
                 elem,
@@ -1667,16 +1666,22 @@ impl State {
                 );
                 if !is_already_registered {
                     trace!("Watching failed with error {err:?} on window {elem:#?}");
-                    return false;
+                    registered_all = false;
                 }
             }
         }
-        true
+        registered_all
     }
 
     fn rebind_window_element(&mut self, wid: WindowId, elem: AXUIElement, info: &WindowInfo) {
-        let Some((old_elem, was_animating)) =
-            self.windows.get(&wid).map(|window| (window.elem.clone(), window.is_animating))
+        let Some((old_elem, was_animating, old_notifications_registered)) =
+            self.windows.get(&wid).map(|window| {
+                (
+                    window.elem.clone(),
+                    window.is_animating,
+                    window.notifications_registered,
+                )
+            })
         else {
             return;
         };
@@ -1689,7 +1694,8 @@ impl State {
         // context in that case, so a late notification remains memory-safe and its
         // encoded wid still resolves to this logical window.
         self.remove_window_notifications(&old_elem);
-        if !self.register_window_notifications(&elem, wid) {
+        let notifications_registered = self.register_window_notifications(&elem, wid);
+        if !notifications_registered && old_notifications_registered {
             // Keep the last usable binding and restore its notifications when the
             // replacement cannot yet be observed. A later AXWindows refresh retries.
             self.remove_window_notifications(&elem);
@@ -1704,6 +1710,7 @@ impl State {
         self.elem_to_wid.insert(elem.clone(), wid);
         if let Some(window) = self.windows.get_mut(&wid) {
             window.elem = elem;
+            window.notifications_registered = notifications_registered;
             window.window_server_id = info.sys_id.or(window.window_server_id);
             window.title = info.title.clone();
         }

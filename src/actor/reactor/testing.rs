@@ -233,7 +233,7 @@ impl Reactor {
             },
             frame_monotonic: frame,
             is_manageable,
-            ignore_app_rule: false,
+            manage_override: None,
         });
     }
 }

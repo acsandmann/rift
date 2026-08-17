@@ -63,12 +63,11 @@ impl WindowRecord {
         self.pending_operation.and_then(|operation| operation.requested_frame)
     }
 
-    pub fn is_manageable(&self) -> bool {
-        self.state.as_ref().is_some_and(|state| state.is_manageable)
-    }
-
-    pub fn is_effectively_manageable(&self) -> bool {
-        self.state.as_ref().is_some_and(WindowState::is_effectively_manageable)
+    pub(crate) fn is_admitted_with_rule_override(
+        &self,
+        rule_override: Option<bool>,
+    ) -> Option<bool> {
+        self.state.as_ref().map(|state| state.is_admitted_with_override(rule_override))
     }
 
     pub fn window_server_id(&self) -> Option<WindowServerId> { self.window_server_id }

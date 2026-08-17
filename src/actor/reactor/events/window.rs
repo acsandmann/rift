@@ -40,15 +40,7 @@ pub fn handle_window_created(
         state.windows.track_window_server_info(info);
     }
 
-    let mut window_state: WindowState = window.into();
-    let is_manageable = utils::compute_window_manageability(
-        window_state.info.sys_id,
-        window_state.info.is_minimized,
-        window_state.info.is_standard,
-        window_state.info.is_root,
-        |wsid| state.windows.get_window_server_info(wsid),
-    );
-    window_state.is_manageable = is_manageable;
+    let window_state: WindowState = window.into();
     if let Some(wsid) = window_state.info.sys_id {
         transactions.store_txid(
             wsid,
@@ -58,13 +50,16 @@ pub fn handle_window_created(
     }
 
     state.windows.insert_window(wid, window_state);
+    let _ = utils::refresh_heuristic(state, wid);
 
     let outcome = EventOutcome::window_membership_changed(false, true);
-    Ok(if is_manageable {
-        outcome.with_created_window_finalization(wid)
-    } else {
-        outcome
-    })
+    Ok(
+        if state.windows.window(wid).is_some_and(WindowState::can_reconcile_admission) {
+            outcome.with_created_window_finalization(wid)
+        } else {
+            outcome
+        },
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -127,7 +122,6 @@ pub fn handle_window_minimized(
             return Ok(crate::actor::reactor::events::EventOutcome::no_change());
         }
         window.info.is_minimized = true;
-        window.is_manageable = false;
         window.info.sys_id
     } else {
         debug!(?wid, "Received WindowMinimized for unknown window - ignoring");
@@ -137,6 +131,7 @@ pub fn handle_window_minimized(
         state.windows.mark_window_hidden(ws_id);
     }
     state.windows.set_visibility(wid, WindowVisibility::Minimized);
+    let _ = utils::refresh_heuristic(state, wid);
     Ok(
         crate::actor::reactor::events::EventOutcome::window_membership_changed(false, false)
             .with_layout_event(LayoutEvent::WindowRemoved(wid)),
@@ -154,13 +149,12 @@ pub fn handle_window_deminiaturized(
     payload: WindowDeminiaturizedPayload,
 ) -> anyhow::Result<crate::actor::reactor::events::EventOutcome> {
     let WindowDeminiaturizedPayload { window: wid, active_space } = payload;
-    let (server_id, is_ax_standard, is_ax_root) = match state.windows.window_mut(wid) {
+    match state.windows.window_mut(wid) {
         Some(window) => {
             if !window.info.is_minimized {
                 return Ok(crate::actor::reactor::events::EventOutcome::no_change());
             }
             window.info.is_minimized = false;
-            (window.info.sys_id, window.info.is_standard, window.info.is_root)
         }
         None => {
             debug!(
@@ -169,18 +163,14 @@ pub fn handle_window_deminiaturized(
             );
             return Ok(crate::actor::reactor::events::EventOutcome::no_change());
         }
-    };
-    let is_manageable =
-        utils::compute_window_manageability(server_id, false, is_ax_standard, is_ax_root, |wsid| {
-            state.windows.get_window_server_info(wsid)
-        });
-    if let Some(window) = state.windows.window_mut(wid) {
-        window.is_manageable = is_manageable;
     }
+    let _ = utils::refresh_heuristic(state, wid);
     state.windows.set_visibility(wid, WindowVisibility::Visible);
 
     let mut outcome = crate::actor::reactor::events::EventOutcome::no_change();
-    if is_manageable && let Some(space) = active_space {
+    if state.windows.window(wid).is_some_and(WindowState::is_admitted)
+        && let Some(space) = active_space
+    {
         outcome =
             crate::actor::reactor::events::EventOutcome::window_membership_changed(false, false)
                 .with_layout_event(LayoutEvent::WindowAdded(space, wid));

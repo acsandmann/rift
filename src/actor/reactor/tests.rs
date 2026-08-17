@@ -3607,7 +3607,7 @@ fn fullscreen_startup_fixture(
             position: None,
             size: None,
             focus: false,
-            manage: true,
+            manage: Some(true),
             app_name: None,
             title_regex: None,
             title_substring: None,
@@ -3848,11 +3848,7 @@ fn discovery_manageability_loss_removes_window_from_layout() {
         "window must be removed from layout when discovery marks it unmanageable"
     );
     assert!(
-        reactor
-            .state
-            .windows
-            .window(wid)
-            .is_some_and(|window| !window.matches_filter(WindowFilter::Manageable)),
+        reactor.state.windows.window(wid).is_some_and(|window| !window.is_manageable),
         "reactor state must keep the window marked unmanageable"
     );
 }

@@ -312,7 +312,9 @@ workspace_names = [
 #   - size ({ w, h }): initial size in logical pixels. Either dimension may be omitted. Floating
 #     windows are initially resized; tiled windows receive a one-time resize after insertion.
 #   - focus (boolean): focus the window after applying the rule, switching to its virtual workspace.
-#   - manage (boolean): whether Rift should manage the matching window. Set to false to ignore the window completely (default = true).
+#   - manage (boolean): optional explicit management override. Set to false to ignore the
+#     matching window completely, or true to override Rift/macOS manageability heuristics
+#     for a visible window. When omitted, normal heuristics apply. Minimized windows remain unmanaged.
 #
 # Matching behavior (summary):
 #   1. All rules that match a window are evaluated.
