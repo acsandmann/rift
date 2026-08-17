@@ -64,6 +64,8 @@ mod SpaceEventHandler {
 #[cfg(test)]
 mod tests;
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::thread;
 
 use animation::Sender as AnimationSender;
@@ -285,6 +287,9 @@ pub enum Event {
 
     #[serde(skip)]
     Query(query::QueryRequest),
+
+    #[serde(skip)]
+    InstallIpc(crate::ipc::InstallRequest),
 
     Command(Command),
 
@@ -813,32 +818,43 @@ impl Reactor {
         }
     }
 
-    async fn run(mut reactor: Reactor, events: Receiver, events_tx: Sender) {
+    async fn run(reactor: Reactor, events: Receiver, events_tx: Sender) {
         let (raise_manager_tx, raise_manager_rx) = actor::channel();
         let (animation_tx, animation_rx) = tokio::sync::mpsc::unbounded_channel();
-        reactor.communication_manager.raise_manager_tx = raise_manager_tx.clone();
-        reactor.animation_tx = Some(animation_tx);
-        let event_tap_tx = reactor.communication_manager.event_tap_tx.clone();
+        let reactor = Rc::new(RefCell::new(reactor));
+        let event_tap_tx = {
+            let mut reactor = reactor.borrow_mut();
+            reactor.communication_manager.raise_manager_tx = raise_manager_tx.clone();
+            reactor.animation_tx = Some(animation_tx);
+            reactor.communication_manager.event_tap_tx.clone()
+        };
         let reactor_task = Self::run_reactor_loop(reactor, events);
         let raise_manager_task = RaiseManager::run(raise_manager_rx, events_tx, event_tap_tx);
         let animation_task = animation::AnimationManager::run(animation_rx);
         let _ = tokio::join!(reactor_task, raise_manager_task, animation_task);
     }
 
-    async fn run_reactor_loop(mut reactor: Reactor, mut events: Receiver) {
+    async fn run_reactor_loop(reactor: Rc<RefCell<Reactor>>, mut events: Receiver) {
         const MAX_EVENT_BATCH: usize = 64;
 
         while let Some((span, event)) = events.recv().await {
             let _guard = span.enter();
-            reactor.handle_loop_event(event);
+            Self::handle_thread_event(&reactor, event);
             // Drain a bounded batch to reduce recv/select overhead.
             for _ in 1..MAX_EVENT_BATCH {
                 let Ok((span, event)) = events.try_recv() else {
                     break;
                 };
                 let _guard = span.enter();
-                reactor.handle_loop_event(event);
+                Self::handle_thread_event(&reactor, event);
             }
+        }
+    }
+
+    fn handle_thread_event(reactor: &Rc<RefCell<Reactor>>, event: Event) {
+        match event {
+            Event::InstallIpc(request) => crate::ipc::install_mach_server(reactor.clone(), request),
+            event => reactor.borrow_mut().handle_loop_event(event),
         }
     }
 
@@ -859,6 +875,10 @@ impl Reactor {
         self.handle_event(event);
         #[cfg(any(test, debug_assertions))]
         self.state.windows.debug_assert_invariants();
+    }
+
+    pub(crate) fn handle_ipc_command(&mut self, command: Command) {
+        self.handle_loop_event(Event::Command(command));
     }
 
     fn note_windowserver_activity(event: &Event) {

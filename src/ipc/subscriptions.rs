@@ -6,7 +6,7 @@ use std::thread;
 use crossbeam_channel::{Sender, TrySendError, bounded};
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use serde_json::Value;
 use tracing::{debug, error, info, warn};
 
@@ -29,7 +29,11 @@ pub struct ServerState {
     event_dispatch_tx: Sender<DispatchBatch>,
 }
 
-pub type SharedServerState = Arc<RwLock<ServerState>>;
+/// Subscription state is internally synchronized by `DashMap`, `Mutex`, and
+/// the dispatch channel. An outer lock would serialize otherwise independent
+/// subscription and publication operations without protecting any additional
+/// invariant.
+pub type SharedServerState = Arc<ServerState>;
 
 const EVENT_DISPATCH_QUEUE_CAPACITY: usize = 4096;
 
@@ -177,11 +181,11 @@ impl ServerState {
     }
 
     pub fn publish(&self, event: BroadcastEvent) {
-        self.forward_event_to_cli_subscribers(event.clone());
-        self.forward_event_to_subscribers(event);
+        self.forward_event_to_cli_subscribers(&event);
+        self.forward_event_to_subscribers(&event);
     }
 
-    fn forward_event_to_subscribers(&self, event: BroadcastEvent) {
+    fn forward_event_to_subscribers(&self, event: &BroadcastEvent) {
         let event_name = event.kind().as_str();
 
         let mut targets: HashSet<ClientPort> = HashSet::default();
@@ -196,7 +200,7 @@ impl ServerState {
             return;
         }
 
-        let event_json = match serde_json::to_string(&event) {
+        let event_json = match serde_json::to_string(event) {
             Ok(s) => s,
             Err(e) => {
                 error!("Failed to serialize broadcast event: {}", e);
@@ -224,7 +228,7 @@ impl ServerState {
         }
     }
 
-    fn forward_event_to_cli_subscribers(&self, event: BroadcastEvent) {
+    fn forward_event_to_cli_subscribers(&self, event: &BroadcastEvent) {
         let event_name = event.kind().as_str();
 
         // Collect relevant subscriptions without full HashMap clone
@@ -240,7 +244,7 @@ impl ServerState {
         }
 
         for subscription in relevant {
-            crate::ipc::cli_exec::execute_cli_subscription(&event, &subscription);
+            crate::ipc::cli_exec::execute_cli_subscription(event, &subscription);
         }
     }
 

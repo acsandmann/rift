@@ -9,8 +9,8 @@
 compile_error!("rift-client only supports macOS");
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
-use std::mem::{size_of, zeroed};
-use std::ptr::copy_nonoverlapping;
+use std::mem::{MaybeUninit, size_of};
+use std::ptr::{addr_of_mut, copy_nonoverlapping};
 use std::thread;
 use std::time::Duration;
 
@@ -265,6 +265,38 @@ struct ReceiveBuffer {
     trailer: [u8; 512],
 }
 
+/// Initializes only the inline message bytes declared in the Mach header.
+/// Keeping the maximum-sized storage uninitialized avoids clearing 256 KiB
+/// for every usually-small client request without introducing an allocation.
+unsafe fn prepare_inline_send(
+    storage: &mut MaybeUninit<InlineMessage>,
+    mut header: MachMessageHeader,
+    payload: &[u8],
+) -> *mut MachMessageHeader {
+    debug_assert!(payload.len() <= MAX_MESSAGE_SIZE);
+
+    let aligned_len = (payload.len() + 3) & !3;
+    header.size = (size_of::<MachMessageHeader>() + aligned_len) as u32;
+
+    let message = storage.as_mut_ptr();
+    let header_ptr = unsafe { addr_of_mut!((*message).header) };
+    unsafe { header_ptr.write(header) };
+
+    let data = unsafe { addr_of_mut!((*message).data) }.cast::<u8>();
+    unsafe { copy_nonoverlapping(payload.as_ptr(), data, payload.len()) };
+    if aligned_len > payload.len() {
+        unsafe {
+            std::ptr::write_bytes(
+                data.add(payload.len()),
+                0,
+                aligned_len.saturating_sub(payload.len()),
+            )
+        };
+    }
+
+    header_ptr
+}
+
 #[repr(C)]
 struct MachPortLimits {
     queue_limit: u32,
@@ -424,35 +456,26 @@ unsafe fn send_request(
         }
     };
 
-    let aligned_len = (payload.len() + 3) & !3;
-    let mut message: InlineMessage = unsafe { zeroed() };
-    message.header.remote_port = service_port.name;
-    message.header.local_port = reply_port;
-    message.header.id = reply_port as i32;
-    message.header.bits = message_bits(
-        MACH_MSG_TYPE_COPY_SEND,
-        if subscription_port.is_some() {
-            MACH_MSG_TYPE_COPY_SEND
-        } else {
-            MACH_MSG_TYPE_MAKE_SEND
-        },
-    );
-    message.header.size = (size_of::<MachMessageHeader>() + aligned_len) as u32;
-    unsafe {
-        copy_nonoverlapping(payload.as_ptr(), message.data.as_mut_ptr(), payload.len());
-    }
-
-    let result = unsafe {
-        mach_msg(
-            &mut message.header,
-            MACH_SEND_MSG,
-            message.header.size,
-            0,
-            0,
-            0,
-            0,
-        )
+    let header = MachMessageHeader {
+        bits: message_bits(
+            MACH_MSG_TYPE_COPY_SEND,
+            if subscription_port.is_some() {
+                MACH_MSG_TYPE_COPY_SEND
+            } else {
+                MACH_MSG_TYPE_MAKE_SEND
+            },
+        ),
+        size: 0,
+        remote_port: service_port.name,
+        local_port: reply_port,
+        voucher_port: 0,
+        id: reply_port as i32,
     };
+    let mut storage = MaybeUninit::<InlineMessage>::uninit();
+    let header_ptr = unsafe { prepare_inline_send(&mut storage, header, payload) };
+    let send_size = unsafe { (*header_ptr).size };
+
+    let result = unsafe { mach_msg(header_ptr, MACH_SEND_MSG, send_size, 0, 0, 0, 0) };
     if result != KERN_SUCCESS {
         return Err(ClientError::Mach {
             operation: "mach_msg(send)",
@@ -464,10 +487,14 @@ unsafe fn send_request(
 }
 
 unsafe fn receive_message(reply_port: MachPort) -> Result<Vec<u8>, ClientError> {
-    let mut buffer: ReceiveBuffer = unsafe { zeroed() };
+    // The kernel initializes the received header, payload, and trailer. Leave
+    // the maximum-sized backing storage untouched until then.
+    let mut buffer = MaybeUninit::<ReceiveBuffer>::uninit();
+    let buffer_ptr = buffer.as_mut_ptr();
+    let header_ptr = unsafe { addr_of_mut!((*buffer_ptr).message.header) };
     let result = unsafe {
         mach_msg(
-            &mut buffer.message.header,
+            header_ptr,
             MACH_RCV_MSG,
             0,
             size_of::<ReceiveBuffer>() as u32,
@@ -483,14 +510,15 @@ unsafe fn receive_message(reply_port: MachPort) -> Result<Vec<u8>, ClientError> 
         });
     }
 
-    let payload_len =
-        buffer.message.header.size.saturating_sub(size_of::<MachMessageHeader>() as u32) as usize;
+    let payload_len = unsafe { (*header_ptr).size }
+        .saturating_sub(size_of::<MachMessageHeader>() as u32) as usize;
     if payload_len > MAX_MESSAGE_SIZE {
-        unsafe { mach_msg_destroy(&mut buffer.message.header) };
+        unsafe { mach_msg_destroy(header_ptr) };
         return Err(ClientError::MessageTooLarge);
     }
-    let payload = buffer.message.data[..payload_len].to_vec();
-    unsafe { mach_msg_destroy(&mut buffer.message.header) };
+    let data = unsafe { addr_of_mut!((*buffer_ptr).message.data) }.cast::<u8>();
+    let payload = unsafe { std::slice::from_raw_parts(data, payload_len) }.to_vec();
+    unsafe { mach_msg_destroy(header_ptr) };
     Ok(payload)
 }
 
@@ -499,6 +527,32 @@ const fn message_bits(remote: u32, local: u32) -> u32 { remote | (local << 8) }
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inline_send_initializes_header_payload_and_padding() {
+        let payload = b"hello";
+        let header = MachMessageHeader {
+            bits: 7,
+            size: 0,
+            remote_port: 11,
+            local_port: 13,
+            voucher_port: 0,
+            id: 17,
+        };
+        let mut storage = MaybeUninit::<InlineMessage>::uninit();
+        let header_ptr = unsafe { prepare_inline_send(&mut storage, header, payload) };
+
+        unsafe {
+            assert_eq!((*header_ptr).bits, 7);
+            assert_eq!((*header_ptr).remote_port, 11);
+            assert_eq!((*header_ptr).local_port, 13);
+            assert_eq!((*header_ptr).id, 17);
+            assert_eq!((*header_ptr).size as usize, size_of::<MachMessageHeader>() + 8);
+
+            let data = addr_of_mut!((*storage.as_mut_ptr()).data).cast::<u8>();
+            assert_eq!(std::slice::from_raw_parts(data, 8), b"hello\0\0\0");
+        }
+    }
 
     #[test]
     fn parses_nul_terminated_response_with_alignment_padding() {

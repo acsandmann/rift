@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
+pub use rift_protocol::MetricsCommand;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer, Registry};
@@ -31,12 +31,6 @@ fn timing_layer() -> TimingLayer {
     tracing_timing::Builder::default()
         //.events(group::ByName)
         .layer(|| Histogram::new_with_max(100_000_000, 2).unwrap())
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum MetricsCommand {
-    ShowTiming,
 }
 
 pub fn handle_command(command: MetricsCommand) {
