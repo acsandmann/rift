@@ -22,6 +22,7 @@ pub const EVENT_MASK: u64 = (1u64 << CGS_EVENT_GESTURE) | (1u64 << CGS_EVENT_DOC
 
 const K_GESTURE_HID_TYPE_FIELD: CGEventField = CGEventField(110);
 const K_GESTURE_SWIPE_MOTION_FIELD: CGEventField = CGEventField(123);
+const K_GESTURE_PHASE_FIELD: CGEventField = CGEventField(132);
 
 const K_IOHID_EVENT_TYPE_DIGITIZER: u32 = 11;
 const K_IOHID_EVENT_TYPE_DOCK_SWIPE: i64 = 23;
@@ -146,6 +147,9 @@ pub fn contact_payload(event: &CGEvent) -> Option<GesturePayload> {
 
 #[inline]
 fn payload_with_centroid(event: &CGEvent, centroid: bool) -> Option<GesturePayload> {
+    if is_processed_gesture(event) {
+        return Some(GesturePayload::Processed);
+    }
     let hid = HidEvent::copy_from(event)?;
     if !is_path_collection(hid.as_ptr()) {
         return Some(GesturePayload::Processed);
@@ -157,6 +161,9 @@ fn payload_with_centroid(event: &CGEvent, centroid: bool) -> Option<GesturePaylo
 /// retained HID lookup and one stack CFArray copy, with no heap allocation.
 #[inline]
 pub fn scroll_payload(event: &CGEvent) -> Option<ScrollGesturePayload> {
+    if is_processed_gesture(event) {
+        return Some(ScrollGesturePayload::Processed);
+    }
     let hid = HidEvent::copy_from(event)?;
     if !is_path_collection(hid.as_ptr()) {
         return Some(ScrollGesturePayload::Processed);
@@ -168,6 +175,9 @@ pub fn scroll_payload(event: &CGEvent) -> Option<ScrollGesturePayload> {
 /// gestures need this solely to detect that the physical session ended.
 #[inline]
 pub fn scroll_contact_payload(event: &CGEvent) -> Option<ScrollGesturePayload> {
+    if is_processed_gesture(event) {
+        return Some(ScrollGesturePayload::Processed);
+    }
     let hid = HidEvent::copy_from(event)?;
     if !is_path_collection(hid.as_ptr()) {
         return Some(ScrollGesturePayload::Processed);
@@ -176,6 +186,15 @@ pub fn scroll_contact_payload(event: &CGEvent) -> Option<ScrollGesturePayload> {
         ScrollTouchFrame::contact_presence_from_digitizer(hid.as_ptr())
             .map(ScrollGesturePayload::Touch)
     }
+}
+
+/// Physical digitizer collections are unphased. WindowServer emits processed
+/// gesture events alongside them with a nonzero began/changed/ended/cancelled
+/// phase. Checking the scalar CGEvent field first avoids retaining and
+/// inspecting an IOHID event that the recognizers do not otherwise use.
+#[inline(always)]
+fn is_processed_gesture(event: &CGEvent) -> bool {
+    CGEvent::integer_value_field(Some(event), K_GESTURE_PHASE_FIELD) != 0
 }
 
 #[inline(always)]
