@@ -252,7 +252,7 @@ fn menu_bar_hidden() -> bool {
     status != 0
 }
 
-fn menu_bar_height(did: u32) -> f64 {
+pub fn menu_bar_height(did: u32) -> f64 {
     let mut height: u32 = 0;
     unsafe { SLSGetDisplayMenubarHeight(did, &mut height) };
     height as f64
