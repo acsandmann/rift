@@ -804,11 +804,22 @@ impl State {
 
                 let _ = elem.set_position(pos);
 
-                let frame =
+                let mut frame =
                     match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
                         Some(frame) => frame,
                         None => return Ok(false),
                     };
+
+                // one retry
+                if frame.origin.x != pos.x || frame.origin.y != pos.y {
+                    warn!("set_position failed, retrying");
+                    let _ = elem.set_position(pos);
+                    frame =
+                        match self.handle_ax_result(wid, trace("frame", &elem, || elem.frame()))? {
+                            Some(frame) => frame,
+                            None => return Ok(false),
+                        };
+                }
 
                 self.send_event(Event::WindowFrameChanged(
                     wid,
