@@ -64,6 +64,7 @@ impl PersistedLayout {
             floating_positions: self.floating_positions,
             app_rules: AppRuleEngine::default(),
             focused_window: None,
+            native_fullscreen_suspended: HashSet::default(),
             window_layout_constraints: HashMap::default(),
             virtual_workspace_manager: self.virtual_workspace_manager,
             layout_settings: LayoutSettings::default(),

@@ -1585,20 +1585,201 @@ fn known_window_server_appearance_restores_same_workspace_after_fullscreen() {
     let frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
     let user_space = SpaceId::new(1);
     let fullscreen_space = SpaceId::new(0x400000000 + user_space.get());
-    let wid = WindowId::new(1, 1);
+    let windows = [WindowId::new(1, 1), WindowId::new(1, 2), WindowId::new(1, 3)];
+    let wid = windows[1];
 
     reactor.handle_event(space_state_event(vec![frame], vec![Some(user_space)]));
-    make_active_app(&mut apps, &mut reactor, 1, make_windows(1), Some(wid));
+    make_active_app(&mut apps, &mut reactor, 1, make_windows(3), Some(wid));
+    reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+        workspace: None,
+        mode: LayoutMode::Bsp,
+    });
+    reactor.send_layout_event(LayoutEvent::WindowFocused(user_space, wid));
+    reactor.handle_test_layout_command(LayoutCommand::ResizeWindowBy { amount: 0.2 });
+
+    let topology_before = reactor
+        .query_layout_state(Some(user_space.get()), None)
+        .expect("BSP layout state before fullscreen")
+        .container_tree;
+    let layout_before = test_layout(&mut reactor, user_space, frame);
 
     let wsid = reactor.state.windows.window(wid).unwrap().info.sys_id.unwrap();
     window_server_appeared(&mut reactor, wsid, fullscreen_space, SpaceEventKind::Fullscreen);
     assert!(!has_window_in_layout(&mut reactor, user_space, frame, wid));
+    assert_eq!(
+        reactor
+            .query_layout_state(Some(user_space.get()), None)
+            .expect("BSP layout state while fullscreen")
+            .container_tree,
+        topology_before,
+        "entering native fullscreen must preserve BSP topology and split weights"
+    );
+    let layout_while_fullscreen = test_layout(&mut reactor, user_space, frame);
+    for (other, expected_frame) in &layout_before {
+        if *other != wid {
+            assert_eq!(
+                layout_while_fullscreen
+                    .iter()
+                    .find(|(candidate, _)| candidate == other)
+                    .map(|(_, actual_frame)| actual_frame),
+                Some(expected_frame),
+                "the fullscreen leaf should continue reserving its original BSP slot"
+            );
+        }
+    }
 
     window_server_appeared(&mut reactor, wsid, user_space, SpaceEventKind::User);
 
     assert!(
         has_window_in_layout(&mut reactor, user_space, frame, wid),
         "managed window should return to layout when native fullscreen exits back to the same space"
+    );
+    assert_eq!(
+        reactor
+            .query_layout_state(Some(user_space.get()), None)
+            .expect("BSP layout state after fullscreen")
+            .container_tree,
+        topology_before,
+        "exiting native fullscreen must retain exact BSP topology"
+    );
+    assert_eq!(
+        test_layout(&mut reactor, user_space, frame),
+        layout_before,
+        "exiting native fullscreen must restore exact pre-fullscreen window frames"
+    );
+}
+
+#[test]
+fn frame_change_fullscreen_fallback_preserves_bsp_topology_and_split_weights() {
+    let (mut apps, mut reactor) = test_context();
+
+    let frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let user_space = SpaceId::new(1);
+    let fullscreen_space = SpaceId::new(0x400000000 + user_space.get());
+    let windows = [WindowId::new(1, 1), WindowId::new(1, 2), WindowId::new(1, 3)];
+    let wid = windows[1];
+
+    reactor.handle_event(space_state_event(vec![frame], vec![Some(user_space)]));
+    make_active_app(&mut apps, &mut reactor, 1, make_windows(3), Some(wid));
+    reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+        workspace: None,
+        mode: LayoutMode::Bsp,
+    });
+    reactor.send_layout_event(LayoutEvent::WindowFocused(user_space, wid));
+    reactor.handle_test_layout_command(LayoutCommand::ResizeWindowBy { amount: 0.2 });
+
+    let topology_before = reactor
+        .query_layout_state(Some(user_space.get()), None)
+        .expect("BSP layout state before fullscreen")
+        .container_tree;
+    let layout_before = test_layout(&mut reactor, user_space, frame);
+    let cached_frame_before = reactor.state.windows.window(wid).unwrap().frame_monotonic;
+    let wsid = reactor.state.windows.window(wid).unwrap().info.sys_id.unwrap();
+
+    // Reproduce the real browser transition: the direct WindowServer membership changes first,
+    // while Rift's forwarded fullscreen-space inventory has not observed the new Space yet.
+    assert!(reactor.space_state.fullscreen_spaces.is_empty());
+    crate::sys::window_server::set_window_spaces_override(
+        wsid,
+        Some(vec![fullscreen_space.get()]),
+    );
+    reactor.handle_event(Event::WindowFrameChanged(
+        wid,
+        frame,
+        None,
+        Requested(false),
+        Some(MouseState::Up),
+    ));
+
+    assert!(
+        reactor
+            .state
+            .windows
+            .is_window_server_id_native_fullscreen_suspended(wsid)
+    );
+    assert!(
+        reactor
+            .state
+            .windows
+            .window(wid)
+            .unwrap()
+            .frame_monotonic
+            .same_as(cached_frame_before),
+        "the fullscreen animation frame must not replace the cached tiled frame"
+    );
+    assert_eq!(
+        reactor
+            .query_layout_state(Some(user_space.get()), None)
+            .expect("BSP layout state while fullscreen")
+            .container_tree,
+        topology_before,
+        "frame-based fullscreen detection must preserve the exact BSP topology"
+    );
+    assert!(!has_window_in_layout(&mut reactor, user_space, frame, wid));
+
+    // Browser video fullscreen can leave the original AX window reporting false throughout the
+    // projection lifecycle. That uncorroborated value must not bypass the membership gate.
+    reactor.handle_event(Event::WindowNativeFullscreenChanged(wid, false));
+    assert!(
+        reactor
+            .state
+            .windows
+            .is_window_server_id_native_fullscreen_suspended(wsid)
+    );
+
+    // A regular AppKit fullscreen window reports true during entry. Its later false value is an
+    // authoritative exit signal even if the active-Space inventory has not caught up yet.
+    reactor.handle_event(Event::WindowNativeFullscreenChanged(wid, true));
+    assert!(
+        reactor
+            .state
+            .windows
+            .native_fullscreen_record_for_window(wid)
+            .is_some_and(|record| record.ax_fullscreen_observed)
+    );
+
+    crate::sys::window_server::set_window_spaces_override(wsid, Some(vec![user_space.get()]));
+    let misleading_return_frame = CGRect::new(
+        CGPoint::new(0., 0.),
+        CGSize::new(frame.size.width / 2.0, frame.size.height),
+    );
+    reactor.handle_event(Event::WindowFrameChanged(
+        wid,
+        misleading_return_frame,
+        None,
+        Requested(false),
+        Some(MouseState::Up),
+    ));
+
+    assert!(
+        reactor
+            .state
+            .windows
+            .is_window_server_id_native_fullscreen_suspended(wsid),
+        "direct membership alone should still wait for a trustworthy exit signal"
+    );
+    reactor.handle_event(Event::WindowNativeFullscreenChanged(wid, false));
+    crate::sys::window_server::set_window_spaces_override(wsid, None);
+
+    assert!(
+        reactor
+            .state
+            .windows
+            .native_fullscreen_record_for_window_server_id(wsid)
+            .is_none()
+    );
+    assert_eq!(
+        reactor
+            .query_layout_state(Some(user_space.get()), None)
+            .expect("BSP layout state after fullscreen")
+            .container_tree,
+        topology_before,
+        "the return animation must not rebalance or reinsert the preserved BSP leaf"
+    );
+    assert_eq!(
+        test_layout(&mut reactor, user_space, frame),
+        layout_before,
+        "the exact pre-fullscreen split weights and frames must be restored"
     );
 }
 
@@ -3143,6 +3324,333 @@ fn authoritative_active_window_snapshot_removes_missing_window_from_active_layou
 }
 
 #[test]
+fn authoritative_snapshot_fullscreen_transition_preserves_bsp_split_weights() {
+    let (mut apps, mut reactor) = test_context();
+    let frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let user_space = SpaceId::new(1);
+    let fullscreen_space = SpaceId::new(0x400000000 + user_space.get());
+    let windows = [WindowId::new(44, 1), WindowId::new(44, 2), WindowId::new(44, 3)];
+    let fullscreen_window = windows[1];
+
+    reactor.handle_event(space_state_event(vec![frame], vec![Some(user_space)]));
+    make_active_app(&mut apps, &mut reactor, 44, make_windows(3), Some(fullscreen_window));
+    reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+        workspace: None,
+        mode: LayoutMode::Bsp,
+    });
+    reactor.send_layout_event(LayoutEvent::WindowFocused(user_space, fullscreen_window));
+    reactor.handle_test_layout_command(LayoutCommand::ResizeWindowBy { amount: 0.2 });
+
+    let window_servers: Vec<_> = windows
+        .iter()
+        .map(|wid| reactor.state.windows.window(*wid).unwrap().info.sys_id.unwrap())
+        .collect();
+    for wsid in &window_servers {
+        reactor.mark_test_window_visible_in_space(*wsid, user_space);
+    }
+    let fullscreen_wsid = window_servers[1];
+    let topology_before = reactor
+        .query_layout_state(Some(user_space.get()), None)
+        .expect("BSP layout state before authoritative fullscreen transition")
+        .container_tree;
+    let layout_before = test_layout(&mut reactor, user_space, frame);
+
+    crate::sys::window_server::set_window_spaces_override(
+        fullscreen_wsid,
+        Some(vec![fullscreen_space.get()]),
+    );
+    reactor.reconcile_authoritative_active_window_snapshot(
+        window_servers
+            .iter()
+            .copied()
+            .filter(|wsid| *wsid != fullscreen_wsid)
+            .map(|wsid| (wsid, Some(user_space)))
+            .collect(),
+        false,
+    );
+
+    assert!(
+        reactor
+            .state
+            .windows
+            .is_window_server_id_native_fullscreen_suspended(fullscreen_wsid)
+    );
+    assert_eq!(
+        reactor.assigned_space_for_window_id(fullscreen_window),
+        Some(user_space),
+        "native fullscreen must retain the original workspace assignment"
+    );
+    assert_eq!(
+        reactor
+            .query_layout_state(Some(user_space.get()), None)
+            .expect("BSP layout state while fullscreen")
+            .container_tree,
+        topology_before,
+        "authoritative membership refresh must not collapse the fullscreen BSP leaf"
+    );
+    assert!(!has_window_in_layout(
+        &mut reactor,
+        user_space,
+        frame,
+        fullscreen_window
+    ));
+
+    crate::sys::window_server::set_window_spaces_override(
+        fullscreen_wsid,
+        Some(vec![user_space.get()]),
+    );
+    reactor.reconcile_authoritative_active_window_snapshot(
+        window_servers
+            .iter()
+            .copied()
+            .filter(|wsid| *wsid != fullscreen_wsid)
+            .map(|wsid| (wsid, Some(user_space)))
+            .collect(),
+        false,
+    );
+
+    assert!(
+        reactor
+            .state
+            .windows
+            .is_window_server_id_native_fullscreen_suspended(fullscreen_wsid),
+        "direct Desktop membership alone must not restore before the active-Space list catches up"
+    );
+    assert_eq!(
+        reactor
+            .query_layout_state(Some(user_space.get()), None)
+            .expect("BSP layout state during lagging fullscreen exit")
+            .container_tree,
+        topology_before,
+        "a lagging exit snapshot must not collapse the preserved BSP leaf"
+    );
+
+    reactor.reconcile_authoritative_active_window_snapshot(
+        window_servers
+            .iter()
+            .copied()
+            .map(|wsid| (wsid, Some(user_space)))
+            .collect(),
+        false,
+    );
+    crate::sys::window_server::set_window_spaces_override(fullscreen_wsid, None);
+
+    assert!(
+        reactor
+            .state
+            .windows
+            .native_fullscreen_record_for_window_server_id(fullscreen_wsid)
+            .is_none()
+    );
+    assert_eq!(
+        reactor
+            .query_layout_state(Some(user_space.get()), None)
+            .expect("BSP layout state after authoritative fullscreen transition")
+            .container_tree,
+        topology_before
+    );
+    assert_eq!(
+        test_layout(&mut reactor, user_space, frame),
+        layout_before,
+        "returning from fullscreen must restore the exact pre-fullscreen split weights"
+    );
+}
+
+#[test]
+fn new_transient_space_with_stale_window_membership_preserves_focused_bsp_leaf() {
+    let (mut apps, mut reactor) = test_context();
+    let frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let user_space = SpaceId::new(1);
+    let transient_space = SpaceId::new(182);
+    let windows = [WindowId::new(45, 1), WindowId::new(45, 2), WindowId::new(45, 3)];
+    let fullscreen_window = windows[1];
+
+    reactor.handle_event(space_state_event(vec![frame], vec![Some(user_space)]));
+    make_active_app(&mut apps, &mut reactor, 45, make_windows(3), Some(fullscreen_window));
+    reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+        workspace: None,
+        mode: LayoutMode::Bsp,
+    });
+    reactor.send_layout_event(LayoutEvent::WindowFocused(user_space, fullscreen_window));
+    reactor.handle_test_layout_command(LayoutCommand::ResizeWindowBy { amount: 0.2 });
+
+    let window_servers: Vec<_> = windows
+        .iter()
+        .map(|wid| reactor.state.windows.window(*wid).unwrap().info.sys_id.unwrap())
+        .collect();
+    for wsid in &window_servers {
+        reactor.mark_test_window_visible_in_space(*wsid, user_space);
+    }
+    let fullscreen_wsid = window_servers[1];
+    let topology_before = reactor
+        .query_layout_state(Some(user_space.get()), None)
+        .expect("BSP layout before stale-membership fullscreen transition")
+        .container_tree;
+    let layout_before = test_layout(&mut reactor, user_space, frame);
+
+    reactor
+        .space_state
+        .display_space_ids
+        .insert("display".to_string(), vec![user_space]);
+    let Event::SpaceStateChanged(mut entering) =
+        space_state_event(vec![frame], vec![Some(user_space)])
+    else {
+        unreachable!("space_state_event must produce a space-state event");
+    };
+    entering
+        .display_space_ids
+        .insert("display".to_string(), vec![user_space, transient_space]);
+    entering
+        .last_user_space_by_display
+        .insert("display".to_string(), user_space);
+    reactor.update_transient_fullscreen_space_candidates(&entering);
+
+    // This is the live browser failure: the display inventory already contains the temporary
+    // Space, but the direct per-window query still reports the original Desktop.
+    crate::sys::window_server::set_window_spaces_override(
+        fullscreen_wsid,
+        Some(vec![user_space.get()]),
+    );
+    reactor.reconcile_authoritative_active_window_snapshot(
+        window_servers
+            .iter()
+            .copied()
+            .filter(|wsid| *wsid != fullscreen_wsid)
+            .map(|wsid| (wsid, Some(user_space)))
+            .collect(),
+        false,
+    );
+
+    assert!(
+        reactor
+            .state
+            .windows
+            .is_window_server_id_native_fullscreen_suspended(fullscreen_wsid),
+        "new transient Space plus focused-window disappearance must suspend the BSP leaf"
+    );
+    assert_eq!(
+        reactor
+            .query_layout_state(Some(user_space.get()), None)
+            .expect("BSP layout while direct membership is stale")
+            .container_tree,
+        topology_before
+    );
+
+    // A lagging discovery/admission update can still emit its generic removal after the
+    // authoritative Space snapshot has suspended the live window. That late removal must not
+    // collapse the preserved BSP leaf and cause a default 50/50 reinsert on fullscreen exit.
+    reactor.send_layout_event(LayoutEvent::WindowRemoved(fullscreen_window));
+    assert_eq!(
+        reactor
+            .query_layout_state(Some(user_space.get()), None)
+            .expect("BSP layout after a late fullscreen removal")
+            .container_tree,
+        topology_before,
+        "late generic removal must preserve a live native-fullscreen leaf"
+    );
+
+    // Zen replaces its normal AX window with a separate fullscreen projection. Discovery then
+    // retires the original AX state and emits another removal plus an empty per-app layout sync.
+    // The suspended leaf and its saved workspace must survive until the original window returns.
+    let original_state = reactor
+        .state
+        .windows
+        .window(fullscreen_window)
+        .cloned()
+        .expect("the original browser window should still have live AX state");
+    let original_workspace = reactor
+        .state
+        .windows
+        .workspace_info_for_window(fullscreen_window)
+        .expect("the original browser window should have a workspace assignment");
+    reactor.state.windows.remove_window(fullscreen_window);
+    reactor.send_layout_event(LayoutEvent::WindowRemoved(fullscreen_window));
+    reactor.send_layout_event(LayoutEvent::WindowsOnScreenUpdated(
+        user_space,
+        fullscreen_window.pid,
+        Vec::new(),
+        None,
+    ));
+    assert_eq!(
+        reactor
+            .query_layout_state(Some(user_space.get()), None)
+            .expect("BSP layout while the original AX window is replaced")
+            .container_tree,
+        topology_before,
+        "fullscreen AX projection replacement must preserve the original BSP leaf"
+    );
+
+    reactor
+        .state
+        .windows
+        .insert_window(fullscreen_window, original_state);
+
+    let Event::SpaceStateChanged(mut exiting) =
+        space_state_event(vec![frame], vec![Some(user_space)])
+    else {
+        unreachable!("space_state_event must produce a space-state event");
+    };
+    exiting
+        .display_space_ids
+        .insert("display".to_string(), vec![user_space]);
+    exiting
+        .last_user_space_by_display
+        .insert("display".to_string(), user_space);
+    reactor.update_transient_fullscreen_space_candidates(&exiting);
+
+    // The active-Space list also lags during exit. Preserve the suspension through that gap.
+    reactor.reconcile_authoritative_active_window_snapshot(
+        window_servers
+            .iter()
+            .copied()
+            .filter(|wsid| *wsid != fullscreen_wsid)
+            .map(|wsid| (wsid, Some(user_space)))
+            .collect(),
+        false,
+    );
+    assert!(
+        reactor
+            .state
+            .windows
+            .is_window_server_id_native_fullscreen_suspended(fullscreen_wsid)
+    );
+
+    reactor.reconcile_authoritative_active_window_snapshot(
+        window_servers
+            .iter()
+            .copied()
+            .map(|wsid| (wsid, Some(user_space)))
+            .collect(),
+        false,
+    );
+    crate::sys::window_server::set_window_spaces_override(fullscreen_wsid, None);
+
+    assert!(
+        reactor
+            .state
+            .windows
+            .native_fullscreen_record_for_window_server_id(fullscreen_wsid)
+            .is_none()
+    );
+    assert_eq!(
+        reactor
+            .state
+            .windows
+            .workspace_info_for_window(fullscreen_window),
+        Some(original_workspace),
+        "fullscreen restoration must reinstate workspace ownership lost with the AX replacement"
+    );
+    assert_eq!(
+        reactor
+            .query_layout_state(Some(user_space.get()), None)
+            .expect("BSP layout after stale-membership fullscreen transition")
+            .container_tree,
+        topology_before
+    );
+    assert_eq!(test_layout(&mut reactor, user_space, frame), layout_before);
+}
+
+#[test]
 fn authoritative_active_window_snapshot_reassigns_missing_window_to_inactive_space() {
     let (mut apps, mut reactor) = test_context();
     let frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
@@ -3913,7 +4421,13 @@ fn unfullscreen_restores_window_tracking() {
     apps.simulate_until_quiet(&mut reactor);
 
     // Exit fullscreen (return to user space).
-    reactor.handle_event(space_state_event(vec![full_screen], vec![Some(user_space)]));
+    reactor.handle_event(space_state_event_with(
+        vec![full_screen],
+        vec![Some(user_space)],
+        |state| {
+            state.active_window_spaces.insert(WindowServerId::new(1), user_space);
+        },
+    ));
 
     // The reactor should trigger a GetVisibleWindows request.
     let mut saw_get_visible_windows = false;

@@ -1136,6 +1136,9 @@ impl State {
                     Requested(false),
                     event::get_mouse_state(),
                 ));
+                if let Ok(is_fullscreen) = elem.fullscreen() {
+                    self.send_event(Event::WindowNativeFullscreenChanged(wid, is_fullscreen));
+                }
             }
             AxNotificationKind::WindowMiniaturized => {
                 let Ok(wid) = self.wid_for_notification(&elem, hinted_wid) else {

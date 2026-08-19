@@ -72,6 +72,11 @@ pub enum LayoutEvent {
     WindowAdded(SpaceId, WindowId),
     WindowRemoved(WindowId),
     WindowRemovedPreserveFloating(WindowId),
+    /// Temporarily stop emitting frames for a window that moved to a native macOS fullscreen
+    /// Space while preserving its exact layout-tree membership.
+    WindowNativeFullscreenSuspended(WindowId),
+    /// Resume frame emission after a native fullscreen window returns to a user Space.
+    WindowNativeFullscreenRestored(WindowId),
     WindowFocused(SpaceId, WindowId),
     WindowResized {
         wid: WindowId,
@@ -123,6 +128,10 @@ pub struct LayoutEngine {
     floating_positions: FloatingPositionStore,
     app_rules: AppRuleEngine,
     focused_window: Option<WindowId>,
+    /// Windows retain their layout-tree leaf while macOS hosts them on a temporary native
+    /// fullscreen Space. Keeping this state in the engine also lets identity rekeys transfer the
+    /// suspension atomically with the preserved leaf.
+    native_fullscreen_suspended: HashSet<WindowId>,
     window_layout_constraints: HashMap<WindowId, WindowLayoutConstraints>,
     virtual_workspace_manager: WorkspaceStore,
     layout_settings: LayoutSettings,
@@ -1199,12 +1208,20 @@ impl LayoutEngine {
 
             // AX/window-server discovery can temporarily omit windows. Keep windows that are
             // still assigned to this workspace so a partial snapshot does not tear them out
-            // of the tree and cause their sibling weights to be rebuilt.
+            // of the tree and cause their sibling weights to be rebuilt. A browser may replace
+            // its normal AX window with a fullscreen projection, temporarily removing even the
+            // saved workspace assignment; the native-fullscreen lifecycle is authoritative then.
             for wid in current.iter().copied() {
+                let preserve_suspended = self.native_fullscreen_suspended.contains(&wid)
+                    && window_store.is_window_native_fullscreen_suspended(wid);
+                let preserve_assigned = self.virtual_workspace_manager.workspace_for_window(
+                    window_store,
+                    space,
+                    wid,
+                ) == Some(ws_id);
                 if !desired.contains(&wid)
                     && !self.floating.is_floating(wid)
-                    && self.virtual_workspace_manager.workspace_for_window(window_store, space, wid)
-                        == Some(ws_id)
+                    && (preserve_suspended || preserve_assigned)
                 {
                     desired.push(wid);
                 }
@@ -1313,6 +1330,7 @@ impl LayoutEngine {
             floating_positions: FloatingPositionStore::default(),
             app_rules: AppRuleEngine::new(&virtual_workspace_config.app_rules),
             focused_window: None,
+            native_fullscreen_suspended: HashSet::default(),
             window_layout_constraints: HashMap::default(),
             virtual_workspace_manager,
             layout_settings: layout_settings.clone(),
@@ -1591,6 +1609,7 @@ impl LayoutEngine {
                     ws.layout_system.remove_windows_for_app(pid);
                 }
                 self.floating.remove_all_for_pid(pid);
+                self.native_fullscreen_suspended.retain(|wid| wid.pid != pid);
                 self.window_layout_constraints.retain(|wid, _| wid.pid != pid);
                 self.forget_persisted_app(pid);
 
@@ -1604,10 +1623,49 @@ impl LayoutEngine {
                 }
             }
             LayoutEvent::WindowRemoved(wid) => {
-                self.remove_window_internal(window_store, wid, false);
+                // Discovery, admission, and WindowServer visibility updates can emit an ordinary
+                // removal after native-fullscreen entry has already suspended the window. Some
+                // browsers also replace the normal AX window with a separate fullscreen
+                // projection, temporarily removing the original WindowState entirely. The native
+                // fullscreen record remains authoritative across that replacement, so neither
+                // form of late removal may collapse the preserved BSP leaf.
+                if self.native_fullscreen_suspended.contains(&wid)
+                    && window_store.is_window_native_fullscreen_suspended(wid)
+                {
+                    info!(?wid, "Preserving suspended native-fullscreen leaf from late removal");
+                    self.floating.remove_active_for_window(wid);
+                } else {
+                    self.native_fullscreen_suspended.remove(&wid);
+                    self.remove_window_internal(window_store, wid, false);
+                }
             }
             LayoutEvent::WindowRemovedPreserveFloating(wid) => {
-                self.remove_window_internal(window_store, wid, true);
+                // WindowServer sends a disappearance for the source user Space during native
+                // fullscreen entry. Once suspended, that disappearance must not collapse the
+                // preserved layout leaf.
+                if self.native_fullscreen_suspended.contains(&wid) {
+                    self.floating.remove_active_for_window(wid);
+                } else {
+                    self.remove_window_internal(window_store, wid, true);
+                }
+            }
+            LayoutEvent::WindowNativeFullscreenSuspended(wid) => {
+                let changed = self.native_fullscreen_suspended.insert(wid);
+                self.floating.remove_active_for_window(wid);
+                if self.focused_window == Some(wid) {
+                    self.focused_window = None;
+                }
+                return EventResponse {
+                    changed,
+                    ..EventResponse::default()
+                };
+            }
+            LayoutEvent::WindowNativeFullscreenRestored(wid) => {
+                let changed = self.native_fullscreen_suspended.remove(&wid);
+                return EventResponse {
+                    changed,
+                    ..EventResponse::default()
+                };
             }
             LayoutEvent::WindowFocused(space, wid) => {
                 if self.floating.is_floating(wid) {
@@ -1641,6 +1699,12 @@ impl LayoutEngine {
                 new_frame,
                 screens,
             } => {
+                // AX can deliver the fullscreen animation's frame before WindowServer delivers
+                // the matching Space lifecycle event. A suspended leaf keeps its pre-fullscreen
+                // split weight until the window returns to its user Space.
+                if self.native_fullscreen_suspended.contains(&wid) {
+                    return EventResponse::default();
+                }
                 for (space, screen_frame, display_uuid) in screens {
                     let Some((ws_id, layout)) = self.workspace_and_layout(space) else {
                         debug!(
@@ -2136,16 +2200,20 @@ impl LayoutEngine {
         let Some((ws_id, layout)) = self.workspace_and_layout(space) else {
             return Vec::new();
         };
-        self.workspace_tree(ws_id).calculate_layout(
-            layout,
-            screen,
-            self.layout_settings.stack.stack_offset,
-            &self.window_layout_constraints,
-            gaps,
-            stack_line_thickness,
-            stack_line_horiz,
-            stack_line_vert,
-        )
+        self.workspace_tree(ws_id)
+            .calculate_layout(
+                layout,
+                screen,
+                self.layout_settings.stack.stack_offset,
+                &self.window_layout_constraints,
+                gaps,
+                stack_line_thickness,
+                stack_line_horiz,
+                stack_line_vert,
+            )
+            .into_iter()
+            .filter(|(wid, _)| !self.native_fullscreen_suspended.contains(wid))
+            .collect()
     }
 
     pub fn calculate_layout_with_virtual_workspaces<F>(
@@ -2335,6 +2403,8 @@ impl LayoutEngine {
             positions.insert(wid, hidden_rect);
         }
 
+        positions.retain(|wid, _| !self.native_fullscreen_suspended.contains(wid));
+
         positions.into_iter().collect()
     }
 
@@ -2426,6 +2496,8 @@ impl LayoutEngine {
                 positions.insert(window_id, stored_position);
             }
         }
+
+        positions.retain(|wid, _| !self.native_fullscreen_suspended.contains(wid));
 
         positions.into_iter().collect()
     }
@@ -3026,6 +3098,9 @@ impl LayoutEngine {
         self.virtual_workspace_manager.transfer_window_identity(from, to);
         self.floating_positions.transfer_window_identity(from, to);
         self.floating.transfer_window_identity(from, to);
+        if self.native_fullscreen_suspended.remove(&from) {
+            self.native_fullscreen_suspended.insert(to);
+        }
         self.transfer_persisted_window_identity(from, to);
         if let Some(constraints) = self.window_layout_constraints.remove(&from) {
             self.window_layout_constraints.insert(to, constraints);
@@ -3512,6 +3587,228 @@ mod tests {
             Some(assigned_workspace),
             "window should reappear in the same workspace after a temporary hide"
         );
+    }
+
+    #[test]
+    fn native_fullscreen_suspension_preserves_bsp_topology_and_split_weights() {
+        let mut window_store = WindowStore::default();
+        let mut layout_settings = LayoutSettings::default();
+        layout_settings.mode = LayoutMode::Bsp;
+        let mut engine = LayoutEngine::new(
+            &VirtualWorkspaceSettings::default(),
+            &layout_settings,
+            None,
+        );
+        let space = SpaceId::new(304);
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1200.0, 900.0));
+        let windows = [WindowId::new(42, 1), WindowId::new(42, 2), WindowId::new(42, 3)];
+        let window_info = |wid| (wid, None, None, None, true, CGSize::new(0.0, 0.0), None, None);
+
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::SpaceExposed(space, screen.size),
+        );
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::windows_on_screen_updated(
+                space,
+                windows[0].pid,
+                windows.iter().copied().map(window_info).collect(),
+                None,
+            ),
+        );
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::WindowFocused(space, windows[1]),
+        );
+        let _ = engine.handle_command(
+            &mut window_store,
+            Some(space),
+            &[space],
+            &HashMap::default(),
+            LayoutCommand::ResizeWindowBy { amount: 0.2 },
+        );
+
+        let topology_before = engine
+            .query_workspace_layout(space, None)
+            .expect("BSP workspace should be initialized")
+            .container_tree;
+        let frames_before = engine.calculate_layout(
+            space,
+            screen,
+            &layout_settings.gaps,
+            0.0,
+            Default::default(),
+            Default::default(),
+        );
+
+        let suspended = windows[1];
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::WindowNativeFullscreenSuspended(suspended),
+        );
+        // macOS can report the old user-Space disappearance after the fullscreen appearance.
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::WindowRemovedPreserveFloating(suspended),
+        );
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::WindowResized {
+                wid: suspended,
+                old_frame: frames_before
+                    .iter()
+                    .find(|(wid, _)| *wid == suspended)
+                    .expect("suspended window should have a pre-fullscreen frame")
+                    .1,
+                new_frame: screen,
+                screens: vec![(space, screen, None)],
+            },
+        );
+
+        assert_eq!(
+            engine
+                .query_workspace_layout(space, None)
+                .expect("suspended BSP workspace should remain initialized")
+                .container_tree,
+            topology_before,
+            "native fullscreen must preserve the exact BSP leaf, nesting, selection, and weights"
+        );
+        let frames_while_suspended = engine.calculate_layout(
+            space,
+            screen,
+            &layout_settings.gaps,
+            0.0,
+            Default::default(),
+            Default::default(),
+        );
+        assert!(!frames_while_suspended.iter().any(|(wid, _)| *wid == suspended));
+        for (wid, frame) in &frames_before {
+            if *wid != suspended {
+                assert_eq!(
+                    frames_while_suspended.iter().find(|(other, _)| other == wid).map(|(_, f)| f),
+                    Some(frame),
+                    "the suspended leaf should continue reserving its original split"
+                );
+            }
+        }
+
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::WindowNativeFullscreenRestored(suspended),
+        );
+        let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowAdded(space, suspended));
+
+        assert_eq!(
+            engine
+                .query_workspace_layout(space, None)
+                .expect("restored BSP workspace should remain initialized")
+                .container_tree,
+            topology_before
+        );
+        assert_eq!(
+            engine.calculate_layout(
+                space,
+                screen,
+                &layout_settings.gaps,
+                0.0,
+                Default::default(),
+                Default::default(),
+            ),
+            frames_before,
+            "exiting native fullscreen must restore the exact pre-fullscreen frames"
+        );
+    }
+
+    #[test]
+    fn native_fullscreen_suspension_follows_window_identity_rekey() {
+        let mut window_store = WindowStore::default();
+        let mut layout_settings = LayoutSettings::default();
+        layout_settings.mode = LayoutMode::Bsp;
+        let mut engine = LayoutEngine::new(
+            &VirtualWorkspaceSettings::default(),
+            &layout_settings,
+            None,
+        );
+        let space = SpaceId::new(305);
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1200.0, 900.0));
+        let old = WindowId::new(43, 1);
+        let sibling = WindowId::new(43, 2);
+        let replacement = WindowId::new(43, 99);
+        let window_info = |wid| (wid, None, None, None, true, CGSize::new(0.0, 0.0), None, None);
+
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::SpaceExposed(space, screen.size),
+        );
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::windows_on_screen_updated(
+                space,
+                old.pid,
+                vec![window_info(old), window_info(sibling)],
+                None,
+            ),
+        );
+        let expected_frame = engine
+            .calculate_layout(
+                space,
+                screen,
+                &layout_settings.gaps,
+                0.0,
+                Default::default(),
+                Default::default(),
+            )
+            .into_iter()
+            .find(|(wid, _)| *wid == old)
+            .expect("old identity should have a BSP leaf")
+            .1;
+
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::WindowNativeFullscreenSuspended(old),
+        );
+        engine.rekey_window_identity(&mut window_store, old, replacement);
+        assert!(
+            !engine
+                .calculate_layout(
+                    space,
+                    screen,
+                    &layout_settings.gaps,
+                    0.0,
+                    Default::default(),
+                    Default::default(),
+                )
+                .iter()
+                .any(|(wid, _)| *wid == old || *wid == replacement),
+            "the replacement identity must remain suspended"
+        );
+
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::WindowNativeFullscreenRestored(replacement),
+        );
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::WindowAdded(space, replacement),
+        );
+        let restored_frames = engine.calculate_layout(
+            space,
+            screen,
+            &layout_settings.gaps,
+            0.0,
+            Default::default(),
+            Default::default(),
+        );
+        assert_eq!(
+            restored_frames
+                .iter()
+                .find(|(wid, _)| *wid == replacement)
+                .map(|(_, frame)| *frame),
+            Some(expected_frame),
+            "a rekeyed fullscreen window must return to the original BSP slot"
+        );
+        assert!(!restored_frames.iter().any(|(wid, _)| *wid == old));
     }
 
     #[test]

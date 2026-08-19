@@ -97,6 +97,7 @@ use crate::model::broadcast::{
 };
 use crate::model::space_activation::{SpaceActivationConfig, SpaceActivationPolicy};
 use crate::model::tx_store::WindowTxStore;
+use crate::model::window_store::NativeFullscreenTransition;
 use crate::model::{AppRuleResult, RiftState};
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
@@ -231,6 +232,9 @@ pub enum Event {
         Requested,
         Option<MouseState>,
     ),
+    /// The native Accessibility fullscreen attribute observed alongside an unsolicited window
+    /// move/resize notification.
+    WindowNativeFullscreenChanged(WindowId, bool),
     WindowTitleChanged(WindowId, String),
     MenuOpened(pid_t),
     MenuClosed(pid_t),
@@ -321,6 +325,10 @@ pub struct Reactor {
     refresh_quarantine_manager: managers::RefreshQuarantineManager,
     pending_space_change_manager: managers::PendingSpaceChangeManager,
     active_spaces: HashSet<SpaceId>,
+    /// Newly appeared native Spaces that are absent from the user-Desktop inventory. macOS can
+    /// expose browser video fullscreen this way while both its fullscreen type and per-window
+    /// Space membership are temporarily stale.
+    transient_fullscreen_space_candidates: HashSet<SpaceId>,
     pub animation_tx: Option<AnimationSender>,
 }
 
@@ -441,6 +449,7 @@ impl Reactor {
                 pending_space_change: None,
             },
             active_spaces: HashSet::default(),
+            transient_fullscreen_space_candidates: HashSet::default(),
             animation_tx: None,
         };
         reactor
@@ -662,6 +671,62 @@ impl Reactor {
             }
             self.state.windows.mark_window_visible(wsid);
             self.state.windows.clear_window_server_observed(wsid);
+            if let Some(space) = space {
+                self.restore_native_fullscreen_from_active_membership(wsid, space);
+            }
+        }
+    }
+
+    fn restore_native_fullscreen_from_active_membership(
+        &mut self,
+        window_server_id: WindowServerId,
+        space: SpaceId,
+    ) {
+        let Some(record) = self
+            .state
+            .windows
+            .native_fullscreen_record_for_window_server_id(window_server_id)
+        else {
+            return;
+        };
+        let target_space = record
+            .workspace
+            .map(|workspace| workspace.space)
+            .or(record.last_known_user_space);
+        if target_space != Some(space) {
+            return;
+        }
+
+        let Some(restored) = self
+            .state
+            .windows
+            .restore_window_from_native_fullscreen_by_window_server_id(window_server_id)
+        else {
+            return;
+        };
+        let owner = self
+            .state
+            .windows
+            .contains_window(restored.current_window_id)
+            .then_some(restored.current_window_id)
+            .or_else(|| self.state.windows.tracked_window_id(window_server_id));
+        let Some(owner) = owner else { return };
+
+        tracing::info!(
+            ?owner,
+            ?window_server_id,
+            ?space,
+            "Restored native-fullscreen window from active-Space membership"
+        );
+        self.send_layout_event(LayoutEvent::WindowNativeFullscreenRestored(owner));
+        if self.is_space_active(space)
+            && self
+                .state
+                .windows
+                .window(owner)
+                .is_some_and(WindowState::is_admitted)
+        {
+            self.send_layout_event(LayoutEvent::WindowAdded(space, owner));
         }
     }
 
@@ -681,6 +746,88 @@ impl Reactor {
                 continue;
             };
             if !self.is_space_active(space) {
+                continue;
+            }
+
+            let direct_spaces = window_server::window_spaces(wsid);
+            if let Some(fullscreen_space) = direct_spaces
+                .iter()
+                .copied()
+                .find(|candidate| Self::is_direct_fullscreen_space(*candidate))
+            {
+                let _ = self.state.windows.suspend_window_to_native_fullscreen(
+                    wid,
+                    Some(wsid),
+                    Some(space),
+                    fullscreen_space,
+                    NativeFullscreenTransition::Suspended,
+                );
+                tracing::info!(
+                    ?wid,
+                    ?wsid,
+                    ?space,
+                    ?fullscreen_space,
+                    "Suspended missing active-Space window on direct fullscreen Space"
+                );
+                self.send_layout_event(LayoutEvent::WindowNativeFullscreenSuspended(wid));
+                continue;
+            }
+
+            // YouTube/browser fullscreen can add a managed Space and remove the focused window
+            // from the active Desktop before SLSCopySpacesForWindows reports that new Space. The
+            // simultaneous inventory delta plus the focused BSP leaf is the only coherent signal
+            // in that snapshot, and is stronger than the stale direct membership.
+            let was_focused = self.main_window() == Some(wid)
+                || self.last_focused_window_in_space(space) == Some(wid);
+            if was_focused
+                && let Some(fullscreen_space) =
+                    self.transient_fullscreen_space_candidates.iter().copied().next()
+            {
+                let _ = self.state.windows.suspend_window_to_native_fullscreen(
+                    wid,
+                    Some(wsid),
+                    Some(space),
+                    fullscreen_space,
+                    NativeFullscreenTransition::Suspended,
+                );
+                tracing::info!(
+                    ?wid,
+                    ?wsid,
+                    ?space,
+                    ?fullscreen_space,
+                    ?direct_spaces,
+                    "Suspended focused window on newly appeared transient Space"
+                );
+                self.send_layout_event(LayoutEvent::WindowNativeFullscreenSuspended(wid));
+                continue;
+            }
+
+            // Native fullscreen exit is asynchronous. The direct membership can already point
+            // back at the original Desktop while the per-Space window list still omits the
+            // window. Keep the suspended leaf until an active-Space membership observation
+            // restores it; otherwise this lagging snapshot collapses the leaf and a later AX
+            // discovery inserts it again with default BSP weights.
+            if self.state.windows.is_window_native_fullscreen_suspended(wid) {
+                debug!(
+                    ?wid,
+                    ?wsid,
+                    ?space,
+                    ?direct_spaces,
+                    "Preserving native-fullscreen leaf while active-Space membership catches up"
+                );
+                continue;
+            }
+
+            // A direct same-Space membership is stronger than a temporarily incomplete
+            // per-Space window-list sample. This also avoids collapsing ordinary windows during
+            // the short WindowServer visibility gap around minimize and animation transitions.
+            if direct_spaces.contains(&space) {
+                debug!(
+                    ?wid,
+                    ?wsid,
+                    ?space,
+                    "Preserving window confirmed on active Space by direct membership"
+                );
                 continue;
             }
 
@@ -884,6 +1031,7 @@ impl Reactor {
     fn note_windowserver_activity(event: &Event) {
         let wsid = match event {
             Event::WindowFrameChanged(wid, ..) => Some(wid.idx.get()),
+            Event::WindowNativeFullscreenChanged(wid, ..) => Some(wid.idx.get()),
             Event::WindowCreated(wid, ..) => Some(wid.idx.get()),
             Event::WindowDestroyed(wid) => Some(wid.idx.get()),
             Event::WindowMinimized(wid) => Some(wid.idx.get()),
@@ -934,6 +1082,7 @@ impl Reactor {
                 | Event::WindowServerDestroyed(..)
                 | Event::WindowServerAppeared(..)
                 | Event::WindowFrameChanged(..)
+                | Event::WindowNativeFullscreenChanged(..)
                 | Event::WindowMinimized(..)
                 | Event::WindowDeminiaturized(..)
                 | Event::WindowTitleChanged(..)
@@ -1341,6 +1490,11 @@ impl Reactor {
                     .window(wid)
                     .map(|window| (window.info.sys_id, window.frame_monotonic))
                     .unwrap_or((None, new_frame));
+                if let Some(outcome) = server_id.and_then(|server_id| {
+                    self.handle_native_fullscreen_frame_transition(wid, server_id)
+                }) {
+                    return Ok(outcome);
+                }
                 let old_space = self.geometry_space_for_window(&old_frame, server_id);
                 let new_space = self.geometry_space_for_window(&new_frame, server_id);
                 let old_space_active = old_space.is_some_and(|space| self.is_space_active(space));
@@ -1403,6 +1557,57 @@ impl Reactor {
                     outcome.dispatch_mouse_up = true;
                 }
                 outcome.focused_window = raised_window;
+                return Ok(outcome);
+            }
+            Event::WindowNativeFullscreenChanged(wid, is_fullscreen) => {
+                if is_fullscreen {
+                    self.state.windows.mark_window_native_fullscreen_ax_observed(wid);
+                    return Ok(EventOutcome::no_change());
+                }
+
+                let Some(record) = self.state.windows.native_fullscreen_record_for_window(wid)
+                else {
+                    return Ok(EventOutcome::no_change());
+                };
+                // A regular browser window often remains AX-non-fullscreen while a separate
+                // video projection occupies the transient Space. Do not let that unrelated
+                // `false` value bypass the stricter active-membership exit path.
+                if !record.ax_fullscreen_observed {
+                    return Ok(EventOutcome::no_change());
+                }
+
+                let target_space = record
+                    .workspace
+                    .map(|workspace| workspace.space)
+                    .or(record.last_known_user_space);
+                let Some(target_space) = target_space else {
+                    return Ok(EventOutcome::no_change());
+                };
+                let Some(window_server_id) = record.window_server_id else {
+                    return Ok(EventOutcome::no_change());
+                };
+                let direct_spaces = window_server::window_spaces(window_server_id);
+                if direct_spaces.iter().copied().any(Self::is_direct_fullscreen_space) {
+                    return Ok(EventOutcome::no_change());
+                }
+
+                let mut outcome = EventOutcome::no_change();
+                if self
+                    .restore_fullscreen_window_to_user_space(
+                        window_server_id,
+                        target_space,
+                        wid,
+                        &mut outcome,
+                    )
+                    .is_some()
+                {
+                    tracing::info!(
+                        ?wid,
+                        ?window_server_id,
+                        ?target_space,
+                        "Restored native-fullscreen window from AXFullscreen exit"
+                    );
+                }
                 return Ok(outcome);
             }
             Event::WindowTitleChanged(wid, new_title) => {
@@ -2226,6 +2431,33 @@ impl Reactor {
             }
 
             for record in records {
+                let target_space = record
+                    .workspace
+                    .map(|workspace| workspace.space)
+                    .or(record.last_known_user_space);
+
+                // The display can report the original Desktop before the fullscreen window has
+                // actually rejoined that Desktop. Do not clear the suspension based on display
+                // state alone: wait until both direct and active-Space memberships confirm the
+                // return. Frame and membership handlers provide the same confirmation path.
+                if let (Some(window_server_id), Some(target_space)) =
+                    (record.window_server_id, target_space)
+                {
+                    let direct_spaces = window_server::window_spaces(window_server_id);
+                    let still_on_transient_space = direct_spaces
+                        .iter()
+                        .copied()
+                        .any(Self::is_direct_fullscreen_space);
+                    let active_membership_confirmed = self
+                        .space_state
+                        .active_window_spaces
+                        .get(&window_server_id)
+                        .is_some_and(|space| *space == target_space);
+                    if still_on_transient_space || !active_membership_confirmed {
+                        continue;
+                    }
+                }
+
                 let _ = self
                     .state
                     .windows
@@ -2250,10 +2482,9 @@ impl Reactor {
                             .then_some(record.current_window_id)
                     });
 
-                let target_space = record
-                    .workspace
-                    .map(|workspace| workspace.space)
-                    .or(record.last_known_user_space);
+                if let Some(window_id) = live_window_id {
+                    self.send_layout_event(LayoutEvent::WindowNativeFullscreenRestored(window_id));
+                }
 
                 if let (Some(window_id), Some(target_space)) = (live_window_id, target_space)
                     && let Some(source_space) =
@@ -2432,6 +2663,7 @@ impl Reactor {
         &mut self,
         space_state: ForwardedSpaceState,
     ) -> anyhow::Result<EventOutcome> {
+        self.update_transient_fullscreen_space_candidates(&space_state);
         let mut outcome = EventOutcome::window_membership_changed(false, true);
         let analysis = topology_workflow::analyze_space_snapshot(
             &self.space_state,
@@ -2561,6 +2793,37 @@ impl Reactor {
         Ok(outcome)
     }
 
+    fn update_transient_fullscreen_space_candidates(&mut self, incoming: &ForwardedSpaceState) {
+        // The first snapshot after startup contains the complete Desktop inventory, not a
+        // transition. It cannot identify newly created transient Spaces safely.
+        if self.space_state.display_space_ids.is_empty() {
+            self.transient_fullscreen_space_candidates.clear();
+            return;
+        }
+
+        let previous: HashSet<SpaceId> = self
+            .space_state
+            .display_space_ids
+            .values()
+            .flatten()
+            .copied()
+            .collect();
+        let current_user_spaces: HashSet<SpaceId> = incoming
+            .active_spaces
+            .iter()
+            .copied()
+            .chain(incoming.last_user_space_by_display.values().copied())
+            .collect();
+        self.transient_fullscreen_space_candidates = incoming
+            .display_space_ids
+            .values()
+            .flatten()
+            .copied()
+            .filter(|space| !previous.contains(space))
+            .filter(|space| !current_user_spaces.contains(space))
+            .collect();
+    }
+
     fn try_apply_pending_space_change(&mut self) {
         if let Some(pending) = self.pending_space_change_manager.pending_space_change.take() {
             if pending.screens.len() == self.space_state.screens.len() {
@@ -2663,6 +2926,12 @@ impl Reactor {
             .map(|(wid, info)| {
                 let current_native_space =
                     info.sys_id.and_then(|wsid| self.resolve_native_space(wsid, None));
+                let active_membership_confirmed = info.sys_id.is_some_and(|wsid| {
+                    self.state.windows.is_window_visible(wsid)
+                        || current_native_space.is_some_and(|space| {
+                            self.space_state.active_window_spaces.get(&wsid) == Some(&space)
+                        })
+                });
                 let active_space = self
                     .best_space_for_window(&info.frame, info.sys_id)
                     .filter(|space| self.is_space_active(*space))
@@ -2673,6 +2942,7 @@ impl Reactor {
                     wid,
                     info,
                     current_native_space,
+                    active_membership_confirmed,
                     active_space,
                 }
             })
@@ -2923,6 +3193,8 @@ impl Reactor {
             .or_else(|| {
                 self.state.windows.contains_window(original_window).then_some(original_window)
             })?;
+        *outcome = std::mem::take(outcome)
+            .with_layout_event(LayoutEvent::WindowNativeFullscreenRestored(owner));
         if owner != original_window && self.assigned_space_for_window_id(original_window).is_some()
         {
             *outcome = std::mem::take(outcome)
@@ -3065,6 +3337,9 @@ impl Reactor {
         let mut layout_changed = false;
 
         for wid in windows {
+            if self.state.windows.is_window_native_fullscreen_suspended(wid) {
+                continue;
+            }
             let Some(authoritative_space) = self.authoritative_space_for_window_id(wid) else {
                 continue;
             };
@@ -3174,6 +3449,134 @@ impl Reactor {
 
     fn is_known_fullscreen_window(&self, wsid: WindowServerId) -> bool {
         self.state.windows.is_window_server_id_native_fullscreen_suspended(wsid)
+    }
+
+    fn is_direct_fullscreen_space(space: SpaceId) -> bool {
+        #[cfg(test)]
+        {
+            space.get() >= 0x400000000
+        }
+        #[cfg(not(test))]
+        {
+            // Some macOS/browser combinations expose video fullscreen Spaces with a transient
+            // non-user type instead of the documented fullscreen type (4). Rift cannot manage
+            // any non-user Space as a Desktop, so treat both forms as native fullscreen here.
+            window_server::space_is_fullscreen(space.get())
+                || !window_server::space_is_user(space.get())
+        }
+    }
+
+    /// WindowServer lifecycle notifications can lag behind AX frame notifications during native
+    /// fullscreen transitions. Detect the transition from the window's direct Space memberships
+    /// before the generic frame-change workflow can interpret the fullscreen frame as a resize or
+    /// cross-Space move and collapse its preserved BSP leaf.
+    fn handle_native_fullscreen_frame_transition(
+        &mut self,
+        wid: WindowId,
+        window_server_id: WindowServerId,
+    ) -> Option<EventOutcome> {
+        let spaces = window_server::window_spaces(window_server_id);
+        if let Some(fullscreen_space) = spaces
+            .iter()
+            .copied()
+            .find(|space| Self::is_direct_fullscreen_space(*space))
+        {
+            let last_known_user_space = self
+                .assigned_space_for_window_id(wid)
+                .or_else(|| {
+                    self.state
+                        .windows
+                        .native_fullscreen_record_for_window(wid)
+                        .and_then(|record| record.last_known_user_space)
+                })
+                .or_else(|| {
+                    self.state
+                        .windows
+                        .window_server_space(window_server_id)
+                        .filter(|space| !Self::is_direct_fullscreen_space(*space))
+                });
+            let _ = self.state.windows.suspend_window_to_native_fullscreen(
+                wid,
+                Some(window_server_id),
+                last_known_user_space,
+                fullscreen_space,
+                NativeFullscreenTransition::Suspended,
+            );
+            debug!(
+                ?wid,
+                ?window_server_id,
+                ?fullscreen_space,
+                ?last_known_user_space,
+                "Suspended native-fullscreen window from direct Space membership"
+            );
+            return Some(
+                EventOutcome::no_change()
+                    .with_layout_event(LayoutEvent::WindowNativeFullscreenSuspended(wid)),
+            );
+        }
+
+        let record = self
+            .state
+            .windows
+            .native_fullscreen_record_for_window_server_id(window_server_id)?;
+        let target_space = record
+            .workspace
+            .map(|workspace| workspace.space)
+            .or(record.last_known_user_space)?;
+        if !spaces.contains(&target_space) {
+            return None;
+        }
+
+        if self
+            .space_state
+            .active_window_spaces
+            .get(&window_server_id)
+            .is_none_or(|space| *space != target_space)
+        {
+            debug!(
+                ?wid,
+                ?window_server_id,
+                ?target_space,
+                "Deferring native-fullscreen restore until active-Space membership catches up"
+            );
+            return Some(EventOutcome::no_change());
+        }
+
+        let restored = self
+            .state
+            .windows
+            .restore_window_from_native_fullscreen_by_window_server_id(window_server_id)?;
+        let owner = self
+            .state
+            .windows
+            .contains_window(restored.current_window_id)
+            .then_some(restored.current_window_id)
+            .unwrap_or(wid);
+        self.state
+            .windows
+            .set_window_server_space(window_server_id, Some(target_space));
+        if self.is_space_active(target_space) {
+            self.state.windows.mark_window_visible(window_server_id);
+        }
+
+        debug!(
+            ?owner,
+            ?window_server_id,
+            ?target_space,
+            "Restored native-fullscreen window from direct Space membership"
+        );
+        let mut outcome = EventOutcome::no_change()
+            .with_layout_event(LayoutEvent::WindowNativeFullscreenRestored(owner));
+        if self.is_space_active(target_space)
+            && self
+                .state
+                .windows
+                .window(owner)
+                .is_some_and(WindowState::is_admitted)
+        {
+            outcome = outcome.with_layout_event(LayoutEvent::WindowAdded(target_space, owner));
+        }
+        Some(outcome)
     }
 
     fn window_center_on_known_screen(&self, wid: WindowId) -> Option<CGPoint> {

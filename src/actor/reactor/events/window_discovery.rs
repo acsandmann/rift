@@ -100,6 +100,7 @@ fn sync_window_server_id_mapping(
     old_sys_id: Option<WindowServerId>,
     new_sys_id: Option<WindowServerId>,
     current_native_space: Option<SpaceId>,
+    active_membership_confirmed: bool,
 ) -> crate::actor::reactor::events::EventOutcome {
     let mut outcome = crate::actor::reactor::events::EventOutcome::default();
     if old_sys_id != new_sys_id
@@ -134,9 +135,14 @@ fn sync_window_server_id_mapping(
                 .workspace
                 .map(|workspace| workspace.space)
                 .or(record.last_known_user_space);
-            if current_space != record.fullscreen_space && Some(current_space) == target_user_space
+            if active_membership_confirmed
+                && current_space != record.fullscreen_space
+                && Some(current_space) == target_user_space
             {
-                let _ = state.windows.restore_window_from_native_fullscreen(wid);
+                if state.windows.restore_window_from_native_fullscreen(wid).is_some() {
+                    outcome = outcome
+                        .with_layout_event(LayoutEvent::WindowNativeFullscreenRestored(wid));
+                }
             }
         }
     }
@@ -281,6 +287,7 @@ pub(crate) struct ObservedWindow {
     pub(crate) wid: WindowId,
     pub(crate) info: WindowInfo,
     pub(crate) current_native_space: Option<SpaceId>,
+    pub(crate) active_membership_confirmed: bool,
     pub(crate) active_space: Option<SpaceId>,
 }
 
@@ -322,6 +329,7 @@ pub(crate) fn process_window_list(
                     old_sys_id,
                     info.sys_id,
                     window.current_native_space,
+                    window.active_membership_confirmed,
                 ));
                 if let Ok(existing_outcome) =
                     sync_existing_window_state(state, wid, info, window.active_space)
@@ -336,6 +344,7 @@ pub(crate) fn process_window_list(
                     None,
                     info.sys_id,
                     window.current_native_space,
+                    window.active_membership_confirmed,
                 ));
                 let window_state: WindowState = WindowState::from((*info).clone());
                 state.windows.insert_window(wid, window_state);
@@ -351,6 +360,7 @@ pub(crate) fn process_window_list(
             wid,
             info,
             current_native_space,
+            active_membership_confirmed,
             active_space,
         } = window;
         if state.windows.contains_window(wid) {
@@ -362,6 +372,7 @@ pub(crate) fn process_window_list(
                 old_sys_id,
                 info.sys_id,
                 current_native_space,
+                active_membership_confirmed,
             ));
             if let Ok(existing_outcome) =
                 sync_existing_window_state(state, wid, &info, active_space)
@@ -376,6 +387,7 @@ pub(crate) fn process_window_list(
                 None,
                 info.sys_id,
                 current_native_space,
+                active_membership_confirmed,
             ));
             new_windows.push((wid, info));
         }

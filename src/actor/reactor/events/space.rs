@@ -143,7 +143,8 @@ pub fn handle_window_server_destroyed(
         if let (Some(wid), Some(user_space)) = (window_id, last_known_user_space)
             && assigned_space == Some(user_space)
         {
-            outcome = outcome.with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
+            outcome = outcome
+                .with_layout_event(LayoutEvent::WindowNativeFullscreenSuspended(wid));
             layout_changed = active_spaces.contains(&user_space);
         }
         if layout_changed && !mission_control_active {
@@ -311,8 +312,9 @@ pub fn handle_window_server_appeared(
                         if let Some(user_space) = last_known_user_space
                             && assigned_space == Some(user_space)
                         {
-                            outcome = outcome
-                                .with_layout_event(LayoutEvent::WindowRemovedPreserveFloating(wid));
+                            outcome = outcome.with_layout_event(
+                                LayoutEvent::WindowNativeFullscreenSuspended(wid),
+                            );
                             layout_changed = active_spaces.contains(&user_space);
                         }
                     }

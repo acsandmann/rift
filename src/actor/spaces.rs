@@ -906,7 +906,10 @@ impl SpacesActor {
         }
         #[cfg(not(test))]
         {
+            // Native video fullscreen can be reported as a transient non-user Space rather than
+            // the documented fullscreen type. Both forms must be kept out of Desktop topology.
             window_server::space_is_fullscreen(space.get())
+                || !window_server::space_is_user(space.get())
         }
     }
 

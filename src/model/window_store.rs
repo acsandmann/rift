@@ -98,6 +98,10 @@ pub struct NativeFullscreenRecord {
     pub last_known_user_space: Option<SpaceId>,
     pub fullscreen_space: SpaceId,
     pub transition: NativeFullscreenTransition,
+    /// The owning AX window explicitly reported `AXFullscreen = true`. This distinguishes
+    /// ordinary AppKit fullscreen from browser video projections, whose original AX window can
+    /// remain non-fullscreen while a separate transient projection owns the native Space.
+    pub ax_fullscreen_observed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -532,6 +536,8 @@ impl WindowStore {
                 .or_else(|| existing.and_then(|record| record.last_known_user_space)),
             fullscreen_space,
             transition,
+            ax_fullscreen_observed: existing
+                .is_some_and(|record| record.ax_fullscreen_observed),
         };
         self.windows.entry(window_id).or_default().placement = WindowPlacement::NativeFullscreen;
         self.app_windows.entry(window_id.pid).or_default().insert(window_id);
@@ -612,12 +618,32 @@ impl WindowStore {
         self.native_fullscreen_records_by_original_window.values().copied()
     }
 
+    /// Remember that this lifecycle was corroborated by the window's native AX fullscreen
+    /// attribute. A later `false` value is then an authoritative exit signal even when the
+    /// active-Space window inventory is still lagging behind the animation.
+    pub fn mark_window_native_fullscreen_ax_observed(&mut self, window_id: WindowId) -> bool {
+        let Some(original_window_id) = self.native_fullscreen_original_window(window_id) else {
+            return false;
+        };
+        let Some(record) =
+            self.native_fullscreen_records_by_original_window.get_mut(&original_window_id)
+        else {
+            return false;
+        };
+        let changed = !record.ax_fullscreen_observed;
+        record.ax_fullscreen_observed = true;
+        changed
+    }
+
     pub fn restore_window_from_native_fullscreen(
         &mut self,
         window_id: WindowId,
     ) -> Option<NativeFullscreenRecord> {
         let original_window_id = self.native_fullscreen_original_window(window_id)?;
         let record = self.remove_native_fullscreen_record_by_original_window(original_window_id)?;
+        if let Some(workspace) = record.workspace {
+            self.assign_window_to_workspace(record.current_window_id, workspace);
+        }
         if let Some(window) = self.windows.get_mut(&record.current_window_id) {
             window.placement = if window.rule_floating {
                 WindowPlacement::Floating
