@@ -187,12 +187,15 @@ pub fn handle_close_window(
 
 pub fn handle_config_updated(
     config: &mut Config,
+    space_activation_policy: &mut SpaceActivationPolicy,
     layout: &mut LayoutManager,
     state: &RiftState,
     drag: &mut DragManager,
     new_config: Config,
 ) -> anyhow::Result<EventOutcome> {
     *config = new_config;
+    space_activation_policy
+        .set_configured_disabled_spaces(&config.settings.disabled_space_ids);
     layout.layout_engine.set_layout_settings(&config.settings.layout);
 
     layout
@@ -201,7 +204,9 @@ pub fn handle_config_updated(
 
     drag.update_config(config.settings.window_snapping);
 
-    Ok(EventOutcome::layout_changed(false).with_service_config_update(config.clone()))
+    Ok(EventOutcome::layout_changed(false)
+        .with_active_space_recompute()
+        .with_service_config_update(config.clone()))
 }
 
 pub fn handle_command_reactor_debug(

@@ -83,6 +83,26 @@ fn config_reload_propagates_non_keybinding_changes_to_wm_controller() {
 }
 
 #[test]
+fn config_reload_recomputes_persistently_disabled_spaces() {
+    let mut reactor = test_reactor();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(6);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    assert!(reactor.is_space_active(space));
+
+    let mut updated = reactor.config.clone();
+    updated.settings.disabled_space_ids = vec![space.get()];
+    reactor.handle_event(Event::ConfigUpdated(updated));
+    assert!(!reactor.is_space_active(space));
+
+    let mut updated = reactor.config.clone();
+    updated.settings.disabled_space_ids.clear();
+    reactor.handle_event(Event::ConfigUpdated(updated));
+    assert!(reactor.is_space_active(space));
+}
+
+#[test]
 fn it_ignores_stale_resize_events() {
     let (mut apps, mut reactor) = test_context();
     reactor.handle_event(space_state_event(

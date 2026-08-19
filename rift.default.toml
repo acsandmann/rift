@@ -17,6 +17,10 @@ animation_fps = 100.0
 # - If false, spaces are managed by default and you can disable specific ones.
 # Default is true; uncomment to change.
 #default_disable = false
+# Native macOS Space IDs that Rift should never manage. These exclusions are
+# persistent across Rift restarts, unlike toggle_space_activated. Find IDs with
+# `rift-cli query displays`. IDs can change if a macOS Space is deleted/recreated.
+disabled_space_ids = []
 
 # Mouse/Focus behavior
 # - focus_follows_mouse: moving the mouse into a window focuses it

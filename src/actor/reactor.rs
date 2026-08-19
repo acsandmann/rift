@@ -377,6 +377,9 @@ impl Reactor {
             Some((tx, store)) => (Some(tx), store),
             None => (None, WindowTxStore::new()),
         };
+        let mut space_activation_policy = SpaceActivationPolicy::new();
+        space_activation_policy
+            .set_configured_disabled_spaces(&config.settings.disabled_space_ids);
         let reactor = Reactor {
             config: config.clone(),
             one_space,
@@ -384,7 +387,7 @@ impl Reactor {
             layout_manager: managers::LayoutManager { layout_engine },
             state: RiftState::default(),
             space_state: ForwardedSpaceState::default(),
-            space_activation_policy: SpaceActivationPolicy::new(),
+            space_activation_policy,
             main_window_tracker: MainWindowTracker::default(),
             drag_manager: managers::DragManager {
                 drag_state: DragState::Inactive,
@@ -1543,6 +1546,7 @@ impl Reactor {
             Event::ConfigUpdated(new_cfg) => {
                 return command_workflow::handle_config_updated(
                     &mut self.config,
+                    &mut self.space_activation_policy,
                     &mut self.layout_manager,
                     &self.state,
                     &mut self.drag_manager,

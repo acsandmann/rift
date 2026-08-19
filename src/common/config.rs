@@ -6,7 +6,7 @@ use regex::RegexBuilder;
 pub use rift_protocol::{AnimationEasing, ConfigCommand, LayoutMode, WorkspaceSelector};
 use serde::{Deserialize, Serialize};
 
-use super::collections::HashMap;
+use super::collections::{HashMap, HashSet};
 use crate::actor::wm_controller::WmCommand;
 use crate::sys::hotkey::{Hotkey, HotkeySpec};
 
@@ -425,6 +425,10 @@ pub struct Settings {
     pub animation_easing: AnimationEasing,
     #[serde(default = "yes")]
     pub default_disable: bool,
+    /// Native macOS Space IDs that Rift must never manage. Unlike temporary
+    /// `toggle_space_activated` overrides, these exclusions survive restarts.
+    #[serde(default)]
+    pub disabled_space_ids: Vec<u64>,
     #[serde(default = "yes")]
     pub mouse_follows_focus: bool,
     #[serde(default = "yes")]
@@ -1015,6 +1019,16 @@ impl Settings {
                 "animation_fps must be positive, got {}",
                 self.animation_fps
             ));
+        }
+
+        if self.disabled_space_ids.contains(&0) {
+            issues.push("disabled_space_ids must contain only positive Space IDs".to_string());
+        }
+
+        let unique_disabled_space_ids: HashSet<u64> =
+            self.disabled_space_ids.iter().copied().collect();
+        if unique_disabled_space_ids.len() != self.disabled_space_ids.len() {
+            issues.push("disabled_space_ids must not contain duplicates".to_string());
         }
 
         issues.extend(self.layout.validate());
@@ -1619,6 +1633,23 @@ mod tests {
     use super::*;
     use crate::actor::reactor;
     use crate::layout_engine::{LayoutCommand, ResizeOrientation};
+
+    #[test]
+    fn disabled_space_ids_parse_and_validate() {
+        let settings: Settings = toml::from_str("disabled_space_ids = [3, 6]").unwrap();
+
+        assert_eq!(settings.disabled_space_ids, vec![3, 6]);
+        assert!(settings.validate().is_empty());
+    }
+
+    #[test]
+    fn disabled_space_ids_reject_zero_and_duplicates() {
+        let settings: Settings = toml::from_str("disabled_space_ids = [0, 6, 6]").unwrap();
+        let issues = settings.validate();
+
+        assert!(issues.iter().any(|issue| issue.contains("positive Space IDs")));
+        assert!(issues.iter().any(|issue| issue.contains("duplicates")));
+    }
 
     #[test]
     fn layout_insertion_point_supports_global_default_and_per_mode_override() {
