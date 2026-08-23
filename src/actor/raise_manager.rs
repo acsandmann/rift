@@ -842,11 +842,14 @@ mod tests {
             // The focus_window should have been moved to the end.
             assert_eq!(requests.len(), 1);
             if let Request::Raise(wids, _, seq_id, quiet) = &requests[0] {
-                assert_eq!(*wids, vec![
-                    WindowId::new(1, 1),
-                    WindowId::new(1, 2),
-                    WindowId::new(1, 7),
-                ]);
+                assert_eq!(
+                    *wids,
+                    vec![
+                        WindowId::new(1, 1),
+                        WindowId::new(1, 2),
+                        WindowId::new(1, 7),
+                    ]
+                );
                 assert_eq!(*seq_id, 1);
                 assert_eq!(*quiet, Quiet::No);
             } else {

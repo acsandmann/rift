@@ -93,7 +93,9 @@ struct SwipeState {
 
 impl SwipeState {
     #[inline]
-    fn reset(&mut self) { *self = Self::default(); }
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -130,7 +132,9 @@ struct ScrollState {
 
 impl ScrollState {
     #[inline]
-    fn reset(&mut self) { *self = Self::default(); }
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
 
     #[inline]
     fn finish_contacts(&mut self) {
@@ -155,7 +159,9 @@ struct PathDelta {
 
 impl PathDelta {
     #[inline(always)]
-    fn magnitude(self) -> f64 { self.dx.abs().max(self.dy.abs()) }
+    fn magnitude(self) -> f64 {
+        self.dx.abs().max(self.dy.abs())
+    }
 }
 
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq)]
@@ -739,7 +745,9 @@ fn normalize_tolerance(value: f64) -> f64 {
 }
 
 #[inline(always)]
-fn gesture_event_mask() -> CGEventMask { gesture::EVENT_MASK }
+fn gesture_event_mask() -> CGEventMask {
+    gesture::EVENT_MASK
+}
 
 unsafe extern "C-unwind" fn gesture_callback(
     _proxy: CGEventTapProxy,

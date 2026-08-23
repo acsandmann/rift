@@ -208,7 +208,9 @@ impl From<TypedRiftCommand> for RiftCommand {
 
 impl<'de> Deserialize<'de> for RiftCommand {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where D: Deserializer<'de> {
+    where
+        D: Deserializer<'de>,
+    {
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum CommandInput {
@@ -224,7 +226,9 @@ impl<'de> Deserialize<'de> for RiftCommand {
 }
 
 fn decode_legacy_command<E>(command: &str) -> Result<RiftCommand, E>
-where E: DeError {
+where
+    E: DeError,
+{
     match serde_json::from_str::<LegacyCommand>(command)
         .map_err(|error| E::custom(format!("invalid legacy command JSON: {error}")))?
     {

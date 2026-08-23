@@ -160,7 +160,9 @@ unsafe fn drop_mouse_ctx(ptr: *mut std::ffi::c_void) {
 
 impl EventTap {
     #[inline]
-    fn stack_line_hover_enabled(&self, state: &State) -> bool { state.stack_line_enabled }
+    fn stack_line_hover_enabled(&self, state: &State) -> bool {
+        state.stack_line_enabled
+    }
 
     #[inline]
     fn focus_follows_mouse_handler_enabled(state: &State) -> bool {
@@ -521,10 +523,14 @@ impl EventTap {
     }
 
     #[inline]
-    fn reset_mouse_move_sample_gate(&self) { self.mouse_move_last_timestamp.set(None); }
+    fn reset_mouse_move_sample_gate(&self) {
+        self.mouse_move_last_timestamp.set(None);
+    }
 
     #[inline]
-    fn reset_mouse_window(&self) { self.mouse_window.set(MouseWindow::default()); }
+    fn reset_mouse_window(&self) {
+        self.mouse_window.set(MouseWindow::default());
+    }
 
     fn reconcile_after_tap_reenabled(&self) {
         let mut state = self.state.borrow_mut();
@@ -898,9 +904,13 @@ impl State {
             .and_then(|(_, space)| self.layout_mode_by_space.get(space).copied())
     }
 
-    fn note_key_down(&mut self, key_code: KeyCode) { self.pressed_keys.insert(key_code); }
+    fn note_key_down(&mut self, key_code: KeyCode) {
+        self.pressed_keys.insert(key_code);
+    }
 
-    fn note_key_up(&mut self, key_code: KeyCode) { self.pressed_keys.remove(&key_code); }
+    fn note_key_up(&mut self, key_code: KeyCode) {
+        self.pressed_keys.remove(&key_code);
+    }
 
     fn note_flags_changed(&mut self, key_code: KeyCode) {
         if !is_modifier_key(key_code) {
@@ -979,7 +989,9 @@ impl State {
     }
 
     #[inline]
-    fn reset_mouse_sampling(&mut self) { self.last_stack_line_hit = None; }
+    fn reset_mouse_sampling(&mut self) {
+        self.last_stack_line_hit = None;
+    }
 }
 
 #[inline]

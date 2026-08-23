@@ -230,9 +230,13 @@ mod tests {
 
     use super::*;
 
-    fn workspace() -> VirtualWorkspaceId { KeyData::from_ffi(1).into() }
+    fn workspace() -> VirtualWorkspaceId {
+        KeyData::from_ffi(1).into()
+    }
 
-    fn frame() -> CGRect { CGRect::new(CGPoint::new(10.0, 20.0), CGSize::new(300.0, 200.0)) }
+    fn frame() -> CGRect {
+        CGRect::new(CGPoint::new(10.0, 20.0), CGSize::new(300.0, 200.0))
+    }
 
     #[test]
     fn window_lifecycle_cleanup_removes_all_saved_frames() {

@@ -200,7 +200,9 @@ static APPLICATION_OBSERVERS: Lazy<Mutex<HashMap<pid_t, usize>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 pub fn set_application_callback<F>(callback: F)
-where F: Fn(pid_t, AppInfo) + Send + Sync + 'static {
+where
+    F: Fn(pid_t, AppInfo) + Send + Sync + 'static,
+{
     *APPLICATION_CALLBACK.lock() = Some(Arc::new(callback));
 }
 
@@ -335,11 +337,17 @@ impl NSRunningApplicationExt for NSRunningApplication {
         NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
     }
 
-    fn pid(&self) -> pid_t { self.processIdentifier() }
+    fn pid(&self) -> pid_t {
+        self.processIdentifier()
+    }
 
-    fn bundle_id(&self) -> Option<Retained<NSString>> { self.bundleIdentifier() }
+    fn bundle_id(&self) -> Option<Retained<NSString>> {
+        self.bundleIdentifier()
+    }
 
-    fn localized_name(&self) -> Option<Retained<NSString>> { self.localizedName() }
+    fn localized_name(&self) -> Option<Retained<NSString>> {
+        self.localizedName()
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

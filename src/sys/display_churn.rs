@@ -24,9 +24,13 @@ pub fn end() -> u64 {
     DISPLAY_CHURN_EPOCH.fetch_add(1, Ordering::SeqCst).wrapping_add(1)
 }
 
-pub fn is_active() -> bool { DISPLAY_CHURN_ACTIVE.load(Ordering::SeqCst) }
+pub fn is_active() -> bool {
+    DISPLAY_CHURN_ACTIVE.load(Ordering::SeqCst)
+}
 
-pub fn epoch() -> u64 { DISPLAY_CHURN_EPOCH.load(Ordering::SeqCst) }
+pub fn epoch() -> u64 {
+    DISPLAY_CHURN_EPOCH.load(Ordering::SeqCst)
+}
 
 pub fn flags() -> DisplayReconfigFlags {
     DisplayReconfigFlags::from_bits_truncate(DISPLAY_CHURN_FLAGS.load(Ordering::SeqCst) as u32)

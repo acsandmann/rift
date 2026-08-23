@@ -2,7 +2,9 @@ use super::*;
 
 pub(super) const CURRENT_SCHEMA_VERSION: u32 = 2;
 
-fn legacy_schema_version() -> u32 { 0 }
+fn legacy_schema_version() -> u32 {
+    0
+}
 
 /// Owned, versioned representation of the layout file.
 ///

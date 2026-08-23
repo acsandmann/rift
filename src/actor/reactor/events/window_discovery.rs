@@ -42,12 +42,10 @@ fn sync_existing_window_state(
 
     let outcome = match (was_minimized, info.is_minimized) {
         (false, true) => window::handle_window_minimized(state, wid)?,
-        (true, false) => {
-            window::handle_window_deminiaturized(state, window::WindowDeminiaturizedPayload {
-                window: wid,
-                active_space,
-            })?
-        }
+        (true, false) => window::handle_window_deminiaturized(
+            state,
+            window::WindowDeminiaturizedPayload { window: wid, active_space },
+        )?,
         _ => {
             if let Some(existing) = state.windows.window_mut(wid) {
                 existing.info.is_minimized = info.is_minimized;
@@ -450,6 +448,101 @@ fn apply_assignment_result(
         }
     };
     (outcome, effects)
+}
+
+/// For native tabs (e.g. Ghostty) the `WindowServer` key window can switch to a
+/// new `WindowId` (same pid, new idx) that reuses the same on-screen frame
+/// while the previous tab's `WindowId` is still the one present in the tiling
+/// tree. If we then emit `WindowFocused(new_id)` without rekeying, the
+/// `in_active_tree` gate in `Reactor::WindowServerFocusChanged` drops the
+/// event and the app appears unfocused, while layout recovery may raise a
+/// different pid. This helper opportunistically rekeys the occupying frame's
+/// persistent identity onto the new native-tab id so the focus event lands in
+/// the active workspace.
+pub(crate) fn succeed_occupying_frame_identity(
+    state: &mut crate::model::RiftState,
+    layout: &mut crate::actor::reactor::managers::LayoutManager,
+    new_wid: WindowId,
+    space: SpaceId,
+) -> anyhow::Result<()> {
+    if state.windows.contains_window(new_wid) {
+        return Ok(());
+    }
+    let candidates = layout
+        .layout_engine
+        .windows_in_active_workspace(&state.windows, space);
+    let mut same_pid: Vec<WindowId> = candidates
+        .iter()
+        .copied()
+        .filter(|wid| wid.pid == new_wid.pid)
+        .collect();
+    // Ghostty native tabs: WindowServerFocusChanged often arrives after the
+    // previous tab was already `WindowRemoved`, leaving the active workspace
+    // empty. Fall back to focused window of same pid so we can still rekey
+    // the occupying frame without scanning all workspaces (which would cause
+    // cross-workspace pollution and break `switch_to_workspace`).
+    if same_pid.is_empty() {
+        if let Some(focused) = layout.layout_engine.focused_window()
+            && focused.pid == new_wid.pid
+            && state.windows.contains_window(focused)
+        {
+            same_pid = vec![focused];
+        }
+    }
+    if same_pid.is_empty() {
+        return Ok(());
+    }
+    let from = layout
+        .layout_engine
+        .focused_window()
+        .filter(|wid| wid.pid == new_wid.pid && same_pid.contains(wid))
+        .or_else(|| same_pid.first().copied());
+    let Some(from) = from else {
+        return Ok(());
+    };
+    if from == new_wid {
+        return Ok(());
+    }
+    // Heuristic: only rekey when the two windows plausibly occupy the same
+    // frame (native tabs share geometry) or there is a single tiled window
+    // for that pid on the space. This avoids collapsing two legitimate
+    // tiled windows of the same app.
+    let from_wsid = state.windows.window(from).and_then(|w| w.info.sys_id);
+    let new_wsid = WindowServerId::from(new_wid);
+    let from_info = from_wsid.and_then(|wsid| state.windows.get_window_server_info(wsid));
+    let new_info = state
+        .windows
+        .get_window_server_info(new_wsid)
+        .or_else(|| crate::sys::window_server::get_window(new_wsid));
+    let should_rekey = if let (Some(f), Some(n)) = (from_info, new_info) {
+        (f.frame.origin.x - n.frame.origin.x).abs() < 2.0
+            && (f.frame.origin.y - n.frame.origin.y).abs() < 2.0
+            && (f.frame.size.width - n.frame.size.width).abs() < 2.0
+            && (f.frame.size.height - n.frame.size.height).abs() < 2.0
+    } else {
+        same_pid.len() == 1
+    };
+    if !should_rekey {
+        return Ok(());
+    }
+    // Ensure the new identity has a `WindowState` to receive the persistent
+    // metadata; rekey will then transfer workspace/floating/constraints.
+    if !state.windows.contains_window(new_wid) {
+        if let Some(old_state) = state.windows.window(from).cloned() {
+            let mut new_state = old_state;
+            new_state.info.sys_id = Some(new_wsid);
+            state.windows.insert_window(new_wid, new_state);
+            // Track WSID -> new wid so future AX discovery does not resurrect `from`.
+            state.windows.track_window_server_id(new_wsid, new_wid);
+        }
+    }
+    layout
+        .layout_engine
+        .rekey_window_identity(&mut state.windows, from, new_wid);
+    // `rekey` transfers persistent metadata but leaves the old `WindowId`
+    // pruned; ensure the new wsid remains tracked.
+    state.windows.track_window_server_id(new_wsid, new_wid);
+    Ok(())
 }
 
 pub(crate) struct EmitLayoutPayload<'a> {

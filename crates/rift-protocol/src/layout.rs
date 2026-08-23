@@ -10,7 +10,9 @@ pub enum Orientation {
 }
 
 impl Default for Orientation {
-    fn default() -> Self { Self::Horizontal }
+    fn default() -> Self {
+        Self::Horizontal
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -105,7 +107,9 @@ impl LayoutKind {
         }
     }
 
-    pub const fn is_group(self) -> bool { self.is_stacked() }
+    pub const fn is_group(self) -> bool {
+        self.is_stacked()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]

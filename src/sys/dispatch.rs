@@ -33,7 +33,9 @@ unsafe impl Send for NamedQueueHandle {}
 unsafe impl Sync for NamedQueueHandle {}
 
 impl Drop for NamedQueueHandle {
-    fn drop(&mut self) { unsafe { dispatch_release(self.queue as *const c_void) }; }
+    fn drop(&mut self) {
+        unsafe { dispatch_release(self.queue as *const c_void) };
+    }
 }
 
 static NAMED_QUEUES: OnceCell<Mutex<Vec<Box<NamedQueueHandle>>>> = OnceCell::new();
@@ -172,7 +174,9 @@ pub fn block_on<T: 'static>(
         sem: Managed,
     }
     impl ArcWake for GcdWaker {
-        fn wake_by_ref(this: &Arc<Self>) { this.sem.signal(); }
+        fn wake_by_ref(this: &Arc<Self>) {
+            this.sem.signal();
+        }
     }
 
     let sem = Managed::new(0);

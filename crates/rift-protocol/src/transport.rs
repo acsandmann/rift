@@ -138,9 +138,12 @@ mod tests {
         }))
         .unwrap();
 
-        assert_eq!(request, RiftRequest::ExecuteCommand {
-            command: RiftCommand::Layout(LayoutCommand::SwitchToWorkspace(5)),
-        });
+        assert_eq!(
+            request,
+            RiftRequest::ExecuteCommand {
+                command: RiftCommand::Layout(LayoutCommand::SwitchToWorkspace(5)),
+            }
+        );
     }
 
     #[test]
@@ -150,8 +153,11 @@ mod tests {
         }))
         .unwrap();
 
-        assert_eq!(request, RiftRequest::GetWindowInfo {
-            window_id: WindowId::new(42, 7).unwrap(),
-        });
+        assert_eq!(
+            request,
+            RiftRequest::GetWindowInfo {
+                window_id: WindowId::new(42, 7).unwrap(),
+            }
+        );
     }
 }

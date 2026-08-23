@@ -87,7 +87,9 @@ pub struct DisplayLink {
 
 impl DisplayLink {
     pub fn new<F>(callback: F) -> Result<Self, CVReturn>
-    where F: FnMut() -> bool + Send + 'static {
+    where
+        F: FnMut() -> bool + Send + 'static,
+    {
         let mut link: CVDisplayLinkRef = ptr::null_mut();
         let status = unsafe { CVDisplayLinkCreateWithActiveCGDisplays(&mut link) };
         if status != 0 {
@@ -130,7 +132,9 @@ impl DisplayLink {
     /// Get the display's refresh rate in Hz (frames per second).
     /// Returns None if the refresh rate hasn't been determined yet.
     /// You may need to start the DisplayLink briefly to get this information.
-    pub fn refresh_rate(&self) -> Option<f64> { *self.refresh_rate.lock() }
+    pub fn refresh_rate(&self) -> Option<f64> {
+        *self.refresh_rate.lock()
+    }
 
     /// Get the display's refresh rate, starting the DisplayLink briefly if needed.
     /// This is a convenience method that will start the DisplayLink for a short time

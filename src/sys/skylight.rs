@@ -254,7 +254,9 @@ impl From<CGSEventType> for u32 {
 
 impl fmt::Display for KnownCGSEvent {
     #[inline]
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { fmt::Debug::fmt(self, f) }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self, f)
+    }
 }
 
 impl fmt::Display for CGSEventType {

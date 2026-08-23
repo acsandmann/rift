@@ -63,11 +63,15 @@ impl IsWithin for ic::CGSize {
 }
 
 impl IsWithin for f64 {
-    fn is_within(&self, how_much: f64, other: Self) -> bool { (self - other).abs() < how_much }
+    fn is_within(&self, how_much: f64, other: Self) -> bool {
+        (self - other).abs() < how_much
+    }
 }
 
 pub trait SameAs: IsWithin + Sized {
-    fn same_as(&self, other: Self) -> bool { self.is_within(0.1, other) }
+    fn same_as(&self, other: Self) -> bool {
+        self.is_within(0.1, other)
+    }
 }
 
 impl SameAs for ic::CGRect {}
@@ -105,7 +109,9 @@ impl CGRectExt for ic::CGRect {
             && self.max().y >= other.max().y
     }
 
-    fn area(&self) -> f64 { self.size.width * self.size.height }
+    fn area(&self) -> f64 {
+        self.size.width * self.size.height
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -133,14 +139,18 @@ pub struct CGSizeDef {
 
 impl SerializeAs<ic::CGRect> for CGRectDef {
     fn serialize_as<S>(value: &ic::CGRect, serializer: S) -> Result<S::Ok, S::Error>
-    where S: serde::Serializer {
+    where
+        S: serde::Serializer,
+    {
         CGRectDef::serialize(value, serializer)
     }
 }
 
 impl<'de> DeserializeAs<'de, ic::CGRect> for CGRectDef {
     fn deserialize_as<D>(deserializer: D) -> Result<ic::CGRect, D::Error>
-    where D: Deserializer<'de> {
+    where
+        D: Deserializer<'de>,
+    {
         CGRectDef::deserialize(deserializer)
     }
 }

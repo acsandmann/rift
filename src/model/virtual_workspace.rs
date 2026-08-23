@@ -77,11 +77,17 @@ impl VirtualWorkspace {
         }
     }
 
-    pub fn tree(&self) -> &LayoutSystemKind { &self.layout_system }
+    pub fn tree(&self) -> &LayoutSystemKind {
+        &self.layout_system
+    }
 
-    pub fn tree_mut(&mut self) -> &mut LayoutSystemKind { &mut self.layout_system }
+    pub fn tree_mut(&mut self) -> &mut LayoutSystemKind {
+        &mut self.layout_system
+    }
 
-    pub fn layout_mode(&self) -> LayoutMode { self.layout_mode }
+    pub fn layout_mode(&self) -> LayoutMode {
+        self.layout_mode
+    }
 
     pub fn create_layout_system(mode: LayoutMode, settings: &LayoutSettings) -> LayoutSystemKind {
         match mode {
@@ -123,7 +129,9 @@ impl VirtualWorkspace {
         self.last_focused = window_id;
     }
 
-    pub fn last_focused(&self) -> Option<WindowId> { self.last_focused }
+    pub fn last_focused(&self) -> Option<WindowId> {
+        self.last_focused
+    }
 }
 
 /// Owns the virtual workspace topology for each native macOS space.
@@ -164,7 +172,9 @@ pub struct WorkspaceStore {
 }
 
 impl Default for WorkspaceStore {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl WorkspaceStore {
@@ -479,7 +489,9 @@ impl WorkspaceStore {
         })
     }
 
-    pub fn workspace_auto_back_and_forth(&self) -> bool { self.workspace_auto_back_and_forth }
+    pub fn workspace_auto_back_and_forth(&self) -> bool {
+        self.workspace_auto_back_and_forth
+    }
 
     pub fn set_active_workspace(
         &mut self,
@@ -1060,10 +1072,11 @@ impl WorkspaceStore {
             });
         let workspace_id =
             self.resolve_rule_workspace(space, workspace.as_ref(), existing_assignment)?;
-        if !self.ensure_window_assignment(window_store, window_id, WindowWorkspaceInfo {
-            space,
-            workspace_id,
-        }) {
+        if !self.ensure_window_assignment(
+            window_store,
+            window_id,
+            WindowWorkspaceInfo { space, workspace_id },
+        ) {
             error!("Failed to apply window workspace assignment");
             return Err(WorkspaceError::AssignmentFailed);
         }
@@ -1240,12 +1253,14 @@ mod tests {
             Some(ws2_id)
         );
 
-        assert_eq!(manager.workspace_windows(&window_store, space, ws1_id), vec![
-            window1
-        ]);
-        assert_eq!(manager.workspace_windows(&window_store, space, ws2_id), vec![
-            window2
-        ]);
+        assert_eq!(
+            manager.workspace_windows(&window_store, space, ws1_id),
+            vec![window1]
+        );
+        assert_eq!(
+            manager.workspace_windows(&window_store, space, ws2_id),
+            vec![window2]
+        );
     }
 
     #[test]
@@ -1262,9 +1277,10 @@ mod tests {
             manager.workspace_for_window(&window_store, space, window),
             Some(ws1_id)
         );
-        assert_eq!(manager.workspace_windows(&window_store, space, ws1_id), vec![
-            window
-        ]);
+        assert_eq!(
+            manager.workspace_windows(&window_store, space, ws1_id),
+            vec![window]
+        );
 
         assert!(manager.assign_window_to_workspace(&mut window_store, space, window, ws2_id));
         assert_eq!(
@@ -1272,9 +1288,10 @@ mod tests {
             Some(ws2_id)
         );
         assert!(manager.workspace_windows(&window_store, space, ws1_id).is_empty());
-        assert_eq!(manager.workspace_windows(&window_store, space, ws2_id), vec![
-            window
-        ]);
+        assert_eq!(
+            manager.workspace_windows(&window_store, space, ws2_id),
+            vec![window]
+        );
     }
 
     #[test]

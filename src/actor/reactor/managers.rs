@@ -1,4 +1,4 @@
-use objc2_core_foundation::{CGPoint, CGRect};
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use rift_protocol::StackInfo;
 use tracing::trace;
 
@@ -25,7 +25,9 @@ pub struct AppManager {
 }
 
 impl AppManager {
-    pub fn new() -> Self { AppManager { apps: HashMap::default() } }
+    pub fn new() -> Self {
+        AppManager { apps: HashMap::default() }
+    }
 }
 
 /// Manages drag operations and window swapping
@@ -36,13 +38,21 @@ pub struct DragManager {
 }
 
 impl DragManager {
-    pub fn reset(&mut self) { self.drag_swap_manager.reset(); }
+    pub fn reset(&mut self) {
+        self.drag_swap_manager.reset();
+    }
 
-    pub fn last_target(&self) -> Option<WindowId> { self.drag_swap_manager.last_target() }
+    pub fn last_target(&self) -> Option<WindowId> {
+        self.drag_swap_manager.last_target()
+    }
 
-    pub fn dragged(&self) -> Option<WindowId> { self.drag_swap_manager.dragged() }
+    pub fn dragged(&self) -> Option<WindowId> {
+        self.drag_swap_manager.dragged()
+    }
 
-    pub fn origin_frame(&self) -> Option<CGRect> { self.drag_swap_manager.origin_frame() }
+    pub fn origin_frame(&self) -> Option<CGRect> {
+        self.drag_swap_manager.origin_frame()
+    }
 
     pub fn update_config(&mut self, config: WindowSnappingSettings) {
         self.drag_swap_manager.update_config(config);
@@ -133,7 +143,9 @@ impl RefreshQuarantineManager {
         }
     }
 
-    pub fn blocks_refreshes(&self) -> bool { self.state() != RefreshQuarantineState::Ready }
+    pub fn blocks_refreshes(&self) -> bool {
+        self.state() != RefreshQuarantineState::Ready
+    }
 }
 
 /// Manages communication channels to other actors
@@ -397,8 +409,36 @@ impl LayoutManager {
             }
 
             if is_workspace_switch {
-                any_frame_changed |=
-                    AnimationManager::workspace_switch_layout(reactor, space, &layout, skip_wid);
+                // Simulated workspace transition (slide/fade) when enabled.
+                let try_animated = {
+                    use crate::common::config::WorkspaceTransition;
+                    let cfg = &reactor.config.settings;
+                    cfg.animate
+                        && cfg.workspace_transition != WorkspaceTransition::None
+                        && !crate::sys::power::is_low_power_mode_enabled()
+                };
+                if try_animated {
+                    let screen_frame = reactor
+                        .space_state
+                        .screen_by_space(space)
+                        .map(|s| s.frame)
+                        .unwrap_or(CGRect::new(
+                            CGPoint::new(0.0, 0.0),
+                            CGSize::new(1000.0, 800.0),
+                        ));
+                    let animated =
+                        AnimationManager::workspace_switch_animated(reactor, space, &layout, screen_frame, skip_wid);
+                    if animated {
+                        any_frame_changed |= true;
+                    } else {
+                        any_frame_changed |= AnimationManager::workspace_switch_layout(
+                            reactor, space, &layout, skip_wid,
+                        );
+                    }
+                } else {
+                    any_frame_changed |=
+                        AnimationManager::workspace_switch_layout(reactor, space, &layout, skip_wid);
+                }
             } else if reactor.workspace_switch_manager.active_workspace_switch.is_some() {
                 any_frame_changed |=
                     AnimationManager::instant_layout(reactor, space, &layout, skip_wid);

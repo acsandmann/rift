@@ -224,10 +224,13 @@ fn quarantines_window_space_events_during_sleep_before_churn_begins() {
     actor.handle_event(Event::SpaceCreated(SpaceId::new(5)));
     actor.handle_event(Event::SpaceDestroyed(SpaceId::new(6)));
 
-    assert_eq!(actor.state.quarantine_stats, QuarantineStats {
-        appeared_dropped: 1,
-        destroyed_dropped: 1
-    });
+    assert_eq!(
+        actor.state.quarantine_stats,
+        QuarantineStats {
+            appeared_dropped: 1,
+            destroyed_dropped: 1
+        }
+    );
     assert!(!actor.state.visible_window_spaces.contains_key(&appeared));
     assert_eq!(
         actor.state.visible_window_spaces.get(&existing),
@@ -761,10 +764,10 @@ fn wake_transient_cannot_steal_another_displays_space_history() {
     ));
     match recv_wm(&mut wm_rx) {
         wm_controller::WmEvent::SpaceStateUpdated(state, _) => {
-            assert_eq!(state.space_remaps, vec![(
-                external_space_before_sleep,
-                external_space_after_wake
-            )]);
+            assert_eq!(
+                state.space_remaps,
+                vec![(external_space_before_sleep, external_space_after_wake)]
+            );
             assert!(!state.space_remaps.contains(&(builtin_space, external_space_after_wake)));
         }
         other => panic!("unexpected wm event: {other:?}"),
@@ -845,9 +848,11 @@ fn topology_window_delta_is_emitted_when_windows_leave_space_during_churn_withou
     let _ = recv_wm(&mut wm_rx);
 
     crate::sys::window_server::set_space_window_list_for_space_override(space.get(), Some(vec![]));
-    actor.synthesize_topology_window_delta(9, actor.state.display_churn_flags, &[make_screen(
-        Some(space),
-    )]);
+    actor.synthesize_topology_window_delta(
+        9,
+        actor.state.display_churn_flags,
+        &[make_screen(Some(space))],
+    );
     crate::sys::window_server::set_space_window_list_for_space_override(space.get(), None);
     actor.forward_screen_parameters(
         vec![make_screen(Some(space))],
@@ -917,10 +922,14 @@ fn topology_window_delta_treats_same_window_space_move_as_remove_then_add() {
         new_space.get(),
         Some(vec![wsid.as_u32()]),
     );
-    actor.synthesize_topology_window_delta(10, actor.state.display_churn_flags, &[
-        make_screen_with(1, "display-left", 0.0, 1000.0, Some(old_space)),
-        make_screen_with(2, "display-right", 1000.0, 1000.0, Some(new_space)),
-    ]);
+    actor.synthesize_topology_window_delta(
+        10,
+        actor.state.display_churn_flags,
+        &[
+            make_screen_with(1, "display-left", 0.0, 1000.0, Some(old_space)),
+            make_screen_with(2, "display-right", 1000.0, 1000.0, Some(new_space)),
+        ],
+    );
     crate::sys::window_server::set_space_window_list_for_space_override(new_space.get(), None);
     actor.forward_screen_parameters(
         vec![

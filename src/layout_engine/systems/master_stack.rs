@@ -22,10 +22,14 @@ pub struct MasterStackLayoutSystem {
     settings: MasterStackSettings,
 }
 
-fn default_master_stack_settings() -> MasterStackSettings { MasterStackSettings::default() }
+fn default_master_stack_settings() -> MasterStackSettings {
+    MasterStackSettings::default()
+}
 
 impl Default for MasterStackLayoutSystem {
-    fn default() -> Self { Self::new(MasterStackSettings::default()) }
+    fn default() -> Self {
+        Self::new(MasterStackSettings::default())
+    }
 }
 
 impl MasterStackLayoutSystem {
@@ -516,7 +520,9 @@ impl LayoutSystem for MasterStackLayoutSystem {
         layout
     }
 
-    fn contains_layout(&self, layout: LayoutId) -> bool { self.inner.contains_layout(layout) }
+    fn contains_layout(&self, layout: LayoutId) -> bool {
+        self.inner.contains_layout(layout)
+    }
 
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
         let cloned = self.inner.clone_layout(layout);
@@ -525,7 +531,9 @@ impl LayoutSystem for MasterStackLayoutSystem {
         cloned
     }
 
-    fn remove_layout(&mut self, layout: LayoutId) { self.inner.remove_layout(layout); }
+    fn remove_layout(&mut self, layout: LayoutId) {
+        self.inner.remove_layout(layout);
+    }
 
     fn draw_tree(&self, layout: LayoutId) -> String {
         let root = self.inner.root(layout);
@@ -625,7 +633,9 @@ impl LayoutSystem for MasterStackLayoutSystem {
         self.inner.visible_windows_under_selection(layout)
     }
 
-    fn ascend_selection(&mut self, layout: LayoutId) -> bool { self.inner.ascend_selection(layout) }
+    fn ascend_selection(&mut self, layout: LayoutId) -> bool {
+        self.inner.ascend_selection(layout)
+    }
 
     fn descend_selection(&mut self, layout: LayoutId) -> bool {
         self.inner.descend_selection(layout)
@@ -946,7 +956,9 @@ impl LayoutSystem for MasterStackLayoutSystem {
         self.inner.parent_of_selection_is_stacked(layout)
     }
 
-    fn unjoin_selection(&mut self, layout: LayoutId) { self.normalize_layout(layout); }
+    fn unjoin_selection(&mut self, layout: LayoutId) {
+        self.normalize_layout(layout);
+    }
 
     fn resize_selection_by(
         &mut self,
@@ -958,16 +970,22 @@ impl LayoutSystem for MasterStackLayoutSystem {
         self.inner.resize_selection_by(layout, amount, orientation);
     }
 
-    fn rebalance(&mut self, layout: LayoutId) { self.normalize_layout(layout); }
+    fn rebalance(&mut self, layout: LayoutId) {
+        self.normalize_layout(layout);
+    }
 
-    fn toggle_tile_orientation(&mut self, layout: LayoutId) { self.normalize_layout(layout); }
+    fn toggle_tile_orientation(&mut self, layout: LayoutId) {
+        self.normalize_layout(layout);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
+    fn w(idx: u32) -> WindowId {
+        WindowId::new(1, idx)
+    }
 
     #[test]
     fn test_create_layout() {
@@ -1004,11 +1022,10 @@ mod tests {
         system.add_window_after_selection(layout, w(2));
         system.add_window_after_selection(layout, w(3));
 
-        assert_eq!(system.windows_in_layout_by_container(layout), vec![
-            w(1),
-            w(2),
-            w(3)
-        ]);
+        assert_eq!(
+            system.windows_in_layout_by_container(layout),
+            vec![w(1), w(2), w(3)]
+        );
     }
 
     #[test]

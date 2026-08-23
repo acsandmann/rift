@@ -288,7 +288,9 @@ impl EventTap {
         }
     }
 
-    pub fn set_enabled(&self, enabled: bool) { CGEvent::tap_enable(&self.port, enabled); }
+    pub fn set_enabled(&self, enabled: bool) {
+        CGEvent::tap_enable(&self.port, enabled);
+    }
 }
 
 impl Drop for EventTap {

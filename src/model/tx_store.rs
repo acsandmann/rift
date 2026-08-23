@@ -18,7 +18,9 @@ pub struct TxRecord {
 pub struct WindowTxStore(Arc<DashMap<WindowServerId, TxRecord>>);
 
 impl WindowTxStore {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub fn insert(&self, id: WindowServerId, txid: TransactionId, target: CGRect) {
         match self.0.entry(id) {
@@ -35,7 +37,9 @@ impl WindowTxStore {
         self.0.get(id).map(|entry| *entry)
     }
 
-    pub fn remove(&self, id: &WindowServerId) { self.0.remove(id); }
+    pub fn remove(&self, id: &WindowServerId) {
+        self.0.remove(id);
+    }
 
     pub fn clear_target(&self, id: &WindowServerId) {
         if let Some(mut record) = self.0.get_mut(id) {

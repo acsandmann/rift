@@ -117,13 +117,17 @@ impl LayoutEngine {
                         .flatten()
                 })
             });
-            self.persistence.record(window_id, WindowFingerprint {
-                window_server_id: current_window_server_id,
-                title: (!window.info.title.trim().is_empty()).then(|| window.info.title.clone()),
-                width: window.frame_monotonic.size.width,
-                height: window.frame_monotonic.size.height,
-                app_id,
-            });
+            self.persistence.record(
+                window_id,
+                WindowFingerprint {
+                    window_server_id: current_window_server_id,
+                    title: (!window.info.title.trim().is_empty())
+                        .then(|| window.info.title.clone()),
+                    width: window.frame_monotonic.size.width,
+                    height: window.frame_monotonic.size.height,
+                    app_id,
+                },
+            );
         }
     }
 

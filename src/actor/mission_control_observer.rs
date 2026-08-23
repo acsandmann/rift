@@ -126,7 +126,9 @@ impl NativeMissionControl {
         self.active.store(false, Ordering::SeqCst);
     }
 
-    pub fn is_active(&self) -> bool { self.active.load(Ordering::SeqCst) }
+    pub fn is_active(&self) -> bool {
+        self.active.load(Ordering::SeqCst)
+    }
 }
 
 impl State {

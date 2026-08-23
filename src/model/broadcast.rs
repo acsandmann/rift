@@ -18,4 +18,6 @@ pub fn protocol_workspace_id(id: VirtualWorkspaceId) -> rift_protocol::Workspace
     }
 }
 
-pub fn protocol_window_id(id: WindowId) -> rift_protocol::WindowId { id.into() }
+pub fn protocol_window_id(id: WindowId) -> rift_protocol::WindowId {
+    id.into()
+}

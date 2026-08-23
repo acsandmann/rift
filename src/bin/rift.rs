@@ -141,7 +141,14 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
 
     let config_path = opt.config.clone().unwrap_or_else(|| config_file());
     let mut config = if config_path.exists() {
-        Config::read(&config_path).unwrap()
+        match Config::read(&config_path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Failed to read config at {}: {e}", config_path.display());
+                eprintln!("Using default config (ignoring invalid entries). Fix your config.toml to remove the error.");
+                Config::default()
+            }
+        }
     } else {
         Config::default()
     };

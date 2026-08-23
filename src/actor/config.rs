@@ -67,7 +67,9 @@ impl ConfigActor {
         }
     }
 
-    fn handle_config_query(&self) -> Config { self.config.clone() }
+    fn handle_config_query(&self) -> Config {
+        self.config.clone()
+    }
 
     fn handle_config_command(&mut self, cmd: ConfigCommand) -> Result<(), String> {
         debug!("Applying config command: {:?}", cmd);

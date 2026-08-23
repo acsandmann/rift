@@ -50,7 +50,9 @@ unsafe extern "C" {
 }
 
 #[inline]
-fn k_iomain_port_default() -> mach_port_t { 0 }
+fn k_iomain_port_default() -> mach_port_t {
+    0
+}
 
 struct MtsState {
     actuators: Vec<*mut CFType>,

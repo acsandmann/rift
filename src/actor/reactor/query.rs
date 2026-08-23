@@ -17,7 +17,9 @@ pub struct ReactorQueryHandle {
 }
 
 impl ReactorQueryHandle {
-    pub(super) fn new(tx: Sender) -> Self { Self { tx } }
+    pub(super) fn new(tx: Sender) -> Self {
+        Self { tx }
+    }
 
     fn send_query<T>(
         &self,
@@ -157,7 +159,9 @@ impl Reactor {
     }
 
     #[cfg(test)]
-    pub(crate) fn test_default_query_space(&self) -> Option<SpaceId> { self.default_query_space() }
+    pub(crate) fn test_default_query_space(&self) -> Option<SpaceId> {
+        self.default_query_space()
+    }
 
     pub fn query_workspaces(&mut self, space_id: Option<SpaceId>) -> Vec<RuntimeWorkspaceData> {
         self.handle_workspace_query(space_id)
@@ -171,7 +175,9 @@ impl Reactor {
         self.handle_active_workspace_query(space_id)
     }
 
-    pub fn query_displays(&self) -> Vec<RuntimeDisplayData> { self.handle_displays_query() }
+    pub fn query_displays(&self) -> Vec<RuntimeDisplayData> {
+        self.handle_displays_query()
+    }
 
     pub fn query_workspace_layouts(
         &mut self,
@@ -185,7 +191,9 @@ impl Reactor {
         self.handle_window_info_query(window_id)
     }
 
-    pub fn query_applications(&self) -> Vec<ApplicationData> { self.handle_applications_query() }
+    pub fn query_applications(&self) -> Vec<ApplicationData> {
+        self.handle_applications_query()
+    }
 
     pub fn query_layout_state(
         &self,
@@ -195,7 +203,9 @@ impl Reactor {
         self.handle_layout_state_query(space_id, workspace_id)
     }
 
-    pub fn query_metrics(&self) -> serde_json::Value { self.handle_metrics_query() }
+    pub fn query_metrics(&self) -> serde_json::Value {
+        self.handle_metrics_query()
+    }
 
     pub(super) fn maybe_send_menu_update(&mut self) {
         let menu_tx = match self.menu_manager.menu_tx.as_ref() {

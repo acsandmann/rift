@@ -21,7 +21,9 @@ pub(crate) struct FloatingManager {
 }
 
 impl FloatingManager {
-    pub(crate) fn new() -> Self { Self::default() }
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
 
     pub(crate) fn is_floating(&self, window_id: WindowId) -> bool {
         self.floating_windows.contains(&window_id)
@@ -144,7 +146,9 @@ impl FloatingManager {
         self.last_floating_focus = wid;
     }
 
-    pub(crate) fn last_focus(&self) -> Option<WindowId> { self.last_floating_focus }
+    pub(crate) fn last_focus(&self) -> Option<WindowId> {
+        self.last_floating_focus
+    }
 
     pub(crate) fn normalize_persisted_focus(&mut self) {
         if self

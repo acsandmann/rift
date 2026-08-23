@@ -200,9 +200,13 @@ impl PersistenceState {
         self.windows.remove(&window);
     }
 
-    fn pending_len(&self) -> usize { self.pending_windows.len() }
+    fn pending_len(&self) -> usize {
+        self.pending_windows.len()
+    }
 
-    fn live_fingerprints(&self) -> HashMap<WindowId, WindowFingerprint> { self.windows.clone() }
+    fn live_fingerprints(&self) -> HashMap<WindowId, WindowFingerprint> {
+        self.windows.clone()
+    }
 
     fn set_saved_active_space(&mut self, space: Option<SpaceId>) {
         self.saved_active_space = space.map(|space| space.get());
@@ -238,7 +242,9 @@ impl LayoutEngine {
         self.persistence.forget_window(window);
     }
 
-    pub(super) fn forget_persisted_app(&mut self, pid: pid_t) { self.persistence.forget_app(pid); }
+    pub(super) fn forget_persisted_app(&mut self, pid: pid_t) {
+        self.persistence.forget_app(pid);
+    }
 
     pub(super) fn transfer_persisted_window_identity(&mut self, from: WindowId, to: WindowId) {
         self.persistence.rekey(from, to);

@@ -31,7 +31,9 @@ const RIFT_SYNTHETIC_EVENT_MARKER: i64 = 0x5249_4654;
 const KEYCODE_W: u16 = 0x0d;
 
 impl From<MouseState> for u8 {
-    fn from(state: MouseState) -> u8 { state as u8 }
+    fn from(state: MouseState) -> u8 {
+        state as u8
+    }
 }
 
 impl TryFrom<u8> for MouseState {
@@ -46,7 +48,9 @@ impl TryFrom<u8> for MouseState {
     }
 }
 
-pub fn set_mouse_state(state: MouseState) { MOUSE_STATE.store(state.into(), Ordering::Relaxed); }
+pub fn set_mouse_state(state: MouseState) {
+    MOUSE_STATE.store(state.into(), Ordering::Relaxed);
+}
 
 pub fn get_mouse_state() -> Option<MouseState> {
     match MouseState::try_from(MOUSE_STATE.load(Ordering::Relaxed)) {
@@ -64,9 +68,13 @@ pub fn warp_mouse(point: CGPoint) -> Result<(), CGError> {
     res
 }
 
-pub fn hide_mouse() -> Result<(), CGError> { cg_ok(CGDisplayHideCursor(kCGNullDirectDisplay)) }
+pub fn hide_mouse() -> Result<(), CGError> {
+    cg_ok(CGDisplayHideCursor(kCGNullDirectDisplay))
+}
 
-pub fn show_mouse() -> Result<(), CGError> { cg_ok(CGDisplayShowCursor(kCGNullDirectDisplay)) }
+pub fn show_mouse() -> Result<(), CGError> {
+    cg_ok(CGDisplayShowCursor(kCGNullDirectDisplay))
+}
 
 /// Ask an application to handle its standard Command-W action.
 ///

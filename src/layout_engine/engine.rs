@@ -114,7 +114,9 @@ pub struct LayoutEventOutcome {
 impl std::ops::Deref for LayoutEventOutcome {
     type Target = EventResponse;
 
-    fn deref(&self) -> &Self::Target { &self.response }
+    fn deref(&self) -> &Self::Target {
+        &self.response
+    }
 }
 
 pub struct LayoutEngine {
@@ -144,7 +146,9 @@ pub(crate) struct WorkspaceLayoutQuerySnapshot {
 }
 
 impl LayoutEngine {
-    pub fn focused_window(&self) -> Option<WindowId> { self.focused_window }
+    pub fn focused_window(&self) -> Option<WindowId> {
+        self.focused_window
+    }
 
     /// Resolve an optional workspace index and snapshot its layout for read-only consumers.
     pub(crate) fn query_workspace_layout(
@@ -1380,7 +1384,9 @@ impl LayoutEngine {
             .mark_last_saved(resize.space, resize.workspace_id, layout);
     }
 
-    pub fn debug_tree(&self, space: SpaceId) { self.debug_tree_desc(space, "", false); }
+    pub fn debug_tree(&self, space: SpaceId) {
+        self.debug_tree_desc(space, "", false);
+    }
 
     pub fn debug_tree_desc(&self, space: SpaceId, desc: &'static str, print: bool) {
         if let Some(workspace_id) = self.virtual_workspace_manager.active_workspace(space) {
@@ -2720,7 +2726,9 @@ impl LayoutEngine {
         self.switch_to_workspace(window_store, space, workspace_index, Some(focus_window))
     }
 
-    pub fn virtual_workspace_manager(&self) -> &WorkspaceStore { &self.virtual_workspace_manager }
+    pub fn virtual_workspace_manager(&self) -> &WorkspaceStore {
+        &self.virtual_workspace_manager
+    }
 
     pub fn virtual_workspace_manager_mut(&mut self) -> &mut WorkspaceStore {
         &mut self.virtual_workspace_manager
@@ -3383,12 +3391,15 @@ mod tests {
         assert_eq!(frame.size.width, 234.0);
 
         let user_frame = CGRect::new(new_frame.origin, CGSize::new(400.0, new_frame.size.height));
-        let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowResized {
-            wid: window,
-            old_frame: new_frame,
-            new_frame: user_frame,
-            screens: vec![(space, screen, None)],
-        });
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::WindowResized {
+                wid: window,
+                old_frame: new_frame,
+                new_frame: user_frame,
+                screens: vec![(space, screen, None)],
+            },
+        );
         let frames = engine.calculate_layout(
             space,
             screen,

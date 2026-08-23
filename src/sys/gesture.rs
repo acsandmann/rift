@@ -106,7 +106,9 @@ impl Default for ScrollTouchFrame {
 
 impl ScrollTouchFrame {
     #[inline(always)]
-    pub fn paths(&self) -> &[TouchPath] { &self.paths[..self.len] }
+    pub fn paths(&self) -> &[TouchPath] {
+        &self.paths[..self.len]
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -116,7 +118,9 @@ pub enum ScrollGesturePayload {
 }
 
 #[inline(always)]
-pub fn is_gesture(event_type: CGEventType) -> bool { event_type.0 == CGS_EVENT_GESTURE }
+pub fn is_gesture(event_type: CGEventType) -> bool {
+    event_type.0 == CGS_EVENT_GESTURE
+}
 
 #[inline]
 pub fn is_physical_horizontal_dock_swipe(event_type: CGEventType, event: &CGEvent) -> bool {
@@ -136,7 +140,9 @@ pub fn is_physical_horizontal_dock_swipe(event_type: CGEventType, event: &CGEven
 /// system). Processed events return immediately after the one type read. Raw
 /// frames use a fixed stack array and allocate nothing.
 #[inline]
-pub fn payload(event: &CGEvent) -> Option<GesturePayload> { payload_with_centroid(event, true) }
+pub fn payload(event: &CGEvent) -> Option<GesturePayload> {
+    payload_with_centroid(event, true)
+}
 
 /// Decode only contact presence. This is sufficient after a workspace swipe
 /// has committed or been rejected, when the recognizer is waiting for lift.
@@ -353,10 +359,14 @@ impl HidEvent {
     }
 
     #[inline(always)]
-    fn as_ptr(&self) -> IOHIDEventRef { self.0.as_ptr() }
+    fn as_ptr(&self) -> IOHIDEventRef {
+        self.0.as_ptr()
+    }
 }
 
 impl Drop for HidEvent {
     #[inline(always)]
-    fn drop(&mut self) { unsafe { CFRelease(self.0.as_ptr()) }; }
+    fn drop(&mut self) {
+        unsafe { CFRelease(self.0.as_ptr()) };
+    }
 }

@@ -97,6 +97,13 @@ pub fn handle_window_destroyed(
         }
     }
 
+    if let DragState::Active { session } = &drag.drag_state {
+        if session.window == wid {
+            trace!(?wid, "Clearing active drag because dragged window was destroyed");
+            drag.drag_state = DragState::Inactive;
+        }
+    }
+
     let dragged_window = drag.dragged();
     let last_target = drag.last_target();
     if dragged_window == Some(wid) || last_target == Some(wid) {

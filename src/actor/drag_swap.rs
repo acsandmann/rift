@@ -35,7 +35,9 @@ pub struct DragManager {
 }
 
 impl Default for DragManager {
-    fn default() -> Self { Self::new(WindowSnappingSettings::default()) }
+    fn default() -> Self {
+        Self::new(WindowSnappingSettings::default())
+    }
 }
 
 impl DragManager {
@@ -164,9 +166,13 @@ impl DragManager {
         self.active_candidate.map(|candidate| candidate.window)
     }
 
-    pub fn dragged(&self) -> Option<WindowId> { self.dragged_window }
+    pub fn dragged(&self) -> Option<WindowId> {
+        self.dragged_window
+    }
 
-    pub fn origin_frame(&self) -> Option<CGRect> { self.drag_origin_frame }
+    pub fn origin_frame(&self) -> Option<CGRect> {
+        self.drag_origin_frame
+    }
 
     pub fn update_config(&mut self, config: WindowSnappingSettings) {
         self.config.drag_swap_fraction = if config.drag_swap_fraction <= 0.0 {

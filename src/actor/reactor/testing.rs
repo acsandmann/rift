@@ -147,13 +147,16 @@ impl Reactor {
 
     pub fn add_test_app_with_info(&mut self, pid: pid_t, bundle_id: &str, name: &str) {
         let (app_tx, _app_rx) = actor::channel();
-        self.app_manager.apps.insert(pid, super::AppState {
-            info: AppInfo {
-                bundle_id: Some(bundle_id.to_string()),
-                localized_name: Some(name.to_string()),
+        self.app_manager.apps.insert(
+            pid,
+            super::AppState {
+                info: AppInfo {
+                    bundle_id: Some(bundle_id.to_string()),
+                    localized_name: Some(name.to_string()),
+                },
+                handle: AppThreadHandle::new_for_test(app_tx),
             },
-            handle: AppThreadHandle::new_for_test(app_tx),
-        });
+        );
     }
 
     pub fn add_test_window(
@@ -215,26 +218,29 @@ impl Reactor {
         sys_id: Option<WindowServerId>,
         is_manageable: bool,
     ) {
-        self.state.windows.insert_window(wid, super::WindowState {
-            info: WindowInfo {
-                is_standard: true,
-                is_root: true,
-                is_minimized: false,
-                is_resizable: true,
-                min_size: None,
-                max_size: None,
-                title: format!("Window {wid:?}"),
-                frame,
-                sys_id,
-                bundle_id: None,
-                path: None,
-                ax_role: None,
-                ax_subrole: None,
+        self.state.windows.insert_window(
+            wid,
+            super::WindowState {
+                info: WindowInfo {
+                    is_standard: true,
+                    is_root: true,
+                    is_minimized: false,
+                    is_resizable: true,
+                    min_size: None,
+                    max_size: None,
+                    title: format!("Window {wid:?}"),
+                    frame,
+                    sys_id,
+                    bundle_id: None,
+                    path: None,
+                    ax_role: None,
+                    ax_subrole: None,
+                },
+                frame_monotonic: frame,
+                is_manageable,
+                manage_override: None,
             },
-            frame_monotonic: frame,
-            is_manageable,
-            manage_override: None,
-        });
+        );
     }
 }
 
@@ -401,7 +407,9 @@ pub fn make_window_info(
     }
 }
 
-pub fn make_windows(count: usize) -> Vec<WindowInfo> { (1..=count).map(make_window).collect() }
+pub fn make_windows(count: usize) -> Vec<WindowInfo> {
+    (1..=count).map(make_window).collect()
+}
 
 pub struct Apps {
     tx: actor::Sender<Request>,
@@ -454,10 +462,13 @@ impl Apps {
             .collect();
 
         for (id, info) in (1..).map(|idx| WindowId::new(pid, idx)).zip(&windows) {
-            self.windows.insert(id, TestWindowState {
-                frame: info.frame,
-                ..Default::default()
-            });
+            self.windows.insert(
+                id,
+                TestWindowState {
+                    frame: info.frame,
+                    ..Default::default()
+                },
+            );
         }
         let handle = AppThreadHandle::new_for_test(self.tx.clone());
         vec![Event::ApplicationLaunched {
@@ -667,7 +678,9 @@ impl Apps {
     }
 }
 
-pub fn test_context() -> (Apps, Reactor) { (Apps::new(), test_reactor()) }
+pub fn test_context() -> (Apps, Reactor) {
+    (Apps::new(), test_reactor())
+}
 
 pub fn test_context_with_workspace_count(count: usize) -> (Apps, Reactor) {
     let mut settings = crate::common::config::VirtualWorkspaceSettings::default();

@@ -7,7 +7,9 @@ pub(crate) struct AxisConstraints {
     pub can_grow: bool,
 }
 
-fn sanitize(v: f64) -> f64 { if v.is_finite() { v.max(0.0) } else { 0.0 } }
+fn sanitize(v: f64) -> f64 {
+    if v.is_finite() { v.max(0.0) } else { 0.0 }
+}
 
 /// Solve 1D segment lengths for a container axis.
 ///

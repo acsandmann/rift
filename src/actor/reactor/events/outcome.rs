@@ -72,7 +72,7 @@ pub(crate) struct EventOutcome {
     pub(crate) window_title_broadcasts: Vec<WindowTitleBroadcast>,
     pub(crate) focused_window_broadcast: Option<WindowId>,
     pub(crate) layout_events: Vec<LayoutEvent>,
-    pub(crate) layout_responses: Vec<(EventResponse, Option<SpaceId>)>,
+    pub(crate) layout_responses: Vec<(EventResponse, Option<SpaceId>, bool)>,
     pub(crate) arrange: ArrangeRequest,
     pub(crate) focused_window: Option<WindowId>,
     pub(crate) refresh_window_notifications: bool,
@@ -91,7 +91,9 @@ pub(crate) struct ArrangeRequest {
 
 impl EventOutcome {
     /// The event was observed, but it does not require any follow-up work.
-    pub(crate) fn no_change() -> Self { Self::default() }
+    pub(crate) fn no_change() -> Self {
+        Self::default()
+    }
 
     /// Combines follow-up work produced by nested reducers while preserving
     /// reducer order for every queued operation.
@@ -237,7 +239,16 @@ impl EventOutcome {
         response: EventResponse,
         workspace_switch_space: Option<SpaceId>,
     ) -> Self {
-        self.layout_responses.push((response, workspace_switch_space));
+        self.layout_responses.push((response, workspace_switch_space, false));
+        self
+    }
+
+    pub(crate) fn with_user_layout_response(
+        mut self,
+        response: EventResponse,
+        workspace_switch_space: Option<SpaceId>,
+    ) -> Self {
+        self.layout_responses.push((response, workspace_switch_space, true));
         self
     }
 

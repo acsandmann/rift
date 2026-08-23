@@ -31,7 +31,9 @@ pub fn render_layer_to_cgs_window(window_id: u32, size: CGSize, layer: &CALayer)
 }
 
 pub fn with_disabled_actions<F, R>(f: F) -> R
-where F: FnOnce() -> R {
+where
+    F: FnOnce() -> R,
+{
     CATransaction::begin();
     CATransaction::setDisableActions(true);
     let result = f();

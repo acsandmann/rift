@@ -19,10 +19,31 @@ const DEPRECATED_MAP: &[(&str, &str)] = &[
     ("toggle_tile_orientation", "toggle_orientation"),
 ];
 
-pub fn data_dir() -> PathBuf { dirs::home_dir().unwrap().join(".rift") }
-pub fn restore_file() -> PathBuf { data_dir().join("layout.ron") }
+pub fn data_dir() -> PathBuf {
+    dirs::home_dir().unwrap().join(".rift")
+}
+pub fn restore_file() -> PathBuf {
+    data_dir().join("layout.ron")
+}
 pub fn config_file() -> PathBuf {
     dirs::home_dir().unwrap().join(".config").join("rift").join("config.toml")
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceOwnership {
+    #[default]
+    Space,
+    Display,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceTransition {
+    #[default]
+    None,
+    Slide,
+    Fade,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
@@ -46,6 +67,8 @@ pub struct VirtualWorkspaceSettings {
     pub default_workspace: usize,
     #[serde(default)]
     pub reapply_app_rules_on_title_change: bool,
+    #[serde(default)]
+    pub ownership: WorkspaceOwnership,
     #[serde(default)]
     pub app_rules: Vec<AppWorkspaceRule>,
     #[serde(default)]
@@ -137,6 +160,7 @@ impl Default for VirtualWorkspaceSettings {
             workspace_names: default_workspace_names(),
             default_workspace: 0,
             reapply_app_rules_on_title_change: false,
+            ownership: WorkspaceOwnership::default(),
             app_rules: Vec::new(),
             workspace_rules: Vec::new(),
         }
@@ -356,12 +380,34 @@ fn migrate_legacy_resize_bindings(document: &mut toml::Value) -> bool {
     migrated
 }
 
+fn migrate_workspace_transition_alias(document: &mut toml::Value) -> bool {
+    let Some(settings) = document.get_mut("settings").and_then(|v| v.as_table_mut()) else {
+        return false;
+    };
+    if settings.contains_key("workspace_transition") {
+        return false;
+    }
+    let Some(anim) = settings.get("animation").and_then(|v| v.as_table()).cloned() else {
+        return false;
+    };
+    if let Some(ws) = anim.get("workspace_transition").cloned() {
+        settings.insert("workspace_transition".to_string(), ws);
+        // Remove the nested alias table so deny_unknown_fields does not fail.
+        settings.remove("animation");
+        return true;
+    }
+    false
+}
+
 fn parse_config_file(buf: &str) -> Result<ConfigFile, toml::de::Error> {
     toml::from_str(buf).or_else(|original_error| {
         let Ok(mut document) = toml::from_str::<toml::Value>(buf) else {
             return Err(original_error);
         };
-        if !migrate_legacy_resize_bindings(&mut document) {
+        let mut migrated = false;
+        migrated |= migrate_legacy_resize_bindings(&mut document);
+        migrated |= migrate_workspace_transition_alias(&mut document);
+        if !migrated {
             return Err(original_error);
         }
         document.try_into()
@@ -379,7 +425,9 @@ pub struct Config {
 
 impl<'de> Deserialize<'de> for Config {
     fn deserialize<D>(deserializer: D) -> Result<Config, D::Error>
-    where D: serde::Deserializer<'de> {
+    where
+        D: serde::Deserializer<'de>,
+    {
         #[derive(Deserialize)]
         struct ConfigSerde {
             settings: Settings,
@@ -423,6 +471,8 @@ pub struct Settings {
     pub animation_fps: f64,
     #[serde(default)]
     pub animation_easing: AnimationEasing,
+    #[serde(default)]
+    pub workspace_transition: WorkspaceTransition,
     #[serde(default = "yes")]
     pub default_disable: bool,
     #[serde(default = "yes")]
@@ -631,19 +681,33 @@ pub struct MissionControlSettings {
     pub fade_duration_ms: f64,
 }
 
-fn default_mission_control_fade_duration_ms() -> f64 { 180.0 }
+fn default_mission_control_fade_duration_ms() -> f64 {
+    180.0
+}
 
-fn default_drag_swap_fraction() -> f64 { 0.3 }
+fn default_drag_swap_fraction() -> f64 {
+    0.3
+}
 
-fn default_master_stack_ratio() -> f64 { 0.6 }
+fn default_master_stack_ratio() -> f64 {
+    0.6
+}
 
-fn default_master_stack_count() -> usize { 1 }
+fn default_master_stack_count() -> usize {
+    1
+}
 
-fn default_scrolling_column_width_ratio() -> f64 { 0.7 }
+fn default_scrolling_column_width_ratio() -> f64 {
+    0.7
+}
 
-fn default_scrolling_min_column_width_ratio() -> f64 { 0.3 }
+fn default_scrolling_min_column_width_ratio() -> f64 {
+    0.3
+}
 
-fn default_scrolling_max_column_width_ratio() -> f64 { 0.9 }
+fn default_scrolling_max_column_width_ratio() -> f64 {
+    0.9
+}
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
 #[serde(rename_all = "snake_case")]
@@ -662,7 +726,9 @@ pub enum VerticalPlacement {
 }
 
 impl StackLineSettings {
-    pub fn thickness(&self) -> f64 { if self.enabled { self.thickness } else { 0.0 } }
+    pub fn thickness(&self) -> f64 {
+        if self.enabled { self.thickness } else { 0.0 }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
@@ -1255,9 +1321,13 @@ impl InnerGaps {
     }
 }
 
-fn yes() -> bool { true }
+fn yes() -> bool {
+    true
+}
 
-fn default_stack_offset() -> f64 { 40.0 }
+fn default_stack_offset() -> f64 {
+    40.0
+}
 
 pub fn default_stack_orientation() -> StackDefaultOrientation {
     StackDefaultOrientation::Perpendicular
@@ -1267,16 +1337,26 @@ fn default_master_stack_new_window_placement() -> MasterStackNewWindowPlacement 
     MasterStackNewWindowPlacement::Master
 }
 
-fn default_animation_duration() -> f64 { 0.3 }
+fn default_animation_duration() -> f64 {
+    0.3
+}
 
-fn default_animation_fps() -> f64 { 100.0 }
+fn default_animation_fps() -> f64 {
+    100.0
+}
 
 #[allow(dead_code)]
-pub fn no() -> bool { false }
+pub fn no() -> bool {
+    false
+}
 
-fn default_layout_folder() -> PathBuf { PathBuf::from("~/.config/rift/layouts") }
+fn default_layout_folder() -> PathBuf {
+    PathBuf::from("~/.config/rift/layouts")
+}
 
-fn default_workspace_count() -> usize { 4 }
+fn default_workspace_count() -> usize {
+    4
+}
 
 fn default_workspace_names() -> Vec<String> {
     vec![
@@ -1289,13 +1369,25 @@ fn default_workspace_names() -> Vec<String> {
 
 // Interpreted as normalized fraction when <= 1.0. If > 1.0 and <= 100.0,
 // it is treated as a percentage (e.g. 40.0 -> 0.40).
-fn default_swipe_vertical_tolerance() -> f64 { 0.4 }
-fn default_swipe_fingers() -> usize { 3 }
-fn default_distance_pct() -> f64 { 0.08 }
-fn default_overscroll_threshold() -> f64 { 0.15 }
+fn default_swipe_vertical_tolerance() -> f64 {
+    0.4
+}
+fn default_swipe_fingers() -> usize {
+    3
+}
+fn default_distance_pct() -> f64 {
+    0.08
+}
+fn default_overscroll_threshold() -> f64 {
+    0.15
+}
 
-fn default_stack_line_spacing() -> f64 { 1.0 }
-fn default_stack_line_thickness() -> f64 { 20.0 }
+fn default_stack_line_spacing() -> f64 {
+    1.0
+}
+fn default_stack_line_thickness() -> f64 {
+    20.0
+}
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy, Default)]
 #[serde(rename_all = "snake_case")]
@@ -1312,7 +1404,9 @@ impl Config {
         Self::parse(&buf)
     }
 
-    pub fn default() -> Config { Self::parse(include_str!("../../rift.default.toml")).unwrap() }
+    pub fn default() -> Config {
+        Self::parse(include_str!("../../rift.default.toml")).unwrap()
+    }
 
     /// Save the current config to a file
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
@@ -1565,7 +1659,7 @@ impl Config {
 
     fn parse(buf: &str) -> anyhow::Result<Config> {
         // Attempt to deserialize. If it fails, and the error indicates an unknown enum
-        // variant, attempt to provide a helpful suggestion.
+        // variant, attempt to provide a helpful suggestion or gracefully skip invalid keybindings.
         match parse_config_file(buf) {
             Ok(c) => {
                 let mut keys = Vec::new();
@@ -1589,6 +1683,98 @@ impl Config {
             }
             Err(e) => {
                 let msg = e.to_string();
+                // If the error is due to an unknown keybinding variant, try to recover by
+                // filtering out only the invalid keys and keeping the rest (e.g. Alt+P = toggle_always_on_top
+                // from an old config). This prevents a single typo from wiping the entire config.
+                if msg.contains("keys") && Self::extract_unknown_variant(&msg).is_some() {
+                    if let Ok(mut document) = toml::from_str::<toml::Value>(buf) {
+                        if let Some(keys_table) = document
+                            .get("keys")
+                            .and_then(|v| v.as_table())
+                            .cloned()
+                        {
+                            let mut filtered_keys: HashMap<String, WmCommand> = HashMap::default();
+                            let mut had_invalid = false;
+                            for (k, v) in keys_table {
+                                match v.clone().try_into::<WmCommand>() {
+                                    Ok(cmd) => {
+                                        filtered_keys.insert(k.clone(), cmd);
+                                    }
+                                    Err(err) => {
+                                        had_invalid = true;
+                                        let err_msg = err.to_string();
+                                        if let Some(unknown) =
+                                            Self::extract_unknown_variant(&err_msg)
+                                        {
+                                            let clean_unknown = unknown
+                                                .split("||")
+                                                .next()
+                                                .unwrap_or(&unknown);
+                                            eprintln!(
+                                                "Warning: ignoring invalid keybinding '{}' = '{}': unknown command '{}' — skipping",
+                                                k,
+                                                v.as_str().unwrap_or("?"),
+                                                clean_unknown
+                                            );
+                                            if let Some((suggestion, _)) =
+                                                Self::suggest_similar_command(&unknown)
+                                            {
+                                                eprintln!("  Did you mean `{}`?", suggestion);
+                                            }
+                                        } else {
+                                            eprintln!(
+                                                "Warning: ignoring invalid keybinding '{}': {}",
+                                                k, err_msg
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            if had_invalid {
+                                if let Some(tbl) = document
+                                    .get_mut("keys")
+                                    .and_then(|v| v.as_table_mut())
+                                {
+                                    *tbl = toml::map::Map::from_iter(
+                                        filtered_keys
+                                            .iter()
+                                            .map(|(k, v)| {
+                                                (
+                                                    k.clone(),
+                                                    toml::Value::try_from(v.clone())
+                                                        .unwrap_or(toml::Value::String(
+                                                            format!("{:?}", v),
+                                                        )),
+                                                )
+                                            }),
+                                    );
+                                }
+                                if let Ok(filtered) = document.clone().try_into::<ConfigFile>() {
+                                    let mut keys = Vec::new();
+                                    let mut key_specs = Vec::new();
+                                    for (key, cmd) in filtered.keys {
+                                        let expanded_key = Self::expand_modifier_combinations(
+                                            &key,
+                                            &filtered.modifier_combinations,
+                                        );
+                                        let normalized_key =
+                                            Self::normalize_hotkey_string(&expanded_key);
+                                        if let Ok(hotkey) = Hotkey::from_str(&normalized_key) {
+                                            keys.push((hotkey, cmd.clone()));
+                                            key_specs.push((normalized_key, cmd));
+                                        }
+                                    }
+                                    return Ok(Config {
+                                        settings: filtered.settings,
+                                        keys,
+                                        key_specs,
+                                        virtual_workspaces: filtered.virtual_workspaces,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
                 if let Some(unknown_token) = Self::extract_unknown_variant(&msg) {
                     if let Some((suggestion, deprecated_replacement)) =
                         Self::suggest_similar_command(&unknown_token)

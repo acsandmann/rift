@@ -22,13 +22,21 @@ pub struct Color {
 }
 
 impl Color {
-    pub fn new(r: f64, g: f64, b: f64, a: f64) -> Self { Self { r, g, b, a } }
+    pub fn new(r: f64, g: f64, b: f64, a: f64) -> Self {
+        Self { r, g, b, a }
+    }
 
-    pub fn blue() -> Self { Self::new(0.0, 0.5, 1.0, 1.0) }
+    pub fn blue() -> Self {
+        Self::new(0.0, 0.5, 1.0, 1.0)
+    }
 
-    pub fn light_gray() -> Self { Self::new(0.8, 0.8, 0.8, 1.0) }
+    pub fn light_gray() -> Self {
+        Self::new(0.8, 0.8, 0.8, 1.0)
+    }
 
-    pub fn gray() -> Self { Self::new(0.6, 0.6, 0.6, 1.0) }
+    pub fn gray() -> Self {
+        Self::new(0.6, 0.6, 0.6, 1.0)
+    }
 
     pub fn to_nscolor(&self) -> Retained<objc2_app_kit::NSColor> {
         objc2_app_kit::NSColor::colorWithRed_green_blue_alpha(self.r, self.g, self.b, self.a)
@@ -203,7 +211,9 @@ impl GroupIndicatorWindow {
         self.cgs_window.order_out()
     }
 
-    pub fn space_id(&self) -> Option<SpaceId> { self.state.borrow().space_id }
+    pub fn space_id(&self) -> Option<SpaceId> {
+        self.state.borrow().space_id
+    }
 
     pub fn set_space_id(&self, space_id: SpaceId) {
         self.state.borrow_mut().space_id = Some(space_id);
@@ -228,15 +238,21 @@ impl GroupIndicatorWindow {
         }
     }
 
-    pub fn is_visible(&self) -> bool { self.state.borrow().is_visible }
+    pub fn is_visible(&self) -> bool {
+        self.state.borrow().is_visible
+    }
 
-    pub fn frame(&self) -> CGRect { *self.frame.borrow() }
+    pub fn frame(&self) -> CGRect {
+        *self.frame.borrow()
+    }
 
     pub fn set_click_callback(&self, callback: SegmentClickCallback) {
         self.state.borrow_mut().click_callback = Some(callback);
     }
 
-    pub fn group_data(&self) -> Option<GroupDisplayData> { self.state.borrow().group_data.clone() }
+    pub fn group_data(&self) -> Option<GroupDisplayData> {
+        self.state.borrow().group_data.clone()
+    }
 
     pub fn window_ids(&self) -> Vec<WindowId> {
         self.group_data().map(|d| d.window_ids).unwrap_or_default()

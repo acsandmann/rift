@@ -186,5 +186,7 @@ impl MissionControlActor {
         overlay.update(MissionControlMode::CurrentWorkspace(windows));
     }
 
-    fn refresh_snapshot(&mut self) { self.workspaces = self.reactor.query_workspaces(None); }
+    fn refresh_snapshot(&mut self) {
+        self.workspaces = self.reactor.query_workspaces(None);
+    }
 }

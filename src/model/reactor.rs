@@ -144,7 +144,9 @@ impl WindowState {
         !self.info.is_minimized && manage_override.unwrap_or(self.is_manageable)
     }
 
-    pub(crate) fn can_reconcile_admission(&self) -> bool { !self.info.is_minimized }
+    pub(crate) fn can_reconcile_admission(&self) -> bool {
+        !self.info.is_minimized
+    }
 }
 
 use thiserror::Error;
@@ -185,10 +187,13 @@ mod tests {
 
         let restored: ReactorCommand = serde_json::from_value(serialized).unwrap();
 
-        assert_eq!(restored, ReactorCommand::RestoreLayout {
-            path: "layout.ron".into(),
-            scope: RestoreScope::Workspace,
-            source: RestoreSource::SavedActiveSpace,
-        });
+        assert_eq!(
+            restored,
+            ReactorCommand::RestoreLayout {
+                path: "layout.ron".into(),
+                scope: RestoreScope::Workspace,
+                source: RestoreSource::SavedActiveSpace,
+            }
+        );
     }
 }

@@ -115,20 +115,26 @@ trait CallbackErased: Send {
 }
 
 struct CbOnly<F>
-where F: FnMut(Event) -> OSStatus + Send + 'static {
+where
+    F: FnMut(Event) -> OSStatus + Send + 'static,
+{
     f: F,
 }
 
 impl<F> CallbackErased for CbOnly<F>
-where F: FnMut(Event) -> OSStatus + Send + 'static
+where
+    F: FnMut(Event) -> OSStatus + Send + 'static,
 {
-    fn call(&mut self, ev: Event) -> OSStatus { (self.f)(ev) }
+    fn call(&mut self, ev: Event) -> OSStatus {
+        (self.f)(ev)
+    }
 }
 
 struct CbWithState<F, T>
 where
     F: FnMut(Event, &mut T) -> OSStatus + Send + 'static,
-    T: Send + 'static, {
+    T: Send + 'static,
+{
     f: F,
     t: T,
 }
@@ -138,7 +144,9 @@ where
     F: FnMut(Event, &mut T) -> OSStatus + Send + 'static,
     T: Send + 'static,
 {
-    fn call(&mut self, ev: Event) -> OSStatus { (self.f)(ev, &mut self.t) }
+    fn call(&mut self, ev: Event) -> OSStatus {
+        (self.f)(ev, &mut self.t)
+    }
 }
 
 struct CallbackCtx {
@@ -177,7 +185,9 @@ impl std::fmt::Debug for CarbonListener {
 
 impl CarbonListener {
     pub fn new<F>(target: Target, types: &[EventType], mut callback: F) -> Result<Self, String>
-    where F: FnMut(Event) -> OSStatus + Send + 'static {
+    where
+        F: FnMut(Event) -> OSStatus + Send + 'static,
+    {
         Self::install_impl(target, types, Box::new(CbOnly { f: move |e| (callback)(e) }))
     }
 
@@ -195,7 +205,9 @@ impl CarbonListener {
     }
 
     pub fn application<F>(types: &[EventType], callback: F) -> Result<Self, String>
-    where F: FnMut(Event) -> OSStatus + Send + 'static {
+    where
+        F: FnMut(Event) -> OSStatus + Send + 'static,
+    {
         Self::new(Target::Application, types, callback)
     }
 
@@ -257,5 +269,7 @@ impl CarbonListener {
 }
 
 impl Drop for CarbonListener {
-    fn drop(&mut self) { let _ = self.remove(); }
+    fn drop(&mut self) {
+        let _ = self.remove();
+    }
 }

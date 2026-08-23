@@ -224,10 +224,13 @@ unsafe fn switch_space_macos_27(direction: Direction) {
 
 fn raw_marker_event() -> CFRetained<CGEvent> {
     let event = new_event();
-    set_integer_fields(&event, &[
-        (K_CGS_EVENT_TYPE_FIELD, K_CGS_EVENT_MARKER),
-        (K_GESTURE_SUBTYPE_FIELD, K_GESTURE_SUBTYPE),
-    ]);
+    set_integer_fields(
+        &event,
+        &[
+            (K_CGS_EVENT_TYPE_FIELD, K_CGS_EVENT_MARKER),
+            (K_GESTURE_SUBTYPE_FIELD, K_GESTURE_SUBTYPE),
+        ],
+    );
     event
 }
 
@@ -240,23 +243,32 @@ fn raw_legacy_gesture_event(
     let magnitude_bits = (magnitude as f32).to_bits() as i64;
 
     configure_dock_swipe_event(&event, phase);
-    set_integer_fields(&event, &[
-        (K_GESTURE_PROGRESS_BITS_FIELD, magnitude_bits),
-        (K_GESTURE_LEGACY_ONE_FIELD, K_LEGACY_ONE),
-        (K_GESTURE_SUBTYPE_FIELD, K_GESTURE_SUBTYPE),
-        (K_GESTURE_UNUSED_ZERO_FIELD, 0),
-    ]);
-    set_double_fields(&event, &[
-        (K_GESTURE_SWIPE_PROGRESS_FIELD, magnitude),
-        (K_GESTURE_SWIPE_POSITION_X_FIELD, K_LEGACY_TINY_FLOAT),
-        (K_GESTURE_POSITION_FALLBACK_FIELD, K_LEGACY_TINY_FLOAT),
-    ]);
+    set_integer_fields(
+        &event,
+        &[
+            (K_GESTURE_PROGRESS_BITS_FIELD, magnitude_bits),
+            (K_GESTURE_LEGACY_ONE_FIELD, K_LEGACY_ONE),
+            (K_GESTURE_SUBTYPE_FIELD, K_GESTURE_SUBTYPE),
+            (K_GESTURE_UNUSED_ZERO_FIELD, 0),
+        ],
+    );
+    set_double_fields(
+        &event,
+        &[
+            (K_GESTURE_SWIPE_PROGRESS_FIELD, magnitude),
+            (K_GESTURE_SWIPE_POSITION_X_FIELD, K_LEGACY_TINY_FLOAT),
+            (K_GESTURE_POSITION_FALLBACK_FIELD, K_LEGACY_TINY_FLOAT),
+        ],
+    );
 
     if let Some(velocity_x) = velocity_x {
-        set_double_fields(&event, &[
-            (K_GESTURE_SWIPE_VELOCITY_X_FIELD, velocity_x),
-            (K_GESTURE_SWIPE_VELOCITY_Y_FIELD, velocity_x),
-        ]);
+        set_double_fields(
+            &event,
+            &[
+                (K_GESTURE_SWIPE_VELOCITY_X_FIELD, velocity_x),
+                (K_GESTURE_SWIPE_VELOCITY_Y_FIELD, velocity_x),
+            ],
+        );
     }
 
     event
@@ -270,21 +282,27 @@ fn dock_control_gesture_event(
 ) -> CFRetained<CGEvent> {
     let event = new_event();
     configure_dock_swipe_event(&event, phase);
-    set_integer_fields(&event, &[(
-        K_GESTURE_SWIPE_MASK_FIELD,
-        swipe_mask_for_direction(direction) as i64,
-    )]);
+    set_integer_fields(
+        &event,
+        &[(
+            K_GESTURE_SWIPE_MASK_FIELD,
+            swipe_mask_for_direction(direction) as i64,
+        )],
+    );
     set_double_fields(&event, &[(K_GESTURE_SWIPE_PROGRESS_FIELD, progress)]);
 
     if let Some(velocity_x) = velocity_x {
         set_double_fields(&event, &[(K_GESTURE_SWIPE_VELOCITY_X_FIELD, velocity_x)]);
     }
 
-    set_double_fields(&event, &[
-        (K_GESTURE_FLAVOR_FIELD, K_GESTURE_FLAVOR_DOCK_PRIMARY),
-        (K_GESTURE_TIMESTAMP_FIELD, unsafe { mach_absolute_time() as f64 }),
-        (K_GESTURE_SWIPE_POSITION_X_FIELD, K_GESTURE_SWIPE_POSITION_X),
-    ]);
+    set_double_fields(
+        &event,
+        &[
+            (K_GESTURE_FLAVOR_FIELD, K_GESTURE_FLAVOR_DOCK_PRIMARY),
+            (K_GESTURE_TIMESTAMP_FIELD, unsafe { mach_absolute_time() as f64 }),
+            (K_GESTURE_SWIPE_POSITION_X_FIELD, K_GESTURE_SWIPE_POSITION_X),
+        ],
+    );
     event
 }
 
@@ -421,16 +439,21 @@ fn generate_iohid_system_queue_element(event: &CGEvent) -> Vec<u8> {
     out
 }
 
-fn new_event() -> CFRetained<CGEvent> { CGEvent::new(None).expect("CGEventCreate should succeed") }
+fn new_event() -> CFRetained<CGEvent> {
+    CGEvent::new(None).expect("CGEventCreate should succeed")
+}
 
 fn configure_dock_swipe_event(event: &CGEvent, phase: i64) {
-    set_integer_fields(event, &[
-        (K_CGS_EVENT_TYPE_FIELD, K_CGS_EVENT_DOCK_CONTROL),
-        (K_GESTURE_HID_TYPE_FIELD, K_IOHID_EVENT_TYPE_DOCK_SWIPE),
-        (K_GESTURE_PHASE_FIELD, phase),
-        (K_GESTURE_PHASE_MIRROR_FIELD, phase),
-        (K_GESTURE_SWIPE_MOTION_FIELD, K_CG_GESTURE_MOTION_HORIZONTAL),
-    ]);
+    set_integer_fields(
+        event,
+        &[
+            (K_CGS_EVENT_TYPE_FIELD, K_CGS_EVENT_DOCK_CONTROL),
+            (K_GESTURE_HID_TYPE_FIELD, K_IOHID_EVENT_TYPE_DOCK_SWIPE),
+            (K_GESTURE_PHASE_FIELD, phase),
+            (K_GESTURE_PHASE_MIRROR_FIELD, phase),
+            (K_GESTURE_SWIPE_MOTION_FIELD, K_CG_GESTURE_MOTION_HORIZONTAL),
+        ],
+    );
 }
 
 fn set_integer_fields(event: &CGEvent, fields: &[(CGEventField, i64)]) {

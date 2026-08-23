@@ -28,7 +28,9 @@ pub struct AppRuleDecision {
 }
 
 impl AppRuleDecision {
-    pub(crate) fn management_override(&self) -> Option<bool> { self.manage }
+    pub(crate) fn management_override(&self) -> Option<bool> {
+        self.manage
+    }
 }
 
 /// Complete result of applying a managed app rule to workspace policy.
@@ -109,9 +111,13 @@ impl AppRuleOutcome {
         self.placements.push(placement);
     }
 
-    pub(crate) fn push_resize(&mut self, resize: AppRuleResize) { self.resizes.push(resize); }
+    pub(crate) fn push_resize(&mut self, resize: AppRuleResize) {
+        self.resizes.push(resize);
+    }
 
-    pub(crate) fn has_resizes(&self) -> bool { !self.resizes.is_empty() }
+    pub(crate) fn has_resizes(&self) -> bool {
+        !self.resizes.is_empty()
+    }
 
     pub(crate) fn set_workspace_focus(&mut self, focus: AppRuleWorkspaceFocus) {
         self.workspace_focus = Some(focus);
@@ -326,7 +332,9 @@ impl CompiledRule {
     }
 }
 
-fn nonempty(value: Option<String>) -> Option<String> { value.filter(|value| !value.is_empty()) }
+fn nonempty(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.is_empty())
+}
 
 #[cfg(test)]
 mod tests {

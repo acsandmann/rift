@@ -10,6 +10,10 @@
 animate = false
 animation_duration = 0.3
 animation_fps = 100.0
+# - workspace_transition: simulated cross-workspace animation ("none" | "slide" | "fade")
+#   Requires animate=true. "slide" tweens frames off/on screen, "fade" cross-fades,
+#   "none" (default) is an instant cut. Hot-reloadable.
+#workspace_transition = "none"
 
 # Space activation behavior
 # - If true, spaces start inactive (rift does not manage windows there)
@@ -262,6 +266,10 @@ drag_swap_fraction = 0.3
 # - prevent_wrapping: when true, next/previous workspace switching stops at the first/last
 #   workspace instead of wrapping around
 # - reapply_app_rules_on_title_change: if true, app rules are re-evaluated when a window's title changes
+# - ownership: whether workspaces are owned by native macOS spaces or by displays
+#   - "space" (default): each macOS space has its own set of virtual workspaces (classic)
+#   - "display": workspaces are owned by displays, so switching workspace on one display
+#     does not affect other displays. Toggle this to try display-owned workspaces.
 enabled = true
 default_workspace_count = 4
 auto_assign_windows = true
@@ -269,6 +277,7 @@ preserve_focus_per_workspace = true
 workspace_auto_back_and_forth = false
 prevent_wrapping = false
 reapply_app_rules_on_title_change = false
+ownership = "space"
 
 # Workspace-specific rules
 # - workspace: target workspace by index (integer) or name (string)

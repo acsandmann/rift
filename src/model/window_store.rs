@@ -69,17 +69,29 @@ impl WindowRecord {
         self.state.as_ref().map(|state| state.is_admitted_with_override(rule_override))
     }
 
-    pub fn window_server_id(&self) -> Option<WindowServerId> { self.window_server_id }
+    pub fn window_server_id(&self) -> Option<WindowServerId> {
+        self.window_server_id
+    }
 
-    pub fn native_space(&self) -> Option<SpaceId> { self.native_space }
+    pub fn native_space(&self) -> Option<SpaceId> {
+        self.native_space
+    }
 
-    pub fn workspace(&self) -> Option<WindowWorkspaceInfo> { self.workspace }
+    pub fn workspace(&self) -> Option<WindowWorkspaceInfo> {
+        self.workspace
+    }
 
-    pub fn visibility(&self) -> WindowVisibility { self.visibility }
+    pub fn visibility(&self) -> WindowVisibility {
+        self.visibility
+    }
 
-    pub fn placement(&self) -> WindowPlacement { self.placement }
+    pub fn placement(&self) -> WindowPlacement {
+        self.placement
+    }
 
-    pub fn pending_operation(&self) -> Option<PendingWindowOperation> { self.pending_operation }
+    pub fn pending_operation(&self) -> Option<PendingWindowOperation> {
+        self.pending_operation
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -254,7 +266,9 @@ impl WindowStore {
         self.windows.get(&window_id)
     }
 
-    pub fn contains_window(&self, window_id: WindowId) -> bool { self.window(window_id).is_some() }
+    pub fn contains_window(&self, window_id: WindowId) -> bool {
+        self.window(window_id).is_some()
+    }
 
     pub fn tracked_window_count(&self) -> usize {
         self.windows.values().filter(|record| record.state.is_some()).count()
@@ -416,7 +430,9 @@ impl WindowStore {
     }
 
     pub fn set_visible_windows<I>(&mut self, wsids: I)
-    where I: IntoIterator<Item = WindowServerId> {
+    where
+        I: IntoIterator<Item = WindowServerId>,
+    {
         for wsid in wsids {
             self.mark_window_visible(wsid);
         }
@@ -944,7 +960,9 @@ impl WindowStore {
     }
 
     pub fn mark_wsids_recent<I>(&mut self, wsids: I)
-    where I: IntoIterator<Item = WindowServerId> {
+    where
+        I: IntoIterator<Item = WindowServerId>,
+    {
         let now = Instant::now();
         for wsid in wsids {
             self.server_record_mut(wsid).recent_at = Some(now);
@@ -1074,9 +1092,10 @@ mod tests {
         window_store.set_window_server_space(wsid, Some(space));
 
         assert_eq!(window_store.window_server_space(wsid), Some(space));
-        assert_eq!(window_store.iter_window_server_ids().collect::<Vec<_>>(), vec![
-            wsid
-        ]);
+        assert_eq!(
+            window_store.iter_window_server_ids().collect::<Vec<_>>(),
+            vec![wsid]
+        );
     }
 
     #[test]
@@ -1105,14 +1124,20 @@ mod tests {
         let from = WindowId::new(1, 1);
         let to = WindowId::new(1, 2);
 
-        window_store.assign_window_to_workspace(from, WindowWorkspaceInfo {
-            space,
-            workspace_id: source_workspace,
-        });
-        window_store.assign_window_to_workspace(to, WindowWorkspaceInfo {
-            space,
-            workspace_id: target_workspace,
-        });
+        window_store.assign_window_to_workspace(
+            from,
+            WindowWorkspaceInfo {
+                space,
+                workspace_id: source_workspace,
+            },
+        );
+        window_store.assign_window_to_workspace(
+            to,
+            WindowWorkspaceInfo {
+                space,
+                workspace_id: target_workspace,
+            },
+        );
 
         window_store.transfer_persistent_window_metadata(from, to);
 
@@ -1382,10 +1407,13 @@ mod tests {
             .create_workspace(SpaceId::new(9), Some("Cleanup".to_string()))
             .expect("workspace");
         store.track_window_server_id(wsid, wid);
-        store.assign_window_to_workspace(wid, WindowWorkspaceInfo {
-            space: SpaceId::new(9),
-            workspace_id,
-        });
+        store.assign_window_to_workspace(
+            wid,
+            WindowWorkspaceInfo {
+                space: SpaceId::new(9),
+                workspace_id,
+            },
+        );
         store.begin_operation(wid, None, Some(SpaceId::new(9)));
 
         store.remove_windows_for_app(wid.pid);

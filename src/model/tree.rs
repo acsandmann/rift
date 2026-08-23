@@ -11,11 +11,15 @@ pub struct Tree<O> {
 }
 
 impl Tree<()> {
-    pub fn new() -> Self { Self::with_observer(()) }
+    pub fn new() -> Self {
+        Self::with_observer(())
+    }
 }
 
 impl<O: Observer> Tree<O> {
-    pub fn with_observer(data: O) -> Self { Tree { map: NodeMap::new(), data } }
+    pub fn with_observer(data: O) -> Self {
+        Tree { map: NodeMap::new(), data }
+    }
 
     pub fn mk_node(&mut self) -> UnattachedNode<'_, O> {
         let id = self.map.map.insert(Node::default());
@@ -34,23 +38,35 @@ pub struct NodeMap {
 }
 
 impl NodeMap {
-    fn new() -> NodeMap { NodeMap { map: SlotMap::default() } }
+    fn new() -> NodeMap {
+        NodeMap { map: SlotMap::default() }
+    }
 
-    pub fn capacity(&self) -> usize { self.map.capacity() }
+    pub fn capacity(&self) -> usize {
+        self.map.capacity()
+    }
 
-    pub fn reserve(&mut self, additional: usize) { self.map.reserve(additional) }
+    pub fn reserve(&mut self, additional: usize) {
+        self.map.reserve(additional)
+    }
 
-    pub fn contains(&self, id: NodeId) -> bool { self.map.contains_key(id) }
+    pub fn contains(&self, id: NodeId) -> bool {
+        self.map.contains_key(id)
+    }
 }
 
 impl Index<NodeId> for NodeMap {
     type Output = Node;
 
-    fn index(&self, index: NodeId) -> &Self::Output { &self.map[index] }
+    fn index(&self, index: NodeId) -> &Self::Output {
+        &self.map[index]
+    }
 }
 
 impl IndexMut<NodeId> for NodeMap {
-    fn index_mut(&mut self, index: NodeId) -> &mut Self::Output { &mut self.map[index] }
+    fn index_mut(&mut self, index: NodeId) -> &mut Self::Output {
+        &mut self.map[index]
+    }
 }
 
 /// Represents ownership of a particular node in a tree.
@@ -72,9 +88,13 @@ impl OwnedNode {
     }
 
     /// Marks a non-root node as owned.
-    pub fn own(node: NodeId, name: &'static str) -> Self { OwnedNode(Some(node), name.to_owned()) }
+    pub fn own(node: NodeId, name: &'static str) -> Self {
+        OwnedNode(Some(node), name.to_owned())
+    }
 
-    pub fn id(&self) -> NodeId { self.0.expect("OwnedNode::id called on removed OwnedNode") }
+    pub fn id(&self) -> NodeId {
+        self.0.expect("OwnedNode::id called on removed OwnedNode")
+    }
 
     #[track_caller]
     pub fn remove(&mut self, tree: &mut Tree<impl Observer>) {
@@ -244,7 +264,9 @@ impl NodeId {
 }
 
 pub trait Observer
-where Self: Sized {
+where
+    Self: Sized,
+{
     fn added_to_forest(&mut self, map: &NodeMap, node: NodeId);
     fn added_to_parent(&mut self, map: &NodeMap, node: NodeId);
     fn removing_from_parent(&mut self, map: &NodeMap, node: NodeId);
@@ -272,14 +294,18 @@ pub struct UnattachedNode<'a, O> {
 }
 
 impl<'a, O: Observer> UnattachedNode<'a, O> {
-    pub(crate) fn make_root(self, name: &'static str) -> OwnedNode { OwnedNode::own(self.id, name) }
+    pub(crate) fn make_root(self, name: &'static str) -> OwnedNode {
+        OwnedNode::own(self.id, name)
+    }
 }
 
 impl<'a, O: Observer> UnattachedNode<'a, O> {
     /// Consumes this unattached node and returns its `NodeId` without
     /// creating an `OwnedNode` root guard. The node remains in the forest
     /// as a root until attached or explicitly removed.
-    pub fn into_id(self) -> NodeId { self.id }
+    pub fn into_id(self) -> NodeId {
+        self.id
+    }
 
     #[track_caller]
     pub(crate) fn push_back(self, parent: NodeId) -> NodeId {
@@ -798,7 +824,9 @@ mod tests {
             pretty_assertions::assert_eq!(events, actual);
         }
 
-        fn clear_events(&mut self) { self.tree.data.0.clear(); }
+        fn clear_events(&mut self) {
+            self.tree.data.0.clear();
+        }
     }
 
     #[derive(Clone, PartialEq, Debug)]
@@ -1032,10 +1060,13 @@ mod tests {
         t.assert_events_are([]);
 
         t.child2.detach(&mut t.tree).push_back(t.child1).with(|_id, tree| {
-            TestTree::assert_events_are_inner(tree, &[
-                RemovingFromParent(t.child2, t.root),
-                AddedToParent(t.child2),
-            ]);
+            TestTree::assert_events_are_inner(
+                tree,
+                &[
+                    RemovingFromParent(t.child2, t.root),
+                    AddedToParent(t.child2),
+                ],
+            );
         });
         t.assert_events_are([RemovedChild(t.root)]);
         t.assert_children_are([t.child1, t.child3], t.root);

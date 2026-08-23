@@ -41,7 +41,9 @@ impl<Event> Sender<Event> {
 }
 
 impl<Event> Clone for Sender<Event> {
-    fn clone(&self) -> Self { Self(self.0.clone()) }
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
 }
 
 impl<Event> std::fmt::Debug for Sender<Event> {

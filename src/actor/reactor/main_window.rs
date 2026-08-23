@@ -8,6 +8,10 @@ pub(crate) struct MainWindowTracker {
     global_frontmost: Option<pid_t>,
     window_server_focus: Option<WindowId>,
     window_server_focus_authoritative: bool,
+    /// pid whose WindowServer key window was destroyed before the resolver reported a
+    /// successor (native tab switch). Keeps the key-pid gate armed until
+    /// `WindowServerFocusChanged` or another pid becomes frontmost.
+    key_focus_hold: Option<pid_t>,
 }
 
 struct AppState {
@@ -23,11 +27,14 @@ impl MainWindowTracker {
             &Event::ApplicationLaunched {
                 pid, is_frontmost, main_window, ..
             } => {
-                self.apps.insert(pid, AppState {
-                    is_frontmost,
-                    frontmost_is_quiet: Quiet::No,
-                    main_window,
-                });
+                self.apps.insert(
+                    pid,
+                    AppState {
+                        is_frontmost,
+                        frontmost_is_quiet: Quiet::No,
+                        main_window,
+                    },
+                );
                 (pid, Quiet::No)
             }
             &Event::ApplicationThreadTerminated(pid) => {
@@ -35,11 +42,15 @@ impl MainWindowTracker {
                 if self.window_server_focus.is_some_and(|wid| wid.pid == pid) {
                     self.window_server_focus = None;
                 }
+                if self.key_focus_hold == Some(pid) {
+                    self.key_focus_hold = None;
+                }
                 return None;
             }
             &Event::WindowDestroyed(wid) => {
                 if self.window_server_focus == Some(wid) {
                     self.window_server_focus = None;
+                    self.key_focus_hold = Some(wid.pid);
                 }
                 return None;
             }
@@ -56,6 +67,9 @@ impl MainWindowTracker {
             }
             &Event::ApplicationGloballyActivated(pid) => {
                 self.global_frontmost = Some(pid);
+                if self.key_focus_hold.is_some_and(|hold| hold != pid) {
+                    self.key_focus_hold = None;
+                }
                 let Some(app) = self.apps.get_mut(&pid) else {
                     return None;
                 };
@@ -79,6 +93,7 @@ impl MainWindowTracker {
             &Event::WindowServerFocusChanged(wid, _) => {
                 self.window_server_focus_authoritative = true;
                 self.window_server_focus = Some(wid);
+                self.key_focus_hold = None;
                 return None;
             }
             _ => return None,
@@ -115,7 +130,21 @@ impl MainWindowTracker {
         }
     }
 
-    pub fn is_globally_frontmost(&self, pid: pid_t) -> bool { self.global_frontmost == Some(pid) }
+    pub fn is_globally_frontmost(&self, pid: pid_t) -> bool {
+        self.global_frontmost == Some(pid)
+    }
+
+    pub fn window_server_focus(&self) -> Option<WindowId> {
+        self.window_server_focus
+    }
+
+    /// The pid the OS says owns key focus, only while that claim agrees with the
+    /// globally frontmost app.
+    pub fn key_pid(&self) -> Option<pid_t> {
+        let front = self.global_frontmost?;
+        let claimed = self.window_server_focus.map(|w| w.pid).or(self.key_focus_hold)?;
+        (claimed == front).then_some(front)
+    }
 }
 
 #[cfg(test)]
@@ -135,11 +164,14 @@ mod tests {
         let stale_window = WindowId::new(7, 3);
         let mut tracker = MainWindowTracker::default();
         tracker.global_frontmost = Some(7);
-        tracker.apps.insert(7, AppState {
-            is_frontmost: true,
-            frontmost_is_quiet: Quiet::No,
-            main_window: Some(ax_window),
-        });
+        tracker.apps.insert(
+            7,
+            AppState {
+                is_frontmost: true,
+                frontmost_is_quiet: Quiet::No,
+                main_window: Some(ax_window),
+            },
+        );
 
         assert_eq!(tracker.main_window(), Some(ax_window));
         assert_eq!(
@@ -359,6 +391,68 @@ mod tests {
         assert_eq!(
             reactor.layout_manager.layout_engine.selected_window(space),
             Some(WindowId::new(3, 1))
+        );
+    }
+
+    #[test]
+    fn key_pid_survives_key_window_destroy_until_resolver_or_app_switch() {
+        let mut tracker = MainWindowTracker::default();
+        tracker.global_frontmost = Some(7);
+        // Initial focus via WindowServer
+        let w2 = WindowId::new(7, 2);
+        let w3 = WindowId::new(7, 3);
+        assert_eq!(
+            tracker.handle_event(&Event::WindowServerFocusChanged(w2, SpaceId::new(1))),
+            None
+        );
+        assert_eq!(tracker.key_pid(), Some(7));
+        assert_eq!(tracker.window_server_focus(), Some(w2));
+        // Destroy key window -> hold keeps key_pid armed, window_server_focus cleared
+        let _ = tracker.handle_event(&Event::WindowDestroyed(w2));
+        assert_eq!(tracker.window_server_focus(), None);
+        assert_eq!(tracker.key_pid(), Some(7), "hold should keep key_pid after destroy");
+        // Resolver reports successor tab
+        assert_eq!(
+            tracker.handle_event(&Event::WindowServerFocusChanged(w3, SpaceId::new(1))),
+            None
+        );
+        assert_eq!(tracker.window_server_focus(), Some(w3));
+        assert_eq!(tracker.key_pid(), Some(7));
+        // Now test branch: after destroy, app switch clears hold
+        let mut tracker2 = MainWindowTracker::default();
+        tracker2.global_frontmost = Some(7);
+        let _ = tracker2.handle_event(&Event::WindowServerFocusChanged(w2, SpaceId::new(1)));
+        let _ = tracker2.handle_event(&Event::WindowDestroyed(w2));
+        assert_eq!(tracker2.key_pid(), Some(7));
+        // Switch to different pid -> disarms
+        let _ = tracker2.handle_event(&Event::ApplicationGloballyActivated(8));
+        assert_eq!(tracker2.key_pid(), None, "switch to 8 should clear hold");
+        // Switching back to 7 still None because hold was cleared (no resolver yet)
+        let _ = tracker2.handle_event(&Event::ApplicationGloballyActivated(7));
+        assert_eq!(tracker2.key_pid(), None);
+        // Duplicate activation for same pid should keep hold
+        let mut tracker3 = MainWindowTracker::default();
+        tracker3.global_frontmost = Some(7);
+        let _ = tracker3.handle_event(&Event::WindowServerFocusChanged(w2, SpaceId::new(1)));
+        let _ = tracker3.handle_event(&Event::WindowDestroyed(w2));
+        assert_eq!(tracker3.key_pid(), Some(7));
+        let _ = tracker3.handle_event(&Event::ApplicationGloballyActivated(7));
+        assert_eq!(
+            tracker3.key_pid(),
+            Some(7),
+            "duplicate activation for same pid must not clear hold"
+        );
+        // WindowServerFocusChanged for different pid while front is 7 -> None due to coherence check
+        let mut tracker4 = MainWindowTracker::default();
+        tracker4.global_frontmost = Some(7);
+        let _ = tracker4.handle_event(&Event::WindowServerFocusChanged(w2, SpaceId::new(1)));
+        assert_eq!(tracker4.key_pid(), Some(7));
+        let other = WindowId::new(8, 1);
+        let _ = tracker4.handle_event(&Event::WindowServerFocusChanged(other, SpaceId::new(1)));
+        assert_eq!(
+            tracker4.key_pid(),
+            None,
+            "claimed pid 8 != front 7 should be None"
         );
     }
 }

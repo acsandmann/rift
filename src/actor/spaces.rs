@@ -133,7 +133,9 @@ impl ForwardedSpaceState {
         self.screens.iter().filter_map(|screen| screen.space)
     }
 
-    pub fn first_known_space(&self) -> Option<SpaceId> { self.iter_known_spaces().next() }
+    pub fn first_known_space(&self) -> Option<SpaceId> {
+        self.iter_known_spaces().next()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -684,8 +686,12 @@ impl SpacesActor {
             releases_lifecycle_refresh_quarantine,
             // Every coherent authoritative snapshot is a valid acknowledgement for
             // the reactor's display-churn gate, including ordinary refreshes after
-            // stabilization has already ended.
-            releases_display_churn_refresh_quarantine: true,
+            // stabilization has already ended. Suppress the churn release while
+            // we are still in the sleeping quarantine so the reactor does not
+            // issue a competing visible-windows refresh that fights the
+            // post-wake authoritative snapshot (flicker when a monitor is
+            // plugged during sleep).
+            releases_display_churn_refresh_quarantine: !self.state.sleeping,
             resized_spaces,
             topology_window_delta: self.state.pending_topology_window_delta.take(),
             active_window_spaces: self.state.visible_window_spaces.clone(),
@@ -1031,6 +1037,15 @@ impl SpacesActor {
     ) {
         let current = self.visible_window_spaces_for_screens(screens);
         let previous = std::mem::take(&mut self.state.pre_churn_visible_window_spaces);
+        // If the churn straddled sleep, SpaceIds were reassigned by macOS
+        // while we were asleep. Treating those as appears/disappears drives
+        // a WindowFrameChanged storm (flicker) when the new monitor was
+        // plugged during sleep. Keep spaces stable for this commit.
+        if self.state.sleeping {
+            self.state.visible_window_spaces = current;
+            self.state.pending_topology_window_delta = None;
+            return;
+        }
 
         let mut appeared = Vec::new();
         let mut disappeared = Vec::new();

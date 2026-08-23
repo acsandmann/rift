@@ -297,9 +297,15 @@ impl Clone for LayoutState {
     }
 }
 
-fn default_atomic_bool() -> AtomicBool { AtomicBool::new(false) }
-fn default_atomic_i8() -> AtomicI8 { AtomicI8::new(0) }
-fn default_atomic() -> AtomicU64 { AtomicU64::new(0.0f64.to_bits()) }
+fn default_atomic_bool() -> AtomicBool {
+    AtomicBool::new(false)
+}
+fn default_atomic_i8() -> AtomicI8 {
+    AtomicI8::new(0)
+}
+fn default_atomic() -> AtomicU64 {
+    AtomicU64::new(0.0f64.to_bits())
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ScrollingLayoutSystem {
@@ -308,7 +314,9 @@ pub struct ScrollingLayoutSystem {
     settings: ScrollingLayoutSettings,
 }
 
-fn default_scrolling_settings() -> ScrollingLayoutSettings { ScrollingLayoutSettings::default() }
+fn default_scrolling_settings() -> ScrollingLayoutSettings {
+    ScrollingLayoutSettings::default()
+}
 
 impl Default for ScrollingLayoutSystem {
     fn default() -> Self {
@@ -525,7 +533,9 @@ impl ScrollingLayoutSystem {
         state.request_center_on_selected();
     }
 
-    fn layout_state(&self, layout: LayoutId) -> Option<&LayoutState> { self.layouts.get(layout) }
+    fn layout_state(&self, layout: LayoutId) -> Option<&LayoutState> {
+        self.layouts.get(layout)
+    }
 
     fn layout_state_mut(&mut self, layout: LayoutId) -> Option<&mut LayoutState> {
         self.layouts.get_mut(layout)
@@ -599,12 +609,15 @@ impl ScrollingLayoutSystem {
                 Direction::Right => (col_idx + 1).min(state.columns.len()),
                 _ => return false,
             };
-            state.columns.insert(insert_at, Column {
-                windows: vec![wid],
-                width_offset: 0.0,
-                width_overridden: false,
-                height_weights: vec![weight],
-            });
+            state.columns.insert(
+                insert_at,
+                Column {
+                    windows: vec![wid],
+                    width_offset: 0.0,
+                    width_overridden: false,
+                    height_weights: vec![weight],
+                },
+            );
             state.selected = Some(wid);
             return true;
         }
@@ -631,7 +644,9 @@ impl LayoutSystem for ScrollingLayoutSystem {
         self.layouts.insert(LayoutState::new(self.settings.column_width_ratio))
     }
 
-    fn contains_layout(&self, layout: LayoutId) -> bool { self.layouts.contains_key(layout) }
+    fn contains_layout(&self, layout: LayoutId) -> bool {
+        self.layouts.contains_key(layout)
+    }
 
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
         let cloned = self
@@ -642,7 +657,9 @@ impl LayoutSystem for ScrollingLayoutSystem {
         self.layouts.insert(cloned)
     }
 
-    fn remove_layout(&mut self, layout: LayoutId) { self.layouts.remove(layout); }
+    fn remove_layout(&mut self, layout: LayoutId) {
+        self.layouts.remove(layout);
+    }
 
     fn draw_tree(&self, layout: LayoutId) -> String {
         let Some(state) = self.layouts.get(layout) else {
@@ -1561,12 +1578,15 @@ impl LayoutSystem for ScrollingLayoutSystem {
             Direction::Right => col_idx + 1,
             Direction::Up | Direction::Down => unreachable!(),
         };
-        state.columns.insert(insert_at, Column {
-            windows: vec![wid],
-            width_offset: 0.0,
-            width_overridden: false,
-            height_weights: vec![weight],
-        });
+        state.columns.insert(
+            insert_at,
+            Column {
+                windows: vec![wid],
+                width_offset: 0.0,
+                width_overridden: false,
+                height_weights: vec![weight],
+            },
+        );
         state.selected = Some(wid);
         if niri_navigation {
             state.reveal_selected_without_direction();
@@ -1641,12 +1661,15 @@ impl LayoutSystem for ScrollingLayoutSystem {
         state.columns[col_idx].height_weights = remaining_weights;
         let mut insert_at = col_idx + 1;
         for (idx, wid) in moved.iter().copied().enumerate() {
-            state.columns.insert(insert_at, Column {
-                windows: vec![wid],
-                width_offset: 0.0,
-                width_overridden: false,
-                height_weights: vec![moved_weights[idx]],
-            });
+            state.columns.insert(
+                insert_at,
+                Column {
+                    windows: vec![wid],
+                    width_offset: 0.0,
+                    width_overridden: false,
+                    height_weights: vec![moved_weights[idx]],
+                },
+            );
             insert_at += 1;
         }
         moved
@@ -1681,12 +1704,15 @@ impl LayoutSystem for ScrollingLayoutSystem {
         let wid = state.columns[col_idx].windows.remove(row_idx);
         let weight = state.columns[col_idx].height_weights.remove(row_idx);
         let insert_at = (col_idx + 1).min(state.columns.len());
-        state.columns.insert(insert_at, Column {
-            windows: vec![wid],
-            width_offset: 0.0,
-            width_overridden: false,
-            height_weights: vec![weight],
-        });
+        state.columns.insert(
+            insert_at,
+            Column {
+                windows: vec![wid],
+                width_offset: 0.0,
+                width_overridden: false,
+                height_weights: vec![weight],
+            },
+        );
         state.selected = Some(wid);
         if niri_navigation {
             state.reveal_selected_without_direction();

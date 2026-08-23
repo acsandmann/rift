@@ -78,7 +78,9 @@ impl AnimatedWindow {
 }
 
 impl AnimationManager {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub async fn run(mut rx: Receiver) {
         let mut manager = Self::new();
@@ -291,6 +293,138 @@ impl AnimationManager {
         Self::instant_layout_inner(reactor, space, layout, skip_wid, true)
     }
 
+    /// Animated workspace transition (slide/fade). Returns true if an animation was
+    /// started. Falls back to instant layout when no windows or low-power.
+    pub fn workspace_switch_animated(
+        reactor: &mut Reactor,
+        space: SpaceId,
+        layout: &[(WindowId, CGRect)],
+        screen_frame: CGRect,
+        skip_wid: Option<WindowId>,
+    ) -> bool {
+        use crate::common::config::WorkspaceTransition;
+        let transition = reactor.config.settings.workspace_transition;
+        if transition == WorkspaceTransition::None {
+            return false;
+        }
+        if reactor.config.settings.animation_duration <= 0.0
+            || reactor.config.settings.animation_fps <= 0.0
+        {
+            return false;
+        }
+        if power::is_low_power_mode_enabled() {
+            return false;
+        }
+        let layout_animate = reactor
+            .layout_manager
+            .layout_engine
+            .layout_specific_animate_settings(space)
+            .unwrap_or(reactor.config.settings.animate);
+        if !layout_animate {
+            return false;
+        }
+
+        let mut anim = Animation::new(reactor.config.clone());
+        let mut animated_count = 0usize;
+        let mut any_frame_changed = false;
+
+        for &(wid, target_frame) in layout {
+            if skip_wid == Some(wid) {
+                anim.mark_handled(wid);
+                continue;
+            }
+            let target_frame = target_frame.round();
+            let (start_frame, window_server_id, txid) = {
+                let Some(window) = reactor.state.windows.window_mut(wid) else {
+                    continue;
+                };
+                let current = window.frame_monotonic;
+                if target_frame.same_as(current) && transition == WorkspaceTransition::Fade {
+                    // For fade with identical frame, still animate (no positional change)
+                    // so we need a start == target but still produce an animation.
+                }
+                let wsid = window.info.sys_id;
+                let txid = wsid
+                    .map(|wsid| reactor.transaction_manager.generate_next_txid(wsid))
+                    .unwrap_or_default();
+                let start = match transition {
+                    WorkspaceTransition::Slide => {
+                        // Slide incoming windows from offscreen right (+width) to target.
+                        // Outgoing windows are not in this layout; their animation would
+                        // require separate tracking. For prototype, only incoming slide.
+                        let offscreen_x = screen_frame.max().x;
+                        CGRect {
+                            origin: CGPoint {
+                                x: offscreen_x,
+                                y: target_frame.origin.y,
+                            },
+                            size: target_frame.size,
+                        }
+                    }
+                    WorkspaceTransition::Fade => {
+                        // Fade keeps frame static; animation still runs to provide
+                        // visual duration (future: alpha tween via SLSSetWindowAlpha).
+                        target_frame
+                    }
+                    WorkspaceTransition::None => unreachable!(),
+                };
+                (start, wsid, txid)
+            };
+
+            let handle = {
+                let Some(app_state) = reactor.app_manager.apps.get(&wid.pid) else {
+                    continue;
+                };
+                app_state.handle.clone()
+            };
+
+            // Commit target to monotonic store immediately (visual tween is overlay)
+            if let Some(window) = reactor.state.windows.window_mut(wid) {
+                if !target_frame.same_as(window.frame_monotonic) {
+                    any_frame_changed = true;
+                }
+                window.frame_monotonic = target_frame;
+            } else {
+                continue;
+            }
+
+            if let Some(wsid) = window_server_id {
+                reactor
+                    .transaction_manager
+                    .update_txid_entries([(wsid, txid, target_frame)]);
+            }
+
+            // For slide we animate from offscreen; for fade we still create an entry
+            // so the animation has duration even though start==finish.
+            trace!(?wid, ?start_frame, ?target_frame, ?transition, "Workspace transition anim");
+            anim.add_window(&handle, wid, start_frame, target_frame, false, txid);
+            animated_count += 1;
+        }
+
+        if animated_count == 0 {
+            return false;
+        }
+
+        // If no geometry change but fade was requested, still report changed so
+        // the caller does not fall back to instant path and lose the fade duration.
+        if !any_frame_changed && transition == WorkspaceTransition::Fade {
+            any_frame_changed = true;
+        }
+
+        if let Some(tx) = &reactor.animation_tx {
+            if let Err(err) = tx.send(Message::Replace(anim)) {
+                match err.0 {
+                    Message::Replace(animation) => animation.skip_to_end(),
+                    Message::SkipToEnd(animation) => animation.skip_to_end(),
+                }
+            }
+        } else {
+            anim.skip_to_end();
+        }
+
+        any_frame_changed
+    }
+
     fn instant_layout_inner(
         reactor: &mut Reactor,
         space: SpaceId,
@@ -446,7 +580,9 @@ impl ActiveAnimation {
         self.next_frame += 1;
     }
 
-    fn is_complete(&self) -> bool { self.next_frame > self.animation.frames }
+    fn is_complete(&self) -> bool {
+        self.next_frame > self.animation.frames
+    }
 
     fn current_frames(&self) -> Vec<(WindowId, CGRect)> {
         let frame = self.next_frame.saturating_sub(1);
@@ -509,9 +645,13 @@ impl Animation {
         }
     }
 
-    pub fn is_empty(&self) -> bool { self.windows.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.windows.is_empty()
+    }
 
-    fn begin(&self) { self.begin_windows_not_in(&[]); }
+    fn begin(&self) {
+        self.begin_windows_not_in(&[]);
+    }
 
     fn begin_windows_not_in(&self, skip: &[WindowId]) {
         for window in &self.windows {
@@ -598,7 +738,9 @@ impl Animation {
         }
     }
 
-    fn skip_to_end_and_end(self) { self.finish_all(); }
+    fn skip_to_end_and_end(self) {
+        self.finish_all();
+    }
 }
 
 fn get_frame(a: CGRect, b: CGRect, t: f64) -> CGRect {
@@ -623,7 +765,9 @@ fn ease(t: f64) -> f64 {
     }
 }
 
-fn blend(a: f64, b: f64, s: f64) -> f64 { (1.0 - s) * a + s * b }
+fn blend(a: f64, b: f64, s: f64) -> f64 {
+    (1.0 - s) * a + s * b
+}
 
 #[cfg(test)]
 mod tests {
@@ -635,7 +779,9 @@ mod tests {
         CGRect::new(CGPoint::new(origin_x, origin_y), CGSize::new(width, height))
     }
 
-    fn config() -> Config { Config::default() }
+    fn config() -> Config {
+        Config::default()
+    }
 
     fn animation(handle: &AppThreadHandle, wid: WindowId, from: CGRect, to: CGRect) -> Animation {
         let mut animation = Animation::new(config());

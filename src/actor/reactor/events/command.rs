@@ -132,7 +132,7 @@ pub fn handle_command_layout(
 
     let arrange_space_scope = is_workspace_switch.then_some(workspace_space).flatten();
     Ok(EventOutcome::layout_changed(false)
-        .with_layout_response(response, workspace_space)
+        .with_user_layout_response(response, workspace_space)
         .with_arrange_space_scope(arrange_space_scope))
 }
 
@@ -272,10 +272,13 @@ pub fn handle_command_reactor_toggle_space_activated(
     let Some(space) = payload.space else {
         return Ok(EventOutcome::no_change());
     };
-    policy.toggle_space_activated(payload.config, ToggleSpaceContext {
-        space,
-        display_uuid: payload.display_uuid,
-    });
+    policy.toggle_space_activated(
+        payload.config,
+        ToggleSpaceContext {
+            space,
+            display_uuid: payload.display_uuid,
+        },
+    );
     Ok(EventOutcome::layout_changed(false).with_active_space_recompute())
 }
 
@@ -407,6 +410,6 @@ pub fn handle_command_reactor_move_window_to_display(
     }
 
     Ok(EventOutcome::layout_changed(false)
-        .with_layout_response(response, None)
+        .with_user_layout_response(response, None)
         .with_pre_layout_window_frame_write(payload.window, payload.target_frame, true))
 }

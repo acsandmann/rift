@@ -22,7 +22,9 @@ pub struct StackLayoutSystem {
 }
 
 impl Default for StackLayoutSystem {
-    fn default() -> Self { Self::new(default_stack_orientation()) }
+    fn default() -> Self {
+        Self::new(default_stack_orientation())
+    }
 }
 
 impl StackLayoutSystem {
@@ -167,7 +169,9 @@ impl LayoutSystem for StackLayoutSystem {
         layout
     }
 
-    fn contains_layout(&self, layout: LayoutId) -> bool { self.inner.contains_layout(layout) }
+    fn contains_layout(&self, layout: LayoutId) -> bool {
+        self.inner.contains_layout(layout)
+    }
 
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
         let cloned = self.inner.clone_layout(layout);
@@ -175,9 +179,13 @@ impl LayoutSystem for StackLayoutSystem {
         cloned
     }
 
-    fn remove_layout(&mut self, layout: LayoutId) { self.inner.remove_layout(layout); }
+    fn remove_layout(&mut self, layout: LayoutId) {
+        self.inner.remove_layout(layout);
+    }
 
-    fn draw_tree(&self, layout: LayoutId) -> String { self.inner.draw_tree(layout) }
+    fn draw_tree(&self, layout: LayoutId) -> String {
+        self.inner.draw_tree(layout)
+    }
 
     fn container_tree(&self, layout: LayoutId) -> rift_protocol::ContainerTreeNode {
         self.inner.container_tree(layout)
@@ -222,7 +230,9 @@ impl LayoutSystem for StackLayoutSystem {
         self.inner.visible_windows_under_selection(layout)
     }
 
-    fn ascend_selection(&mut self, layout: LayoutId) -> bool { self.inner.ascend_selection(layout) }
+    fn ascend_selection(&mut self, layout: LayoutId) -> bool {
+        self.inner.ascend_selection(layout)
+    }
 
     fn descend_selection(&mut self, layout: LayoutId) -> bool {
         self.inner.descend_selection(layout)
@@ -393,7 +403,9 @@ impl LayoutSystem for StackLayoutSystem {
 mod tests {
     use super::*;
 
-    fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
+    fn w(idx: u32) -> WindowId {
+        WindowId::new(1, idx)
+    }
 
     #[test]
     fn create_layout_starts_as_stack() {

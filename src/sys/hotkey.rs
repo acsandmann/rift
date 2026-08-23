@@ -30,15 +30,25 @@ impl Modifiers {
     pub const SHIFT_LEFT: Modifiers = Modifiers(0b0000_0001);
     pub const SHIFT_RIGHT: Modifiers = Modifiers(0b0000_0010);
 
-    pub fn empty() -> Self { Modifiers(0) }
+    pub fn empty() -> Self {
+        Modifiers(0)
+    }
 
-    pub fn contains(&self, other: Modifiers) -> bool { (self.0 & other.0) == other.0 }
+    pub fn contains(&self, other: Modifiers) -> bool {
+        (self.0 & other.0) == other.0
+    }
 
-    pub fn intersects(&self, other: Modifiers) -> bool { (self.0 & other.0) != 0 }
+    pub fn intersects(&self, other: Modifiers) -> bool {
+        (self.0 & other.0) != 0
+    }
 
-    pub fn insert(&mut self, other: Modifiers) { self.0 |= other.0; }
+    pub fn insert(&mut self, other: Modifiers) {
+        self.0 |= other.0;
+    }
 
-    pub fn remove(&mut self, other: Modifiers) { self.0 &= !other.0; }
+    pub fn remove(&mut self, other: Modifiers) {
+        self.0 &= !other.0;
+    }
 
     pub fn has_generic_modifiers(&self) -> bool {
         MOD_FAMILIES.iter().any(|m| self.contains(m.generic))
@@ -140,9 +150,13 @@ impl ModFamily {
             || (flags.bits() & self.right_mask) != 0
     }
 
-    fn left_is_active(&self, flags: CGEventFlags) -> bool { (flags.bits() & self.left_mask) != 0 }
+    fn left_is_active(&self, flags: CGEventFlags) -> bool {
+        (flags.bits() & self.left_mask) != 0
+    }
 
-    fn right_is_active(&self, flags: CGEventFlags) -> bool { (flags.bits() & self.right_mask) != 0 }
+    fn right_is_active(&self, flags: CGEventFlags) -> bool {
+        (flags.bits() & self.right_mask) != 0
+    }
 }
 
 const MOD_FAMILIES: &[ModFamily] = &[
@@ -526,7 +540,9 @@ pub struct Hotkey {
 }
 
 impl Hotkey {
-    pub fn new(modifiers: Modifiers, key_code: KeyCode) -> Self { Self { modifiers, key_code } }
+    pub fn new(modifiers: Modifiers, key_code: KeyCode) -> Self {
+        Self { modifiers, key_code }
+    }
 }
 
 impl fmt::Display for Hotkey {
@@ -568,7 +584,9 @@ impl FromStr for Hotkey {
 
 impl<'de> Deserialize<'de> for Hotkey {
     fn deserialize<D>(deserializer: D) -> Result<Hotkey, D::Error>
-    where D: serde::Deserializer<'de> {
+    where
+        D: serde::Deserializer<'de>,
+    {
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum HotkeyRepr {
@@ -595,7 +613,9 @@ pub enum HotkeySpec {
 
 impl<'de> serde::de::Deserialize<'de> for HotkeySpec {
     fn deserialize<D>(deserializer: D) -> Result<HotkeySpec, D::Error>
-    where D: serde::Deserializer<'de> {
+    where
+        D: serde::Deserializer<'de>,
+    {
         #[derive(serde::Deserialize)]
         #[serde(untagged)]
         enum HotkeyRepr {
@@ -749,7 +769,9 @@ pub fn modifier_key_is_active(flags: CGEventFlags, key_code: KeyCode) -> bool {
     modifier_flag_for_key(key_code).is_some_and(|flag| flags.contains(flag))
 }
 
-pub fn is_modifier_key(key_code: KeyCode) -> bool { modifier_flag_for_key(key_code).is_some() }
+pub fn is_modifier_key(key_code: KeyCode) -> bool {
+    modifier_flag_for_key(key_code).is_some()
+}
 
 pub fn key_code_from_event(event: &CGEvent) -> Option<KeyCode> {
     let raw = CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode);

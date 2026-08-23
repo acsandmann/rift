@@ -211,7 +211,9 @@ impl BspLayoutSystem {
         self.window_to_node.insert(wid, node);
     }
 
-    fn unindex_window(&mut self, wid: WindowId) { self.window_to_node.remove(&wid); }
+    fn unindex_window(&mut self, wid: WindowId) {
+        self.window_to_node.remove(&wid);
+    }
 
     fn node_for_window(&self, wid: WindowId) -> Option<NodeId> {
         self.window_to_node.get(&wid).copied()
@@ -229,12 +231,15 @@ impl BspLayoutSystem {
 
     fn make_leaf(&mut self, window: Option<WindowId>) -> NodeId {
         let id = self.tree.mk_node().into_id();
-        self.kind.insert(id, NodeKind::Leaf {
-            window,
-            fullscreen: false,
-            fullscreen_within_gaps: false,
-            preselected: None,
-        });
+        self.kind.insert(
+            id,
+            NodeKind::Leaf {
+                window,
+                fullscreen: false,
+                fullscreen_within_gaps: false,
+                preselected: None,
+            },
+        );
         if let Some(w) = window {
             self.index_window(w, id);
         }
@@ -367,12 +372,15 @@ impl BspLayoutSystem {
                 if let Some(w) = window {
                     self.index_window(w, parent_id);
                 }
-                self.kind.insert(parent_id, NodeKind::Leaf {
-                    window,
-                    fullscreen,
-                    fullscreen_within_gaps,
-                    preselected,
-                });
+                self.kind.insert(
+                    parent_id,
+                    NodeKind::Leaf {
+                        window,
+                        fullscreen,
+                        fullscreen_within_gaps,
+                        preselected,
+                    },
+                );
             }
         }
 
@@ -758,7 +766,9 @@ impl Components {
 mod tests {
     use super::*;
 
-    fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
+    fn w(idx: u32) -> WindowId {
+        WindowId::new(1, idx)
+    }
 
     #[test]
     fn window_in_direction_prefers_leftmost_when_moving_right() {
@@ -985,7 +995,9 @@ impl LayoutSystem for BspLayoutSystem {
         self.layouts.insert(state)
     }
 
-    fn contains_layout(&self, layout: LayoutId) -> bool { self.layouts.contains_key(layout) }
+    fn contains_layout(&self, layout: LayoutId) -> bool {
+        self.layouts.contains_key(layout)
+    }
 
     /// shallow
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
@@ -1686,7 +1698,9 @@ impl LayoutSystem for BspLayoutSystem {
         vec![]
     }
 
-    fn parent_of_selection_is_stacked(&self, _layout: LayoutId) -> bool { false }
+    fn parent_of_selection_is_stacked(&self, _layout: LayoutId) -> bool {
+        false
+    }
 
     fn unstack_parent_of_selection(
         &mut self,

@@ -25,7 +25,9 @@ use crate::ui::stack_line::{
 /// Uses Arc<ArcSwap<...>> for lock-free reads from the input thread.
 pub type SharedHitRects = Arc<ArcSwap<Vec<CGRect>>>;
 
-pub fn new_shared_hit_rects() -> SharedHitRects { Arc::new(ArcSwap::from_pointee(Vec::new())) }
+pub fn new_shared_hit_rects() -> SharedHitRects {
+    Arc::new(ArcSwap::from_pointee(Vec::new()))
+}
 
 #[derive(Debug, Clone)]
 pub struct GroupInfo {
@@ -112,7 +114,9 @@ impl StackLine {
         }
     }
 
-    fn is_enabled(&self) -> bool { self.config.settings.ui.stack_line.enabled }
+    fn is_enabled(&self) -> bool {
+        self.config.settings.ui.stack_line.enabled
+    }
 
     /// Publish the current indicator frames so the event tap can suppress
     /// clicks that land on a visible, non-occluded indicator.

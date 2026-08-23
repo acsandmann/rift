@@ -26,7 +26,9 @@ pub trait CliExecutor: Send + Sync + 'static {
 pub struct DefaultCliExecutor;
 
 impl DefaultCliExecutor {
-    pub fn new() -> Self { Self {} }
+    pub fn new() -> Self {
+        Self {}
+    }
 }
 
 impl CliExecutor for DefaultCliExecutor {

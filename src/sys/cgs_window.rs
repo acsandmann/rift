@@ -37,7 +37,9 @@ impl CFRegion {
     }
 
     #[inline]
-    fn as_ptr(&self) -> *mut CFType { CFRetained::<CFType>::as_ptr(&self.0).as_ptr() }
+    fn as_ptr(&self) -> *mut CFType {
+        CFRetained::<CFType>::as_ptr(&self.0).as_ptr()
+    }
 }
 
 impl Drop for CFRegion {
@@ -124,7 +126,9 @@ impl CgsWindow {
     }
 
     #[inline]
-    pub fn id(&self) -> WindowId { self.id }
+    pub fn id(&self) -> WindowId {
+        self.id
+    }
 
     #[inline]
     pub fn into_unowned(mut self) -> Self {

@@ -54,10 +54,13 @@ impl Selection {
     pub fn select_locally(&mut self, map: &NodeMap, node: NodeId) -> bool {
         if let Some(parent) = node.parent(map) {
             self.nodes
-                .insert(parent, SelectionInfo {
-                    selected_child: node,
-                    stop_here: false,
-                })
+                .insert(
+                    parent,
+                    SelectionInfo {
+                        selected_child: node,
+                        stop_here: false,
+                    },
+                )
                 .map(|info| info.selected_child != node)
                 .unwrap_or(true)
         } else {
@@ -71,10 +74,13 @@ impl Selection {
         }
         let mut node = selection;
         while let Some(parent) = node.parent(map) {
-            self.nodes.insert(parent, SelectionInfo {
-                selected_child: node,
-                stop_here: false,
-            });
+            self.nodes.insert(
+                parent,
+                SelectionInfo {
+                    selected_child: node,
+                    stop_here: false,
+                },
+            );
             node = parent;
         }
     }
@@ -93,10 +99,13 @@ impl Selection {
                     .map(|(_, dest_child)| dest_child)
                     .next()
                     .unwrap_or_else(|| panic!("Dest tree had different structure, or source node had nonexistent selection: {src:?}, {dest:?}"));
-                self.nodes.insert(dest, SelectionInfo {
-                    selected_child,
-                    stop_here: self.nodes[src].stop_here,
-                });
+                self.nodes.insert(
+                    dest,
+                    SelectionInfo {
+                        selected_child,
+                        stop_here: self.nodes[src].stop_here,
+                    },
+                );
             }
             RemovingFromParent(node) => {
                 let parent = node.parent(map).unwrap();

@@ -135,7 +135,9 @@ impl Dimmer {
 }
 
 impl Drop for Dimmer {
-    fn drop(&mut self) { restore_all(self.cid, &self.dimmed); }
+    fn drop(&mut self) {
+        restore_all(self.cid, &self.dimmed);
+    }
 }
 
 fn lock(state: &Mutex<DimmedBySpace>) -> MutexGuard<'_, DimmedBySpace> {

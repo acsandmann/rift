@@ -237,10 +237,13 @@ impl CapturePipeline {
                     .get(&target.window_id)
                     .is_none_or(|cached| target.revision >= cached.revision);
                 if replaces {
-                    state.frames.insert(target.window_id, CapturedFrame {
-                        surface,
-                        revision: target.revision,
-                    });
+                    state.frames.insert(
+                        target.window_id,
+                        CapturedFrame {
+                            surface,
+                            revision: target.revision,
+                        },
+                    );
                 }
                 if replaces && !state.notification_pending {
                     state.notification_pending = true;
@@ -364,7 +367,9 @@ impl MissionControlState {
         self.ensure_selection();
     }
 
-    fn mode(&self) -> Option<&MissionControlMode> { self.mode.as_ref() }
+    fn mode(&self) -> Option<&MissionControlMode> {
+        self.mode.as_ref()
+    }
 
     fn purge(&mut self) {
         self.mode = None;
@@ -381,7 +386,9 @@ impl MissionControlState {
         }
     }
 
-    fn selection(&self) -> Option<Selection> { self.selection }
+    fn selection(&self) -> Option<Selection> {
+        self.selection
+    }
 
     fn set_selection(&mut self, selection: Selection) {
         let is_valid = matches!(
