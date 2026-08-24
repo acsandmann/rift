@@ -1738,11 +1738,17 @@ impl State {
             .iter()
             .filter_map(|elem| WindowServerId::try_from(elem).ok())
             .collect();
-        let mut info_by_id = HashMap::with_capacity_and_hasher(wsids.len(), Default::default());
-        for info in window_server::get_windows(&wsids) {
-            info_by_id.insert(info.id, info);
-        }
-        info_by_id
+        collect_visible_window_server_info(
+            window_server::get_windows(&wsids),
+            window_server::window_ordered_in,
+            |wsid| {
+                trace!(
+                    pid = ?self.pid,
+                    ?wsid,
+                    "Ignoring AX window whose WindowServer peer is explicitly ordered out"
+                );
+            },
+        )
     }
 
     #[inline]
@@ -1901,6 +1907,29 @@ impl State {
     }
 }
 
+/// An ID-targeted WindowServer query can return a retained record even after the user closes an
+/// Electron window and WindowServer orders it out. Treat only an explicit negative ordering result
+/// as authoritative: a failed private query remains inconclusive during display/lifecycle churn.
+fn window_server_peer_is_visible(ordered_in: Option<bool>) -> bool {
+    !matches!(ordered_in, Some(false))
+}
+
+fn collect_visible_window_server_info(
+    infos: Vec<WindowServerInfo>,
+    mut ordered_in: impl FnMut(WindowServerId) -> Option<bool>,
+    mut on_ordered_out: impl FnMut(WindowServerId),
+) -> HashMap<WindowServerId, WindowServerInfo> {
+    let mut info_by_id = HashMap::with_capacity_and_hasher(infos.len(), Default::default());
+    for info in infos {
+        if window_server_peer_is_visible(ordered_in(info.id)) {
+            info_by_id.insert(info.id, info);
+        } else {
+            on_ordered_out(info.id);
+        }
+    }
+    info_by_id
+}
+
 impl Drop for State {
     fn drop(&mut self) {
         if let Some((_, _, _, tx)) = self.last_activated.take() {
@@ -2010,4 +2039,46 @@ fn trace<T>(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+
+    use super::collect_visible_window_server_info;
+    use crate::sys::window_server::{WindowServerId, WindowServerInfo};
+
+    fn server_info(id: u32) -> WindowServerInfo {
+        WindowServerInfo {
+            id: WindowServerId::new(id),
+            pid: 1234,
+            layer: 0,
+            frame: CGRect::new(CGPoint::new(0., 0.), CGSize::new(800., 600.)),
+            min_frame: CGSize::ZERO,
+            max_frame: CGSize::ZERO,
+        }
+    }
+
+    #[test]
+    fn retained_ordered_out_record_is_excluded_from_visible_map() {
+        let ordered_in = WindowServerId::new(1);
+        let ordered_out = WindowServerId::new(2);
+        let unknown = WindowServerId::new(3);
+
+        let mut rejected = Vec::new();
+        let visible = collect_visible_window_server_info(
+            vec![server_info(1), server_info(2), server_info(3)],
+            |id| match id {
+                id if id == ordered_in => Some(true),
+                id if id == ordered_out => Some(false),
+                _ => None,
+            },
+            |id| rejected.push(id),
+        );
+
+        assert!(visible.contains_key(&ordered_in));
+        assert!(!visible.contains_key(&ordered_out));
+        assert!(visible.contains_key(&unknown));
+        assert_eq!(rejected, vec![ordered_out]);
+    }
 }
