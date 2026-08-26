@@ -746,11 +746,11 @@ fn build_static_menu(mtm: MainThreadMarker, handler: &MenuActionHandler) -> Buil
         layout_submenu.addItem(&item);
         layout_items.push((mode, item));
     }
-    layout_item.setSubmenu(Some(&layout_submenu));
-    menu.addItem(&layout_item);
 
-    let layouts_item = make_menu_item(mtm, "Layout Presets", None, None, None, None, None, None);
-    let layouts_title = NSString::from_str("Layout Presets");
+    add_separator(&layout_submenu);
+
+    let layouts_item = make_menu_item(mtm, "Presets", None, None, None, None, None, None);
+    let layouts_title = NSString::from_str("Presets");
     let layouts_submenu: Retained<NSMenu> =
         unsafe { msg_send![NSMenu::alloc(mtm), initWithTitle: &*layouts_title] };
     let save_item = make_menu_item(mtm, "Save Layout", None, None, None, None, None, None);
@@ -813,7 +813,10 @@ fn build_static_menu(mtm: MainThreadMarker, handler: &MenuActionHandler) -> Buil
         restore_menus.push(restore_submenu);
     }
     layouts_item.setSubmenu(Some(&layouts_submenu));
-    menu.addItem(&layouts_item);
+    layout_submenu.addItem(&layouts_item);
+
+    layout_item.setSubmenu(Some(&layout_submenu));
+    menu.addItem(&layout_item);
 
     add_separator(&menu);
 
