@@ -4152,6 +4152,18 @@ impl Reactor {
             .or_else(|| window_server::get_window(wsid));
 
         let Some(info) = window_info else { return false };
+        // The untracked-window fallback exists for ordinary application
+        // windows that are intentionally outside Rift's model. Desktop,
+        // menu-bar, Dock, and other system surfaces use nonzero layers and
+        // must never be made key merely because the pointer crossed them.
+        if info.layer != 0 {
+            trace!(
+                ?wsid,
+                layer = info.layer,
+                "Skipping non-application surface under cursor"
+            );
+            return false;
+        }
         window_server::make_key_window(info.pid, wsid).is_ok()
     }
 
