@@ -317,7 +317,9 @@ impl MenuIcon {
         };
 
         if render_inputs.is_empty() {
-            self.status_item.setVisible(false);
+            if self.status_item.isVisible() {
+                self.status_item.setVisible(false);
+            }
             self.prev_width = 0.0;
             return;
         }
@@ -332,7 +334,9 @@ impl MenuIcon {
         };
         let size = NSSize::new(layout.total_width, CELL_HEIGHT);
         self.view.set_layout(layout);
-        self.status_item.setVisible(true);
+        if !self.status_item.isVisible() {
+            self.status_item.setVisible(true);
+        }
 
         let width_changed = self.prev_width != size.width;
         if width_changed {
@@ -344,12 +348,18 @@ impl MenuIcon {
             if width_changed {
                 button.setNeedsLayout(true);
             }
-            self.view.setFrameSize(size);
+            let frame = self.view.frame();
+            if frame.size != size {
+                self.view.setFrameSize(size);
+            }
             let bounds = button.bounds();
-            self.view.setFrameOrigin(CGPoint::new(
+            let origin = CGPoint::new(
                 (bounds.size.width - size.width) / 2.0,
                 (bounds.size.height - size.height) / 2.0,
-            ));
+            );
+            if frame.origin != origin {
+                self.view.setFrameOrigin(origin);
+            }
         }
     }
 }
@@ -473,11 +483,14 @@ fn menu_separator() -> Retained<NSMenuItem> {
 }
 
 fn set_menu_item_checked(item: &NSMenuItem, checked: bool) {
-    item.setState(if checked {
+    let state = if checked {
         NSControlStateValueOn
     } else {
         NSControlStateValueOff
-    });
+    };
+    if item.state() != state {
+        item.setState(state);
+    }
 }
 
 fn set_menu_item_hotkey(item: &NSMenuItem, hotkey: Option<&Hotkey>) {
