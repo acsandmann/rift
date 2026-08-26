@@ -2144,6 +2144,28 @@ fn handle_layout_response_groups_windows_by_app_and_screen() {
 }
 
 #[test]
+fn untracked_focus_fallback_rejects_system_surfaces() {
+    let info = |layer| WindowServerInfo {
+        pid: 1,
+        id: WindowServerId::new(1),
+        layer,
+        frame: CGRect::new(CGPoint::ZERO, CGSize::new(100., 100.)),
+        min_frame: CGSize::ZERO,
+        max_frame: CGSize::ZERO,
+    };
+
+    assert!(untracked_window_is_focusable(&info(0)));
+    assert!(
+        !untracked_window_is_focusable(&info(-1)),
+        "desktop layer must not become key"
+    );
+    assert!(
+        !untracked_window_is_focusable(&info(25)),
+        "menu/system layer must not become key"
+    );
+}
+
+#[test]
 fn handle_layout_response_includes_handles_for_raise_and_focus_windows() {
     let (mut apps, mut reactor) = test_context();
     let (raise_manager_tx, mut raise_manager_rx) = actor::channel();
@@ -2447,6 +2469,45 @@ fn auto_workspace_switch_follows_activated_window_when_same_app_is_visible_elsew
         }
         _ => panic!("Unexpected event: {msg:?}"),
     }
+}
+
+#[test]
+fn wake_restored_activation_does_not_switch_workspace_before_user_input() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let activated = WindowId::new(2, 1);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    apps.make_app_and_settle(&mut reactor, 2, make_windows(2));
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, activated));
+    reactor.handle_test_layout_command(LayoutCommand::MoveWindowToWorkspace {
+        workspace: WorkspaceSelector::Index(1),
+        follow: false,
+        window_id: None,
+    });
+    reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(0));
+    apps.simulate_until_quiet(&mut reactor);
+
+    reactor.handle_event(Event::SystemWoke);
+    reactor.handle_event(Event::ApplicationGloballyActivated(activated.pid));
+    reactor.handle_event(Event::ApplicationActivated(activated.pid, Quiet::No));
+
+    assert_eq!(
+        reactor.layout_manager.layout_engine.active_workspace_idx(space),
+        Some(0),
+        "loginwindow's restored activation must not change virtual workspaces"
+    );
+
+    // A real input event ends lifecycle suppression, so normal click/Dock
+    // activation semantics continue to work after recovery.
+    reactor.handle_event(Event::MouseUp);
+    reactor.handle_event(Event::ApplicationActivated(activated.pid, Quiet::No));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.active_workspace_idx(space),
+        Some(1),
+        "auto workspace switching should resume after explicit user input"
+    );
 }
 
 #[test]

@@ -436,6 +436,7 @@ impl Reactor {
                 awaiting_post_session_snapshot: false,
                 pending_visible_refresh: false,
                 deferred_refresh_tracks_mission_control: false,
+                suppress_auto_workspace_switch_until_input: false,
             },
             pending_space_change_manager: managers::PendingSpaceChangeManager {
                 pending_space_change: None,
@@ -1022,6 +1023,14 @@ impl Reactor {
         self.log_event(&event);
         self.recording_manager.record.on_event(&event);
 
+        // Wake/unlock produces synthetic activation notifications as loginwindow
+        // yields focus back to the pre-sleep application. Only real input makes
+        // a subsequent activation a trustworthy request to follow an app to a
+        // different virtual workspace.
+        if matches!(event, Event::MouseUp | Event::MouseMoved(_) | Event::Command(_)) {
+            self.refresh_quarantine_manager.suppress_auto_workspace_switch_until_input = false;
+        }
+
         match event {
             Event::SystemWillSleep => {
                 self.refresh_quarantine_manager.sleeping = true;
@@ -1031,6 +1040,7 @@ impl Reactor {
             Event::SystemWoke => {
                 self.refresh_quarantine_manager.sleeping = true;
                 self.refresh_quarantine_manager.awaiting_post_wake_snapshot = true;
+                self.refresh_quarantine_manager.suppress_auto_workspace_switch_until_input = true;
                 let outcome = system_workflow::handle_system_woke()?;
                 self.defer_visible_refresh(true);
                 return Ok(outcome);
@@ -1043,6 +1053,7 @@ impl Reactor {
             Event::SessionDidBecomeActive => {
                 self.refresh_quarantine_manager.session_inactive = true;
                 self.refresh_quarantine_manager.awaiting_post_session_snapshot = true;
+                self.refresh_quarantine_manager.suppress_auto_workspace_switch_until_input = true;
                 self.defer_visible_refresh(true);
                 return Ok(EventOutcome::default());
             }
@@ -3626,6 +3637,14 @@ impl Reactor {
     }
 
     fn handle_app_activation_workspace_switch(&mut self, pid: pid_t) -> EventOutcome {
+        if self.refresh_quarantine_manager.suppress_auto_workspace_switch_until_input {
+            debug!(
+                pid,
+                "Skipping auto workspace switch for lifecycle-restored activation before user input"
+            );
+            return EventOutcome::no_change();
+        }
+
         if self.workspace_switch_manager.active_workspace_switch.is_some() {
             trace!(
                 "Skipping auto workspace switch for pid {} because a workspace switch is in progress",

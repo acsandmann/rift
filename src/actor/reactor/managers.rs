@@ -118,6 +118,10 @@ pub struct RefreshQuarantineManager {
     pub awaiting_post_session_snapshot: bool,
     pub pending_visible_refresh: bool,
     pub deferred_refresh_tracks_mission_control: bool,
+    /// LoginWindow/AppKit can replay application activations while restoring a
+    /// session. Those activations are not user intent and must not drive a
+    /// virtual-workspace switch. Explicit input clears this latch.
+    pub suppress_auto_workspace_switch_until_input: bool,
 }
 
 impl RefreshQuarantineManager {
