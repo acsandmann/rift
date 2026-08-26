@@ -707,11 +707,45 @@ impl Default for TraditionalLayoutSettings {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct BspLayoutSettings {
     #[serde(flatten)]
     pub base: BaseLayoutSettings,
+    /// Centers the lone tiled window; runtime toggles reset on config reload.
+    #[serde(default)]
+    pub center_single_window: bool,
+    /// Centered lone-window width as a fraction of usable width (0.1..1.0).
+    #[serde(default = "default_bsp_center_width_ratio")]
+    pub center_single_window_width_ratio: f64,
+    /// Centered lone-window height as a fraction of usable height (0.1..1.0).
+    #[serde(default = "default_bsp_center_height_ratio")]
+    pub center_single_window_height_ratio: f64,
+}
+
+fn default_bsp_center_width_ratio() -> f64 { 0.7 }
+
+fn default_bsp_center_height_ratio() -> f64 { 0.8 }
+
+impl BspLayoutSettings {
+    /// Returns ratios when lone-window centering is enabled.
+    pub fn center_single_window_ratios(&self) -> Option<(f64, f64)> {
+        self.center_single_window.then_some((
+            self.center_single_window_width_ratio,
+            self.center_single_window_height_ratio,
+        ))
+    }
+}
+
+impl Default for BspLayoutSettings {
+    fn default() -> Self {
+        Self {
+            base: BaseLayoutSettings::default(),
+            center_single_window: false,
+            center_single_window_width_ratio: default_bsp_center_width_ratio(),
+            center_single_window_height_ratio: default_bsp_center_height_ratio(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Default)]

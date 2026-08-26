@@ -323,6 +323,8 @@ enum LayoutCommands {
     PromoteToMaster,
     /// Swap the first master with the first stack window (master/stack layout only)
     SwapMasterStack,
+    /// Toggle centering of the lone tiled window (BSP layout only)
+    ToggleCenterSingleWindow,
     /// Swap two windows by window id (`WindowId { pid: ..., idx: ... }`)
     SwapWindows { a: String, b: String },
     /// Scroll the strip by a normalized delta (scrolling layout only)
@@ -920,6 +922,9 @@ fn map_layout_command(cmd: LayoutCommands) -> Result<CliCommand, String> {
         LayoutCommands::SwapMasterStack => Ok(CliCommand::Reactor(reactor::Command::Layout(
             LC::SwapMasterStack,
         ))),
+        LayoutCommands::ToggleCenterSingleWindow => Ok(CliCommand::Reactor(
+            reactor::Command::Layout(LC::ToggleCenterSingleWindow),
+        )),
         LayoutCommands::SwapWindows { a, b } => Ok(CliCommand::Reactor(reactor::Command::Layout(
             LC::SwapWindows(parse_window_id(&a)?.into(), parse_window_id(&b)?.into()),
         ))),
