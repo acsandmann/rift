@@ -12,7 +12,8 @@ mod selectors;
 mod transport;
 
 pub use commands::{
-    AnimationEasing, ConfigCommand, LayoutCommand, MetricsCommand, ReactorCommand, RiftCommand,
+    AnimationEasing, ConfigCommand, FloatingWindowSize, FloatingWindowSizePreset, LayoutCommand,
+    MetricsCommand, ReactorCommand, RiftCommand, ToggleWindowFloatingOptions,
 };
 pub use events::{EventKind, RiftEvent, StackInfo, WorkspaceId};
 pub use layout::{Direction, LayoutKind, LayoutMode, Orientation, ResizeOrientation};

@@ -465,6 +465,10 @@ comb1 = "Alt + Shift"
 "Alt + Ctrl + E" = "unjoin_windows"
 
 "Alt + Shift + Space" = "toggle_window_floating"
+# Optional floating placement (sizes are in logical points):
+# "Alt + Shift + Space" = { toggle_window_floating = { center = true } }
+# "Alt + Shift + Space" = { toggle_window_floating = { center = true, size = { w = 640, h = 480 } } }
+# "Alt + Shift + Space" = { toggle_window_floating = { center = true, size = "smart" } }
 "Alt + F" = "toggle_fullscreen"
 "Alt + Shift + F" = "toggle_fullscreen_within_gaps"
 "comb1 + Ctrl + Space" = "toggle_focus_floating" # briefly bring focus to floating window

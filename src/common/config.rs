@@ -1616,8 +1616,13 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    use rift_protocol::{
+        FloatingWindowSize, FloatingWindowSizePreset, ToggleWindowFloatingOptions,
+    };
+
     use super::*;
     use crate::actor::reactor;
+    use crate::actor::wm_controller::ConfiguredLayoutCommand;
     use crate::layout_engine::{LayoutCommand, ResizeOrientation};
 
     #[test]

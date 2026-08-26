@@ -43,6 +43,16 @@ impl From<CGSize> for Size {
 }
 
 impl WorkspaceLayouts {
+    pub(crate) fn active_size(
+        &self,
+        space: SpaceId,
+        workspace: crate::model::VirtualWorkspaceId,
+    ) -> Option<CGSize> {
+        self.map
+            .get(&(space, workspace))
+            .map(|info| CGSize::new(info.active_size.width.into(), info.active_size.height.into()))
+    }
+
     pub(crate) fn validate_persisted(
         &self,
         workspaces: &crate::model::WorkspaceStore,

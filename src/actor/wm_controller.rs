@@ -50,7 +50,14 @@ pub enum WmEvent {
 #[serde(untagged)]
 pub enum WmCommand {
     Wm(WmCmd),
+    ConfiguredLayout(ConfiguredLayoutCommand),
     ReactorCommand(reactor::Command),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfiguredLayoutCommand {
+    ToggleWindowFloating(rift_protocol::ToggleWindowFloatingOptions),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, strum_macros::VariantNames)]
@@ -370,6 +377,11 @@ impl WmController {
             }
             Command(Wm(Exec(cmd))) => {
                 self.exec_cmd(cmd);
+            }
+            Command(ConfiguredLayout(ConfiguredLayoutCommand::ToggleWindowFloating(options))) => {
+                self.events_tx.send(reactor::Event::Command(reactor::Command::Layout(
+                    layout::LayoutCommand::ToggleWindowFloatingWithOptions(options),
+                )));
             }
             Command(ReactorCommand(cmd)) => {
                 self.events_tx.send(reactor::Event::Command(cmd));

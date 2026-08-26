@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use rift_protocol::{FloatingWindowSize, FloatingWindowSizePreset, ToggleWindowFloatingOptions};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
@@ -27,6 +28,33 @@ mod persistence;
 use persistence::PersistenceState;
 pub use persistence::{RestoreReport, RestoreRequest, RestoreScope, RestoreSource, RestoreWarning};
 pub use rift_protocol::LayoutCommand;
+
+const SMART_FLOATING_WIDTH_RATIO: f64 = 0.8;
+const SMART_FLOATING_HEIGHT_RATIO: f64 = 0.93;
+
+fn requested_floating_frame(
+    mut frame: CGRect,
+    screen: CGRect,
+    center: bool,
+    size: Option<FloatingWindowSize>,
+) -> CGRect {
+    if let Some(size) = size {
+        frame.size = match size {
+            FloatingWindowSize::Dimensions { w, h } => CGSize::new(w, h),
+            FloatingWindowSize::Preset(FloatingWindowSizePreset::Smart) => CGSize::new(
+                screen.size.width * SMART_FLOATING_WIDTH_RATIO,
+                screen.size.height * SMART_FLOATING_HEIGHT_RATIO,
+            ),
+        };
+    }
+    if center {
+        frame.origin = CGPoint::new(
+            screen.mid().x - frame.size.width / 2.0,
+            screen.mid().y - frame.size.height / 2.0,
+        );
+    }
+    frame
+}
 
 #[derive(Debug, Clone)]
 pub struct GroupContainerInfo {
@@ -1694,7 +1722,12 @@ impl LayoutEngine {
         };
         debug!(?self.focused_window, last_floating_focus=?self.floating.last_focus(), ?is_floating);
 
-        if let LayoutCommand::ToggleWindowFloating = &command {
+        let floating_options = match &command {
+            LayoutCommand::ToggleWindowFloating => Some(ToggleWindowFloatingOptions::default()),
+            LayoutCommand::ToggleWindowFloatingWithOptions(options) => Some(*options),
+            _ => None,
+        };
+        if let Some(options) = floating_options {
             let Some(wid) = self.focused_window else {
                 return EventResponse::default();
             };
@@ -1727,6 +1760,28 @@ impl LayoutEngine {
                     self.floating.add_active(space, wid.pid, wid);
                     if let Some((ws_id, _)) = self.workspace_and_layout(space) {
                         self.workspace_tree_mut(ws_id).remove_window(wid);
+                        if options != ToggleWindowFloatingOptions::default()
+                            && let (Some(center), Some(size), Some(current)) = (
+                                visible_space_centers.get(&space),
+                                self.workspace_layouts.active_size(space, ws_id),
+                                window_store.window(wid).map(|window| window.frame_monotonic),
+                            )
+                        {
+                            let screen = CGRect::new(
+                                CGPoint::new(
+                                    center.x - size.width / 2.0,
+                                    center.y - size.height / 2.0,
+                                ),
+                                size,
+                            );
+                            let frame = requested_floating_frame(
+                                current,
+                                screen,
+                                options.center,
+                                options.size,
+                            );
+                            self.floating_positions.store(space, ws_id, wid, frame);
+                        }
                     } else {
                         debug!(
                             "No active workspace/layout for space {:?}; leaving window {:?} out of tiling removal",
@@ -1836,7 +1891,8 @@ impl LayoutEngine {
         }
 
         match command {
-            LayoutCommand::ToggleWindowFloating => unreachable!(),
+            LayoutCommand::ToggleWindowFloating
+            | LayoutCommand::ToggleWindowFloatingWithOptions(_) => unreachable!(),
             LayoutCommand::ToggleFocusFloating => unreachable!(),
 
             LayoutCommand::SwapWindows(a, b) => {
@@ -3165,6 +3221,26 @@ mod tests {
             &LayoutSettings::default(),
             None,
         )
+    }
+
+    #[test]
+    fn floating_toggle_frame_sizes_then_centers_in_the_native_screen_frame() {
+        let screen = CGRect::new(CGPoint::new(100.0, 40.0), CGSize::new(1000.0, 800.0));
+        let current = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(300.0, 200.0));
+
+        assert_eq!(
+            requested_floating_frame(current, screen, true, None),
+            CGRect::new(CGPoint::new(450.0, 340.0), current.size)
+        );
+        assert_eq!(
+            requested_floating_frame(
+                current,
+                screen,
+                true,
+                Some(FloatingWindowSize::Preset(FloatingWindowSizePreset::Smart)),
+            ),
+            CGRect::new(CGPoint::new(200.0, 68.0), CGSize::new(800.0, 744.0))
+        );
     }
 
     fn build_three_spaces() -> (

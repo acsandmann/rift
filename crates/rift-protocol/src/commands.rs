@@ -9,6 +9,28 @@ use crate::{
     WindowId, WorkspaceSelector,
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FloatingWindowSizePreset {
+    Smart,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum FloatingWindowSize {
+    Dimensions { w: f64, h: f64 },
+    Preset(FloatingWindowSizePreset),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToggleWindowFloatingOptions {
+    #[serde(default)]
+    pub center: bool,
+    #[serde(default)]
+    pub size: Option<FloatingWindowSize>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LayoutCommand {
@@ -25,6 +47,7 @@ pub enum LayoutCommand {
     UnjoinWindows,
     ToggleFocusFloating,
     ToggleWindowFloating,
+    ToggleWindowFloatingWithOptions(ToggleWindowFloatingOptions),
     ToggleFullscreen,
     ToggleFullscreenWithinGaps,
     ResizeWindowGrow(ResizeOrientation),
