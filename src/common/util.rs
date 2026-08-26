@@ -3,25 +3,24 @@ use tracing::{error, trace};
 pub fn parse_command(command: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut current_part = String::new();
-    let mut in_quotes = false;
+    // `Some(q)` = inside a `q`-delimited quote group; only the matching `q`
+    // closes it. A different quote char inside the group is a literal, so a
+    // double-quoted phrase keeps inner spaces and apostrophes intact.
+    let mut quote_char: Option<char> = None;
     let mut chars = command.chars().peekable();
 
     while let Some(ch) = chars.next() {
         match ch {
-            '\'' | '"' => {
-                if in_quotes {
-                    in_quotes = false;
-                } else {
-                    in_quotes = true;
-                }
+            '\'' | '"' if quote_char.is_none() || quote_char == Some(ch) => {
+                quote_char = if quote_char.is_none() { Some(ch) } else { None };
             }
-            ' ' | '\t' if !in_quotes => {
+            ' ' | '\t' if quote_char.is_none() => {
                 if !current_part.is_empty() {
                     parts.push(current_part.clone());
                     current_part.clear();
                 }
             }
-            '\\' if in_quotes => {
+            '\\' if quote_char.is_some() => {
                 if let Some(next_ch) = chars.next() {
                     match next_ch {
                         'n' => current_part.push('\n'),
