@@ -515,6 +515,7 @@ fn make_menu_item(
     item
 }
 
+#[allow(unused)]
 fn menu_image(symbol_name: &str, accessibility_description: &str) -> Option<Retained<NSImage>> {
     let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(
         &NSString::from_str(symbol_name),
@@ -664,6 +665,53 @@ fn build_static_menu(mtm: MainThreadMarker, handler: &MenuActionHandler) -> Buil
     let title = NSString::from_str("Rift");
     let menu: Retained<NSMenu> = unsafe { msg_send![NSMenu::alloc(mtm), initWithTitle: &*title] };
 
+    let tiling_item = make_menu_item(
+        mtm,
+        "Tiling",
+        Some(sel!(onToggleSpaceActivation:)),
+        Some(handler),
+        Some(false),
+        None,
+        None,
+        None,
+    );
+    menu.addItem(&tiling_item);
+
+    add_separator(&menu);
+
+    let workspace_item = make_menu_item(mtm, "Workspace", None, None, None, None, None, None);
+
+    let ws_submenu_title = NSString::from_str("Workspace");
+    let ws_submenu: Retained<NSMenu> =
+        unsafe { msg_send![NSMenu::alloc(mtm), initWithTitle: &*ws_submenu_title] };
+
+    let next_workspace_item = make_menu_item(
+        mtm,
+        "Next Workspace",
+        Some(sel!(onNextWorkspace:)),
+        Some(handler),
+        None,
+        None,
+        None,
+        None,
+    );
+    ws_submenu.addItem(&next_workspace_item);
+    let prev_workspace_item = make_menu_item(
+        mtm,
+        "Previous Workspace",
+        Some(sel!(onPrevWorkspace:)),
+        Some(handler),
+        None,
+        None,
+        None,
+        None,
+    );
+    ws_submenu.addItem(&prev_workspace_item);
+    add_separator(&ws_submenu);
+    workspace_item.setSubmenu(Some(&ws_submenu));
+    workspace_item.setEnabled(false);
+    menu.addItem(&workspace_item);
+
     let layout_item = make_menu_item(mtm, "Layout", None, None, None, None, None, None);
 
     let layout_submenu_title = NSString::from_str("Layout");
@@ -700,39 +748,6 @@ fn build_static_menu(mtm: MainThreadMarker, handler: &MenuActionHandler) -> Buil
     }
     layout_item.setSubmenu(Some(&layout_submenu));
     menu.addItem(&layout_item);
-
-    let workspace_item = make_menu_item(mtm, "Workspaces", None, None, None, None, None, None);
-
-    let ws_submenu_title = NSString::from_str("Workspace");
-    let ws_submenu: Retained<NSMenu> =
-        unsafe { msg_send![NSMenu::alloc(mtm), initWithTitle: &*ws_submenu_title] };
-
-    let next_workspace_item = make_menu_item(
-        mtm,
-        "Next Workspace",
-        Some(sel!(onNextWorkspace:)),
-        Some(handler),
-        None,
-        None,
-        None,
-        None,
-    );
-    ws_submenu.addItem(&next_workspace_item);
-    let prev_workspace_item = make_menu_item(
-        mtm,
-        "Previous Workspace",
-        Some(sel!(onPrevWorkspace:)),
-        Some(handler),
-        None,
-        None,
-        None,
-        None,
-    );
-    ws_submenu.addItem(&prev_workspace_item);
-    add_separator(&ws_submenu);
-    workspace_item.setSubmenu(Some(&ws_submenu));
-    workspace_item.setEnabled(false);
-    menu.addItem(&workspace_item);
 
     let layouts_item = make_menu_item(mtm, "Layout Presets", None, None, None, None, None, None);
     let layouts_title = NSString::from_str("Layout Presets");
@@ -801,29 +816,7 @@ fn build_static_menu(mtm: MainThreadMarker, handler: &MenuActionHandler) -> Buil
     menu.addItem(&layouts_item);
 
     add_separator(&menu);
-    let tiling_item = make_menu_item(
-        mtm,
-        "Enable Tiling",
-        Some(sel!(onToggleSpaceActivation:)),
-        Some(handler),
-        Some(false),
-        None,
-        None,
-        None,
-    );
-    menu.addItem(&tiling_item);
 
-    add_separator(&menu);
-    menu.addItem(&make_menu_item(
-        mtm,
-        "Settings…",
-        Some(sel!(onOpenConfig:)),
-        Some(handler),
-        None,
-        None,
-        None,
-        None,
-    ));
     let reload_item = make_menu_item(
         mtm,
         "Reload Config",
@@ -834,10 +827,24 @@ fn build_static_menu(mtm: MainThreadMarker, handler: &MenuActionHandler) -> Buil
         None,
         None,
     );
+
     menu.addItem(&reload_item);
 
-    let help_item = make_menu_item(mtm, "Help / Documentation", None, None, None, None, None, None);
-    let help_submenu_title = NSString::from_str("Help / Documentation");
+    menu.addItem(&make_menu_item(
+        mtm,
+        "Settings…",
+        Some(sel!(onOpenConfig:)),
+        Some(handler),
+        None,
+        None,
+        None,
+        None,
+    ));
+
+    add_separator(&menu);
+
+    let help_item = make_menu_item(mtm, "Help", None, None, None, None, None, None);
+    let help_submenu_title = NSString::from_str("Help");
     let help_submenu: Retained<NSMenu> =
         unsafe { msg_send![NSMenu::alloc(mtm), initWithTitle: &*help_submenu_title] };
     help_submenu.addItem(&make_menu_item(
@@ -874,7 +881,6 @@ fn build_static_menu(mtm: MainThreadMarker, handler: &MenuActionHandler) -> Buil
     help_item.setSubmenu(Some(&help_submenu));
     menu.addItem(&help_item);
 
-    add_separator(&menu);
     menu.addItem(&make_menu_item(
         mtm,
         "Support Rift…",
@@ -883,7 +889,7 @@ fn build_static_menu(mtm: MainThreadMarker, handler: &MenuActionHandler) -> Buil
         None,
         None,
         None,
-        menu_image("heart", "Support Rift"),
+        None, //menu_image("heart", "Support Rift"),
     ));
 
     add_separator(&menu);
