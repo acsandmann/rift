@@ -10,6 +10,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some("window_title_changed") => EventKind::WindowTitleChanged,
         Some("focused_window_changed") => EventKind::FocusedWindowChanged,
         Some("stacks_changed") => EventKind::StacksChanged,
+        Some("layout_changed") => EventKind::LayoutChanged,
         Some("*") | None => EventKind::All,
         Some(other) => return Err(format!("unknown event kind: {other}").into()),
     };

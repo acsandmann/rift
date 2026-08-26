@@ -2,7 +2,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{LayoutKind, WindowId};
+use crate::{LayoutKind, LayoutStateData, WindowId};
 
 /// Events available through the Mach subscription API.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -13,6 +13,7 @@ pub enum EventKind {
     WindowTitleChanged,
     FocusedWindowChanged,
     StacksChanged,
+    LayoutChanged,
     #[serde(rename = "*")]
     All,
 }
@@ -25,6 +26,7 @@ impl EventKind {
             Self::WindowTitleChanged => "window_title_changed",
             Self::FocusedWindowChanged => "focused_window_changed",
             Self::StacksChanged => "stacks_changed",
+            Self::LayoutChanged => "layout_changed",
             Self::All => "*",
         }
     }
@@ -81,6 +83,14 @@ pub enum RiftEvent {
         space_id: u64,
         display_uuid: Option<String>,
     },
+    LayoutChanged {
+        workspace_id: WorkspaceId,
+        workspace_index: Option<u64>,
+        workspace_name: String,
+        space_id: u64,
+        display_uuid: Option<String>,
+        layout: LayoutStateData,
+    },
 }
 
 impl RiftEvent {
@@ -91,6 +101,7 @@ impl RiftEvent {
             Self::WindowTitleChanged { .. } => EventKind::WindowTitleChanged,
             Self::FocusedWindowChanged { .. } => EventKind::FocusedWindowChanged,
             Self::StacksChanged { .. } => EventKind::StacksChanged,
+            Self::LayoutChanged { .. } => EventKind::LayoutChanged,
         }
     }
 
@@ -100,7 +111,8 @@ impl RiftEvent {
             | Self::WindowsChanged { space_id, .. }
             | Self::WindowTitleChanged { space_id, .. }
             | Self::FocusedWindowChanged { space_id, .. }
-            | Self::StacksChanged { space_id, .. } => *space_id,
+            | Self::StacksChanged { space_id, .. }
+            | Self::LayoutChanged { space_id, .. } => *space_id,
         }
     }
 
@@ -110,7 +122,8 @@ impl RiftEvent {
             | Self::WindowsChanged { display_uuid, .. }
             | Self::WindowTitleChanged { display_uuid, .. }
             | Self::FocusedWindowChanged { display_uuid, .. }
-            | Self::StacksChanged { display_uuid, .. } => display_uuid.as_deref(),
+            | Self::StacksChanged { display_uuid, .. }
+            | Self::LayoutChanged { display_uuid, .. } => display_uuid.as_deref(),
         }
     }
 }
@@ -158,6 +171,76 @@ mod tests {
                 "workspace_id": { "idx": 3, "version": 1 },
                 "workspace_name": "main",
                 "display_uuid": "display"
+            })
+        );
+    }
+
+    #[test]
+    fn layout_changed_has_a_typed_subscription_and_workspace_context() {
+        let event = RiftEvent::LayoutChanged {
+            workspace_id: WorkspaceId { idx: 3, version: 1 },
+            workspace_index: Some(2),
+            workspace_name: "main".into(),
+            space_id: 42,
+            display_uuid: Some("display".into()),
+            layout: LayoutStateData {
+                space_id: 42,
+                workspace_id: 2,
+                is_active_workspace: true,
+                mode: "traditional".into(),
+                floating_windows: Vec::new(),
+                tiled_windows: Vec::new(),
+                focused_window: None,
+                selected_window: None,
+                container_tree: crate::ContainerTreeNode {
+                    node_type: crate::ContainerNodeType::Placeholder,
+                    layout_kind: None,
+                    weight: None,
+                    window_id: None,
+                    is_selected: false,
+                    is_fullscreen: false,
+                    is_fullscreen_within_gaps: false,
+                    role: None,
+                    pending_split: None,
+                    children: Vec::new(),
+                },
+            },
+        };
+
+        assert_eq!(event.kind(), EventKind::LayoutChanged);
+        assert_eq!(event.space_id(), 42);
+        assert_eq!(event.display_uuid(), Some("display"));
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            serde_json::json!({
+                "type": "layout_changed",
+                "workspace_id": { "idx": 3, "version": 1 },
+                "workspace_index": 2,
+                "workspace_name": "main",
+                "space_id": 42,
+                "display_uuid": "display",
+                "layout": {
+                    "space_id": 42,
+                    "workspace_id": 2,
+                    "is_active_workspace": true,
+                    "mode": "traditional",
+                    "floating_windows": [],
+                    "tiled_windows": [],
+                    "focused_window": null,
+                    "selected_window": null,
+                    "container_tree": {
+                        "node_type": "placeholder",
+                        "layout_kind": null,
+                        "weight": null,
+                        "window_id": null,
+                        "is_selected": false,
+                        "is_fullscreen": false,
+                        "is_fullscreen_within_gaps": false,
+                        "role": null,
+                        "pending_split": null,
+                        "children": []
+                    }
+                }
             })
         );
     }

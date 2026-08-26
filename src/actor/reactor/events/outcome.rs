@@ -71,6 +71,7 @@ pub(crate) struct EventOutcome {
     pub(crate) finalize_created_windows: Vec<WindowId>,
     pub(crate) window_title_broadcasts: Vec<WindowTitleBroadcast>,
     pub(crate) focused_window_broadcast: Option<WindowId>,
+    pub(crate) broadcast_layout_changed: bool,
     pub(crate) layout_events: Vec<LayoutEvent>,
     pub(crate) layout_responses: Vec<(EventResponse, Option<SpaceId>)>,
     pub(crate) arrange: ArrangeRequest,
@@ -125,6 +126,7 @@ impl EventOutcome {
         self.window_title_broadcasts.append(&mut other.window_title_broadcasts);
         self.focused_window_broadcast =
             other.focused_window_broadcast.or(self.focused_window_broadcast);
+        self.broadcast_layout_changed |= other.broadcast_layout_changed;
         self.layout_events.append(&mut other.layout_events);
         self.layout_responses.append(&mut other.layout_responses);
         if other.arrange.requested {
@@ -176,6 +178,7 @@ impl EventOutcome {
             finalize_created_windows: Vec::new(),
             window_title_broadcasts: Vec::new(),
             focused_window_broadcast: None,
+            broadcast_layout_changed: true,
             layout_events: Vec::new(),
             layout_responses: Vec::new(),
             arrange: ArrangeRequest {
@@ -426,6 +429,7 @@ mod tests {
             assert_eq!(outcome.arrange.passes, 0);
             assert!(!outcome.refresh_window_notifications);
             assert!(!outcome.refresh_layout_mode);
+            assert!(!outcome.broadcast_layout_changed);
         }
     }
 
@@ -439,6 +443,7 @@ mod tests {
         assert!(!outcome.refresh_window_notifications);
         assert!(!outcome.refresh_focus_follows_mouse);
         assert!(outcome.refresh_layout_mode);
+        assert!(outcome.broadcast_layout_changed);
 
         let outcome = EventOutcome::window_membership_changed(true, true);
         assert!(outcome.arrange.requested);
@@ -470,5 +475,6 @@ mod tests {
             EventOutcome::layout_changed(false).with_arrange_space_scope(Some(second_space)),
         );
         assert_eq!(outcome.arrange.space_scope, None);
+        assert!(outcome.broadcast_layout_changed);
     }
 }

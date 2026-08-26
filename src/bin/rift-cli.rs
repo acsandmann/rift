@@ -821,9 +821,10 @@ fn parse_event_kind(input: &str) -> Result<EventKind, String> {
         "window_title_changed" => Ok(EventKind::WindowTitleChanged),
         "focused_window_changed" => Ok(EventKind::FocusedWindowChanged),
         "stacks_changed" => Ok(EventKind::StacksChanged),
+        "layout_changed" => Ok(EventKind::LayoutChanged),
         "*" => Ok(EventKind::All),
         other => Err(format!(
-            "Invalid event '{}'; expected workspace_changed, windows_changed, window_title_changed, focused_window_changed, stacks_changed, or *",
+            "Invalid event '{}'; expected workspace_changed, windows_changed, window_title_changed, focused_window_changed, stacks_changed, layout_changed, or *",
             other
         )),
     }
