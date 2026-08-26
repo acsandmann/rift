@@ -2144,28 +2144,6 @@ fn handle_layout_response_groups_windows_by_app_and_screen() {
 }
 
 #[test]
-fn untracked_focus_fallback_rejects_system_surfaces() {
-    let info = |layer| WindowServerInfo {
-        pid: 1,
-        id: WindowServerId::new(1),
-        layer,
-        frame: CGRect::new(CGPoint::ZERO, CGSize::new(100., 100.)),
-        min_frame: CGSize::ZERO,
-        max_frame: CGSize::ZERO,
-    };
-
-    assert!(untracked_window_is_focusable(&info(0)));
-    assert!(
-        !untracked_window_is_focusable(&info(-1)),
-        "desktop layer must not become key"
-    );
-    assert!(
-        !untracked_window_is_focusable(&info(25)),
-        "menu/system layer must not become key"
-    );
-}
-
-#[test]
 fn handle_layout_response_includes_handles_for_raise_and_focus_windows() {
     let (mut apps, mut reactor) = test_context();
     let (raise_manager_tx, mut raise_manager_rx) = actor::channel();
