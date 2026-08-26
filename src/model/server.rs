@@ -29,6 +29,7 @@ pub struct RuntimeWindowData {
     pub id: WindowId,
     pub is_floating: bool,
     pub is_focused: bool,
+    pub layout_position: Option<protocol::WindowLayoutPosition>,
     pub app_name: Option<String>,
     pub info: WindowInfo,
 }
@@ -75,6 +76,7 @@ impl From<RuntimeWindowData> for protocol::WindowData {
             bundle_id: value.info.bundle_id,
             app_name: value.app_name,
             window_server_id: value.info.sys_id.map(|id| id.as_u32()),
+            layout_position: value.layout_position,
         }
     }
 }
@@ -133,6 +135,7 @@ impl Serialize for RuntimeWindowData {
             bundle_id: Option<&'a String>,
             app_name: Option<&'a String>,
             window_server_id: Option<u32>,
+            layout_position: Option<&'a protocol::WindowLayoutPosition>,
         }
 
         let helper = WindowDataSer {
@@ -144,6 +147,7 @@ impl Serialize for RuntimeWindowData {
             bundle_id: self.info.bundle_id.as_ref(),
             app_name: self.app_name.as_ref(),
             window_server_id: self.info.sys_id.map(|id| id.as_u32()),
+            layout_position: self.layout_position.as_ref(),
         };
 
         helper.serialize(serializer)
@@ -165,6 +169,7 @@ impl<'de> Deserialize<'de> for RuntimeWindowData {
             bundle_id: Option<String>,
             app_name: Option<String>,
             window_server_id: Option<u32>,
+            layout_position: Option<protocol::WindowLayoutPosition>,
         }
 
         let helper = WindowDataDe::deserialize(deserializer)?;
@@ -188,6 +193,7 @@ impl<'de> Deserialize<'de> for RuntimeWindowData {
             id: helper.id,
             is_floating: helper.is_floating,
             is_focused: helper.is_focused,
+            layout_position: helper.layout_position,
             app_name: helper.app_name,
             info,
         })
@@ -293,6 +299,7 @@ mod tests {
             id: WindowId::new(123, 7),
             is_floating: true,
             is_focused: false,
+            layout_position: Some(protocol::WindowLayoutPosition { column: 2, row: 1 }),
             app_name: Some("Test App".to_string()),
             info,
         };
@@ -307,6 +314,7 @@ mod tests {
             "bundle_id": "com.example.test",
             "app_name": "Test App",
             "window_server_id": 99,
+            "layout_position": { "column": 2, "row": 1 },
         });
         assert_eq!(value, expected);
     }

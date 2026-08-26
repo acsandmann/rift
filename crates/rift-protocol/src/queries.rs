@@ -105,6 +105,14 @@ pub struct Rect {
     pub size: Size,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct WindowLayoutPosition {
+    /// Zero-based logical column in the workspace layout.
+    pub column: usize,
+    /// Zero-based logical row within `column`.
+    pub row: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WindowData {
     pub id: WindowId,
@@ -115,6 +123,11 @@ pub struct WindowData {
     pub bundle_id: Option<String>,
     pub app_name: Option<String>,
     pub window_server_id: Option<u32>,
+    /// Stable topology-derived position in the workspace layout.
+    ///
+    /// This does not depend on the window's animated frame. It is `None` for floating windows,
+    /// layout modes without column semantics, and queries without a workspace context.
+    pub layout_position: Option<WindowLayoutPosition>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -125,6 +138,8 @@ pub struct WorkspaceData {
     pub layout_mode: String,
     pub is_active: bool,
     pub window_count: usize,
+    /// Workspace windows in logical column-major order when the layout has column semantics.
+    /// Windows without a logical position follow in their existing stable order.
     pub windows: Vec<WindowData>,
 }
 

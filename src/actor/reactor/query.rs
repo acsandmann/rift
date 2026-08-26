@@ -1,15 +1,34 @@
 use std::sync::mpsc::{RecvError, SyncSender, sync_channel};
 
 use objc2_core_foundation::CGRect;
-use rift_protocol::{ApplicationData, LayoutStateData, WorkspaceLayoutData};
+use rift_protocol::{
+    ApplicationData, ContainerTreeNode, LayoutStateData, WindowLayoutPosition, WorkspaceLayoutData,
+};
 
 use crate::actor::app::WindowId;
 use crate::actor::menu_bar;
 use crate::actor::reactor::{Event, Reactor, Sender};
-use crate::common::collections::HashSet;
+use crate::common::collections::{HashMap, HashSet};
 use crate::model::server::{RuntimeDisplayData, RuntimeWindowData, RuntimeWorkspaceData};
 use crate::model::virtual_workspace::VirtualWorkspaceId;
 use crate::sys::screen::{ScreenInfo, SpaceId};
+
+fn logical_window_positions(tree: &ContainerTreeNode) -> HashMap<WindowId, WindowLayoutPosition> {
+    tree.children
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| column.role.as_deref() == Some("column"))
+        .flat_map(|(column, node)| {
+            node.children.iter().enumerate().filter_map(move |(row, node)| {
+                let window = node.window_id?;
+                Some((WindowId::new(window.pid, window.idx), WindowLayoutPosition {
+                    column,
+                    row,
+                }))
+            })
+        })
+        .collect()
+}
 
 #[derive(Clone)]
 pub struct ReactorQueryHandle {
@@ -320,9 +339,19 @@ impl Reactor {
             let predicted_map: std::collections::HashMap<WindowId, CGRect> =
                 predicted_positions.into_iter().collect();
 
+            let logical_positions = space_id
+                .and_then(|space| {
+                    self.layout_manager.layout_engine.query_workspace_layout(space, Some(index))
+                })
+                .map(|snapshot| logical_window_positions(&snapshot.container_tree))
+                .unwrap_or_default();
+
             let mut windows: Vec<RuntimeWindowData> = Vec::new();
             for wid in workspace_windows_ids.into_iter() {
                 if let Some(mut wd) = self.create_window_data(wid) {
+                    if !wd.is_floating {
+                        wd.layout_position = logical_positions.get(&wid).copied();
+                    }
                     if !is_active {
                         if let Some(pred) = predicted_map.get(&wid).copied() {
                             wd.info.frame = pred;
@@ -331,6 +360,13 @@ impl Reactor {
                     windows.push(wd);
                 }
             }
+            // Scrolling windows are returned in their logical visual order. Floating and
+            // non-column layouts retain their existing stable membership order afterward.
+            windows.sort_by_key(|window| {
+                window.layout_position.map_or((1, usize::MAX, usize::MAX), |position| {
+                    (0, position.column, position.row)
+                })
+            });
 
             let layout_mode = space_id
                 .and_then(|space| {

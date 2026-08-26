@@ -2133,6 +2133,7 @@ impl Reactor {
             id: window_id,
             is_floating: self.layout_manager.layout_engine.is_window_floating(window_id),
             is_focused: self.main_window() == Some(window_id),
+            layout_position: None,
             app_name,
             info: WindowInfo {
                 title: window_state.info.title.clone(),
