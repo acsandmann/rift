@@ -567,18 +567,13 @@ impl Reactor {
         let activated_set: HashSet<SpaceId> = activated.iter().copied().collect();
         let mut windows_by_pid: HashMap<pid_t, Vec<WindowId>> = HashMap::default();
 
-        for (wid, state) in self.state.windows.iter_windows() {
-            if !state.can_reconcile_admission() {
-                continue;
-            }
-            let Some(space) = self.best_space_for_window_id(wid) else {
-                continue;
-            };
-
+        for (&wsid, &space) in &self.space_state.active_window_spaces {
             if !activated_set.contains(&space) {
                 continue;
             }
-
+            let Some(wid) = self.state.windows.tracked_window_id(wsid) else { continue };
+            let Some(state) = self.state.windows.window(wid) else { continue };
+            if !state.can_reconcile_admission() { continue; }
             windows_by_pid.entry(wid.pid).or_default().push(wid);
         }
 
@@ -593,7 +588,7 @@ impl Reactor {
 
     fn refresh_window_server_snapshot_for_active_spaces(&mut self) {
         let active_windows = self.authoritative_active_space_windows();
-        self.reconcile_authoritative_active_window_snapshot(active_windows, false);
+        self.reconcile_authoritative_active_window_snapshot(active_windows, true);
     }
 
     fn authoritative_active_space_windows(&self) -> Vec<(WindowServerId, Option<SpaceId>)> {
@@ -730,6 +725,7 @@ impl Reactor {
         active_windows: Vec<(WindowServerId, Option<SpaceId>)>,
         preserve_missing_assignments: bool,
     ) {
+        let observed_windows = active_windows.clone();
         let previously_visible_wsids: Vec<_> =
             self.state.windows.iter_visible_window_server_ids().collect();
         self.refresh_active_space_window_membership(active_windows);
@@ -737,7 +733,7 @@ impl Reactor {
             previously_visible_wsids,
             preserve_missing_assignments,
         );
-        self.reconcile_windows_with_authoritative_spaces();
+        self.reconcile_windows_in_authoritative_active_snapshot(&observed_windows);
     }
 
     fn is_login_window_pid(&self, pid: pid_t) -> bool {
@@ -3096,23 +3092,36 @@ impl Reactor {
         !was_on_active_space && self.is_window_on_active_space(wid)
     }
 
-    fn reconcile_windows_with_authoritative_spaces(&mut self) -> bool {
+    fn reconcile_windows_in_authoritative_active_snapshot(
+        &mut self,
+        active_windows: &[(WindowServerId, Option<SpaceId>)],
+    ) -> bool {
         if self.refreshes_blocked() {
             self.defer_visible_refresh(true);
             return false;
         }
 
-        let windows: Vec<_> = self.state.windows.iter_windows().map(|(wid, _)| wid).collect();
+        let windows: Vec<_> = active_windows.iter().filter_map(|&(wsid, observed_space)| {
+            let wid = self.state.windows.tracked_window_id(wsid)?;
+            let authoritative_space = self.state.windows.window_server_space(wsid).or(observed_space)?;
+            Some((wid, authoritative_space))
+        }).collect();
         let mut layout_changed = false;
 
-        for wid in windows {
-            let Some(authoritative_space) = self.authoritative_space_for_window_id(wid) else {
-                continue;
-            };
+        for (wid, authoritative_space) in windows {
             layout_changed |= self.reassign_window_to_authoritative_space(wid, authoritative_space);
         }
 
         layout_changed
+    }
+
+    #[cfg(test)]
+    fn reconcile_windows_with_authoritative_spaces(&mut self) -> bool {
+        let active_windows: Vec<_> = self.state.windows.iter_windows().filter_map(|(wid, state)| {
+            let wsid = state.info.sys_id?;
+            Some((wsid, self.authoritative_space_for_window_id(wid)))
+        }).collect();
+        self.reconcile_windows_in_authoritative_active_snapshot(&active_windows)
     }
 
     fn current_reported_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
@@ -3573,7 +3582,8 @@ impl Reactor {
                             window.info.ax_subrole.clone(),
                         )
                     });
-                    self.layout_manager.layout_engine.assign_window_with_app_info(
+                    let engine = &mut self.layout_manager.layout_engine;
+                    if reapply_effects { engine.reapply_window_with_app_info(
                         &mut self.state.windows,
                         *wid,
                         space,
@@ -3582,7 +3592,16 @@ impl Reactor {
                         window_metadata.as_ref().map(|metadata| metadata.0.as_str()),
                         window_metadata.as_ref().and_then(|metadata| metadata.1.as_deref()),
                         window_metadata.as_ref().and_then(|metadata| metadata.2.as_deref()),
-                    )
+                    ) } else { engine.assign_window_with_app_info(
+                        &mut self.state.windows,
+                        *wid,
+                        space,
+                        app_info.bundle_id.as_deref(),
+                        app_info.localized_name.as_deref(),
+                        window_metadata.as_ref().map(|metadata| metadata.0.as_str()),
+                        window_metadata.as_ref().and_then(|metadata| metadata.1.as_deref()),
+                        window_metadata.as_ref().and_then(|metadata| metadata.2.as_deref()),
+                    ) }
                 };
 
                 match assign_result {

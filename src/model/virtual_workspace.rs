@@ -939,28 +939,8 @@ impl WorkspaceStore {
         window_id: WindowId,
         space: SpaceId,
     ) -> Option<WindowWorkspaceInfo> {
-        let existing_assignment = window_store.workspace_info_for_window(window_id)?;
-        if existing_assignment.space == space {
-            return Some(existing_assignment);
-        }
-
-        // Treat an empty, newly initialized target space as a transient native-space-id churn
-        // candidate and preserve workspace ownership by ordinal. Once the target space already
-        // has assignments, prefer the normal resolution path so real cross-space moves still
-        // follow the destination space.
-        if window_store.has_workspace_assignments_in_space(space) {
-            return None;
-        }
-
-        let source_index = self
-            .ordered_workspace_ids(existing_assignment.space)
-            .iter()
-            .position(|&workspace_id| workspace_id == existing_assignment.workspace_id)?;
-        let target_workspace_id = *self.ordered_workspace_ids(space).get(source_index)?;
-        Some(WindowWorkspaceInfo {
-            space,
-            workspace_id: target_workspace_id,
-        })
+        window_store.workspace_info_for_window(window_id)
+            .filter(|assignment| assignment.space == space)
     }
 
     fn ensure_window_assignment(
@@ -981,11 +961,12 @@ impl WorkspaceStore {
         }
     }
 
-    fn resolve_rule_workspace(
+    fn resolve_rule_workspace_with_policy(
         &mut self,
         space: SpaceId,
         selector: Option<&WorkspaceSelector>,
         existing: Option<WindowWorkspaceInfo>,
+        preserve_existing: bool,
     ) -> Result<VirtualWorkspaceId, WorkspaceError> {
         let selected = selector.and_then(|selector| {
             let workspaces = self.list_workspaces(space);
@@ -1003,8 +984,8 @@ impl WorkspaceStore {
                 "App rule workspace was not found; preserving assignment"
             );
         }
-        selected
-            .or_else(|| existing.map(|assignment| assignment.workspace_id))
+        let existing = existing.map(|assignment| assignment.workspace_id);
+        (if preserve_existing { existing.or(selected) } else { selected.or(existing) })
             .map(Ok)
             .unwrap_or_else(|| self.get_default_workspace(space))
     }
@@ -1016,6 +997,12 @@ impl WorkspaceStore {
         space: SpaceId,
         rule_decision: Option<AppRuleDecision>,
     ) -> Result<AppRuleResult, WorkspaceError> {
+        self.apply_app_rule_decision_with_policy(window_store, window_id, space, rule_decision, false)
+    }
+    pub(crate) fn apply_app_rule_decision_preserving_workspace(&mut self, window_store: &mut WindowStore, window_id: WindowId, space: SpaceId, rule_decision: Option<AppRuleDecision>) -> Result<AppRuleResult, WorkspaceError> {
+        self.apply_app_rule_decision_with_policy(window_store, window_id, space, rule_decision, true)
+    }
+    fn apply_app_rule_decision_with_policy(&mut self, window_store: &mut WindowStore, window_id: WindowId, space: SpaceId, rule_decision: Option<AppRuleDecision>, preserve_existing: bool) -> Result<AppRuleResult, WorkspaceError> {
         self.ensure_space_initialized(space);
         if self
             .workspaces_by_space
@@ -1058,8 +1045,7 @@ impl WorkspaceStore {
                     decision.focus,
                 )
             });
-        let workspace_id =
-            self.resolve_rule_workspace(space, workspace.as_ref(), existing_assignment)?;
+        let workspace_id = self.resolve_rule_workspace_with_policy(space, workspace.as_ref(), existing_assignment, preserve_existing)?;
         if !self.ensure_window_assignment(window_store, window_id, WindowWorkspaceInfo {
             space,
             workspace_id,
@@ -1342,7 +1328,7 @@ mod tests {
     }
 
     #[test]
-    fn preserves_workspace_ordinal_across_transient_space_id_churn() {
+    fn generic_assignment_does_not_infer_space_id_churn_from_empty_target() {
         let mut window_store = WindowStore::default();
         let mut settings = VirtualWorkspaceSettings::default();
         settings.default_workspace_count = 3;
@@ -1354,7 +1340,7 @@ mod tests {
         let old_workspaces = manager.list_workspaces(old_space);
         let new_workspaces = manager.list_workspaces(new_space);
         let preserved_workspace = old_workspaces[2].0;
-        let expected_target_workspace = new_workspaces[2].0;
+        let expected_target_workspace = new_workspaces[0].0;
 
         assert!(manager.assign_window_to_workspace(
             &mut window_store,
