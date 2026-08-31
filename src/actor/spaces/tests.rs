@@ -970,6 +970,65 @@ fn duplicate_visible_window_keeps_previous_active_space_when_lookup_races() {
 }
 
 #[test]
+fn duplicate_visible_window_keeps_previous_active_space_when_lookup_conflicts() {
+    let wsid = WindowServerId::new(93);
+    let old_space = SpaceId::new(521);
+    let other_space = SpaceId::new(522);
+    let mut visible = HashMap::default();
+    let previous_visible = HashMap::from_iter([(wsid, old_space)]);
+    let active_spaces = HashSet::from_iter([old_space, other_space]);
+
+    SpacesActor::record_visible_window_space(
+        &mut visible,
+        &previous_visible,
+        &active_spaces,
+        wsid,
+        old_space,
+        Some(other_space),
+    );
+    SpacesActor::record_visible_window_space(
+        &mut visible,
+        &previous_visible,
+        &active_spaces,
+        wsid,
+        other_space,
+        Some(other_space),
+    );
+
+    assert_eq!(visible.get(&wsid).copied(), Some(old_space));
+}
+
+#[test]
+fn duplicate_visible_window_does_not_keep_previous_inactive_space() {
+    let wsid = WindowServerId::new(94);
+    let old_space = SpaceId::new(531);
+    let left_space = SpaceId::new(532);
+    let right_space = SpaceId::new(533);
+    let mut visible = HashMap::default();
+    let previous_visible = HashMap::from_iter([(wsid, old_space)]);
+    let active_spaces = HashSet::from_iter([left_space, right_space]);
+
+    SpacesActor::record_visible_window_space(
+        &mut visible,
+        &previous_visible,
+        &active_spaces,
+        wsid,
+        left_space,
+        Some(right_space),
+    );
+    SpacesActor::record_visible_window_space(
+        &mut visible,
+        &previous_visible,
+        &active_spaces,
+        wsid,
+        right_space,
+        Some(right_space),
+    );
+
+    assert_eq!(visible.get(&wsid).copied(), Some(right_space));
+}
+
+#[test]
 fn duplicate_visible_window_uses_authoritative_space_when_available() {
     let wsid = WindowServerId::new(92);
     let left_space = SpaceId::new(511);
