@@ -1,6 +1,7 @@
 // ported from https://github.com/koekeishiya/yabai/blob/master/src/misc/service.h
 
 use std::env;
+use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::os::unix::process::ExitStatusExt;
@@ -12,6 +13,9 @@ use nix::unistd::getuid;
 
 const LAUNCHCTL_PATH: &str = "/bin/launchctl";
 const RIFT_PLIST: &str = "git.acsandmann.rift";
+/// The agent binary launchd starts. `rift-cli` has to look for it by name;
+/// `rift` is it.
+const RIFT_AGENT_BIN: &str = "rift";
 
 #[derive(Subcommand)]
 pub enum ServiceCommands {
@@ -57,7 +61,7 @@ fn plist_path() -> io::Result<PathBuf> {
 fn find_rift_executable_in_path(path_env: &std::ffi::OsStr) -> io::Result<Option<PathBuf>> {
     let mut current_dir: Option<PathBuf> = None;
     for dir in env::split_paths(path_env) {
-        let candidate = dir.join("rift");
+        let candidate = dir.join(RIFT_AGENT_BIN);
         if candidate.is_file() {
             if candidate.is_absolute() {
                 return Ok(Some(candidate));
@@ -76,28 +80,44 @@ fn find_rift_executable_in_path(path_env: &std::ffi::OsStr) -> io::Result<Option
     Ok(None)
 }
 
+/// The rift agent binary the launchd plist should point at.
+///
+/// `current_exe` comes first because `rift service` runs inside the agent: the
+/// binary to launch is this one, and searching `$PATH` instead can name a
+/// different install — running a dev build's `rift service start` would write a
+/// plist pointing at Homebrew's rift and then "restart" that. macOS reports the
+/// path the binary was invoked through rather than resolving it, so a Homebrew
+/// invocation still records the stable `bin/rift` symlink rather than the
+/// Cellar path a version bump moves out from under it.
+///
+/// `rift-cli service` is not the agent, so it falls back to looking for one.
 fn find_rift_executable() -> io::Result<PathBuf> {
-    if let Some(path_env) = env::var_os("PATH") {
-        if let Some(candidate) = find_rift_executable_in_path(&path_env)? {
-            return Ok(candidate);
-        }
-    }
-
     let exe_path = env::current_exe().map_err(|_| {
         io::Error::new(
             io::ErrorKind::Other,
             "unable to retrieve path of current executable",
         )
     })?;
-    let sibling = exe_path.with_file_name("rift");
+
+    if exe_path.file_name() == Some(OsStr::new(RIFT_AGENT_BIN)) {
+        return Ok(exe_path);
+    }
+
+    let sibling = exe_path.with_file_name(RIFT_AGENT_BIN);
     if sibling.is_file() {
         return Ok(sibling);
+    }
+
+    if let Some(path_env) = env::var_os("PATH") {
+        if let Some(candidate) = find_rift_executable_in_path(&path_env)? {
+            return Ok(candidate);
+        }
     }
 
     Err(io::Error::new(
         io::ErrorKind::NotFound,
         format!(
-            "rift agent executable not found: not present in $PATH and no sibling 'rift' next to current executable ('{}')",
+            "rift agent executable not found: no sibling 'rift' next to current executable ('{}') and none in $PATH",
             exe_path.display()
         ),
     ))
