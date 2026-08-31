@@ -138,7 +138,25 @@ impl Reactor {
         new: Vec<(WindowId, WindowInfo)>,
         known_visible: Vec<WindowId>,
     ) {
-        self.handle_event(Event::WindowsDiscovered { pid, new, known_visible });
+        let token = if let Some(token) = self.window_inventory_manager.in_flight.get(&pid).copied()
+        {
+            token
+        } else {
+            self.window_inventory_manager.next_request_id += 1;
+            let token = crate::actor::app::WindowInventoryToken {
+                request_id: self.window_inventory_manager.next_request_id,
+                topology_revision: self.window_inventory_manager.topology_revision,
+            };
+            self.window_inventory_manager.in_flight.insert(pid, token);
+            token
+        };
+        self.handle_event(Event::WindowsDiscovered {
+            pid,
+            token,
+            successful: true,
+            new,
+            known_visible,
+        });
     }
 
     pub fn add_test_app(&mut self, pid: pid_t) {
@@ -541,7 +559,7 @@ impl Apps {
             match request {
                 Request::Terminate => break,
                 Request::WindowMaybeDestroyed(_) => {}
-                Request::GetVisibleWindows => {
+                Request::RefreshWindowInventory(token) => {
                     if got_visible_windows {
                         continue;
                     }
@@ -553,6 +571,8 @@ impl Apps {
                     for (pid, windows) in app_windows {
                         events.push(Event::WindowsDiscovered {
                             pid,
+                            token,
+                            successful: true,
                             new: vec![],
                             known_visible: windows,
                         });

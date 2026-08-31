@@ -299,6 +299,17 @@ pub struct AppThreadHandle {
     requests_tx: actor::Sender<Request>,
 }
 
+/// Identifies the world snapshot for which an AX window inventory was requested.
+///
+/// AX window enumeration is asynchronous and space-filtered. A response is only
+/// safe to reconcile while both this request and its topology revision are still
+/// current in the reactor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WindowInventoryToken {
+    pub request_id: u64,
+    pub topology_revision: u64,
+}
+
 impl AppThreadHandle {
     pub(crate) fn new_for_test(requests_tx: actor::Sender<Request>) -> Self {
         let this = AppThreadHandle { requests_tx };
@@ -317,7 +328,7 @@ impl Debug for AppThreadHandle {
 #[derive(Debug)]
 pub enum Request {
     Terminate,
-    GetVisibleWindows,
+    RefreshWindowInventory(WindowInventoryToken),
     /// Reconcile the authoritative Carbon front-process change with AX state.
     ///
     /// Carbon supplies the activation edge, while the app thread resolves the
@@ -424,12 +435,14 @@ struct PendingFrame {
 }
 
 impl State {
-    fn refresh_visible_windows(&mut self) -> Result<(), AxError> {
+    fn refresh_window_inventory(&mut self, token: WindowInventoryToken) -> Result<(), AxError> {
         let window_elems = match self.app.windows() {
             Ok(elems) => elems,
             Err(e) => {
                 self.send_event(Event::WindowsDiscovered {
                     pid: self.pid,
+                    token,
+                    successful: false,
                     new: Default::default(),
                     known_visible: Default::default(),
                 });
@@ -483,10 +496,11 @@ impl State {
 
         self.send_event(Event::WindowsDiscovered {
             pid: self.pid,
+            token,
+            successful: true,
             new,
             known_visible,
         });
-        self.on_main_window_changed(None, true);
         Ok(())
     }
 
@@ -760,9 +774,9 @@ impl State {
                     return Ok(false);
                 }
 
-                // Trigger a visible windows refresh. If the window is gone, the reactor
-                // will detect it via missing membership and tear down state.
-                self.refresh_visible_windows()?;
+                // Destruction is verified by the reactor's revisioned inventory
+                // coordinator. Do not enumerate AX windows independently here.
+                self.send_event(Event::WindowInventoryRefreshRequested(self.pid));
                 return Ok(false);
             }
             Request::CloseWindow(window_server_id) => {
@@ -776,8 +790,8 @@ impl State {
                     warn!(pid = self.pid, ?window_server_id, "Failed to post Command-W");
                 }
             }
-            Request::GetVisibleWindows => {
-                self.refresh_visible_windows()?;
+            Request::RefreshWindowInventory(token) => {
+                self.refresh_window_inventory(token)?;
             }
             Request::ApplicationGloballyActivated(pid) => {
                 if pid == self.pid {

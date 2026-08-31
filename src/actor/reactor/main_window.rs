@@ -348,11 +348,7 @@ mod tests {
         reactor.handle_event(space_state_event(vec![screen_frame], vec![None]));
         reactor.handle_event(ApplicationActivated(3, Quiet::No));
         reactor.handle_event(ApplicationGloballyActivated(3));
-        reactor.handle_event(WindowsDiscovered {
-            pid,
-            new: vec![],
-            known_visible: vec![WindowId::new(3, 1), WindowId::new(3, 2)],
-        });
+        reactor.discover_test_windows(pid, vec![], vec![WindowId::new(3, 1), WindowId::new(3, 2)]);
         assert_eq!(Some(WindowId::new(3, 1)), reactor.main_window());
 
         reactor.handle_event(space_state_event(vec![screen_frame], vec![Some(space)]));

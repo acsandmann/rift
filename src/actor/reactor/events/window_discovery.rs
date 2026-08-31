@@ -146,7 +146,6 @@ fn sync_window_server_id_mapping(
 /// Identify windows that should be removed as stale.
 #[derive(Debug)]
 pub(crate) struct StaleCleanupSnapshot {
-    pub(crate) pending_refresh: bool,
     pub(crate) suppressed: bool,
     pub(crate) mission_control_active: bool,
     pub(crate) drag_active: bool,
@@ -166,12 +165,10 @@ pub(crate) fn identify_stale_windows(
     pid: pid_t,
     known_visible: &[WindowId],
     snapshot: &StaleCleanupSnapshot,
-) -> (Vec<WindowId>, bool) {
+) -> Vec<WindowId> {
     const MIN_REAL_WINDOW_DIMENSION: f64 = 2.0;
 
     let known_visible_set: HashSet<WindowId> = known_visible.iter().cloned().collect();
-    let pending_refresh = snapshot.pending_refresh;
-
     // TODO: Rewrite it
     let has_visible_window_server_ids = state
         .windows
@@ -183,7 +180,7 @@ pub(crate) fn identify_stale_windows(
         || (known_visible_set.is_empty() && !has_visible_window_server_ids);
 
     if skip_stale_cleanup {
-        return (Vec::new(), false);
+        return Vec::new();
     }
 
     let stale_windows = state
@@ -247,7 +244,7 @@ pub(crate) fn identify_stale_windows(
         })
         .collect();
 
-    (stale_windows, pending_refresh)
+    stale_windows
 }
 
 /// Remove stale windows and send events.
@@ -255,10 +252,7 @@ pub(crate) fn cleanup_stale_windows(
     state: &mut crate::model::RiftState,
     transactions: &crate::actor::reactor::transaction_manager::TransactionManager,
     drag: &mut crate::actor::reactor::managers::DragManager,
-    mission_control: &mut crate::actor::reactor::managers::MissionControlManager,
-    pid: pid_t,
     stale_windows: Vec<WindowId>,
-    pending_refresh: bool,
 ) -> anyhow::Result<crate::actor::reactor::events::EventOutcome> {
     let mut outcome = crate::actor::reactor::events::EventOutcome::default();
     for wid in stale_windows {
@@ -268,9 +262,6 @@ pub(crate) fn cleanup_stale_windows(
             drag,
             window::WindowDestroyedPayload { window: wid },
         )?);
-    }
-    if pending_refresh {
-        mission_control.pending_mission_control_refresh.remove(&pid);
     }
     Ok(outcome)
 }
@@ -288,64 +279,13 @@ pub(crate) fn process_window_list(
     state: &mut crate::model::RiftState,
     layout: &mut crate::actor::reactor::managers::LayoutManager,
     observed: Vec<ObservedWindow>,
-    app_info: &Option<AppInfo>,
 ) -> (
     Vec<(WindowId, WindowInfo)>,
     crate::actor::reactor::events::EventOutcome,
 ) {
-    const APP_RULE_TTL_MS: u64 = 1000;
-
     let mut new_windows = Vec::new();
     let mut outcome = crate::actor::reactor::events::EventOutcome::default();
 
-    state.windows.purge_expired(APP_RULE_TTL_MS);
-
-    let any_recent = observed.iter().any(|window| {
-        let info = &window.info;
-        info.sys_id
-            .map_or(false, |wsid| state.windows.is_wsid_recent(wsid, APP_RULE_TTL_MS))
-    });
-
-    if any_recent && app_info.is_none() && !observed.is_empty() {
-        // Update state for any newly reported windows, but do not early-return;
-        // proceed to emit WindowsOnScreenUpdated so existing mappings are respected
-        // without reapplying app rules.
-        for window in &observed {
-            let wid = window.wid;
-            let info = &window.info;
-            if state.windows.contains_window(wid) {
-                let old_sys_id = state.windows.window(wid).and_then(|window| window.info.sys_id);
-                outcome.absorb(sync_window_server_id_mapping(
-                    state,
-                    layout,
-                    wid,
-                    old_sys_id,
-                    info.sys_id,
-                    window.current_native_space,
-                ));
-                if let Ok(existing_outcome) =
-                    sync_existing_window_state(state, wid, info, window.active_space)
-                {
-                    outcome.absorb(existing_outcome);
-                }
-            } else {
-                outcome.absorb(sync_window_server_id_mapping(
-                    state,
-                    layout,
-                    wid,
-                    None,
-                    info.sys_id,
-                    window.current_native_space,
-                ));
-                let window_state: WindowState = WindowState::from((*info).clone());
-                state.windows.insert_window(wid, window_state);
-                let _ = utils::refresh_heuristic(state, wid);
-            }
-        }
-        // fall through
-    }
-
-    // Process all new windows
     for window in observed {
         let ObservedWindow {
             wid,
@@ -541,62 +481,29 @@ pub(crate) fn emit_layout_events(
         app_windows.entry(space).or_default().push(wid);
     }
 
-    // Pre-pass: update the VWM for all windows definitively assigned to a space before
-    // processing any per-space layout events. Without this, the ordering of space events
-    // determines whether a window removed from one space's tree gets re-added by the
-    // loop in sync_tiled_windows_for_app (which reads the VWM state at event time).
-    // By updating the VWM upfront, the guard logic in sync_tiled_windows_for_app can
-    // correctly identify cross-space moves regardless of event ordering.
-    let mut assignment_results = BTreeMap::new();
-    for (&space, windows_for_space) in &app_windows {
-        for &wid in windows_for_space {
-            assignment_results.insert(
-                (space, wid),
-                assign_discovered_window_to_space(state, layout, wid, space, app_info),
-            );
-        }
-    }
-
     let discovered_spaces = active_spaces.iter().copied().collect::<Vec<_>>();
-    for space in active_spaces {
-        let windows_for_space = app_windows.remove(&space).unwrap_or_default();
-        let mut resolved_app_rules = HashMap::default();
-
-        if !windows_for_space.is_empty() {
-            for &wid in &windows_for_space {
-                let assign_result = assignment_results.remove(&(space, wid)).unwrap_or_else(|| {
-                    assign_discovered_window_to_space(state, layout, wid, space, app_info)
-                });
-                let (apply_outcome, effects) =
-                    apply_assignment_result(state, layout, wid, space, assign_result);
-                outcome.absorb(apply_outcome);
-                if let Some(effects) = effects {
-                    resolved_app_rules.insert(wid, effects);
-                }
+    for (space, mut windows_for_space) in app_windows {
+        windows_for_space.sort_unstable();
+        for wid in windows_for_space {
+            let assignment = assign_discovered_window_to_space(state, layout, wid, space, app_info);
+            let (assignment_outcome, effects) =
+                apply_assignment_result(state, layout, wid, space, assignment);
+            outcome.absorb(assignment_outcome);
+            let Some(effects) = effects else {
+                continue;
+            };
+            let Some(window) = state.windows.window(wid).filter(|window| window.is_admitted())
+            else {
+                continue;
+            };
+            if active_spaces.contains(&space) {
+                outcome =
+                    outcome.with_layout_event(LayoutEvent::WindowObserved(space, ResolvedWindow {
+                        info: window.layout_info(wid),
+                        effects,
+                    }));
             }
         }
-
-        let windows: Vec<_> = windows_for_space
-            .into_iter()
-            .filter_map(|wid| {
-                let effects = resolved_app_rules.remove(&wid)?;
-                let window = state.windows.window(wid)?;
-                if !window.is_admitted() {
-                    return None;
-                }
-                Some(ResolvedWindow {
-                    info: window.layout_info(wid),
-                    effects,
-                })
-            })
-            .collect();
-
-        outcome = outcome.with_layout_event(LayoutEvent::WindowsOnScreenUpdated(
-            space,
-            pid,
-            windows,
-            app_info.clone(),
-        ));
     }
 
     // Matching is allowed to observe every native-space slice for this application before stale

@@ -285,7 +285,7 @@ pub fn handle_window_server_appeared(
                     } else if let Some(pid) =
                         state.windows.pending_native_fullscreen_pid_for_window_server_id(wsid)
                     {
-                        outcome = outcome.with_app_request(pid, Request::GetVisibleWindows);
+                        outcome = outcome.with_window_inventory_request(pid);
                     }
                 }
                 SpaceEventKind::Fullscreen => {
@@ -305,7 +305,7 @@ pub fn handle_window_server_appeared(
                     if tracked_window_id.is_none()
                         && let Some(pid) = owner_pid
                     {
-                        outcome = outcome.with_app_request(pid, Request::GetVisibleWindows);
+                        outcome = outcome.with_window_inventory_request(pid);
                     }
                     if let Some(wid) = tracked_window_id {
                         if let Some(user_space) = last_known_user_space
@@ -367,7 +367,7 @@ pub fn handle_window_server_appeared(
                 Some(wsid),
                 last_known_user_space,
             );
-            outcome = outcome.with_app_request(window_server_info.pid, Request::GetVisibleWindows);
+            outcome = outcome.with_window_inventory_request(window_server_info.pid);
 
             return Ok(outcome);
         }
@@ -380,7 +380,7 @@ pub fn handle_window_server_appeared(
                     outcome.with_wm_event(WmEvent::AppLaunch(window_server_info.pid, app_info));
             }
         } else {
-            outcome = outcome.with_app_request(window_server_info.pid, Request::GetVisibleWindows);
+            outcome = outcome.with_window_inventory_request(window_server_info.pid);
         }
     }
     Ok(outcome)

@@ -939,7 +939,8 @@ impl WorkspaceStore {
         window_id: WindowId,
         space: SpaceId,
     ) -> Option<WindowWorkspaceInfo> {
-        window_store.workspace_info_for_window(window_id)
+        window_store
+            .workspace_info_for_window(window_id)
             .filter(|assignment| assignment.space == space)
     }
 
@@ -985,9 +986,13 @@ impl WorkspaceStore {
             );
         }
         let existing = existing.map(|assignment| assignment.workspace_id);
-        (if preserve_existing { existing.or(selected) } else { selected.or(existing) })
-            .map(Ok)
-            .unwrap_or_else(|| self.get_default_workspace(space))
+        (if preserve_existing {
+            existing.or(selected)
+        } else {
+            selected.or(existing)
+        })
+        .map(Ok)
+        .unwrap_or_else(|| self.get_default_workspace(space))
     }
 
     pub(crate) fn apply_app_rule_decision(
@@ -997,12 +1002,39 @@ impl WorkspaceStore {
         space: SpaceId,
         rule_decision: Option<AppRuleDecision>,
     ) -> Result<AppRuleResult, WorkspaceError> {
-        self.apply_app_rule_decision_with_policy(window_store, window_id, space, rule_decision, false)
+        self.apply_app_rule_decision_with_policy(
+            window_store,
+            window_id,
+            space,
+            rule_decision,
+            false,
+        )
     }
-    pub(crate) fn apply_app_rule_decision_preserving_workspace(&mut self, window_store: &mut WindowStore, window_id: WindowId, space: SpaceId, rule_decision: Option<AppRuleDecision>) -> Result<AppRuleResult, WorkspaceError> {
-        self.apply_app_rule_decision_with_policy(window_store, window_id, space, rule_decision, true)
+
+    pub(crate) fn apply_app_rule_decision_preserving_workspace(
+        &mut self,
+        window_store: &mut WindowStore,
+        window_id: WindowId,
+        space: SpaceId,
+        rule_decision: Option<AppRuleDecision>,
+    ) -> Result<AppRuleResult, WorkspaceError> {
+        self.apply_app_rule_decision_with_policy(
+            window_store,
+            window_id,
+            space,
+            rule_decision,
+            true,
+        )
     }
-    fn apply_app_rule_decision_with_policy(&mut self, window_store: &mut WindowStore, window_id: WindowId, space: SpaceId, rule_decision: Option<AppRuleDecision>, preserve_existing: bool) -> Result<AppRuleResult, WorkspaceError> {
+
+    fn apply_app_rule_decision_with_policy(
+        &mut self,
+        window_store: &mut WindowStore,
+        window_id: WindowId,
+        space: SpaceId,
+        rule_decision: Option<AppRuleDecision>,
+        preserve_existing: bool,
+    ) -> Result<AppRuleResult, WorkspaceError> {
         self.ensure_space_initialized(space);
         if self
             .workspaces_by_space
@@ -1045,7 +1077,12 @@ impl WorkspaceStore {
                     decision.focus,
                 )
             });
-        let workspace_id = self.resolve_rule_workspace_with_policy(space, workspace.as_ref(), existing_assignment, preserve_existing)?;
+        let workspace_id = self.resolve_rule_workspace_with_policy(
+            space,
+            workspace.as_ref(),
+            existing_assignment,
+            preserve_existing,
+        )?;
         if !self.ensure_window_assignment(window_store, window_id, WindowWorkspaceInfo {
             space,
             workspace_id,

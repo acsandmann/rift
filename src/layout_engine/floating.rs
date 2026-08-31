@@ -63,12 +63,6 @@ impl FloatingManager {
         self.fullscreen_windows.get(&window_id).copied()
     }
 
-    pub(crate) fn clear_active_for_app(&mut self, space: SpaceId, pid: pid_t) {
-        if let Some(space_map) = self.active_floating_windows.get_mut(&space) {
-            space_map.remove(&pid);
-        }
-    }
-
     pub(crate) fn add_active(&mut self, space: SpaceId, pid: pid_t, wid: WindowId) {
         self.active_floating_windows
             .entry(space)

@@ -5,7 +5,7 @@ use tracing::trace;
 use super::replay::Record;
 use super::{AppState, Event, WorkspaceSwitchOrigin, WorkspaceSwitchState};
 use crate::actor;
-use crate::actor::app::{WindowId, pid_t};
+use crate::actor::app::{WindowId, WindowInventoryToken, pid_t};
 use crate::actor::drag_swap::DragManager as DragSwapManager;
 use crate::actor::reactor::Reactor;
 use crate::actor::reactor::animation::AnimationManager;
@@ -65,7 +65,14 @@ pub struct MenuManager {
 /// Manages Mission Control state
 pub struct MissionControlManager {
     pub mission_control_state: super::MissionControlState,
-    pub pending_mission_control_refresh: HashSet<pid_t>,
+}
+
+/// Owns ordering and coalescing for asynchronous AX window inventories.
+pub struct WindowInventoryManager {
+    pub topology_revision: u64,
+    pub next_request_id: u64,
+    pub in_flight: HashMap<pid_t, WindowInventoryToken>,
+    pub pending: HashSet<pid_t>,
 }
 
 /// Manages workspace switching state
@@ -116,8 +123,7 @@ pub struct RefreshQuarantineManager {
     pub display_churn_active: bool,
     pub awaiting_post_wake_snapshot: bool,
     pub awaiting_post_session_snapshot: bool,
-    pub pending_visible_refresh: bool,
-    pub deferred_refresh_tracks_mission_control: bool,
+    pub pending_inventory_refresh: bool,
     /// LoginWindow/AppKit can replay application activations while restoring a
     /// session. Those activations are not user intent and must not drive a
     /// virtual-workspace switch. Explicit input clears this latch.

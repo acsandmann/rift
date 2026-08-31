@@ -50,11 +50,12 @@ pub(crate) struct EventOutcome {
     pub(crate) recompute_active_spaces: bool,
     pub(crate) repair_spaces_after_mission_control: bool,
     pub(crate) refresh_after_mission_control: bool,
-    pub(crate) force_refresh_all_windows: bool,
+    pub(crate) refresh_window_inventories: bool,
     pub(crate) switch_native_space: Option<Direction>,
     pub(crate) wm_commands: Vec<WmCmd>,
     pub(crate) wm_events: Vec<WmEvent>,
     pub(crate) app_requests: Vec<(pid_t, Request)>,
+    pub(crate) window_inventory_requests: Vec<pid_t>,
     pub(crate) topology_reassignments: Vec<TopologyReassignment>,
     pub(crate) confirmed_window_spaces: Vec<(WindowServerId, SpaceId)>,
     pub(crate) fullscreen_restorations: Vec<(WindowServerId, SpaceId, WindowId)>,
@@ -102,11 +103,12 @@ impl EventOutcome {
         self.recompute_active_spaces |= other.recompute_active_spaces;
         self.repair_spaces_after_mission_control |= other.repair_spaces_after_mission_control;
         self.refresh_after_mission_control |= other.refresh_after_mission_control;
-        self.force_refresh_all_windows |= other.force_refresh_all_windows;
+        self.refresh_window_inventories |= other.refresh_window_inventories;
         self.switch_native_space = other.switch_native_space.or(self.switch_native_space);
         self.wm_commands.append(&mut other.wm_commands);
         self.wm_events.append(&mut other.wm_events);
         self.app_requests.append(&mut other.app_requests);
+        self.window_inventory_requests.append(&mut other.window_inventory_requests);
         self.topology_reassignments.append(&mut other.topology_reassignments);
         self.confirmed_window_spaces.append(&mut other.confirmed_window_spaces);
         self.fullscreen_restorations.append(&mut other.fullscreen_restorations);
@@ -157,11 +159,12 @@ impl EventOutcome {
             recompute_active_spaces: false,
             repair_spaces_after_mission_control: false,
             refresh_after_mission_control: false,
-            force_refresh_all_windows: false,
+            refresh_window_inventories: false,
             switch_native_space: None,
             wm_commands: Vec::new(),
             wm_events: Vec::new(),
             app_requests: Vec::new(),
+            window_inventory_requests: Vec::new(),
             topology_reassignments: Vec::new(),
             confirmed_window_spaces: Vec::new(),
             fullscreen_restorations: Vec::new(),
@@ -235,6 +238,11 @@ impl EventOutcome {
         self
     }
 
+    pub(crate) fn with_window_inventory_request(mut self, pid: pid_t) -> Self {
+        self.window_inventory_requests.push(pid);
+        self
+    }
+
     pub(crate) fn with_layout_response(
         mut self,
         response: EventResponse,
@@ -255,8 +263,8 @@ impl EventOutcome {
         self
     }
 
-    pub(crate) fn with_force_window_refresh(mut self) -> Self {
-        self.force_refresh_all_windows = true;
+    pub(crate) fn with_window_inventory_refresh(mut self) -> Self {
+        self.refresh_window_inventories = true;
         self
     }
 

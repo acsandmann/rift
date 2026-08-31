@@ -1,5 +1,3 @@
-use std::time::Instant;
-
 use serde::{Deserialize, Serialize};
 
 use crate::actor::app::WindowId;
@@ -124,7 +122,6 @@ struct WindowServerRecord {
     observed: bool,
     space: Option<SpaceId>,
     info: Option<WindowServerInfo>,
-    recent_at: Option<Instant>,
     pending_native_fullscreen: Option<PendingNativeFullscreenState>,
 }
 
@@ -326,7 +323,6 @@ impl WindowStore {
                 && !record.observed
                 && record.space.is_none()
                 && record.info.is_none()
-                && record.recent_at.is_none()
                 && record.pending_native_fullscreen.is_none()
         });
         if should_remove {
@@ -493,7 +489,6 @@ impl WindowStore {
             record.observed = false;
             record.space = None;
             record.info = None;
-            record.recent_at = None;
         }
         if let Some(wid) = wid
             && let Some(record) = self.windows.get_mut(&wid)
@@ -940,36 +935,6 @@ impl WindowStore {
             if record.space == Some(old_space) {
                 record.space = Some(new_space);
             }
-        }
-    }
-
-    pub fn mark_wsids_recent<I>(&mut self, wsids: I)
-    where I: IntoIterator<Item = WindowServerId> {
-        let now = Instant::now();
-        for wsid in wsids {
-            self.server_record_mut(wsid).recent_at = Some(now);
-        }
-    }
-
-    pub fn is_wsid_recent(&self, wsid: WindowServerId, ttl_ms: u64) -> bool {
-        self.window_servers
-            .get(&wsid)
-            .and_then(|record| record.recent_at)
-            .is_some_and(|ts| ts.elapsed().as_millis() < ttl_ms as u128)
-    }
-
-    pub fn purge_expired(&mut self, ttl_ms: u64) {
-        let now = Instant::now();
-        let wsids: Vec<_> = self.window_servers.keys().copied().collect();
-        for wsid in wsids {
-            if let Some(record) = self.window_servers.get_mut(&wsid)
-                && record
-                    .recent_at
-                    .is_some_and(|ts| now.duration_since(ts).as_millis() >= ttl_ms as u128)
-            {
-                record.recent_at = None;
-            }
-            self.prune_window_server_record(wsid);
         }
     }
 
