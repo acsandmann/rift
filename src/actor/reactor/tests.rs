@@ -1283,6 +1283,37 @@ fn crossing_native_spaces_reconciles_membership_with_one_arrange_pass() {
 }
 
 #[test]
+fn unmanageable_window_crossing_spaces_is_not_reinserted_into_layout() {
+    let mut reactor = test_reactor();
+    let screen1 = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 800.));
+    let screen2 = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 800.));
+    let space1 = SpaceId::new(1);
+    let space2 = SpaceId::new(2);
+    let wid = WindowId::new(1, 1);
+    let wsid = WindowServerId::new(101);
+    let initial_frame = CGRect::new(CGPoint::new(100., 100.), CGSize::new(500., 400.));
+    let moved_frame = CGRect::new(CGPoint::new(1100., 100.), CGSize::new(500., 400.));
+
+    reactor.handle_event(space_state_event(vec![screen1, screen2], vec![
+        Some(space1),
+        Some(space2),
+    ]));
+    reactor.add_test_window_with_manageability(wid, wsid, Some(space1), initial_frame, false);
+
+    reactor.handle_event(Event::WindowFrameChanged(
+        wid,
+        moved_frame,
+        None,
+        Requested(false),
+        Some(crate::sys::event::MouseState::Up),
+    ));
+
+    assert_eq!(reactor.state.windows.window_server_space(wsid), Some(space2));
+    assert_eq!(reactor.assigned_space_for_window_id(wid), None);
+    assert!(!has_window_in_layout(&mut reactor, space2, screen2, wid));
+}
+
+#[test]
 fn duplicate_minimize_deminimize_and_unknown_window_events_do_not_arrange() {
     let (mut reactor, wid, _wsid, _space1, _space2, _frame) = reactor_with_window_on_space1();
 

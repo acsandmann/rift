@@ -23,7 +23,7 @@ use tracing::{Instrument, Span, debug, info, instrument, trace, warn};
 use crate::actor;
 use crate::actor::reactor::transaction_manager::TransactionId;
 use crate::actor::reactor::{self, Event, Requested};
-use crate::common::collections::HashMap;
+use crate::common::collections::{HashMap, HashSet};
 use crate::model::tx_store::WindowTxStore;
 use crate::sys::app::NSRunningApplicationExt;
 pub use crate::sys::app::{AppInfo, WindowInfo, pid_t};
@@ -452,6 +452,7 @@ impl State {
         let server_info_by_id = self.visible_window_server_info_map(&window_elems);
         let mut new = Vec::with_capacity(window_elems.len());
         let mut known_visible = Vec::with_capacity(window_elems.len());
+        let mut seen_wids = HashSet::default();
 
         for elem in window_elems {
             let wsid = WindowServerId::try_from(&elem).ok();
@@ -469,17 +470,19 @@ impl State {
                 continue;
             }
 
-            let Some(wid) = self.id(&elem).ok().or_else(|| {
-                self.register_window(elem.clone(), hint).map(|(info, wid, _)| {
-                    if !info.is_minimized {
-                        known_visible.push(wid);
-                    }
-                    new.push((wid, info));
-                    wid
-                })
+            let Some((wid, info)) = self.id(&elem).ok().map(|wid| (wid, info)).or_else(|| {
+                self.register_window(elem.clone(), hint)
+                    .map(|(registered_info, wid, _)| (wid, registered_info))
             }) else {
                 continue;
             };
+
+            // AXWindows can expose the same stable WindowServer window more than once while a
+            // transient child window is being created. Reconcile each identity once per
+            // inventory so a duplicate cannot overwrite its admission classification.
+            if !seen_wids.insert(wid) {
+                continue;
+            }
 
             // The WindowServer id is stable across sleep/display transitions, but
             // the corresponding AXUIElement is not. `id` intentionally resolves the

@@ -372,7 +372,9 @@ pub fn handle_window_frame_changed(
                     state.windows.set_window_server_space(server, Some(space));
                     state.windows.mark_window_visible(server);
                 }
-                if new_space_active {
+                if new_space_active
+                    && state.windows.window(wid).is_some_and(WindowState::is_admitted)
+                {
                     if let Some(workspace) = layout.layout_engine.active_workspace(space) {
                         let _ = layout
                             .layout_engine

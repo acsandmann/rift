@@ -4,7 +4,7 @@ use tracing::{trace, warn};
 use crate::actor::app::WindowId;
 use crate::actor::reactor::events::EventOutcome;
 use crate::actor::reactor::managers::{DragManager, LayoutManager};
-use crate::actor::reactor::{DragState, LayoutEvent};
+use crate::actor::reactor::{DragState, LayoutEvent, WindowState};
 use crate::common::collections::HashMap;
 use crate::layout_engine::LayoutCommand;
 use crate::model::RiftState;
@@ -55,21 +55,32 @@ pub fn handle_mouse_up(
                 outcome = outcome.with_layout_event(LayoutEvent::WindowRemoved(window));
             }
             if let Some(space) = payload.final_space {
-                if let Some(server_id) =
-                    state.windows.window(window).and_then(|window| window.info.sys_id)
-                {
-                    state.windows.set_window_server_space(server_id, Some(space));
-                    state.windows.mark_window_visible(server_id);
+                if state.windows.window(window).is_some_and(WindowState::is_admitted) {
+                    if let Some(server_id) =
+                        state.windows.window(window).and_then(|window| window.info.sys_id)
+                    {
+                        state.windows.set_window_server_space(server_id, Some(space));
+                        state.windows.mark_window_visible(server_id);
+                    }
+                    if let Some(workspace) = layout.layout_engine.active_workspace(space)
+                        && !layout
+                            .layout_engine
+                            .virtual_workspace_manager_mut()
+                            .assign_window_to_workspace(
+                                &mut state.windows,
+                                space,
+                                window,
+                                workspace,
+                            )
+                    {
+                        warn!(?window, ?workspace, "failed to assign dragged window");
+                    }
+                    outcome = outcome.with_layout_event(LayoutEvent::WindowAdded(space, window));
+                } else if session.origin_space == payload.final_space {
+                    // A transient child window may enter drag tracking before its AX admission is
+                    // settled. Never let drag completion promote it into a tiled workspace.
+                    outcome = outcome.with_layout_event(LayoutEvent::WindowRemoved(window));
                 }
-                if let Some(workspace) = layout.layout_engine.active_workspace(space)
-                    && !layout
-                        .layout_engine
-                        .virtual_workspace_manager_mut()
-                        .assign_window_to_workspace(&mut state.windows, space, window, workspace)
-                {
-                    warn!(?window, ?workspace, "failed to assign dragged window");
-                }
-                outcome = outcome.with_layout_event(LayoutEvent::WindowAdded(space, window));
             }
             drag.skip_layout_for_window = Some(window);
             needs_layout = true;

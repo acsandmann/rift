@@ -18,7 +18,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use super::geometry::CGRectDef;
-use super::window_server::{WindowServerId, WindowServerInfo};
+use super::window_server::{WindowServerId, WindowServerInfo, window_parent};
 use crate::sys::axuielement::{
     AX_STANDARD_WINDOW_SUBROLE, AX_WINDOW_ROLE, AXUIElement, Error as AxError,
 };
@@ -414,9 +414,10 @@ impl WindowInfo {
 
         let min_size = server_info.map(|info| info.min_frame).or_else(|| None);
         let max_size = server_info.map(|info| info.max_frame).or_else(|| None);
+        let is_root = id.map(|id| window_parent(id).is_none()).unwrap_or(true);
         let info = WindowInfo {
             is_standard,
-            is_root: true,
+            is_root,
             is_minimized,
             is_resizable,
             min_size,
