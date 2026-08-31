@@ -229,14 +229,38 @@ fn spawn_launchctl(args: &[&str]) -> io::Result<()> {
     Ok(())
 }
 
-fn service_is_running() -> io::Result<bool> {
-    let uid = getuid();
-    let service_target = format!("gui/{}/{}", uid, RIFT_PLIST);
-    match run_launchctl(&["print", &service_target], true) {
-        Ok(code) => Ok(code == 0),
-        Err(_) => Ok(false),
-    }
+/// Every launchd label rift is known to run under.
+///
+/// `rift service` owns the first one, but a Homebrew install is started by
+/// `brew services` under Homebrew's own label instead — so looking only at
+/// rift's label reports a perfectly healthy install as "not installed".
+const KNOWN_LABELS: &[&str] = &[RIFT_PLIST, "homebrew.mxcl.rift-plus", "homebrew.mxcl.rift"];
+
+/// What launchd is doing with rift, for `rift status`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceStatus {
+    /// The label rift is loaded under, if launchd is running it at all.
+    pub running: Option<String>,
+    /// Whether the plist `rift service` manages is installed.
+    pub own_plist_installed: bool,
 }
+
+pub fn service_state() -> io::Result<ServiceStatus> {
+    Ok(ServiceStatus {
+        running: KNOWN_LABELS
+            .iter()
+            .find(|label| job_is_running(label))
+            .map(|label| (*label).to_string()),
+        own_plist_installed: plist_path()?.is_file(),
+    })
+}
+
+fn job_is_running(label: &str) -> bool {
+    let service_target = format!("gui/{}/{}", getuid(), label);
+    run_launchctl(&["print", &service_target], true).is_ok_and(|code| code == 0)
+}
+
+fn service_is_running() -> io::Result<bool> { Ok(job_is_running(RIFT_PLIST)) }
 
 pub fn service_install_internal(plist_path: &Path) -> io::Result<()> {
     let plist = plist_contents()?;

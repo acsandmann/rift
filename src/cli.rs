@@ -26,6 +26,12 @@ enum CliCommand {
 /// `rift-cli query windows` execute the same implementation.
 #[derive(Subcommand)]
 pub enum ClientCommand {
+    /// Report whether rift, its launchd service and the scripting addition are healthy
+    Status {
+        /// Print the report as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Query information from rift
     Query {
         #[command(subcommand)]
@@ -482,6 +488,22 @@ pub enum SubscribeCommands {
 /// Run a client command against the window manager, then exit with its result.
 pub fn run(command: ClientCommand) -> ! {
     let request = match command {
+        // Status probes the service and Dock as well as the running rift, so it
+        // is not one IPC request and reports its own exit code.
+        ClientCommand::Status { json } => {
+            let report = crate::status::report();
+            let printed = if json {
+                write_json(&report, true)
+            } else {
+                print!("{}", report.render());
+                Ok(())
+            };
+            if let Err(error) = printed {
+                eprintln!("Failed to print the status report: {}", error);
+                process::exit(1);
+            }
+            process::exit(if report.window_manager_is_up() { 0 } else { 1 });
+        }
         ClientCommand::Subscribe {
             subscribe: SubscribeCommands::Mach { event },
         } => {
@@ -545,6 +567,9 @@ pub fn run(command: ClientCommand) -> ! {
 
 fn build_request(command: ClientCommand) -> Result<RiftRequest, String> {
     match command {
+        ClientCommand::Status { .. } => {
+            unreachable!("status reports locally and never builds a request")
+        }
         ClientCommand::Query { query } => build_query_request(query),
         ClientCommand::Execute { command } => build_execute_request(command),
         ClientCommand::Subscribe { subscribe } => build_subscribe_request(subscribe),
