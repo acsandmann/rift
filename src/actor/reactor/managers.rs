@@ -73,6 +73,7 @@ pub struct WindowInventoryManager {
     pub next_request_id: u64,
     pub in_flight: HashMap<pid_t, WindowInventoryToken>,
     pub pending: HashSet<pid_t>,
+    pub refocus_after_refresh: HashMap<pid_t, WindowId>,
 }
 
 /// Manages workspace switching state

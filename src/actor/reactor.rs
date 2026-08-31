@@ -205,6 +205,11 @@ pub enum Event {
     },
     #[serde(skip)]
     WindowInventoryRefreshRequested(pid_t),
+    #[serde(skip)]
+    RaiseTargetsMissing {
+        windows: Vec<WindowId>,
+        sequence_id: u64,
+    },
     WindowCreated(
         WindowId,
         WindowInfo,
@@ -435,6 +440,7 @@ impl Reactor {
                 next_request_id: 0,
                 in_flight: HashMap::default(),
                 pending: HashSet::default(),
+                refocus_after_refresh: HashMap::default(),
             },
             refocus_manager: managers::RefocusManager {
                 stale_cleanup_state: StaleCleanupState::Enabled,
@@ -512,6 +518,7 @@ impl Reactor {
     fn forget_window_inventory(&mut self, pid: pid_t) {
         self.window_inventory_manager.in_flight.remove(&pid);
         self.window_inventory_manager.pending.remove(&pid);
+        self.window_inventory_manager.refocus_after_refresh.remove(&pid);
     }
 
     fn finish_window_inventory(
@@ -1250,6 +1257,20 @@ impl Reactor {
                 self.request_window_inventory(pid);
                 return Ok(EventOutcome::default());
             }
+            Event::RaiseTargetsMissing { windows, sequence_id } => {
+                let Some(first) = windows.first() else {
+                    return Ok(EventOutcome::default());
+                };
+                self.window_inventory_manager.refocus_after_refresh.insert(first.pid, *first);
+                self.request_window_inventory(first.pid);
+                let mut outcome = EventOutcome::default();
+                for window_id in windows {
+                    outcome
+                        .raise_requests
+                        .push(raise_manager::Event::RaiseCompleted { window_id, sequence_id });
+                }
+                return Ok(outcome);
+            }
             Event::WindowsDiscovered {
                 pid,
                 token,
@@ -1261,9 +1282,17 @@ impl Reactor {
                     debug!(pid, ?token, successful, "Discarding stale AX window inventory");
                     return Ok(EventOutcome::default());
                 }
+                let refocus = self
+                    .window_inventory_manager
+                    .refocus_after_refresh
+                    .remove(&pid)
+                    .is_some_and(|target| new.iter().any(|(wid, _)| *wid == target));
                 let mut outcome = application_workflow::handle_windows_discovered(
                     application_workflow::WindowsDiscoveredPayload { pid, new, known_visible },
                 )?;
+                if refocus {
+                    outcome = outcome.with_arrange_passes(1);
+                }
                 outcome.focused_window = raised_window;
                 return Ok(outcome);
             }

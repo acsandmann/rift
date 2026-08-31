@@ -656,11 +656,19 @@ impl State {
     async fn handle_raises(this: &RefCell<Self>, mut rx: actor::Receiver<RaiseRequest>) {
         while let Some((span, raise)) = rx.recv().await {
             let RaiseRequest(wids, token, sequence_id, quiet) = raise;
-            if let Err(e) = Self::handle_raise_request(this, wids, &token, sequence_id, quiet)
+            if let Err(e) = Self::handle_raise_request(this, &wids, &token, sequence_id, quiet)
                 .instrument(span)
                 .await
             {
                 debug!("Raise request failed: {e:?}");
+                if matches!(
+                    e,
+                    RaiseError::AXError(AxError::NotFound)
+                        | RaiseError::AXError(AxError::Ax(AXError::InvalidUIElement))
+                ) {
+                    this.borrow()
+                        .send_event(Event::RaiseTargetsMissing { windows: wids, sequence_id });
+                }
             }
         }
     }
@@ -1222,7 +1230,7 @@ impl From<AxError> for RaiseError {
 impl State {
     async fn handle_raise_request(
         this_ref: &RefCell<Self>,
-        wids: Vec<WindowId>,
+        wids: &[WindowId],
         token: &CancellationToken,
         sequence_id: u64,
         quiet: Quiet,
