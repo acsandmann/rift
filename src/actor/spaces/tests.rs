@@ -1270,10 +1270,7 @@ fn display_churn_stabilization_rejects_duplicate_space_snapshot_until_valid() {
     ));
 
     let epoch = actor.state.display_churn_epoch;
-    actor.state.screens = vec![
-        make_screen_with(1, "display-left", 0.0, 1000.0, Some(left)),
-        make_screen_with(2, "display-right", 1000.0, 1000.0, Some(left)),
-    ];
+    actor.state.screens = vec![make_screen_with(3, "wake-placeholder", 0.0, 1000.0, None)];
 
     actor.attempt_finish_display_churn(epoch, 0);
     actor.attempt_finish_display_churn(epoch, 1);
@@ -1281,11 +1278,20 @@ fn display_churn_stabilization_rejects_duplicate_space_snapshot_until_valid() {
 
     actor.state.screens = vec![
         make_screen_with(1, "display-left", 0.0, 1000.0, Some(left)),
-        make_screen_with(2, "display-right", 1000.0, 1000.0, Some(right)),
+        make_screen_with(2, "display-right", 1000.0, 1000.0, Some(left)),
     ];
 
     actor.attempt_finish_display_churn(epoch, 2);
     actor.attempt_finish_display_churn(epoch, 3);
+    assert_no_wm_event(&mut wm_rx);
+
+    actor.state.screens = vec![
+        make_screen_with(1, "display-left", 0.0, 1000.0, Some(left)),
+        make_screen_with(2, "display-right", 1000.0, 1000.0, Some(right)),
+    ];
+
+    actor.attempt_finish_display_churn(epoch, 4);
+    actor.attempt_finish_display_churn(epoch, 5);
 
     match recv_wm(&mut wm_rx) {
         wm_controller::WmEvent::SpaceStateUpdated(state, _) => {

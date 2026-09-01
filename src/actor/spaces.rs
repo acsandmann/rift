@@ -1353,7 +1353,7 @@ impl SpacesActor {
         };
 
         if hits >= DISPLAY_STABLE_REQUIRED_HITS {
-            if !Self::screen_snapshot_is_valid_for_commit(&screens) {
+            if !Self::screen_snapshot_is_ready_for_authoritative_commit(&screens, true) {
                 self.state.display_topology_state = None;
                 if !self.retry_display_stabilization(expected_epoch, attempt) {
                     self.finish_display_churn(expected_epoch, true);
