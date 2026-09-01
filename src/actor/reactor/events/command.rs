@@ -44,6 +44,7 @@ pub fn handle_command_layout(
     } = payload;
     info!(?cmd);
     let is_move_node = matches!(cmd, LayoutCommand::MoveNode(_));
+    let is_selection_command = matches!(cmd, LayoutCommand::Ascend | LayoutCommand::Descend);
     let is_workspace_switch = matches!(
         cmd,
         LayoutCommand::NextWorkspace(_)
@@ -133,10 +134,12 @@ pub fn handle_command_layout(
         return Ok(EventOutcome::no_change());
     }
 
+    let selection_changed = is_selection_command && response.changed;
     let arrange_space_scope = is_workspace_switch.then_some(workspace_space).flatten();
     let mut outcome = EventOutcome::layout_changed(false)
         .with_layout_response(response, workspace_space)
         .with_arrange_space_scope(arrange_space_scope);
+    outcome.broadcast_selection_changed = selection_changed;
     if is_move_node && let Some(window) = post_arrange_mouse_warp {
         outcome = outcome.with_post_arrange_mouse_warp(window);
     }

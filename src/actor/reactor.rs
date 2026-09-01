@@ -2119,6 +2119,11 @@ impl Reactor {
                 outcome.arrange.space_scope.or_else(|| self.workspace_command_space()),
             );
         }
+        if outcome.broadcast_selection_changed {
+            self.broadcast_selection_changed(
+                outcome.arrange.space_scope.or_else(|| self.workspace_command_space()),
+            );
+        }
 
         if layout_changed
             && let Some(window) = outcome.post_arrange_mouse_warp
@@ -2515,6 +2520,18 @@ impl Reactor {
     }
 
     fn broadcast_layout_changed(&self, space: Option<SpaceId>) {
+        self.broadcast_layout_state_changed(space, rift_protocol::EventKind::LayoutChanged);
+    }
+
+    fn broadcast_selection_changed(&self, space: Option<SpaceId>) {
+        self.broadcast_layout_state_changed(space, rift_protocol::EventKind::SelectionChanged);
+    }
+
+    fn broadcast_layout_state_changed(
+        &self,
+        space: Option<SpaceId>,
+        kind: rift_protocol::EventKind,
+    ) {
         if let Some(space) = space
             && self.is_space_active(space)
             && let Some(workspace_id) = self.layout_manager.layout_engine.active_workspace(space)
@@ -2526,13 +2543,27 @@ impl Reactor {
                 .layout_engine
                 .workspace_name(space, workspace_id)
                 .unwrap_or_else(|| format!("Workspace {:?}", workspace_id));
-            let event = BroadcastEvent::LayoutChanged {
-                workspace_id: protocol_workspace_id(workspace_id),
-                workspace_index,
-                workspace_name,
-                space_id: space.get(),
-                display_uuid: self.display_uuid_for_space(space),
-                layout,
+            let workspace_id = protocol_workspace_id(workspace_id);
+            let space_id = space.get();
+            let display_uuid = self.display_uuid_for_space(space);
+            let event = match kind {
+                rift_protocol::EventKind::LayoutChanged => BroadcastEvent::LayoutChanged {
+                    workspace_id,
+                    workspace_index,
+                    workspace_name,
+                    space_id,
+                    display_uuid,
+                    layout,
+                },
+                rift_protocol::EventKind::SelectionChanged => BroadcastEvent::SelectionChanged {
+                    workspace_id,
+                    workspace_index,
+                    workspace_name,
+                    space_id,
+                    display_uuid,
+                    layout,
+                },
+                _ => return,
             };
             let _ = self.communication_manager.event_broadcaster.send(event);
         }

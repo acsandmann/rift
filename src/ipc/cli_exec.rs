@@ -144,8 +144,16 @@ impl CliExecutor for DefaultCliExecutor {
                 space_id,
                 display_uuid,
                 layout: _,
+            }
+            | BroadcastEvent::SelectionChanged {
+                workspace_id,
+                workspace_index,
+                workspace_name,
+                space_id,
+                display_uuid,
+                layout: _,
             } => {
-                env_vars.insert("RIFT_EVENT_TYPE".into(), "layout_changed".into());
+                env_vars.insert("RIFT_EVENT_TYPE".into(), event.kind().as_str().into());
                 env_vars.insert("RIFT_WORKSPACE_ID".into(), workspace_id.to_string());
                 env_vars.insert("RIFT_WORKSPACE_NAME".into(), workspace_name.clone());
                 if let Some(workspace_index) = workspace_index {

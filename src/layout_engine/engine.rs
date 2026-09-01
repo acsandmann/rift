@@ -1932,12 +1932,12 @@ impl LayoutEngine {
                 if is_floating {
                     return EventResponse::default();
                 }
-                self.workspace_tree_mut(workspace_id).ascend_selection(layout);
-                EventResponse::default()
+                let changed = self.workspace_tree_mut(workspace_id).ascend_selection(layout);
+                EventResponse { changed, ..Default::default() }
             }
             LayoutCommand::Descend => {
-                self.workspace_tree_mut(workspace_id).descend_selection(layout);
-                EventResponse::default()
+                let changed = self.workspace_tree_mut(workspace_id).descend_selection(layout);
+                EventResponse { changed, ..Default::default() }
             }
             LayoutCommand::MoveNode(direction) => {
                 self.workspace_layouts.mark_last_saved(space, workspace_id, layout);

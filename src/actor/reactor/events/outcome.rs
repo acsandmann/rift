@@ -74,6 +74,7 @@ pub(crate) struct EventOutcome {
     pub(crate) window_title_broadcasts: Vec<WindowTitleBroadcast>,
     pub(crate) focused_window_broadcast: Option<WindowId>,
     pub(crate) broadcast_layout_changed: bool,
+    pub(crate) broadcast_selection_changed: bool,
     pub(crate) layout_events: Vec<LayoutEvent>,
     pub(crate) layout_responses: Vec<(EventResponse, Option<SpaceId>)>,
     pub(crate) arrange: ArrangeRequest,
@@ -132,6 +133,7 @@ impl EventOutcome {
         self.focused_window_broadcast =
             other.focused_window_broadcast.or(self.focused_window_broadcast);
         self.broadcast_layout_changed |= other.broadcast_layout_changed;
+        self.broadcast_selection_changed |= other.broadcast_selection_changed;
         self.layout_events.append(&mut other.layout_events);
         self.layout_responses.append(&mut other.layout_responses);
         if other.arrange.requested {
@@ -186,6 +188,7 @@ impl EventOutcome {
             window_title_broadcasts: Vec::new(),
             focused_window_broadcast: None,
             broadcast_layout_changed: true,
+            broadcast_selection_changed: false,
             layout_events: Vec::new(),
             layout_responses: Vec::new(),
             arrange: ArrangeRequest {
