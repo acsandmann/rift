@@ -493,6 +493,20 @@ impl Reactor {
             .extend(self.window_inventory_manager.in_flight.keys().copied());
     }
 
+    fn abandon_window_inventories_from_instability(&mut self) {
+        // AX requests issued before sleep or display teardown are not guaranteed to
+        // reply. Keeping them in `in_flight` prevents the authoritative recovery
+        // snapshot from requesting replacement AX elements, leaving every affected
+        // window unusable until its application is activated manually.
+        let abandoned = self
+            .window_inventory_manager
+            .in_flight
+            .drain()
+            .map(|(pid, _)| pid)
+            .collect::<Vec<_>>();
+        self.window_inventory_manager.pending.extend(abandoned);
+    }
+
     fn request_window_inventory(&mut self, pid: pid_t) {
         if self.refreshes_blocked() || self.window_inventory_manager.in_flight.contains_key(&pid) {
             self.window_inventory_manager.pending.insert(pid);
@@ -1538,13 +1552,28 @@ impl Reactor {
                     space_state.releases_lifecycle_refresh_quarantine;
                 let releases_display_churn_refresh_quarantine =
                     space_state.releases_display_churn_refresh_quarantine;
-                let outcome = self.handle_authoritative_space_snapshot(space_state)?;
+                let releases_instability = (releases_lifecycle_refresh_quarantine
+                    && (self.refresh_quarantine_manager.awaiting_post_wake_snapshot
+                        || self.refresh_quarantine_manager.awaiting_post_session_snapshot))
+                    || (releases_display_churn_refresh_quarantine
+                        && self.refresh_quarantine_manager.display_churn_active);
+                if releases_instability {
+                    self.abandon_window_inventories_from_instability();
+                }
+                let mut outcome = self.handle_authoritative_space_snapshot(space_state)?;
                 if releases_lifecycle_refresh_quarantine {
                     self.release_post_instability_quarantine_after_authoritative_snapshot();
                 }
                 if releases_display_churn_refresh_quarantine {
                     self.refresh_quarantine_manager.display_churn_active = false;
                     self.request_refresh_when_spaces_actor_stabilizes();
+                }
+                if releases_instability {
+                    // Releasing either recovery gate already flushes the deferred
+                    // all-app refresh. A topology-changing snapshot requests the
+                    // same refresh through its outcome; leave only one request per
+                    // app instead of immediately scheduling a redundant follow-up.
+                    outcome.refresh_window_inventories = false;
                 }
                 return Ok(outcome);
             }
