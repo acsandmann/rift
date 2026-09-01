@@ -174,8 +174,6 @@ pub struct LayoutStateData {
     pub selected_window: Option<WindowId>,
     /// Normalized topology for the queried workspace's tiled layout.
     ///
-    /// Internal node IDs are intentionally omitted because they are not stable across layout
-    /// mutations. Consumers can identify leaves by `window_id` and other nodes by their path.
     pub container_tree: ContainerTreeNode,
 }
 
@@ -192,6 +190,8 @@ pub enum ContainerNodeType {
 /// A platform-neutral view of one node in a tiled layout.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ContainerTreeNode {
+    /// Stable identity for this node for as long as it exists in the workspace.
+    pub node_id: u64,
     pub node_type: ContainerNodeType,
     /// The layout target for this node, in the same coordinate space as `WindowData::frame`.
     ///

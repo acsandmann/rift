@@ -1,5 +1,6 @@
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use serde::{Deserialize, Serialize};
+use slotmap::Key;
 
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::{HashMap, HashSet};
@@ -1066,6 +1067,7 @@ impl LayoutSystem for BspLayoutSystem {
 
             match system.kind.get(node) {
                 Some(NodeKind::Split { orientation, .. }) => rift_protocol::ContainerTreeNode {
+                    node_id: node.data().as_ffi(),
                     node_type: rift_protocol::ContainerNodeType::Container,
                     frame: Default::default(),
                     layout_kind: Some(rift_protocol::LayoutKind::from(*orientation)),
@@ -1087,6 +1089,7 @@ impl LayoutSystem for BspLayoutSystem {
                     fullscreen_within_gaps,
                     preselected,
                 }) => rift_protocol::ContainerTreeNode {
+                    node_id: node.data().as_ffi(),
                     node_type: if window.is_some() {
                         rift_protocol::ContainerNodeType::Window
                     } else {

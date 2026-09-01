@@ -193,6 +193,7 @@ mod tests {
                 focused_window: None,
                 selected_window: None,
                 container_tree: crate::ContainerTreeNode {
+                    node_id: 1,
                     node_type: crate::ContainerNodeType::Placeholder,
                     frame: Default::default(),
                     layout_kind: None,
@@ -230,6 +231,7 @@ mod tests {
                     "focused_window": null,
                     "selected_window": null,
                     "container_tree": {
+                        "node_id": 1,
                         "node_type": "placeholder",
                         "frame": {
                             "origin": { "x": 0.0, "y": 0.0 },

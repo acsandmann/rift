@@ -329,6 +329,25 @@ mod tests {
         windows
     }
 
+    fn node_ids(tree: &rift_protocol::ContainerTreeNode) -> Vec<u64> {
+        let mut ids = vec![tree.node_id];
+        for child in &tree.children {
+            ids.extend(node_ids(child));
+        }
+        ids
+    }
+
+    fn assert_stable_unique_ids(
+        before: &rift_protocol::ContainerTreeNode,
+        after: &rift_protocol::ContainerTreeNode,
+    ) {
+        let before_ids = node_ids(before);
+        let after_ids = node_ids(after);
+        assert_eq!(before_ids, after_ids);
+        let unique: std::collections::HashSet<_> = after_ids.iter().copied().collect();
+        assert_eq!(unique.len(), after_ids.len());
+    }
+
     #[test]
     fn normalized_container_trees_expose_layout_topology() {
         let mut traditional = TraditionalLayoutSystem::default();
@@ -342,6 +361,8 @@ mod tests {
             window_nodes(&tree).iter().filter(|node| node.is_selected).count(),
             1
         );
+        traditional.select_window(layout, w(1));
+        assert_stable_unique_ids(&tree, &traditional.container_tree(layout));
 
         let mut bsp = BspLayoutSystem::default();
         let layout = bsp.create_layout();
@@ -351,6 +372,8 @@ mod tests {
         assert_eq!(tree.children.len(), 2);
         let total_weight: f64 = tree.children.iter().filter_map(|node| node.weight).sum();
         assert!((total_weight - 1.0).abs() < f64::EPSILON);
+        bsp.select_window(layout, w(1));
+        assert_stable_unique_ids(&tree, &bsp.container_tree(layout));
 
         let mut master_stack = MasterStackLayoutSystem::default();
         let layout = master_stack.create_layout();
@@ -368,6 +391,8 @@ mod tests {
         let tree = scrolling.container_tree(layout);
         assert!(tree.children.iter().all(|node| node.role.as_deref() == Some("column")));
         assert_eq!(window_nodes(&tree).len(), 2);
+        scrolling.select_window(layout, w(1));
+        assert_stable_unique_ids(&tree, &scrolling.container_tree(layout));
     }
 }
 mod stack;
