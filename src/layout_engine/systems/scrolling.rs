@@ -675,6 +675,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
                     .enumerate()
                     .map(|(index, &window)| rift_protocol::ContainerTreeNode {
                         node_type: rift_protocol::ContainerNodeType::Window,
+                        frame: Default::default(),
                         layout_kind: None,
                         weight: Some(column.height_weights.get(index).copied().unwrap_or(1.0)),
                         window_id: Some(window.into()),
@@ -688,6 +689,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
                     .collect();
                 rift_protocol::ContainerTreeNode {
                     node_type: rift_protocol::ContainerNodeType::Container,
+                    frame: Default::default(),
                     layout_kind: Some(rift_protocol::LayoutKind::Vertical),
                     weight: Some((state.column_width_ratio + column.width_offset).max(0.0)),
                     window_id: None,
@@ -703,6 +705,7 @@ impl LayoutSystem for ScrollingLayoutSystem {
 
         rift_protocol::ContainerTreeNode {
             node_type: rift_protocol::ContainerNodeType::Container,
+            frame: Default::default(),
             layout_kind: Some(rift_protocol::LayoutKind::Horizontal),
             weight: None,
             window_id: None,

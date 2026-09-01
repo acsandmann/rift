@@ -47,6 +47,19 @@ pub struct RuntimeDisplayData {
     pub inactive_space_ids: Vec<u64>,
 }
 
+pub(crate) fn protocol_rect(frame: objc2_core_foundation::CGRect) -> protocol::Rect {
+    protocol::Rect {
+        origin: protocol::Point {
+            x: frame.origin.x,
+            y: frame.origin.y,
+        },
+        size: protocol::Size {
+            width: frame.size.width,
+            height: frame.size.height,
+        },
+    }
+}
+
 impl From<WindowId> for protocol::WindowId {
     fn from(value: WindowId) -> Self {
         Self {
@@ -61,16 +74,7 @@ impl From<RuntimeWindowData> for protocol::WindowData {
         Self {
             id: value.id.into(),
             title: value.info.title,
-            frame: protocol::Rect {
-                origin: protocol::Point {
-                    x: value.info.frame.origin.x,
-                    y: value.info.frame.origin.y,
-                },
-                size: protocol::Size {
-                    width: value.info.frame.size.width,
-                    height: value.info.frame.size.height,
-                },
-            },
+            frame: protocol_rect(value.info.frame),
             is_floating: value.is_floating,
             is_focused: value.is_focused,
             bundle_id: value.info.bundle_id,
@@ -101,16 +105,7 @@ impl From<RuntimeDisplayData> for protocol::DisplayData {
             uuid: value.info.display_uuid,
             name: value.info.name,
             screen_id: value.info.id.as_u32(),
-            frame: protocol::Rect {
-                origin: protocol::Point {
-                    x: value.info.frame.origin.x,
-                    y: value.info.frame.origin.y,
-                },
-                size: protocol::Size {
-                    width: value.info.frame.size.width,
-                    height: value.info.frame.size.height,
-                },
-            },
+            frame: protocol_rect(value.info.frame),
             space: value.info.space.map(|space| space.get()),
             is_active_space: value.is_active_space,
             is_active_context: value.is_active_context,

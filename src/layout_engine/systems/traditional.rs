@@ -1629,6 +1629,7 @@ impl TraditionalLayoutSystem {
                 } else {
                     rift_protocol::ContainerNodeType::Container
                 },
+                frame: Default::default(),
                 layout_kind: window.is_none().then_some(info.kind),
                 weight: node.parent(system.map()).map(|_| f64::from(info.size)),
                 window_id: window.map(Into::into),

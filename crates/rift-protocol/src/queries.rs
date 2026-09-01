@@ -87,19 +87,19 @@ impl WindowId {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Point {
     pub x: f64,
     pub y: f64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Size {
     pub width: f64,
     pub height: f64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Rect {
     pub origin: Point,
     pub size: Size,
@@ -193,6 +193,11 @@ pub enum ContainerNodeType {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ContainerTreeNode {
     pub node_type: ContainerNodeType,
+    /// The layout target for this node, in the same coordinate space as `WindowData::frame`.
+    ///
+    /// Container frames describe the space allocated by the layout engine, before any window
+    /// animation. Window frames are the target frames emitted by that same layout calculation.
+    pub frame: Rect,
     /// Split/stack behavior for a container. Window and placeholder nodes use `None`.
     pub layout_kind: Option<LayoutKind>,
     /// This node's relative share within its parent, when the layout engine has one.

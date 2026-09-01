@@ -194,6 +194,7 @@ mod tests {
                 selected_window: None,
                 container_tree: crate::ContainerTreeNode {
                     node_type: crate::ContainerNodeType::Placeholder,
+                    frame: Default::default(),
                     layout_kind: None,
                     weight: None,
                     window_id: None,
@@ -230,6 +231,10 @@ mod tests {
                     "selected_window": null,
                     "container_tree": {
                         "node_type": "placeholder",
+                        "frame": {
+                            "origin": { "x": 0.0, "y": 0.0 },
+                            "size": { "width": 0.0, "height": 0.0 }
+                        },
                         "layout_kind": null,
                         "weight": null,
                         "window_id": null,

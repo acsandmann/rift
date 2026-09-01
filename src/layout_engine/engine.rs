@@ -204,6 +204,31 @@ impl LayoutEngine {
         })
     }
 
+    pub(crate) fn calculate_workspace_layout(
+        &self,
+        space: SpaceId,
+        workspace_id: VirtualWorkspaceId,
+        screen: CGRect,
+        gaps: &crate::common::config::GapSettings,
+        stack_line_thickness: f64,
+        stack_line_horiz: crate::common::config::HorizontalPlacement,
+        stack_line_vert: crate::common::config::VerticalPlacement,
+    ) -> Vec<(WindowId, CGRect)> {
+        let Some(layout) = self.workspace_layouts.active(space, workspace_id) else {
+            return Vec::new();
+        };
+        self.workspace_tree(workspace_id).calculate_layout(
+            layout,
+            screen,
+            self.layout_settings.stack.stack_offset,
+            &self.window_layout_constraints,
+            gaps,
+            stack_line_thickness,
+            stack_line_horiz,
+            stack_line_vert,
+        )
+    }
+
     /// Get the active workspace ID for a space, ensuring initialization.
     fn active_workspace_id(&self, space: SpaceId) -> Option<VirtualWorkspaceId> {
         self.virtual_workspace_manager.active_workspace(space)
@@ -2134,14 +2159,13 @@ impl LayoutEngine {
         stack_line_horiz: crate::common::config::HorizontalPlacement,
         stack_line_vert: crate::common::config::VerticalPlacement,
     ) -> Vec<(WindowId, CGRect)> {
-        let Some((ws_id, layout)) = self.workspace_and_layout(space) else {
+        let Some((workspace_id, _)) = self.workspace_and_layout(space) else {
             return Vec::new();
         };
-        self.workspace_tree(ws_id).calculate_layout(
-            layout,
+        self.calculate_workspace_layout(
+            space,
+            workspace_id,
             screen,
-            self.layout_settings.stack.stack_offset,
-            &self.window_layout_constraints,
             gaps,
             stack_line_thickness,
             stack_line_horiz,

@@ -1067,6 +1067,7 @@ impl LayoutSystem for BspLayoutSystem {
             match system.kind.get(node) {
                 Some(NodeKind::Split { orientation, .. }) => rift_protocol::ContainerTreeNode {
                     node_type: rift_protocol::ContainerNodeType::Container,
+                    frame: Default::default(),
                     layout_kind: Some(rift_protocol::LayoutKind::from(*orientation)),
                     weight,
                     window_id: None,
@@ -1091,6 +1092,7 @@ impl LayoutSystem for BspLayoutSystem {
                     } else {
                         rift_protocol::ContainerNodeType::Placeholder
                     },
+                    frame: Default::default(),
                     layout_kind: None,
                     weight,
                     window_id: window.map(Into::into),

@@ -2,16 +2,59 @@ use std::sync::mpsc::{RecvError, SyncSender, sync_channel};
 
 use objc2_core_foundation::CGRect;
 use rift_protocol::{
-    ApplicationData, ContainerTreeNode, LayoutStateData, WindowLayoutPosition, WorkspaceLayoutData,
+    ApplicationData, ContainerTreeNode, LayoutStateData, Point, Rect, Size, WindowLayoutPosition,
+    WorkspaceLayoutData,
 };
 
 use crate::actor::app::WindowId;
 use crate::actor::menu_bar;
 use crate::actor::reactor::{Event, Reactor, Sender};
 use crate::common::collections::{HashMap, HashSet};
-use crate::model::server::{RuntimeDisplayData, RuntimeWindowData, RuntimeWorkspaceData};
+use crate::model::server::{
+    RuntimeDisplayData, RuntimeWindowData, RuntimeWorkspaceData, protocol_rect,
+};
 use crate::model::virtual_workspace::VirtualWorkspaceId;
 use crate::sys::screen::{ScreenInfo, SpaceId};
+
+fn union_rect(a: Rect, b: Rect) -> Rect {
+    let x = a.origin.x.min(b.origin.x);
+    let y = a.origin.y.min(b.origin.y);
+    let max_x = (a.origin.x + a.size.width).max(b.origin.x + b.size.width);
+    let max_y = (a.origin.y + a.size.height).max(b.origin.y + b.size.height);
+    Rect {
+        origin: Point { x, y },
+        size: Size {
+            width: max_x - x,
+            height: max_y - y,
+        },
+    }
+}
+
+fn attach_target_frames(
+    node: &mut ContainerTreeNode,
+    window_frames: &HashMap<WindowId, Rect>,
+) -> Option<Rect> {
+    if let Some(window) = node.window_id {
+        node.frame = *window_frames.get(&WindowId::new(window.pid, window.idx))?;
+        return Some(node.frame);
+    }
+
+    node.frame = node
+        .children
+        .iter_mut()
+        .filter_map(|child| attach_target_frames(child, window_frames))
+        .reduce(union_rect)?;
+    Some(node.frame)
+}
+
+fn propagate_single_child_allocations(node: &mut ContainerTreeNode) {
+    if let [child] = node.children.as_mut_slice()
+        && child.window_id.is_none()
+    {
+        child.frame = node.frame;
+    }
+    node.children.iter_mut().for_each(propagate_single_child_allocations);
+}
 
 fn logical_window_positions(tree: &ContainerTreeNode) -> HashMap<WindowId, WindowLayoutPosition> {
     tree.children
@@ -547,10 +590,30 @@ impl Reactor {
             return None;
         }
 
-        let snapshot = self
+        let mut snapshot = self
             .layout_manager
             .layout_engine
             .query_workspace_layout(space_id, workspace_id)?;
+        let screen = self.space_state.screen_by_space(space_id)?;
+        let display_uuid = screen.display_uuid_owned();
+        let gaps = self.config.settings.layout.gaps.effective_for_display(display_uuid.as_deref());
+        let target_frames = self.layout_manager.layout_engine.calculate_workspace_layout(
+            space_id,
+            snapshot.workspace_id,
+            screen.frame,
+            &gaps,
+            self.config.settings.ui.stack_line.thickness(),
+            self.config.settings.ui.stack_line.horiz_placement,
+            self.config.settings.ui.stack_line.vert_placement,
+        );
+        let target_frames: HashMap<WindowId, Rect> = target_frames
+            .into_iter()
+            .map(|(window, frame)| (window, protocol_rect(frame)))
+            .collect();
+        let tiling_area = crate::layout_engine::utils::compute_tiling_area(screen.frame, &gaps);
+        attach_target_frames(&mut snapshot.container_tree, &target_frames);
+        snapshot.container_tree.frame = protocol_rect(tiling_area);
+        propagate_single_child_allocations(&mut snapshot.container_tree);
         let workspace_windows = self
             .layout_manager
             .layout_engine

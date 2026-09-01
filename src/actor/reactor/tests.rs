@@ -31,6 +31,10 @@ fn layout_query_exposes_active_and_inactive_workspace_container_trees() {
         rift_protocol::ContainerNodeType::Container
     );
     assert_eq!(state.container_tree.children.len(), 2);
+    assert!(state.container_tree.frame.size.width > 0.0);
+    assert!(state.container_tree.frame.size.height > 0.0);
+    assert!(state.container_tree.children.iter().all(|node| node.frame.size.width > 0.0));
+    assert!(state.container_tree.children.iter().all(|node| node.frame.size.height > 0.0));
     assert_eq!(
         state
             .container_tree
@@ -4685,6 +4689,14 @@ fn sleep_ax_churn_preserves_modified_layout_through_recovery() {
 
 #[test]
 fn clamshell_sleep_preserves_nested_layout_across_display_replacement() {
+    fn without_frames(
+        mut node: rift_protocol::ContainerTreeNode,
+    ) -> rift_protocol::ContainerTreeNode {
+        node.frame = Default::default();
+        node.children = node.children.into_iter().map(without_frames).collect();
+        node
+    }
+
     let (mut apps, mut reactor) = test_context();
     let external_screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(3440., 1409.));
     let internal_screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1728., 1083.));
@@ -4714,11 +4726,13 @@ fn clamshell_sleep_preserves_nested_layout_across_display_replacement() {
     }
 
     assert_eq!(
-        reactor
-            .query_layout_state(Some(space.get()), None)
-            .expect("quarantined layout state")
-            .container_tree,
-        topology_before,
+        without_frames(
+            reactor
+                .query_layout_state(Some(space.get()), None)
+                .expect("quarantined layout state")
+                .container_tree,
+        ),
+        without_frames(topology_before.clone()),
         "sleep-time AX destruction must not flatten the nested layout",
     );
 
@@ -4741,11 +4755,13 @@ fn clamshell_sleep_preserves_nested_layout_across_display_replacement() {
     reactor.discover_test_windows(1, rediscovered, window_ids.clone());
 
     assert_eq!(
-        reactor
-            .query_layout_state(Some(space.get()), None)
-            .expect("internal-display layout state")
-            .container_tree,
-        topology_before,
+        without_frames(
+            reactor
+                .query_layout_state(Some(space.get()), None)
+                .expect("internal-display layout state")
+                .container_tree,
+        ),
+        without_frames(topology_before),
         "clamshell recovery must preserve container nesting, order, selection, and weights",
     );
     assert_eq!(
