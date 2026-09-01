@@ -1834,6 +1834,8 @@ impl Reactor {
                 );
             }
             Event::Command(Command::Layout(command)) => {
+                let post_arrange_mouse_warp =
+                    self.config.settings.mouse_follows_focus.then(|| self.main_window()).flatten();
                 let command_space = self.command_context_space();
                 let (visible_spaces, visible_space_centers) = self.visible_spaces_for_layout(false);
                 return command_workflow::handle_command_layout(
@@ -1845,6 +1847,7 @@ impl Reactor {
                         command_space,
                         visible_spaces,
                         visible_space_centers,
+                        post_arrange_mouse_warp,
                     },
                 );
             }
@@ -2108,6 +2111,13 @@ impl Reactor {
             self.broadcast_layout_changed(
                 outcome.arrange.space_scope.or_else(|| self.workspace_command_space()),
             );
+        }
+
+        if layout_changed
+            && let Some(window) = outcome.post_arrange_mouse_warp
+            && let Some(center) = self.window_center_on_known_screen(window)
+        {
+            self.warp_mouse(center);
         }
 
         for request in outcome.raise_requests {

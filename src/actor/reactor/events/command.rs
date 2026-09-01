@@ -26,6 +26,7 @@ pub struct LayoutCommandPayload {
     pub command_space: Option<SpaceId>,
     pub visible_spaces: Vec<SpaceId>,
     pub visible_space_centers: HashMap<SpaceId, objc2_core_foundation::CGPoint>,
+    pub post_arrange_mouse_warp: Option<WindowId>,
 }
 
 pub fn handle_command_layout(
@@ -39,8 +40,10 @@ pub fn handle_command_layout(
         command_space,
         visible_spaces,
         visible_space_centers,
+        post_arrange_mouse_warp,
     } = payload;
     info!(?cmd);
+    let is_move_node = matches!(cmd, LayoutCommand::MoveNode(_));
     let is_workspace_switch = matches!(
         cmd,
         LayoutCommand::NextWorkspace(_)
@@ -131,9 +134,13 @@ pub fn handle_command_layout(
     }
 
     let arrange_space_scope = is_workspace_switch.then_some(workspace_space).flatten();
-    Ok(EventOutcome::layout_changed(false)
+    let mut outcome = EventOutcome::layout_changed(false)
         .with_layout_response(response, workspace_space)
-        .with_arrange_space_scope(arrange_space_scope))
+        .with_arrange_space_scope(arrange_space_scope);
+    if is_move_node && let Some(window) = post_arrange_mouse_warp {
+        outcome = outcome.with_post_arrange_mouse_warp(window);
+    }
+    Ok(outcome)
 }
 
 fn current_floating_positions(
