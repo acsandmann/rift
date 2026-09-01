@@ -882,7 +882,9 @@ impl LayoutEngine {
             // In scrolling layout, don't jump to adjacent displays at the
             // boundary. Off-screen columns are intentionally hidden, so
             // cross-display focus here would select a hidden window.
-            if matches!(self.workspace_tree(ws_id), LayoutSystemKind::Scrolling(_)) {
+            if matches!(direction, Direction::Left | Direction::Right)
+                && matches!(self.workspace_tree(ws_id), LayoutSystemKind::Scrolling(_))
+            {
                 return EventResponse::default();
             }
             if let Some(new_space) = self.next_space_for_direction(
@@ -3710,6 +3712,65 @@ mod tests {
             result.is_ok(),
             "cross-space move focus should not panic when adjacent space is not initialized"
         );
+    }
+
+    #[test]
+    fn scrolling_layout_preserves_vertical_cross_display_focus() {
+        let mut settings = VirtualWorkspaceSettings::default();
+        settings.workspace_rules = vec![WorkspaceLayoutRule {
+            workspace: WorkspaceSelector::Index(0),
+            layout: LayoutMode::Scrolling,
+        }];
+        let mut engine = LayoutEngine::new(&settings, &LayoutSettings::default(), None);
+        let mut window_store = WindowStore::default();
+        let current_space = SpaceId::new(60);
+        let upper_space = SpaceId::new(61);
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1920.0, 1080.0));
+        let current_window = WindowId::new(60, 1);
+        let upper_window = WindowId::new(61, 1);
+        let window_info = |wid| (wid, None, None, None, true, CGSize::new(0.0, 0.0), None, None);
+
+        for space in [current_space, upper_space] {
+            let _ = engine
+                .handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen.size));
+        }
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::windows_observed(
+                current_space,
+                current_window.pid,
+                vec![window_info(current_window)],
+                None,
+            ),
+        );
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::windows_observed(
+                upper_space,
+                upper_window.pid,
+                vec![window_info(upper_window)],
+                None,
+            ),
+        );
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::WindowFocused(current_space, current_window),
+        );
+
+        let visible_spaces = vec![current_space, upper_space];
+        let mut visible_space_centers = HashMap::default();
+        visible_space_centers.insert(current_space, CGPoint::new(960.0, 540.0));
+        visible_space_centers.insert(upper_space, CGPoint::new(960.0, 1620.0));
+
+        let response = engine.handle_command(
+            &mut window_store,
+            Some(current_space),
+            &visible_spaces,
+            &visible_space_centers,
+            LayoutCommand::MoveFocus(Direction::Up),
+        );
+
+        assert_eq!(response.focus_window, Some(upper_window));
     }
 
     #[test]
