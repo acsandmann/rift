@@ -213,8 +213,11 @@ pub fn reap_on_exit_proc(pid: pid_t) {
     let ctx = Box::into_raw(Box::new(pid)) as *mut c_void;
     extern "C" fn proc_event_handler(ctx: *mut c_void) {
         let pid = unsafe { *(ctx as *mut pid_t) };
-        match waitpid(Pid::from_raw(pid), Some(WaitPidFlag::WNOHANG)) {
-            Ok(WaitStatus::StillAlive) => {}
+        let status = match waitpid(Pid::from_raw(pid), Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::StillAlive) => waitpid(Pid::from_raw(pid), None),
+            other => other,
+        };
+        match status {
             Ok(WaitStatus::Exited(p, _)) | Ok(WaitStatus::Signaled(p, _, _)) => {
                 let raw = p.as_raw();
                 if let Some(_src) = sources_map().lock().remove(&raw) {
