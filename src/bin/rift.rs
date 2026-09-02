@@ -292,9 +292,10 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
         Some(window_tx_store.clone()),
     );
 
-    let notification_center = NotificationCenter::new(wm_controller_sender.clone(), spaces_tx);
+    let notification_center =
+        NotificationCenter::new(wm_controller_sender.clone(), spaces_tx.clone());
 
-    let process_actor = ProcessActor::new(wm_controller_sender.clone());
+    let process_actor = ProcessActor::new(wm_controller_sender.clone(), spaces_tx);
 
     let stack_line_hit_rects = rift_wm::actor::stack_line::new_shared_hit_rects();
     let event_tap = EventTap::new(

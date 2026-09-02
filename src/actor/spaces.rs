@@ -306,11 +306,17 @@ impl SpacesActor {
                 self.schedule_screen_refresh();
             }
             Event::SessionDidResignActive => {
+                if self.state.session_inactive {
+                    return;
+                }
                 self.state.session_inactive = true;
                 self.state.release_reactor_quarantine_on_next_forward = false;
                 self.reactor_tx.send(reactor::Event::SessionDidResignActive);
             }
             Event::SessionDidBecomeActive => {
+                if !self.state.session_inactive {
+                    return;
+                }
                 self.state.session_inactive = false;
                 self.reactor_tx.send(reactor::Event::SessionDidBecomeActive);
                 if let Some(screen_cache) = self.state.screen_cache.as_mut() {

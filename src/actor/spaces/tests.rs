@@ -405,6 +405,32 @@ fn session_lock_buffers_space_updates_until_unlock_rescan() {
 }
 
 #[test]
+fn duplicate_session_hints_are_idempotent() {
+    let (mut actor, _wm_rx, mut reactor_rx) = build_actor();
+
+    actor.handle_event(Event::SessionDidBecomeActive);
+    assert!(reactor_rx.try_recv().is_err());
+
+    actor.handle_event(Event::SessionDidResignActive);
+    assert!(matches!(
+        reactor_rx.try_recv().map(|(_, event)| event),
+        Ok(reactor::Event::SessionDidResignActive)
+    ));
+
+    actor.handle_event(Event::SessionDidResignActive);
+    assert!(reactor_rx.try_recv().is_err());
+
+    actor.handle_event(Event::SessionDidBecomeActive);
+    assert!(matches!(
+        reactor_rx.try_recv().map(|(_, event)| event),
+        Ok(reactor::Event::SessionDidBecomeActive)
+    ));
+
+    actor.handle_event(Event::SessionDidBecomeActive);
+    assert!(reactor_rx.try_recv().is_err());
+}
+
+#[test]
 fn timed_refresh_does_not_forward_while_session_is_inactive() {
     let (mut actor, mut wm_rx, mut reactor_rx) = build_actor();
     let unlocked = SpaceId::new(41);

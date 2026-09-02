@@ -3,6 +3,7 @@ use std::future;
 use objc2_app_kit::NSRunningApplication;
 use tracing::{debug, warn};
 
+use crate::actor::spaces;
 use crate::actor::wm_controller::{self, WmEvent};
 use crate::sys::app::{AppInfo, NSRunningApplicationExt, pid_t};
 use crate::sys::carbon::{CarbonListener, Event, event_type};
@@ -43,6 +44,14 @@ fn app_info_for_pid(pid: pid_t) -> AppInfo {
     }
 }
 
+fn session_event_for_front_app(info: &AppInfo) -> spaces::Event {
+    if info.bundle_id.as_deref() == Some("com.apple.loginwindow") {
+        spaces::Event::SessionDidResignActive
+    } else {
+        spaces::Event::SessionDidBecomeActive
+    }
+}
+
 unsafe fn pid_for_psn(psn: &ProcessSerialNumber) -> Option<pid_t> {
     let mut pid: pid_t = 0;
     if unsafe { GetProcessPID(psn, &mut pid) } == NO_ERR && pid != 0 {
@@ -58,7 +67,7 @@ pub struct ProcessActor {
 }
 
 impl ProcessActor {
-    pub fn new(sender: wm_controller::Sender) -> Self {
+    pub fn new(sender: wm_controller::Sender, spaces_sender: spaces::Sender) -> Self {
         let types = [
             event_type(K_EVENT_CLASS_APPLICATION, K_EVENT_APP_LAUNCHED),
             event_type(K_EVENT_CLASS_APPLICATION, K_EVENT_APP_TERMINATED),
@@ -90,6 +99,13 @@ impl ProcessActor {
                 }
                 K_EVENT_APP_FRONT_SWITCHED => {
                     debug!("Carbon: App front switched ({pid})");
+                    // NSWorkspace's session/lock notifications are not reliable on every
+                    // macOS configuration, but Carbon consistently reports loginwindow as
+                    // the front process. Feed that signal to the topology authority before
+                    // forwarding the activation so lock-screen WindowServer snapshots are
+                    // quarantined even when AppKit omits SessionDidResignActive.
+                    let info = app_info_for_pid(pid);
+                    spaces_sender.send(session_event_for_front_app(&info));
                     wm_sender.send(WmEvent::AppGloballyActivated(pid));
                 }
                 K_EVENT_APP_TERMINATED => {
@@ -111,4 +127,30 @@ impl ProcessActor {
     }
 
     pub async fn run(self) { future::pending::<()>().await; }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn carbon_front_switch_classifies_loginwindow_as_session_boundary() {
+        let loginwindow = AppInfo {
+            bundle_id: Some("com.apple.loginwindow".into()),
+            localized_name: Some("loginwindow".into()),
+        };
+        let app = AppInfo {
+            bundle_id: Some("com.example.app".into()),
+            localized_name: Some("App".into()),
+        };
+
+        assert!(matches!(
+            session_event_for_front_app(&loginwindow),
+            spaces::Event::SessionDidResignActive
+        ));
+        assert!(matches!(
+            session_event_for_front_app(&app),
+            spaces::Event::SessionDidBecomeActive
+        ));
+    }
 }
