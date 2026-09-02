@@ -3944,6 +3944,107 @@ mod tests {
     }
 
     #[test]
+    fn display_size_round_trip_restores_its_saved_layout() {
+        let mut window_store = WindowStore::default();
+        let mut engine = test_engine();
+        let space = SpaceId::new(98);
+        let external = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(3440.0, 1409.0));
+        let internal = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1728.0, 1083.0));
+        let pid: pid_t = 5157;
+        let w1 = WindowId::new(pid, 1);
+        let w2 = WindowId::new(pid, 2);
+        let info = |wid| {
+            (
+                wid,
+                None,
+                None,
+                None,
+                true,
+                CGSize::new(500.0, 500.0),
+                None,
+                None,
+            )
+        };
+
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::SpaceExposed(space, external.size),
+        );
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::windows_observed(space, pid, vec![info(w1), info(w2)], None),
+        );
+        let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowFocused(space, w1));
+        let _ = engine.handle_command(
+            &mut window_store,
+            Some(space),
+            &[space],
+            &HashMap::default(),
+            LayoutCommand::ResizeWindowBy { amount: 0.2 },
+        );
+
+        let gaps = engine.layout_settings.gaps.clone();
+        let external_layout = engine.calculate_layout(
+            space,
+            external,
+            &gaps,
+            0.0,
+            Default::default(),
+            Default::default(),
+        );
+
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::SpaceExposed(space, internal.size),
+        );
+        let internal_layout = engine.calculate_layout(
+            space,
+            internal,
+            &gaps,
+            0.0,
+            Default::default(),
+            Default::default(),
+        );
+        let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowFocused(space, w2));
+        let _ = engine.handle_command(
+            &mut window_store,
+            Some(space),
+            &[space],
+            &HashMap::default(),
+            LayoutCommand::ResizeWindowBy { amount: 0.2 },
+        );
+        assert_ne!(
+            engine.calculate_layout(
+                space,
+                internal,
+                &gaps,
+                0.0,
+                Default::default(),
+                Default::default(),
+            ),
+            internal_layout,
+            "test setup must modify the built-in-display layout"
+        );
+
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::SpaceExposed(space, external.size),
+        );
+        assert_eq!(
+            engine.calculate_layout(
+                space,
+                external,
+                &gaps,
+                0.0,
+                Default::default(),
+                Default::default(),
+            ),
+            external_layout,
+            "returning to a display size must restore its own layout configuration"
+        );
+    }
+
+    #[test]
     fn repeated_windows_on_screen_update_does_not_rebalance_unchanged_tiled_layout() {
         let mut window_store = WindowStore::default();
         let mut engine = test_engine();

@@ -4804,6 +4804,15 @@ fn clamshell_sleep_preserves_nested_layout_across_display_replacement() {
         node
     }
 
+    fn without_frames_or_node_ids(
+        mut node: rift_protocol::ContainerTreeNode,
+    ) -> rift_protocol::ContainerTreeNode {
+        node.frame = Default::default();
+        node.node_id = 0;
+        node.children = node.children.into_iter().map(without_frames_or_node_ids).collect();
+        node
+    }
+
     let (mut apps, mut reactor) = test_context();
     let external_screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(3440., 1409.));
     let internal_screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1728., 1083.));
@@ -4862,19 +4871,46 @@ fn clamshell_sleep_preserves_nested_layout_across_display_replacement() {
     reactor.discover_test_windows(1, rediscovered, window_ids.clone());
 
     assert_eq!(
-        without_frames(
+        without_frames_or_node_ids(
             reactor
                 .query_layout_state(Some(space.get()), None)
                 .expect("internal-display layout state")
                 .container_tree,
         ),
-        without_frames(topology_before),
+        without_frames_or_node_ids(topology_before.clone()),
         "clamshell recovery must preserve container nesting, order, selection, and weights",
     );
     assert_eq!(
         test_layout(&mut reactor, space, internal_screen).len(),
         window_ids.len(),
         "every rediscovered window must occupy exactly one layout slot",
+    );
+
+    let mut screens = make_screen_snapshots(vec![external_screen], vec![Some(space)]);
+    screens[0].display_uuid = "external-display".to_string();
+    let mut reconnected = forwarded_space_state(screens);
+    reconnected.display_set_changed = true;
+    reconnected.topology_changed = true;
+    reconnected.allow_space_remap = true;
+    reconnected.should_force_refresh_layout = true;
+    reconnected.releases_display_churn_refresh_quarantine = true;
+    reconnected.resized_spaces.push((space, external_screen.size));
+    for wid in &window_ids {
+        reconnected
+            .active_window_spaces
+            .insert(WindowServerId::new(wid.idx.get()), space);
+    }
+    reactor.handle_event(Event::SpaceStateChanged(reconnected));
+
+    assert_eq!(
+        without_frames(
+            reactor
+                .query_layout_state(Some(space.get()), None)
+                .expect("reconnected external-display layout state")
+                .container_tree,
+        ),
+        without_frames(topology_before),
+        "reconnecting a known display size must reactivate the exact saved layout tree",
     );
 }
 

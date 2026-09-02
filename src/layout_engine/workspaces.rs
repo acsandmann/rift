@@ -135,7 +135,7 @@ impl WorkspaceLayouts {
         let size = Size::from(size);
         for workspace_id in workspaces {
             let workspace_key = (space, workspace_id);
-            let (workspace_layout, mut unchanged) = match self.map.entry(workspace_key) {
+            let (workspace_layout, previous_layout) = match self.map.entry(workspace_key) {
                 crate::common::collections::hash_map::Entry::Vacant(entry) => (
                     entry.insert(SpaceLayoutInfo {
                         active_size: size,
@@ -146,24 +146,16 @@ impl WorkspaceLayouts {
                 ),
                 crate::common::collections::hash_map::Entry::Occupied(entry) => {
                     let info = entry.into_mut();
-                    let old_size = info.active_size;
-                    if old_size != size {
-                        if let Some(active_layout) = info.active() {
-                            info.configurations.entry(old_size).or_insert(active_layout);
-                        }
-                        let taken = info.configurations.remove(&old_size);
-                        info.active_size = size;
-                        (info, taken)
-                    } else {
-                        (info, None)
-                    }
+                    let previous_layout = info.active();
+                    info.active_size = size;
+                    (info, previous_layout)
                 }
             };
 
             let layout = match workspace_layout.configurations.entry(size) {
                 crate::common::collections::hash_map::Entry::Vacant(entry) => {
-                    *entry.insert(if let Some(source) = unchanged.take() {
-                        source
+                    *entry.insert(if let Some(source) = previous_layout {
+                        tree.clone_layout(source)
                     } else if let Some(source) = workspace_layout.last_saved {
                         tree.clone_layout(source)
                     } else {
@@ -175,10 +167,6 @@ impl WorkspaceLayouts {
                     *entry.get()
                 }
             };
-
-            if let Some(removed) = unchanged {
-                tree.remove_layout(removed);
-            }
 
             tracing::debug!(
                 "Using layout {:?} for workspace {:?} on space {:?}",
