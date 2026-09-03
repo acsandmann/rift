@@ -1688,10 +1688,8 @@ impl Config {
                 // from an old config). This prevents a single typo from wiping the entire config.
                 if msg.contains("keys") && Self::extract_unknown_variant(&msg).is_some() {
                     if let Ok(mut document) = toml::from_str::<toml::Value>(buf) {
-                        if let Some(keys_table) = document
-                            .get("keys")
-                            .and_then(|v| v.as_table())
-                            .cloned()
+                        if let Some(keys_table) =
+                            document.get("keys").and_then(|v| v.as_table()).cloned()
                         {
                             let mut filtered_keys: HashMap<String, WmCommand> = HashMap::default();
                             let mut had_invalid = false;
@@ -1706,10 +1704,8 @@ impl Config {
                                         if let Some(unknown) =
                                             Self::extract_unknown_variant(&err_msg)
                                         {
-                                            let clean_unknown = unknown
-                                                .split("||")
-                                                .next()
-                                                .unwrap_or(&unknown);
+                                            let clean_unknown =
+                                                unknown.split("||").next().unwrap_or(&unknown);
                                             eprintln!(
                                                 "Warning: ignoring invalid keybinding '{}' = '{}': unknown command '{}' — skipping",
                                                 k,
@@ -1731,23 +1727,19 @@ impl Config {
                                 }
                             }
                             if had_invalid {
-                                if let Some(tbl) = document
-                                    .get_mut("keys")
-                                    .and_then(|v| v.as_table_mut())
+                                if let Some(tbl) =
+                                    document.get_mut("keys").and_then(|v| v.as_table_mut())
                                 {
-                                    *tbl = toml::map::Map::from_iter(
-                                        filtered_keys
-                                            .iter()
-                                            .map(|(k, v)| {
-                                                (
-                                                    k.clone(),
-                                                    toml::Value::try_from(v.clone())
-                                                        .unwrap_or(toml::Value::String(
-                                                            format!("{:?}", v),
-                                                        )),
-                                                )
-                                            }),
-                                    );
+                                    *tbl = toml::map::Map::from_iter(filtered_keys.iter().map(
+                                        |(k, v)| {
+                                            (
+                                                k.clone(),
+                                                toml::Value::try_from(v.clone()).unwrap_or(
+                                                    toml::Value::String(format!("{:?}", v)),
+                                                ),
+                                            )
+                                        },
+                                    ));
                                 }
                                 if let Ok(filtered) = document.clone().try_into::<ConfigFile>() {
                                     let mut keys = Vec::new();

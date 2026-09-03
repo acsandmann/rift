@@ -171,18 +171,38 @@ impl AnimationManager {
                 match window_store.window_mut(wid) {
                     Some(window) => {
                         let current_frame = window.frame_monotonic;
-                        if target_frame.same_as(current_frame) {
-                            continue;
-                        }
+                        // rift-ship-01: two guards for relaunch latch —
+                        // (app) coalescing guard in app.rs (flush-before-coalesce
+                        // bounded by txid) preserves per-batch backpressure but
+                        // cannot unlatch reactor skips; (reactor) one-frame
+                        // guard bypasses frame_monotonic/tx redundant checks when
+                        // suppress_next_redundant_animation_check is armed at
+                        // startup (relaunch). Deferred: partial snapshot
+                        // (Reactor::remove_windows_missing_from_active_space_snapshot)
+                        // and Ghostty rekey (same_pid fallback in
+                        // reactor/events/window_discovery.rs:480,492,518) remain
+                        // for follow-up ships — see AGENTS.md §14. ponytail
+                        // ceiling: bool + HashMap guards only; generation/VecDeque
+                        // if measured.
                         let wsid = window.info.sys_id;
-                        if let Some(wsid) = wsid {
-                            if reactor
-                                .transaction_manager
-                                .get_target_frame(wsid)
-                                .is_some_and(|pending| pending.same_as(target_frame))
-                            {
-                                trace!(?wid, ?target_frame, "Skipping redundant layout request");
+                        let suppress = reactor.suppress_next_redundant_animation_check;
+                        if !suppress {
+                            if target_frame.same_as(current_frame) {
                                 continue;
+                            }
+                            if let Some(wsid) = wsid {
+                                if reactor
+                                    .transaction_manager
+                                    .get_target_frame(wsid)
+                                    .is_some_and(|pending| pending.same_as(target_frame))
+                                {
+                                    trace!(
+                                        ?wid,
+                                        ?target_frame,
+                                        "Skipping redundant layout request"
+                                    );
+                                    continue;
+                                }
                             }
                         }
                         any_frame_changed = true;
@@ -249,7 +269,6 @@ impl AnimationManager {
                 .layout_specific_animate_settings(space)
                 .unwrap_or(reactor.config.settings.animate);
             let skip_anim = is_resize || !layout_animate || low_power;
-
             if let Some(tx) = &reactor.animation_tx {
                 let message = if skip_anim {
                     Message::SkipToEnd(anim)
@@ -389,14 +408,18 @@ impl AnimationManager {
             }
 
             if let Some(wsid) = window_server_id {
-                reactor
-                    .transaction_manager
-                    .update_txid_entries([(wsid, txid, target_frame)]);
+                reactor.transaction_manager.update_txid_entries([(wsid, txid, target_frame)]);
             }
 
             // For slide we animate from offscreen; for fade we still create an entry
             // so the animation has duration even though start==finish.
-            trace!(?wid, ?start_frame, ?target_frame, ?transition, "Workspace transition anim");
+            trace!(
+                ?wid,
+                ?start_frame,
+                ?target_frame,
+                ?transition,
+                "Workspace transition anim"
+            );
             anim.add_window(&handle, wid, start_frame, target_frame, false, txid);
             animated_count += 1;
         }

@@ -5054,3 +5054,73 @@ fn floating_window_toggles_to_fullscreen_within_gaps() {
         "expected {expected:?}, got {laid_out:?}"
     );
 }
+
+/// Regression (rift-ship-01): the one-frame relaunch guard must still be armed
+/// for the first `apply_layout` batch that actually writes frames. A relaunch
+/// starts with layouts that move nothing (no window is tracked yet), and if
+/// those consume the guard, the restored window stays latched by
+/// `frame_monotonic` plus its pending transaction target — the instant snap
+/// this ship exists to prevent. While the guard is armed the redundant-layout
+/// skips in `AnimationManager::animate_layout` are bypassed, so the write for
+/// the already-at-target window still reaches the app actor; the very next
+/// layout is skipped again, which is the "one frame" bound.
+#[test]
+fn relaunch_guard_survives_a_layout_that_writes_no_frames() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let pid: pid_t = 1;
+    let wid = WindowId::new(pid, 1);
+    let wsid = WindowServerId::new(1);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+
+    // Startup layout before any window is tracked: no frame is written.
+    assert!(
+        !reactor.update_layout_or_warn(false, false, None),
+        "a layout with nothing tracked should not report a frame change"
+    );
+    assert!(apps.requests().is_empty());
+
+    // Post-relaunch state: the window is restored sitting exactly at its layout
+    // target and its transaction target is still latched, so both redundancy
+    // skips would fire.
+    apps.register_app_without_launch(&mut reactor, pid);
+    reactor.add_test_window(
+        wid,
+        wsid,
+        Some(space),
+        CGRect::new(CGPoint::new(0., 0.), CGSize::new(50., 50.)),
+    );
+    let _ = reactor
+        .layout_manager
+        .layout_engine
+        .handle_event(&mut reactor.state.windows, LayoutEvent::WindowAdded(space, wid));
+    let target = laid_out_frame(&mut reactor, space, screen, wid).expect("window laid out");
+    reactor.state.windows.window_mut(wid).expect("restored window").frame_monotonic = target;
+    let txid = reactor.transaction_manager.generate_next_txid(wsid);
+    reactor.transaction_manager.store_txid(wsid, txid, target);
+
+    assert!(
+        reactor.update_layout_or_warn(false, false, None),
+        "the guard should still be armed for the first layout that writes frames"
+    );
+    let requests = apps.requests();
+    assert!(
+        requests.iter().any(|req| matches!(req,
+                Request::SetWindowFrame(req_wid, frame, _, _)
+                    if *req_wid == wid && frame.same_as(target))
+            || matches!(req,
+                Request::SetBatchWindowFrame(frames, _, _)
+                    if frames.iter().any(|(req_wid, frame)| *req_wid == wid && frame.same_as(target)))),
+        "the armed guard must bypass the frame_monotonic/transaction skips so the \
+         post-relaunch window is written: {requests:?}"
+    );
+
+    // One frame only: the guard is consumed, so the identical layout is skipped.
+    assert!(!reactor.update_layout_or_warn(false, false, None));
+    assert!(
+        apps.requests().is_empty(),
+        "the guard should only bypass the redundant-layout skips once"
+    );
+}

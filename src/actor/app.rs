@@ -843,6 +843,26 @@ impl State {
                 ));
             }
             Request::AnimationFrame { wid, frame, set_size, txid } => {
+                // ponytail: one-frame coalescing guard, bounded to transaction
+                // boundaries. A pending frame from a *different* transaction
+                // belongs to an animation that was replaced mid-flight, so its
+                // last write is flushed instead of being silently dropped by the
+                // successor's first frame. Frames within one animation share a
+                // txid and still coalesce, which keeps the per-batch write
+                // backpressure. This does not relax the reactor-side
+                // `frame_monotonic` / tx-target skips in
+                // `AnimationManager::animate_layout`. Keeps HashMap shape;
+                // upgrade to a per-window queue only if coalescing is measured.
+                // Deferred roots: partial snapshot
+                // (`Reactor::remove_windows_missing_from_active_space_snapshot`)
+                // and Ghostty rekey (`same_pid` fallback in
+                // `reactor/events/window_discovery.rs`) untouched for follow-up
+                // ships.
+                if self.pending_frames.get(&wid).is_some_and(|pending| pending.txid != txid)
+                    && let Err(err) = self.flush_frames(wid)
+                {
+                    warn!(?wid, ?err, "Failed to flush superseded animation frame");
+                }
                 self.pending_frames.insert(
                     wid,
                     PendingFrame {
@@ -2034,4 +2054,149 @@ fn trace<T>(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use objc2_core_foundation::CGSize;
+
+    use super::*;
+
+    /// Keeps the actor's channel receivers alive for the duration of a test.
+    struct TestApp {
+        state: RefCell<State>,
+        _events_rx: actor::Receiver<Event>,
+        _raises_rx: actor::Receiver<RaiseRequest>,
+    }
+
+    /// Builds an app actor bound to this process. `elem` stands in for a real
+    /// window element; the AX writes it receives fail harmlessly, which is fine
+    /// because what this exercises is *which* pending frames reach the write
+    /// path, not what the window server does with them.
+    fn test_app(wid: WindowId, elem: AXUIElement) -> TestApp {
+        let pid = wid.pid;
+        let app = AXUIElement::application(pid);
+        let running_app = NSRunningApplication::currentApplication();
+        let observer = Observer::new(pid).expect("observer for self").install(|_, _| {});
+        let (events_tx, _events_rx) = actor::channel();
+        let (raises_tx, _raises_rx) = actor::channel();
+        let mut windows = HashMap::default();
+        windows.insert(
+            wid,
+            AppWindowState {
+                elem,
+                notifications_registered: false,
+                last_seen_txid: TransactionId::default(),
+                hidden_by_app: false,
+                window_server_id: None,
+                title: String::new(),
+                is_animating: false,
+                last_animation_frame: None,
+            },
+        );
+        TestApp {
+            state: RefCell::new(State {
+                pid,
+                bundle_id: None,
+                running_app,
+                app,
+                observer,
+                events_tx,
+                windows,
+                elem_to_wid: HashMap::default(),
+                last_window_idx: wid.idx.get(),
+                main_window: None,
+                last_activated: None,
+                pending_activation_quiet: None,
+                is_hidden: false,
+                is_frontmost: false,
+                enhanced_ui: EnhancedUi::default(),
+                raises_tx,
+                tx_store: None,
+                pending_frames: HashMap::default(),
+            }),
+            _events_rx,
+            _raises_rx,
+        }
+    }
+
+    fn animation_frame(
+        wid: WindowId,
+        frame: CGRect,
+        set_size: bool,
+        txid: TransactionId,
+    ) -> (Span, Request) {
+        (
+            Span::none(),
+            Request::AnimationFrame { wid, frame, set_size, txid },
+        )
+    }
+
+    fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
+        CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))
+    }
+
+    /// Two frames of the *same* animation that land in one drained batch still
+    /// coalesce to a single write, which is the backpressure `pending_frames`
+    /// exists for.
+    #[test]
+    fn frames_of_one_transaction_coalesce_within_a_batch() {
+        let wid = WindowId::new(std::process::id() as pid_t, 1);
+        let txid = TransactionId::default().next();
+        let app = test_app(wid, AXUIElement::application(wid.pid));
+
+        State::handle_request_batch(
+            &app.state,
+            vec![
+                animation_frame(wid, rect(0., 0., 100., 100.), true, txid),
+                animation_frame(wid, rect(0., 0., 200., 200.), true, txid),
+            ],
+        );
+
+        let state = app.state.borrow();
+        let window = &state.windows[&wid];
+        // Only the last frame of the transaction was written.
+        assert_eq!(window.last_animation_frame, Some(rect(0., 0., 200., 200.)));
+        assert_eq!(window.last_seen_txid, txid);
+        assert!(state.pending_frames.is_empty());
+    }
+
+    /// Regression (rift-ship-01): when a mid-flight animation is replaced, the
+    /// superseded transaction's last frame must still be written rather than
+    /// being silently dropped by the successor's first frame, even when both
+    /// land in the same drained batch.
+    #[test]
+    fn superseded_transaction_frame_is_written_before_its_successor() {
+        let wid = WindowId::new(std::process::id() as pid_t, 1);
+        let old_txid = TransactionId::default().next();
+        let new_txid = old_txid.next();
+        let app = test_app(wid, AXUIElement::application(wid.pid));
+
+        // Both frames drain in one batch: the app actor is behind the ~10ms
+        // animation tick, which is the only case where coalescing engages.
+        State::handle_request_batch(
+            &app.state,
+            vec![
+                // Last frame of the animation being replaced (size + position).
+                animation_frame(wid, rect(10., 10., 300., 300.), true, old_txid),
+                // First frame of the replacement (position only).
+                animation_frame(wid, rect(50., 50., 999., 999.), false, new_txid),
+            ],
+        );
+
+        let state = app.state.borrow();
+        let window = &state.windows[&wid];
+        // `last_animation_frame` is only recorded by the sizing write path, so
+        // seeing the superseded frame there proves that write ran. Without the
+        // flush-before-coalesce guard it stays `None`: the old frame is
+        // overwritten in `pending_frames` and never reaches the AX writes.
+        assert_eq!(
+            window.last_animation_frame,
+            Some(rect(10., 10., 300., 300.)),
+            "superseded transaction's frame was dropped instead of written"
+        );
+        // The replacement still wins the final write.
+        assert_eq!(window.last_seen_txid, new_txid);
+        assert!(state.pending_frames.is_empty());
+    }
 }

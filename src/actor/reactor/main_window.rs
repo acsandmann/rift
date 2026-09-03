@@ -410,7 +410,11 @@ mod tests {
         // Destroy key window -> hold keeps key_pid armed, window_server_focus cleared
         let _ = tracker.handle_event(&Event::WindowDestroyed(w2));
         assert_eq!(tracker.window_server_focus(), None);
-        assert_eq!(tracker.key_pid(), Some(7), "hold should keep key_pid after destroy");
+        assert_eq!(
+            tracker.key_pid(),
+            Some(7),
+            "hold should keep key_pid after destroy"
+        );
         // Resolver reports successor tab
         assert_eq!(
             tracker.handle_event(&Event::WindowServerFocusChanged(w3, SpaceId::new(1))),

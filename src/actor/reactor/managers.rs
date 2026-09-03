@@ -303,6 +303,11 @@ impl LayoutManager {
             .take()
             .or(reactor.drag_manager.drag_swap_manager.dragged());
         let mut any_frame_changed = false;
+        // rift-ship-01: consume one-frame relaunch guard for
+        // frame_monotonic+tx latch. One bool for the whole batch so
+        // multi-display first layout is fully guarded. ponytail: bool
+        // only; generation counter if needed.
+        let was_suppressed = reactor.suppress_next_redundant_animation_check;
 
         let active_space = reactor.workspace_command_space();
         for (space, layout) in layout_result {
@@ -418,16 +423,17 @@ impl LayoutManager {
                         && !crate::sys::power::is_low_power_mode_enabled()
                 };
                 if try_animated {
-                    let screen_frame = reactor
-                        .space_state
-                        .screen_by_space(space)
-                        .map(|s| s.frame)
-                        .unwrap_or(CGRect::new(
-                            CGPoint::new(0.0, 0.0),
-                            CGSize::new(1000.0, 800.0),
-                        ));
-                    let animated =
-                        AnimationManager::workspace_switch_animated(reactor, space, &layout, screen_frame, skip_wid);
+                    let screen_frame =
+                        reactor.space_state.screen_by_space(space).map(|s| s.frame).unwrap_or(
+                            CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0)),
+                        );
+                    let animated = AnimationManager::workspace_switch_animated(
+                        reactor,
+                        space,
+                        &layout,
+                        screen_frame,
+                        skip_wid,
+                    );
                     if animated {
                         any_frame_changed |= true;
                     } else {
@@ -436,8 +442,9 @@ impl LayoutManager {
                         );
                     }
                 } else {
-                    any_frame_changed |=
-                        AnimationManager::workspace_switch_layout(reactor, space, &layout, skip_wid);
+                    any_frame_changed |= AnimationManager::workspace_switch_layout(
+                        reactor, space, &layout, skip_wid,
+                    );
                 }
             } else if reactor.workspace_switch_manager.active_workspace_switch.is_some() {
                 any_frame_changed |=
@@ -446,6 +453,11 @@ impl LayoutManager {
                 any_frame_changed |=
                     AnimationManager::animate_layout(reactor, space, &layout, is_resize, skip_wid);
             }
+        }
+        // Keep guard alive until it actually gates a layout (first app with empty
+        // layout burns it otherwise).
+        if was_suppressed && any_frame_changed {
+            reactor.suppress_next_redundant_animation_check = false;
         }
 
         Ok(any_frame_changed)

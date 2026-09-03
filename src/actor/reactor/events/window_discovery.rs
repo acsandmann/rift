@@ -468,14 +468,9 @@ pub(crate) fn succeed_occupying_frame_identity(
     if state.windows.contains_window(new_wid) {
         return Ok(());
     }
-    let candidates = layout
-        .layout_engine
-        .windows_in_active_workspace(&state.windows, space);
-    let mut same_pid: Vec<WindowId> = candidates
-        .iter()
-        .copied()
-        .filter(|wid| wid.pid == new_wid.pid)
-        .collect();
+    let candidates = layout.layout_engine.windows_in_active_workspace(&state.windows, space);
+    let mut same_pid: Vec<WindowId> =
+        candidates.iter().copied().filter(|wid| wid.pid == new_wid.pid).collect();
     // Ghostty native tabs: WindowServerFocusChanged often arrives after the
     // previous tab was already `WindowRemoved`, leaving the active workspace
     // empty. Fall back to focused window of same pid so we can still rekey
@@ -536,9 +531,7 @@ pub(crate) fn succeed_occupying_frame_identity(
             state.windows.track_window_server_id(new_wsid, new_wid);
         }
     }
-    layout
-        .layout_engine
-        .rekey_window_identity(&mut state.windows, from, new_wid);
+    layout.layout_engine.rekey_window_identity(&mut state.windows, from, new_wid);
     // `rekey` transfers persistent metadata but leaves the old `WindowId`
     // pruned; ensure the new wsid remains tracked.
     state.windows.track_window_server_id(new_wsid, new_wid);

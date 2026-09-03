@@ -499,6 +499,22 @@ impl Apps {
         }]
     }
 
+    /// Registers `pid` with the reactor against this harness's request channel,
+    /// so its window writes are observable through [`Apps::requests`] without
+    /// dispatching `ApplicationLaunched` (which runs a layout of its own).
+    pub fn register_app_without_launch(&self, reactor: &mut Reactor, pid: pid_t) {
+        reactor.app_manager.apps.insert(
+            pid,
+            super::AppState {
+                info: AppInfo {
+                    bundle_id: Some(format!("com.testapp{pid}")),
+                    localized_name: Some(format!("TestApp{pid}")),
+                },
+                handle: AppThreadHandle::new_for_test(self.tx.clone()),
+            },
+        );
+    }
+
     pub fn requests(&mut self) -> Vec<Request> {
         let mut requests = Vec::new();
         while let Ok((_, req)) = self.rx.try_recv() {

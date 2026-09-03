@@ -333,6 +333,9 @@ pub struct Reactor {
     pending_space_change_manager: managers::PendingSpaceChangeManager,
     active_spaces: HashSet<SpaceId>,
     pub animation_tx: Option<AnimationSender>,
+    // rift-ship-01: one-frame guard for relaunch latch (frame_monotonic + tx).
+    // ponytail ceiling: bool only; promote to generation counter if needed.
+    pub(crate) suppress_next_redundant_animation_check: bool,
 }
 
 impl Reactor {
@@ -453,6 +456,7 @@ impl Reactor {
             },
             active_spaces: HashSet::default(),
             animation_tx: None,
+            suppress_next_redundant_animation_check: true,
         };
         reactor
     }
@@ -3341,7 +3345,11 @@ impl Reactor {
         }
         let geometry_changed = response.changed;
         self.prepare_refocus_after_layout_event(&event_clone);
-        self.handle_layout_response(response, workspace_switch_space, workspace_switch_space.is_some());
+        self.handle_layout_response(
+            response,
+            workspace_switch_space,
+            workspace_switch_space.is_some(),
+        );
         if geometry_changed {
             self.update_layout_or_warn(
                 false,
@@ -3850,7 +3858,8 @@ impl Reactor {
                 // Non-user response while `pid` owns key focus: only a same-pid pending
                 // refocus may recover; never cursor/desktop recovery.
                 if let Some(space) = pending_refocus_space.take()
-                    && let Some(wid) = self.last_focused_window_in_space(space).filter(|w| w.pid == pid)
+                    && let Some(wid) =
+                        self.last_focused_window_in_space(space).filter(|w| w.pid == pid)
                 {
                     focus_window = Some(wid);
                     false

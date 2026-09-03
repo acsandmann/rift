@@ -145,7 +145,9 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
             Ok(c) => c,
             Err(e) => {
                 eprintln!("Failed to read config at {}: {e}", config_path.display());
-                eprintln!("Using default config (ignoring invalid entries). Fix your config.toml to remove the error.");
+                eprintln!(
+                    "Using default config (ignoring invalid entries). Fix your config.toml to remove the error."
+                );
                 Config::default()
             }
         }
