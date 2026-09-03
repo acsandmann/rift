@@ -20,11 +20,11 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
       - name: Format Check
-        run: cargo +nightly fmt --all --check --verbose
+        run: cargo fmt --all --check --verbose
 
   test:
     runs-on: macos-14
