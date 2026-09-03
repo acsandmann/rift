@@ -2168,12 +2168,20 @@ impl TraditionalLayoutSystem {
                 node2.detach(&mut self.tree).push_back(new_container).with(|child, tree| {
                     tree.data.layout.info[child].size = size2;
                 });
-                self.tree.data.layout.info[new_container].size = size1 + size2;
                 self.tree.data.layout.info[new_container].total = size1 + size2;
-                self.tree.data.layout.info[p1].total = p1
-                    .children(&self.tree.map)
-                    .map(|child| self.tree.data.layout.info[child].size.max(0.0))
-                    .sum();
+                // Detaching both children can leave `p1` with a single child, in which
+                // case the tree observer collapses `p1`: it hoists `new_container` into
+                // p1's slot (inheriting p1's size via assume_size_of) and removes `p1`
+                // from the forest. Touching `info[p1]` afterwards panics on a dead key.
+                // Only recompute p1 while it is still alive; when it was collapsed away,
+                // new_container already inherited the correct size.
+                if self.tree.map.contains(p1) {
+                    self.tree.data.layout.info[new_container].size = size1 + size2;
+                    self.tree.data.layout.info[p1].total = p1
+                        .children(&self.tree.map)
+                        .map(|child| self.tree.data.layout.info[child].size.max(0.0))
+                        .sum();
+                }
                 return new_container;
             }
         }
@@ -3555,6 +3563,41 @@ mod tests {
             (sum_children - total).abs() < 0.0001,
             "parent total should remain equal to the sum of child sizes after joining siblings"
         );
+    }
+
+    #[test]
+    fn consecutive_perpendicular_joins_do_not_panic() {
+        // Regression: two joins in quick succession where the second collapses the
+        // container built by the first. Moving both children out of `p1` leaves it
+        // with one child, so the tree observer collapses `p1` and removes it from the
+        // forest mid-join; the old code then indexed `info[p1]` on a dead key and
+        // panicked with "invalid SecondaryMap key used".
+        let mut system = TraditionalLayoutSystem::default();
+        let layout = system.create_layout();
+        let root = system.root(layout);
+        system.tree.data.layout.set_kind(root, LayoutKind::Horizontal);
+
+        let w1 = w(160);
+        let w2 = w(161);
+        let w3 = w(162);
+        system.add_window_after_selection(layout, w1);
+        system.add_window_after_selection(layout, w2);
+        system.add_window_after_selection(layout, w3);
+
+        // First join builds a vertical container holding exactly w1 and w2.
+        assert!(system.select_window(layout, w1));
+        system.join_selection_with_direction(layout, Direction::Down);
+
+        // Second join is perpendicular to that container. It merges the container's
+        // only two children, leaving the container with a single child, so the tree
+        // observer collapses it and removes it from the forest mid-join. Must not panic.
+        assert!(system.select_window(layout, w1));
+        system.join_selection_with_direction(layout, Direction::Right);
+
+        // Tree must remain internally consistent: every window still reachable.
+        let mut windows = system.all_windows_in_layout(layout);
+        windows.sort();
+        assert_eq!(windows, vec![w1, w2, w3], "{}", system.draw_tree(layout));
     }
 
     #[test]
