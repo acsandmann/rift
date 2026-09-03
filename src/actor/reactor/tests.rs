@@ -4522,6 +4522,91 @@ fn partial_post_wake_snapshot_preserves_manual_workspace_assignment() {
 }
 
 #[test]
+fn ax_invalidation_before_lifecycle_signal_preserves_workspace_assignment() {
+    let (mut apps, mut reactor) = test_context_with_workspace_count(2);
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+    let secondary_workspace = reactor.test_workspace(space, 1);
+    assert!(reactor.assign_test_window_to_workspace(space, wid, secondary_workspace));
+
+    // The issue #456 recordings show this event arriving before loginwindow or
+    // any power/session notification, so no lifecycle quarantine is active yet.
+    reactor.handle_event(Event::WindowInvalidated(
+        wid,
+        super::WindowInvalidationSource::InvalidUiElement,
+    ));
+
+    assert!(reactor.state.windows.contains_window(wid));
+    assert_eq!(
+        reactor.test_workspace_for_window(space, wid),
+        Some(secondary_workspace),
+        "AX invalidation alone must not erase the logical workspace assignment"
+    );
+
+    let info = reactor.state.windows.window(wid).unwrap().info.clone();
+    reactor.discover_test_windows(1, vec![(wid, info)], vec![wid]);
+
+    assert_eq!(
+        reactor.test_workspace_for_window(space, wid),
+        Some(secondary_workspace),
+        "rediscovering the same WindowServer identity must update it in place"
+    );
+}
+
+#[test]
+fn window_server_destroy_after_ax_invalidation_removes_logical_window() {
+    let (mut apps, mut reactor) = test_context_with_workspace_count(2);
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+    let workspace = reactor.test_workspace(space, 1);
+    assert!(reactor.assign_test_window_to_workspace(space, wid, workspace));
+    let wsid = reactor.test_window_server_id(wid);
+
+    reactor.handle_event(Event::WindowInvalidated(
+        wid,
+        super::WindowInvalidationSource::InvalidUiElement,
+    ));
+    assert!(reactor.state.windows.contains_window(wid));
+
+    crate::sys::window_server::set_window_ordered_in_override(wsid, Some(false));
+    reactor.handle_event(Event::WindowServerDestroyed(wsid, space, SpaceEventKind::User));
+    crate::sys::window_server::set_window_ordered_in_override(wsid, None);
+
+    assert!(!reactor.state.windows.contains_window(wid));
+    assert_eq!(reactor.test_workspace_for_window(space, wid), None);
+}
+
+#[test]
+fn app_termination_after_ax_invalidation_removes_logical_windows() {
+    let (mut apps, mut reactor) = test_context_with_workspace_count(2);
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let pid = 1;
+    let wid = WindowId::new(pid, 1);
+
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, pid, make_windows(1));
+    let workspace = reactor.test_workspace(space, 1);
+    assert!(reactor.assign_test_window_to_workspace(space, wid, workspace));
+
+    reactor.handle_event(Event::WindowInvalidated(
+        wid,
+        super::WindowInvalidationSource::AxDestroyedNotification,
+    ));
+    assert!(reactor.state.windows.contains_window(wid));
+
+    reactor.handle_event(Event::ApplicationThreadTerminated(pid));
+
+    assert!(!reactor.state.windows.contains_window(wid));
+    assert_eq!(reactor.test_workspace_for_window(space, wid), None);
+}
+
+#[test]
 fn current_ax_destruction_after_quarantine_release_removes_window() {
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));

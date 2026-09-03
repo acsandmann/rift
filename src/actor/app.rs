@@ -1099,7 +1099,10 @@ impl State {
                 if self.remove_window(wid).is_none() {
                     return;
                 }
-                self.send_event(Event::WindowDestroyed(wid));
+                self.send_event(Event::WindowInvalidated(
+                    wid,
+                    crate::actor::reactor::WindowInvalidationSource::AxDestroyedNotification,
+                ));
 
                 self.on_main_window_changed(Some(wid), false);
             }
@@ -1784,7 +1787,10 @@ impl State {
     fn handle_ax_error(&mut self, wid: WindowId, err: &AXError) -> bool {
         if matches!(*err, AXError::InvalidUIElement) {
             if self.remove_window(wid).is_some() {
-                self.send_event(Event::WindowDestroyed(wid));
+                self.send_event(Event::WindowInvalidated(
+                    wid,
+                    crate::actor::reactor::WindowInvalidationSource::InvalidUiElement,
+                ));
                 self.on_main_window_changed(Some(wid), false);
             }
             return true;
@@ -1837,7 +1843,10 @@ impl State {
     fn remove_tracked_window(&mut self, wid: WindowId, reason: &'static str) {
         if self.remove_window(wid).is_some() {
             debug!(?wid, reason);
-            self.send_event(Event::WindowDestroyed(wid));
+            self.send_event(Event::WindowInvalidated(
+                wid,
+                crate::actor::reactor::WindowInvalidationSource::StaleAxElement,
+            ));
         }
     }
 

@@ -1593,6 +1593,10 @@ impl LayoutEngine {
                 self.forget_persisted_app(pid);
 
                 self.virtual_workspace_manager.remove_windows_for_app(window_store, pid);
+                // Process termination is authoritative. Unlike an invalid AX handle,
+                // nothing owned by this pid can be rediscovered and rebound, so remove
+                // the complete window records after detaching their workspace state.
+                window_store.remove_windows_for_app(pid);
                 self.floating_positions.remove_app(pid);
             }
             LayoutEvent::WindowAdded(space, wid) => {

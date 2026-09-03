@@ -217,6 +217,10 @@ pub enum Event {
         Option<MouseState>,
     ),
     WindowDestroyed(WindowId),
+    /// The AXUIElement became invalid, but that is not proof that its native
+    /// WindowServer window was destroyed. This commonly happens before macOS
+    /// publishes sleep/session lifecycle notifications.
+    WindowInvalidated(WindowId, WindowInvalidationSource),
     #[serde(skip)]
     WindowServerDestroyed(
         crate::sys::window_server::WindowServerId,
@@ -309,6 +313,15 @@ pub enum Event {
 
     #[serde(skip)]
     ConfigUpdated(Config),
+}
+
+/// The AX-side observation that caused an app actor to discard its handle.
+/// None of these observations prove that the WindowServer window is gone.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum WindowInvalidationSource {
+    AxDestroyedNotification,
+    InvalidUiElement,
+    StaleAxElement,
 }
 
 pub struct Reactor {
@@ -986,7 +999,7 @@ impl Reactor {
         let wsid = match event {
             Event::WindowFrameChanged(wid, ..) => Some(wid.idx.get()),
             Event::WindowCreated(wid, ..) => Some(wid.idx.get()),
-            Event::WindowDestroyed(wid) => Some(wid.idx.get()),
+            Event::WindowDestroyed(wid) | Event::WindowInvalidated(wid, _) => Some(wid.idx.get()),
             Event::WindowMinimized(wid) => Some(wid.idx.get()),
             Event::WindowDeminiaturized(wid) => Some(wid.idx.get()),
             Event::MouseMoved(..) => None,
@@ -1013,6 +1026,7 @@ impl Reactor {
             event,
             Event::WindowCreated(..)
                 | Event::WindowDestroyed(..)
+                | Event::WindowInvalidated(..)
                 | Event::WindowServerDestroyed(..)
                 | Event::WindowServerAppeared(..)
                 | Event::WindowsDiscovered { .. }
@@ -1032,6 +1046,7 @@ impl Reactor {
             event,
             Event::WindowCreated(..)
                 | Event::WindowDestroyed(..)
+                | Event::WindowInvalidated(..)
                 | Event::WindowServerDestroyed(..)
                 | Event::WindowServerAppeared(..)
                 | Event::WindowFrameChanged(..)
@@ -1341,6 +1356,21 @@ impl Reactor {
                 )?;
                 outcome.focused_window = raised_window;
                 return Ok(outcome);
+            }
+            Event::WindowInvalidated(wid, source) => {
+                // AX elements are routinely invalidated while the display/session is
+                // transitioning, and the notification establishing that transition can
+                // arrive later. Keep the logical window, workspace assignment, and layout
+                // node until WindowServer destruction or an authoritative inventory proves
+                // that the native window is gone. A later inventory can then rebind the new
+                // AX element to this stable WindowServer-backed identity in place.
+                trace!(
+                    ?wid,
+                    ?source,
+                    "Preserving logical window after AX element invalidation"
+                );
+                return Ok(EventOutcome::focus_changed(None, should_update_notifications)
+                    .with_window_inventory_request(wid.pid));
             }
             Event::WindowServerDestroyed(wsid, sid, kind) => {
                 let tracked_window = self.state.windows.tracked_window_id(wsid);
