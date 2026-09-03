@@ -2758,9 +2758,11 @@ impl Reactor {
             else {
                 continue;
             };
-            self.layout_manager
-                .layout_engine
-                .update_space_display(space, Some(display_uuid.to_string()));
+            self.layout_manager.layout_engine.update_space_display(
+                space,
+                Some(display_uuid.to_string()),
+                !screen.is_builtin,
+            );
         }
         let current_screens = self.screens_for_current_spaces();
         self.space_activation_policy

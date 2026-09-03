@@ -243,16 +243,18 @@ impl LayoutManager {
                 continue;
             }
             let display_uuid_opt = screen.display_uuid_owned();
+            let is_external = !screen.is_builtin;
             let gaps = reactor
                 .config
                 .settings
                 .layout
                 .gaps
-                .effective_for_display(display_uuid_opt.as_deref());
-            reactor
-                .layout_manager
-                .layout_engine
-                .update_space_display(space, display_uuid_opt.clone());
+                .effective_for_display(display_uuid_opt.as_deref(), is_external);
+            reactor.layout_manager.layout_engine.update_space_display(
+                space,
+                display_uuid_opt.clone(),
+                is_external,
+            );
             let mut layout =
                 reactor.layout_manager.layout_engine.calculate_layout_with_virtual_workspaces(
                     &reactor.state.windows,
@@ -308,12 +310,13 @@ impl LayoutManager {
             if let Some(screen) = reactor.space_state.screen_by_space(space) {
                 let screen_frame = screen.frame;
                 let display_uuid = screen.display_uuid_owned();
+                let is_external = !screen.is_builtin;
                 let gaps = reactor
                     .config
                     .settings
                     .layout
                     .gaps
-                    .effective_for_display(display_uuid.as_deref());
+                    .effective_for_display(display_uuid.as_deref(), is_external);
                 let active_workspace_for_space_has_fullscreen = active_space == Some(space)
                     && reactor
                         .layout_manager
