@@ -93,6 +93,7 @@ const APP_NOTIFICATIONS: &[(AxNotificationKind, &str)] = &[
     (AxNotificationKind::WindowCreated, kAXWindowCreatedNotification),
     (AxNotificationKind::MenuOpened, kAXMenuOpenedNotification),
     (AxNotificationKind::MenuClosed, kAXMenuClosedNotification),
+    (AxNotificationKind::TitleChanged, kAXTitleChangedNotification),
 ];
 
 const WINDOW_NOTIFICATIONS: &[(AxNotificationKind, &str)] = &[
@@ -110,7 +111,6 @@ const WINDOW_NOTIFICATIONS: &[(AxNotificationKind, &str)] = &[
         AxNotificationKind::WindowDeminiaturized,
         kAXWindowDeminiaturizedNotification,
     ),
-    (AxNotificationKind::TitleChanged, kAXTitleChangedNotification),
 ];
 
 const WINDOW_ANIMATION_NOTIFICATIONS: &[AxNotificationKind] = &[
