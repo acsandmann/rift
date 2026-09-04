@@ -680,6 +680,7 @@ impl WorkspaceStore {
             let _ = window_store.remove_window_assignment(window_id);
             window_store.clear_rule_metadata(window_id);
         }
+        window_store.forget_last_workspace_for_app(pid);
     }
 
     /// Gets all windows in the active virtual workspace for a given native space.
@@ -936,6 +937,21 @@ impl WorkspaceStore {
         window_id: WindowId,
         space: SpaceId,
     ) -> Result<VirtualWorkspaceId, WorkspaceError> {
+        // S1-class fix: re-admission defaults to last-workspace memory instead of
+        // the active workspace. Stale entries (deleted/foreign workspace) are
+        // discarded, falling through to the default below.
+        if let Some(remembered) =
+            self.remembered_workspace_assignment(window_store, window_id, space)
+            && self.assign_window_to_workspace(
+                window_store,
+                space,
+                window_id,
+                remembered.workspace_id,
+            )
+        {
+            window_store.clear_rule_floating(window_id);
+            return Ok(remembered.workspace_id);
+        }
         let default_workspace_id = self.get_default_workspace(space)?;
         if self.assign_window_to_workspace(window_store, space, window_id, default_workspace_id) {
             window_store.clear_rule_floating(window_id);
@@ -945,13 +961,35 @@ impl WorkspaceStore {
         }
     }
 
+    /// Last-workspace memory for `window_id`, but only when it still names a
+    /// live workspace of `space`. `remap_space` and workspace deletion can leave
+    /// the memory pointing at a workspace that no longer exists.
+    pub(crate) fn remembered_workspace_assignment(
+        &self,
+        window_store: &WindowStore,
+        window_id: WindowId,
+        space: SpaceId,
+    ) -> Option<WindowWorkspaceInfo> {
+        window_store.last_workspace_for_window(window_id).filter(|remembered| {
+            remembered.space == space
+                && self.workspaces.get(remembered.workspace_id).map(|workspace| workspace.space)
+                    == Some(space)
+        })
+    }
+
     fn preserved_workspace_assignment(
         &self,
         window_store: &WindowStore,
         window_id: WindowId,
         space: SpaceId,
     ) -> Option<WindowWorkspaceInfo> {
-        let existing_assignment = window_store.workspace_info_for_window(window_id)?;
+        // S1-class fix: removal stashes the live assignment in the store's
+        // last-workspace memory, so consult it when the live record is gone
+        // (minimise, partial snapshot). Same-space only; cross-space moves keep
+        // the resolution path below.
+        let existing_assignment = window_store
+            .workspace_info_for_window(window_id)
+            .or_else(|| self.remembered_workspace_assignment(window_store, window_id, space))?;
         if existing_assignment.space == space {
             return Some(existing_assignment);
         }
@@ -1260,6 +1298,131 @@ mod tests {
         assert_eq!(
             manager.workspace_windows(&window_store, space, ws2_id),
             vec![window2]
+        );
+    }
+
+    #[test]
+    fn minimise_roundtrip_restores_last_workspace_instead_of_active() {
+        // S1d: a window in a non-active workspace is removed (minimise erases the
+        // live assignment) then re-admitted while another workspace is active.
+        // Re-admission must default to last-workspace memory, not active.
+        let mut window_store = WindowStore::default();
+        let mut manager = WorkspaceStore::new();
+        let space = SpaceId::new(1);
+        let ws1_id = manager.create_workspace(space, Some("WS1".to_string())).unwrap();
+        let ws2_id = manager.create_workspace(space, Some("WS2".to_string())).unwrap();
+        let window = WindowId::new(1, 1);
+
+        assert!(manager.set_active_workspace(space, ws1_id));
+        assert!(manager.assign_window_to_workspace(&mut window_store, space, window, ws2_id));
+
+        // Minimise half: removal erases the live assignment.
+        manager.remove_window(&mut window_store, window);
+        assert_eq!(window_store.workspace_info_for_window(window), None);
+
+        // Deminimise half via the rule path: no rule, active workspace is ws1.
+        let effects =
+            expect_managed(manager.apply_app_rule_decision(&mut window_store, window, space, None));
+        assert_eq!(effects.workspace_id, ws2_id);
+
+        // And via the direct admission path after a second removal.
+        manager.remove_window(&mut window_store, window);
+        assert_eq!(
+            manager.auto_assign_window(&mut window_store, window, space),
+            Ok(ws2_id)
+        );
+    }
+
+    #[test]
+    fn last_workspace_memory_naming_a_deleted_workspace_falls_back_to_default() {
+        let mut window_store = WindowStore::default();
+        let mut manager = WorkspaceStore::new();
+        let old_space = SpaceId::new(1);
+        let new_space = SpaceId::new(2);
+        let migrated_ws =
+            manager.create_workspace(old_space, Some("Migrated".to_string())).unwrap();
+        let transient_ws =
+            manager.create_workspace(new_space, Some("Transient".to_string())).unwrap();
+        let migrated_window = WindowId::new(10, 1);
+        let transient_window = WindowId::new(11, 1);
+
+        assert!(manager.assign_window_to_workspace(
+            &mut window_store,
+            old_space,
+            migrated_window,
+            migrated_ws
+        ));
+        assert!(manager.assign_window_to_workspace(
+            &mut window_store,
+            new_space,
+            transient_window,
+            transient_ws
+        ));
+
+        // Deletes the target space's auto-created workspaces and strips the
+        // assignments of their windows, leaving memory of a dead workspace.
+        manager.remap_space(&mut window_store, old_space, new_space);
+        assert!(manager.workspace_info(new_space, transient_ws).is_none());
+
+        let effects = expect_managed(manager.apply_app_rule_decision(
+            &mut window_store,
+            transient_window,
+            new_space,
+            None,
+        ));
+        assert_eq!(
+            effects.workspace_id,
+            manager.get_default_workspace(new_space).unwrap()
+        );
+        assert_eq!(
+            manager.workspace_for_window(&window_store, new_space, transient_window),
+            Some(effects.workspace_id)
+        );
+    }
+
+    #[test]
+    fn last_workspace_memory_follows_a_remapped_space_id() {
+        let mut window_store = WindowStore::default();
+        let mut manager = WorkspaceStore::new();
+        let old_space = SpaceId::new(1);
+        let new_space = SpaceId::new(2);
+        let ws1_id = manager.create_workspace(old_space, Some("WS1".to_string())).unwrap();
+        let ws2_id = manager.create_workspace(old_space, Some("WS2".to_string())).unwrap();
+        let window = WindowId::new(12, 1);
+
+        assert!(manager.set_active_workspace(old_space, ws1_id));
+        assert!(manager.assign_window_to_workspace(&mut window_store, old_space, window, ws2_id));
+
+        // Minimise, then native space identity churn renames the space.
+        manager.remove_window(&mut window_store, window);
+        manager.remap_space(&mut window_store, old_space, new_space);
+
+        assert_eq!(
+            manager.auto_assign_window(&mut window_store, window, new_space),
+            Ok(ws2_id)
+        );
+    }
+
+    #[test]
+    fn app_close_forgets_last_workspace_memory() {
+        let mut window_store = WindowStore::default();
+        let mut manager = WorkspaceStore::new();
+        let space = SpaceId::new(1);
+        let ws1_id = manager.create_workspace(space, Some("WS1".to_string())).unwrap();
+        let ws2_id = manager.create_workspace(space, Some("WS2".to_string())).unwrap();
+        let window = WindowId::new(13, 1);
+
+        assert!(manager.set_active_workspace(space, ws1_id));
+        assert!(manager.assign_window_to_workspace(&mut window_store, space, window, ws2_id));
+
+        manager.remove_windows_for_app(&mut window_store, window.pid);
+        assert_eq!(window_store.last_workspace_for_window(window), None);
+
+        // A relaunch on a recycled pid lands in the active workspace, not the
+        // dead app's.
+        assert_eq!(
+            manager.auto_assign_window(&mut window_store, window, space),
+            Ok(ws1_id)
         );
     }
 

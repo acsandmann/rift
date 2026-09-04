@@ -3031,11 +3031,28 @@ impl Reactor {
                 )
                 .is_some()
         } else {
-            let Some(target_workspace) = self
-                .layout_manager
-                .layout_engine
-                .ensure_active_workspace_info(authoritative_space)
-                .map(|(workspace_id, _)| workspace_id)
+            let remembered = assigned_space
+                .is_none()
+                .then(|| {
+                    self.layout_manager
+                        .layout_engine
+                        .virtual_workspace_manager()
+                        .remembered_workspace_assignment(
+                            &self.state.windows,
+                            wid,
+                            authoritative_space,
+                        )
+                        .map(|remembered| remembered.workspace_id)
+                })
+                .flatten();
+
+            let Some(target_workspace) = remembered
+                .or_else(|| {
+                    self.layout_manager
+                        .layout_engine
+                        .ensure_active_workspace_info(authoritative_space)
+                        .map(|(workspace_id, _)| workspace_id)
+                })
                 .or_else(|| {
                     self.layout_manager.layout_engine.active_workspace(authoritative_space)
                 })

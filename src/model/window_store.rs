@@ -159,6 +159,12 @@ pub struct WindowStore {
     app_windows: HashMap<i32, HashSet<WindowId>>,
     window_servers: HashMap<WindowServerId, WindowServerRecord>,
     workspace_windows: HashMap<WindowWorkspaceInfo, HashSet<WindowId>>,
+    // S1-class fix: removal (minimise, partial snapshot, destroy-path errs) must
+    // never destroy membership info. The last live assignment is stashed here so
+    // re-admission defaults to it instead of the active workspace. Cleared when
+    // the window is destroyed or its app closes, so a recycled WindowId cannot
+    // inherit a dead window's workspace.
+    last_workspace: HashMap<WindowId, WindowWorkspaceInfo>,
     native_fullscreen_records_by_original_window: HashMap<WindowId, NativeFullscreenRecord>,
     native_fullscreen_original_window_by_current_window: HashMap<WindowId, WindowId>,
     native_fullscreen_original_window_by_window_server: HashMap<WindowServerId, WindowId>,
@@ -750,10 +756,26 @@ impl WindowStore {
     pub fn remove_window_assignment(&mut self, window_id: WindowId) -> Option<WindowWorkspaceInfo> {
         let old = self.windows.get_mut(&window_id).and_then(|record| record.workspace.take());
         if let Some(old_assignment) = old {
+            self.last_workspace.insert(window_id, old_assignment);
             self.remove_window_from_workspace_index(window_id, old_assignment);
         }
         self.prune_window_record(window_id);
         old
+    }
+
+    /// Last live workspace assignment remembered across non-destructive removal
+    /// (minimise, partial WindowServer snapshot). `None` once the window is
+    /// destroyed or its app closes.
+    pub fn last_workspace_for_window(&self, window_id: WindowId) -> Option<WindowWorkspaceInfo> {
+        self.last_workspace.get(&window_id).copied()
+    }
+
+    /// Drops the last-workspace memory for every window of `pid`. Apps close
+    /// without per-window destroy events, so this is the destroy boundary that
+    /// keeps a relaunch on a recycled pid from inheriting the dead app's
+    /// workspaces.
+    pub fn forget_last_workspace_for_app(&mut self, pid: i32) {
+        self.last_workspace.retain(|window_id, _| window_id.pid != pid);
     }
 
     /// Move workspace/rule metadata from an old AX window id to a new one when
@@ -798,6 +820,9 @@ impl WindowStore {
         target.pending_operation = pending;
         target.operation_generation = target.operation_generation.max(generation);
         self.app_windows.entry(to.pid).or_default().insert(to);
+        if let Some(remembered) = self.last_workspace.remove(&from) {
+            self.last_workspace.insert(to, remembered);
+        }
 
         if let Some(source) = self.windows.get_mut(&from) {
             source.workspace = None;
@@ -858,6 +883,7 @@ impl WindowStore {
     }
 
     pub fn remove_window(&mut self, window_id: WindowId) {
+        self.last_workspace.remove(&window_id);
         if let Some(record) = self.windows.remove(&window_id)
             && let Some(assignment) = record.workspace
         {
@@ -955,6 +981,11 @@ impl WindowStore {
         for record in self.window_servers.values_mut() {
             if record.space == Some(old_space) {
                 record.space = Some(new_space);
+            }
+        }
+        for remembered in self.last_workspace.values_mut() {
+            if remembered.space == old_space {
+                remembered.space = new_space;
             }
         }
     }

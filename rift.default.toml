@@ -313,7 +313,9 @@ workspace_names = [
 #   - ax_role / ax_subrole: exact match against macOS Accessibility (AX) role/subrole
 #
 # Rule options:
-#   - workspace (integer, 0-based): target workspace index. If omitted or invalid, uses the active workspace.
+#   - workspace (integer, 0-based): target workspace index. If omitted or invalid, the window keeps
+#     the workspace it is already in on that space (or the last one it was in, e.g. across a
+#     minimize/restore); a window with no such workspace goes to the active one.
 #     Alternatively, `workspace` may be a workspace name string to target by name.
 #   - floating (boolean): whether matched windows should float by default.
 #   - position ({ x, y }): initial normalized position for floating windows. Values range from

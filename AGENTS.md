@@ -16,7 +16,7 @@ Guidance for agentic coding assistants working in this repository.
 
 ## 3) Toolchain and CI baseline
 - CI runs on `macos-14`.
-- CI format check: `cargo +nightly fmt --all --check --verbose`.
+- CI format check: `cargo fmt --all --check --verbose` on the stable toolchain (`.github/workflows/rust.yml`); `rustfmt.toml`'s unstable options are silently ignored there, so a nightly-only formatting must still satisfy stable.
 - CI compile check: `cargo check --locked`.
 - CI tests: `cargo nextest run`.
 - `build.rs` links macOS frameworks, so non-macOS builds may fail.
@@ -193,6 +193,6 @@ When adding a config field, update:
 - Still open — start Ship 2 here if needed. The optimism in (1) and (2) is normally self-correcting via `EndWindowAnimation` → `WindowFrameChanged(.., Requested(true), ..)` → `classify_window_frame_change` (src/actor/reactor/events/window.rs) which reassigns `frame_monotonic` to the AX read-back frame and clears the tx target. Latch persists only when that reconciliation does not run (e.g., `Animation::carry_over` dropping a window listed in `handled_windows` without `end()`, or tx target surviving when read-back `!same_as` target) — confirm which fires before changing predicates further.
 - Ponytail ceiling: bool + HashMap guards only; upgrade to per-window `VecDeque`/timer queue or generation counter only if measured coalescing persists.
 - Deferred (follow-up ships, do not fix here):
-  - Partial WindowServer snapshot erasing workspace membership in `Reactor::remove_windows_missing_from_active_space_snapshot` (src/actor/reactor.rs:727, `is_window_visible` too narrow, `preserve_assignments == false` path).
+  - Narrow `is_window_visible` gate in `Reactor::remove_windows_missing_from_active_space_snapshot` (src/actor/reactor.rs:693) still evicts windows from the layout on a partial WindowServer snapshot. The membership loss that made that eviction destructive is fixed: removal stashes the last live assignment (`WindowStore::last_workspace`) and re-admission prefers it over the active workspace (`WorkspaceStore::remembered_workspace_assignment`, regression tests in `src/model/virtual_workspace.rs`).
   - Ghostty rekey fallback in `src/actor/reactor/events/window_discovery.rs:518` (`same_pid.len() == 1`) plus unrestricted `focused_window()` at `:480` and `:492` feeding `reconcile_restored_window` (src/layout_engine/engine/persistence/reconcile.rs:201).
 - The originating investigation write-up (`data/rift-relaunch/report.md`) is not committed to this repo; everything needed for follow-up ships is inlined above rather than cited by section number.

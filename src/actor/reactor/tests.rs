@@ -3150,6 +3150,43 @@ fn authoritative_active_window_snapshot_removes_missing_window_from_active_layou
 }
 
 #[test]
+fn partial_snapshot_readmission_restores_last_workspace_instead_of_active() {
+    let (mut apps, mut reactor) = test_context_with_workspace_count(2);
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let pid: pid_t = 44;
+    let omitted = WindowId::new(pid, 1);
+    let retained = WindowId::new(pid, 2);
+
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, pid, make_windows(2));
+
+    let secondary_workspace = reactor.test_workspace(space, 1);
+    assert!(reactor.assign_test_window_to_workspace(space, omitted, secondary_workspace));
+    assert_ne!(
+        Some(secondary_workspace),
+        reactor.layout_manager.layout_engine.active_workspace(space)
+    );
+
+    let omitted_wsid = reactor.test_window_server_id(omitted);
+    let retained_wsid = reactor.test_window_server_id(retained);
+    reactor.mark_test_window_visible_in_space(omitted_wsid, space);
+    reactor.mark_test_window_visible_in_space(retained_wsid, space);
+
+    // WindowServer still owns the omitted window on the same space, so the
+    // snapshot drops its assignment and the very next reconcile re-admits it.
+    crate::sys::window_server::set_window_spaces_override(omitted_wsid, Some(vec![space.get()]));
+    reactor
+        .reconcile_authoritative_active_window_snapshot(vec![(retained_wsid, Some(space))], false);
+    crate::sys::window_server::set_window_spaces_override(omitted_wsid, None);
+
+    assert_eq!(
+        reactor.test_workspace_for_window(space, omitted),
+        Some(secondary_workspace),
+        "re-admission after a partial snapshot must restore the last workspace rather than the active one"
+    );
+}
+
+#[test]
 fn authoritative_active_window_snapshot_reassigns_missing_window_to_inactive_space() {
     let (mut apps, mut reactor) = test_context();
     let frame = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
