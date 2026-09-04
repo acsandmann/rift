@@ -888,15 +888,24 @@ fn map_layout_command(cmd: LayoutCommands) -> Result<CliCommand, String> {
     match cmd {
         LayoutCommands::Ascend => Ok(CliCommand::Reactor(reactor::Command::Layout(LC::Ascend))),
         LayoutCommands::Descend => Ok(CliCommand::Reactor(reactor::Command::Layout(LC::Descend))),
-        LayoutCommands::MoveNode { direction } => Ok(CliCommand::Reactor(
-            reactor::Command::Layout(LC::MoveNode(direction.into())),
-        )),
-        LayoutCommands::JoinWindow { direction } => Ok(CliCommand::Reactor(
-            reactor::Command::Layout(LC::JoinWindow(direction.into())),
-        )),
-        LayoutCommands::ConsumeOrExpelWindow { direction } => Ok(CliCommand::Reactor(
-            reactor::Command::Layout(LC::ConsumeOrExpelWindow(direction.into())),
-        )),
+        LayoutCommands::MoveNode { direction } => {
+            let direction = parse_focus_direction(&direction)?;
+            Ok(CliCommand::Reactor(reactor::Command::Layout(LC::MoveNode(
+                direction,
+            ))))
+        }
+        LayoutCommands::JoinWindow { direction } => {
+            let direction = parse_focus_direction(&direction)?;
+            Ok(CliCommand::Reactor(reactor::Command::Layout(LC::JoinWindow(
+                direction,
+            ))))
+        }
+        LayoutCommands::ConsumeOrExpelWindow { direction } => {
+            let direction = parse_focus_direction(&direction)?;
+            Ok(CliCommand::Reactor(reactor::Command::Layout(
+                LC::ConsumeOrExpelWindow(direction),
+            )))
+        }
         LayoutCommands::ToggleStack => {
             Ok(CliCommand::Reactor(reactor::Command::Layout(LC::ToggleStack)))
         }
@@ -1180,6 +1189,70 @@ mod tests {
             serde_json::json!({
                 "execute_command": { "command": { "config": { "set_animate": true } } }
             })
+        );
+    }
+
+    #[test]
+    fn invalid_move_node_direction_returns_error_not_panic() {
+        let result = build_execute_request(ExecuteCommands::Layout {
+            layout_cmd: LayoutCommands::MoveNode { direction: "foo".into() },
+        });
+
+        assert!(
+            result.is_err(),
+            "expected an error for an invalid direction, got Ok: {result:?}"
+        );
+        assert!(
+            result.unwrap_err().contains("Invalid focus direction"),
+            "expected the error to mention 'Invalid focus direction'"
+        );
+    }
+
+    #[test]
+    fn invalid_join_window_direction_returns_error_not_panic() {
+        let result = build_execute_request(ExecuteCommands::Layout {
+            layout_cmd: LayoutCommands::JoinWindow { direction: "foo".into() },
+        });
+
+        assert!(
+            result.is_err(),
+            "expected an error for an invalid direction, got Ok: {result:?}"
+        );
+        assert!(
+            result.unwrap_err().contains("Invalid focus direction"),
+            "expected the error to mention 'Invalid focus direction'"
+        );
+    }
+
+    #[test]
+    fn invalid_consume_or_expel_window_direction_returns_error_not_panic() {
+        let result = build_execute_request(ExecuteCommands::Layout {
+            layout_cmd: LayoutCommands::ConsumeOrExpelWindow { direction: "foo".into() },
+        });
+
+        assert!(
+            result.is_err(),
+            "expected an error for an invalid direction, got Ok: {result:?}"
+        );
+        assert!(
+            result.unwrap_err().contains("Invalid focus direction"),
+            "expected the error to mention 'Invalid focus direction'"
+        );
+    }
+
+    #[test]
+    fn valid_layout_direction_is_accepted_and_normalized() {
+        // Mixed-case / surrounding-whitespace input must be accepted and normalized to
+        // the canonical lowercase value, matching the existing focus/switch path.
+        let request = build_execute_request(ExecuteCommands::Layout {
+            layout_cmd: LayoutCommands::MoveNode { direction: " Left ".into() },
+        })
+        .expect("a valid direction should be accepted");
+
+        let rendered = serde_json::to_string(&request).unwrap();
+        assert!(
+            rendered.contains("\"left\""),
+            "expected the normalized direction 'left' in the request, got: {rendered}"
         );
     }
 }
