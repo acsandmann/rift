@@ -114,7 +114,7 @@ fi
 if ! check_service; then
   echo ""
   echo "Live Mach not reachable — falling back to headless harness results:"
-  echo "  ./scripts/autonomous-test.sh  (already passed: 221 tests, 5 drag_harness)"
+  echo "  ./scripts/autonomous-test.sh"
   exit 1
 fi
 
