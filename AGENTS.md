@@ -26,7 +26,7 @@ Run commands from repo root.
 
 ### Recommended local gate
 ```bash
-cargo +nightly fmt --all --check --verbose
+cargo fmt --all --check --verbose
 cargo check --locked
 cargo nextest run
 ```
@@ -46,8 +46,8 @@ cargo run --bin rift-cli -- --help
 
 ### Format and lint
 ```bash
-cargo +nightly fmt --all --check --verbose
-cargo +nightly fmt --all
+cargo fmt --all --check --verbose
+cargo fmt --all
 cargo clippy --workspace --all-targets
 ```
 
