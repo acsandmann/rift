@@ -2384,7 +2384,6 @@ fn workspace_switch_batches_all_window_positions_with_eui_enabled() {
 
 #[test]
 fn non_workspace_instant_layout_keeps_full_frame_batch() {
-    let _counters = super::testing::exclusive_decline_counters();
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
     let space = SpaceId::new(1);
@@ -3339,6 +3338,7 @@ fn decline_gates_count_and_pair_requests_to_frames() {
         );
     }
 
+    let _counters = super::testing::exclusive_decline_counters();
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
     let space = SpaceId::new(1);
