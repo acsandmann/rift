@@ -3239,6 +3239,106 @@ fn decline_gates_count_and_pair_requests_to_frames() {
     );
 }
 
+/// The operator-facing half of the G2 decline instrumentation is the TRACE line
+/// itself: a gate that bumps a counter but logs nothing leaves an operator with
+/// a number and no reason. Drives one decline on each path through a real
+/// `tracing` subscriber (the `tracing_tree` renderer `common::log` installs in
+/// production) and asserts every decline names its gate and its reason.
+#[test]
+fn decline_gates_emit_operator_visible_trace_lines() {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    use tracing_subscriber::layer::SubscriberExt;
+
+    use crate::common::config::WorkspaceTransition;
+
+    #[derive(Clone)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let sink = Capture(Arc::clone(&log));
+    let subscriber = tracing_subscriber::registry().with(
+        tracing_tree::HierarchicalLayer::new(2)
+            .with_ansi(false)
+            .with_targets(true)
+            .with_writer(move || sink.clone()),
+    );
+
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+    let _ = apps.requests();
+    let target = CGRect::new(CGPoint::new(25., 30.), CGSize::new(700., 650.));
+
+    tracing::subscriber::with_default(subscriber, || {
+        // Live resize takes the instant path: is_resize.
+        super::animation::AnimationManager::animate_layout(
+            &mut reactor,
+            space,
+            &[(wid, target)],
+            true,
+            None,
+        );
+        let _ = apps.requests();
+        // The same target again is already satisfied: same_as.
+        super::animation::AnimationManager::animate_layout(
+            &mut reactor,
+            space,
+            &[(wid, target)],
+            true,
+            None,
+        );
+        // Workspace-switch dispatch, animation switched off entirely: animate_off.
+        super::animation::AnimationManager::workspace_switch_wants_animation(&reactor);
+        // Animation on, but no transition configured: transition_none.
+        reactor.config.settings.animate = true;
+        reactor.config.settings.workspace_transition = WorkspaceTransition::None;
+        super::animation::AnimationManager::workspace_switch_wants_animation(&reactor);
+        // Dispatch gate open, but the switch has nothing to move: no_windows.
+        reactor.config.settings.workspace_transition = WorkspaceTransition::Slide;
+        super::animation::AnimationManager::workspace_switch_animated(
+            &mut reactor,
+            space,
+            &[],
+            screen,
+            None,
+        );
+    });
+
+    let rendered = String::from_utf8(log.lock().unwrap().clone()).expect("log is utf8");
+    // Printed so `cargo test ... -- --nocapture` shows an operator exactly what
+    // rift's log says when it declines an animation.
+    println!("{rendered}");
+    for (gate, reason) in [
+        ("is_resize", "live resize takes instant path"),
+        ("same_as", "target matches current frame"),
+        ("animate_off", "animation disabled"),
+        ("transition_none", "no transition configured"),
+        ("no_windows", "no windows to animate"),
+    ] {
+        let line = rendered
+            .lines()
+            .find(|line| line.contains(&format!("decline_gate=\"{gate}\"")))
+            .unwrap_or_else(|| panic!("no TRACE line for decline gate {gate}:\n{rendered}"));
+        assert!(
+            line.contains(reason),
+            "the {gate} TRACE line must state the reason, got: {line}"
+        );
+    }
+}
+
 #[test]
 fn display_index_selector_uses_physical_left_to_right_order() {
     let mut reactor = test_reactor();
@@ -5368,4 +5468,3 @@ fn relaunch_guard_survives_a_layout_that_writes_no_frames() {
         "the guard should only bypass the redundant-layout skips once"
     );
 }
-

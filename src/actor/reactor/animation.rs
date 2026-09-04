@@ -25,7 +25,7 @@ pub type Receiver = mpsc::UnboundedReceiver<Message>;
 /// ADDITIVE TRACING ONLY: nothing reads these counters on any decision path,
 /// so they can never alter control flow or behavior. Each gate increments its
 /// counter and emits a `decline_gate`-tagged TRACE line; `decline_counts()`
-/// exposes the totals for tests and diagnostics.
+/// exposes the totals to tests (see `DeclineSnapshot`).
 struct DeclineCounters {
     same_as: AtomicU64,
     tx_duplicate: AtomicU64,
