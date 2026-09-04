@@ -1,3 +1,6 @@
+use std::cell::{Cell, RefCell};
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use tracing::debug;
 
@@ -13,8 +16,50 @@ use crate::sys::geometry::SameAs;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::{WindowServerId, WindowServerInfo};
 
+/// The animation decline counters are process-global, so delta assertions on
+/// them are only trustworthy when no other reactor test runs alongside. Every
+/// reactor this harness builds takes the read side for the rest of its thread
+/// (libtest gives each test its own thread, and drops thread locals with it);
+/// `exclusive_decline_counters` takes the write side.
+static DECLINE_COUNTERS: RwLock<()> = RwLock::new(());
+
+thread_local! {
+    static SHARED_COUNTERS: RefCell<Option<RwLockReadGuard<'static, ()>>> =
+        const { RefCell::new(None) };
+    static WANTS_EXCLUSIVE: Cell<bool> = const { Cell::new(false) };
+}
+
+fn join_shared_decline_counters() {
+    if WANTS_EXCLUSIVE.with(Cell::get) {
+        return;
+    }
+    SHARED_COUNTERS.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(DECLINE_COUNTERS.read().unwrap_or_else(|e| e.into_inner()));
+        }
+    });
+}
+
+/// Exclusive access to the process-global decline counters. Acquire it before
+/// building the reactor and hold it for as long as the delta assertions run.
+pub struct ExclusiveDeclineCounters(#[allow(dead_code)] RwLockWriteGuard<'static, ()>);
+
+pub fn exclusive_decline_counters() -> ExclusiveDeclineCounters {
+    SHARED_COUNTERS.with(|slot| slot.borrow_mut().take());
+    WANTS_EXCLUSIVE.with(|flag| flag.set(true));
+    ExclusiveDeclineCounters(DECLINE_COUNTERS.write().unwrap_or_else(|e| e.into_inner()))
+}
+
+impl Drop for ExclusiveDeclineCounters {
+    fn drop(&mut self) {
+        WANTS_EXCLUSIVE.with(|flag| flag.set(false));
+    }
+}
+
 impl Reactor {
     pub fn new_for_test(layout: LayoutEngine) -> Reactor {
+        join_shared_decline_counters();
         let mut config = Config::default();
         config.settings.default_disable = false;
         config.settings.animate = false;

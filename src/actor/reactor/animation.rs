@@ -33,6 +33,9 @@ struct DeclineCounters {
     is_resize: AtomicU64,
     low_power: AtomicU64,
     animate_off: AtomicU64,
+    transition_none: AtomicU64,
+    zero_duration: AtomicU64,
+    no_windows: AtomicU64,
 }
 
 static DECLINE: DeclineCounters = DeclineCounters {
@@ -42,10 +45,15 @@ static DECLINE: DeclineCounters = DeclineCounters {
     is_resize: AtomicU64::new(0),
     low_power: AtomicU64::new(0),
     animate_off: AtomicU64::new(0),
+    transition_none: AtomicU64::new(0),
+    zero_duration: AtomicU64::new(0),
+    no_windows: AtomicU64::new(0),
 };
 
 /// Snapshot of decline-gate totals. Fields parallel the gate list above;
-/// `animate_off` covers the remaining `SkipToEnd` arm (`animate = false`).
+/// `animate_off` covers the remaining `SkipToEnd` arm (`animate = false`) plus
+/// the workspace-switch gates that decline for the same reason, and
+/// `transition_none` / `zero_duration` / `no_windows` are workspace-switch only.
 /// Test read-out (production visibility is the TRACE lines themselves); the
 /// issue-8 contract task can un-gate this if it needs runtime reads.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +65,9 @@ pub struct DeclineSnapshot {
     pub is_resize: u64,
     pub low_power: u64,
     pub animate_off: u64,
+    pub transition_none: u64,
+    pub zero_duration: u64,
+    pub no_windows: u64,
 }
 
 /// Read current decline-gate totals. Pure load; never affects layout decisions.
@@ -69,6 +80,9 @@ pub fn decline_counts() -> DeclineSnapshot {
         is_resize: DECLINE.is_resize.load(Ordering::Relaxed),
         low_power: DECLINE.low_power.load(Ordering::Relaxed),
         animate_off: DECLINE.animate_off.load(Ordering::Relaxed),
+        transition_none: DECLINE.transition_none.load(Ordering::Relaxed),
+        zero_duration: DECLINE.zero_duration.load(Ordering::Relaxed),
+        no_windows: DECLINE.no_windows.load(Ordering::Relaxed),
     }
 }
 
@@ -317,9 +331,9 @@ impl AnimationManager {
                 .unwrap_or(reactor.config.settings.animate);
             let skip_anim = is_resize || !layout_animate || low_power;
 
-            // G2: count which gate forced the instant path. Precedence follows
-            // the `skip_anim` disjunction so concurrent reasons count once,
-            // deterministically. Counts only fire when an animation existed.
+            // G2: count which gate forced the instant path. Attribution order is
+            // is_resize -> low_power -> animate_off, so concurrent reasons count
+            // once, deterministically. Counts only fire when an animation existed.
             if skip_anim {
                 if is_resize {
                     DECLINE.is_resize.fetch_add(1, Ordering::Relaxed);
