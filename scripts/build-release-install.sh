@@ -78,7 +78,7 @@ fi
 echo ""
 
 echo "[4/4] Verify"
-ls -lh "$DEST"/rift "$DEST"/rift-cli "$EXECUTABLE" 2>/dev/null | awk '{print $9, $5}'
+for f in "$DEST"/rift "$DEST"/rift-cli "$EXECUTABLE"; do [[ -e $f ]] && du -h "$f"; done
 echo ""
 echo "  codesign rift:"
 codesign -dv "$DEST/rift" 2>&1 | grep -E "Identifier|TeamIdentifier|Authority|Signature" | head -n 5

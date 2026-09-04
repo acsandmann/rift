@@ -129,7 +129,6 @@ echo "[5/5] Live execute smoke (non-destructive)"
 
 # Non-destructive commands: query workspace layout, then no-op toggle and revert via query
 # These don't move your windows; they just prove execute path works
-for cmd in "query workspace-layout" "query layout --space-id 1" 2>/dev/null; do true; done
 
 # Use execute debug/serialize which are read-only
 echo "→ execute debug (layout tree)"

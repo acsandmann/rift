@@ -26,8 +26,8 @@ for bin in "${BINS[@]}"; do
   echo "[build-local] cp $src -> $dst"
   cp -f "$src" "$dst"
   chmod +x "$dst"
-  echo "[build-local] codesign --force --sign - $dst"
-  codesign --force --sign - --identifier "git.acsandmann.$bin" --timestamp=none "$dst"
+  echo "[build-local] codesign --force --sign $IDENTITY $dst"
+  codesign --force --sign "$IDENTITY" --identifier "git.acsandmann.$bin" --timestamp=none "$dst"
   codesign --verify --strict --verbose=2 "$dst"
 done
 
