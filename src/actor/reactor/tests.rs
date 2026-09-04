@@ -2212,6 +2212,7 @@ fn workspace_switch_batches_all_window_positions_with_eui_enabled() {
 
 #[test]
 fn non_workspace_instant_layout_keeps_full_frame_batch() {
+    let _counters = super::testing::exclusive_decline_counters();
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
     let space = SpaceId::new(1);
@@ -3036,14 +3037,15 @@ fn animated_layout_handles_windows_without_server_ids() {
 /// every animation-decline gate counts, and every frame-bearing request pairs
 /// per-window to one txid converging on the requested target.
 ///
-/// Counter assertions use `>=` deltas: tests share one process-global counter
-/// set across threads, so exact equality would be flaky. Pairing and
-/// request-emptiness assertions are thread-local and exact.
+/// The counters are process-global, so the test holds the harness's exclusive
+/// decline-counter guard for its whole body and asserts exact `+1` deltas;
+/// without that guard a concurrent test could mask a gate that stopped counting.
 #[test]
 fn decline_gates_count_and_pair_requests_to_frames() {
     use std::collections::HashMap;
 
     use super::transaction_manager::TransactionId;
+    use crate::common::config::WorkspaceTransition;
 
     /// Per-window request-to-frame pairing (Q2 §6 audit, automated): expand
     /// every frame-bearing request into ordered (txid, frame) pairs per window.
@@ -3107,8 +3109,9 @@ fn decline_gates_count_and_pair_requests_to_frames() {
         None,
     ));
     assert_paired_to_target(&pairs(&apps.requests()), wid, target);
-    assert!(
-        super::animation::decline_counts().is_resize > before.is_resize,
+    assert_eq!(
+        super::animation::decline_counts().is_resize,
+        before.is_resize + 1,
         "resize decline must count"
     );
 
@@ -3125,8 +3128,9 @@ fn decline_gates_count_and_pair_requests_to_frames() {
         apps.requests().is_empty(),
         "declined layout must emit no requests"
     );
-    assert!(
-        super::animation::decline_counts().same_as > before.same_as,
+    assert_eq!(
+        super::animation::decline_counts().same_as,
+        before.same_as + 1,
         "same_as decline must count"
     );
 
@@ -3150,8 +3154,9 @@ fn decline_gates_count_and_pair_requests_to_frames() {
         apps.requests().is_empty(),
         "declined layout must emit no requests"
     );
-    assert!(
-        super::animation::decline_counts().tx_duplicate > before.tx_duplicate,
+    assert_eq!(
+        super::animation::decline_counts().tx_duplicate,
+        before.tx_duplicate + 1,
         "tx_duplicate decline must count"
     );
 
@@ -3173,9 +3178,64 @@ fn decline_gates_count_and_pair_requests_to_frames() {
         None,
     ));
     assert_paired_to_target(&pairs(&apps.requests()), wid, hidden_target);
-    assert!(
-        super::animation::decline_counts().hidden_window > before.hidden_window,
+    assert_eq!(
+        super::animation::decline_counts().hidden_window,
+        before.hidden_window + 1,
         "hidden_window decline must count"
+    );
+
+    // Workspace-switch dispatch declines before the animated path is entered:
+    // animation disabled outright, then no transition configured.
+    let before = super::animation::decline_counts();
+    assert!(!super::animation::AnimationManager::workspace_switch_wants_animation(&reactor));
+    assert_eq!(
+        super::animation::decline_counts().animate_off,
+        before.animate_off + 1,
+        "workspace-switch dispatch must count animation being disabled"
+    );
+
+    reactor.config.settings.animate = true;
+    reactor.config.settings.workspace_transition = WorkspaceTransition::None;
+    let before = super::animation::decline_counts();
+    assert!(!super::animation::AnimationManager::workspace_switch_wants_animation(&reactor));
+    assert_eq!(
+        super::animation::decline_counts().transition_none,
+        before.transition_none + 1,
+        "workspace-switch dispatch must count a missing transition"
+    );
+
+    reactor.config.settings.workspace_transition = WorkspaceTransition::Slide;
+    assert!(super::animation::AnimationManager::workspace_switch_wants_animation(&reactor));
+
+    // With the dispatch gate open but nothing to move, the animated path itself
+    // declines and counts.
+    let before = super::animation::decline_counts();
+    assert!(!super::animation::AnimationManager::workspace_switch_animated(
+        &mut reactor,
+        space,
+        &[],
+        screen,
+        None,
+    ));
+    assert_eq!(
+        super::animation::decline_counts().no_windows,
+        before.no_windows + 1,
+        "workspace-switch animation must count having no windows"
+    );
+
+    reactor.config.settings.animation_duration = 0.0;
+    let before = super::animation::decline_counts();
+    assert!(!super::animation::AnimationManager::workspace_switch_animated(
+        &mut reactor,
+        space,
+        &[(wid, hidden_target)],
+        screen,
+        None,
+    ));
+    assert_eq!(
+        super::animation::decline_counts().zero_duration,
+        before.zero_duration + 1,
+        "workspace-switch animation must count a non-positive duration"
     );
 }
 

@@ -415,14 +415,7 @@ impl LayoutManager {
 
             if is_workspace_switch {
                 // Simulated workspace transition (slide/fade) when enabled.
-                let try_animated = {
-                    use crate::common::config::WorkspaceTransition;
-                    let cfg = &reactor.config.settings;
-                    cfg.animate
-                        && cfg.workspace_transition != WorkspaceTransition::None
-                        && !crate::sys::power::is_low_power_mode_enabled()
-                };
-                if try_animated {
+                if AnimationManager::workspace_switch_wants_animation(reactor) {
                     let screen_frame =
                         reactor.space_state.screen_by_space(space).map(|s| s.frame).unwrap_or(
                             CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0)),

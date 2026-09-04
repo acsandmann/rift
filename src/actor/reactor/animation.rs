@@ -33,6 +33,9 @@ struct DeclineCounters {
     is_resize: AtomicU64,
     low_power: AtomicU64,
     animate_off: AtomicU64,
+    transition_none: AtomicU64,
+    zero_duration: AtomicU64,
+    no_windows: AtomicU64,
 }
 
 static DECLINE: DeclineCounters = DeclineCounters {
@@ -42,10 +45,15 @@ static DECLINE: DeclineCounters = DeclineCounters {
     is_resize: AtomicU64::new(0),
     low_power: AtomicU64::new(0),
     animate_off: AtomicU64::new(0),
+    transition_none: AtomicU64::new(0),
+    zero_duration: AtomicU64::new(0),
+    no_windows: AtomicU64::new(0),
 };
 
 /// Snapshot of decline-gate totals. Fields parallel the gate list above;
-/// `animate_off` covers the remaining `SkipToEnd` arm (`animate = false`).
+/// `animate_off` covers the remaining `SkipToEnd` arm (`animate = false`) plus
+/// the workspace-switch gates that decline for the same reason, and
+/// `transition_none` / `zero_duration` / `no_windows` are workspace-switch only.
 /// Test read-out (production visibility is the TRACE lines themselves); the
 /// issue-8 contract task can un-gate this if it needs runtime reads.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +65,9 @@ pub struct DeclineSnapshot {
     pub is_resize: u64,
     pub low_power: u64,
     pub animate_off: u64,
+    pub transition_none: u64,
+    pub zero_duration: u64,
+    pub no_windows: u64,
 }
 
 /// Read current decline-gate totals. Pure load; never affects layout decisions.
@@ -69,6 +80,9 @@ pub fn decline_counts() -> DeclineSnapshot {
         is_resize: DECLINE.is_resize.load(Ordering::Relaxed),
         low_power: DECLINE.low_power.load(Ordering::Relaxed),
         animate_off: DECLINE.animate_off.load(Ordering::Relaxed),
+        transition_none: DECLINE.transition_none.load(Ordering::Relaxed),
+        zero_duration: DECLINE.zero_duration.load(Ordering::Relaxed),
+        no_windows: DECLINE.no_windows.load(Ordering::Relaxed),
     }
 }
 
@@ -334,9 +348,9 @@ impl AnimationManager {
                 .layout_specific_animate_settings(space)
                 .unwrap_or(reactor.config.settings.animate);
             let skip_anim = is_resize || !layout_animate || low_power;
-            // G2: count which gate forced the instant path. Precedence follows
-            // the `skip_anim` disjunction so concurrent reasons count once,
-            // deterministically. Counts only fire when an animation existed.
+            // G2: count which gate forced the instant path. Attribution order is
+            // is_resize -> low_power -> animate_off, so concurrent reasons count
+            // once, deterministically. Counts only fire when an animation existed.
             if skip_anim {
                 if is_resize {
                     DECLINE.is_resize.fetch_add(1, Ordering::Relaxed);
@@ -404,6 +418,43 @@ impl AnimationManager {
         Self::instant_layout_inner(reactor, space, layout, skip_wid, true)
     }
 
+    /// Workspace-switch dispatch gate: whether the caller should attempt the
+    /// animated transition at all. Counts the gate that declines it, so a switch
+    /// that never enters `workspace_switch_animated` is still audited.
+    /// Attribution order is animate_off -> transition_none -> low_power.
+    pub(super) fn workspace_switch_wants_animation(reactor: &Reactor) -> bool {
+        use crate::common::config::WorkspaceTransition;
+        let cfg = &reactor.config.settings;
+        let transition_none = cfg.workspace_transition == WorkspaceTransition::None;
+        let low_power = power::is_low_power_mode_enabled();
+        if cfg.animate && !transition_none && !low_power {
+            return true;
+        }
+        if !cfg.animate {
+            DECLINE.animate_off.fetch_add(1, Ordering::Relaxed);
+            trace!(
+                decline_gate = "animate_off",
+                workspace_switch = true,
+                "Declined workspace transition: animation disabled"
+            );
+        } else if transition_none {
+            DECLINE.transition_none.fetch_add(1, Ordering::Relaxed);
+            trace!(
+                decline_gate = "transition_none",
+                workspace_switch = true,
+                "Declined workspace transition: no transition configured"
+            );
+        } else {
+            DECLINE.low_power.fetch_add(1, Ordering::Relaxed);
+            trace!(
+                decline_gate = "low_power",
+                workspace_switch = true,
+                "Declined workspace transition: low power mode"
+            );
+        }
+        false
+    }
+
     /// Animated workspace transition (slide/fade). Returns true if an animation was
     /// started. Falls back to instant layout when no windows or low-power.
     pub fn workspace_switch_animated(
@@ -416,14 +467,32 @@ impl AnimationManager {
         use crate::common::config::WorkspaceTransition;
         let transition = reactor.config.settings.workspace_transition;
         if transition == WorkspaceTransition::None {
+            DECLINE.transition_none.fetch_add(1, Ordering::Relaxed);
+            trace!(
+                decline_gate = "transition_none",
+                workspace_switch = true,
+                "Declined workspace transition: no transition configured"
+            );
             return false;
         }
         if reactor.config.settings.animation_duration <= 0.0
             || reactor.config.settings.animation_fps <= 0.0
         {
+            DECLINE.zero_duration.fetch_add(1, Ordering::Relaxed);
+            trace!(
+                decline_gate = "zero_duration",
+                workspace_switch = true,
+                "Declined workspace transition: non-positive duration or fps"
+            );
             return false;
         }
         if power::is_low_power_mode_enabled() {
+            DECLINE.low_power.fetch_add(1, Ordering::Relaxed);
+            trace!(
+                decline_gate = "low_power",
+                workspace_switch = true,
+                "Declined workspace transition: low power mode"
+            );
             return false;
         }
         let layout_animate = reactor
@@ -432,6 +501,12 @@ impl AnimationManager {
             .layout_specific_animate_settings(space)
             .unwrap_or(reactor.config.settings.animate);
         if !layout_animate {
+            DECLINE.animate_off.fetch_add(1, Ordering::Relaxed);
+            trace!(
+                decline_gate = "animate_off",
+                workspace_switch = true,
+                "Declined workspace transition: animation disabled for layout"
+            );
             return false;
         }
 
@@ -517,6 +592,12 @@ impl AnimationManager {
         }
 
         if animated_count == 0 {
+            DECLINE.no_windows.fetch_add(1, Ordering::Relaxed);
+            trace!(
+                decline_gate = "no_windows",
+                workspace_switch = true,
+                "Declined workspace transition: no windows to animate"
+            );
             return false;
         }
 
