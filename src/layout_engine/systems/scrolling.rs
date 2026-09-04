@@ -958,7 +958,20 @@ impl LayoutSystem for ScrollingLayoutSystem {
                 Self::proportional_column_width(tiling.size.width, gap_x, ratio)
             });
             let start = column_starts.get(col_idx).copied().unwrap_or(0.0);
-            let x = anchor_x + start - offset;
+            let mut x = anchor_x + start - offset;
+            // Detect columns outside the tiling viewport, but park them beyond
+            // the physical screen edge. Using the tiling edge as the parking
+            // position would leave outer-gap pixels on-screen and can still
+            // overlap an adjacent display.
+            let visible_left = tiling.origin.x;
+            let visible_right = tiling.origin.x + tiling.size.width;
+            if x + column_width <= visible_left {
+                // Column is fully off-screen left.
+                x = screen.origin.x - column_width;
+            } else if x >= visible_right {
+                // Column is fully off-screen right.
+                x = screen.max().x;
+            }
             if col.windows.is_empty() {
                 continue;
             }
