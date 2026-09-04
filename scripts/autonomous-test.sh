@@ -7,13 +7,9 @@ echo "== rift autonomous test harness =="
 echo "Root: $ROOT"
 echo ""
 
-# 1. Format check (if nightly available)
-if rustup toolchain list 2>/dev/null | grep -q nightly; then
-  echo "[1/4] cargo +nightly fmt --all --check --verbose"
-  cargo +nightly fmt --all --check --verbose
-else
-  echo "[1/4] SKIP fmt (nightly not installed) — run: rustup toolchain install nightly"
-fi
+# 1. Format check (stable toolchain, same as .github/workflows/rust.yml)
+echo "[1/4] cargo fmt --all --check --verbose"
+cargo fmt --all --check --verbose
 echo ""
 
 # 2. Compile check
