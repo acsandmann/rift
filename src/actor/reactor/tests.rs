@@ -3032,6 +3032,153 @@ fn animated_layout_handles_windows_without_server_ids() {
     );
 }
 
+/// G2 decline instrumentation (Q2 §§4.2-4.3 legitimate-skip list, §6 audit):
+/// every animation-decline gate counts, and every frame-bearing request pairs
+/// per-window to one txid converging on the requested target.
+///
+/// Counter assertions use `>=` deltas: tests share one process-global counter
+/// set across threads, so exact equality would be flaky. Pairing and
+/// request-emptiness assertions are thread-local and exact.
+#[test]
+fn decline_gates_count_and_pair_requests_to_frames() {
+    use std::collections::HashMap;
+
+    use super::transaction_manager::TransactionId;
+
+    /// Per-window request-to-frame pairing (Q2 §6 audit, automated): expand
+    /// every frame-bearing request into ordered (txid, frame) pairs per window.
+    fn pairs(requests: &[Request]) -> HashMap<WindowId, Vec<(TransactionId, CGRect)>> {
+        let mut map: HashMap<WindowId, Vec<(TransactionId, CGRect)>> = HashMap::new();
+        for request in requests {
+            match request {
+                Request::SetWindowFrame(wid, frame, txid, _) => {
+                    map.entry(*wid).or_default().push((*txid, *frame));
+                }
+                Request::SetBatchWindowFrame(frames, txid, _) => {
+                    for (wid, frame) in frames {
+                        map.entry(*wid).or_default().push((*txid, *frame));
+                    }
+                }
+                Request::AnimationFrame { wid, frame, txid, .. } => {
+                    map.entry(*wid).or_default().push((*txid, *frame));
+                }
+                _ => {}
+            }
+        }
+        map
+    }
+
+    /// One txid per window, last paired frame equals the requested target.
+    fn assert_paired_to_target(
+        paired: &HashMap<WindowId, Vec<(TransactionId, CGRect)>>,
+        wid: WindowId,
+        target: CGRect,
+    ) {
+        let entry = paired
+            .get(&wid)
+            .unwrap_or_else(|| panic!("window {wid:?} must have paired frame requests"));
+        assert!(
+            entry.iter().all(|(txid, _)| *txid == entry[0].0),
+            "one txid per window, got: {entry:?}"
+        );
+        assert_eq!(
+            entry.last().map(|(_, frame)| *frame),
+            Some(target),
+            "paired frames must converge on the requested target: {entry:?}"
+        );
+    }
+
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+    let _ = apps.requests();
+
+    // Fresh target on the resize path: paired instant write + is_resize counted.
+    let target = CGRect::new(CGPoint::new(25., 30.), CGSize::new(700., 650.));
+    let before = super::animation::decline_counts();
+    assert!(super::animation::AnimationManager::animate_layout(
+        &mut reactor,
+        space,
+        &[(wid, target)],
+        true,
+        None,
+    ));
+    assert_paired_to_target(&pairs(&apps.requests()), wid, target);
+    assert!(
+        super::animation::decline_counts().is_resize > before.is_resize,
+        "resize decline must count"
+    );
+
+    // Identical relayout declines via same_as and emits no new requests.
+    let before = super::animation::decline_counts();
+    assert!(!super::animation::AnimationManager::animate_layout(
+        &mut reactor,
+        space,
+        &[(wid, target)],
+        true,
+        None,
+    ));
+    assert!(
+        apps.requests().is_empty(),
+        "declined layout must emit no requests"
+    );
+    assert!(
+        super::animation::decline_counts().same_as > before.same_as,
+        "same_as decline must count"
+    );
+
+    // Stale monotonic store with a live tx target declines via tx_duplicate.
+    let stale = CGRect::new(CGPoint::new(5., 5.), CGSize::new(700., 650.));
+    reactor
+        .state
+        .windows
+        .window_mut(wid)
+        .expect("window must exist")
+        .frame_monotonic = stale;
+    let before = super::animation::decline_counts();
+    assert!(!super::animation::AnimationManager::animate_layout(
+        &mut reactor,
+        space,
+        &[(wid, target)],
+        true,
+        None,
+    ));
+    assert!(
+        apps.requests().is_empty(),
+        "declined layout must emit no requests"
+    );
+    assert!(
+        super::animation::decline_counts().tx_duplicate > before.tx_duplicate,
+        "tx_duplicate decline must count"
+    );
+
+    // Window on an inactive workspace declines animation for direct positioning.
+    reactor.handle_test_layout_command(LayoutCommand::MoveWindowToWorkspace {
+        workspace: WorkspaceSelector::Index(1),
+        follow: false,
+        window_id: Some(1),
+    });
+    apps.simulate_until_quiet(&mut reactor);
+    let _ = apps.requests();
+    let hidden_target = CGRect::new(CGPoint::new(100., 100.), CGSize::new(500., 400.));
+    let before = super::animation::decline_counts();
+    assert!(super::animation::AnimationManager::animate_layout(
+        &mut reactor,
+        space,
+        &[(wid, hidden_target)],
+        true,
+        None,
+    ));
+    assert_paired_to_target(&pairs(&apps.requests()), wid, hidden_target);
+    assert!(
+        super::animation::decline_counts().hidden_window > before.hidden_window,
+        "hidden_window decline must count"
+    );
+}
+
 #[test]
 fn display_index_selector_uses_physical_left_to_right_order() {
     let mut reactor = test_reactor();
@@ -5161,3 +5308,4 @@ fn relaunch_guard_survives_a_layout_that_writes_no_frames() {
         "the guard should only bypass the redundant-layout skips once"
     );
 }
+

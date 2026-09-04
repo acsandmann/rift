@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
@@ -17,6 +18,59 @@ use crate::sys::window_server::WindowServerId;
 
 pub type Sender = mpsc::UnboundedSender<Message>;
 pub type Receiver = mpsc::UnboundedReceiver<Message>;
+
+/// Countable TRACE instrumentation for every animation-decline gate
+/// (Q2 §§4.2-4.3 legitimate-skip list, northstar §5 G2).
+///
+/// ADDITIVE TRACING ONLY: nothing reads these counters on any decision path,
+/// so they can never alter control flow or behavior. Each gate increments its
+/// counter and emits a `decline_gate`-tagged TRACE line; `decline_counts()`
+/// exposes the totals for tests and diagnostics.
+struct DeclineCounters {
+    same_as: AtomicU64,
+    tx_duplicate: AtomicU64,
+    hidden_window: AtomicU64,
+    is_resize: AtomicU64,
+    low_power: AtomicU64,
+    animate_off: AtomicU64,
+}
+
+static DECLINE: DeclineCounters = DeclineCounters {
+    same_as: AtomicU64::new(0),
+    tx_duplicate: AtomicU64::new(0),
+    hidden_window: AtomicU64::new(0),
+    is_resize: AtomicU64::new(0),
+    low_power: AtomicU64::new(0),
+    animate_off: AtomicU64::new(0),
+};
+
+/// Snapshot of decline-gate totals. Fields parallel the gate list above;
+/// `animate_off` covers the remaining `SkipToEnd` arm (`animate = false`).
+/// Test read-out (production visibility is the TRACE lines themselves); the
+/// issue-8 contract task can un-gate this if it needs runtime reads.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[cfg(test)]
+pub struct DeclineSnapshot {
+    pub same_as: u64,
+    pub tx_duplicate: u64,
+    pub hidden_window: u64,
+    pub is_resize: u64,
+    pub low_power: u64,
+    pub animate_off: u64,
+}
+
+/// Read current decline-gate totals. Pure load; never affects layout decisions.
+#[cfg(test)]
+pub fn decline_counts() -> DeclineSnapshot {
+    DeclineSnapshot {
+        same_as: DECLINE.same_as.load(Ordering::Relaxed),
+        tx_duplicate: DECLINE.tx_duplicate.load(Ordering::Relaxed),
+        hidden_window: DECLINE.hidden_window.load(Ordering::Relaxed),
+        is_resize: DECLINE.is_resize.load(Ordering::Relaxed),
+        low_power: DECLINE.low_power.load(Ordering::Relaxed),
+        animate_off: DECLINE.animate_off.load(Ordering::Relaxed),
+    }
+}
 
 #[derive(Debug)]
 pub enum Message {
@@ -188,6 +242,13 @@ impl AnimationManager {
                         let suppress = reactor.suppress_next_redundant_animation_check;
                         if !suppress {
                             if target_frame.same_as(current_frame) {
+                                DECLINE.same_as.fetch_add(1, Ordering::Relaxed);
+                                trace!(
+                                    decline_gate = "same_as",
+                                    ?wid,
+                                    ?target_frame,
+                                    "Declined animation: target matches current frame"
+                                );
                                 continue;
                             }
                             if let Some(wsid) = wsid {
@@ -196,7 +257,9 @@ impl AnimationManager {
                                     .get_target_frame(wsid)
                                     .is_some_and(|pending| pending.same_as(target_frame))
                                 {
+                                    DECLINE.tx_duplicate.fetch_add(1, Ordering::Relaxed);
                                     trace!(
+                                        decline_gate = "tx_duplicate",
                                         ?wid,
                                         ?target_frame,
                                         "Skipping redundant layout request"
@@ -239,7 +302,9 @@ impl AnimationManager {
                 }
             } else {
                 anim.mark_handled(wid);
+                DECLINE.hidden_window.fetch_add(1, Ordering::Relaxed);
                 trace!(
+                    decline_gate = "hidden_window",
                     ?wid,
                     ?current_frame,
                     ?target_frame,
@@ -269,6 +334,33 @@ impl AnimationManager {
                 .layout_specific_animate_settings(space)
                 .unwrap_or(reactor.config.settings.animate);
             let skip_anim = is_resize || !layout_animate || low_power;
+            // G2: count which gate forced the instant path. Precedence follows
+            // the `skip_anim` disjunction so concurrent reasons count once,
+            // deterministically. Counts only fire when an animation existed.
+            if skip_anim {
+                if is_resize {
+                    DECLINE.is_resize.fetch_add(1, Ordering::Relaxed);
+                    trace!(
+                        decline_gate = "is_resize",
+                        animated_windows = animated_count,
+                        "Declined animation: live resize takes instant path"
+                    );
+                } else if low_power {
+                    DECLINE.low_power.fetch_add(1, Ordering::Relaxed);
+                    trace!(
+                        decline_gate = "low_power",
+                        animated_windows = animated_count,
+                        "Declined animation: low power mode takes instant path"
+                    );
+                } else {
+                    DECLINE.animate_off.fetch_add(1, Ordering::Relaxed);
+                    trace!(
+                        decline_gate = "animate_off",
+                        animated_windows = animated_count,
+                        "Declined animation: animation disabled takes instant path"
+                    );
+                }
+            }
             if let Some(tx) = &reactor.animation_tx {
                 let message = if skip_anim {
                     Message::SkipToEnd(anim)
@@ -477,6 +569,14 @@ impl AnimationManager {
             let target_frame = target_frame.round();
             let current_frame = window.frame_monotonic;
             if target_frame.same_as(current_frame) {
+                DECLINE.same_as.fetch_add(1, Ordering::Relaxed);
+                trace!(
+                    decline_gate = "same_as",
+                    decline_path = "instant",
+                    ?wid,
+                    ?target_frame,
+                    "Declined instant layout: target matches current frame"
+                );
                 continue;
             }
             if let Some(wsid) = window.info.sys_id {
@@ -485,7 +585,14 @@ impl AnimationManager {
                     .get_target_frame(wsid)
                     .is_some_and(|pending| pending.same_as(target_frame))
                 {
-                    trace!(?wid, ?target_frame, "Skipping redundant instant layout request");
+                    DECLINE.tx_duplicate.fetch_add(1, Ordering::Relaxed);
+                    trace!(
+                        decline_gate = "tx_duplicate",
+                        decline_path = "instant",
+                        ?wid,
+                        ?target_frame,
+                        "Skipping redundant instant layout request"
+                    );
                     continue;
                 }
             }
