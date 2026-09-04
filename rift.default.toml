@@ -156,6 +156,7 @@ default_orientation = "perpendicular"
 # Gap configuration
 # - outer: space between windows and screen edges
 # - inner: space between tiled windows
+# - external: optional overrides applied to every external display.
 # - per_display: optional display-specific overrides keyed by display UUID.
 #   When present, the values in a per-display override replace the defaults
 #   (you may override only `outer`, only `inner`, or both for a display).
@@ -170,6 +171,13 @@ right = 0
 [settings.layout.gaps.inner]
 horizontal = 0
 vertical = 0
+
+# Example external-display override:
+# [settings.layout.gaps.external.outer]
+# top = 48
+# left = 0
+# bottom = 0
+# right = 0
 
 # Example per-display overrides:
 # Replace the quoted key with your display's UUID. Only specify values you want to override.

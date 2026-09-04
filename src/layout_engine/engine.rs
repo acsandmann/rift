@@ -159,6 +159,7 @@ pub struct LayoutEngine {
     layout_settings: LayoutSettings,
     broadcast_tx: Option<BroadcastSender>,
     space_display_map: HashMap<SpaceId, Option<String>>,
+    space_display_external: HashMap<SpaceId, bool>,
     display_last_space: HashMap<String, SpaceId>,
     persistence: PersistenceState,
     /// Set only while a master-file startup restore is waiting for the first display snapshot.
@@ -1211,12 +1212,19 @@ impl LayoutEngine {
         Some((workspace_id, workspace_name))
     }
 
-    pub fn update_space_display(&mut self, space: SpaceId, display_uuid: Option<String>) {
+    pub fn update_space_display(
+        &mut self,
+        space: SpaceId,
+        display_uuid: Option<String>,
+        is_external: bool,
+    ) {
         if let Some(uuid) = display_uuid {
             self.space_display_map.insert(space, Some(uuid.clone()));
+            self.space_display_external.insert(space, is_external);
             self.display_last_space.insert(uuid, space);
         } else {
             self.space_display_map.remove(&space);
+            self.space_display_external.remove(&space);
         }
     }
 
@@ -1261,6 +1269,9 @@ impl LayoutEngine {
         if let Some(uuid) = self.space_display_map.remove(&old_space) {
             self.space_display_map.insert(new_space, uuid);
         }
+        if let Some(is_external) = self.space_display_external.remove(&old_space) {
+            self.space_display_external.insert(new_space, is_external);
+        }
 
         for (_uuid, space) in self.display_last_space.iter_mut() {
             if *space == old_space {
@@ -1277,6 +1288,8 @@ impl LayoutEngine {
         self.space_display_map.retain(|_, uuid_opt| {
             uuid_opt.as_ref().map(|uuid| active.contains(uuid.as_str())).unwrap_or(false)
         });
+        self.space_display_external
+            .retain(|space, _| self.space_display_map.contains_key(space));
     }
 
     pub fn new(
@@ -1298,6 +1311,7 @@ impl LayoutEngine {
             layout_settings: layout_settings.clone(),
             broadcast_tx,
             space_display_map: HashMap::default(),
+            space_display_external: HashMap::default(),
             display_last_space: HashMap::default(),
             persistence: PersistenceState::default(),
             startup_restore_pending: false,
@@ -1343,7 +1357,8 @@ impl LayoutEngine {
         let Some(layout) = self.workspace_layouts.active(resize.space, resize.workspace_id) else {
             return;
         };
-        let gaps = self.layout_settings.gaps.effective_for_display(display_uuid);
+        let is_external = self.space_display_external.get(&resize.space).copied().unwrap_or(false);
+        let gaps = self.layout_settings.gaps.effective_for_display(display_uuid, is_external);
         let previous_selection = self.workspace_tree(resize.workspace_id).selected_window(layout);
         let tree = self.workspace_tree_mut(resize.workspace_id);
         let _ = tree.select_window(layout, resize.window);
@@ -1651,8 +1666,12 @@ impl LayoutEngine {
                         );
                         continue;
                     };
-                    let gaps =
-                        self.layout_settings.gaps.effective_for_display(display_uuid.as_deref());
+                    let is_external =
+                        self.space_display_external.get(&space).copied().unwrap_or(false);
+                    let gaps = self
+                        .layout_settings
+                        .gaps
+                        .effective_for_display(display_uuid.as_deref(), is_external);
                     self.workspace_tree_mut(ws_id).on_window_resized(
                         layout,
                         wid,
@@ -3920,7 +3939,7 @@ mod tests {
             ),
         );
 
-        let gaps = engine.layout_settings.gaps.effective_for_display(None);
+        let gaps = engine.layout_settings.gaps.effective_for_display(None, false);
         let positions = engine.calculate_layout_with_virtual_workspaces(
             &window_store,
             space,
