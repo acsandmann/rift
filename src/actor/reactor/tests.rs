@@ -1449,6 +1449,72 @@ fn cross_display_drag_clears_source_floating_position() {
 }
 
 #[test]
+fn floating_drag_with_latched_swap_stores_the_release_frame() {
+    let (mut reactor, floating_wid, space1, _screen, floating_frame) =
+        reactor_with_floating_window();
+    let workspace = reactor
+        .layout_manager
+        .layout_engine
+        .active_workspace(space1)
+        .expect("workspace");
+
+    // A tiled neighbour under the floating window. Overlapping it fully makes the
+    // drag-swap scorer latch a swap candidate on the first drag frame.
+    let tiled_wid = WindowId::new(1, 2);
+    reactor.add_test_window(tiled_wid, WindowServerId::new(102), Some(space1), floating_frame);
+    assert!(reactor.assign_test_window_to_workspace(space1, tiled_wid, workspace));
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space1, tiled_wid));
+    assert!(!reactor.layout_manager.layout_engine.is_window_floating(tiled_wid));
+
+    let latched_frame = CGRect::new(
+        CGPoint::new(floating_frame.origin.x + 10., floating_frame.origin.y + 10.),
+        floating_frame.size,
+    );
+    reactor.handle_event(Event::WindowFrameChanged(
+        floating_wid,
+        latched_frame,
+        None,
+        Requested(false),
+        Some(MouseState::Down),
+    ));
+    assert!(
+        matches!(reactor.drag_manager.drag_state, DragState::PendingSwap { .. }),
+        "expected the overlap to latch a pending swap; got {:?}",
+        reactor.drag_manager.drag_state
+    );
+
+    // Keep dragging with the swap still latched, then release.
+    let released_frame = CGRect::new(
+        CGPoint::new(floating_frame.origin.x + 40., floating_frame.origin.y + 60.),
+        floating_frame.size,
+    );
+    reactor.handle_event(Event::WindowFrameChanged(
+        floating_wid,
+        released_frame,
+        None,
+        Requested(false),
+        Some(MouseState::Down),
+    ));
+    assert!(matches!(
+        reactor.drag_manager.drag_state,
+        DragState::PendingSwap { .. }
+    ));
+    reactor.handle_event(Event::MouseUp);
+
+    assert!(matches!(reactor.drag_manager.drag_state, DragState::Inactive));
+    assert!(reactor.layout_manager.layout_engine.is_window_floating(floating_wid));
+    let stored = reactor
+        .layout_manager
+        .layout_engine
+        .get_floating_position(space1, workspace, floating_wid)
+        .expect("floating position");
+    assert!(
+        stored.same_as(released_frame),
+        "mouse-up must store where the window was released, not where the swap latched: {stored:?}"
+    );
+}
+
+#[test]
 fn stale_user_space_disappearance_does_not_restore_old_display_assignment() {
     let (mut reactor, wid, wsid, space1, space2, _) = reactor_with_window_moved_to_space2();
 
