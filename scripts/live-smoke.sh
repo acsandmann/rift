@@ -127,9 +127,6 @@ echo "[4/5] Windows"
 query_and_assert "windows" query windows
 echo "[5/5] Live execute smoke (non-destructive)"
 
-# Non-destructive commands: query workspace layout, then no-op toggle and revert via query
-# These don't move your windows; they just prove execute path works
-
 # Use execute debug/serialize which are read-only
 echo "→ execute debug (layout tree)"
 if rift_cli execute debug 2>&1 | head -n 40; then echo "  ✓ debug ok"; else echo "  ✗ debug failed"; fi
