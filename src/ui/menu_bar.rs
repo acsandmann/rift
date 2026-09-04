@@ -1,4 +1,5 @@
 // many ideas for how this works were taken from https://github.com/xiamaz/YabaiIndicator
+use std::borrow::Cow;
 #[cfg(test)]
 use std::cell::Cell;
 use std::cell::RefCell;
@@ -94,6 +95,7 @@ pub struct MenuIcon {
     layout_folder: PathBuf,
     mtm: MainThreadMarker,
     prev_width: f64,
+    render_key: Option<MenuIconRenderKey>,
 }
 
 struct WorkspaceMenuItem {
@@ -160,6 +162,7 @@ impl MenuIcon {
             layout_folder: layout_folder.to_path_buf(),
             mtm,
             prev_width: 0.0,
+            render_key: None,
         };
         this.menu_handler.set_layout_folder(layout_folder.to_path_buf());
         this.refresh_layout_library();
@@ -286,17 +289,12 @@ impl MenuIcon {
         settings: &MenuBarSettings,
     ) {
         let show_windows = matches!(settings.display_style, WorkspaceDisplayStyle::Layout);
-        let label_for = |workspace: &RuntimeWorkspaceData| match settings.active_label {
-            ActiveWorkspaceLabel::Index => (workspace.index + 1).to_string(),
-            ActiveWorkspaceLabel::Name if !workspace.name.is_empty() => workspace.name.clone(),
-            ActiveWorkspaceLabel::Name => (workspace.index + 1).to_string(),
-        };
         let make_input = |workspace| WorkspaceRenderInput {
             workspace,
             label: if show_windows {
-                String::new()
+                Cow::Borrowed("")
             } else {
-                label_for(workspace)
+                workspace_label(workspace, settings.active_label)
             },
             show_windows,
         };
@@ -315,25 +313,33 @@ impl MenuIcon {
                 .map(|workspace| vec![make_input(workspace)])
                 .unwrap_or_default(),
         };
+        let render_changed =
+            self.render_key.as_ref().is_none_or(|key| !key.matches_inputs(&render_inputs));
 
         if render_inputs.is_empty() {
             if self.status_item.isVisible() {
                 self.status_item.setVisible(false);
             }
             self.prev_width = 0.0;
+            if render_changed {
+                self.render_key = Some(MenuIconRenderKey::from_inputs(&render_inputs));
+            }
             return;
         }
 
-        let layout = {
-            let ivars = self.view.ivars();
-            build_layout(
-                &render_inputs,
-                ivars.active_text_attrs.as_ref(),
-                ivars.inactive_text_attrs.as_ref(),
-            )
-        };
-        let size = NSSize::new(layout.total_width, CELL_HEIGHT);
-        self.view.set_layout(layout);
+        let size = NSSize::new(workspace_strip_width(render_inputs.len()), CELL_HEIGHT);
+        if render_changed {
+            let layout = {
+                let ivars = self.view.ivars();
+                build_layout(
+                    &render_inputs,
+                    ivars.active_text_attrs.as_ref(),
+                    ivars.inactive_text_attrs.as_ref(),
+                )
+            };
+            self.view.set_layout(layout);
+            self.render_key = Some(MenuIconRenderKey::from_inputs(&render_inputs));
+        }
         if !self.status_item.isVisible() {
             self.status_item.setVisible(true);
         }
@@ -354,8 +360,8 @@ impl MenuIcon {
             }
             let bounds = button.bounds();
             let origin = CGPoint::new(
-                (bounds.size.width - size.width) / 2.0,
-                (bounds.size.height - size.height) / 2.0,
+                centered_origin(bounds.origin.x, bounds.size.width, size.width),
+                centered_origin(bounds.origin.y, bounds.size.height, size.height),
             );
             if frame.origin != origin {
                 self.view.setFrameOrigin(origin);
@@ -375,7 +381,6 @@ impl Drop for MenuIcon {
 
 #[derive(Default)]
 struct MenuIconLayout {
-    total_width: f64,
     workspaces: Vec<WorkspaceRenderData>,
 }
 
@@ -388,8 +393,83 @@ struct WorkspaceRenderData {
 
 struct WorkspaceRenderInput<'a> {
     workspace: &'a RuntimeWorkspaceData,
+    label: Cow<'a, str>,
+    show_windows: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct MenuIconRenderKey {
+    workspaces: Vec<WorkspaceRenderKey>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct WorkspaceRenderKey {
     label: String,
     show_windows: bool,
+    is_active: bool,
+    window_count: usize,
+    window_frames: Vec<[u64; 4]>,
+}
+
+impl MenuIconRenderKey {
+    fn from_inputs(inputs: &[WorkspaceRenderInput<'_>]) -> Self {
+        let workspaces = inputs
+            .iter()
+            .map(|input| WorkspaceRenderKey {
+                label: input.label.to_string(),
+                show_windows: input.show_windows,
+                is_active: input.workspace.is_active,
+                window_count: input
+                    .show_windows
+                    .then_some(input.workspace.window_count)
+                    .unwrap_or_default(),
+                window_frames: input
+                    .show_windows
+                    .then(|| {
+                        input
+                            .workspace
+                            .windows
+                            .iter()
+                            .map(|window| {
+                                let frame = window.info.frame;
+                                [
+                                    frame.origin.x.to_bits(),
+                                    frame.origin.y.to_bits(),
+                                    frame.size.width.to_bits(),
+                                    frame.size.height.to_bits(),
+                                ]
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            })
+            .collect();
+        Self { workspaces }
+    }
+
+    fn matches_inputs(&self, inputs: &[WorkspaceRenderInput<'_>]) -> bool {
+        self.workspaces.len() == inputs.len()
+            && self.workspaces.iter().zip(inputs).all(|(key, input)| {
+                key.label == input.label
+                    && key.show_windows == input.show_windows
+                    && key.is_active == input.workspace.is_active
+                    && (!input.show_windows || key.window_count == input.workspace.window_count)
+                    && (!input.show_windows
+                        || (key.window_frames.len() == input.workspace.windows.len()
+                            && key.window_frames.iter().zip(&input.workspace.windows).all(
+                                |(frame_key, window)| {
+                                    let frame = window.info.frame;
+                                    *frame_key
+                                        == [
+                                            frame.origin.x.to_bits(),
+                                            frame.origin.y.to_bits(),
+                                            frame.size.width.to_bits(),
+                                            frame.size.height.to_bits(),
+                                        ]
+                                },
+                            )))
+            })
+    }
 }
 
 struct CachedTextLine {
@@ -403,6 +483,43 @@ struct MenuIconViewIvars {
     layout: RefCell<MenuIconLayout>,
     active_text_attrs: Retained<NSDictionary<NSAttributedStringKey, AnyObject>>,
     inactive_text_attrs: Retained<NSDictionary<NSAttributedStringKey, AnyObject>>,
+}
+
+#[inline]
+fn centered_origin(container_origin: f64, container_size: f64, content_size: f64) -> f64 {
+    container_origin + (container_size - content_size) / 2.0
+}
+
+#[inline]
+fn workspace_strip_width(count: usize) -> f64 {
+    CELL_WIDTH * count as f64 + CELL_SPACING * count.saturating_sub(1) as f64
+}
+
+fn workspace_label(
+    workspace: &RuntimeWorkspaceData,
+    label_style: ActiveWorkspaceLabel,
+) -> Cow<'_, str> {
+    match label_style {
+        ActiveWorkspaceLabel::Index => Cow::Owned((workspace.index + 1).to_string()),
+        ActiveWorkspaceLabel::Name if !workspace.name.is_empty() => {
+            Cow::Borrowed(workspace.name.as_str())
+        }
+        ActiveWorkspaceLabel::Name => Cow::Owned((workspace.index + 1).to_string()),
+    }
+}
+
+#[inline]
+fn workspace_cell_rect(index: usize) -> CGRect {
+    // Keep the centered stroke entirely inside its cell so the first and last
+    // borders are not clipped by the view bounds.
+    let stroke_inset = BORDER_WIDTH / 2.0;
+    CGRect::new(
+        CGPoint::new(
+            index as f64 * (CELL_WIDTH + CELL_SPACING) + stroke_inset,
+            stroke_inset,
+        ),
+        CGSize::new(CELL_WIDTH - BORDER_WIDTH, CELL_HEIGHT - BORDER_WIDTH),
+    )
 }
 
 fn as_any_object<T: Message>(obj: &T) -> &AnyObject {
@@ -1171,6 +1288,57 @@ mod layout_library_tests {
         let layouts = layout_library_files_in(directory.path());
         assert_eq!(layouts[0].0, "new-layout");
     }
+
+    #[test]
+    fn workspace_strip_math_has_no_trailing_spacing() {
+        assert_eq!(workspace_strip_width(0), 0.0);
+        assert_eq!(workspace_strip_width(1), CELL_WIDTH);
+        assert_eq!(workspace_strip_width(3), 3.0 * CELL_WIDTH + 2.0 * CELL_SPACING);
+    }
+
+    #[test]
+    fn workspace_borders_are_centered_and_remain_inside_the_strip() {
+        let first = workspace_cell_rect(0);
+        let last = workspace_cell_rect(2);
+        let half_stroke = BORDER_WIDTH / 2.0;
+
+        assert_eq!(first.origin.x - half_stroke, 0.0);
+        assert_eq!(first.origin.y - half_stroke, 0.0);
+        assert_eq!(first.origin.y + first.size.height + half_stroke, CELL_HEIGHT);
+        assert_eq!(
+            last.origin.x + last.size.width + half_stroke,
+            workspace_strip_width(3)
+        );
+    }
+
+    #[test]
+    fn centered_origin_accounts_for_nonzero_container_origins() {
+        assert_eq!(centered_origin(4.0, 20.0, 6.0), 11.0);
+        assert_eq!(centered_origin(-2.0, 15.0, 5.0), 3.0);
+    }
+
+    #[test]
+    fn render_key_only_matches_visually_identical_inputs() {
+        let mut workspace = workspace("one", 0, "main", true, "bsp");
+        let key = MenuIconRenderKey::from_inputs(&[WorkspaceRenderInput {
+            workspace: &workspace,
+            label: Cow::Borrowed("1"),
+            show_windows: false,
+        }]);
+
+        assert!(key.matches_inputs(&[WorkspaceRenderInput {
+            workspace: &workspace,
+            label: Cow::Borrowed("1"),
+            show_windows: false,
+        }]));
+
+        workspace.is_active = false;
+        assert!(!key.matches_inputs(&[WorkspaceRenderInput {
+            workspace: &workspace,
+            label: Cow::Borrowed("1"),
+            show_windows: false,
+        }]));
+    }
 }
 
 fn build_text_attrs(
@@ -1249,14 +1417,10 @@ fn build_layout(
     inactive_attrs: &NSDictionary<NSAttributedStringKey, AnyObject>,
 ) -> MenuIconLayout {
     let count = inputs.len();
-    let total_width = (CELL_WIDTH * count as f64) + (CELL_SPACING * count.saturating_sub(1) as f64);
-
     let mut workspaces = Vec::with_capacity(count);
     for (i, input) in inputs.iter().enumerate() {
         let workspace = input.workspace;
-        let bg_x = i as f64 * (CELL_WIDTH + CELL_SPACING);
-        let bg_y = 0.0;
-        let bg_rect = CGRect::new(CGPoint::new(bg_x, bg_y), CGSize::new(CELL_WIDTH, CELL_HEIGHT));
+        let bg_rect = workspace_cell_rect(i);
 
         let fill_alpha = if input.show_windows {
             if workspace.is_active {
@@ -1315,7 +1479,7 @@ fn build_layout(
         });
     }
 
-    MenuIconLayout { total_width, workspaces }
+    MenuIconLayout { workspaces }
 }
 
 fn add_rounded_rect(ctx: &CGContext, x: f64, y: f64, w: f64, h: f64, r: f64) {
@@ -1354,20 +1518,22 @@ define_class!(
                 CGContext::clear_rect(Some(cg), bounds);
 
                 let y_offset = (bounds.size.height - CELL_HEIGHT) / 2.0;
+                CGContext::set_rgb_stroke_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
+                CGContext::set_line_width(Some(cg), BORDER_WIDTH);
 
                 for workspace in layout.workspaces.iter() {
                     let rect = workspace.bg_rect;
                     let bg_y = rect.origin.y + y_offset;
-                    add_rounded_rect(
-                        cg,
-                        rect.origin.x,
-                        bg_y,
-                        rect.size.width,
-                        rect.size.height,
-                        CORNER_RADIUS,
-                    );
 
                     if workspace.fill_alpha > 0.0 {
+                        add_rounded_rect(
+                            cg,
+                            rect.origin.x,
+                            bg_y,
+                            rect.size.width,
+                            rect.size.height,
+                            CORNER_RADIUS,
+                        );
                         CGContext::set_rgb_fill_color(
                             Some(cg),
                             1.0,
@@ -1386,8 +1552,6 @@ define_class!(
                         rect.size.height,
                         CORNER_RADIUS,
                     );
-                    CGContext::set_rgb_stroke_color(Some(cg), 1.0, 1.0, 1.0, 1.0);
-                    CGContext::set_line_width(Some(cg), BORDER_WIDTH);
                     CGContext::stroke_path(Some(cg));
 
                     for window in &workspace.windows {
@@ -1419,10 +1583,16 @@ define_class!(
                     }
 
                     if let Some(label_line) = &workspace.label_line {
-                        let text_width = label_line.width;
-                        let text_center_y = bg_y + rect.size.height / 2.0;
-                        let baseline_y = text_center_y - (label_line.ascent - label_line.descent) / 2.0;
-                        let text_x = rect.origin.x + (rect.size.width - text_width) / 2.0;
+                        let text_x = centered_origin(
+                            rect.origin.x,
+                            rect.size.width,
+                            label_line.width,
+                        );
+                        let baseline_y = centered_origin(
+                            bg_y,
+                            rect.size.height,
+                            label_line.ascent + label_line.descent,
+                        ) + label_line.descent;
 
                         CGContext::save_g_state(Some(cg));
                         if workspace.fill_alpha > 0.0 {
