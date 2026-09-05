@@ -773,6 +773,24 @@ mod tests {
     }
 
     #[test]
+    fn move_focus_raises_only_the_focus_target() {
+        let mut system = BspLayoutSystem::default();
+        let layout = system.create_layout();
+        system.add_window_after_selection(layout, w(1));
+        system.add_window_after_selection(layout, w(2));
+        system.add_window_after_selection(layout, w(3));
+
+        let (focus, raise_windows) = system.move_focus(layout, Direction::Left);
+
+        assert_eq!(focus, Some(w(1)));
+        assert_eq!(
+            raise_windows,
+            vec![w(1)],
+            "BSP windows never overlap; raising the other visible windows fronts every app in turn"
+        );
+    }
+
+    #[test]
     fn window_in_direction_prefers_top_for_down_direction_after_orientation_toggle() {
         let mut system = BspLayoutSystem::default();
         let layout = system.create_layout();
@@ -1197,8 +1215,7 @@ impl LayoutSystem for BspLayoutSystem {
         layout: LayoutId,
         direction: Direction,
     ) -> (Option<WindowId>, Vec<WindowId>) {
-        let raise_windows = self.visible_windows_in_layout(layout);
-        if raise_windows.is_empty() {
+        if self.visible_windows_in_layout(layout).is_empty() {
             return (None, vec![]);
         }
         let sel_snapshot = self.selection_of_layout(layout);
@@ -1214,7 +1231,12 @@ impl LayoutSystem for BspLayoutSystem {
             Some(NodeKind::Leaf { window, .. }) => *window,
             _ => None,
         };
-        (focus, raise_windows)
+        // Tiled BSP windows never overlap, so only the focus target needs to be
+        // raised. Raising every visible window makes the raise manager front
+        // each app in turn (via make_key_window) before the target, which
+        // flickers the menu bar and any focus border on every focus move. The
+        // traditional engine already raises only the revealed group.
+        (focus, focus.into_iter().collect())
     }
 
     fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
