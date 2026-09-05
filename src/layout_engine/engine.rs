@@ -480,6 +480,7 @@ impl LayoutEngine {
                 }
                 LayoutSystemKind::Bsp(system) => {
                     system.set_window_insertion_point(insertion_point);
+                    system.set_center_single_window(settings.bsp.center_single_window_ratios());
                 }
                 LayoutSystemKind::Stack(system) => {
                     system.update_settings(settings.stack.default_orientation, insertion_point);
@@ -494,6 +495,15 @@ impl LayoutEngine {
                     mode_settings.base = settings.resolved_base_for(mode);
                     system.update_settings(&mode_settings);
                 }
+            }
+        }
+    }
+
+    fn sync_bsp_center_single_window(&mut self) {
+        let ratios = self.layout_settings.bsp.center_single_window_ratios();
+        for (_, workspace) in self.virtual_workspace_manager.workspaces.iter_mut() {
+            if let LayoutSystemKind::Bsp(system) = &mut workspace.layout_system {
+                system.set_center_single_window(ratios);
             }
         }
     }
@@ -2059,6 +2069,15 @@ impl LayoutEngine {
                     LayoutSystemKind::Scrolling(s) => {
                         Self::toggle_orientation_for_system(s, layout, default_orientation)
                     }
+                }
+            }
+            LayoutCommand::ToggleCenterSingleWindow => {
+                self.layout_settings.bsp.center_single_window =
+                    !self.layout_settings.bsp.center_single_window;
+                self.sync_bsp_center_single_window();
+                EventResponse {
+                    changed: true,
+                    ..EventResponse::default()
                 }
             }
             LayoutCommand::ResizeWindowGrow(orientation) => {

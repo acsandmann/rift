@@ -39,6 +39,8 @@ pub struct BspLayoutSystem {
     window_to_node: HashMap<WindowId, NodeId>,
     #[serde(skip, default)]
     window_insertion_point: WindowInsertionPoint,
+    #[serde(default)]
+    center_single_window: Option<(f64, f64)>,
 }
 
 impl BspLayoutSystem {
@@ -188,6 +190,7 @@ impl Default for BspLayoutSystem {
             kind: Default::default(),
             window_to_node: Default::default(),
             window_insertion_point: WindowInsertionPoint::default(),
+            center_single_window: None,
         }
     }
 }
@@ -202,6 +205,10 @@ impl BspLayoutSystem {
 
     pub fn set_window_insertion_point(&mut self, value: WindowInsertionPoint) {
         self.window_insertion_point = value;
+    }
+
+    pub fn set_center_single_window(&mut self, ratios: Option<(f64, f64)>) {
+        self.center_single_window = ratios;
     }
 
     fn index_window(&mut self, wid: WindowId, node: NodeId) {
@@ -722,6 +729,29 @@ impl BspLayoutSystem {
             _ => None,
         }
     }
+
+    fn center_single_window_frame(
+        &self,
+        state: &LayoutState,
+        rect: CGRect,
+        width_ratio: f64,
+        height_ratio: f64,
+    ) -> Option<(WindowId, CGRect)> {
+        let mut windows = Vec::new();
+        self.collect_windows_under(state.root, &mut windows);
+        let [window] = windows.as_slice() else { return None };
+
+        let width = (rect.size.width * width_ratio.clamp(0.1, 1.0)).round();
+        let height = (rect.size.height * height_ratio.clamp(0.1, 1.0)).round();
+        let frame = CGRect {
+            origin: CGPoint {
+                x: rect.origin.x + ((rect.size.width - width) / 2.0).round(),
+                y: rect.origin.y + ((rect.size.height - height) / 2.0).round(),
+            },
+            size: CGSize { width, height },
+        };
+        Some((*window, frame))
+    }
 }
 
 #[derive(Default, Serialize, Deserialize, Debug)]
@@ -977,6 +1007,49 @@ mod tests {
             "orthogonal max-only constraint should not change the parent split allocation"
         );
     }
+
+    #[test]
+    fn center_single_window_centers_lone_leaf_only() {
+        let mut system = BspLayoutSystem::default();
+        system.set_center_single_window(Some((0.7, 0.8)));
+        let layout = system.create_layout();
+        system.add_window_after_selection(layout, w(1));
+
+        let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1200.0, 900.0));
+        assert_eq!(
+            system.calculate_layout(
+                layout,
+                screen,
+                0.0,
+                &HashMap::default(),
+                &Default::default(),
+                0.0,
+                Default::default(),
+                Default::default(),
+            ),
+            vec![(
+                w(1),
+                CGRect::new(CGPoint::new(180.0, 90.0), CGSize::new(840.0, 720.0))
+            )]
+        );
+
+        system.add_window_after_selection(layout, w(2));
+        assert_eq!(
+            system
+                .calculate_layout(
+                    layout,
+                    screen,
+                    0.0,
+                    &HashMap::default(),
+                    &Default::default(),
+                    0.0,
+                    Default::default(),
+                    Default::default(),
+                )
+                .len(),
+            2
+        );
+    }
 }
 
 impl LayoutSystem for BspLayoutSystem {
@@ -1129,6 +1202,13 @@ impl LayoutSystem for BspLayoutSystem {
         let mut out = Vec::new();
         if let Some(state) = self.layouts.get(layout).copied() {
             let rect = Self::apply_outer_gaps(screen, gaps);
+            if let Some((width_ratio, height_ratio)) = self.center_single_window
+                && !self.has_fullscreen_in_subtree(state.root)
+                && let Some(frame) =
+                    self.center_single_window_frame(&state, rect, width_ratio, height_ratio)
+            {
+                return vec![frame];
+            }
             self.calculate_layout_recursive(state.root, rect, screen, constraints, gaps, &mut out);
         }
         out
