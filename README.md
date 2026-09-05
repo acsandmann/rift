@@ -53,6 +53,15 @@ Get up and running via the wiki:
 [<kbd><br>quick start<br></kbd>][quick_start]
 <br>
 
+To check a configuration file without starting Rift, run:
+
+```sh
+rift config check --config ~/.config/rift/config.toml
+```
+
+The command parses the TOML and runs Rift's semantic checks before any
+Accessibility, WindowServer, or other runtime services are initialized.
+
 ## Status
 Rift is a stable, reliable, and performant window manager used by many. It is still in development and thus new features, optimizations, and general improvements are regularly released, but is more than good enough for daily use.
 

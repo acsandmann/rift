@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::HashMap as StdHashMap;
 use std::ffi::c_void;
 use std::fmt;
@@ -10,6 +11,37 @@ use objc2_core_foundation::CFData;
 use objc2_core_graphics::{CGEvent, CGEventField, CGEventFlags};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+
+thread_local! {
+    static OFFLINE_KEY_RESOLUTION: Cell<bool> = const { Cell::new(false) };
+    #[cfg(test)]
+    static KEYBOARD_LAYOUT_LOOKUPS: Cell<usize> = const { Cell::new(0) };
+}
+
+struct OfflineKeyResolutionGuard {
+    previous: bool,
+}
+
+impl Drop for OfflineKeyResolutionGuard {
+    fn drop(&mut self) { OFFLINE_KEY_RESOLUTION.with(|offline| offline.set(self.previous)); }
+}
+
+/// Run key parsing without consulting the active macOS keyboard layout.
+///
+/// Offline config checks still use the normal hotkey parser and reject invalid
+/// named keys. Character keys use only the static fallback map.
+pub(crate) fn with_offline_key_resolution<R>(f: impl FnOnce() -> R) -> R {
+    let previous = OFFLINE_KEY_RESOLUTION.with(|offline| offline.replace(true));
+    let _guard = OfflineKeyResolutionGuard { previous };
+    f()
+}
+
+#[cfg(test)]
+pub(crate) fn keyboard_layout_lookup_count_for_test() -> usize {
+    KEYBOARD_LAYOUT_LOOKUPS.with(Cell::get)
+}
+
+pub(crate) fn offline_key_resolution_enabled() -> bool { OFFLINE_KEY_RESOLUTION.with(Cell::get) }
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct Modifiers(u8);
@@ -674,6 +706,13 @@ impl FromStr for KeyCode {
                 return Ok(k);
             }
 
+            if offline_key_resolution_enabled() {
+                return Err(anyhow!(
+                    "Cannot resolve character key '{}' offline without the active keyboard layout",
+                    s
+                ));
+            }
+
             return Err(anyhow!("carbon keymap failed"));
         }
 
@@ -1206,6 +1245,9 @@ fn generate_virtual_keymap() -> StdHashMap<String, KeyCode> {
     let _guard = KEYMAP_GENERATION_LOCK.lock();
     let mut keymap = StdHashMap::new();
 
+    #[cfg(test)]
+    KEYBOARD_LAYOUT_LOOKUPS.with(|lookups| lookups.set(lookups.get() + 1));
+
     let keyboard = unsafe { TISCopyCurrentASCIICapableKeyboardLayoutInputSource() };
     if keyboard.is_null() {
         tracing::warn!("Could not get ASCII-capable keyboard layout input source");
@@ -1276,10 +1318,33 @@ fn generate_virtual_keymap() -> StdHashMap<String, KeyCode> {
 }
 
 pub fn keycode_from_char(ch: &str) -> Option<KeyCode> {
+    if offline_key_resolution_enabled() {
+        return offline_static_keycode_from_char(ch);
+    }
+
     generate_virtual_keymap()
         .get(&ch.to_lowercase())
         .copied()
         .or_else(|| fallback_keycode_from_char(ch))
+}
+
+fn offline_static_keycode_from_char(ch: &str) -> Option<KeyCode> {
+    fallback_keycode_from_char(ch).or_else(|| {
+        Some(match ch {
+            "-" => KeyCode::Minus,
+            "=" => KeyCode::Equal,
+            "," => KeyCode::Comma,
+            "." => KeyCode::Period,
+            "/" => KeyCode::Slash,
+            ";" => KeyCode::Semicolon,
+            "'" => KeyCode::Quote,
+            "`" => KeyCode::Backquote,
+            "\\" => KeyCode::Backslash,
+            "[" => KeyCode::BracketLeft,
+            "]" => KeyCode::BracketRight,
+            _ => return None,
+        })
+    })
 }
 
 fn fallback_keycode_from_char(ch: &str) -> Option<KeyCode> {
