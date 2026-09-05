@@ -2418,6 +2418,37 @@ fn non_workspace_instant_layout_keeps_full_frame_batch() {
 }
 
 #[test]
+fn smooth_scroll_command_uses_positions_and_leaves_focus_unchanged() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let focused = WindowId::new(1, 2);
+    reactor.config.settings.layout.scrolling.gestures.smooth = true;
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    make_active_app(&mut apps, &mut reactor, 1, make_windows(2), Some(focused));
+    reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+        workspace: None,
+        mode: LayoutMode::Scrolling,
+    });
+    apps.simulate_until_quiet(&mut reactor);
+    let _ = apps.requests();
+    let before = reactor.main_window();
+    reactor.handle_test_layout_command(LayoutCommand::ScrollStrip { delta: -0.02 });
+    let requests = apps.requests();
+    assert!(
+        requests.iter().any(|r| matches!(r, Request::SetWorkspaceSwitchPositions(..))),
+        "scroll must use position-only writes: {requests:?}"
+    );
+    assert!(
+        !requests
+            .iter()
+            .any(|r| matches!(r, Request::SetWindowFrame(..) | Request::SetBatchWindowFrame(..))),
+        "pure scrolling must not resize windows: {requests:?}"
+    );
+    assert_eq!(reactor.main_window(), before);
+}
+
+#[test]
 fn workspace_switch_layout_falls_back_to_full_frames_for_size_changes() {
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));

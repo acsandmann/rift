@@ -1900,11 +1900,13 @@ impl Reactor {
                 );
             }
             Event::Command(Command::Layout(command)) => {
+                let direct_positions = matches!(command, layout::LayoutCommand::ScrollStrip { .. })
+                    && self.config.settings.layout.scrolling.gestures.smooth;
                 let post_arrange_mouse_warp =
                     self.config.settings.mouse_follows_focus.then(|| self.main_window()).flatten();
                 let command_space = self.command_context_space();
                 let (visible_spaces, visible_space_centers) = self.visible_spaces_for_layout(false);
-                return command_workflow::handle_command_layout(
+                let mut outcome = command_workflow::handle_command_layout(
                     &mut self.state,
                     &mut self.layout_manager,
                     &mut self.workspace_switch_manager,
@@ -1915,7 +1917,12 @@ impl Reactor {
                         visible_space_centers,
                         post_arrange_mouse_warp,
                     },
-                );
+                )?;
+                outcome.arrange.direct_positions = direct_positions;
+                if direct_positions {
+                    outcome.arrange.space_scope = command_space;
+                }
+                return Ok(outcome);
             }
             Event::Command(Command::Reactor(ReactorCommand::MoveWindowToDisplay {
                 selector,
@@ -2161,6 +2168,15 @@ impl Reactor {
         if outcome.arrange.requested && (!self.is_in_drag() || outcome.arrange.window_was_destroyed)
         {
             for _ in 0..outcome.arrange.passes.max(1) {
+                if outcome.arrange.direct_positions {
+                    layout_changed |=
+                        LayoutManager::update_scroll_layout(self, outcome.arrange.space_scope)
+                            .unwrap_or_else(|error| {
+                                warn!(?error, "Scroll layout update failed");
+                                false
+                            });
+                    continue;
+                }
                 layout_changed |= self.update_layout_or_warn(
                     outcome.arrange.is_resize,
                     matches!(
