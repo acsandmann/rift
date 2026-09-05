@@ -19,8 +19,10 @@ use crate::sys::window_server::WindowServerId;
 pub type Sender = mpsc::UnboundedSender<Message>;
 pub type Receiver = mpsc::UnboundedReceiver<Message>;
 
-/// Countable TRACE instrumentation for every animation-decline gate
-/// (Q2 §§4.2-4.3 legitimate-skip list, northstar §5 G2).
+/// Countable TRACE instrumentation for the animation-decline gates on the
+/// animated and instant layout paths (Q2 §§4.2-4.3 legitimate-skip list,
+/// northstar §5 G2). Workspace switches always take the position-only path,
+/// so there is no switch gate to count.
 ///
 /// ADDITIVE TRACING ONLY: nothing reads these counters on any decision path,
 /// so they can never alter control flow or behavior. Each gate increments its
@@ -33,9 +35,6 @@ struct DeclineCounters {
     is_resize: AtomicU64,
     low_power: AtomicU64,
     animate_off: AtomicU64,
-    transition_none: AtomicU64,
-    zero_duration: AtomicU64,
-    no_windows: AtomicU64,
 }
 
 static DECLINE: DeclineCounters = DeclineCounters {
@@ -45,15 +44,9 @@ static DECLINE: DeclineCounters = DeclineCounters {
     is_resize: AtomicU64::new(0),
     low_power: AtomicU64::new(0),
     animate_off: AtomicU64::new(0),
-    transition_none: AtomicU64::new(0),
-    zero_duration: AtomicU64::new(0),
-    no_windows: AtomicU64::new(0),
 };
 
-/// Snapshot of decline-gate totals. Fields parallel the gate list above;
-/// `animate_off` covers the remaining `SkipToEnd` arm (`animate = false`) plus
-/// the workspace-switch gates that decline for the same reason, and
-/// `transition_none` / `zero_duration` / `no_windows` are workspace-switch only.
+/// Snapshot of decline-gate totals. Fields parallel the gate list above.
 /// Test read-out (production visibility is the TRACE lines themselves); the
 /// issue-8 contract task can un-gate this if it needs runtime reads.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -65,9 +58,6 @@ pub struct DeclineSnapshot {
     pub is_resize: u64,
     pub low_power: u64,
     pub animate_off: u64,
-    pub transition_none: u64,
-    pub zero_duration: u64,
-    pub no_windows: u64,
 }
 
 /// Read current decline-gate totals. Pure load; never affects layout decisions.
@@ -80,9 +70,6 @@ pub fn decline_counts() -> DeclineSnapshot {
         is_resize: DECLINE.is_resize.load(Ordering::Relaxed),
         low_power: DECLINE.low_power.load(Ordering::Relaxed),
         animate_off: DECLINE.animate_off.load(Ordering::Relaxed),
-        transition_none: DECLINE.transition_none.load(Ordering::Relaxed),
-        zero_duration: DECLINE.zero_duration.load(Ordering::Relaxed),
-        no_windows: DECLINE.no_windows.load(Ordering::Relaxed),
     }
 }
 

@@ -3293,7 +3293,6 @@ fn decline_gates_count_and_pair_requests_to_frames() {
     use std::collections::HashMap;
 
     use super::transaction_manager::TransactionId;
-    use crate::common::config::WorkspaceTransition;
 
     /// Per-window request-to-frame pairing (Q2 §6 audit, automated): expand
     /// every frame-bearing request into ordered (txid, frame) pairs per window.
@@ -3432,60 +3431,6 @@ fn decline_gates_count_and_pair_requests_to_frames() {
         before.hidden_window + 1,
         "hidden_window decline must count"
     );
-
-    // Workspace-switch dispatch declines before the animated path is entered:
-    // animation disabled outright, then no transition configured.
-    let before = super::animation::decline_counts();
-    assert!(!super::animation::AnimationManager::workspace_switch_wants_animation(&reactor));
-    assert_eq!(
-        super::animation::decline_counts().animate_off,
-        before.animate_off + 1,
-        "workspace-switch dispatch must count animation being disabled"
-    );
-
-    reactor.config.settings.animate = true;
-    reactor.config.settings.workspace_transition = WorkspaceTransition::None;
-    let before = super::animation::decline_counts();
-    assert!(!super::animation::AnimationManager::workspace_switch_wants_animation(&reactor));
-    assert_eq!(
-        super::animation::decline_counts().transition_none,
-        before.transition_none + 1,
-        "workspace-switch dispatch must count a missing transition"
-    );
-
-    reactor.config.settings.workspace_transition = WorkspaceTransition::Slide;
-    assert!(super::animation::AnimationManager::workspace_switch_wants_animation(&reactor));
-
-    // With the dispatch gate open but nothing to move, the animated path itself
-    // declines and counts.
-    let before = super::animation::decline_counts();
-    assert!(!super::animation::AnimationManager::workspace_switch_animated(
-        &mut reactor,
-        space,
-        &[],
-        screen,
-        None,
-    ));
-    assert_eq!(
-        super::animation::decline_counts().no_windows,
-        before.no_windows + 1,
-        "workspace-switch animation must count having no windows"
-    );
-
-    reactor.config.settings.animation_duration = 0.0;
-    let before = super::animation::decline_counts();
-    assert!(!super::animation::AnimationManager::workspace_switch_animated(
-        &mut reactor,
-        space,
-        &[(wid, hidden_target)],
-        screen,
-        None,
-    ));
-    assert_eq!(
-        super::animation::decline_counts().zero_duration,
-        before.zero_duration + 1,
-        "workspace-switch animation must count a non-positive duration"
-    );
 }
 
 /// The operator-facing half of the G2 decline instrumentation is the TRACE line
@@ -3499,8 +3444,6 @@ fn decline_gates_emit_operator_visible_trace_lines() {
     use std::sync::{Arc, Mutex};
 
     use tracing_subscriber::layer::SubscriberExt;
-
-    use crate::common::config::WorkspaceTransition;
 
     #[derive(Clone)]
     struct Capture(Arc<Mutex<Vec<u8>>>);
@@ -3523,6 +3466,11 @@ fn decline_gates_emit_operator_visible_trace_lines() {
             .with_writer(move || sink.clone()),
     );
 
+    // The animate_off drive below depends on layout settings resolution, which
+    // shares process-global test-harness state; without serialization the TRACE
+    // assertion flakes under parallel load. Hold the harness exclusive guard
+    // for the whole body (same contract as the counter-delta test above).
+    let _counters = super::testing::exclusive_decline_counters();
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
     let space = SpaceId::new(1);
@@ -3549,19 +3497,16 @@ fn decline_gates_emit_operator_visible_trace_lines() {
             true,
             None,
         );
-        // Workspace-switch dispatch, animation switched off entirely: animate_off.
-        super::animation::AnimationManager::workspace_switch_wants_animation(&reactor);
-        // Animation on, but no transition configured: transition_none.
-        reactor.config.settings.animate = true;
-        reactor.config.settings.workspace_transition = WorkspaceTransition::None;
-        super::animation::AnimationManager::workspace_switch_wants_animation(&reactor);
-        // Dispatch gate open, but the switch has nothing to move: no_windows.
-        reactor.config.settings.workspace_transition = WorkspaceTransition::Slide;
-        super::animation::AnimationManager::workspace_switch_animated(
+        // Animation disabled takes the instant path: animate_off. A fresh
+        // target is required: the previous target is already satisfied and
+        // would decline at same_as before reaching the instant-path gate.
+        reactor.config.settings.animate = false;
+        let target2 = CGRect::new(CGPoint::new(30., 35.), CGSize::new(700., 650.));
+        super::animation::AnimationManager::animate_layout(
             &mut reactor,
             space,
-            &[],
-            screen,
+            &[(wid, target2)],
+            false,
             None,
         );
     });
@@ -3574,8 +3519,6 @@ fn decline_gates_emit_operator_visible_trace_lines() {
         ("is_resize", "live resize takes instant path"),
         ("same_as", "target matches current frame"),
         ("animate_off", "animation disabled"),
-        ("transition_none", "no transition configured"),
-        ("no_windows", "no windows to animate"),
     ] {
         let line = rendered
             .lines()
@@ -3586,123 +3529,6 @@ fn decline_gates_emit_operator_visible_trace_lines() {
             "the {gate} TRACE line must state the reason, got: {line}"
         );
     }
-}
-
-/// End-to-end for the gap this instrumentation closed: a real workspace switch
-/// used to decline its transition through an inline predicate in `LayoutManager`
-/// that touched no gate, so the switch was silently uncounted and unlogged.
-/// Drives `LayoutCommand::SwitchToWorkspace` the way a keybind does, with
-/// animation off, and asserts the switch still lands instantly *and* that the
-/// decline is both counted and explained on the operator's log.
-///
-/// Holds the harness's exclusive decline-counter guard (acquired before the
-/// reactor is built) so the counter delta cannot be masked by a concurrent test.
-#[test]
-fn workspace_switch_command_counts_and_logs_its_decline() {
-    use std::io::Write;
-    use std::sync::{Arc, Mutex};
-
-    use tracing_subscriber::layer::SubscriberExt;
-
-    use crate::common::config::WorkspaceTransition;
-
-    #[derive(Clone)]
-    struct Capture(Arc<Mutex<Vec<u8>>>);
-    impl Write for Capture {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    let _counters = super::testing::exclusive_decline_counters();
-    let (mut apps, mut reactor) = test_context();
-    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
-    let space = SpaceId::new(1);
-
-    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(2));
-    let _ = apps.requests();
-    reactor.handle_test_layout_command(LayoutCommand::MoveWindowToWorkspace {
-        workspace: WorkspaceSelector::Index(1),
-        follow: false,
-        window_id: Some(2),
-    });
-    apps.simulate_until_quiet(&mut reactor);
-    let _ = apps.requests();
-
-    // A switch to a workspace with a transition configured, but animation off:
-    // the decline happens before `workspace_switch_animated` is ever entered.
-    reactor.config.settings.workspace_transition = WorkspaceTransition::Slide;
-    assert!(
-        !reactor.config.settings.animate,
-        "harness default is animation off"
-    );
-
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let sink = Capture(Arc::clone(&log));
-    let subscriber = tracing_subscriber::registry().with(
-        tracing_tree::HierarchicalLayer::new(2)
-            .with_ansi(false)
-            .with_targets(true)
-            .with_writer(move || sink.clone()),
-    );
-
-    let before = super::animation::decline_counts();
-    tracing::subscriber::with_default(subscriber, || {
-        reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(1));
-    });
-    let after = super::animation::decline_counts();
-
-    // The switch still happens; it just happens instantly: the outgoing window is
-    // pushed offscreen and the incoming one is given the screen in one batch,
-    // with no `AnimationFrame` tween in between.
-    let requests = apps.requests();
-    assert!(
-        requests.iter().any(|req| matches!(
-            req,
-            Request::SetWorkspaceSwitchPositions(positions, _, _)
-                if positions.iter().any(|(wid, _)| *wid == WindowId::new(1, 1))
-        )),
-        "the outgoing window must still be repositioned: {requests:?}"
-    );
-    assert!(
-        requests.iter().any(|req| matches!(
-            req,
-            Request::SetBatchWindowFrame(frames, _, _)
-                if frames.iter().any(|(wid, frame)| *wid == WindowId::new(1, 2)
-                    && frame.same_as(screen))
-        )),
-        "the incoming window must still be laid out on screen: {requests:?}"
-    );
-    assert!(
-        !requests.iter().any(|req| matches!(req, Request::AnimationFrame { .. })),
-        "a declined transition must not tween: {requests:?}"
-    );
-
-    assert!(
-        after.animate_off > before.animate_off,
-        "a declined workspace switch must be counted (animate_off {} -> {})",
-        before.animate_off,
-        after.animate_off
-    );
-
-    let rendered = String::from_utf8(log.lock().unwrap().clone()).expect("log is utf8");
-    println!("{rendered}");
-    let line = rendered
-        .lines()
-        .find(|line| {
-            line.contains("decline_gate=\"animate_off\"") && line.contains("workspace_switch=true")
-        })
-        .unwrap_or_else(|| {
-            panic!("workspace switch declined its transition without logging why:\n{rendered}")
-        });
-    assert!(
-        line.contains("animation disabled"),
-        "the workspace-switch decline line must state the reason, got: {line}"
-    );
 }
 
 #[test]
