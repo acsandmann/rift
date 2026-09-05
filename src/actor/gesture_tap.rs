@@ -8,6 +8,7 @@
 use std::cell::{Cell, RefCell};
 use std::panic::AssertUnwindSafe;
 use std::rc::Rc;
+use std::time::Duration;
 
 use objc2_core_foundation::{CGPoint, CGRect};
 use objc2_core_graphics::{
@@ -43,6 +44,8 @@ pub type Sender = actor::Sender<GestureRequest>;
 pub type Receiver = actor::Receiver<GestureRequest>;
 
 pub struct GestureTap {
+    pending_scroll: Cell<f64>,
+    scroll_flush_requested: tokio::sync::Notify,
     config: RefCell<Config>,
     wm_sender: wm_controller::Sender,
     swipe: RefCell<Option<SwipeHandler>>,
@@ -98,6 +101,7 @@ impl SwipeState {
 
 #[derive(Debug, Clone)]
 struct ScrollConfig {
+    smooth: bool,
     consume: bool,
     invert_horizontal: bool,
     vertical_tolerance: f64,
@@ -109,6 +113,7 @@ impl ScrollConfig {
     fn from_config(config: &Config) -> Option<Self> {
         let g = &config.settings.layout.scrolling.gestures;
         g.enabled.then(|| Self {
+            smooth: g.smooth,
             consume: config.settings.gestures.consume_dock_swipe,
             invert_horizontal: g.invert_horizontal,
             vertical_tolerance: normalize_tolerance(g.vertical_tolerance),
@@ -236,6 +241,8 @@ impl GestureTap {
         let default_layout_mode = config.settings.layout.mode;
         let (swipe, scroll) = Self::build_gesture_handlers(&config);
         Self {
+            pending_scroll: Cell::new(0.0),
+            scroll_flush_requested: tokio::sync::Notify::new(),
             config: RefCell::new(config),
             wm_sender,
             swipe: RefCell::new(swipe),
@@ -253,6 +260,8 @@ impl GestureTap {
         let mut requests_rx = self.requests_rx.take().unwrap();
         let (recovery_tx, mut recovery_rx) = tokio::sync::mpsc::unbounded_channel();
         let this = Rc::new(self);
+        let mut scroll_timer = crate::sys::timer::Timer::manual();
+        let mut scroll_scheduled = false;
 
         if this.gesture_handlers_enabled() {
             this.create_and_install_tap(&recovery_tx);
@@ -260,6 +269,19 @@ impl GestureTap {
 
         loop {
             tokio::select! {
+                _ = this.scroll_flush_requested.notified() => {
+                    if !scroll_scheduled {
+                        scroll_timer.set_next_fire(Duration::from_secs_f64(1.0 / 60.0));
+                        scroll_scheduled = true;
+                    }
+                }
+                _ = scroll_timer.next(), if scroll_scheduled => {
+                    scroll_scheduled = false;
+                    let delta = this.pending_scroll.replace(0.0);
+                    if delta != 0.0 {
+                        this.send_layout_command(LC::ScrollStrip { delta });
+                    }
+                }
                 recovery = recovery_rx.recv() => {
                     let Some(Recovery::TapInvalidated(generation)) = recovery else { break };
                     this.rebuild_invalidated_tap(generation, &recovery_tx);
@@ -290,6 +312,7 @@ impl GestureTap {
                 map.extend(modes);
             }
             GestureRequest::SpaceStateUpdated(space_state) => {
+                self.pending_scroll.set(0.0);
                 *self.screen_spaces.borrow_mut() = space_state
                     .screens
                     .into_iter()
@@ -619,7 +642,13 @@ impl GestureTap {
             dx = -dx;
         }
         state.accum_dx += dx;
-        if state.accum_dx.abs() >= cfg.distance_pct {
+        if cfg.smooth {
+            // Keep the final partial movement when contacts lift. A single timer
+            // flushes all samples in a frame, including immediate reversals.
+            self.pending_scroll.set(self.pending_scroll.get() + state.accum_dx);
+            state.accum_dx = 0.0;
+            self.scroll_flush_requested.notify_one();
+        } else if state.accum_dx.abs() >= cfg.distance_pct {
             let delta = state.accum_dx;
             state.accum_dx = 0.0;
             self.send_layout_command(LC::ScrollStrip { delta });
@@ -636,6 +665,7 @@ impl GestureTap {
     }
 
     fn reset_gesture_state(&self) {
+        self.pending_scroll.set(0.0);
         if let Some(handler) = self.swipe.borrow().as_ref() {
             handler.state.borrow_mut().reset();
         }
@@ -779,6 +809,60 @@ unsafe extern "C-unwind" fn gesture_tap_invalidated(user_info: *mut std::ffi::c_
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn frame(x: f64, y: f64, count: usize) -> ScrollTouchFrame {
+        let mut frame = ScrollTouchFrame::default();
+        frame.len = count;
+        for i in 0..count {
+            frame.paths[i] = TouchPath { index: i as isize, x, y };
+        }
+        frame
+    }
+
+    #[test]
+    fn smooth_scroll_preserves_small_motion_reversal_and_release_tail() {
+        let mut config = Config::default();
+        config.settings.layout.scrolling.gestures.enabled = true;
+        config.settings.layout.scrolling.gestures.smooth = true;
+        let (tx, mut rx) = actor::channel();
+        let (_, requests) = actor::channel();
+        let tap = GestureTap::new(config, tx, requests);
+        let scroll = tap.scroll.borrow();
+        let handler = scroll.as_ref().unwrap();
+        tap.handle_scroll(handler, frame(0.3, 0.3, 3));
+        tap.handle_scroll(handler, frame(0.31, 0.3, 3));
+        tap.handle_scroll(handler, frame(0.315, 0.3, 3));
+        tap.handle_scroll(handler, frame(0.312, 0.3, 3));
+        tap.handle_scroll(handler, frame(0.0, 0.0, 0));
+        assert!((tap.pending_scroll.get() - 0.012).abs() < 1e-9);
+        // Samples are accumulated for the timer, never sent individually.
+        assert!(rx.try_recv().is_err());
+        drop(scroll);
+        tap.reset_gesture_state();
+        assert_eq!(tap.pending_scroll.get(), 0.0);
+    }
+
+    #[test]
+    fn legacy_scroll_still_waits_for_distance_threshold() {
+        let mut config = Config::default();
+        config.settings.layout.scrolling.gestures.enabled = true;
+        let (tx, mut rx) = actor::channel();
+        let (_, requests) = actor::channel();
+        let tap = GestureTap::new(config, tx, requests);
+        let scroll = tap.scroll.borrow();
+        let handler = scroll.as_ref().unwrap();
+        tap.handle_scroll(handler, frame(0.3, 0.3, 3));
+        tap.handle_scroll(handler, frame(0.31, 0.3, 3));
+        assert!(rx.try_recv().is_err());
+        tap.handle_scroll(handler, frame(0.40, 0.3, 3));
+        assert!(matches!(rx.try_recv().unwrap().1,
+            WmEvent::Command(WmCommand::ReactorCommand(reactor::Command::Layout(
+                LC::ScrollStrip { delta }
+            ))) if (delta - 0.1).abs() < 1e-9));
+        assert_eq!(tap.pending_scroll.get(), 0.0);
+    }
+
     use super::{
         ContactDisposition, GestureState, PathDelta, classify_contacts, select_moving_cohort,
     };

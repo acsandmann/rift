@@ -86,6 +86,7 @@ pub(crate) struct EventOutcome {
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct ArrangeRequest {
+    pub(crate) direct_positions: bool,
     pub(crate) requested: bool,
     pub(crate) passes: u8,
     pub(crate) is_resize: bool,
@@ -148,6 +149,7 @@ impl EventOutcome {
             self.arrange.requested = true;
             self.arrange.passes = self.arrange.passes.saturating_add(other.arrange.passes).max(1);
             self.arrange.is_resize |= other.arrange.is_resize;
+            self.arrange.direct_positions |= other.arrange.direct_positions;
             self.arrange.window_was_destroyed |= other.arrange.window_was_destroyed;
         }
         self.focused_window = other.focused_window.or(self.focused_window);
@@ -192,6 +194,7 @@ impl EventOutcome {
             layout_events: Vec::new(),
             layout_responses: Vec::new(),
             arrange: ArrangeRequest {
+                direct_positions: false,
                 requested: true,
                 passes: 1,
                 is_resize,

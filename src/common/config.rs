@@ -851,6 +851,9 @@ pub enum MasterStackNewWindowPlacement {
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 pub struct ScrollingGestureSettings {
+    /// Coalesce continuous motion at 60 Hz instead of dispatching distance steps.
+    #[serde(default)]
+    pub smooth: bool,
     /// Enable horizontal scroll gestures to switch columns
     #[serde(default = "no")]
     pub enabled: bool,
@@ -877,6 +880,7 @@ pub struct ScrollingGestureSettings {
 impl Default for ScrollingGestureSettings {
     fn default() -> Self {
         Self {
+            smooth: false,
             enabled: false,
             invert_horizontal: false,
             vertical_tolerance: default_swipe_vertical_tolerance(),
