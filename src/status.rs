@@ -1,15 +1,12 @@
 //! What `rift status` reports.
 //!
-//! Three things can independently be wrong: launchd may not be running the
-//! agent, the agent may be running but not answering, and the scripting
-//! addition inside Dock may be absent, stale or degraded. Each is probed on its
-//! own so the output says which one to fix.
+//! Launchd may not be running the agent, or the agent may be running but not
+//! answering. Each is probed independently so the output says which one to fix.
 
 use serde::Serialize;
 use serde_json::Value;
 
 use crate::ipc::RiftMachClient;
-use crate::sys::osax::{SaCommands, handle_sa_command};
 use crate::sys::service;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -48,8 +45,7 @@ pub struct Report {
 impl Report {
     /// Whether the window manager itself is up.
     ///
-    /// This is what the exit status reports. A missing scripting addition is
-    /// deliberately not a failure: rift runs without it, with fewer features.
+    /// This is what the exit status reports.
     pub fn window_manager_is_up(&self) -> bool {
         self.checks
             .iter()
@@ -75,12 +71,11 @@ impl Report {
 
 const WINDOW_MANAGER: &str = "window manager";
 const LAUNCHD_SERVICE: &str = "launchd service";
-const SCRIPTING_ADDITION: &str = "scripting addition";
 
 /// Probes every component and returns what each one said.
 pub fn report() -> Report {
     Report {
-        checks: vec![window_manager(), launchd_service(), scripting_addition()],
+        checks: vec![window_manager(), launchd_service()],
     }
 }
 
@@ -113,7 +108,7 @@ fn window_manager() -> Check {
         Ok(metrics) => Check {
             name: WINDOW_MANAGER,
             health: Health::Ok,
-            detail: summarize_metrics(&metrics),
+            detail: summarize_metrics(&metrics, env!("CARGO_PKG_VERSION")),
         },
         Err(error) => Check {
             name: WINDOW_MANAGER,
@@ -123,14 +118,30 @@ fn window_manager() -> Check {
     }
 }
 
-fn summarize_metrics(metrics: &Value) -> String {
+/// Names the version that is running, and says so when it is not the one
+/// asking: after an upgrade the new binary answers `rift status` while the old
+/// one keeps running until the service restarts, and nothing else tells them
+/// apart.
+fn summarize_metrics(metrics: &Value, own_version: &str) -> String {
     let count = |key: &str| metrics.get(key).and_then(Value::as_u64);
-    match (count("windows_managed"), count("workspaces"), count("screens")) {
-        (Some(windows), Some(workspaces), Some(screens)) => {
-            format!("running — {windows} windows, {workspaces} workspaces, {screens} screens")
-        }
-        _ => "running".to_string(),
+    let mut summary = match metrics.get("version").and_then(Value::as_str) {
+        Some(version) => format!("running {version}"),
+        None => "running".to_string(),
+    };
+    if let (Some(windows), Some(workspaces), Some(screens)) =
+        (count("windows_managed"), count("workspaces"), count("screens"))
+    {
+        summary.push_str(&format!(
+            " — {windows} windows, {workspaces} workspaces, {screens} screens"
+        ));
     }
+    // A rift from before the version was reported is necessarily older than
+    // this binary, so its silence is a mismatch too.
+    let running = metrics.get("version").and_then(Value::as_str);
+    if running != Some(own_version) {
+        summary.push_str(&format!("; restart rift to run {own_version}"));
+    }
+    summary
 }
 
 fn launchd_service() -> Check {
@@ -170,30 +181,6 @@ fn launchd_service() -> Check {
     }
 }
 
-fn scripting_addition() -> Check {
-    match handle_sa_command(&SaCommands::Status) {
-        Ok(detail) => Check {
-            name: SCRIPTING_ADDITION,
-            health: Health::Ok,
-            detail: trim_subject(&detail),
-        },
-        // Everything rift needs the addition for degrades to a fallback, so a
-        // missing or stale payload is never fatal.
-        Err(detail) => Check {
-            name: SCRIPTING_ADDITION,
-            health: Health::Degraded,
-            detail: trim_subject(&detail),
-        },
-    }
-}
-
-/// `rift sa status` writes whole sentences because it is its own command. Here
-/// the row already says which component is speaking.
-fn trim_subject(detail: &str) -> String {
-    let trimmed = detail.strip_prefix("scripting addition ").unwrap_or(detail);
-    trimmed.strip_prefix("is ").unwrap_or(trimmed).to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,18 +195,15 @@ mod tests {
 
     #[test]
     fn exit_status_follows_the_window_manager_alone() {
-        let degraded_addition = Report {
-            checks: vec![
-                check(WINDOW_MANAGER, Health::Ok),
-                check(SCRIPTING_ADDITION, Health::Degraded),
-            ],
+        let running_without_launchd = Report {
+            checks: vec![check(WINDOW_MANAGER, Health::Ok), check(LAUNCHD_SERVICE, Health::Down)],
         };
-        assert!(degraded_addition.window_manager_is_up());
+        assert!(running_without_launchd.window_manager_is_up());
 
         let unanswering = Report {
             checks: vec![
                 check(WINDOW_MANAGER, Health::Degraded),
-                check(SCRIPTING_ADDITION, Health::Ok),
+                check(LAUNCHD_SERVICE, Health::Ok),
             ],
         };
         assert!(!unanswering.window_manager_is_up());
@@ -230,49 +214,52 @@ mod tests {
         let rendered = Report {
             checks: vec![
                 check(WINDOW_MANAGER, Health::Ok),
-                check(SCRIPTING_ADDITION, Health::Down),
+                check(LAUNCHD_SERVICE, Health::Down),
             ],
         }
         .render();
 
         let columns: Vec<usize> =
             rendered.lines().map(|line| line.find("  ").expect("a gap")).collect();
-        assert_eq!(columns, vec![WINDOW_MANAGER.len(), SCRIPTING_ADDITION.len()]);
-    }
-
-    #[test]
-    fn trimming_leaves_the_part_the_row_label_does_not_already_say() {
-        assert_eq!(
-            trim_subject("scripting addition is loaded and healthy (payload v1.0.0)"),
-            "loaded and healthy (payload v1.0.0)"
-        );
-        assert_eq!(
-            trim_subject("scripting addition is NOT loaded (nothing answered)"),
-            "NOT loaded (nothing answered)"
-        );
-        assert_eq!(
-            trim_subject("scripting addition v1.0.0 is loaded but could not find dock.spaces"),
-            "v1.0.0 is loaded but could not find dock.spaces"
-        );
-        assert_eq!(
-            trim_subject("something else entirely"),
-            "something else entirely"
-        );
+        assert_eq!(columns, vec![WINDOW_MANAGER.len(), WINDOW_MANAGER.len()]);
     }
 
     #[test]
     fn metrics_summary_falls_back_when_fields_are_missing() {
         assert_eq!(
-            summarize_metrics(&serde_json::json!({
-                "windows_managed": 10,
-                "workspaces": 7,
-                "screens": 2
-            })),
-            "running — 10 windows, 7 workspaces, 2 screens"
+            summarize_metrics(
+                &serde_json::json!({
+                    "version": "1.0.0",
+                    "windows_managed": 10,
+                    "workspaces": 7,
+                    "screens": 2
+                }),
+                "1.0.0"
+            ),
+            "running 1.0.0 — 10 windows, 7 workspaces, 2 screens"
         );
         assert_eq!(
-            summarize_metrics(&serde_json::json!({ "windows_managed": 10 })),
-            "running"
+            summarize_metrics(
+                &serde_json::json!({ "version": "1.0.0", "windows_managed": 10 }),
+                "1.0.0"
+            ),
+            "running 1.0.0"
+        );
+    }
+
+    #[test]
+    fn metrics_summary_names_the_binary_when_the_running_rift_is_another() {
+        assert_eq!(
+            summarize_metrics(&serde_json::json!({ "version": "1.0.0" }), "1.1.0"),
+            "running 1.0.0; restart rift to run 1.1.0"
+        );
+        // A rift too old to report a version at all.
+        assert_eq!(
+            summarize_metrics(
+                &serde_json::json!({ "windows_managed": 10, "workspaces": 7, "screens": 2 }),
+                "1.1.0"
+            ),
+            "running — 10 windows, 7 workspaces, 2 screens; restart rift to run 1.1.0"
         );
     }
 }

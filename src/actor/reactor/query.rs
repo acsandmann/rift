@@ -659,8 +659,13 @@ impl Reactor {
             .map(|(id, count)| (format!("{:?}", id), *count))
             .collect();
 
+        // The version of the process answering, which after an upgrade is not
+        // the version of the binary asking. Reported here rather than through
+        // a request of its own so that a client old enough not to know about
+        // it still gets an answer.
         serde_json::json!({
-               "windows_managed": self.state.windows.tracked_window_count(),
+            "version": env!("CARGO_PKG_VERSION"),
+            "windows_managed": self.state.windows.tracked_window_count(),
             "workspaces": stats.total_workspaces,
             "applications": self.app_manager.apps.len(),
             "screens": self.space_state.screens.len(),
