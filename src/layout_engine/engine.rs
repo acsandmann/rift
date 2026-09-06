@@ -2837,13 +2837,18 @@ impl LayoutEngine {
         } else {
             false
         };
-        let mut decision = self.app_rules.evaluate(WindowRuleContext {
+        let context = WindowRuleContext {
             app_bundle_id,
             app_name,
             window_title,
             ax_role,
             ax_subrole,
-        });
+        };
+        let mut decision = if reapply_workspace_rule {
+            self.app_rules.evaluate_for_title_change(context)
+        } else {
+            self.app_rules.evaluate(context)
+        };
         // A persistence match is an explicit restoration of the user's previous
         // workspace. App rules still control admission and other effects, but
         // their default placement must not relocate the window during restore.

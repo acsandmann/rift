@@ -216,6 +216,26 @@ impl AppRuleEngine {
     }
 
     pub fn evaluate(&self, context: WindowRuleContext<'_>) -> Option<AppRuleDecision> {
+        self.matching_rule(context).map(|rule| rule.action.clone())
+    }
+
+    /// Re-evaluate rules after a title change without letting a title-independent
+    /// fallback reassert its initial workspace placement.
+    pub fn evaluate_for_title_change(
+        &self,
+        context: WindowRuleContext<'_>,
+    ) -> Option<AppRuleDecision> {
+        self.matching_rule(context).map(|rule| {
+            let mut decision = rule.action.clone();
+            if !rule.matches_title() {
+                decision.workspace = None;
+                decision.focus = false;
+            }
+            decision
+        })
+    }
+
+    fn matching_rule(&self, context: WindowRuleContext<'_>) -> Option<&CompiledRule> {
         let app_id = context.app_bundle_id.map(str::to_ascii_lowercase);
         let app_name = context.app_name.map(str::to_lowercase);
         let title = context.window_title.map(str::to_lowercase);
@@ -233,11 +253,12 @@ impl AppRuleEngine {
             })
             // More matcher fields win; configuration order is the deterministic tie-breaker.
             .max_by_key(|rule| (rule.specificity, std::cmp::Reverse(rule.index)))
-            .map(|rule| rule.action.clone())
     }
 }
 
 impl CompiledRule {
+    fn matches_title(&self) -> bool { self.title_regex.is_some() || self.title_substring.is_some() }
+
     fn new(index: usize, rule: AppWorkspaceRule) -> Option<Self> {
         let AppWorkspaceRule {
             app_id,
@@ -411,5 +432,33 @@ mod tests {
                 })
                 .is_none()
         );
+    }
+
+    #[test]
+    fn title_change_does_not_reassert_workspace_from_non_title_fallback() {
+        let generic = rule("com.example.Editor", 1);
+        let mut titled = rule("com.example.Editor", 2);
+        titled.title_substring = Some("special".into());
+        titled.size = Some(AppRuleSize { w: Some(80.0), h: None });
+        let engine = AppRuleEngine::new(&[generic, titled]);
+
+        let fallback = engine
+            .evaluate_for_title_change(WindowRuleContext {
+                app_bundle_id: Some("com.example.Editor"),
+                window_title: Some("ordinary window"),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(fallback.workspace, None);
+
+        let title_match = engine
+            .evaluate_for_title_change(WindowRuleContext {
+                app_bundle_id: Some("com.example.Editor"),
+                window_title: Some("special window"),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(title_match.workspace, Some(WorkspaceSelector::Index(2)));
+        assert_eq!(title_match.size, Some(AppRuleSize { w: Some(80.0), h: None }));
     }
 }

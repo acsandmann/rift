@@ -3092,6 +3092,59 @@ fn title_change_rule_moves_window_to_matching_workspace() {
 }
 
 #[test]
+fn title_change_non_title_fallback_preserves_manually_moved_workspace() {
+    let settings = crate::common::config::VirtualWorkspaceSettings {
+        default_workspace_count: 3,
+        reapply_app_rules_on_title_change: true,
+        app_rules: vec![
+            crate::common::config::AppWorkspaceRule {
+                app_id: Some("com.testapp1".into()),
+                workspace: Some(WorkspaceSelector::Index(1)),
+                ..Default::default()
+            },
+            crate::common::config::AppWorkspaceRule {
+                app_id: Some("com.testapp1".into()),
+                workspace: Some(WorkspaceSelector::Index(1)),
+                title_substring: Some("btop".into()),
+                size: Some(crate::common::config::AppRuleSize { w: Some(80.0), h: None }),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let (mut apps, mut reactor) = (Apps::new(), test_reactor_with_workspace_settings(&settings));
+    reactor.config.virtual_workspaces = settings;
+    let space = SpaceId::new(1);
+    let window = WindowId::new(1, 1);
+    reactor.handle_event(space_state_event(
+        vec![CGRect::new(CGPoint::ZERO, CGSize::new(1000., 1000.))],
+        vec![Some(space)],
+    ));
+    make_active_app(&mut apps, &mut reactor, 1, make_windows(1), Some(window));
+
+    let manually_selected = reactor.test_workspace(space, 2);
+    assert!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .virtual_workspace_manager_mut()
+            .assign_window_to_workspace(
+                &mut reactor.state.windows,
+                space,
+                window,
+                manually_selected,
+            )
+    );
+
+    reactor.handle_event(Event::WindowTitleChanged(window, "ordinary shell".into()));
+
+    assert_eq!(
+        reactor.test_workspace_for_window(space, window),
+        Some(manually_selected)
+    );
+}
+
+#[test]
 fn menu_open_state_is_cleared_when_owner_deactivates() {
     let mut reactor = test_reactor();
     let (event_tap_tx, mut event_tap_rx) = actor::channel();
