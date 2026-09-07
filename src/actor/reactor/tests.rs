@@ -4650,10 +4650,10 @@ fn dock_disconnect_between_two_sleeps_preserves_workspace_assignments() {
     let windows = make_windows(3);
     let ids: Vec<_> = (1..=3).map(|idx| WindowId::new(1, idx)).collect();
     let rediscovered = ids.iter().copied().zip(windows.iter().cloned()).collect::<Vec<_>>();
-    reactor.handle_event(space_state_event(
-        vec![external, internal],
-        vec![Some(space), Some(SpaceId::new(6))],
-    ));
+    reactor.handle_event(space_state_event(vec![external, internal], vec![
+        Some(space),
+        Some(SpaceId::new(6)),
+    ]));
     apps.make_app_and_settle(&mut reactor, 1, windows);
     let workspaces = reactor.test_workspace_ids(space);
     for (&wid, &workspace) in ids.iter().zip(&workspaces) {
@@ -4680,7 +4680,10 @@ fn dock_disconnect_between_two_sleeps_preserves_workspace_assignments() {
         recovered.active_window_spaces.insert(reactor.test_window_server_id(wid), space);
     }
     reactor.handle_event(Event::SpaceStateChanged(recovered.clone()));
-    assert!(reactor.refreshes_blocked(), "wake must not release the locked-session gate");
+    assert!(
+        reactor.refreshes_blocked(),
+        "wake must not release the locked-session gate"
+    );
     for &wid in &ids {
         reactor.handle_event(Event::WindowInvalidated(
             wid,
