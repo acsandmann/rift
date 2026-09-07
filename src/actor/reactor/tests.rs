@@ -4641,6 +4641,73 @@ fn partial_post_wake_snapshot_preserves_manual_workspace_assignment() {
 }
 
 #[test]
+fn dock_disconnect_between_two_sleeps_preserves_workspace_assignments() {
+    let (mut apps, mut reactor) = test_context_with_workspace_count(3);
+    let external = CGRect::new(CGPoint::new(0., 0.), CGSize::new(3008., 1692.));
+    let internal = CGRect::new(CGPoint::new(3008., 32.), CGSize::new(1728., 1085.));
+    let undocked = CGRect::new(CGPoint::new(0., 38.), CGSize::new(2056., 1291.));
+    let space = SpaceId::new(1);
+    let windows = make_windows(3);
+    let ids: Vec<_> = (1..=3).map(|idx| WindowId::new(1, idx)).collect();
+    let rediscovered = ids.iter().copied().zip(windows.iter().cloned()).collect::<Vec<_>>();
+    reactor.handle_event(space_state_event(
+        vec![external, internal],
+        vec![Some(space), Some(SpaceId::new(6))],
+    ));
+    apps.make_app_and_settle(&mut reactor, 1, windows);
+    let workspaces = reactor.test_workspace_ids(space);
+    for (&wid, &workspace) in ids.iter().zip(&workspaces) {
+        assert!(reactor.assign_test_window_to_workspace(space, wid, workspace));
+    }
+    assert!(reactor.set_test_active_workspace(space, workspaces[1]));
+    apps.requests();
+
+    // The capture wakes briefly after undocking, then sleeps again before unlock.
+    reactor.handle_event(Event::SessionDidResignActive);
+    reactor.handle_event(Event::SystemWillSleep);
+    reactor.handle_event(Event::SystemWoke);
+    reactor.handle_event(Event::DisplayChurnBegin);
+    let mut screens = make_screen_snapshots(vec![undocked], vec![Some(space)]);
+    screens[0].display_uuid = "internal-display".into();
+    let mut recovered = forwarded_space_state(screens);
+    recovered.display_set_changed = true;
+    recovered.topology_changed = true;
+    recovered.should_force_refresh_layout = true;
+    recovered.releases_lifecycle_refresh_quarantine = true;
+    recovered.releases_display_churn_refresh_quarantine = true;
+    recovered.resized_spaces.push((space, undocked.size));
+    for &wid in &ids {
+        recovered.active_window_spaces.insert(reactor.test_window_server_id(wid), space);
+    }
+    reactor.handle_event(Event::SpaceStateChanged(recovered.clone()));
+    assert!(reactor.refreshes_blocked(), "wake must not release the locked-session gate");
+    for &wid in &ids {
+        reactor.handle_event(Event::WindowInvalidated(
+            wid,
+            super::WindowInvalidationSource::InvalidUiElement,
+        ));
+    }
+    reactor.discover_test_windows(1, vec![], vec![]);
+    reactor.handle_event(Event::SystemWillSleep);
+    reactor.handle_event(Event::SystemWoke);
+    reactor.handle_event(Event::SpaceStateChanged(recovered.clone()));
+    assert!(reactor.refreshes_blocked());
+    reactor.handle_event(Event::SessionDidBecomeActive);
+    recovered.display_set_changed = false;
+    recovered.topology_changed = false;
+    recovered.resized_spaces.clear();
+    reactor.handle_event(Event::SpaceStateChanged(recovered));
+    assert!(!reactor.refreshes_blocked());
+    reactor.discover_test_windows(1, rediscovered, ids.clone());
+
+    for (&wid, &workspace) in ids.iter().zip(&workspaces) {
+        assert_eq!(reactor.test_workspace_for_window(space, wid), Some(workspace));
+        assert_eq!(reactor.test_workspace_windows(space, workspace), vec![wid]);
+    }
+    assert_eq!(reactor.test_active_workspace_windows(space), vec![ids[1]]);
+}
+
+#[test]
 fn ax_invalidation_before_lifecycle_signal_preserves_workspace_assignment() {
     let (mut apps, mut reactor) = test_context_with_workspace_count(2);
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
