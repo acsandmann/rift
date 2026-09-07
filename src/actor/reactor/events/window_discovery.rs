@@ -7,6 +7,7 @@ use crate::common::collections::{BTreeMap, HashMap, HashSet};
 use crate::layout_engine::ResolvedWindow;
 use crate::model::virtual_workspace::WorkspaceError;
 use crate::model::{AppRuleEffects, AppRuleResult};
+use crate::sys::axuielement::AX_WINDOW_ROLE;
 use crate::sys::screen::SpaceId;
 use crate::sys::window_server::WindowServerId;
 
@@ -26,16 +27,38 @@ fn sync_existing_window_state(
         if info.frame.size.width != 0.0 || info.frame.size.height != 0.0 {
             existing.frame_monotonic = info.frame;
         }
-        existing.info.is_standard = info.is_standard;
         existing.info.is_root = info.is_root;
         existing.info.is_resizable = info.is_resizable;
         existing.info.min_size = info.min_size;
         existing.info.max_size = info.max_size;
         existing.info.sys_id = info.sys_id;
-        existing.info.bundle_id = info.bundle_id.clone();
-        existing.info.path = info.path.clone();
-        existing.info.ax_role = info.ax_role.clone();
-        existing.info.ax_subrole = info.ax_subrole.clone();
+        // A window rift has already admitted is not turned away again by a
+        // report that still describes a root AXWindow. JetBrains apps
+        // re-report their document window as `AXDialog` for as long as one of
+        // their own modals is up — the same window, same id, still a resizable
+        // root AXWindow, called a dialog because it has a sheet over it. Taken
+        // at face value that retires the IDE from its tree on every Cmd+Shift+K
+        // and reflows every window beside it, and only some later inventory
+        // puts it back. The whole shape half of such a report is dropped, not
+        // just the flag: `WindowInfo` blanks `bundle_id` and `path` for a
+        // window it thinks is not standard, and app rules match on the subrole,
+        // so keeping half of it would leave the window described as something
+        // rift is not treating it as. A promotion is still believed, and a
+        // window that has genuinely changed shape — another role, no longer
+        // root — is still retired.
+        let shadowed_by_a_modal = existing.info.is_standard
+            && !info.is_standard
+            && info.is_root
+            && info.ax_role.as_deref() == Some(AX_WINDOW_ROLE);
+        if shadowed_by_a_modal {
+            trace!(?wid, subrole = ?info.ax_subrole, "Keeping an admitted window a modal re-reports as non-standard");
+        } else {
+            existing.info.is_standard = info.is_standard;
+            existing.info.bundle_id = info.bundle_id.clone();
+            existing.info.path = info.path.clone();
+            existing.info.ax_role = info.ax_role.clone();
+            existing.info.ax_subrole = info.ax_subrole.clone();
+        }
     } else {
         return Ok(crate::actor::reactor::events::EventOutcome::default());
     }
