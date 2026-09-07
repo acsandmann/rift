@@ -1,5 +1,3 @@
-use std::cmp::Ordering;
-
 use super::*;
 
 pub(super) type WorkspaceLocation = (SpaceId, VirtualWorkspaceId);
@@ -59,43 +57,10 @@ pub(super) fn choose_match(
         );
 
     let exact_identity = direct.is_some() || server_id_match.is_some();
-    let selected = direct.map(|candidate| candidate.window).or(server_id_match).or_else(|| {
-        let compatible = |candidate: &&RestoreCandidate<'_>| {
-            candidate.fingerprint.app_compatible_with(fingerprint)
-        };
-        let same_space: Vec<_> = candidates
-            .iter()
-            .filter(compatible)
-            .filter(|candidate| candidate.location.is_none_or(|(space, _)| space == live_space))
-            .collect();
-        let pool = if same_space.is_empty() {
-            candidates.iter().filter(compatible).collect::<Vec<_>>()
-        } else {
-            same_space
-        };
-        pool.into_iter()
-            .max_by(|a, b| compare_fallback(a, b, fingerprint))
-            .map(|candidate| candidate.window)
-    })?;
-
-    let selected_fingerprint =
-        candidates.iter().find(|candidate| candidate.window == selected)?.fingerprint;
-    let title_matches =
-        selected_fingerprint.title.is_some() && selected_fingerprint.title == fingerprint.title;
-    let size_delta = (selected_fingerprint.width - fingerprint.width).abs()
-        + (selected_fingerprint.height - fingerprint.height).abs();
-    let known_app_match =
-        selected_fingerprint.app_id.is_some() && selected_fingerprint.app_id == fingerprint.app_id;
-    let size_matches = size_delta <= 8.0;
-    // Bundle identity narrows the search pool but does not identify a particular window. Require
-    // both available window-specific signals, otherwise identical default sizes or common titles
-    // let one window from an application consume another window's saved slot. This deliberately
-    // prefers leaving a saved slot empty over manufacturing a convincing ghost match.
-    if !exact_identity {
-        if !known_app_match || !title_matches || !size_matches {
-            return None;
-        }
-    }
+    let selected = direct
+        .map(|candidate| candidate.window)
+        .or(server_id_match)
+        .or_else(|| choose_fallback(fingerprint, candidates))?;
 
     let mut duplicate_identities = if direct.is_none() && server_id_match.is_some() {
         fingerprint.window_server_id.map_or_else(Vec::new, |window_server_id| {
@@ -120,22 +85,41 @@ pub(super) fn choose_match(
     })
 }
 
-fn compare_fallback(
-    a: &RestoreCandidate<'_>,
-    b: &RestoreCandidate<'_>,
+fn choose_fallback(
     live: &WindowFingerprint,
-) -> Ordering {
-    let score = |saved: &WindowFingerprint| {
-        let app = (saved.app_id.is_some() && saved.app_id == live.app_id) as u8;
-        let title = (saved.title.is_some() && saved.title == live.title) as u8;
-        let size_delta = (saved.width - live.width).abs() + (saved.height - live.height).abs();
-        (app, title, size_delta)
-    };
-    let (app_a, title_a, size_a) = score(a.fingerprint);
-    let (app_b, title_b, size_b) = score(b.fingerprint);
-    app_a
-        .cmp(&app_b)
-        .then_with(|| title_a.cmp(&title_b))
-        .then_with(|| size_b.partial_cmp(&size_a).unwrap_or(Ordering::Equal))
-        .then_with(|| b.window.cmp(&a.window))
+    candidates: &[RestoreCandidate<'_>],
+) -> Option<WindowId> {
+    // A known bundle id plus a non-empty title identifies a restarted application's window when
+    // that pair occurs only once. Size is layout output, so it must not veto that association.
+    let matching: Vec<_> = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.fingerprint.app_id.is_some()
+                && candidate.fingerprint.app_id == live.app_id
+                && candidate.fingerprint.title.is_some()
+                && candidate.fingerprint.title == live.title
+        })
+        .collect();
+    if matching.len() == 1 {
+        return Some(matching[0].window);
+    }
+
+    // Duplicate titles do occur within an application. In that case size is useful only as a
+    // disambiguation signal: accept the uniquely closest saved frame and reject an equal-distance
+    // tie instead of assigning a saved slot arbitrarily.
+    let mut closest = None;
+    let mut closest_delta = f64::INFINITY;
+    let mut tied = false;
+    for candidate in matching {
+        let delta = (candidate.fingerprint.width - live.width).abs()
+            + (candidate.fingerprint.height - live.height).abs();
+        if delta < closest_delta {
+            closest = Some(candidate.window);
+            closest_delta = delta;
+            tied = false;
+        } else if delta == closest_delta {
+            tied = true;
+        }
+    }
+    (!tied).then_some(closest).flatten()
 }
