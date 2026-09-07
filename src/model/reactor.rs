@@ -123,16 +123,16 @@ impl From<WindowInfo> for WindowState {
 
 impl WindowState {
     pub(crate) fn layout_info(&self, wid: WindowId) -> WindowLayoutInfo {
-        (
-            wid,
-            Some(self.info.title.clone()),
-            self.info.ax_role.clone(),
-            self.info.ax_subrole.clone(),
-            self.info.is_resizable,
-            self.frame_monotonic.size,
-            self.info.min_size,
-            self.info.max_size,
-        )
+        WindowLayoutInfo {
+            window_id: wid,
+            title: Some(self.info.title.clone()),
+            ax_role: self.info.ax_role.clone(),
+            ax_subrole: self.info.ax_subrole.clone(),
+            is_resizable: self.info.is_resizable,
+            current_size: self.frame_monotonic.size,
+            min_size: self.info.min_size,
+            max_size: self.info.max_size,
+        }
     }
 
     /// The single admission policy used by every layout-facing caller.

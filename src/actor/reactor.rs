@@ -4503,7 +4503,7 @@ impl Reactor {
                 self.request_refocus_if_hidden(*space, *wid);
             }
             LayoutEvent::WindowObserved(space, window) => {
-                if self.window_in_non_active_workspace(*space, window.info.0) {
+                if self.window_in_non_active_workspace(*space, window.info.window_id) {
                     self.refocus_manager.refocus_state = RefocusState::Pending(*space);
                 }
             }
