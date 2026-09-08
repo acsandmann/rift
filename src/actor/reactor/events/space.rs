@@ -270,7 +270,7 @@ pub fn handle_window_server_appeared(
 
             state.windows.set_window_server_space(wsid, Some(resolved_space));
             state.windows.mark_window_visible(wsid);
-            outcome = outcome.with_confirmed_window_space(wsid, resolved_space);
+            outcome.confirmed_window_spaces.push((wsid, resolved_space));
         }
     }
 
@@ -279,9 +279,8 @@ pub fn handle_window_server_appeared(
             match kind {
                 SpaceEventKind::User => {
                     if let Some(wid) = state.windows.tracked_window_id(wsid) {
-                        outcome = outcome
-                            .with_fullscreen_restoration(wsid, sid, wid)
-                            .with_arrange_passes(1);
+                        outcome.fullscreen_restorations.push((wsid, sid, wid));
+                        outcome = outcome.with_arrange_passes(1);
                     } else if let Some(pid) =
                         state.windows.pending_native_fullscreen_pid_for_window_server_id(wsid)
                     {
@@ -376,8 +375,7 @@ pub fn handle_window_server_appeared(
 
         if !app_known {
             if let Some(app_info) = running_app_info {
-                outcome =
-                    outcome.with_wm_event(WmEvent::AppLaunch(window_server_info.pid, app_info));
+                outcome.wm_events.push(WmEvent::AppLaunch(window_server_info.pid, app_info));
             }
         } else {
             outcome = outcome.with_window_inventory_request(window_server_info.pid);
@@ -414,7 +412,8 @@ pub fn handle_mission_control_native_exited(
         MissionControlState::Active
     );
     mission_control.mission_control_state = MissionControlState::Inactive;
-    let outcome = EventOutcome::layout_changed(false).with_mission_control_recovery();
+    let mut outcome = EventOutcome::layout_changed(false);
+    outcome.recover_after_mission_control = true;
     Ok(if changed {
         outcome.with_focus_follows_mouse_refresh()
     } else {

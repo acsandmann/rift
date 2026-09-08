@@ -141,7 +141,7 @@ pub fn handle_command_layout(
         .with_arrange_space_scope(arrange_space_scope);
     outcome.broadcast_selection_changed = selection_changed;
     if is_move_node && let Some(window) = post_arrange_mouse_warp {
-        outcome = outcome.with_post_arrange_mouse_warp(window);
+        outcome.post_arrange_mouse_warp = Some(window);
     }
     Ok(outcome)
 }
@@ -180,13 +180,19 @@ pub fn handle_command_metrics(cmd: MetricsCommand) -> anyhow::Result<EventOutcom
 pub fn handle_switch_native_space(
     direction: crate::layout_engine::Direction,
 ) -> anyhow::Result<EventOutcome> {
-    Ok(EventOutcome::no_change().with_native_space_switch(direction))
+    Ok(EventOutcome {
+        switch_native_space: Some(direction),
+        ..EventOutcome::default()
+    })
 }
 
 pub fn handle_mission_control_command(
     command: crate::actor::wm_controller::WmCmd,
 ) -> anyhow::Result<EventOutcome> {
-    Ok(EventOutcome::no_change().with_wm_command(command))
+    Ok(EventOutcome {
+        wm_commands: vec![command],
+        ..EventOutcome::default()
+    })
 }
 
 pub fn handle_close_window(
@@ -211,7 +217,10 @@ pub fn handle_config_updated(
 
     drag.update_config(config.settings.window_snapping);
 
-    Ok(EventOutcome::layout_changed(false).with_service_config_update(config.clone()))
+    Ok(EventOutcome {
+        service_config_update: Some(config.clone()),
+        ..EventOutcome::layout_changed(false)
+    })
 }
 
 pub fn handle_command_reactor_debug(
@@ -385,7 +394,7 @@ pub fn handle_command_reactor_focus_window(
 
         outcome = outcome.with_raise_request(focus_window_raise_request(apps, window_id));
     } else if let Some(wsid) = window_server_id {
-        outcome = outcome.with_make_key_window(window_id.pid, wsid);
+        outcome.make_key_windows.push((window_id.pid, wsid));
     }
     Ok(outcome)
 }
