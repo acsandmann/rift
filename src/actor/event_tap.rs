@@ -160,11 +160,9 @@ unsafe fn drop_mouse_ctx(ptr: *mut std::ffi::c_void) {
 
 impl EventTap {
     #[inline]
-    fn stack_line_hover_enabled(&self, state: &State) -> bool { state.stack_line_enabled }
-
-    #[inline]
-    fn focus_follows_mouse_handler_enabled(state: &State) -> bool {
-        state.focus_follows_mouse_config_enabled && state.focus_follows_mouse_enabled
+    fn mouse_move_mask_needed(state: &State) -> bool {
+        state.event_processing_enabled
+            && (state.stack_line_enabled || state.focus_follows_mouse_config_enabled)
     }
 
     fn keyboard_handlers_enabled(&self) -> bool {
@@ -172,10 +170,7 @@ impl EventTap {
     }
 
     fn mouse_move_handlers_enabled(&self) -> bool {
-        let state = self.state.borrow();
-        state.event_processing_enabled
-            && (self.stack_line_hover_enabled(&state)
-                || Self::focus_follows_mouse_handler_enabled(&state))
+        Self::mouse_move_mask_needed(&self.state.borrow())
     }
 
     fn desired_event_mask(&self) -> CGEventMask {
@@ -284,11 +279,8 @@ impl EventTap {
             .as_ref()
             .map(|target| state.compute_disable_hotkey_active(target))
             .unwrap_or(false);
-        let event_mask = build_event_mask(
-            disable_hotkey.is_some(),
-            state.event_processing_enabled
-                && (state.stack_line_enabled || Self::focus_follows_mouse_handler_enabled(&state)),
-        );
+        let event_mask =
+            build_event_mask(disable_hotkey.is_some(), Self::mouse_move_mask_needed(&state));
         let mouse_move_min_interval_ns = mouse_move_sampling_profile(state.low_power_mode);
         EventTap {
             events_tx,
@@ -410,7 +402,6 @@ impl EventTap {
                     self.reset_mouse_move_sample_gate();
                     self.reset_mouse_window();
                 }
-                should_rebuild_mask = true;
             }
             Request::SetHotkeys(bindings) => {
                 *self.hotkey_specs.borrow_mut() = bindings;
@@ -1061,6 +1052,28 @@ mod tests {
             state.layout_mode_at_point(CGPoint::new(150.0, 50.0)),
             Some(crate::common::config::LayoutMode::Scrolling)
         );
+    }
+
+    #[test]
+    fn temporary_focus_follows_mouse_suppression_keeps_the_event_mask() {
+        let mut state = State::default();
+        state.event_processing_enabled = true;
+        state.focus_follows_mouse_config_enabled = true;
+
+        let armed = EventTap::mouse_move_mask_needed(&state);
+        state.focus_follows_mouse_enabled = false;
+        let suppressed = EventTap::mouse_move_mask_needed(&state);
+
+        assert!(armed);
+        assert_eq!(armed, suppressed);
+    }
+
+    #[test]
+    fn mouse_moves_are_not_observed_without_a_consumer() {
+        let mut state = State::default();
+        state.event_processing_enabled = true;
+
+        assert!(!EventTap::mouse_move_mask_needed(&state));
     }
 
     #[test]
