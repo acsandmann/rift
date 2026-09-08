@@ -7,7 +7,9 @@ use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
 use crate::common::config::WindowInsertionPoint;
 use crate::layout_engine::systems::constraints::{AxisConstraints, solve_axis_lengths};
-use crate::layout_engine::systems::{LayoutSystem, WindowLayoutConstraints};
+use crate::layout_engine::systems::{
+    LayoutSystem, WindowLayoutConstraints, reconcile_app_membership,
+};
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{Direction, LayoutId, LayoutKind, Orientation, ResizeOrientation};
 use crate::model::selection::*;
@@ -660,58 +662,24 @@ impl LayoutSystem for TraditionalLayoutSystem {
         }
     }
 
-    fn windows_for_app(&self, layout: LayoutId, pid: pid_t) -> Vec<WindowId> {
-        self.root(layout)
+    fn set_windows_for_app(&mut self, layout: LayoutId, pid: pid_t, desired: Vec<WindowId>) {
+        let root = self.root(layout);
+        let current = root
             .traverse_postorder(self.map())
             .filter_map(|node| self.window_at(node))
             .filter(|wid| wid.pid == pid)
-            .collect()
-    }
-
-    fn set_windows_for_app(&mut self, layout: LayoutId, pid: pid_t, mut desired: Vec<WindowId>) {
-        let root = self.root(layout);
-        let mut current = root
-            .traverse_postorder(self.map())
-            .filter_map(|node| self.window_at(node).map(|wid| (wid, node)))
-            .filter(|(wid, _)| wid.pid == pid)
             .collect::<Vec<_>>();
-        desired.sort_unstable();
-        current.sort_unstable();
-        debug_assert!(desired.iter().all(|wid| wid.pid == pid));
-        let mut desired = desired.into_iter().peekable();
-        let mut current = current.into_iter().peekable();
-        loop {
-            match (desired.peek(), current.peek()) {
-                (Some(des), Some((cur, _))) if des == cur => {
-                    desired.next();
-                    current.next();
-                }
-                (Some(des), None) => {
-                    self.add_window_after_selection(layout, *des);
-                    desired.next();
-                }
-                (Some(des), Some((cur, _))) if des < cur => {
-                    self.add_window_after_selection(layout, *des);
-                    desired.next();
-                }
-                (_, Some((_, node))) => {
-                    if self.tree.data.layout.info[*node].is_fullscreen {
-                        current.next();
-                    } else {
-                        node.detach(&mut self.tree).remove();
-                        current.next();
-                    }
-                }
-                (None, None) => break,
+        let delta = reconcile_app_membership(pid, current, desired);
+        for wid in delta.removals {
+            if let Some(node) = self.tree.data.window.node_for(layout, wid)
+                && !self.tree.data.layout.info[node].is_fullscreen
+            {
+                node.detach(&mut self.tree).remove();
             }
         }
-    }
-
-    fn has_windows_for_app(&self, layout: LayoutId, pid: pid_t) -> bool {
-        self.root(layout)
-            .traverse_postorder(self.map())
-            .filter_map(|node| self.window_at(node))
-            .any(|wid| wid.pid == pid)
+        for wid in delta.additions {
+            self.add_window_after_selection(layout, wid);
+        }
     }
 
     fn contains_window(&self, layout: LayoutId, wid: WindowId) -> bool {
