@@ -238,7 +238,7 @@ impl Menu {
                 Self::open_path_or_url("https://github.com/acsandmann/rift");
             }
             MenuAction::OpenDocumentation => {
-                Self::open_path_or_url("https://github.com/acsandmann/rift#readme");
+                Self::open_path_or_url("https://acsandmann.github.io/rift-docs/");
             }
             MenuAction::OpenMatrix => {
                 Self::open_path_or_url("https://matrix.to/#/#rift:matrix.org");
