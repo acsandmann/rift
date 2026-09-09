@@ -7,7 +7,7 @@ use crate::common::collections::HashMap;
 use crate::common::config::{
     MasterStackNewWindowPlacement, MasterStackSettings, MasterStackSide, WindowInsertionPoint,
 };
-use crate::layout_engine::systems::WindowLayoutConstraints;
+use crate::layout_engine::systems::{WindowLayoutConstraints, reconcile_app_membership};
 use crate::layout_engine::utils::compute_tiling_area;
 use crate::layout_engine::{
     Direction, LayoutId, LayoutKind, LayoutSystem, Orientation, ResizeOrientation,
@@ -577,6 +577,8 @@ impl MasterStackLayoutSystem {
 }
 
 impl LayoutSystem for MasterStackLayoutSystem {
+    delegate_traditional_layout_system!();
+
     fn create_layout(&mut self) -> LayoutId {
         let layout = self.inner.create_layout();
         let root = self.inner.root(layout);
@@ -585,16 +587,12 @@ impl LayoutSystem for MasterStackLayoutSystem {
         layout
     }
 
-    fn contains_layout(&self, layout: LayoutId) -> bool { self.inner.contains_layout(layout) }
-
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
         let cloned = self.inner.clone_layout(layout);
         let (_root, master, stack) = self.ensure_structure(cloned);
         self.enforce_master_count(cloned, master, stack);
         cloned
     }
-
-    fn remove_layout(&mut self, layout: LayoutId) { self.inner.remove_layout(layout); }
 
     fn draw_tree(&self, layout: LayoutId) -> String {
         let root = self.inner.root(layout);
@@ -678,38 +676,8 @@ impl LayoutSystem for MasterStackLayoutSystem {
         )
     }
 
-    fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
-        self.inner.selected_window(layout)
-    }
-
     fn all_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
         MasterStackLayoutSystem::all_windows_in_layout(self, layout)
-    }
-
-    fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
-        self.inner.visible_windows_in_layout(layout)
-    }
-
-    fn visible_windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId> {
-        self.inner.visible_windows_under_selection(layout)
-    }
-
-    fn ascend_selection(&mut self, layout: LayoutId) -> bool { self.inner.ascend_selection(layout) }
-
-    fn descend_selection(&mut self, layout: LayoutId) -> bool {
-        self.inner.descend_selection(layout)
-    }
-
-    fn move_focus(
-        &mut self,
-        layout: LayoutId,
-        direction: Direction,
-    ) -> (Option<WindowId>, Vec<WindowId>) {
-        self.inner.move_focus(layout, direction)
-    }
-
-    fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
-        self.inner.window_in_direction(layout, direction)
     }
 
     fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId) {
@@ -718,10 +686,6 @@ impl LayoutSystem for MasterStackLayoutSystem {
         let node = self.insert_window_in_container(layout, target, wid);
         self.inner.select(node);
         self.rebalance_after_new_window(layout, master, stack, target, wid);
-    }
-
-    fn replace_window(&mut self, from: WindowId, to: WindowId) {
-        self.inner.replace_window(from, to);
     }
 
     fn remove_window(&mut self, wid: WindowId) {
@@ -751,77 +715,26 @@ impl LayoutSystem for MasterStackLayoutSystem {
         }
     }
 
-    fn windows_for_app(&self, layout: LayoutId, pid: pid_t) -> Vec<WindowId> {
-        self.inner.windows_for_app(layout, pid)
-    }
-
-    fn set_windows_for_app(&mut self, layout: LayoutId, pid: pid_t, mut desired: Vec<WindowId>) {
+    fn set_windows_for_app(&mut self, layout: LayoutId, pid: pid_t, desired: Vec<WindowId>) {
         let (_root, master, stack) = self.ensure_structure(layout);
         let root = self.inner.root(layout);
-        let mut current = root
+        let current = root
             .traverse_postorder(self.inner.map())
-            .filter_map(|node| self.inner.window_at(node).map(|wid| (wid, node)))
-            .filter(|(wid, _)| wid.pid == pid)
+            .filter_map(|node| self.inner.window_at(node))
+            .filter(|wid| wid.pid == pid)
             .collect::<Vec<_>>();
-        desired.sort_unstable();
-        current.sort_unstable();
-        debug_assert!(desired.iter().all(|wid| wid.pid == pid));
-        let mut desired = desired.into_iter().peekable();
-        let mut current = current.into_iter().peekable();
-        loop {
-            match (desired.peek(), current.peek()) {
-                (Some(des), Some((cur, _))) if des == cur => {
-                    desired.next();
-                    current.next();
-                }
-                (Some(des), None) => {
-                    self.add_window_after_selection(layout, *des);
-                    desired.next();
-                }
-                (Some(des), Some((cur, _))) if des < cur => {
-                    self.add_window_after_selection(layout, *des);
-                    desired.next();
-                }
-                (_, Some((_, node))) => {
-                    if self.inner.tree.data.layout.info[*node].is_fullscreen {
-                        current.next();
-                    } else {
-                        node.detach(&mut self.inner.tree).remove();
-                        current.next();
-                    }
-                }
-                (None, None) => break,
+        let delta = reconcile_app_membership(pid, current, desired);
+        for wid in delta.removals {
+            if let Some(node) = self.inner.tree.data.window.node_for(layout, wid)
+                && !self.inner.tree.data.layout.info[node].is_fullscreen
+            {
+                node.detach(&mut self.inner.tree).remove();
             }
         }
+        for wid in delta.additions {
+            self.add_window_after_selection(layout, wid);
+        }
         self.enforce_master_count(layout, master, stack);
-    }
-
-    fn has_windows_for_app(&self, layout: LayoutId, pid: pid_t) -> bool {
-        self.inner.has_windows_for_app(layout, pid)
-    }
-
-    fn contains_window(&self, layout: LayoutId, wid: WindowId) -> bool {
-        self.inner.contains_window(layout, wid)
-    }
-
-    fn select_window(&mut self, layout: LayoutId, wid: WindowId) -> bool {
-        self.inner.select_window(layout, wid)
-    }
-
-    fn on_window_resized(
-        &mut self,
-        layout: LayoutId,
-        wid: WindowId,
-        old_frame: CGRect,
-        new_frame: CGRect,
-        screen: CGRect,
-        gaps: &crate::common::config::GapSettings,
-    ) {
-        self.inner.on_window_resized(layout, wid, old_frame, new_frame, screen, gaps);
-    }
-
-    fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
-        self.inner.swap_windows(layout, a, b)
     }
 
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool {
@@ -959,18 +872,6 @@ impl LayoutSystem for MasterStackLayoutSystem {
     fn split_selection(&mut self, layout: LayoutId, kind: LayoutKind) {
         let _ = kind;
         self.normalize_layout(layout);
-    }
-
-    fn toggle_fullscreen_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
-        self.inner.toggle_fullscreen_of_selection(layout)
-    }
-
-    fn toggle_fullscreen_within_gaps_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
-        self.inner.toggle_fullscreen_within_gaps_of_selection(layout)
-    }
-
-    fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
-        self.inner.has_any_fullscreen_node(layout)
     }
 
     fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction) {

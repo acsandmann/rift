@@ -9,4 +9,4 @@ pub mod window_discovery;
 
 mod outcome;
 
-pub(crate) use outcome::{EventOutcome, WindowDiscoveryRequest};
+pub(crate) use outcome::{CloseWindowRequest, EventOutcome, WindowDiscoveryRequest};

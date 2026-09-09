@@ -87,6 +87,50 @@ impl WindowLayoutConstraints {
     }
 }
 
+pub(crate) struct AppMembershipDelta {
+    pub additions: Vec<WindowId>,
+    pub removals: Vec<WindowId>,
+}
+
+/// Compute the identity changes needed to reconcile one application's layout membership.
+/// Representations remain responsible for insertion placement and protected-node removal rules.
+pub(crate) fn reconcile_app_membership(
+    pid: pid_t,
+    mut current: Vec<WindowId>,
+    mut desired: Vec<WindowId>,
+) -> AppMembershipDelta {
+    debug_assert!(current.iter().all(|wid| wid.pid == pid));
+    debug_assert!(desired.iter().all(|wid| wid.pid == pid));
+    current.sort_unstable();
+    desired.sort_unstable();
+
+    let mut additions = Vec::new();
+    let mut removals = Vec::new();
+    let (mut current_idx, mut desired_idx) = (0, 0);
+    while current_idx < current.len() || desired_idx < desired.len() {
+        match (current.get(current_idx), desired.get(desired_idx)) {
+            (Some(current), Some(desired)) if current == desired => {
+                current_idx += 1;
+                desired_idx += 1;
+            }
+            (Some(current), Some(desired)) if current < desired => {
+                removals.push(*current);
+                current_idx += 1;
+            }
+            (_, Some(desired)) => {
+                additions.push(*desired);
+                desired_idx += 1;
+            }
+            (Some(current), None) => {
+                removals.push(*current);
+                current_idx += 1;
+            }
+            (None, None) => break,
+        }
+    }
+    AppMembershipDelta { additions, removals }
+}
+
 #[enum_dispatch]
 pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     fn create_layout(&mut self) -> LayoutId;
@@ -131,9 +175,16 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     fn remove_window(&mut self, wid: WindowId);
     fn remove_window_and_rebalance_parent(&mut self, wid: WindowId) { self.remove_window(wid) }
     fn remove_windows_for_app(&mut self, pid: pid_t);
-    fn windows_for_app(&self, layout: LayoutId, pid: pid_t) -> Vec<WindowId>;
+    fn windows_for_app(&self, layout: LayoutId, pid: pid_t) -> Vec<WindowId> {
+        self.all_windows_in_layout(layout)
+            .into_iter()
+            .filter(|wid| wid.pid == pid)
+            .collect()
+    }
     fn set_windows_for_app(&mut self, layout: LayoutId, pid: pid_t, desired: Vec<WindowId>);
-    fn has_windows_for_app(&self, layout: LayoutId, pid: pid_t) -> bool;
+    fn has_windows_for_app(&self, layout: LayoutId, pid: pid_t) -> bool {
+        self.all_windows_in_layout(layout).into_iter().any(|wid| wid.pid == pid)
+    }
     fn contains_window(&self, layout: LayoutId, wid: WindowId) -> bool;
     fn select_window(&mut self, layout: LayoutId, wid: WindowId) -> bool;
     fn on_window_resized(
@@ -154,36 +205,109 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
         from_layout: LayoutId,
         to_layout: LayoutId,
     );
-    fn split_selection(&mut self, layout: LayoutId, kind: LayoutKind);
+    fn split_selection(&mut self, _layout: LayoutId, _kind: LayoutKind) {}
 
     fn toggle_fullscreen_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId>;
     fn toggle_fullscreen_within_gaps_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId>;
     fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool;
 
-    fn join_selection_with_direction(&mut self, layout: LayoutId, direction: Direction);
+    fn join_selection_with_direction(&mut self, _layout: LayoutId, _direction: Direction) {}
     fn consume_or_expel_selection(&mut self, layout: LayoutId, direction: Direction) {
         self.join_selection_with_direction(layout, direction);
     }
     fn apply_stacking_to_parent_of_selection(
         &mut self,
-        layout: LayoutId,
-        default_orientation: crate::common::config::StackDefaultOrientation,
-    ) -> Vec<WindowId>;
+        _layout: LayoutId,
+        _default_orientation: crate::common::config::StackDefaultOrientation,
+    ) -> Vec<WindowId> {
+        Vec::new()
+    }
     fn unstack_parent_of_selection(
         &mut self,
-        layout: LayoutId,
-        default_orientation: crate::common::config::StackDefaultOrientation,
-    ) -> Vec<WindowId>;
-    fn parent_of_selection_is_stacked(&self, layout: LayoutId) -> bool;
-    fn unjoin_selection(&mut self, _layout: LayoutId);
+        _layout: LayoutId,
+        _default_orientation: crate::common::config::StackDefaultOrientation,
+    ) -> Vec<WindowId> {
+        Vec::new()
+    }
+    fn parent_of_selection_is_stacked(&self, _layout: LayoutId) -> bool { false }
+    fn unjoin_selection(&mut self, _layout: LayoutId) {}
     fn resize_selection_by(
         &mut self,
         layout: LayoutId,
         amount: f64,
         orientation: ResizeOrientation,
     );
-    fn rebalance(&mut self, layout: LayoutId);
-    fn toggle_tile_orientation(&mut self, layout: LayoutId);
+    fn rebalance(&mut self, _layout: LayoutId) {}
+    fn toggle_tile_orientation(&mut self, _layout: LayoutId) {}
+}
+
+/// Forward representation-level operations shared by tree-backed layout policies.
+/// Policy implementations still spell out every operation that can change their invariants.
+macro_rules! delegate_traditional_layout_system {
+    () => {
+        fn contains_layout(&self, layout: LayoutId) -> bool { self.inner.contains_layout(layout) }
+        fn remove_layout(&mut self, layout: LayoutId) { self.inner.remove_layout(layout); }
+        fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
+            self.inner.selected_window(layout)
+        }
+        fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
+            self.inner.visible_windows_in_layout(layout)
+        }
+        fn visible_windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId> {
+            self.inner.visible_windows_under_selection(layout)
+        }
+        fn ascend_selection(&mut self, layout: LayoutId) -> bool {
+            self.inner.ascend_selection(layout)
+        }
+        fn descend_selection(&mut self, layout: LayoutId) -> bool {
+            self.inner.descend_selection(layout)
+        }
+        fn move_focus(
+            &mut self,
+            layout: LayoutId,
+            direction: Direction,
+        ) -> (Option<WindowId>, Vec<WindowId>) {
+            self.inner.move_focus(layout, direction)
+        }
+        fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
+            self.inner.window_in_direction(layout, direction)
+        }
+        fn replace_window(&mut self, from: WindowId, to: WindowId) {
+            self.inner.replace_window(from, to);
+        }
+        fn contains_window(&self, layout: LayoutId, wid: WindowId) -> bool {
+            self.inner.contains_window(layout, wid)
+        }
+        fn select_window(&mut self, layout: LayoutId, wid: WindowId) -> bool {
+            self.inner.select_window(layout, wid)
+        }
+        fn on_window_resized(
+            &mut self,
+            layout: LayoutId,
+            wid: WindowId,
+            old_frame: CGRect,
+            new_frame: CGRect,
+            screen: CGRect,
+            gaps: &crate::common::config::GapSettings,
+        ) {
+            self.inner.on_window_resized(layout, wid, old_frame, new_frame, screen, gaps);
+        }
+        fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
+            self.inner.swap_windows(layout, a, b)
+        }
+        fn toggle_fullscreen_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
+            self.inner.toggle_fullscreen_of_selection(layout)
+        }
+        fn toggle_fullscreen_within_gaps_of_selection(
+            &mut self,
+            layout: LayoutId,
+        ) -> Vec<WindowId> {
+            self.inner.toggle_fullscreen_within_gaps_of_selection(layout)
+        }
+        fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
+            self.inner.has_any_fullscreen_node(layout)
+        }
+    };
 }
 
 mod traditional;
@@ -206,6 +330,13 @@ mod tests {
     use crate::common::config::{ScrollingLayoutSettings, WindowInsertionPoint};
 
     fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
+
+    #[test]
+    fn app_membership_reconciliation_is_representation_neutral() {
+        let delta = super::reconcile_app_membership(1, vec![w(1), w(3)], vec![w(2), w(3)]);
+        assert_eq!(delta.additions, vec![w(2)]);
+        assert_eq!(delta.removals, vec![w(1)]);
+    }
 
     #[test]
     fn common_insertion_point_controls_tree_and_linear_layouts() {
