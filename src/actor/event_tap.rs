@@ -933,11 +933,16 @@ impl State {
     }
 
     fn compute_disable_hotkey_active(&self, target: &Hotkey) -> bool {
+        self.modifiers_active(target.modifiers) && self.base_key_active(target.key_code)
+    }
+
+    /// Whether every modifier in `target` is held. Extra modifiers are allowed.
+    fn modifiers_active(&self, target: Modifiers) -> bool {
         let active_mods = modifiers_from_flags_with_keys(self.current_flags, &self.pressed_keys);
 
         let check_modifier = |left: Modifiers, right: Modifiers| -> bool {
-            let target_has_left = target.modifiers.contains(left);
-            let target_has_right = target.modifiers.contains(right);
+            let target_has_left = target.contains(left);
+            let target_has_right = target.contains(right);
             let active_has_left = active_mods.contains(left);
             let active_has_right = active_mods.contains(right);
 
@@ -957,11 +962,7 @@ impl State {
         let alt_ok = check_modifier(Modifiers::ALT_LEFT, Modifiers::ALT_RIGHT);
         let meta_ok = check_modifier(Modifiers::META_LEFT, Modifiers::META_RIGHT);
 
-        if !(shift_ok && ctrl_ok && alt_ok && meta_ok) {
-            return false;
-        }
-
-        self.base_key_active(target.key_code)
+        shift_ok && ctrl_ok && alt_ok && meta_ok
     }
 
     fn base_key_active(&self, key_code: KeyCode) -> bool {
