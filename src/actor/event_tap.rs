@@ -1056,16 +1056,37 @@ mod tests {
 
     #[test]
     fn temporary_focus_follows_mouse_suppression_keeps_the_event_mask() {
-        let mut state = State::default();
-        state.event_processing_enabled = true;
-        state.focus_follows_mouse_config_enabled = true;
+        let mut config = Config::default();
+        config.settings.focus_follows_mouse = true;
+        config.settings.ui.stack_line.enabled = false;
+        let (events_tx, _events_rx) = actor::channel();
+        let (_requests_tx, requests_rx) = actor::channel();
+        let (wm_tx, _wm_rx) = actor::channel();
+        let (stack_line_tx, _stack_line_rx) = actor::channel();
+        let event_tap = Arc::new(EventTap::new(
+            config,
+            events_tx,
+            requests_rx,
+            wm_tx,
+            stack_line_tx,
+            Arc::new(ArcSwap::from_pointee(Vec::new())),
+        ));
+        event_tap.state.borrow_mut().event_processing_enabled = true;
 
-        let armed = EventTap::mouse_move_mask_needed(&state);
-        state.focus_follows_mouse_enabled = false;
-        let suppressed = EventTap::mouse_move_mask_needed(&state);
+        let mask_before = event_tap.desired_event_mask();
+        let generation_before = event_tap.tap_generation.get();
+        // Guards against a vacuous pass: mouse moves must actually be in the mask.
+        assert_ne!(
+            mask_before,
+            build_event_mask(event_tap.keyboard_handlers_enabled(), false)
+        );
 
-        assert!(armed);
-        assert_eq!(armed, suppressed);
+        let (recovery_tx, _recovery_rx) = tokio::sync::mpsc::unbounded_channel();
+        event_tap.on_request(Request::SetFocusFollowsMouseEnabled(false), &recovery_tx);
+
+        assert!(!event_tap.state.borrow().focus_follows_mouse_enabled);
+        assert_eq!(event_tap.desired_event_mask(), mask_before);
+        assert_eq!(event_tap.tap_generation.get(), generation_before);
     }
 
     #[test]
