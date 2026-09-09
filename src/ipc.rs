@@ -92,7 +92,13 @@ pub(crate) fn install_mach_server(reactor: Rc<RefCell<reactor::Reactor>>, reques
             config_jobs,
         ));
         let context = Box::into_raw(handler);
-        if !unsafe { mach_server_install(context.cast(), handle_mach_request_c) } {
+        if !unsafe {
+            mach_server_install(
+                context.cast(),
+                handle_mach_request_c,
+                handle_mach_client_disconnect_c,
+            )
+        } {
             unsafe { drop(Box::from_raw(context)) };
             return Err("Failed to install Mach IPC on the reactor run loop".into());
         }
@@ -156,8 +162,13 @@ impl IpcRequestHandler {
                 return;
             }
             RiftRequest::Subscribe { event } => {
-                self.server_state.subscribe_client(client_port, event.to_string());
-                encode_success(serde_json::json!({ "subscribed": event.to_string() }))
+                if self.server_state.subscribe_client(client_port, event.to_string()) {
+                    encode_success(serde_json::json!({ "subscribed": event.to_string() }))
+                } else {
+                    encode_error(serde_json::json!({
+                        "message": "Failed to monitor subscription port"
+                    }))
+                }
             }
             RiftRequest::Unsubscribe { event } => {
                 self.server_state.unsubscribe_client(client_port, event.to_string());
@@ -377,6 +388,19 @@ unsafe extern "C" fn handle_mach_request_c(
 
     let client_port = unsafe { (*original_msg).msgh_remote_port };
     handler.handle_message(trimmed_slice, client_port, unsafe { &mut *original_msg });
+}
+
+unsafe extern "C" fn handle_mach_client_disconnect_c(
+    context: *mut std::ffi::c_void,
+    client_port: ClientPort,
+) {
+    if context.is_null() {
+        error!("Invalid context pointer for Mach client disconnect");
+        return;
+    }
+
+    let handler = unsafe { &*(context as *const IpcRequestHandler) };
+    handler.server_state.remove_client(client_port);
 }
 
 fn send_error_response(header: &mut mach_msg_header_t, message: &str) {

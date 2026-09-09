@@ -12,7 +12,10 @@ use tracing::{debug, error, info, warn};
 
 use crate::common::collections::{HashMap, HashSet};
 use crate::model::broadcast::BroadcastEvent;
-use crate::sys::mach::{mach_release_send_right, mach_retain_send_right, mach_try_send_message};
+use crate::sys::mach::{
+    mach_release_send_right, mach_retain_send_right, mach_try_send_message,
+    mach_unwatch_send_right, mach_watch_send_right,
+};
 
 pub type ClientPort = u32;
 
@@ -67,10 +70,9 @@ impl ServerState {
         }
     }
 
-    pub fn subscribe_client(&self, client_port: ClientPort, event: String) {
+    pub fn subscribe_client(&self, client_port: ClientPort, event: String) -> bool {
         info!("Client {} subscribing to event: {}", client_port, event);
         let mut added = false;
-        let mut should_retain_send_right = false;
 
         match self.subscriptions_by_client.entry(client_port) {
             Entry::Occupied(mut entry) => {
@@ -81,16 +83,21 @@ impl ServerState {
                 }
             }
             Entry::Vacant(entry) => {
+                if !unsafe { mach_retain_send_right(client_port) } {
+                    warn!("Failed to retain send right for client {}", client_port);
+                    return false;
+                }
+                if !unsafe { mach_watch_send_right(client_port) } {
+                    let _ = unsafe { mach_release_send_right(client_port) };
+                    warn!("Failed to watch client {} for disconnection", client_port);
+                    return false;
+                }
                 added = true;
-                should_retain_send_right = true;
                 entry.insert(vec![event.clone()]);
             }
         }
 
         if added {
-            if should_retain_send_right {
-                let _ = unsafe { mach_retain_send_right(client_port) };
-            }
             self.subscriptions_by_event
                 .entry(event.clone())
                 .and_modify(|clients| {
@@ -101,6 +108,7 @@ impl ServerState {
                 .or_insert_with(|| vec![client_port]);
             info!("Client {} now subscribed to '{}'", client_port, event);
         }
+        true
     }
 
     pub fn unsubscribe_client(&self, client_port: ClientPort, event: String) {
@@ -315,6 +323,7 @@ impl ServerState {
                     }
                 }
             }
+            unsafe { mach_unwatch_send_right(client_port) };
             let _ = unsafe { mach_release_send_right(client_port) };
         }
     }
