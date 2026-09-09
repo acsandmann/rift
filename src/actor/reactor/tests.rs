@@ -2815,6 +2815,38 @@ fn focus_follows_mouse_emits_focus_without_explicit_arrange() {
 }
 
 #[test]
+fn focus_follows_mouse_raise_is_quiet_so_stale_main_window_cannot_switch_workspace() {
+    let reactor = test_reactor();
+    let space = SpaceId::new(1);
+    let window = WindowId::new(7, 1);
+
+    let outcome = window_workflow::handle_mouse_moved_over_window(
+        &reactor.app_manager,
+        window_workflow::MouseMovedPayload {
+            window: Some(window),
+            should_sync: true,
+            is_main: false,
+            needs_layout_sync: true,
+            active_space: Some(space),
+        },
+    )
+    .expect("mouse focus workflow");
+
+    match outcome.raise_requests.as_slice() {
+        [raise_manager::Event::RaiseRequest(RaiseRequest { focus_window, focus_quiet, .. })] => {
+            assert_eq!(focus_window.map(|(wid, _)| wid), Some(window));
+            assert_eq!(*focus_quiet, Quiet::Yes);
+        }
+        other => panic!("Unexpected raise requests: {other:?}"),
+    }
+    assert!(matches!(
+        outcome.layout_events.as_slice(),
+        [LayoutEvent::WindowFocused(event_space, event_window)]
+            if *event_space == space && *event_window == window
+    ));
+}
+
+#[test]
 fn resolved_activation_without_main_window_does_not_choose_arbitrary_app_window() {
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
