@@ -377,6 +377,7 @@ fn apply_assignment_result(
     let mut outcome = crate::actor::reactor::events::EventOutcome::default();
     let effects = match assign_result {
         Ok(AppRuleResult::Managed(effects)) => Some(effects),
+        Ok(AppRuleResult::Unchanged) => None,
         Ok(AppRuleResult::Rejected(_)) => {
             if utils::rejection_needs_removal(state, layout, wid, space) {
                 outcome = outcome.with_layout_event(LayoutEvent::WindowRemoved(wid));

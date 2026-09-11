@@ -193,6 +193,10 @@ enum WindowCommands {
     ToggleFullscreen,
     /// Toggle fullscreen within configured outer gaps (respects outer gaps / fills tiling area)
     ToggleFullscreenWithinGaps,
+    /// Hide the focused scratchpad window, or show the next hidden one on the current workspace
+    ToggleScratchpad,
+    /// Park the focused window in the scratchpad (hidden, floating, on no workspace)
+    MoveToScratchpad,
     /// Grow the current window size (increments by ~5%).
     ResizeGrow {
         /// Axis to resize; smart chooses the nearest applicable split.
@@ -765,6 +769,12 @@ fn map_window_command(cmd: WindowCommands) -> Result<CliCommand, String> {
         WindowCommands::ToggleFullscreenWithinGaps => Ok(CliCommand::Reactor(
             reactor::Command::Layout(LC::ToggleFullscreenWithinGaps),
         )),
+        WindowCommands::ToggleScratchpad => Ok(CliCommand::Reactor(reactor::Command::Layout(
+            LC::ToggleScratchpad,
+        ))),
+        WindowCommands::MoveToScratchpad => Ok(CliCommand::Reactor(reactor::Command::Layout(
+            LC::MoveToScratchpad,
+        ))),
         WindowCommands::ResizeGrow { orientation } => Ok(CliCommand::Reactor(
             reactor::Command::Layout(LC::ResizeWindowGrow(orientation.into())),
         )),
@@ -1172,6 +1182,24 @@ mod tests {
                 "execute_command": { "command": { "layout": "next_window" } }
             })
         );
+    }
+
+    #[test]
+    fn scratchpad_window_commands_map_to_layout_commands() {
+        for (subcommand, layout_command) in [
+            ("toggle-scratchpad", "toggle_scratchpad"),
+            ("move-to-scratchpad", "move_to_scratchpad"),
+        ] {
+            let cli = Cli::try_parse_from(["rift-cli", "execute", "window", subcommand])
+                .unwrap_or_else(|error| panic!("{subcommand} should parse: {error}"));
+            let request = build_request(cli.command).unwrap();
+            assert_eq!(
+                serde_json::to_value(request).unwrap(),
+                serde_json::json!({
+                    "execute_command": { "command": { "layout": layout_command } }
+                })
+            );
+        }
     }
 
     #[test]

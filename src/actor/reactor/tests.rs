@@ -7,6 +7,7 @@ use crate::actor::app::{AppThreadHandle, Request, pid_t};
 use crate::actor::wm_controller::WmEvent;
 use crate::common::config::{LayoutMode, OuterGaps, WorkspaceSelector};
 use crate::layout_engine::{Direction, LayoutCommand, LayoutEvent};
+use crate::model::HideCorner;
 use crate::model::window_store::NativeFullscreenTransition;
 use crate::sys::app::{AppInfo, WindowInfo};
 use crate::sys::geometry::SameAs;
@@ -3964,6 +3965,7 @@ fn fullscreen_startup_fixture(
             position: None,
             size: None,
             focus: false,
+            scratchpad: false,
             manage: Some(true),
             app_name: None,
             title_regex: None,
@@ -5617,4 +5619,322 @@ fn floating_window_toggles_to_fullscreen_within_gaps() {
         laid_out.same_as(expected),
         "expected {expected:?}, got {laid_out:?}"
     );
+}
+
+/// Two workspaces, one 1000x1000 screen, `window_count` tiled windows of pid 1, window (1, 1) focused.
+fn scratchpad_context(window_count: usize) -> (Apps, Reactor, SpaceId, CGRect) {
+    let (mut apps, mut reactor) = test_context_with_workspace_count(2);
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(window_count));
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, WindowId::new(1, 1)));
+    let _ = apps.requests();
+    (apps, reactor, space, screen)
+}
+
+fn last_frame_write_for(requests: &[Request], wid: WindowId) -> Option<CGRect> {
+    requests.iter().rev().find_map(|req| match req {
+        Request::SetWindowFrame(w, frame, _, _) if *w == wid => Some(*frame),
+        Request::SetBatchWindowFrame(frames, _, _) => {
+            frames.iter().find(|(w, _)| *w == wid).map(|(_, frame)| *frame)
+        }
+        _ => None,
+    })
+}
+
+fn is_parked(reactor: &Reactor, space: SpaceId, wid: WindowId) -> bool {
+    reactor.test_workspace_for_window(space, wid).is_none()
+}
+
+#[test]
+fn move_to_scratchpad_parks_focused_window_offscreen_and_unassigns_it() {
+    let (mut apps, mut reactor, space, screen) = scratchpad_context(2);
+    let wid = WindowId::new(1, 1);
+    let frame = reactor.state.windows.window(wid).expect("window").frame_monotonic;
+    let hidden = reactor
+        .layout_manager
+        .layout_engine
+        .virtual_workspace_manager()
+        .calculate_hidden_position_multi(screen, frame, HideCorner::BottomRight, None, &[screen]);
+
+    reactor.handle_test_layout_command(LayoutCommand::MoveToScratchpad);
+
+    assert!(is_parked(&reactor, space, wid));
+    assert_eq!(reactor.test_active_workspace_windows(space), vec![
+        WindowId::new(1, 2)
+    ]);
+    assert!(reactor.layout_manager.layout_engine.is_window_floating(wid));
+    let requests = apps.requests();
+    let written = last_frame_write_for(&requests, wid)
+        .unwrap_or_else(|| panic!("parked window must be moved off-screen: {requests:?}"));
+    assert!(written.same_as(hidden), "expected {hidden:?}, got {written:?}");
+}
+
+#[test]
+fn toggle_scratchpad_shows_parked_window_at_half_width_three_quarter_height_centered() {
+    let (mut apps, mut reactor, space, _screen) = scratchpad_context(2);
+    let (raise_tx, mut raise_rx) = actor::channel();
+    reactor.communication_manager.raise_manager_tx = raise_tx;
+    let wid = WindowId::new(1, 1);
+    reactor.handle_test_layout_command(LayoutCommand::MoveToScratchpad);
+    apps.simulate_until_quiet(&mut reactor);
+    while raise_rx.try_recv().is_ok() {}
+
+    reactor.handle_test_layout_command(LayoutCommand::ToggleScratchpad);
+
+    let active = reactor.layout_manager.layout_engine.active_workspace(space);
+    assert_eq!(reactor.test_workspace_for_window(space, wid), active);
+    let requests = apps.requests();
+    let written = last_frame_write_for(&requests, wid)
+        .unwrap_or_else(|| panic!("shown window must be laid out: {requests:?}"));
+    let expected = CGRect::new(CGPoint::new(250., 125.), CGSize::new(500., 750.));
+    assert!(
+        written.same_as(expected),
+        "expected {expected:?}, got {written:?}"
+    );
+    let msg = raise_rx.try_recv().expect("showing must raise the window").1;
+    match msg {
+        raise_manager::Event::RaiseRequest(RaiseRequest { focus_window, .. }) => {
+            assert_eq!(focus_window.map(|(w, _)| w), Some(wid));
+        }
+        _ => panic!("Unexpected event: {msg:?}"),
+    }
+}
+
+#[test]
+fn toggle_scratchpad_on_shown_window_parks_it_and_focuses_remaining_window() {
+    let (mut apps, mut reactor, space, _screen) = scratchpad_context(2);
+    let (raise_tx, mut raise_rx) = actor::channel();
+    reactor.communication_manager.raise_manager_tx = raise_tx;
+    let wid = WindowId::new(1, 1);
+    reactor.handle_test_layout_command(LayoutCommand::MoveToScratchpad);
+    apps.simulate_until_quiet(&mut reactor);
+    reactor.handle_test_layout_command(LayoutCommand::ToggleScratchpad);
+    apps.simulate_until_quiet(&mut reactor);
+    while raise_rx.try_recv().is_ok() {}
+
+    reactor.handle_test_layout_command(LayoutCommand::ToggleScratchpad);
+
+    assert!(is_parked(&reactor, space, wid));
+    assert_eq!(reactor.test_active_workspace_windows(space), vec![
+        WindowId::new(1, 2)
+    ]);
+    let msg = raise_rx.try_recv().expect("hiding must hand focus to the remaining window").1;
+    match msg {
+        raise_manager::Event::RaiseRequest(RaiseRequest { focus_window, .. }) => {
+            assert_eq!(focus_window.map(|(w, _)| w), Some(WindowId::new(1, 2)));
+        }
+        _ => panic!("Unexpected event: {msg:?}"),
+    }
+}
+
+#[test]
+fn toggle_scratchpad_cycles_parked_windows_oldest_first() {
+    let (mut apps, mut reactor, space, _screen) = scratchpad_context(3);
+    let (a, b) = (WindowId::new(1, 1), WindowId::new(1, 2));
+    reactor.handle_test_layout_command(LayoutCommand::MoveToScratchpad);
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, b));
+    reactor.handle_test_layout_command(LayoutCommand::MoveToScratchpad);
+    apps.simulate_until_quiet(&mut reactor);
+    assert!(is_parked(&reactor, space, a) && is_parked(&reactor, space, b));
+
+    reactor.handle_test_layout_command(LayoutCommand::ToggleScratchpad);
+    assert!(
+        !is_parked(&reactor, space, a),
+        "oldest parked window shows first"
+    );
+    assert!(is_parked(&reactor, space, b));
+
+    reactor.handle_test_layout_command(LayoutCommand::ToggleScratchpad);
+    assert!(
+        is_parked(&reactor, space, a),
+        "toggle on the shown member hides it"
+    );
+    assert!(is_parked(&reactor, space, b));
+
+    reactor.handle_test_layout_command(LayoutCommand::ToggleScratchpad);
+    assert!(is_parked(&reactor, space, a));
+    assert!(
+        !is_parked(&reactor, space, b),
+        "next toggle shows the other window"
+    );
+}
+
+#[test]
+fn toggle_scratchpad_without_members_parks_focused_window() {
+    let (_apps, mut reactor, space, _screen) = scratchpad_context(2);
+    let wid = WindowId::new(1, 1);
+
+    reactor.handle_test_layout_command(LayoutCommand::ToggleScratchpad);
+
+    assert!(is_parked(&reactor, space, wid));
+    assert!(reactor.layout_manager.layout_engine.is_window_floating(wid));
+    assert_eq!(reactor.test_active_workspace_windows(space), vec![
+        WindowId::new(1, 2)
+    ]);
+}
+
+#[test]
+fn toggle_scratchpad_pulls_member_shown_on_inactive_workspace() {
+    let (mut apps, mut reactor, space, _screen) = scratchpad_context(2);
+    let wid = WindowId::new(1, 1);
+    reactor.handle_test_layout_command(LayoutCommand::MoveToScratchpad);
+    reactor.handle_test_layout_command(LayoutCommand::ToggleScratchpad);
+    apps.simulate_until_quiet(&mut reactor);
+    reactor.handle_test_layout_command(LayoutCommand::SwitchToWorkspace(1));
+    apps.simulate_until_quiet(&mut reactor);
+    let ws1 = reactor.test_workspace(space, 1);
+    assert_eq!(
+        reactor.layout_manager.layout_engine.active_workspace(space),
+        Some(ws1)
+    );
+
+    reactor.handle_test_layout_command(LayoutCommand::ToggleScratchpad);
+
+    assert_eq!(reactor.test_workspace_for_window(space, wid), Some(ws1));
+}
+
+#[test]
+fn unfloating_scratchpad_window_leaves_scratchpad() {
+    let (mut apps, mut reactor, space, _screen) = scratchpad_context(2);
+    let wid = WindowId::new(1, 1);
+    reactor.handle_test_layout_command(LayoutCommand::MoveToScratchpad);
+    reactor.handle_test_layout_command(LayoutCommand::ToggleScratchpad);
+    apps.simulate_until_quiet(&mut reactor);
+    assert!(reactor.layout_manager.layout_engine.is_scratchpad_member(wid));
+
+    reactor.handle_test_layout_command(LayoutCommand::ToggleWindowFloating);
+
+    assert!(!reactor.layout_manager.layout_engine.is_window_floating(wid));
+    assert!(!reactor.layout_manager.layout_engine.is_scratchpad_member(wid));
+    assert!(!is_parked(&reactor, space, wid));
+}
+
+#[test]
+fn windows_discovered_keeps_parked_scratchpad_window_hidden() {
+    let (mut apps, mut reactor, space, _screen) = scratchpad_context(2);
+    let wid = WindowId::new(1, 1);
+    reactor.handle_test_layout_command(LayoutCommand::MoveToScratchpad);
+    apps.simulate_until_quiet(&mut reactor);
+
+    reactor.discover_test_windows(1, vec![], vec![wid, WindowId::new(1, 2)]);
+
+    assert!(
+        is_parked(&reactor, space, wid),
+        "discovery must not re-assign a parked window"
+    );
+    assert_eq!(reactor.test_active_workspace_windows(space), vec![
+        WindowId::new(1, 2)
+    ]);
+}
+
+#[test]
+fn shown_scratchpad_holds_focus_against_hover_on_every_other_window() {
+    let (mut apps, mut reactor, space, _screen) = scratchpad_context(3);
+    apps.make_app_and_settle(&mut reactor, 2, make_windows(1));
+    let scratch = WindowId::new(1, 1);
+    let sibling = WindowId::new(1, 2);
+    let foreign = WindowId::new(2, 1);
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, scratch));
+    reactor.handle_test_layout_command(LayoutCommand::MoveToScratchpad);
+    reactor.handle_test_layout_command(LayoutCommand::ToggleScratchpad);
+    apps.simulate_until_quiet(&mut reactor);
+
+    assert!(
+        !reactor.should_raise_on_mouse_over(sibling),
+        "same-app window must not autoraise"
+    );
+    assert!(
+        !reactor.should_raise_on_mouse_over(foreign),
+        "other-app window must not autoraise"
+    );
+    assert!(
+        reactor.should_raise_on_mouse_over(scratch),
+        "the scratchpad itself may autoraise"
+    );
+
+    reactor.handle_test_layout_command(LayoutCommand::ToggleScratchpad);
+    apps.simulate_until_quiet(&mut reactor);
+
+    assert!(is_parked(&reactor, space, scratch));
+    assert!(
+        reactor.should_raise_on_mouse_over(sibling),
+        "focus-follows-mouse resumes once the scratchpad is hidden"
+    );
+}
+
+#[test]
+fn app_rule_scratchpad_parks_new_window_and_refocuses_previous() {
+    let settings = crate::common::config::VirtualWorkspaceSettings {
+        app_rules: vec![crate::common::config::AppWorkspaceRule {
+            app_id: Some("com.testapp2".into()),
+            scratchpad: true,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let (mut apps, mut reactor) = (Apps::new(), test_reactor_with_workspace_settings(&settings));
+    reactor.config.virtual_workspaces = settings;
+    let (raise_tx, mut raise_rx) = actor::channel();
+    reactor.communication_manager.raise_manager_tx = raise_tx;
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let previous = WindowId::new(1, 1);
+    let scratch = WindowId::new(2, 1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, previous));
+    while raise_rx.try_recv().is_ok() {}
+
+    apps.make_app_and_settle(&mut reactor, 2, make_windows(1));
+
+    assert!(
+        is_parked(&reactor, space, scratch),
+        "rule must park the new window"
+    );
+    assert!(reactor.layout_manager.layout_engine.is_window_floating(scratch));
+    assert_eq!(reactor.test_active_workspace_windows(space), vec![previous]);
+    let refocus = std::iter::from_fn(|| raise_rx.try_recv().ok())
+        .filter_map(|(_, msg)| match msg {
+            raise_manager::Event::RaiseRequest(RaiseRequest { focus_window, .. }) => {
+                focus_window.map(|(w, _)| w)
+            }
+            _ => None,
+        })
+        .last();
+    assert_eq!(
+        refocus,
+        Some(previous),
+        "focus must return to the previously focused window"
+    );
+}
+
+#[test]
+fn activating_parked_scratchpad_window_shows_it() {
+    let (mut apps, mut reactor, space, _screen) = scratchpad_context(2);
+    let (raise_tx, mut raise_rx) = actor::channel();
+    reactor.communication_manager.raise_manager_tx = raise_tx;
+    let wid = WindowId::new(1, 1);
+    reactor.handle_test_layout_command(LayoutCommand::MoveToScratchpad);
+    apps.simulate_until_quiet(&mut reactor);
+    while raise_rx.try_recv().is_ok() {}
+    let _ = apps.requests();
+
+    // Cmd-Tab / Dock click: the app thread resolves the app's main window, which is the parked one.
+    reactor.handle_event(Event::ApplicationGloballyActivated(1));
+    assert_eq!(reactor.main_window(), Some(wid));
+    reactor.handle_event(Event::ApplicationActivated(1, Quiet::No));
+
+    assert!(
+        !is_parked(&reactor, space, wid),
+        "activation must unpark instead of focusing a hidden window"
+    );
+    let active = reactor.layout_manager.layout_engine.active_workspace(space);
+    assert_eq!(reactor.test_workspace_for_window(space, wid), active);
+    let msg = raise_rx.try_recv().expect("unparking must raise the window").1;
+    match msg {
+        raise_manager::Event::RaiseRequest(RaiseRequest { focus_window, .. }) => {
+            assert_eq!(focus_window.map(|(w, _)| w), Some(wid));
+        }
+        _ => panic!("Unexpected event: {msg:?}"),
+    }
 }
