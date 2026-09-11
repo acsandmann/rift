@@ -343,12 +343,15 @@ enum ConfigCommands {
     SetAnimate {
         value: String,
     },
+    /// Set the animation duration in seconds
     SetAnimationDuration {
         value: f64,
     },
+    /// Set the animation frame rate
     SetAnimationFps {
         value: f64,
     },
+    /// Set the animation easing curve
     SetAnimationEasing {
         value: String,
     },
@@ -358,10 +361,12 @@ enum ConfigCommands {
         #[arg(action = clap::ArgAction::Set)]
         value: bool,
     },
+    /// Show or hide the pointer after focus changes
     SetMouseHidesOnFocus {
         #[arg(action = clap::ArgAction::Set)]
         value: bool,
     },
+    /// Enable or disable focusing windows under the pointer
     SetFocusFollowsMouse {
         #[arg(action = clap::ArgAction::Set)]
         value: bool,
@@ -376,12 +381,14 @@ enum ConfigCommands {
     SetStackDefaultOrientation {
         value: String,
     },
+    /// Set the outer gap on each screen edge
     SetOuterGaps {
         top: f64,
         left: f64,
         bottom: f64,
         right: f64,
     },
+    /// Set the horizontal and vertical gaps between windows
     SetInnerGaps {
         horizontal: f64,
         vertical: f64,
