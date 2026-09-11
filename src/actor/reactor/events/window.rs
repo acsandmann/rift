@@ -55,14 +55,7 @@ pub fn handle_window_created(
     let outcome = EventOutcome::window_membership_changed(false, true);
     Ok(
         if state.windows.window(wid).is_some_and(WindowState::can_reconcile_admission) {
-            // Finalization emits WindowAdded, and send_layout_event immediately
-            // arranges the affected space when that changes the layout. Keeping
-            // the generic membership arrange here as well starts a second layout
-            // application while the first one is still being written, which is
-            // especially visible in scrolling layouts as a brief resize/shift.
-            let mut outcome = outcome.with_arrange_passes(0);
-            outcome.finalize_created_windows.push(wid);
-            outcome
+            outcome.with_created_window_finalization(wid)
         } else {
             outcome
         },
