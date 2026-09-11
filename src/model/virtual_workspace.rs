@@ -92,9 +92,11 @@ impl VirtualWorkspace {
                 ),
             ),
             LayoutMode::Bsp => {
-                LayoutSystemKind::Bsp(crate::layout_engine::systems::BspLayoutSystem::new(
+                let mut system = crate::layout_engine::systems::BspLayoutSystem::new(
                     settings.window_insertion_point_for(mode),
-                ))
+                );
+                system.set_center_single_window(settings.bsp.center_single_window_ratios());
+                LayoutSystemKind::Bsp(system)
             }
             LayoutMode::Stack => LayoutSystemKind::Stack(
                 crate::layout_engine::systems::StackLayoutSystem::new_with_insertion_point(
