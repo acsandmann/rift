@@ -465,7 +465,7 @@ pub fn handle_mouse_moved_over_window(
                 raise_windows: vec![vec![window]],
                 focus_window: Some((window, None)),
                 app_handles,
-                focus_quiet: Quiet::No,
+                focus_quiet: Quiet::Yes,
             },
         ));
     }
