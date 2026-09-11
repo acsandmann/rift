@@ -1395,7 +1395,7 @@ fn master_restore_resolves_old_space_id_by_display_identity() {
         (saved_b, "display-b", LayoutMode::Scrolling),
     ] {
         let _ = snapshot.handle_event(&mut snapshot_store, LayoutEvent::SpaceExposed(space, size));
-        snapshot.update_space_display(space, Some(display.into()));
+        snapshot.update_space_display(space, Some(display.into()), false);
         let workspace = snapshot.active_workspace(space).unwrap();
         assert!(snapshot.switch_workspace_layout_mode(&snapshot_store, space, workspace, mode,));
     }
@@ -1410,7 +1410,7 @@ fn master_restore_resolves_old_space_id_by_display_identity() {
     let mut engine = test_engine();
     let mut window_store = WindowStore::default();
     let _ = engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(current_a, size));
-    engine.update_space_display(current_a, Some("display-a".into()));
+    engine.update_space_display(current_a, Some("display-a".into()), false);
     engine
         .restore_layout(
             path.clone(),
@@ -1464,7 +1464,7 @@ fn startup_restore_remaps_saved_space_by_display_identity_once() {
     let mut snapshot_store = WindowStore::default();
     let _ =
         snapshot.handle_event(&mut snapshot_store, LayoutEvent::SpaceExposed(saved_space, size));
-    snapshot.update_space_display(saved_space, Some(display.clone()));
+    snapshot.update_space_display(saved_space, Some(display.clone()), false);
     let path = std::env::temp_dir().join(format!(
         "rift-startup-space-remap-test-{}-{}.ron",
         std::process::id(),
@@ -1497,7 +1497,7 @@ fn startup_restore_handles_space_id_swaps_between_displays() {
     let mut snapshot_store = WindowStore::default();
     for (space, display) in [(space_a, "display-a"), (space_b, "display-b")] {
         let _ = snapshot.handle_event(&mut snapshot_store, LayoutEvent::SpaceExposed(space, size));
-        snapshot.update_space_display(space, Some(display.into()));
+        snapshot.update_space_display(space, Some(display.into()), false);
         let workspace = snapshot.active_workspace(space).unwrap();
         assert!(snapshot.virtual_workspace_manager.rename_workspace(
             space,

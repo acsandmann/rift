@@ -252,6 +252,7 @@ impl<'de> Deserialize<'de> for RuntimeDisplayData {
             id: ScreenId::new(helper.screen_id),
             frame: helper.frame,
             display_uuid: helper.uuid,
+            is_builtin: false,
             name: helper.name,
             space: helper.space.map(SpaceId::new),
         };
@@ -320,6 +321,7 @@ mod tests {
             id: ScreenId::new(7),
             frame: CGRect::new(CGPoint::new(10.0, 20.0), CGSize::new(300.0, 400.0)),
             display_uuid: "display-uuid".to_string(),
+            is_builtin: false,
             name: Some("Primary".to_string()),
             space: Some(SpaceId::new(42)),
         };

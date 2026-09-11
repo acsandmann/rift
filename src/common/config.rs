@@ -928,6 +928,9 @@ pub struct GapSettings {
     /// Inner gaps (space between windows)
     #[serde(default)]
     pub inner: InnerGaps,
+    /// Gap overrides applied to every external display
+    #[serde(default)]
+    pub external: Option<GapOverride>,
     /// Display-specific gap overrides keyed by display UUID
     #[serde(default)]
     pub per_display: HashMap<String, GapOverride>,
@@ -1165,6 +1168,19 @@ impl GapSettings {
         // Validate inner gaps
         issues.extend(self.inner.validate());
 
+        if let Some(overrides) = &self.external {
+            if let Some(outer) = &overrides.outer {
+                for issue in outer.validate() {
+                    issues.push(format!("external {issue}"));
+                }
+            }
+            if let Some(inner) = &overrides.inner {
+                for issue in inner.validate() {
+                    issues.push(format!("external {issue}"));
+                }
+            }
+        }
+
         for (uuid, overrides) in &self.per_display {
             if let Some(outer) = &overrides.outer {
                 for issue in outer.validate() {
@@ -1181,12 +1197,27 @@ impl GapSettings {
         issues
     }
 
-    pub fn effective_for_display(&self, display_uuid: Option<&str>) -> GapSettings {
+    pub fn effective_for_display(
+        &self,
+        display_uuid: Option<&str>,
+        is_external: bool,
+    ) -> GapSettings {
         let mut resolved = GapSettings {
             outer: self.outer.clone(),
             inner: self.inner.clone(),
+            external: None,
             per_display: HashMap::default(),
         };
+        if is_external {
+            if let Some(overrides) = &self.external {
+                if let Some(outer_override) = &overrides.outer {
+                    resolved.outer = outer_override.clone();
+                }
+                if let Some(inner_override) = &overrides.inner {
+                    resolved.inner = inner_override.clone();
+                }
+            }
+        }
         if let Some(uuid) = display_uuid {
             if let Some(overrides) = self.per_display.get(uuid) {
                 if let Some(outer_override) = &overrides.outer {
@@ -1619,6 +1650,71 @@ mod tests {
     use super::*;
     use crate::actor::reactor;
     use crate::layout_engine::{LayoutCommand, ResizeOrientation};
+
+    #[test]
+    fn external_gap_override_applies_only_to_external_displays() {
+        let gaps: GapSettings = toml::from_str(
+            r#"
+                [outer]
+                top = 10
+                left = 10
+                bottom = 10
+                right = 10
+
+                [external.outer]
+                top = 58
+                left = 10
+                bottom = 10
+                right = 10
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            gaps.effective_for_display(Some("built-in"), false).outer.top,
+            10.0
+        );
+        assert_eq!(
+            gaps.effective_for_display(Some("external"), true).outer.top,
+            58.0
+        );
+    }
+
+    #[test]
+    fn display_uuid_override_wins_over_external_override() {
+        let gaps: GapSettings = toml::from_str(
+            r#"
+                [outer]
+                top = 10
+
+                [external.outer]
+                top = 58
+
+                [per_display.special.outer]
+                top = 72
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(gaps.effective_for_display(Some("special"), true).outer.top, 72.0);
+    }
+
+    #[test]
+    fn external_gap_override_is_validated() {
+        let gaps: GapSettings = toml::from_str(
+            r#"
+                [external.outer]
+                top = -1
+            "#,
+        )
+        .unwrap();
+
+        assert!(
+            gaps.validate()
+                .iter()
+                .any(|issue| { issue.contains("external outer.top gap must be non-negative") })
+        );
+    }
 
     #[test]
     fn layout_insertion_point_supports_global_default_and_per_mode_override() {

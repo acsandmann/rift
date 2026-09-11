@@ -357,8 +357,12 @@ impl Reactor {
 
                     if let Some(screen) = screen_info {
                         let display_uuid = screen.display_uuid_opt();
-                        let gaps =
-                            self.config.settings.layout.gaps.effective_for_display(display_uuid);
+                        let gaps = self
+                            .config
+                            .settings
+                            .layout
+                            .gaps
+                            .effective_for_display(display_uuid, !screen.is_builtin);
                         self.layout_manager.layout_engine.calculate_layout_for_workspace(
                             &self.state.windows,
                             space,
@@ -596,7 +600,12 @@ impl Reactor {
             .query_workspace_layout(space_id, workspace_id)?;
         let screen = self.space_state.screen_by_space(space_id)?;
         let display_uuid = screen.display_uuid_owned();
-        let gaps = self.config.settings.layout.gaps.effective_for_display(display_uuid.as_deref());
+        let gaps = self
+            .config
+            .settings
+            .layout
+            .gaps
+            .effective_for_display(display_uuid.as_deref(), !screen.is_builtin);
         let target_frames = self.layout_manager.layout_engine.calculate_workspace_layout(
             space_id,
             snapshot.workspace_id,

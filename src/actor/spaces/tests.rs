@@ -9,6 +9,7 @@ fn make_screen(space: Option<SpaceId>) -> ScreenInfo {
         id: crate::sys::screen::ScreenId::new(1),
         frame: CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0)),
         display_uuid: "display-1".to_string(),
+        is_builtin: false,
         name: Some("Display".to_string()),
         space,
     }
@@ -25,6 +26,7 @@ fn make_screen_with(
         id: crate::sys::screen::ScreenId::new(screen_id),
         frame: CGRect::new(CGPoint::new(origin_x, 0.0), CGSize::new(width, 800.0)),
         display_uuid: display_uuid.to_string(),
+        is_builtin: false,
         name: Some(display_uuid.to_string()),
         space,
     }
