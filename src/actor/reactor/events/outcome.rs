@@ -239,6 +239,11 @@ impl EventOutcome {
         self
     }
 
+    pub(crate) fn with_created_window_finalization(mut self, window: WindowId) -> Self {
+        self.finalize_created_windows.push(window);
+        self
+    }
+
     pub(crate) fn with_window_server_updates(mut self, updates: Vec<WindowServerInfo>) -> Self {
         self.window_server_updates = updates;
         self
