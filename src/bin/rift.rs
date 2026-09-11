@@ -20,8 +20,8 @@ use rift_wm::actor::stack_line::StackLine;
 use rift_wm::actor::window_notify as window_notify_actor;
 use rift_wm::actor::wm_controller::{self, WmController};
 use rift_wm::common::config::{Config, config_file, restore_file};
-use rift_wm::common::log;
 use rift_wm::common::util::execute_startup_commands;
+use rift_wm::common::{config_check, log};
 use rift_wm::ipc;
 use rift_wm::layout_engine::LayoutEngine;
 use rift_wm::model::tx_store::WindowTxStore;
@@ -68,7 +68,7 @@ struct Cli {
     record: Option<PathBuf>,
 
     /// Path to configuration file to use (overrides default).
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, global = true, value_name = "PATH")]
     config: Option<PathBuf>,
 
     #[command(subcommand)]
@@ -77,11 +77,22 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Check a configuration file without starting Rift.
+    Config {
+        #[command(subcommand)]
+        config: ConfigCommands,
+    },
     /// Manage the launchd service for rift
     Service {
         #[command(subcommand)]
         service: ServiceCommands,
     },
+}
+
+#[derive(Subcommand)]
+enum ConfigCommands {
+    /// Parse and semantically validate the configuration at --config PATH.
+    Check,
 }
 
 /// this is okay because there is no recovery mechanism for actors
@@ -93,8 +104,22 @@ async fn supervise(name: &'static str, fut: impl Future<Output = ()>) {
 }
 
 fn main() {
-    sigpipe::reset();
     let opt = Cli::parse();
+
+    if let Some(Commands::Config { config: ConfigCommands::Check }) = &opt.command {
+        let Some(path) = opt.config.as_deref() else {
+            eprintln!("rift config check requires --config PATH");
+            process::exit(1);
+        };
+        if let Err(error) = config_check::check(path) {
+            eprintln!("rift config check: {error:#}");
+            process::exit(1);
+        }
+        println!("Configuration is valid: {}", path.display());
+        process::exit(0);
+    }
+
+    sigpipe::reset();
 
     if let Some(Commands::Service { service }) = &opt.command {
         match handle_service_command(service) {
