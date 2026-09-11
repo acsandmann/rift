@@ -16,6 +16,33 @@ fn test_engine() -> LayoutEngine {
     )
 }
 
+fn plain_window_state(title: &str) -> WindowState {
+    let frame = objc2_core_foundation::CGRect::new(
+        objc2_core_foundation::CGPoint::new(100.0, 100.0),
+        CGSize::new(800.0, 600.0),
+    );
+    WindowState {
+        info: WindowInfo {
+            is_standard: true,
+            is_root: true,
+            is_minimized: false,
+            is_resizable: true,
+            min_size: None,
+            max_size: None,
+            title: title.into(),
+            frame,
+            sys_id: None,
+            bundle_id: None,
+            path: None,
+            ax_role: None,
+            ax_subrole: None,
+        },
+        frame_monotonic: frame,
+        is_manageable: true,
+        manage_override: None,
+    }
+}
+
 #[test]
 fn identity_transfer_preserves_window_tree_position_and_fingerprint() {
     let mut window_store = WindowStore::default();
@@ -392,6 +419,56 @@ fn load_removes_serialized_window_state_without_a_fingerprint() {
         loaded.virtual_workspace_manager.last_focused_window(space, workspace),
         None
     );
+}
+
+#[test]
+fn save_and_load_preserve_parked_scratchpad_window() {
+    let mut engine = test_engine();
+    let mut window_store = WindowStore::default();
+    let space = SpaceId::new(123);
+    let parked = WindowId::new(42, 1);
+    let sibling = WindowId::new(42, 2);
+    let _ = engine.handle_event(
+        &mut window_store,
+        LayoutEvent::SpaceExposed(space, CGSize::new(1200.0, 800.0)),
+    );
+    let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowAdded(space, parked));
+    let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowAdded(space, sibling));
+    window_store.insert_window(parked, plain_window_state("Scratch"));
+    engine.persistence.windows.insert(parked, WindowFingerprint {
+        window_server_id: Some(7),
+        title: Some("Scratch".into()),
+        width: 800.0,
+        height: 600.0,
+        app_id: Some("com.example.term".into()),
+    });
+    let _ = engine.park_window(&mut window_store, space, parked);
+    assert!(engine.is_scratchpad_parked(parked));
+
+    let loaded = LayoutEngine::deserialize_from_str(&engine.serialize_to_string()).unwrap();
+
+    assert!(loaded.is_scratchpad_parked(parked));
+    assert!(loaded.is_window_floating(parked));
+}
+
+#[test]
+fn load_drops_scratchpad_member_without_a_fingerprint() {
+    let mut engine = test_engine();
+    let mut window_store = WindowStore::default();
+    let space = SpaceId::new(123);
+    let ghost = WindowId::new(42, 9);
+    let _ = engine.handle_event(
+        &mut window_store,
+        LayoutEvent::SpaceExposed(space, CGSize::new(1200.0, 800.0)),
+    );
+    let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowAdded(space, ghost));
+    window_store.insert_window(ghost, plain_window_state("Ghost"));
+    let _ = engine.park_window(&mut window_store, space, ghost);
+    assert!(!engine.persistence.windows.contains_key(&ghost));
+
+    let loaded = LayoutEngine::deserialize_from_str(&engine.serialize_to_string()).unwrap();
+
+    assert!(!loaded.is_scratchpad_member(ghost));
 }
 
 #[test]

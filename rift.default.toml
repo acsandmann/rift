@@ -312,6 +312,10 @@ workspace_names = [
 #   - size ({ w, h }): initial size in logical pixels. Either dimension may be omitted. Floating
 #     windows are initially resized; tiled windows receive a one-time resize after insertion.
 #   - focus (boolean): focus the window after applying the rule, switching to its virtual workspace.
+#   - scratchpad (boolean): park matching windows in the scratchpad as soon as they appear (implies
+#     floating). Summon them with the `toggle_scratchpad` command; the first show sizes the window to
+#     50% x 75% of the screen and centers it, later shows keep the geometry you left it in.
+#     Cannot be combined with workspace, position, size, focus, or manage = false.
 #   - manage (boolean): optional explicit management override. Set to false to ignore the
 #     matching window completely, or true to override Rift/macOS manageability heuristics
 #     for a visible window. When omitted, normal heuristics apply. Minimized windows remain unmanaged.
@@ -407,6 +411,10 @@ comb1 = "Alt + Shift"
 # - consume_or_expel_window = "left"|"right"|"up"|"down"
 # - toggle_stack / toggle_orientation / unjoin_windows
 # - toggle_focus_floating / toggle_window_floating / toggle_fullscreen / toggle_fullscreen_within_gaps
+# - move_to_scratchpad (i3 "move scratchpad": hide the focused window off every workspace; it becomes floating)
+# - toggle_scratchpad (i3 "scratchpad show": focused scratchpad window -> hide it; otherwise show the next
+#   hidden one centered on the current workspace, cycling oldest first; with no scratchpad windows at all,
+#   parks the focused window. Tiling a scratchpad window with toggle_window_floating removes it from the scratchpad)
 # - resize_window_grow / resize_window_shrink (without param, horizontal is default)
 # - resize_window_grow = "horizontal"|"vertical"|"smart"
 # - resize_window_shrink = "horizontal"|"vertical"|"smart"
@@ -472,6 +480,11 @@ comb1 = "Alt + Shift"
 "Alt + F" = "toggle_fullscreen"
 "Alt + Shift + F" = "toggle_fullscreen_within_gaps"
 "comb1 + Ctrl + Space" = "toggle_focus_floating" # briefly bring focus to floating window
+
+# i3-style scratchpad: park a window off every workspace and summon it with one key.
+# Pair with an app rule such as { app_id = "net.kovidgoyal.kitty", title_substring = "Scratchpad", scratchpad = true }
+# "Alt + Escape" = "toggle_scratchpad"
+# "Alt + Shift + Escape" = "move_to_scratchpad"
 
 # smartly resize windows
 "Alt + Shift + Equal" = "resize_window_grow"

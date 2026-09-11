@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use super::{
-    Direction, FloatingManager, LayoutId, LayoutSystemKind, ResizeOrientation, WorkspaceLayouts,
+    Direction, FloatingManager, LayoutId, LayoutSystemKind, ResizeOrientation, Scratchpad,
+    WorkspaceLayouts,
 };
 #[cfg(test)]
 use crate::actor::app::AppInfo;
@@ -33,6 +34,9 @@ pub use rift_protocol::LayoutCommand;
 
 const SMART_FLOATING_WIDTH_RATIO: f64 = 0.8;
 const SMART_FLOATING_HEIGHT_RATIO: f64 = 0.93;
+// i3's defaults for a scratchpad window first shown after being parked from tiling.
+const SCRATCHPAD_WIDTH_RATIO: f64 = 0.5;
+const SCRATCHPAD_HEIGHT_RATIO: f64 = 0.75;
 
 fn requested_floating_frame(
     mut frame: CGRect,
@@ -154,6 +158,7 @@ impl std::ops::Deref for LayoutEventOutcome {
 pub struct LayoutEngine {
     workspace_layouts: WorkspaceLayouts,
     floating: FloatingManager,
+    scratchpad: Scratchpad,
     floating_positions: FloatingPositionStore,
     app_rules: AppRuleEngine,
     focused_window: Option<WindowId>,
@@ -1074,6 +1079,7 @@ impl LayoutEngine {
         if !preserve_floating {
             self.virtual_workspace_manager.remove_window(window_store, wid);
             self.floating_positions.remove_window(wid);
+            self.scratchpad.remove(wid);
             self.forget_persisted_window(wid);
         }
 
@@ -1119,6 +1125,9 @@ impl LayoutEngine {
         space: SpaceId,
         wid: WindowId,
     ) -> bool {
+        if self.scratchpad.is_parked(wid) {
+            return false;
+        }
         let active_space_before = self.space_with_window(wid);
 
         let assigned_workspace =
@@ -1293,6 +1302,7 @@ impl LayoutEngine {
         LayoutEngine {
             workspace_layouts: WorkspaceLayouts::default(),
             floating: FloatingManager::new(),
+            scratchpad: Scratchpad::default(),
             floating_positions: FloatingPositionStore::default(),
             app_rules: AppRuleEngine::new(&virtual_workspace_config.app_rules),
             focused_window: None,
@@ -1524,6 +1534,11 @@ impl LayoutEngine {
                     self.broadcast_windows_changed(window_store, space);
                 }
 
+                // Last, so the floating/tiling bookkeeping above cannot re-activate the window.
+                if effects.scratchpad && !self.scratchpad.is_member(wid) {
+                    return self.park_window(window_store, space, wid);
+                }
+
                 if let Some((window, workspace)) = focus_request {
                     let workspace_index = self
                         .virtual_workspace_manager_mut()
@@ -1582,6 +1597,7 @@ impl LayoutEngine {
                     ws.layout_system.remove_windows_for_app(pid);
                 }
                 self.floating.remove_all_for_pid(pid);
+                self.scratchpad.remove_for_pid(pid);
                 self.window_layout_constraints.retain(|wid, _| wid.pid != pid);
                 self.forget_persisted_app(pid);
 
@@ -1605,6 +1621,9 @@ impl LayoutEngine {
                 self.remove_window_internal(window_store, wid, true);
             }
             LayoutEvent::WindowFocused(space, wid) => {
+                if self.scratchpad.is_parked(wid) {
+                    return EventResponse::default();
+                }
                 if self.floating.is_floating(wid) {
                     self.focused_window = Some(wid);
                     self.floating.set_last_focus(Some(wid));
@@ -1722,6 +1741,7 @@ impl LayoutEngine {
                 }
                 self.floating.remove_floating(wid);
                 self.floating.set_last_focus(None);
+                self.scratchpad.remove(wid);
             } else {
                 if let Some(space) = space {
                     self.floating.add_active(space, wid.pid, wid);
@@ -1861,6 +1881,15 @@ impl LayoutEngine {
             LayoutCommand::ToggleWindowFloating
             | LayoutCommand::ToggleWindowFloatingWithOptions(_) => unreachable!(),
             LayoutCommand::ToggleFocusFloating => unreachable!(),
+            LayoutCommand::MoveToScratchpad => match self.focused_window {
+                Some(wid) if !self.scratchpad.is_parked(wid) => {
+                    self.park_window(window_store, space, wid)
+                }
+                _ => EventResponse::default(),
+            },
+            LayoutCommand::ToggleScratchpad => {
+                self.toggle_scratchpad(window_store, space, workspace_id, visible_space_centers)
+            }
 
             LayoutCommand::SwapWindows(a, b) => {
                 let a = crate::actor::app::WindowId::new(a.pid, a.idx);
@@ -2830,6 +2859,10 @@ impl LayoutEngine {
         } else {
             false
         };
+        // After identity restore so a persisted parked window maps onto its live id first.
+        if self.scratchpad.is_parked(window_id) {
+            return Ok(AppRuleResult::Unchanged);
+        }
         let context = WindowRuleContext {
             app_bundle_id,
             app_name,
@@ -3051,6 +3084,22 @@ impl LayoutEngine {
         self.virtual_workspace_manager.get_stats(window_store)
     }
 
+    pub fn is_scratchpad_member(&self, window_id: WindowId) -> bool {
+        self.scratchpad.is_member(window_id)
+    }
+
+    pub fn is_scratchpad_parked(&self, window_id: WindowId) -> bool {
+        self.scratchpad.is_parked(window_id)
+    }
+
+    pub fn scratchpad_shown(&self) -> impl Iterator<Item = WindowId> + '_ {
+        self.scratchpad.shown()
+    }
+
+    pub fn scratchpad_parked(&self) -> impl Iterator<Item = WindowId> + '_ {
+        self.scratchpad.parked()
+    }
+
     pub fn is_window_floating(&self, window_id: WindowId) -> bool {
         self.floating.is_floating(window_id)
     }
@@ -3111,6 +3160,7 @@ impl LayoutEngine {
         self.virtual_workspace_manager.transfer_window_identity(from, to);
         self.floating_positions.transfer_window_identity(from, to);
         self.floating.transfer_window_identity(from, to);
+        self.scratchpad.transfer_identity(from, to);
         self.transfer_persisted_window_identity(from, to);
         if let Some(constraints) = self.window_layout_constraints.remove(&from) {
             self.window_layout_constraints.insert(to, constraints);
@@ -3226,8 +3276,168 @@ impl LayoutEngine {
         space: SpaceId,
         window_id: WindowId,
     ) -> bool {
+        // Unassigned windows count as active; parked scratchpad windows are the exception.
+        !self.scratchpad.is_parked(window_id)
+            && self.virtual_workspace_manager.is_window_in_active_workspace(
+                window_store,
+                space,
+                window_id,
+            )
+    }
+
+    fn command_screen(
+        &self,
+        space: SpaceId,
+        workspace_id: VirtualWorkspaceId,
+        visible_space_centers: &HashMap<SpaceId, CGPoint>,
+    ) -> Option<CGRect> {
+        let center = visible_space_centers.get(&space)?;
+        let size = self.workspace_layouts.active_size(space, workspace_id)?;
+        Some(CGRect::new(
+            CGPoint::new(center.x - size.width / 2.0, center.y - size.height / 2.0),
+            size,
+        ))
+    }
+
+    fn toggle_scratchpad(
+        &mut self,
+        window_store: &mut WindowStore,
+        space: SpaceId,
+        workspace_id: VirtualWorkspaceId,
+        visible_space_centers: &HashMap<SpaceId, CGPoint>,
+    ) -> EventResponse {
+        if let Some(wid) = self.focused_window.filter(|wid| self.scratchpad.is_shown(*wid)) {
+            return self.park_window(window_store, space, wid);
+        }
+        let Some(screen) = self.command_screen(space, workspace_id, visible_space_centers) else {
+            return EventResponse::default();
+        };
+        // Persisted members whose app is gone are skipped rather than pruned.
+        let is_live = |wid: &WindowId| window_store.window(*wid).is_some();
+        let shown = self.scratchpad.shown().find(is_live);
+        if let Some(wid) = shown {
+            if self.virtual_workspace_manager.workspace_for_window(window_store, space, wid)
+                == Some(workspace_id)
+            {
+                self.focused_window = Some(wid);
+                self.floating.set_last_focus(Some(wid));
+                return EventResponse {
+                    changed: true,
+                    raise_windows: vec![wid],
+                    focus_window: Some(wid),
+                    boundary_hit: None,
+                };
+            }
+            return self.show_scratchpad_window(window_store, space, screen, wid);
+        }
+        let parked = self.scratchpad.parked().find(is_live);
+        if let Some(wid) = parked {
+            return self.show_scratchpad_window(window_store, space, screen, wid);
+        }
+        match self.focused_window {
+            Some(wid) => self.park_window(window_store, space, wid),
+            None => EventResponse::default(),
+        }
+    }
+
+    /// Hides `wid` in the scratchpad: floating, on no workspace, parked off-screen by the reactor.
+    fn park_window(
+        &mut self,
+        window_store: &mut WindowStore,
+        space: SpaceId,
+        wid: WindowId,
+    ) -> EventResponse {
+        let Some(active_workspace) = self.virtual_workspace_manager.active_workspace(space) else {
+            return EventResponse::default();
+        };
+        let workspace_id = self
+            .virtual_workspace_manager
+            .workspace_for_window(window_store, space, wid)
+            .unwrap_or(active_workspace);
+        let was_tiled = !self.floating.is_floating(wid);
+        if was_tiled {
+            self.remove_window_from_all_tiling_trees(wid);
+        } else {
+            self.floating.remove_active_for_window(wid);
+        }
+        // Saved for every park: restores the pre-hide frame on re-show and keeps the floating
+        // flag alive across a restart (load drops floating windows without a saved location).
+        if self.floating.fullscreen_kind(wid).is_none()
+            && let Some(frame) = window_store.window(wid).map(|w| w.frame_monotonic)
+        {
+            self.floating_positions.store(space, workspace_id, wid, frame);
+        }
+        self.floating.set_fullscreen(wid, None);
+        self.floating.add_floating(wid);
+        if self.virtual_workspace_manager.last_focused_window(space, workspace_id) == Some(wid) {
+            self.virtual_workspace_manager
+                .set_last_focused_window(space, workspace_id, None);
+        }
+        self.virtual_workspace_manager.remove_window(window_store, wid);
+        if self.focused_window == Some(wid) {
+            self.focused_window = None;
+        }
+        if self.floating.last_focus() == Some(wid) {
+            self.floating.set_last_focus(None);
+        }
+        self.scratchpad.park(wid, was_tiled);
+        self.broadcast_windows_changed(window_store, space);
+        EventResponse {
+            changed: true,
+            raise_windows: Vec::new(),
+            focus_window: self.preferred_focus_for_workspace(
+                window_store,
+                space,
+                active_workspace,
+                None,
+            ),
+            boundary_hit: None,
+        }
+    }
+
+    /// Shows scratchpad member `wid` as a floating window on the active workspace of `space`.
+    /// Also pulls a member that is currently shown on another workspace or space.
+    pub fn show_scratchpad_window(
+        &mut self,
+        window_store: &mut WindowStore,
+        space: SpaceId,
+        screen: CGRect,
+        wid: WindowId,
+    ) -> EventResponse {
+        let Some(workspace_id) = self.virtual_workspace_manager.active_workspace(space) else {
+            return EventResponse::default();
+        };
+        self.floating.remove_active_for_window(wid);
+        if !self.virtual_workspace_manager.assign_window_to_workspace(
+            window_store,
+            space,
+            wid,
+            workspace_id,
+        ) {
+            return EventResponse::default();
+        }
+        self.floating.add_floating(wid);
+        self.floating.add_active(space, wid.pid, wid);
+        if self.scratchpad.show(wid) {
+            let current = window_store.window(wid).map_or(screen, |w| w.frame_monotonic);
+            let size = FloatingWindowSize::Dimensions {
+                w: screen.size.width * SCRATCHPAD_WIDTH_RATIO,
+                h: screen.size.height * SCRATCHPAD_HEIGHT_RATIO,
+            };
+            let frame = requested_floating_frame(current, screen, true, Some(size));
+            self.floating_positions.store(space, workspace_id, wid, frame);
+        }
+        self.focused_window = Some(wid);
+        self.floating.set_last_focus(Some(wid));
         self.virtual_workspace_manager
-            .is_window_in_active_workspace(window_store, space, window_id)
+            .set_last_focused_window(space, workspace_id, Some(wid));
+        self.broadcast_windows_changed(window_store, space);
+        EventResponse {
+            changed: true,
+            raise_windows: vec![wid],
+            focus_window: Some(wid),
+            boundary_hit: None,
+        }
     }
 }
 
@@ -3357,6 +3567,7 @@ mod tests {
             position: Some(AppRulePosition { x: 0.4, y: 0.7 }),
             size: Some(AppRuleSize { w: Some(640.0), h: Some(480.0) }),
             focus: true,
+            scratchpad: false,
             manage: Some(true),
             app_name: None,
             title_regex: None,
@@ -3432,6 +3643,7 @@ mod tests {
             position: None,
             size: Some(AppRuleSize { w: Some(234.0), h: None }),
             focus: false,
+            scratchpad: false,
             manage: Some(true),
             app_name: None,
             title_regex: None,

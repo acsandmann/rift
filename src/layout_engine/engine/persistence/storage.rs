@@ -253,6 +253,8 @@ impl LayoutEngine {
             }
         }
         self.floating.normalize_persisted_focus();
+        let floating = &self.floating;
+        self.scratchpad.retain(|window| floating.is_floating(window));
     }
 
     fn normalize_loaded_workspace_focus(&mut self) {

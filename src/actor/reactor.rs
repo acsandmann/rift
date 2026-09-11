@@ -3040,7 +3040,7 @@ impl Reactor {
         let wid = self.state.windows.tracked_window_id(wsid)?;
         let assigned_space = self.assigned_space_for_window_id(wid)?;
         if !self.is_space_active(assigned_space)
-            || !self.window_in_non_active_workspace(assigned_space, wid)
+            || !self.window_hidden_from_active_workspace(assigned_space, wid)
         {
             return None;
         }
@@ -3691,6 +3691,25 @@ impl Reactor {
             return false;
         }
 
+        // A visible scratchpad window holds focus against hover; only a click or toggle moves it.
+        let engine = &self.layout_manager.layout_engine;
+        let active_workspace = engine.active_workspace(space);
+        let scratchpad_holds_focus = engine.scratchpad_shown().any(|member| {
+            member != wid
+                && engine.virtual_workspace_manager().workspace_for_window(
+                    &self.state.windows,
+                    space,
+                    member,
+                ) == active_workspace
+        });
+        if scratchpad_holds_focus {
+            trace!(
+                ?wid,
+                "Ignoring mouse over window while a scratchpad window is shown"
+            );
+            return false;
+        }
+
         let Some(candidate_wsid) = window.info.sys_id else {
             return true;
         };
@@ -3830,6 +3849,7 @@ impl Reactor {
                             windows_needing_layout_refresh.push((*wid, assignment));
                         }
                     }
+                    Ok(AppRuleResult::Unchanged) => {}
                     Ok(AppRuleResult::Rejected(_)) => {
                         if utils::rejection_needs_removal(
                             &self.state,
@@ -3940,6 +3960,20 @@ impl Reactor {
         let Some(window_space) = self.best_space_for_window_id(app_window_id) else {
             return EventOutcome::no_change();
         };
+
+        // Cmd-Tab / Dock activation of a parked scratchpad window: show it rather than leave
+        // keyboard focus on an off-screen window.
+        if self.layout_manager.layout_engine.is_scratchpad_parked(app_window_id)
+            && let Some(screen) = self.space_state.screen_by_space(window_space).map(|s| s.frame)
+        {
+            let response = self.layout_manager.layout_engine.show_scratchpad_window(
+                &mut self.state.windows,
+                window_space,
+                screen,
+                app_window_id,
+            );
+            return EventOutcome::layout_changed(false).with_layout_response(response, None);
+        }
 
         self.maybe_auto_switch_to_window_workspace(pid, app_window_id, window_space)
     }
@@ -4499,12 +4533,15 @@ impl Reactor {
     }
 
     fn request_refocus_if_hidden(&mut self, space: SpaceId, window_id: WindowId) {
-        if self.window_in_non_active_workspace(space, window_id) {
+        if self.window_hidden_from_active_workspace(space, window_id) {
             self.refocus_manager.refocus_state = RefocusState::Pending(space);
         }
     }
 
-    fn window_in_non_active_workspace(&self, space: SpaceId, window_id: WindowId) -> bool {
+    fn window_hidden_from_active_workspace(&self, space: SpaceId, window_id: WindowId) -> bool {
+        if self.layout_manager.layout_engine.is_scratchpad_parked(window_id) {
+            return true;
+        }
         let Some(active_workspace) = self.layout_manager.layout_engine.active_workspace(space)
         else {
             return false;
@@ -4522,7 +4559,7 @@ impl Reactor {
                 self.request_refocus_if_hidden(*space, *wid);
             }
             LayoutEvent::WindowObserved(space, window) => {
-                if self.window_in_non_active_workspace(*space, window.info.window_id) {
+                if self.window_hidden_from_active_workspace(*space, window.info.window_id) {
                     self.refocus_manager.refocus_state = RefocusState::Pending(*space);
                 }
             }

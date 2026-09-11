@@ -16,6 +16,7 @@ use crate::actor::{
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{LayoutMode, WindowSnappingSettings};
 use crate::layout_engine::LayoutEngine;
+use crate::model::HideCorner;
 use crate::model::broadcast::{BroadcastEvent, BroadcastSender, protocol_workspace_id};
 use crate::sys::screen::SpaceId;
 
@@ -170,6 +171,40 @@ pub struct LayoutManager {
 
 pub type LayoutResult = Vec<(SpaceId, Vec<(WindowId, CGRect)>)>;
 
+/// Parked scratchpad windows belong to no workspace, so the per-space layout never sees them.
+/// Park each one in the hidden corner of the in-scope screen it currently sits on.
+fn place_parked_scratchpad_windows(
+    reactor: &Reactor,
+    screens_in_scope: &[(SpaceId, CGRect)],
+    all_screen_frames: &[CGRect],
+    layout_result: &mut LayoutResult,
+) {
+    let engine = &reactor.layout_manager.layout_engine;
+    for wid in engine.scratchpad_parked() {
+        let Some(frame) = reactor.state.windows.window(wid).map(|w| w.frame_monotonic) else {
+            continue;
+        };
+        let current_space = reactor.best_space_for_window_id(wid);
+        let target = screens_in_scope
+            .iter()
+            .find(|(space, _)| Some(*space) == current_space)
+            .or_else(|| current_space.is_none().then(|| screens_in_scope.first()).flatten());
+        let Some((space, screen)) = target else {
+            continue;
+        };
+        let hidden = engine.virtual_workspace_manager().calculate_hidden_position_multi(
+            *screen,
+            frame,
+            HideCorner::BottomRight,
+            None,
+            all_screen_frames,
+        );
+        if let Some((_, positions)) = layout_result.iter_mut().find(|(s, _)| s == space) {
+            positions.push((wid, hidden));
+        }
+    }
+}
+
 fn bound_frame_to_screen(frame: CGRect, screen: CGRect) -> CGRect {
     const WINDOW_HIDDEN_THRESHOLD: f64 = 10.0;
 
@@ -231,6 +266,7 @@ impl LayoutManager {
             .filter(|space| reactor.is_space_active(*space))
             .count();
         let mut layout_result = LayoutResult::new();
+        let mut screens_in_scope = Vec::new();
 
         for screen in screens {
             let Some(space) = screen.space else {
@@ -282,9 +318,16 @@ impl LayoutManager {
                     &active_workspace_windows,
                 );
             }
+            screens_in_scope.push((space, screen.frame));
             layout_result.push((space, layout));
         }
 
+        place_parked_scratchpad_windows(
+            reactor,
+            &screens_in_scope,
+            &all_screen_frames,
+            &mut layout_result,
+        );
         layout_result
     }
 

@@ -50,6 +50,8 @@ pub enum LayoutCommand {
     ToggleWindowFloatingWithOptions(ToggleWindowFloatingOptions),
     ToggleFullscreen,
     ToggleFullscreenWithinGaps,
+    ToggleScratchpad,
+    MoveToScratchpad,
     ResizeWindowGrow(ResizeOrientation),
     ResizeWindowShrink(ResizeOrientation),
     ResizeWindowBy {

@@ -25,6 +25,7 @@ pub struct AppRuleDecision {
     pub position: Option<AppRulePosition>,
     pub size: Option<AppRuleSize>,
     pub focus: bool,
+    pub scratchpad: bool,
 }
 
 impl AppRuleDecision {
@@ -42,12 +43,13 @@ pub struct AppRuleEffects {
     pub position: Option<AppRulePosition>,
     pub size: Option<AppRuleSize>,
     pub focus: bool,
+    pub scratchpad: bool,
     pub was_rule_floating: bool,
 }
 
 impl AppRuleEffects {
     pub(crate) fn should_float(self, was_floating: bool) -> bool {
-        self.floating || (!self.was_rule_floating && was_floating)
+        self.floating || self.scratchpad || (!self.was_rule_floating && was_floating)
     }
 
     pub(crate) fn floating_placement(
@@ -85,6 +87,8 @@ impl AppRuleEffects {
 pub enum AppRuleResult {
     Managed(AppRuleEffects),
     Rejected(AppRuleRejection),
+    /// Rule evaluation was skipped; the window keeps its current state (parked scratchpad).
+    Unchanged,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -267,6 +271,7 @@ impl CompiledRule {
             position,
             size,
             focus,
+            scratchpad,
             manage,
             app_name,
             title_regex,
@@ -312,6 +317,7 @@ impl CompiledRule {
                 position,
                 size,
                 focus,
+                scratchpad,
             },
             app_id,
             app_name,
@@ -388,6 +394,7 @@ mod tests {
                 position: Some(AppRulePosition { x: 0.4, y: 0.7 }),
                 size: Some(AppRuleSize { w: Some(640.0), h: Some(480.0) }),
                 focus: true,
+                scratchpad: false,
             })
         );
     }
