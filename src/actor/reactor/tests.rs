@@ -5482,6 +5482,54 @@ fn wsid_rekey_preserves_floating_membership_and_position() {
 }
 
 #[test]
+fn native_space_resolution_queries_only_when_needed() {
+    use crate::sys::window_server::{set_window_spaces_override, window_space_query_count};
+
+    // Exercise all live outcomes, including unavailable and a third space.
+    for pending_move in [false, true] {
+        for live_id in [None, Some(1), Some(2), Some(3)] {
+            let (reactor, _wid, wsid, origin, target, _) = if pending_move {
+                reactor_with_window_moved_to_space2()
+            } else {
+                reactor_with_window_on_space1()
+            };
+            let live = live_id.map(SpaceId::new);
+            set_window_spaces_override(wsid, Some(live_id.into_iter().collect()));
+            for observation in [Some(origin), Some(target), None] {
+                let before = window_space_query_count();
+                let resolved = reactor.resolve_native_space(wsid, observation);
+                let queries = window_space_query_count() - before;
+                let needs_live =
+                    observation.is_none() || (pending_move && observation != Some(target));
+                let expected = match observation {
+                    Some(observed) if pending_move && observed != target => {
+                        Some(if live == Some(observed) {
+                            observed
+                        } else {
+                            target
+                        })
+                    }
+                    Some(observed) => Some(observed),
+                    None => {
+                        live.or(if pending_move { Some(target) } else { None }).or(Some(origin))
+                    }
+                };
+                assert_eq!(
+                    resolved, expected,
+                    "pending={pending_move}, observation={observation:?}, live={live:?}"
+                );
+                assert_eq!(
+                    queries,
+                    usize::from(needs_live),
+                    "pending={pending_move}, observation={observation:?}, live={live:?}"
+                );
+            }
+            set_window_spaces_override(wsid, None);
+        }
+    }
+}
+
+#[test]
 fn native_space_resolution_policy_table() {
     let mut cases = Vec::new();
 

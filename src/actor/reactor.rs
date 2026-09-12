@@ -3370,20 +3370,45 @@ impl Reactor {
         observation: Option<SpaceId>,
     ) -> Option<SpaceId> {
         let pending = self.pending_target_space_for_window_server_id(wsid);
-        let live = window_server::window_space(wsid);
         let prior = self.state.windows.window_server_space(wsid);
 
-        match (observation, pending) {
+        let (resolved, live) = match (observation, pending) {
             (Some(observed), Some(target)) if observed != target => {
-                if live == Some(observed) {
+                let live = window_server::window_space(wsid);
+                let resolved = if live == Some(observed) {
                     Some(observed)
                 } else {
                     Some(target)
-                }
+                };
+                (resolved, Some(live))
             }
-            (Some(observed), _) => Some(observed),
-            (None, _) => live.or(pending).or(prior),
+            (Some(observed), _) => (Some(observed), None),
+            (None, _) => {
+                let live = window_server::window_space(wsid);
+                (live.or(pending).or(prior), Some(live))
+            }
+        };
+        match live {
+            Some(live) => trace!(
+                ?wsid,
+                ?observation,
+                ?pending,
+                ?prior,
+                ?live,
+                ?resolved,
+                "Resolved native space"
+            ),
+            None => trace!(
+                ?wsid,
+                ?observation,
+                ?pending,
+                ?prior,
+                live = "not queried",
+                ?resolved,
+                "Resolved native space"
+            ),
         }
+        resolved
     }
 
     fn best_space_for_window_id(&self, wid: WindowId) -> Option<SpaceId> {
