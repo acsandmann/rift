@@ -334,7 +334,13 @@ pub fn handle_window_frame_changed(
                 },
             };
         }
-        if let DragState::Active { session } = &mut drag.drag_state {
+        // A pending swap is still a live drag: `last_frame` and `settled_space` are
+        // what mouse-up uses to place the window and choose its final space, so
+        // freezing them here strands the window at the position where the swap
+        // candidate was first scored instead of where the user released it.
+        if let DragState::Active { session } | DragState::PendingSwap { session, .. } =
+            &mut drag.drag_state
+        {
             session.last_frame = new_frame;
             session.layout_dirty = true;
             if session.settled_space != new_space {
@@ -352,7 +358,7 @@ pub fn handle_window_frame_changed(
                 });
             }
         } else {
-            outcome = outcome.with_drag_swap_evaluation(wid, new_frame);
+            outcome.drag_swap_evaluations.push((wid, new_frame));
         }
     } else {
         drag.skip_layout_for_window = Some(wid);
@@ -398,7 +404,7 @@ pub fn handle_window_frame_changed(
     }
 
     if handle_mouse_up_if_needed(drag, false, mouse_state) {
-        outcome = outcome.with_mouse_up_dispatch();
+        outcome.dispatch_mouse_up = true;
     }
     Ok(outcome)
 }
@@ -420,9 +426,10 @@ pub fn handle_window_title_changed(
             return Ok(crate::actor::reactor::events::EventOutcome::no_change());
         }
         window.info.title = new_title.clone();
-        return Ok(crate::actor::reactor::events::EventOutcome::no_change()
-            .with_app_rule_reapply(wid)
-            .with_window_title_broadcast(wid, previous_title, new_title));
+        let mut outcome = crate::actor::reactor::events::EventOutcome::no_change()
+            .with_window_title_broadcast(wid, previous_title, new_title);
+        outcome.reapply_app_rules.push(wid);
+        return Ok(outcome);
     }
     Ok(crate::actor::reactor::events::EventOutcome::no_change())
 }

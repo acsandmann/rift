@@ -70,7 +70,7 @@ use std::thread;
 
 use animation::Sender as AnimationSender;
 use events::{
-    EventOutcome, app as application_workflow, command as command_workflow,
+    CloseWindowRequest, EventOutcome, app as application_workflow, command as command_workflow,
     drag as interaction_workflow, focus as focus_service, space as topology_workflow,
     system as system_workflow, window as window_workflow,
 };
@@ -347,6 +347,8 @@ pub struct Reactor {
     pending_space_change_manager: managers::PendingSpaceChangeManager,
     active_spaces: HashSet<SpaceId>,
     pub animation_tx: Option<AnimationSender>,
+    #[cfg(test)]
+    event_outcome_phase_trace: Vec<&'static str>,
 }
 
 impl Reactor {
@@ -473,6 +475,8 @@ impl Reactor {
             },
             active_spaces: HashSet::default(),
             animation_tx: None,
+            #[cfg(test)]
+            event_outcome_phase_trace: Vec::new(),
         };
         reactor
     }
@@ -2041,16 +2045,16 @@ impl Reactor {
     /// discovery requests made directly by a workflow are consequently observed
     /// only after its model mutation is complete.
     fn apply_event_outcome(&mut self, outcome: EventOutcome) {
+        #[cfg(test)]
+        self.event_outcome_phase_trace.push("model");
         if !outcome.window_server_updates.is_empty() {
             self.update_partial_window_server_info(outcome.window_server_updates);
         }
         if outcome.recompute_active_spaces {
             self.recompute_and_set_active_spaces_from_current_screens();
         }
-        if outcome.repair_spaces_after_mission_control {
+        if outcome.recover_after_mission_control {
             self.repair_spaces_after_mission_control();
-        }
-        if outcome.refresh_after_mission_control {
             self.refresh_windows_after_mission_control();
         }
         if outcome.refresh_window_inventories {
@@ -2126,6 +2130,8 @@ impl Reactor {
             }
         }
 
+        #[cfg(test)]
+        self.event_outcome_phase_trace.push("frame-writes");
         // Some transitions need to place a window on its destination display
         // before arranging that display. Keep these writes ahead of both layout
         // responses and the arrange pass so tiling always supplies the final frame.
@@ -2151,6 +2157,8 @@ impl Reactor {
             }
         }
 
+        #[cfg(test)]
+        self.event_outcome_phase_trace.push("layout");
         for event in outcome.layout_events {
             self.send_layout_event(event);
         }
@@ -2165,7 +2173,8 @@ impl Reactor {
         }
 
         let mut layout_changed = false;
-        if outcome.arrange.requested && (!self.is_in_drag() || outcome.arrange.window_was_destroyed)
+        if outcome.arrange.passes > 0
+            && (!self.is_in_drag() || outcome.arrange.window_was_destroyed)
         {
             for _ in 0..outcome.arrange.passes.max(1) {
                 if outcome.arrange.direct_positions {
@@ -2189,17 +2198,6 @@ impl Reactor {
             // Publish the menu state once after all arrange passes have completed.
             self.maybe_send_menu_update();
         }
-        if outcome.broadcast_layout_changed && layout_changed {
-            self.broadcast_layout_changed(
-                outcome.arrange.space_scope.or_else(|| self.workspace_command_space()),
-            );
-        }
-        if outcome.broadcast_selection_changed {
-            self.broadcast_selection_changed(
-                outcome.arrange.space_scope.or_else(|| self.workspace_command_space()),
-            );
-        }
-
         if layout_changed
             && let Some(window) = outcome.post_arrange_mouse_warp
             && let Some(center) = self.window_center_on_known_screen(window)
@@ -2207,12 +2205,16 @@ impl Reactor {
             self.warp_mouse(center);
         }
 
+        #[cfg(test)]
+        self.event_outcome_phase_trace.push("raising");
         for request in outcome.raise_requests {
             if let Err(error) = self.communication_manager.raise_manager_tx.try_send(request) {
                 warn!(%error, "failed to send raise request");
             }
         }
 
+        #[cfg(test)]
+        self.event_outcome_phase_trace.push("focus");
         if let Some((space, window)) =
             focus_service::resolve(outcome.focused_window, |wid| self.best_space_for_window_id(wid))
         {
@@ -2251,10 +2253,12 @@ impl Reactor {
             }
         }
 
-        if let Some(window_server_id) = outcome.close_window {
-            let target = match window_server_id {
-                Some(wsid) => self.state.windows.tracked_window_id(wsid),
-                None => self.main_window(),
+        if let Some(request) = outcome.close_window {
+            let (target, window_server_id) = match request {
+                CloseWindowRequest::Window(wsid) => {
+                    (self.state.windows.tracked_window_id(wsid), Some(wsid))
+                }
+                CloseWindowRequest::Focused => (self.main_window(), None),
             };
             if let Some(window) = target {
                 self.request_close_window(window.pid, window_server_id);
@@ -2294,6 +2298,8 @@ impl Reactor {
             }
         }
 
+        #[cfg(test)]
+        self.event_outcome_phase_trace.push("ui");
         if outcome.refresh_window_notifications {
             let mut ids: Vec<u32> = self
                 .state
@@ -2314,6 +2320,18 @@ impl Reactor {
         }
         if outcome.refresh_layout_mode {
             self.update_event_tap_layout_mode();
+        }
+        #[cfg(test)]
+        self.event_outcome_phase_trace.push("broadcasts");
+        if outcome.arrange.passes > 0 && layout_changed {
+            self.broadcast_layout_changed(
+                outcome.arrange.space_scope.or_else(|| self.workspace_command_space()),
+            );
+        }
+        if outcome.broadcast_selection_changed {
+            self.broadcast_selection_changed(
+                outcome.arrange.space_scope.or_else(|| self.workspace_command_space()),
+            );
         }
         for broadcast in outcome.window_title_broadcasts {
             self.broadcast_window_title_changed(
@@ -2801,7 +2819,8 @@ impl Reactor {
         self.finalize_space_change(&spaces, active_windows, releases_lifecycle_refresh_quarantine);
         self.try_apply_pending_space_change();
         if should_force_refresh_layout {
-            outcome = outcome.with_window_inventory_refresh().with_arrange_passes(1);
+            outcome.refresh_window_inventories = true;
+            outcome = outcome.with_arrange_passes(1);
         }
         Ok(outcome)
     }
@@ -4519,7 +4538,7 @@ impl Reactor {
                 self.request_refocus_if_hidden(*space, *wid);
             }
             LayoutEvent::WindowObserved(space, window) => {
-                if self.window_in_non_active_workspace(*space, window.info.0) {
+                if self.window_in_non_active_workspace(*space, window.info.window_id) {
                     self.refocus_manager.refocus_state = RefocusState::Pending(*space);
                 }
             }

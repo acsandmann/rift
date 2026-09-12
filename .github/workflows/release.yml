@@ -119,3 +119,11 @@ jobs:
           git -C tap add "${TAP_FILE_PATH}"
           git -C tap commit -m "chore(formula): rift ${{ steps.pkg.outputs.version }} (universal) - sha256 ${{ steps.pkg.outputs.sha256 }}"
           git -C tap push origin HEAD
+
+      - name: Trigger documentation build
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          repository: acsandmann/rift-docs
+          event-type: rift-release
+          client-payload: '{"rift_ref":"${{ github.event.release.tag_name }}"}'

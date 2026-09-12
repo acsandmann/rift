@@ -1,0 +1,20 @@
+name: Update latest documentation
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger latest documentation build
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          repository: acsandmann/rift-docs
+          event-type: rift-main-updated
+          client-payload: '{"rift_ref":"${{ github.sha }}"}'

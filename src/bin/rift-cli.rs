@@ -211,7 +211,10 @@ enum WindowCommands {
     /// Examples:
     ///   rift-cli execute window resize-by --amount 0.05    # grow by 5%
     ///   rift-cli execute window resize-by --amount -0.10   # shrink by 10%
-    ResizeBy { amount: f64 },
+    ResizeBy {
+        #[arg(long)]
+        amount: f64,
+    },
     /// Close a window as if Command-W was pressed
     Close {
         /// Optional window server ID; defaults to the focused window
@@ -352,12 +355,15 @@ enum ConfigCommands {
 
     /// Update mouse settings
     SetMouseFollowsFocus {
+        #[arg(action = clap::ArgAction::Set)]
         value: bool,
     },
     SetMouseHidesOnFocus {
+        #[arg(action = clap::ArgAction::Set)]
         value: bool,
     },
     SetFocusFollowsMouse {
+        #[arg(action = clap::ArgAction::Set)]
         value: bool,
     },
 

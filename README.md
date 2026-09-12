@@ -45,7 +45,7 @@
 - Works with “Displays have separate Spaces” enabled (unlike all other major WMs)
 
 ## Quick Start
-Get up and running via the wiki:
+Get up and running via the docs:
 <br>
 
 [<kbd><br>config<br></kbd>][config_link]
@@ -72,5 +72,5 @@ Rift began as a fork (and is licensed as such) of <a href="https://github.com/gl
 
 <!---------------------------------------------------------------------------->
 
-[config_link]: https://github.com/acsandmann/rift/wiki/Config
-[quick_start]: https://github.com/acsandmann/rift/wiki/Quick-Start
+[config_link]: https://acsandmann.github.io/rift-docs/reference/configuration/
+[quick_start]: https://acsandmann.github.io/rift-docs/quick-start/

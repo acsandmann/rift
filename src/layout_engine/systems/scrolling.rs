@@ -9,9 +9,11 @@ use crate::common::config::{
     ScrollingFocusNavigationStyle, ScrollingLayoutSettings, WindowInsertionPoint,
 };
 use crate::layout_engine::systems::constraints::{AxisConstraints, solve_axis_lengths};
-use crate::layout_engine::systems::{LayoutSystem, WindowLayoutConstraints};
+use crate::layout_engine::systems::{
+    LayoutSystem, WindowLayoutConstraints, reconcile_app_membership,
+};
 use crate::layout_engine::utils::compute_tiling_area;
-use crate::layout_engine::{Direction, LayoutId, LayoutKind, ResizeOrientation};
+use crate::layout_engine::{Direction, LayoutId, ResizeOrientation};
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 struct Column {
@@ -1207,19 +1209,6 @@ impl LayoutSystem for ScrollingLayoutSystem {
         }
     }
 
-    fn windows_for_app(&self, layout: LayoutId, pid: pid_t) -> Vec<WindowId> {
-        self.layout_state(layout)
-            .map(|state| {
-                state
-                    .columns
-                    .iter()
-                    .flat_map(|c| c.windows.iter().copied())
-                    .filter(|w| w.pid == pid)
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
     fn set_windows_for_app(&mut self, layout: LayoutId, pid: pid_t, desired: Vec<WindowId>) {
         let niri_navigation = matches!(
             self.settings.focus_navigation_style,
@@ -1229,48 +1218,22 @@ impl LayoutSystem for ScrollingLayoutSystem {
         let Some(state) = self.layout_state_mut(layout) else {
             return;
         };
-        let mut desired = desired;
-        desired.sort_unstable();
         let current: Vec<_> = state
             .columns
             .iter()
             .flat_map(|c| c.windows.iter().copied())
             .filter(|w| w.pid == pid)
             .collect();
-        let mut current = current;
-        current.sort_unstable();
-        let mut desired_iter = desired.iter().peekable();
-        let mut current_iter = current.iter().peekable();
-        loop {
-            match (desired_iter.peek(), current_iter.peek()) {
-                (Some(des), Some(cur)) if des == cur => {
-                    desired_iter.next();
-                    current_iter.next();
-                }
-                (Some(des), None) => {
-                    Self::insert_new_column(state, **des, insertion_point);
-                    desired_iter.next();
-                }
-                (Some(des), Some(cur)) if des < cur => {
-                    Self::insert_new_column(state, **des, insertion_point);
-                    desired_iter.next();
-                }
-                (_, Some(cur)) => {
-                    let _ = state.remove_window(**cur);
-                    current_iter.next();
-                }
-                (None, None) => break,
-            }
+        let delta = reconcile_app_membership(pid, current, desired);
+        for wid in delta.removals {
+            let _ = state.remove_window(wid);
+        }
+        for wid in delta.additions {
+            Self::insert_new_column(state, wid, insertion_point);
         }
         if niri_navigation {
             state.reveal_selected_without_direction();
         }
-    }
-
-    fn has_windows_for_app(&self, layout: LayoutId, pid: pid_t) -> bool {
-        self.layout_state(layout)
-            .map(|state| state.columns.iter().flat_map(|c| c.windows.iter()).any(|w| w.pid == pid))
-            .unwrap_or(false)
     }
 
     fn contains_window(&self, layout: LayoutId, wid: WindowId) -> bool {
@@ -1493,10 +1456,6 @@ impl LayoutSystem for ScrollingLayoutSystem {
                 state.align_scroll_to_selected();
             }
         }
-    }
-
-    fn split_selection(&mut self, _layout: LayoutId, _kind: LayoutKind) {
-        // Not applicable for scrolling layout.
     }
 
     fn toggle_fullscreen_of_selection(&mut self, layout: LayoutId) -> Vec<WindowId> {
@@ -1792,10 +1751,6 @@ impl LayoutSystem for ScrollingLayoutSystem {
             state.align_scroll_to_selected();
         }
     }
-
-    fn rebalance(&mut self, _layout: LayoutId) {}
-
-    fn toggle_tile_orientation(&mut self, _layout: LayoutId) {}
 }
 
 #[cfg(test)]
