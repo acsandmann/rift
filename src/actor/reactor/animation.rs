@@ -22,6 +22,7 @@ pub type Receiver = mpsc::UnboundedReceiver<Message>;
 pub enum Message {
     Replace(Animation),
     SkipToEnd(Animation),
+    DirectPositions(Animation),
 }
 
 #[derive(Debug, Default)]
@@ -118,6 +119,11 @@ impl AnimationManager {
                 animation.skip_to_end();
                 None
             }
+            Message::DirectPositions(animation) => {
+                self.finish_active();
+                animation.skip_to_end_positions();
+                None
+            }
         }
     }
 
@@ -145,6 +151,26 @@ impl AnimationManager {
         layout: &[(WindowId, CGRect)],
         is_resize: bool,
         skip_wid: Option<WindowId>,
+    ) -> bool {
+        Self::animate_layout_inner(reactor, space, layout, is_resize, skip_wid, false)
+    }
+
+    pub fn scroll_layout(
+        reactor: &mut Reactor,
+        space: SpaceId,
+        layout: &[(WindowId, CGRect)],
+        skip_wid: Option<WindowId>,
+    ) -> bool {
+        Self::animate_layout_inner(reactor, space, layout, false, skip_wid, true)
+    }
+
+    fn animate_layout_inner(
+        reactor: &mut Reactor,
+        space: SpaceId,
+        layout: &[(WindowId, CGRect)],
+        is_resize: bool,
+        skip_wid: Option<WindowId>,
+        direct_positions: bool,
     ) -> bool {
         let Some(active_ws) = reactor.layout_manager.layout_engine.active_workspace(space) else {
             return false;
@@ -249,7 +275,9 @@ impl AnimationManager {
             let skip_anim = is_resize || !layout_animate || low_power;
 
             if let Some(tx) = &reactor.animation_tx {
-                let message = if skip_anim {
+                let message = if direct_positions {
+                    Message::DirectPositions(anim)
+                } else if skip_anim {
                     Message::SkipToEnd(anim)
                 } else {
                     Message::Replace(anim)
@@ -258,10 +286,15 @@ impl AnimationManager {
                     match err.0 {
                         Message::Replace(animation) => animation.skip_to_end(),
                         Message::SkipToEnd(animation) => animation.skip_to_end(),
+                        Message::DirectPositions(animation) => animation.skip_to_end_positions(),
                     }
                 }
             } else {
-                anim.skip_to_end();
+                if direct_positions {
+                    anim.skip_to_end_positions();
+                } else {
+                    anim.skip_to_end();
+                }
             }
         }
 
@@ -509,6 +542,21 @@ impl Animation {
         }
     }
 
+    fn skip_to_end_positions(&self) {
+        for window in &self.windows {
+            let request = if window.start.size.same_as(window.finish.size) {
+                Request::SetWorkspaceSwitchPositions(
+                    vec![(window.wid, window.finish.origin)],
+                    window.txid,
+                    true,
+                )
+            } else {
+                Request::SetWindowFrame(window.wid, window.finish, window.txid, true)
+            };
+            _ = window.handle.send(request);
+        }
+    }
+
     pub fn is_empty(&self) -> bool { self.windows.is_empty() }
 
     fn begin(&self) { self.begin_windows_not_in(&[]); }
@@ -630,6 +678,42 @@ mod tests {
     use objc2_core_foundation::{CGPoint, CGSize};
 
     use super::*;
+
+    #[test]
+    fn direct_scroll_positions_preserve_size_changes_and_finish_active_animation() {
+        let (tx, mut rx) = crate::actor::channel();
+        let handle = AppThreadHandle::new_for_test(tx);
+        let wid = WindowId::new(1, 1);
+        let mut manager = AnimationManager::new();
+        manager.handle_message(Message::Replace(animation(
+            &handle,
+            wid,
+            rect(0., 0., 100., 100.),
+            rect(100., 0., 100., 100.),
+        )));
+        let _ = collect_requests(&mut rx);
+        manager.handle_message(Message::DirectPositions(animation(
+            &handle,
+            wid,
+            rect(100., 0., 100., 100.),
+            rect(120., 0., 100., 100.),
+        )));
+        let requests = collect_requests(&mut rx);
+        assert!(manager.active.is_none());
+        assert!(
+            matches!(requests.last(), Some(Request::SetWorkspaceSwitchPositions(p, _, true))
+            if p.as_slice() == [(wid, CGPoint::new(120., 0.))])
+        );
+        manager.handle_message(Message::DirectPositions(animation(
+            &handle,
+            wid,
+            rect(120., 0., 100., 100.),
+            rect(130., 0., 200., 100.),
+        )));
+        let requests = collect_requests(&mut rx);
+        assert_eq!(requests.len(), 1);
+        assert_set_window_frame(&requests[0], wid, rect(130., 0., 200., 100.));
+    }
 
     fn rect(origin_x: f64, origin_y: f64, width: f64, height: f64) -> CGRect {
         CGRect::new(CGPoint::new(origin_x, origin_y), CGSize::new(width, height))

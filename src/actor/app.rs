@@ -339,7 +339,7 @@ pub enum Request {
 
     SetWindowFrame(WindowId, CGRect, TransactionId, bool),
     SetBatchWindowFrame(Vec<(WindowId, CGRect)>, TransactionId, bool),
-    /// Position-only batch reserved for virtual workspace switches.
+    /// Position-only batch for workspace switches and interactive strip movement.
     SetWorkspaceSwitchPositions(Vec<(WindowId, CGPoint)>, TransactionId, bool),
     SetWindowPos(WindowId, CGPoint, TransactionId, bool),
     AnimationFrame {

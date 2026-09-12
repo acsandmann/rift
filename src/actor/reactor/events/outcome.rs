@@ -90,6 +90,7 @@ pub(crate) struct EventOutcome {
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct ArrangeRequest {
+    pub(crate) direct_positions: bool,
     pub(crate) passes: u8,
     pub(crate) is_resize: bool,
     pub(crate) window_was_destroyed: bool,
@@ -148,6 +149,7 @@ impl EventOutcome {
             };
             self.arrange.passes = self.arrange.passes.saturating_add(other.arrange.passes).max(1);
             self.arrange.is_resize |= other.arrange.is_resize;
+            self.arrange.direct_positions |= other.arrange.direct_positions;
             self.arrange.window_was_destroyed |= other.arrange.window_was_destroyed;
         }
         self.focused_window = other.focused_window.or(self.focused_window);
@@ -160,6 +162,7 @@ impl EventOutcome {
     pub(crate) fn layout_changed(is_resize: bool) -> Self {
         Self {
             arrange: ArrangeRequest {
+                direct_positions: false,
                 passes: 1,
                 is_resize,
                 window_was_destroyed: false,
