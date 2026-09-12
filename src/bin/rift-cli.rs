@@ -340,21 +340,13 @@ enum LayoutCommands {
 #[derive(Subcommand)]
 enum ConfigCommands {
     /// Update animation settings
-    SetAnimate {
-        value: String,
-    },
+    SetAnimate { value: String },
     /// Set the animation duration in seconds
-    SetAnimationDuration {
-        value: f64,
-    },
+    SetAnimationDuration { value: f64 },
     /// Set the animation frame rate
-    SetAnimationFps {
-        value: f64,
-    },
+    SetAnimationFps { value: f64 },
     /// Set the animation easing curve
-    SetAnimationEasing {
-        value: String,
-    },
+    SetAnimationEasing { value: String },
 
     /// Update mouse settings
     SetMouseFollowsFocus {
@@ -373,14 +365,10 @@ enum ConfigCommands {
     },
 
     /// Update layout settings
-    SetStackOffset {
-        value: f64,
-    },
+    SetStackOffset { value: f64 },
     /// Set the default stack orientation behavior. Value should be one of:
     /// "perpendicular", "same", "horizontal", or "vertical"
-    SetStackDefaultOrientation {
-        value: String,
-    },
+    SetStackDefaultOrientation { value: String },
     /// Set the outer gap on each screen edge
     SetOuterGaps {
         top: f64,
@@ -389,15 +377,10 @@ enum ConfigCommands {
         right: f64,
     },
     /// Set the horizontal and vertical gaps between windows
-    SetInnerGaps {
-        horizontal: f64,
-        vertical: f64,
-    },
+    SetInnerGaps { horizontal: f64, vertical: f64 },
 
     /// Update workspace settings
-    SetWorkspaceNames {
-        names: Vec<String>,
-    },
+    SetWorkspaceNames { names: Vec<String> },
 
     /// Generic set: set an arbitrary config key (dot-separated path) to a JSON value.
     /// Example: rift-cli execute config set --key settings.animate --value true
