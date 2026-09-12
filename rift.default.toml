@@ -30,6 +30,11 @@ mouse_hides_on_focus = true
 # e.g. "Fn"; omit or set to null to keep focus-follows-mouse always active
 #focus_follows_mouse_disable_hotkey = "Fn"
 
+# mouse_modifier: hold this modifier and drag a window with the left mouse button to
+# move it, or with the right mouse button to resize it (like yabai's mouse_modifier).
+# Modifier-only spec, e.g. "Cmd" or "Ctrl + Alt". Omit to disable.
+#mouse_modifier = "Cmd"
+
 # Prevent certain apps from stealing focus/causing workspace switches
 # Provide bundle identifiers (e.g., "com.apple.Spotlight")
 # Examples:

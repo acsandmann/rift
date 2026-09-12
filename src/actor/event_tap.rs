@@ -28,7 +28,7 @@ use objc2_core_graphics::{
 };
 use tracing::{debug, error, trace, warn};
 
-use super::reactor::{self, Event};
+use super::reactor::{self, Event, MouseDragAction};
 use super::stack_line;
 use crate::actor;
 use crate::actor::spaces::ForwardedSpaceState;
@@ -47,6 +47,9 @@ use crate::ui::stack_line::point_hits_indicator_frame;
 
 const MOUSE_MOVE_MIN_INTERVAL_NS_NORMAL: u64 = 8_000_000; // 8ms ~= 125 Hz
 const MOUSE_MOVE_MIN_INTERVAL_NS_LOW_POWER: u64 = 16_000_000; // 16ms ~= 62 Hz
+/// Modifier-drag samples arrive faster than the window can be moved, and every
+/// one costs a reactor pass. Coalesce them to roughly one per display frame.
+const MODIFIER_DRAG_MIN_INTERVAL_NS: u64 = 16_000_000; // 16ms ~= 62 Hz
 
 #[derive(Debug)]
 pub enum Request {
@@ -99,12 +102,46 @@ struct State {
     stack_line_enabled: bool,
     stack_line_hover_mode: StackLineHoverMode,
     disable_hotkey_active: bool,
+    mouse_modifier: Option<Modifiers>,
+    modifier_drag: Option<ModifierDrag>,
     low_power_mode: bool,
     pressed_keys: HashSet<KeyCode>,
     current_flags: CGEventFlags,
     screen_spaces: Vec<(CGRect, SpaceId)>,
     layout_mode_by_space: HashMap<SpaceId, crate::common::config::LayoutMode>,
     last_stack_line_hit: Option<bool>,
+}
+
+/// An in-progress `settings.mouse_modifier` drag.
+struct ModifierDrag {
+    window: WindowServerId,
+    action: MouseDragAction,
+    last: CGPoint,
+    /// Motion observed but not yet handed to the reactor.
+    pending: CGPoint,
+    last_emit: u64,
+}
+
+impl ModifierDrag {
+    /// Records raw motion, releasing it only once per
+    /// [`MODIFIER_DRAG_MIN_INTERVAL_NS`]. Motion held back is added to the next
+    /// release, so throttling changes the update rate and never the distance.
+    fn accumulate(&mut self, loc: CGPoint, timestamp: u64) -> Option<CGPoint> {
+        self.pending.x += loc.x - self.last.x;
+        self.pending.y += loc.y - self.last.y;
+        self.last = loc;
+        if timestamp.saturating_sub(self.last_emit) < MODIFIER_DRAG_MIN_INTERVAL_NS {
+            return None;
+        }
+        self.last_emit = timestamp;
+        self.flush()
+    }
+
+    /// Releases accumulated motion regardless of the interval, for drag end.
+    fn flush(&mut self) -> Option<CGPoint> {
+        let delta = std::mem::replace(&mut self.pending, CGPoint::new(0.0, 0.0));
+        (delta.x != 0.0 || delta.y != 0.0).then_some(delta)
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -128,6 +165,8 @@ impl Default for State {
             stack_line_enabled: false,
             stack_line_hover_mode: StackLineHoverMode::default(),
             disable_hotkey_active: false,
+            mouse_modifier: None,
+            modifier_drag: None,
             low_power_mode: power::is_low_power_mode_enabled(),
             pressed_keys: HashSet::default(),
             current_flags: CGEventFlags::empty(),
@@ -276,6 +315,7 @@ impl EventTap {
             .and_then(|spec| spec.to_hotkey());
         let mut state = State::default();
         state.mouse_hides_on_focus = config.settings.mouse_hides_on_focus;
+        state.mouse_modifier = config.settings.mouse_modifier;
         state.focus_follows_mouse_config_enabled = config.settings.focus_follows_mouse;
         state.stack_line_enabled = config.settings.ui.stack_line.enabled;
         state.stack_line_hover_mode = config.settings.ui.stack_line.hover;
@@ -444,6 +484,7 @@ impl EventTap {
                     state.stack_line_enabled = stack_line_enabled;
                     state.stack_line_hover_mode = stack_line_hover_mode;
                     state.default_layout_mode = default_layout_mode;
+                    state.mouse_modifier = new_config.settings.mouse_modifier;
                     let prev_active = state.disable_hotkey_active;
                     state.disable_hotkey_active = self
                         .disable_hotkey
@@ -606,7 +647,39 @@ impl EventTap {
             state.show_mouse();
         }
         match event_type {
+            CGEventType::LeftMouseDown | CGEventType::RightMouseDown => {
+                if let Some(drag) = state.begin_modifier_drag(event_type, event) {
+                    state.modifier_drag = Some(drag);
+                    return false;
+                }
+            }
+            CGEventType::LeftMouseDragged | CGEventType::RightMouseDragged => {
+                if let Some(drag) = state.modifier_drag.as_mut() {
+                    let loc = CGEvent::location(Some(event));
+                    if let Some(delta) = drag.accumulate(loc, CGEvent::timestamp(Some(event))) {
+                        _ = self.events_tx.send(Event::ModifierDrag {
+                            window: drag.window,
+                            action: drag.action,
+                            delta,
+                        });
+                    }
+                    return false;
+                }
+            }
             CGEventType::RightMouseUp | CGEventType::LeftMouseUp => {
+                // Held-back motion has to land before the drag session closes.
+                if let Some(mut drag) = state.modifier_drag.take() {
+                    if let Some(delta) = drag.flush() {
+                        _ = self.events_tx.send(Event::ModifierDrag {
+                            window: drag.window,
+                            action: drag.action,
+                            delta,
+                        });
+                    }
+                    _ = self.events_tx.send(Event::MouseUp);
+                    // The app never saw the press that started the drag; hide the release too.
+                    return false;
+                }
                 _ = self.events_tx.send(Event::MouseUp);
             }
             _ => (),
@@ -933,11 +1006,16 @@ impl State {
     }
 
     fn compute_disable_hotkey_active(&self, target: &Hotkey) -> bool {
+        self.modifiers_active(target.modifiers) && self.base_key_active(target.key_code)
+    }
+
+    /// Whether every modifier in `target` is held. Extra modifiers are allowed.
+    fn modifiers_active(&self, target: Modifiers) -> bool {
         let active_mods = modifiers_from_flags_with_keys(self.current_flags, &self.pressed_keys);
 
         let check_modifier = |left: Modifiers, right: Modifiers| -> bool {
-            let target_has_left = target.modifiers.contains(left);
-            let target_has_right = target.modifiers.contains(right);
+            let target_has_left = target.contains(left);
+            let target_has_right = target.contains(right);
             let active_has_left = active_mods.contains(left);
             let active_has_right = active_mods.contains(right);
 
@@ -957,11 +1035,36 @@ impl State {
         let alt_ok = check_modifier(Modifiers::ALT_LEFT, Modifiers::ALT_RIGHT);
         let meta_ok = check_modifier(Modifiers::META_LEFT, Modifiers::META_RIGHT);
 
-        if !(shift_ok && ctrl_ok && alt_ok && meta_ok) {
-            return false;
-        }
+        shift_ok && ctrl_ok && alt_ok && meta_ok
+    }
 
-        self.base_key_active(target.key_code)
+    fn begin_modifier_drag(
+        &self,
+        event_type: CGEventType,
+        event: &CGEvent,
+    ) -> Option<ModifierDrag> {
+        let modifier = self.mouse_modifier?;
+        if !self.modifiers_active(modifier) {
+            return None;
+        }
+        let last = CGEvent::location(Some(event));
+        let window = window_server::get_window_at_point(last)?;
+        let action = if event_type == CGEventType::LeftMouseDown {
+            MouseDragAction::Move
+        } else {
+            let frame = window_server::get_window(window)?.frame;
+            MouseDragAction::Resize {
+                left: last.x < frame.origin.x + frame.size.width / 2.0,
+                top: last.y < frame.origin.y + frame.size.height / 2.0,
+            }
+        };
+        Some(ModifierDrag {
+            window,
+            action,
+            last,
+            pending: CGPoint::new(0.0, 0.0),
+            last_emit: 0,
+        })
     }
 
     fn base_key_active(&self, key_code: KeyCode) -> bool {
@@ -1030,6 +1133,43 @@ fn build_event_mask(keyboard_enabled: bool, mouse_move_enabled: bool) -> CGEvent
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn modifier_drag_throttles_updates_without_losing_distance() {
+        let mut drag = ModifierDrag {
+            window: WindowServerId::new(1),
+            action: MouseDragAction::Move,
+            last: CGPoint::new(0.0, 0.0),
+            pending: CGPoint::new(0.0, 0.0),
+            last_emit: 0,
+        };
+
+        // The first sample is not withheld.
+        assert_eq!(
+            drag.accumulate(CGPoint::new(4.0, 0.0), MODIFIER_DRAG_MIN_INTERVAL_NS),
+            Some(CGPoint::new(4.0, 0.0))
+        );
+
+        // Samples inside the interval accumulate instead of dispatching.
+        let mut timestamp = MODIFIER_DRAG_MIN_INTERVAL_NS;
+        for step in 1..=3 {
+            timestamp += MODIFIER_DRAG_MIN_INTERVAL_NS / 4;
+            assert_eq!(
+                drag.accumulate(CGPoint::new(4.0 + f64::from(step), 0.0), timestamp),
+                None
+            );
+        }
+
+        // Crossing the interval releases every withheld pixel at once.
+        timestamp += MODIFIER_DRAG_MIN_INTERVAL_NS;
+        assert_eq!(
+            drag.accumulate(CGPoint::new(10.0, 0.0), timestamp),
+            Some(CGPoint::new(6.0, 0.0))
+        );
+
+        // Nothing left over, and a still cursor dispatches nothing.
+        assert_eq!(drag.flush(), None);
+    }
 
     #[test]
     fn layout_mode_at_point_uses_space_mapping() {

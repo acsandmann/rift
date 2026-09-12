@@ -5618,3 +5618,45 @@ fn floating_window_toggles_to_fullscreen_within_gaps() {
         "expected {expected:?}, got {laid_out:?}"
     );
 }
+
+#[test]
+fn modifier_drag_move_updates_frame_writes_it_and_starts_a_drag_session() {
+    let (mut reactor, wid, wsid, _space1, _space2, frame) = reactor_with_window_on_space1();
+
+    reactor.handle_event(Event::ModifierDrag {
+        window: wsid,
+        action: MouseDragAction::Move,
+        delta: CGPoint::new(30., 20.),
+    });
+
+    let expected = CGRect::new(
+        CGPoint::new(frame.origin.x + 30., frame.origin.y + 20.),
+        frame.size,
+    );
+    assert!(reactor.state.windows.window(wid).unwrap().frame_monotonic.same_as(expected));
+    assert!(matches!(
+        reactor.drag_manager.drag_state,
+        DragState::Active { .. }
+    ));
+    // The write lease is held for the whole drag and released on mouse up.
+    assert_eq!(reactor.modifier_drag_window, Some(wid));
+    reactor.handle_event(Event::MouseUp);
+    assert_eq!(reactor.modifier_drag_window, None);
+}
+
+#[test]
+fn modifier_drag_resize_from_top_left_moves_origin_and_shrinks() {
+    let (mut reactor, wid, wsid, _space1, _space2, frame) = reactor_with_window_on_space1();
+
+    reactor.handle_event(Event::ModifierDrag {
+        window: wsid,
+        action: MouseDragAction::Resize { left: true, top: true },
+        delta: CGPoint::new(10., 40.),
+    });
+
+    let expected = CGRect::new(
+        CGPoint::new(frame.origin.x + 10., frame.origin.y + 40.),
+        CGSize::new(frame.size.width - 10., frame.size.height - 40.),
+    );
+    assert!(reactor.state.windows.window(wid).unwrap().frame_monotonic.same_as(expected));
+}

@@ -102,7 +102,7 @@ use crate::model::tx_store::WindowTxStore;
 use crate::model::{AppRuleResult, RiftState};
 use crate::sys::event::MouseState;
 use crate::sys::executor::Executor;
-use crate::sys::geometry::{CGRectDef, CGRectExt};
+use crate::sys::geometry::{CGPointDef, CGRectDef, CGRectExt};
 pub use crate::sys::screen::ScreenInfo;
 use crate::sys::screen::{SpaceId, order_visible_spaces_by_position};
 use crate::sys::window_server::{
@@ -117,8 +117,8 @@ pub use query::ReactorQueryHandle;
 pub(crate) use crate::model::reactor::{AppState, WindowState};
 pub use crate::model::reactor::{
     Command, DisplaySelector, DragSession, DragState, MenuState, MissionControlState,
-    ReactorCommand, RefocusState, Requested, StaleCleanupState, WorkspaceSwitchOrigin,
-    WorkspaceSwitchState,
+    MouseDragAction, ReactorCommand, RefocusState, Requested, StaleCleanupState,
+    WorkspaceSwitchOrigin, WorkspaceSwitchState,
 };
 
 #[derive(Clone)]
@@ -263,6 +263,13 @@ pub enum Event {
     /// Window resolution and transition deduplication stay on the input
     /// thread; the reactor only applies the model-dependent focus/raise work.
     MouseMoved(WindowServerId),
+    /// The mouse was dragged over a window while `settings.mouse_modifier` was held.
+    ModifierDrag {
+        window: WindowServerId,
+        action: MouseDragAction,
+        #[serde(with = "CGPointDef")]
+        delta: CGPoint,
+    },
     /// Forwarded by the spaces actor after wake has been observed.
     ///
     /// The spaces actor is the authority for sleep/lock/display lifecycle.
@@ -346,6 +353,9 @@ pub struct Reactor {
     refresh_quarantine_manager: managers::RefreshQuarantineManager,
     pending_space_change_manager: managers::PendingSpaceChangeManager,
     active_spaces: HashSet<SpaceId>,
+    /// Window whose app currently holds a drag write lease. See
+    /// [`Reactor::begin_modifier_drag_writes`].
+    modifier_drag_window: Option<WindowId>,
     pub animation_tx: Option<AnimationSender>,
     #[cfg(test)]
     event_outcome_phase_trace: Vec<&'static str>,
@@ -474,6 +484,7 @@ impl Reactor {
                 pending_space_change: None,
             },
             active_spaces: HashSet::default(),
+            modifier_drag_window: None,
             animation_tx: None,
             #[cfg(test)]
             event_outcome_phase_trace: Vec::new(),
@@ -1133,6 +1144,154 @@ impl Reactor {
         }
     }
 
+    /// Takes a frame-write lease on the app owning a modifier-dragged window.
+    ///
+    /// The lease suppresses Enhanced UI and the window's Accessibility
+    /// notifications once for the whole drag rather than once per write, which
+    /// is what [`Request::SetWindowFrame`] would otherwise cost per sample.
+    fn begin_modifier_drag_writes(&mut self, wid: WindowId) {
+        if self.modifier_drag_window == Some(wid) {
+            return;
+        }
+        self.end_modifier_drag_writes();
+        self.modifier_drag_window = Some(wid);
+        if let Some(app) = self.app_manager.apps.get(&wid.pid) {
+            _ = app.handle.send(Request::BeginWindowAnimation(wid));
+        }
+    }
+
+    /// Releases the lease, flushing the last frame and resyncing observers.
+    fn end_modifier_drag_writes(&mut self) {
+        let Some(wid) = self.modifier_drag_window.take() else {
+            return;
+        };
+        if let Some(app) = self.app_manager.apps.get(&wid.pid) {
+            _ = app.handle.send(Request::EndWindowAnimation(wid));
+        }
+    }
+
+    /// Writes a dragged window's frame through the coalescing animation path.
+    ///
+    /// The app actor keeps only the newest frame per window and applies it once
+    /// per drained batch, with no frame read-back and no echo event, so a fast
+    /// drag cannot outrun the Accessibility writes.
+    fn write_modifier_drag_frame(&mut self, wid: WindowId, frame: CGRect, set_size: bool) {
+        let window_server_id = self.state.windows.window(wid).and_then(|window| window.info.sys_id);
+        let txid = if let Some(window_server_id) = window_server_id {
+            let txid = self.transaction_manager.generate_next_txid(window_server_id);
+            self.transaction_manager.store_txid(window_server_id, txid, frame);
+            txid
+        } else {
+            TransactionId::default()
+        };
+        if let Some(app) = self.app_manager.apps.get(&wid.pid) {
+            _ = app.handle.send(Request::AnimationFrame { wid, frame, set_size, txid });
+        }
+    }
+
+    fn handle_window_frame_changed_event(
+        &mut self,
+        wid: WindowId,
+        new_frame: CGRect,
+        last_seen: Option<TransactionId>,
+        requested: bool,
+        mouse_state: Option<MouseState>,
+        raised_window: Option<WindowId>,
+    ) -> anyhow::Result<EventOutcome> {
+        let mission_control_active = self.is_mission_control_active();
+        let mut effective_mouse_state = mouse_state;
+        if matches!(
+            window_workflow::classify_window_frame_change(
+                &mut self.state,
+                &self.transaction_manager,
+                &mut self.drag_manager,
+                wid,
+                new_frame,
+                last_seen,
+                requested,
+                &mut effective_mouse_state,
+                mission_control_active,
+            ),
+            window_workflow::FrameChangeDisposition::Handled
+        ) {
+            let mut outcome = EventOutcome::no_change();
+            outcome.dispatch_mouse_up = effective_mouse_state
+                == Some(crate::sys::event::MouseState::Up)
+                && matches!(
+                    self.drag_manager.drag_state,
+                    DragState::Active { .. } | DragState::PendingSwap { .. }
+                );
+            outcome.focused_window = raised_window;
+            return Ok(outcome);
+        }
+        let (server_id, old_frame) = self
+            .state
+            .windows
+            .window(wid)
+            .map(|window| (window.info.sys_id, window.frame_monotonic))
+            .unwrap_or((None, new_frame));
+        let old_space = self.geometry_space_for_window(&old_frame, server_id);
+        let new_space = self.geometry_space_for_window(&new_frame, server_id);
+        let old_space_active = old_space.is_some_and(|space| self.is_space_active(space));
+        let new_space_active = new_space.is_some_and(|space| self.is_space_active(space));
+        let best_resize_space = self.best_space_for_window(&new_frame, server_id);
+        let active_resize_space = best_resize_space
+            .filter(|space| self.is_space_active(*space))
+            .or_else(|| server_id.is_none().then(|| self.workspace_command_space()).flatten());
+        let pending_target_space =
+            server_id.and_then(|server| self.pending_target_space_for_window_server_id(server));
+        let assigned_space = self.assigned_space_for_window_id(wid);
+        let keep_assigned_for_scrolling = old_space.is_some_and(|space| {
+            self.layout_manager.layout_engine.active_layout_mode_at(space)
+                == crate::common::config::LayoutMode::Scrolling
+                && !self.layout_manager.layout_engine.is_window_floating(wid)
+                && self
+                    .layout_manager
+                    .layout_engine
+                    .virtual_workspace_manager()
+                    .workspace_for_window(&self.state.windows, space, wid)
+                    .is_some()
+        });
+        let screens = self
+            .space_state
+            .screens
+            .iter()
+            .filter_map(|screen| Some((screen.space?, screen.frame, screen.display_uuid_owned())))
+            .collect();
+        let mut outcome = window_workflow::handle_window_frame_changed(
+            &mut self.state,
+            &mut self.layout_manager,
+            &mut self.drag_manager,
+            window_workflow::WindowFrameChangedPayload {
+                window: wid,
+                new_frame,
+                mouse_state: effective_mouse_state,
+                old_space,
+                new_space,
+                old_space_active,
+                new_space_active,
+                active_resize_space,
+                pending_target_space,
+                assigned_space,
+                keep_assigned_for_scrolling,
+                screens,
+            },
+        )?;
+        // Frame acknowledgements and no-op geometry changes can return
+        // early from the reducer. Mouse release still has to terminate
+        // an existing drag session in those cases.
+        if effective_mouse_state == Some(crate::sys::event::MouseState::Up)
+            && matches!(
+                self.drag_manager.drag_state,
+                DragState::Active { .. } | DragState::PendingSwap { .. }
+            )
+        {
+            outcome.dispatch_mouse_up = true;
+        }
+        outcome.focused_window = raised_window;
+        return Ok(outcome);
+    }
+
     fn dispatch_workflow(&mut self, event: Event) -> anyhow::Result<EventOutcome> {
         self.log_event(&event);
         self.recording_manager.record.on_event(&event);
@@ -1476,100 +1635,36 @@ impl Reactor {
                 );
             }
             Event::WindowFrameChanged(wid, new_frame, last_seen, requested, mouse_state) => {
-                let mission_control_active = self.is_mission_control_active();
-                let mut effective_mouse_state = mouse_state;
-                if matches!(
-                    window_workflow::classify_window_frame_change(
-                        &mut self.state,
-                        &self.transaction_manager,
-                        &mut self.drag_manager,
-                        wid,
-                        new_frame,
-                        last_seen,
-                        requested.0,
-                        &mut effective_mouse_state,
-                        mission_control_active,
-                    ),
-                    window_workflow::FrameChangeDisposition::Handled
-                ) {
-                    let mut outcome = EventOutcome::no_change();
-                    outcome.dispatch_mouse_up = effective_mouse_state
-                        == Some(crate::sys::event::MouseState::Up)
-                        && matches!(
-                            self.drag_manager.drag_state,
-                            DragState::Active { .. } | DragState::PendingSwap { .. }
-                        );
-                    outcome.focused_window = raised_window;
-                    return Ok(outcome);
-                }
-                let (server_id, old_frame) = self
-                    .state
-                    .windows
-                    .window(wid)
-                    .map(|window| (window.info.sys_id, window.frame_monotonic))
-                    .unwrap_or((None, new_frame));
-                let old_space = self.geometry_space_for_window(&old_frame, server_id);
-                let new_space = self.geometry_space_for_window(&new_frame, server_id);
-                let old_space_active = old_space.is_some_and(|space| self.is_space_active(space));
-                let new_space_active = new_space.is_some_and(|space| self.is_space_active(space));
-                let best_resize_space = self.best_space_for_window(&new_frame, server_id);
-                let active_resize_space =
-                    best_resize_space.filter(|space| self.is_space_active(*space)).or_else(|| {
-                        server_id.is_none().then(|| self.workspace_command_space()).flatten()
-                    });
-                let pending_target_space = server_id
-                    .and_then(|server| self.pending_target_space_for_window_server_id(server));
-                let assigned_space = self.assigned_space_for_window_id(wid);
-                let keep_assigned_for_scrolling = old_space.is_some_and(|space| {
-                    self.layout_manager.layout_engine.active_layout_mode_at(space)
-                        == crate::common::config::LayoutMode::Scrolling
-                        && !self.layout_manager.layout_engine.is_window_floating(wid)
-                        && self
-                            .layout_manager
-                            .layout_engine
-                            .virtual_workspace_manager()
-                            .workspace_for_window(&self.state.windows, space, wid)
-                            .is_some()
-                });
-                let screens = self
-                    .space_state
-                    .screens
-                    .iter()
-                    .filter_map(|screen| {
-                        Some((screen.space?, screen.frame, screen.display_uuid_owned()))
+                return self.handle_window_frame_changed_event(
+                    wid,
+                    new_frame,
+                    last_seen,
+                    requested.0,
+                    mouse_state,
+                    raised_window,
+                );
+            }
+            Event::ModifierDrag { window, action, delta } => {
+                let Some((wid, frame)) =
+                    self.state.windows.tracked_window_id(window).and_then(|wid| {
+                        Some((wid, self.state.windows.window(wid)?.frame_monotonic))
                     })
-                    .collect();
-                let mut outcome = window_workflow::handle_window_frame_changed(
-                    &mut self.state,
-                    &mut self.layout_manager,
-                    &mut self.drag_manager,
-                    window_workflow::WindowFrameChangedPayload {
-                        window: wid,
-                        new_frame,
-                        mouse_state: effective_mouse_state,
-                        old_space,
-                        new_space,
-                        old_space_active,
-                        new_space_active,
-                        active_resize_space,
-                        pending_target_space,
-                        assigned_space,
-                        keep_assigned_for_scrolling,
-                        screens,
-                    },
+                else {
+                    return Ok(EventOutcome::no_change());
+                };
+                let new_frame = action.apply(frame, delta);
+                self.begin_modifier_drag_writes(wid);
+                // Same path as a native drag so swap detection and split resizing apply;
+                // the frame write follows because macOS is not moving the window for us.
+                let outcome = self.handle_window_frame_changed_event(
+                    wid,
+                    new_frame,
+                    None,
+                    false,
+                    Some(MouseState::Down),
+                    raised_window,
                 )?;
-                // Frame acknowledgements and no-op geometry changes can return
-                // early from the reducer. Mouse release still has to terminate
-                // an existing drag session in those cases.
-                if effective_mouse_state == Some(crate::sys::event::MouseState::Up)
-                    && matches!(
-                        self.drag_manager.drag_state,
-                        DragState::Active { .. } | DragState::PendingSwap { .. }
-                    )
-                {
-                    outcome.dispatch_mouse_up = true;
-                }
-                outcome.focused_window = raised_window;
+                self.write_modifier_drag_frame(wid, new_frame, action.changes_size());
                 return Ok(outcome);
             }
             Event::WindowTitleChanged(wid, new_title) => {
@@ -1617,6 +1712,7 @@ impl Reactor {
                 return Ok(EventOutcome::default());
             }
             Event::MouseUp => {
+                self.end_modifier_drag_writes();
                 let pending_swap = self.get_pending_drag_swap();
                 let (visible_spaces, visible_space_centers) = self.visible_spaces_for_layout(true);
                 let swap_space = pending_swap
