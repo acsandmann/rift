@@ -4936,6 +4936,89 @@ fn ax_destruction_removes_ordered_in_window_outside_churn() {
 }
 
 #[test]
+fn stale_cleanup_observes_only_eligible_omitted_windows() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let returned = WindowId::new(1, 1);
+    let omitted = WindowId::new(1, 2);
+    let minimized = WindowId::new(1, 3);
+    let inactive = WindowId::new(1, 4);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(4));
+    reactor.state.windows.window_mut(minimized).unwrap().info.is_minimized = true;
+    let wsid = reactor.test_window_server_id(omitted);
+    let info = reactor.state.windows.get_window_server_info(wsid);
+    assert!(reactor.state.windows.is_window_visible(wsid));
+    let mut snapshot = window_discovery::StaleCleanupSnapshot {
+        suppressed: false,
+        mission_control_active: false,
+        drag_active: false,
+        inactive_windows: [inactive].into_iter().collect(),
+        server_observations: Default::default(),
+    };
+    let mut suitability_calls = Vec::new();
+    let mut ordered_in_calls = Vec::new();
+    window_discovery::observe_stale_windows(
+        &reactor.state,
+        returned.pid,
+        &[returned],
+        &mut snapshot,
+        |candidate| {
+            suitability_calls.push(candidate);
+            ordered_in_calls.push(candidate);
+            window_discovery::StaleWindowObservation {
+                info,
+                suitable: Some(true),
+                ordered_in: Some(false),
+            }
+        },
+    );
+    assert_eq!(suitability_calls, vec![wsid]);
+    assert_eq!(ordered_in_calls, vec![wsid]);
+    assert_eq!(
+        window_discovery::identify_stale_windows(
+            &reactor.state,
+            returned.pid,
+            &[returned],
+            &snapshot
+        ),
+        vec![omitted],
+        "fresh ordered-out state must override cached visibility for an omitted window",
+    );
+}
+
+#[test]
+fn stale_cleanup_skips_observations_for_returned_windows_and_suppressed_cleanup() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+    for (visible, suppressed, mission_control_active, drag_active) in [
+        (vec![wid], false, false, false),
+        (vec![], true, false, false),
+        (vec![], false, true, false),
+        (vec![], false, false, true),
+    ] {
+        let mut snapshot = window_discovery::StaleCleanupSnapshot {
+            suppressed,
+            mission_control_active,
+            drag_active,
+            inactive_windows: Default::default(),
+            server_observations: Default::default(),
+        };
+        window_discovery::observe_stale_windows(
+            &reactor.state,
+            wid.pid,
+            &visible,
+            &mut snapshot,
+            |_| panic!("ineligible windows must not obtain native observations"),
+        );
+        assert!(snapshot.server_observations.is_empty());
+    }
+}
+
+#[test]
 fn stale_cleanup_uses_ordered_state_instead_of_cached_visibility() {
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));

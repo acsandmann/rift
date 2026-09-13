@@ -160,16 +160,13 @@ pub(crate) struct StaleWindowObservation {
     pub(crate) ordered_in: Option<bool>,
 }
 
-pub(crate) fn identify_stale_windows(
+fn stale_cleanup_candidates(
     state: &crate::model::RiftState,
     pid: pid_t,
     known_visible: &[WindowId],
     snapshot: &StaleCleanupSnapshot,
-) -> Vec<WindowId> {
-    const MIN_REAL_WINDOW_DIMENSION: f64 = 2.0;
-
+) -> Vec<(WindowId, WindowServerId)> {
     let known_visible_set: HashSet<WindowId> = known_visible.iter().cloned().collect();
-    // TODO: Rewrite it
     let has_visible_window_server_ids = state
         .windows
         .iter_visible_window_server_ids()
@@ -183,7 +180,7 @@ pub(crate) fn identify_stale_windows(
         return Vec::new();
     }
 
-    let stale_windows = state
+    state
         .windows
         .iter_windows()
         .filter_map(|(wid, window_state)| {
@@ -212,6 +209,36 @@ pub(crate) fn identify_stale_windows(
                 return None;
             }
 
+            Some((wid, ws_id))
+        })
+        .collect()
+}
+
+/// Obtain fresh native observations only for windows eligible for stale cleanup.
+pub(crate) fn observe_stale_windows(
+    state: &crate::model::RiftState,
+    pid: pid_t,
+    known_visible: &[WindowId],
+    snapshot: &mut StaleCleanupSnapshot,
+    mut observe: impl FnMut(WindowServerId) -> StaleWindowObservation,
+) {
+    snapshot.server_observations = stale_cleanup_candidates(state, pid, known_visible, snapshot)
+        .into_iter()
+        .map(|(_, wsid)| (wsid, observe(wsid)))
+        .collect();
+}
+
+pub(crate) fn identify_stale_windows(
+    state: &crate::model::RiftState,
+    pid: pid_t,
+    known_visible: &[WindowId],
+    snapshot: &StaleCleanupSnapshot,
+) -> Vec<WindowId> {
+    const MIN_REAL_WINDOW_DIMENSION: f64 = 2.0;
+
+    let stale_windows = stale_cleanup_candidates(state, pid, known_visible, snapshot)
+        .into_iter()
+        .filter_map(|(wid, ws_id)| {
             let observation = snapshot.server_observations.get(&ws_id)?;
             let info = match observation.info.as_ref() {
                 Some(info) => info,

@@ -2846,25 +2846,7 @@ impl Reactor {
                 (wid.pid == pid && self.is_window_on_known_inactive_space(wid)).then_some(wid)
             })
             .collect();
-        let server_observations = self
-            .state
-            .windows
-            .iter_windows()
-            .filter_map(|(wid, window)| (wid.pid == pid).then_some(window.info.sys_id).flatten())
-            .map(|wsid| {
-                let info = self
-                    .state
-                    .windows
-                    .get_window_server_info(wsid)
-                    .or_else(|| window_server::get_window(wsid));
-                (wsid, window_discovery::StaleWindowObservation {
-                    info,
-                    suitable: window_server::app_window_suitability(wsid),
-                    ordered_in: window_server::window_ordered_in(wsid),
-                })
-            })
-            .collect();
-        let stale_snapshot = window_discovery::StaleCleanupSnapshot {
+        let mut stale_snapshot = window_discovery::StaleCleanupSnapshot {
             suppressed: matches!(
                 self.refocus_manager.stale_cleanup_state,
                 StaleCleanupState::Suppressed
@@ -2872,7 +2854,7 @@ impl Reactor {
             mission_control_active: self.is_mission_control_active(),
             drag_active: self.is_in_drag(),
             inactive_windows,
-            server_observations,
+            server_observations: Default::default(),
         };
         // AX can replace a window's process-local identity while preserving its
         // WindowServer id. Treat the currently tracked identity as visible for
@@ -2881,6 +2863,21 @@ impl Reactor {
         cleanup_visible.extend(new.iter().filter_map(|(_, info)| {
             info.sys_id.and_then(|wsid| self.state.windows.tracked_window_id(wsid))
         }));
+        window_discovery::observe_stale_windows(
+            &self.state,
+            pid,
+            &cleanup_visible,
+            &mut stale_snapshot,
+            |wsid| window_discovery::StaleWindowObservation {
+                info: self
+                    .state
+                    .windows
+                    .get_window_server_info(wsid)
+                    .or_else(|| window_server::get_window(wsid)),
+                suitable: window_server::app_window_suitability(wsid),
+                ordered_in: window_server::window_ordered_in(wsid),
+            },
+        );
         let stale_windows = window_discovery::identify_stale_windows(
             &self.state,
             pid,
