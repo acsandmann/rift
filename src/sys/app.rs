@@ -417,20 +417,23 @@ impl WindowInfo {
         server_info_hint: Option<WindowServerInfo>,
         identity: &mut NativeWindowIdentity,
     ) -> Result<(Self, Option<WindowServerInfo>), AxError> {
-        let frame = element.frame()?;
-        let role = element.role()?;
-        let subrole = element.subrole()?;
+        let super::axuielement::WindowAttributes {
+            frame,
+            role,
+            subrole,
+            minimized: is_minimized,
+            title,
+        } = element.window_attributes()?;
         let is_standard = role == AX_WINDOW_ROLE && subrole == AX_STANDARD_WINDOW_SUBROLE;
 
-        let ax_role = Some(role.clone());
-        let ax_subrole = Some(subrole.clone());
+        let ax_role = Some(role);
+        let ax_subrole = Some(subrole);
 
         let mut server_info = server_info_hint;
         let id = server_info
             .map(|info| info.id)
             .filter(|id| id.as_nonzero().is_some())
             .or_else(|| identity.resolve(|| WindowServerId::try_from(element).ok()));
-        let is_minimized = element.minimized().unwrap_or_default();
         let is_resizable = element.can_resize().unwrap_or(true);
 
         let (bundle_id, path) = if !is_standard {
@@ -454,7 +457,7 @@ impl WindowInfo {
             is_resizable,
             min_size,
             max_size,
-            title: element.title().unwrap_or_default(),
+            title,
             frame,
             sys_id: id,
             bundle_id,
