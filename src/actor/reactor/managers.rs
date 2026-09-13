@@ -216,7 +216,15 @@ impl LayoutManager {
         space_scope: Option<SpaceId>,
     ) -> Result<bool, crate::model::reactor::ReactorError> {
         let layout_result = Self::calculate_layout(reactor, space_scope);
-        Self::apply_layout(reactor, layout_result, is_resize, is_workspace_switch)
+        Self::apply_layout(reactor, layout_result, is_resize, is_workspace_switch, false)
+    }
+
+    pub fn update_scroll_layout(
+        reactor: &mut Reactor,
+        space_scope: Option<SpaceId>,
+    ) -> Result<bool, crate::model::reactor::ReactorError> {
+        let layout = Self::calculate_layout(reactor, space_scope);
+        Self::apply_layout(reactor, layout, false, false, true)
     }
 
     fn calculate_layout(reactor: &mut Reactor, space_scope: Option<SpaceId>) -> LayoutResult {
@@ -293,6 +301,7 @@ impl LayoutManager {
         layout_result: LayoutResult,
         is_resize: bool,
         is_workspace_switch: bool,
+        direct_positions: bool,
     ) -> Result<bool, crate::model::reactor::ReactorError> {
         let main_window = reactor.main_window();
         trace!(?main_window);
@@ -407,7 +416,10 @@ impl LayoutManager {
                 }
             }
 
-            if is_workspace_switch {
+            if direct_positions {
+                any_frame_changed |=
+                    AnimationManager::scroll_layout(reactor, space, &layout, skip_wid);
+            } else if is_workspace_switch {
                 any_frame_changed |=
                     AnimationManager::workspace_switch_layout(reactor, space, &layout, skip_wid);
             } else if reactor.workspace_switch_manager.active_workspace_switch.is_some() {

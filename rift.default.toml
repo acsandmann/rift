@@ -127,6 +127,9 @@ focus_navigation_style = "niri"
 # animate = false
 
 [settings.layout.scrolling.gestures]
+# Experimental continuous tracking; false preserves distance-based stepping.
+# Uses immediate position updates even when layout animations are enabled.
+smooth = false
 # Enable horizontal scroll gestures to switch columns
 enabled = false
 # Invert horizontal direction (swap left/right)
