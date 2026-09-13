@@ -25,8 +25,8 @@ use crate::actor::reactor::transaction_manager::TransactionId;
 use crate::actor::reactor::{self, Event, Requested};
 use crate::common::collections::{HashMap, HashSet};
 use crate::model::tx_store::WindowTxStore;
-use crate::sys::app::NSRunningApplicationExt;
 pub use crate::sys::app::{AppInfo, WindowInfo, pid_t};
+use crate::sys::app::{NSRunningApplicationExt, NativeWindowIdentity};
 use crate::sys::axuielement::{AX_STANDARD_WINDOW_SUBROLE, AXUIElement, Error as AxError};
 use crate::sys::enhanced_ui::EnhancedUi;
 use crate::sys::event;
@@ -449,18 +449,22 @@ impl State {
                 return Err(e);
             }
         };
-        let server_info_by_id = self.visible_window_server_info_map(&window_elems);
+        let mut window_elems: Vec<_> = window_elems
+            .into_iter()
+            .map(|elem| (elem, NativeWindowIdentity::default()))
+            .collect();
+        let server_info_by_id = self.visible_window_server_info_map(&mut window_elems);
         let mut new = Vec::with_capacity(window_elems.len());
         let mut known_visible = Vec::with_capacity(window_elems.len());
         let mut seen_wids = HashSet::default();
 
-        for elem in window_elems {
-            let wsid = WindowServerId::try_from(&elem).ok();
+        for (elem, mut identity) in window_elems {
+            let wsid = identity.resolve(|| WindowServerId::try_from(&elem).ok());
             let hint = wsid.and_then(|id| server_info_by_id.get(&id).copied());
-            let info = match WindowInfo::from_ax_element(&elem, hint) {
+            let info = match WindowInfo::from_ax_element_with_identity(&elem, hint, &mut identity) {
                 Ok((info, _)) => info,
                 Err(err) => {
-                    let id = self.id(&elem).ok();
+                    let id = self.id_with_identity(&elem, &mut identity).ok();
                     trace!(?id, ?err, "Failed to refresh window info; will retry later");
                     continue;
                 }
@@ -470,10 +474,14 @@ impl State {
                 continue;
             }
 
-            let Some((wid, info)) = self.id(&elem).ok().map(|wid| (wid, info)).or_else(|| {
-                self.register_window(elem.clone(), hint)
-                    .map(|(registered_info, wid, _)| (wid, registered_info))
-            }) else {
+            let Some((wid, info)) =
+                self.id_with_identity(&elem, &mut identity).ok().map(|wid| (wid, info)).or_else(
+                    || {
+                        self.register_window_with_identity(elem.clone(), hint, &mut identity)
+                            .map(|(registered_info, wid, _)| (wid, registered_info))
+                    },
+                )
+            else {
                 continue;
             };
 
@@ -726,8 +734,14 @@ impl State {
             }
         }
 
-        let initial_window_elements = self.app.windows().unwrap_or_default();
-        let server_info_by_id = self.visible_window_server_info_map(&initial_window_elements);
+        let mut initial_window_elements: Vec<_> = self
+            .app
+            .windows()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|elem| (elem, NativeWindowIdentity::default()))
+            .collect();
+        let server_info_by_id = self.visible_window_server_info_map(&mut initial_window_elements);
 
         let window_count = initial_window_elements.len();
         self.windows.reserve(window_count);
@@ -735,8 +749,8 @@ impl State {
         let mut windows = Vec::with_capacity(window_count);
         let mut window_server_info = Vec::with_capacity(window_count);
 
-        for elem in initial_window_elements {
-            let wsid = WindowServerId::try_from(&elem).ok();
+        for (elem, mut identity) in initial_window_elements {
+            let wsid = identity.resolve(|| WindowServerId::try_from(&elem).ok());
             let hint = wsid.and_then(|id| server_info_by_id.get(&id).copied());
             if let Some(info) = hint {
                 window_server_info.push(info);
@@ -745,7 +759,9 @@ impl State {
                 trace!(pid = ?self.pid, ?wsid, "Ignoring AX window without a visible CG window");
                 continue;
             }
-            let Some((info, wid, _)) = self.register_window(elem, hint) else {
+            let Some((info, wid, _)) =
+                self.register_window_with_identity(elem, hint, &mut identity)
+            else {
                 continue;
             };
             windows.push((wid, info));
@@ -1585,7 +1601,21 @@ impl State {
         elem: AXUIElement,
         server_info_hint: Option<WindowServerInfo>,
     ) -> Option<(WindowInfo, WindowId, Option<WindowServerInfo>)> {
-        let Ok((mut info, server_info)) = WindowInfo::from_ax_element(&elem, server_info_hint)
+        self.register_window_with_identity(
+            elem,
+            server_info_hint,
+            &mut NativeWindowIdentity::default(),
+        )
+    }
+
+    fn register_window_with_identity(
+        &mut self,
+        elem: AXUIElement,
+        server_info_hint: Option<WindowServerInfo>,
+        identity: &mut NativeWindowIdentity,
+    ) -> Option<(WindowInfo, WindowId, Option<WindowServerInfo>)> {
+        let Ok((mut info, server_info)) =
+            WindowInfo::from_ax_element_with_identity(&elem, server_info_hint, identity)
         else {
             return None;
         };
@@ -1635,12 +1665,11 @@ impl State {
         }
 
         let window_server_id = info.sys_id.filter(|sid| sid.as_nonzero().is_some()).or_else(|| {
-            WindowServerId::try_from(&elem)
-                .or_else(|e| {
-                    info!("Could not get window server id for {elem:?}: {e}");
-                    Err(e)
-                })
-                .ok()
+            identity.resolve(|| {
+                WindowServerId::try_from(&elem)
+                    .map_err(|e| info!("Could not get window server id for {elem:?}: {e}"))
+                    .ok()
+            })
         });
 
         let idx = window_server_id.and_then(WindowServerId::as_nonzero).unwrap_or_else(|| {
@@ -1760,11 +1789,13 @@ impl State {
 
     fn visible_window_server_info_map(
         &self,
-        window_elements: &[AXUIElement],
+        window_elements: &mut [(AXUIElement, NativeWindowIdentity)],
     ) -> HashMap<WindowServerId, WindowServerInfo> {
         let wsids: Vec<WindowServerId> = window_elements
-            .iter()
-            .filter_map(|elem| WindowServerId::try_from(elem).ok())
+            .iter_mut()
+            .filter_map(|(elem, identity)| {
+                identity.resolve(|| WindowServerId::try_from(&*elem).ok())
+            })
             .collect();
         collect_visible_window_server_info(
             window_server::get_windows(&wsids),
@@ -1863,7 +1894,15 @@ impl State {
     }
 
     fn id(&self, elem: &AXUIElement) -> Result<WindowId, AxError> {
-        if let Ok(id) = WindowServerId::try_from(elem) {
+        self.id_with_identity(elem, &mut NativeWindowIdentity::default())
+    }
+
+    fn id_with_identity(
+        &self,
+        elem: &AXUIElement,
+        identity: &mut NativeWindowIdentity,
+    ) -> Result<WindowId, AxError> {
+        if let Some(id) = identity.resolve(|| WindowServerId::try_from(elem).ok()) {
             if let Some(idx) = id.as_nonzero() {
                 let wid = WindowId { pid: self.pid, idx };
                 if self.windows.contains_key(&wid) {

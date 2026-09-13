@@ -5019,6 +5019,34 @@ fn stale_cleanup_skips_observations_for_returned_windows_and_suppressed_cleanup(
 }
 
 #[test]
+fn stale_cleanup_preserves_returned_server_identity_before_ax_rekey() {
+    let (mut apps, mut reactor) = test_context_with_workspace_count(2);
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let old_wid = WindowId::new(1, 1);
+    let new_wid = WindowId::new(1, 99);
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+    let workspace = reactor.test_workspace_ids(space)[1];
+    assert!(reactor.assign_test_window_to_workspace(space, old_wid, workspace));
+    assert!(reactor.set_test_active_workspace(space, workspace));
+    let wsid = reactor.test_window_server_id(old_wid);
+
+    // Even an explicit negative native observation must not retire an identity
+    // returned by this inventory under a replacement AX id.
+    crate::sys::window_server::set_window_ordered_in_override(wsid, Some(false));
+    rekey_window(&mut reactor, old_wid, new_wid);
+    crate::sys::window_server::set_window_ordered_in_override(wsid, None);
+
+    assert!(reactor.state.windows.window(old_wid).is_none());
+    assert!(reactor.state.windows.window(new_wid).is_some());
+    assert_eq!(reactor.state.windows.tracked_window_id(wsid), Some(new_wid));
+    assert_eq!(
+        reactor.test_workspace_for_window(space, new_wid),
+        Some(workspace)
+    );
+}
+
+#[test]
 fn stale_cleanup_uses_ordered_state_instead_of_cached_visibility() {
     let (mut apps, mut reactor) = test_context();
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));

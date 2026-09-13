@@ -380,10 +380,42 @@ pub struct WindowInfo {
     pub ax_subrole: Option<String>,
 }
 
+/// A successful native identity shared only while processing one owned AX element.
+/// Failures remain retryable, including within the same inventory transaction.
+#[derive(Default)]
+pub(crate) struct NativeWindowIdentity(Option<WindowServerId>);
+
+impl NativeWindowIdentity {
+    pub(crate) fn resolve(
+        &mut self,
+        query: impl FnOnce() -> Option<WindowServerId>,
+    ) -> Option<WindowServerId> {
+        if let Some(id) = self.0 {
+            return Some(id);
+        }
+        let resolved = query();
+        // Zero still uses a process-local identity and may acquire a native ID later.
+        self.0 = resolved.filter(|id| id.as_nonzero().is_some());
+        resolved
+    }
+}
+
 impl WindowInfo {
     pub fn from_ax_element(
         element: &AXUIElement,
         server_info_hint: Option<WindowServerInfo>,
+    ) -> Result<(Self, Option<WindowServerInfo>), AxError> {
+        Self::from_ax_element_with_identity(
+            element,
+            server_info_hint,
+            &mut NativeWindowIdentity::default(),
+        )
+    }
+
+    pub(crate) fn from_ax_element_with_identity(
+        element: &AXUIElement,
+        server_info_hint: Option<WindowServerInfo>,
+        identity: &mut NativeWindowIdentity,
     ) -> Result<(Self, Option<WindowServerInfo>), AxError> {
         let frame = element.frame()?;
         let role = element.role()?;
@@ -397,7 +429,7 @@ impl WindowInfo {
         let id = server_info
             .map(|info| info.id)
             .filter(|id| id.as_nonzero().is_some())
-            .or_else(|| WindowServerId::try_from(element).ok());
+            .or_else(|| identity.resolve(|| WindowServerId::try_from(element).ok()));
         let is_minimized = element.minimized().unwrap_or_default();
         let is_resizable = element.can_resize().unwrap_or(true);
 
@@ -454,4 +486,52 @@ fn bundle_info_for_pid(pid: pid_t) -> (Option<String>, Option<PathBuf>) {
             (bundle_id, path)
         })
         .unwrap_or((None, None))
+}
+
+#[cfg(test)]
+mod native_identity_tests {
+    use super::*;
+
+    #[test]
+    fn inventory_identity_queries_success_once_and_new_pass_queries_again() {
+        let mut calls = 0;
+        for _ in 0..2 {
+            let mut identity = NativeWindowIdentity::default();
+            for _ in 0..4 {
+                assert_eq!(
+                    identity.resolve(|| {
+                        calls += 1;
+                        Some(WindowServerId::new(42))
+                    }),
+                    Some(WindowServerId::new(42))
+                );
+            }
+        }
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn inventory_identity_retries_failure_and_zero_before_sharing_success() {
+        let mut identity = NativeWindowIdentity::default();
+        let mut responses = [
+            None,
+            Some(WindowServerId::new(0)),
+            Some(WindowServerId::new(42)),
+        ]
+        .into_iter();
+        assert_eq!(identity.resolve(|| responses.next().unwrap()), None);
+        assert_eq!(
+            identity.resolve(|| responses.next().unwrap()),
+            Some(WindowServerId::new(0))
+        );
+        assert_eq!(
+            identity.resolve(|| responses.next().unwrap()),
+            Some(WindowServerId::new(42))
+        );
+        assert_eq!(
+            identity.resolve(|| panic!("successful identity must be reused")),
+            Some(WindowServerId::new(42))
+        );
+        assert!(responses.next().is_none());
+    }
 }
