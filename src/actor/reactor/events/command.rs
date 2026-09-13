@@ -325,7 +325,7 @@ fn focus_window_raise_request(apps: &AppManager, window: WindowId) -> raise_mana
         raise_windows: Vec::new(),
         focus_window: Some((window, None)),
         app_handles,
-        focus_quiet: Quiet::No,
+        focus_quiet: Quiet::Yes,
     })
 }
 
