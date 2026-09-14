@@ -3749,7 +3749,7 @@ mod tests {
         let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1920.0, 1080.0));
         let current_window = WindowId::new(60, 1);
         let upper_window = WindowId::new(61, 1);
-        let window_info = |wid| (wid, None, None, None, true, CGSize::new(0.0, 0.0), None, None);
+        let window_info = |wid| window_layout_info(wid, CGSize::new(0.0, 0.0));
 
         for space in [current_space, upper_space] {
             let _ = engine
