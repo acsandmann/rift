@@ -3628,6 +3628,23 @@ impl Reactor {
             };
 
             let window_server_id = window.info.sys_id;
+            if let Some(workspace) = self
+                .layout_manager
+                .layout_engine
+                .virtual_workspace_manager()
+                .workspace_for_window(&self.state.windows, placement.space, placement.window)
+                && self.layout_manager.layout_engine.virtual_workspace_manager().workspaces
+                    [workspace]
+                    .layout_mode()
+                    == crate::common::config::LayoutMode::Floating
+            {
+                self.layout_manager.layout_engine.store_floating_position(
+                    placement.space,
+                    workspace,
+                    placement.window,
+                    frame,
+                );
+            }
             let transaction = if let Some(window_server_id) = window_server_id {
                 let transaction = self.transaction_manager.generate_next_txid(window_server_id);
                 self.transaction_manager.store_txid(window_server_id, transaction, frame);

@@ -91,6 +91,11 @@ impl VirtualWorkspace {
                     settings.traditional.equalize_nodes,
                 ),
             ),
+            LayoutMode::Floating => LayoutSystemKind::Floating(
+                crate::layout_engine::systems::FloatingLayoutSystem::new(
+                    settings.window_insertion_point_for(mode),
+                ),
+            ),
             LayoutMode::Bsp => {
                 LayoutSystemKind::Bsp(crate::layout_engine::systems::BspLayoutSystem::new(
                     settings.window_insertion_point_for(mode),

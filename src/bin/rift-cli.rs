@@ -293,7 +293,7 @@ enum WorkspaceCommands {
         /// Workspace index (0-based). Defaults to active workspace if omitted.
         #[arg(long)]
         workspace_id: Option<usize>,
-        /// Layout mode: traditional, bsp, stack, master_stack, scrolling
+        /// Layout mode: traditional, bsp, stack, master_stack, scrolling, floating
         mode: String,
     },
 }
@@ -831,11 +831,12 @@ fn parse_layout_mode(value: &str) -> Result<LayoutMode, String> {
     match value.trim().to_ascii_lowercase().as_str() {
         "traditional" => Ok(LayoutMode::Traditional),
         "bsp" => Ok(LayoutMode::Bsp),
+        "floating" => Ok(LayoutMode::Floating),
         "stack" => Ok(LayoutMode::Stack),
         "master_stack" => Ok(LayoutMode::MasterStack),
         "scrolling" => Ok(LayoutMode::Scrolling),
         other => Err(format!(
-            "Invalid layout mode '{}'; must be traditional, bsp, stack, master_stack, or scrolling",
+            "Invalid layout mode '{}'; must be traditional, bsp, stack, master_stack, scrolling, or floating",
             other
         )),
     }

@@ -161,6 +161,49 @@ impl TraditionalLayoutSystem {
         self.tree.data.window.layouts_for(wid)
     }
 
+    pub(crate) fn window_insertion_point(&self) -> WindowInsertionPoint {
+        self.window_insertion_point
+    }
+
+    /// Indexed membership access for policies sharing this tree representation.
+    pub(crate) fn window_node(&self, layout: LayoutId, wid: WindowId) -> Option<NodeId> {
+        self.tree.data.window.node_for(layout, wid)
+    }
+
+    pub(crate) fn contains_any_window(&self, wid: WindowId) -> bool {
+        self.tree.data.window.window_nodes.contains_key(&wid)
+    }
+
+    pub(crate) fn window_is_visible(&self, layout: LayoutId, wid: WindowId) -> bool {
+        let Some(node) = self.window_node(layout, wid) else {
+            return false;
+        };
+        node.ancestors_with_parent(self.map()).all(|(child, parent)| {
+            parent.is_none_or(|parent| {
+                !self.layout(parent).is_stacked()
+                    || self.tree.data.selection.local_selection(self.map(), parent) == Some(child)
+            })
+        })
+    }
+
+    pub(crate) fn fullscreen_frame(
+        &self,
+        node: NodeId,
+        screen: CGRect,
+        gaps: &crate::common::config::GapSettings,
+    ) -> Option<CGRect> {
+        node.ancestors(self.map()).find_map(|node| {
+            let info = &self.tree.data.layout.info[node];
+            if info.is_fullscreen {
+                Some(screen)
+            } else if info.is_fullscreen_within_gaps {
+                Some(compute_tiling_area(screen, gaps))
+            } else {
+                None
+            }
+        })
+    }
+
     pub(crate) fn set_layout(&mut self, node: NodeId, kind: LayoutKind) {
         self.tree.data.layout.set_kind(node, kind);
     }
@@ -1240,7 +1283,7 @@ impl TraditionalLayoutSystem {
         self.tree.data.layout.info[parent].total = total;
     }
 
-    fn stack_group_container_info(
+    pub(crate) fn stack_group_container_info(
         &self,
         node: NodeId,
         kind: crate::layout_engine::LayoutKind,

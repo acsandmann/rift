@@ -720,7 +720,7 @@ pub struct LayoutSettings {
     /// Settings inherited by every layout type unless overridden by its table.
     #[serde(flatten)]
     pub base: BaseLayoutSettings,
-    /// Layout mode: "traditional", "bsp", "stack", "master_stack", or "scrolling"
+    /// Layout mode: "traditional", "bsp", "stack", "master_stack", "scrolling", or "floating"
     #[serde(default)]
     pub mode: LayoutMode,
     /// Traditional layout configuration
@@ -1038,6 +1038,7 @@ impl LayoutSettings {
             LayoutMode::Stack => &self.stack.base,
             LayoutMode::MasterStack => &self.master_stack.base,
             LayoutMode::Scrolling => &self.scrolling.base,
+            LayoutMode::Floating => &self.base,
         }
     }
 

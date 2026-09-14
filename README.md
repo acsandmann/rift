@@ -27,6 +27,7 @@
 - Multiple layout styles
   - Tiling (i3/sway-like)
   - Binary Space Partitioning (bspwm-like)
+  - Floating (independent window frames with optional stacks)
   - Master-stack (dwm-like)
   - Scrolling columns (niri-style) <details> <summary><sup>note</sup></summary>when using multiple displays and the scrolling layout, displays must be arranged in a vertical stack or windows may leak into other displays due to displays all existing in the same coordinate space</details>
   - Stack (accordion)

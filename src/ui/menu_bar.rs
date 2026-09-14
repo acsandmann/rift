@@ -530,6 +530,7 @@ fn parse_layout_mode(layout_mode: &str) -> Option<LayoutMode> {
     match layout_mode {
         "traditional" => Some(LayoutMode::Traditional),
         "bsp" => Some(LayoutMode::Bsp),
+        "floating" => Some(LayoutMode::Floating),
         "stack" => Some(LayoutMode::Stack),
         "master_stack" => Some(LayoutMode::MasterStack),
         "scrolling" => Some(LayoutMode::Scrolling),
@@ -541,6 +542,7 @@ fn layout_title(mode: &LayoutMode) -> &'static str {
     match mode {
         LayoutMode::Traditional => "Traditional",
         LayoutMode::Bsp => "BSP",
+        LayoutMode::Floating => "Floating",
         LayoutMode::Stack => "Stack",
         LayoutMode::MasterStack => "Master Stack",
         LayoutMode::Scrolling => "Scrolling",
@@ -726,6 +728,7 @@ fn build_static_menu(mtm: MainThreadMarker, handler: &MenuActionHandler) -> Buil
     for mode in [
         LayoutMode::Traditional,
         LayoutMode::Bsp,
+        LayoutMode::Floating,
         LayoutMode::Stack,
         LayoutMode::MasterStack,
         LayoutMode::Scrolling,
@@ -733,6 +736,7 @@ fn build_static_menu(mtm: MainThreadMarker, handler: &MenuActionHandler) -> Buil
         let action = match mode {
             LayoutMode::Traditional => sel!(onSetLayoutTraditional:),
             LayoutMode::Bsp => sel!(onSetLayoutBsp:),
+            LayoutMode::Floating => sel!(onSetLayoutFloating:),
             LayoutMode::Stack => sel!(onSetLayoutStack:),
             LayoutMode::MasterStack => sel!(onSetLayoutMasterStack:),
             LayoutMode::Scrolling => sel!(onSetLayoutScrolling:),
@@ -1043,6 +1047,11 @@ define_class!(
         #[unsafe(method(onSetLayoutBsp:))]
         fn on_set_layout_bsp(&self, _sender: Option<&AnyObject>) {
             self.emit(MenuAction::SetLayout(LayoutMode::Bsp));
+        }
+
+        #[unsafe(method(onSetLayoutFloating:))]
+        fn on_set_layout_floating(&self, _sender: Option<&AnyObject>) {
+            self.emit(MenuAction::SetLayout(LayoutMode::Floating));
         }
 
         #[unsafe(method(onSetLayoutStack:))]

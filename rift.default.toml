@@ -272,7 +272,7 @@ reapply_app_rules_on_title_change = false
 
 # Workspace-specific rules
 # - workspace: target workspace by index (integer) or name (string)
-# - layout: layout mode to use ("traditional", "bsp", "stack", "master_stack", "scrolling")
+# - layout: layout mode to use ("traditional", "bsp", "stack", "master_stack", "scrolling", "floating")
 # workspace_rules = [
 #   { workspace = 1, layout = "bsp" },
 #   { workspace = "second", layout = "scrolling" }
@@ -397,8 +397,8 @@ comb1 = "Alt + Shift"
 #   (follow and window_id are optional)
 # - create_workspace
 # - switch_to_last_workspace
-# - set_workspace_layout = { mode = "traditional"|"bsp"|"stack"|"master_stack"|"scrolling" } (active workspace)
-# - set_workspace_layout = { workspace = N, mode = "traditional"|"bsp"|"stack"|"master_stack"|"scrolling" }
+# - set_workspace_layout = { mode = "traditional"|"bsp"|"stack"|"master_stack"|"scrolling"|"floating" } (active workspace)
+# - set_workspace_layout = { workspace = N, mode = "traditional"|"bsp"|"stack"|"master_stack"|"scrolling"|"floating" }
 # - next_window / prev_window (focus wraps when it reaches last window in current workspace)
 # - ascend / descend
 # - move_focus = "left"|"right"|"up"|"down"

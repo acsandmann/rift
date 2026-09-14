@@ -244,9 +244,8 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
 /// Forward representation-level operations shared by tree-backed layout policies.
 /// Policy implementations still spell out every operation that can change their invariants.
 macro_rules! delegate_traditional_layout_system {
-    () => {
+    (@tree) => {
         fn contains_layout(&self, layout: LayoutId) -> bool { self.inner.contains_layout(layout) }
-        fn remove_layout(&mut self, layout: LayoutId) { self.inner.remove_layout(layout); }
         fn selected_window(&self, layout: LayoutId) -> Option<WindowId> {
             self.inner.selected_window(layout)
         }
@@ -262,35 +261,11 @@ macro_rules! delegate_traditional_layout_system {
         fn descend_selection(&mut self, layout: LayoutId) -> bool {
             self.inner.descend_selection(layout)
         }
-        fn move_focus(
-            &mut self,
-            layout: LayoutId,
-            direction: Direction,
-        ) -> (Option<WindowId>, Vec<WindowId>) {
-            self.inner.move_focus(layout, direction)
-        }
-        fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
-            self.inner.window_in_direction(layout, direction)
-        }
-        fn replace_window(&mut self, from: WindowId, to: WindowId) {
-            self.inner.replace_window(from, to);
-        }
         fn contains_window(&self, layout: LayoutId, wid: WindowId) -> bool {
             self.inner.contains_window(layout, wid)
         }
         fn select_window(&mut self, layout: LayoutId, wid: WindowId) -> bool {
             self.inner.select_window(layout, wid)
-        }
-        fn on_window_resized(
-            &mut self,
-            layout: LayoutId,
-            wid: WindowId,
-            old_frame: CGRect,
-            new_frame: CGRect,
-            screen: CGRect,
-            gaps: &crate::common::config::GapSettings,
-        ) {
-            self.inner.on_window_resized(layout, wid, old_frame, new_frame, screen, gaps);
         }
         fn swap_windows(&mut self, layout: LayoutId, a: WindowId, b: WindowId) -> bool {
             self.inner.swap_windows(layout, a, b)
@@ -307,6 +282,39 @@ macro_rules! delegate_traditional_layout_system {
         fn has_any_fullscreen_node(&self, layout: LayoutId) -> bool {
             self.inner.has_any_fullscreen_node(layout)
         }
+    };
+    () => {
+        delegate_traditional_layout_system!(@tree);
+        fn remove_layout(&mut self, layout: LayoutId) { self.inner.remove_layout(layout); }
+
+
+        fn move_focus(
+            &mut self,
+            layout: LayoutId,
+            direction: Direction,
+        ) -> (Option<WindowId>, Vec<WindowId>) {
+            self.inner.move_focus(layout, direction)
+        }
+        fn window_in_direction(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
+            self.inner.window_in_direction(layout, direction)
+        }
+        fn replace_window(&mut self, from: WindowId, to: WindowId) {
+            self.inner.replace_window(from, to);
+        }
+
+        fn on_window_resized(
+            &mut self,
+            layout: LayoutId,
+            wid: WindowId,
+            old_frame: CGRect,
+            new_frame: CGRect,
+            screen: CGRect,
+            gaps: &crate::common::config::GapSettings,
+        ) {
+            self.inner.on_window_resized(layout, wid, old_frame, new_frame, screen, gaps);
+        }
+
+
     };
 }
 
@@ -526,6 +534,8 @@ mod tests {
         assert_stable_unique_ids(&tree, &scrolling.container_tree(layout));
     }
 }
+mod floating;
+pub use floating::FloatingLayoutSystem;
 mod stack;
 pub use stack::StackLayoutSystem;
 
@@ -539,4 +549,5 @@ pub enum LayoutSystemKind {
     MasterStack(MasterStackLayoutSystem),
     Scrolling(ScrollingLayoutSystem),
     Stack(StackLayoutSystem),
+    Floating(FloatingLayoutSystem),
 }

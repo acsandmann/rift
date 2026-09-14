@@ -73,6 +73,17 @@ pub fn handle_command_layout(
             | LayoutCommand::CreateWorkspace
             | LayoutCommand::SwitchToLastWorkspace
     );
+    if matches!(
+        cmd,
+        LayoutCommand::JoinWindow(_)
+            | LayoutCommand::ToggleStack
+            | LayoutCommand::ConsumeOrExpelWindow(_)
+    ) && let Some(space) = command_space
+        && layout.layout_engine.active_layout_mode_at(space)
+            == crate::common::config::LayoutMode::Floating
+    {
+        store_current_floating_positions(state, layout, space);
+    }
     let workspace_space = if requires_workspace_space {
         if let Some(space) = command_space {
             store_current_floating_positions(state, layout, space);
@@ -150,23 +161,22 @@ fn current_floating_positions(
     state: &RiftState,
     layout: &LayoutManager,
     space: SpaceId,
-) -> Vec<(SpaceId, WindowId, objc2_core_foundation::CGRect)> {
+) -> Vec<(WindowId, objc2_core_foundation::CGRect)> {
+    let floats_by_layout = layout.layout_engine.active_layout_mode_at(space)
+        == crate::common::config::LayoutMode::Floating;
     layout
         .layout_engine
         .windows_in_active_workspace(&state.windows, space)
         .into_iter()
-        .filter(|window| layout.layout_engine.is_window_floating(*window))
+        .filter(|window| floats_by_layout || layout.layout_engine.is_window_floating(*window))
         .filter_map(|window| {
-            state.windows.window(window).map(|state| (space, window, state.frame_monotonic))
+            state.windows.window(window).map(|state| (window, state.frame_monotonic))
         })
         .collect()
 }
 
 fn store_current_floating_positions(state: &RiftState, layout: &mut LayoutManager, space: SpaceId) {
-    let positions = current_floating_positions(state, layout, space)
-        .into_iter()
-        .map(|(_, window, frame)| (window, frame))
-        .collect::<Vec<_>>();
+    let positions = current_floating_positions(state, layout, space);
     if !positions.is_empty() {
         layout.layout_engine.store_floating_window_positions(space, &positions);
     }
