@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::collections::HashMap;
 use crate::actor::wm_controller::WmCommand;
-use crate::sys::hotkey::{Hotkey, HotkeySpec};
+use crate::sys::hotkey::{Hotkey, HotkeySpec, Modifiers};
 
 pub const MAX_WORKSPACES: usize = 128;
 
@@ -435,6 +435,10 @@ pub struct Settings {
     /// Accepts either a full hotkey (e.g. "Ctrl + A") or a modifier-only spec (e.g. "Ctrl")
     #[serde(default)]
     pub focus_follows_mouse_disable_hotkey: Option<HotkeySpec>,
+    /// Modifier held while dragging a window with the mouse: the left button
+    /// moves it, the right button resizes it. Modifier-only spec, e.g. "Cmd".
+    #[serde(default, with = "mouse_modifier_serde")]
+    pub mouse_modifier: Option<Modifiers>,
     /// Apps that should not trigger automatic workspace switching when activated.
     /// List of bundle identifiers (e.g., "com.apple.Spotlight") that often
     /// inappropriately steal focus and shouldn't cause workspace switches.
@@ -1257,6 +1261,25 @@ impl InnerGaps {
 
 fn yes() -> bool { true }
 
+mod mouse_modifier_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use crate::sys::hotkey::{Modifiers, modifiers_from_str};
+
+    pub fn serialize<S: Serializer>(value: &Option<Modifiers>, s: S) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(mods) => s.serialize_some(&mods.to_string()),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Modifiers>, D::Error> {
+        Option::<String>::deserialize(d)?
+            .map(|s| modifiers_from_str(&s).map_err(serde::de::Error::custom))
+            .transpose()
+    }
+}
+
 fn default_stack_offset() -> f64 { 40.0 }
 
 pub fn default_stack_orientation() -> StackDefaultOrientation {
@@ -1837,6 +1860,13 @@ mod tests {
         let cfg = Config::parse(toml).unwrap();
         // We expect keys to be parsed into hotkeys
         assert!(!cfg.keys.is_empty());
+    }
+
+    #[test]
+    fn mouse_modifier_is_a_modifier_only_spec() {
+        let cfg = Config::parse("[settings]\nmouse_modifier = \"Cmd\"\n[keys]\n").unwrap();
+        assert_eq!(cfg.settings.mouse_modifier, Some(Modifiers::META));
+        assert!(Config::parse("[settings]\nmouse_modifier = \"Cmd + T\"\n[keys]\n").is_err());
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use objc2_core_foundation::CGRect;
+use objc2_core_foundation::{CGPoint, CGRect};
 pub use rift_protocol::{DisplaySelector, ReactorCommand};
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +22,47 @@ pub struct RiftState {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Requested(pub bool);
+
+/// What a `settings.mouse_modifier` drag does to the window under the cursor.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub enum MouseDragAction {
+    Move,
+    /// Resize by moving the edges nearest to where the drag started.
+    Resize {
+        left: bool,
+        top: bool,
+    },
+}
+
+impl MouseDragAction {
+    pub fn changes_size(self) -> bool { matches!(self, MouseDragAction::Resize { .. }) }
+
+    pub fn apply(self, mut frame: CGRect, delta: CGPoint) -> CGRect {
+        match self {
+            MouseDragAction::Move => {
+                frame.origin.x += delta.x;
+                frame.origin.y += delta.y;
+            }
+            MouseDragAction::Resize { left, top } => {
+                if left {
+                    frame.origin.x += delta.x;
+                    frame.size.width -= delta.x;
+                } else {
+                    frame.size.width += delta.x;
+                }
+                if top {
+                    frame.origin.y += delta.y;
+                    frame.size.height -= delta.y;
+                } else {
+                    frame.size.height += delta.y;
+                }
+                frame.size.width = frame.size.width.max(1.0);
+                frame.size.height = frame.size.height.max(1.0);
+            }
+        }
+        frame
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(untagged)]
