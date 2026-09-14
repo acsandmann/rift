@@ -186,6 +186,8 @@ pub enum Event {
     },
     ApplicationTerminated(pid_t),
     ApplicationThreadTerminated(pid_t),
+    #[serde(skip)]
+    AppActorExited(pid_t, AppThreadHandle),
     ApplicationActivated(pid_t, Quiet),
     ApplicationDeactivated(pid_t),
     ApplicationGloballyActivated(pid_t),
@@ -1133,7 +1135,13 @@ impl Reactor {
         }
     }
 
-    fn dispatch_workflow(&mut self, event: Event) -> anyhow::Result<EventOutcome> {
+    fn dispatch_workflow(&mut self, mut event: Event) -> anyhow::Result<EventOutcome> {
+        if let Event::AppActorExited(pid, handle) = &event {
+            if !self.app_manager.apps.get(pid).is_some_and(|app| app.handle.same_actor(handle)) {
+                return Ok(EventOutcome::no_change());
+            }
+            event = Event::ApplicationThreadTerminated(*pid);
+        }
         self.log_event(&event);
         self.recording_manager.record.on_event(&event);
 
@@ -1189,6 +1197,13 @@ impl Reactor {
             Event::ApplicationGloballyActivated(pid)
                 if self.main_window_tracker.is_globally_frontmost(*pid)
         );
+
+        // Reject before updating focus or inventory state.
+        if let Event::ApplicationLaunched { pid, handle, .. } = &event
+            && self.app_manager.reject_duplicate(*pid, handle)
+        {
+            return Ok(EventOutcome::no_change());
+        }
 
         let raised_window = self.main_window_tracker.handle_event(&event);
         match event {

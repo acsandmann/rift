@@ -3,6 +3,7 @@
 //! controls hotkey registration.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use dispatchr::queue;
@@ -23,7 +24,7 @@ pub type Sender = actor::Sender<WmEvent>;
 type Receiver = actor::Receiver<WmEvent>;
 
 use self::WmCmd::*;
-use crate::actor::app::AppInfo;
+use crate::actor::app::{AppInfo, AppThreadHandle, Request};
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::{self, config, event_tap, mission_control, reactor};
 use crate::model::tx_store::WindowTxStore;
@@ -39,6 +40,7 @@ pub enum WmEvent {
     AppGloballyActivated(pid_t),
     AppGloballyDeactivated(pid_t),
     AppTerminated(pid_t),
+    AppExited(pid_t, AppThreadHandle),
     SpaceStateUpdated(ForwardedSpaceState, CoordinateConverter),
     PowerStateChanged(bool),
     KeyboardLayoutChanged,
@@ -134,6 +136,51 @@ pub struct WmController {
     receiver: Receiver,
     sender: Sender,
     hotkeys_installed: bool,
+    apps: AppLifecycle,
+}
+
+// Reserve before spawning; retain the reservation until AX resources are dropped.
+#[derive(Default)]
+struct AppLifecycle(HashMap<pid_t, (AppThreadHandle, AppPhase)>);
+
+enum AppPhase {
+    Active, // Includes initialization.
+    Stopping(Option<AppInfo>),
+}
+
+impl AppLifecycle {
+    fn reserve(
+        &mut self,
+        pid: pid_t,
+        info: AppInfo,
+    ) -> Option<(AppThreadHandle, actor::Receiver<Request>)> {
+        if let Some((_, phase)) = self.0.get_mut(&pid) {
+            if let AppPhase::Stopping(relaunch) = phase {
+                *relaunch = Some(info);
+            }
+            return None;
+        }
+        let (handle, rx) = AppThreadHandle::channel();
+        self.0.insert(pid, (handle.clone(), AppPhase::Active));
+        Some((handle, rx))
+    }
+
+    fn terminate(&mut self, pid: pid_t) {
+        if let Some((handle, phase)) = self.0.get_mut(&pid) {
+            *phase = AppPhase::Stopping(None);
+            _ = handle.send(Request::Terminate);
+        }
+    }
+
+    fn exited(&mut self, pid: pid_t, handle: &AppThreadHandle) -> Option<Option<AppInfo>> {
+        if !self.0.get(&pid)?.0.same_actor(handle) {
+            return None;
+        }
+        Some(match self.0.remove(&pid)?.1 {
+            AppPhase::Stopping(info) => info,
+            _ => None,
+        })
+    }
 }
 
 impl WmController {
@@ -164,6 +211,7 @@ impl WmController {
             receiver,
             sender: sender.clone(),
             hotkeys_installed: false,
+            apps: AppLifecycle::default(),
         };
         (this, sender)
     }
@@ -253,7 +301,15 @@ impl WmController {
             }
             AppTerminated(pid) => {
                 sys::app::remove_application_observer(pid);
-                self.events_tx.send(Event::ApplicationTerminated(pid));
+                self.apps.terminate(pid);
+            }
+            AppExited(pid, handle) => {
+                if let Some(relaunch) = self.apps.exited(pid, &handle) {
+                    self.events_tx.send(Event::AppActorExited(pid, handle));
+                    if let Some(info) = relaunch {
+                        self.new_app(pid, info);
+                    }
+                }
             }
             ConfigUpdated(new_cfg) => {
                 let old_keys_ser = serde_json::to_string(&self.config.config.keys).ok();
@@ -427,12 +483,17 @@ impl WmController {
             }
         }
 
-        actor::app::spawn_app_thread(
-            pid,
-            info,
-            self.events_tx.clone(),
-            self.window_tx_store.clone(),
-        );
+        if let Some((handle, rx)) = self.apps.reserve(pid, info.clone()) {
+            actor::app::spawn_app_thread(
+                pid,
+                info,
+                self.events_tx.clone(),
+                self.window_tx_store.clone(),
+                self.sender.clone(),
+                handle,
+                rx,
+            );
+        }
     }
 
     fn register_hotkeys(&mut self) {
@@ -491,6 +552,34 @@ impl ExecCmd {
         match self {
             ExecCmd::Array(vec) => Cow::Borrowed(&*vec),
             ExecCmd::String(s) => s.split(' ').map(|s| s.to_owned()).collect::<Vec<_>>().into(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod app_lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn dedupe_failure_termination_and_reuse() {
+        for terminated in [false, true] {
+            let mut apps = AppLifecycle::default();
+            let info = || AppInfo {
+                bundle_id: None,
+                localized_name: None,
+            };
+            let (old, mut rx) = apps.reserve(42, info()).unwrap();
+            assert!(apps.reserve(42, info()).is_none());
+            if terminated {
+                apps.terminate(42);
+                assert!(matches!(rx.try_recv().unwrap().1, Request::Terminate));
+                assert!(apps.reserve(42, info()).is_none());
+            }
+            assert!(apps.exited(42, &old).is_some());
+            let (new, _rx) = apps.reserve(42, info()).unwrap();
+            assert!(apps.exited(42, &old).is_none());
+            assert!(!new.same_actor(&old));
+            assert!(apps.reserve(42, info()).is_none());
         }
     }
 }

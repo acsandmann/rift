@@ -13,16 +13,17 @@ use std::time::{Duration, Instant};
 use objc2::rc::Retained;
 use objc2_app_kit::NSRunningApplication;
 use objc2_application_services::AXError;
-use objc2_core_foundation::{CFRunLoop, CGPoint, CGRect};
+use objc2_core_foundation::{CGPoint, CGRect};
 use serde::{Deserialize, Serialize};
+use tokio::select;
 use tokio::sync::oneshot;
-use tokio::{join, select};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, Span, debug, info, instrument, trace, warn};
 
 use crate::actor;
 use crate::actor::reactor::transaction_manager::TransactionId;
 use crate::actor::reactor::{self, Event, Requested};
+use crate::actor::wm_controller::{self, WmEvent};
 use crate::common::collections::{HashMap, HashSet};
 use crate::model::tx_store::WindowTxStore;
 pub use crate::sys::app::{AppInfo, WindowInfo, pid_t};
@@ -316,6 +317,15 @@ impl AppThreadHandle {
         this
     }
 
+    pub fn channel() -> (Self, actor::Receiver<Request>) {
+        let (requests_tx, rx) = actor::channel();
+        (Self { requests_tx }, rx)
+    }
+
+    pub(crate) fn same_actor(&self, other: &Self) -> bool {
+        self.requests_tx.same_channel(&other.requests_tx)
+    }
+
     pub fn send(&self, req: Request) -> anyhow::Result<()> { Ok(self.requests_tx.send(req)) }
 }
 
@@ -383,16 +393,30 @@ pub enum Quiet {
     No,
 }
 
+struct ExitGuard(wm_controller::Sender, pid_t, AppThreadHandle);
+impl Drop for ExitGuard {
+    fn drop(&mut self) { self.0.send(WmEvent::AppExited(self.1, self.2.clone())); }
+}
+
 pub fn spawn_app_thread(
     pid: pid_t,
     info: AppInfo,
     events_tx: reactor::Sender,
     tx_store: Option<WindowTxStore>,
+    wm_tx: wm_controller::Sender,
+    handle: AppThreadHandle,
+    requests_rx: actor::Receiver<Request>,
 ) {
-    thread::Builder::new()
+    let guard = ExitGuard(wm_tx.clone(), pid, handle.clone());
+    if let Err(err) = thread::Builder::new()
         .name(format!("{}({pid})", info.bundle_id.as_deref().unwrap_or("")))
-        .spawn(move || app_thread_main(pid, info, events_tx, tx_store))
-        .unwrap();
+        .spawn(move || {
+            let _guard = guard; // Also reports early initialization failures and panics.
+            app_thread_main(pid, info, events_tx, tx_store, handle.requests_tx, requests_rx);
+        })
+    {
+        warn!(pid, ?err, "Failed to spawn app thread");
+    }
 }
 
 struct State {
@@ -549,10 +573,12 @@ impl State {
         }
 
         let this = RefCell::new(self);
-        join!(
-            Self::handle_incoming(&this, requests_rx, notifications_rx),
-            Self::handle_raises(&this, raises_rx),
-        );
+        // The raises channel is owned by State, so joining both tasks would keep
+        // the actor (and its observer) alive after the incoming task terminates.
+        select! {
+            _ = Self::handle_incoming(&this, requests_rx, notifications_rx) => {},
+            _ = Self::handle_raises(&this, raises_rx) => {},
+        }
     }
 
     async fn handle_incoming(
@@ -610,7 +636,6 @@ impl State {
                 #[allow(non_upper_case_globals)]
                 Err(AxError::Ax(AXError::CannotComplete)) if state.running_app.isTerminated() => {
                     warn!(?state.bundle_id, ?state.pid, "Application terminated without notification");
-                    state.send_event(Event::ApplicationThreadTerminated(state.pid));
                     should_terminate = true;
                     break;
                 }
@@ -787,8 +812,6 @@ impl State {
     fn handle_request(&mut self, request: Request) -> Result<bool, AxError> {
         match request {
             Request::Terminate => {
-                CFRunLoop::current().unwrap().stop();
-                self.send_event(Event::ApplicationThreadTerminated(self.pid));
                 return Ok(true);
             }
             Request::WindowMaybeDestroyed(wid) => {
@@ -2017,6 +2040,8 @@ fn app_thread_main(
     info: AppInfo,
     events_tx: reactor::Sender,
     tx_store: Option<WindowTxStore>,
+    requests_tx: actor::Sender<Request>,
+    requests_rx: actor::Receiver<Request>,
 ) {
     let app = AXUIElement::application(pid);
     let Some(running_app) = NSRunningApplication::with_process_id(pid) else {
@@ -2080,7 +2105,6 @@ fn app_thread_main(
         pending_frames: HashMap::default(),
     };
 
-    let (requests_tx, requests_rx) = actor::channel();
     Executor::run(state.run(info, requests_tx, requests_rx, notifications_rx, raises_rx));
 }
 

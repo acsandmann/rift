@@ -29,6 +29,8 @@ pub fn channel<Event>() -> (Sender<Event>, Receiver<Event>) {
 }
 
 impl<Event> Sender<Event> {
+    pub(crate) fn same_channel(&self, other: &Self) -> bool { self.0.same_channel(&other.0) }
+
     pub fn send(&self, event: Event) {
         // Most of the time we can ignore send errors, they just indicate the
         // app is shutting down.
