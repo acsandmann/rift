@@ -1312,6 +1312,14 @@ impl Config {
         Self::parse(&buf)
     }
 
+    /// Read a configuration without resolving hotkeys through the active
+    /// macOS keyboard layout. This is for offline validation only; runtime
+    /// startup still uses [`Config::read`] so hotkeys become key codes.
+    pub(crate) fn read_offline(path: &Path) -> anyhow::Result<Config> {
+        let buf = std::fs::read_to_string(path)?;
+        Self::parse_offline(&buf)
+    }
+
     pub fn default() -> Config { Self::parse(include_str!("../../rift.default.toml")).unwrap() }
 
     /// Save the current config to a file
@@ -1574,8 +1582,15 @@ impl Config {
                     let expanded_key =
                         Self::expand_modifier_combinations(&key, &c.modifier_combinations);
                     let normalized_key = Self::normalize_hotkey_string(&expanded_key);
-                    let Ok(hotkey) = Hotkey::from_str(&normalized_key) else {
-                        bail!("Could not parse hotkey: {key}");
+                    let hotkey = match Hotkey::from_str(&normalized_key) {
+                        Ok(hotkey) => hotkey,
+                        Err(error)
+                            if crate::sys::hotkey::offline_key_resolution_enabled()
+                                && error.to_string().contains("active keyboard layout") =>
+                        {
+                            bail!("{error}");
+                        }
+                        Err(_) => bail!("Could not parse hotkey: {key}"),
                     };
                     keys.push((hotkey, cmd.clone()));
                     key_specs.push((normalized_key, cmd));
@@ -1611,6 +1626,13 @@ impl Config {
                 }
             }
         }
+    }
+
+    /// Parse the config model without asking macOS to resolve character keys.
+    /// The normal parser still validates all hotkeys; the keyboard layout
+    /// lookup is replaced by a contained static fallback scope.
+    fn parse_offline(buf: &str) -> anyhow::Result<Config> {
+        crate::sys::hotkey::with_offline_key_resolution(|| Self::parse(buf))
     }
 }
 
