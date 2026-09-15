@@ -46,6 +46,10 @@ strip = false
 [lib]
 doctest = false
 
+[features]
+default = []
+custom-event-loop = ["objc2-foundation/NSDate", "objc2-foundation/NSRunLoop"]
+
 [dependencies]
 anyhow = { version = "1.0.83", default-features = false }
 arc-swap = "1"

@@ -1,4 +1,4 @@
-//! A simple async executor that integrates with CFRunLoop.
+//! A simple async executor that integrates with CFRunLoop or AppKit.
 
 use std::cell::RefCell;
 use std::future::Future;
@@ -11,6 +11,8 @@ use objc2::MainThreadMarker;
 use objc2_app_kit::NSApp;
 use objc2_core_foundation::CFRunLoop;
 
+#[cfg(feature = "custom-event-loop")]
+use super::cocoa::EventLoop;
 use super::run_loop::WakeupHandle;
 
 thread_local! {
@@ -34,10 +36,27 @@ impl Executor {
         Self::run_with_loop_fn(task, CFRunLoop::run);
     }
 
+    #[cfg(not(feature = "custom-event-loop"))]
     pub fn run_main(mtm: MainThreadMarker, task: impl Future<Output = ()> + 'static) {
-        // In macOS some events do not fire unless we call this function.
+        // Some macOS notifications require an AppKit pump, not just CFRunLoop.
         // https://github.com/koekeishiya/yabai/issues/2680
         Self::run_with_loop_fn(task, || NSApp(mtm).run());
+    }
+
+    #[cfg(feature = "custom-event-loop")]
+    pub fn run_main(mtm: MainThreadMarker, task: impl Future<Output = ()> + 'static) {
+        let mut task = std::pin::pin!(task);
+        let event_loop = EventLoop::new(NSApp(mtm));
+        let waker: std::task::Waker = event_loop.waker().into();
+        let mut context = Context::from_waker(&waker);
+
+        loop {
+            // Polling Rift can create autoreleased AppKit objects even without a UI event.
+            if objc2::rc::autoreleasepool(|_| task.as_mut().poll(&mut context)) == Poll::Ready(()) {
+                break;
+            }
+            event_loop.wait();
+        }
     }
 
     fn run_with_loop_fn(task: impl Future<Output = ()> + 'static, loop_fn: impl Fn()) {
