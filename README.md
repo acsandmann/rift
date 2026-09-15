@@ -29,7 +29,7 @@
   - Binary Space Partitioning (bspwm-like)
   - Floating (independent window frames with optional stacks)
   - Master-stack (dwm-like)
-  - Scrolling columns (niri-style) <details> <summary><sup>note</sup></summary>when using multiple displays and the scrolling layout, displays must be arranged in a vertical stack or windows may leak into other displays due to displays all existing in the same coordinate space</details>
+  - Scrolling columns (niri-style)
   - Stack (accordion)
 - Menubar icon that opens a menu for switching workspaces, changing layouts, and accessing quick Rift controls <details> <summary><sup>click to see the menu bar icon</sup></summary><img src="assets/menu_menu.png" alt="Rift menu bar icon" /></details>
 - Save and restore layouts from the menu bar or CLI, with reusable layouts listed from a configurable folder <details> <summary><sup>click to see the menu</sup></summary><img src="assets/menu_layouts.png" alt="Rift menu for restoring layouts" /></details>
@@ -55,12 +55,18 @@ Get up and running via the docs:
 <br>
 
 ## Status
-Rift is a stable, reliable, and performant window manager used by many. It is still in development and thus new features, optimizations, and general improvements are regularly released, but is more than good enough for daily use.
 
-> Issues and PRs are very welcome.
+Rift is actively developed and suitable for daily use.
+
+Issues, feature requests, and contributions are welcome.
 
 ## Community
-Join the Rift community on Matrix for discussion, support, and announcements: [#rift:matrix.org](https://matrix.to/#/#rift:matrix.org)
+
+Join [#rift:matrix.org](https://matrix.to/#/#rift:matrix.org) for discussion, support, and development.
+
+## Support
+
+If rift is part of your daily workflow, consider [sponsoring its development](https://github.com/sponsors/acsandmann).
 
 ## Motivation
 Aerospace worked well for me, but I missed animations and the ability to use fullscreen on one display while working on the other. I also prefer leveraging private/undocumented APIs as they tend to be more reliable (due to the OS being built on them and all the public APIs) and performant.
