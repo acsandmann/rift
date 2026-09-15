@@ -272,18 +272,12 @@ impl Menu {
     }
 
     fn reload_config(&self) {
-        let (response, _fut) = r#continue::continuation();
+        let (response, _result) = std::sync::mpsc::sync_channel(1);
         let msg = config::Event::ApplyConfig {
             cmd: ConfigCommand::ReloadConfig,
             response,
         };
-        if let Err(e) = self.config_tx.try_send(msg) {
-            let tokio::sync::mpsc::error::SendError((_span, msg)) = e;
-            match msg {
-                config::Event::ApplyConfig { response, .. } => std::mem::forget(response),
-                config::Event::QueryConfig(response) => std::mem::forget(response),
-            }
-        }
+        self.config_tx.send(msg);
     }
 
     fn spawn_debouncer(

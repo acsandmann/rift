@@ -201,8 +201,6 @@ tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["std", "tracing", "env-filter"], default-features = false }
 tracing-timing = "0.7.0"
 tracing-tree = { version = "0.4.0", features = ["time"], default-features = false }
-continue = { git = "https://github.com/drewcrawford/continue" }
-futures-task = { version = "0.3.31", features = ["alloc"], default-features = false }
 regex = "1.11.0"
 enum_dispatch = "0.3.13"
 crossbeam-channel = "0.5"

@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::mpsc::SyncSender;
 
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
@@ -12,12 +13,12 @@ pub type Receiver = actor::Receiver<Event>;
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Event {
     #[serde(skip)]
-    QueryConfig(r#continue::Sender<Config>),
+    QueryConfig(SyncSender<Config>),
     #[serde(skip)]
     ApplyConfig {
         cmd: ConfigCommand,
         #[serde(skip)]
-        response: r#continue::Sender<Result<(), String>>,
+        response: SyncSender<Result<(), String>>,
     },
 }
 
@@ -46,14 +47,14 @@ impl ConfigActor {
                     reactor_tx,
                     config_path,
                 };
-                crate::sys::executor::Executor::run(actor.run(rx));
+                actor.run(rx);
             })
             .unwrap();
         tx
     }
 
-    async fn run(mut self, mut events: Receiver) {
-        while let Some((_span, event)) = events.recv().await {
+    fn run(mut self, mut events: Receiver) {
+        while let Some((_span, event)) = events.blocking_recv() {
             match event {
                 Event::QueryConfig(resp) => {
                     let v = self.handle_config_query();
@@ -294,5 +295,40 @@ impl ConfigActor {
         } else {
             Err("Config file not found".into())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc::sync_channel;
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn unread_and_dropped_replies_do_not_stall_actor() {
+        let (reactor_tx, _updates) = actor::channel();
+        let config = Config::default();
+        let config_tx = ConfigActor::spawn(config.clone(), reactor_tx);
+        let (response, unread) = sync_channel(1);
+        config_tx.try_send(Event::QueryConfig(response)).unwrap();
+        let (response, dropped) = sync_channel(1);
+        drop(dropped);
+        config_tx
+            .try_send(Event::ApplyConfig {
+                cmd: ConfigCommand::GetConfig,
+                response,
+            })
+            .unwrap();
+        let (response, result) = sync_channel(1);
+        config_tx.try_send(Event::QueryConfig(response)).unwrap();
+        assert_eq!(
+            serde_json::to_value(result.recv_timeout(Duration::from_secs(1)).unwrap()).unwrap(),
+            serde_json::to_value(&config).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(unread.recv().unwrap()).unwrap(),
+            serde_json::to_value(&config).unwrap()
+        );
     }
 }
