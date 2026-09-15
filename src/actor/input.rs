@@ -623,7 +623,7 @@ impl Input {
                 }
                 self.handle_keyboard_event(event_type, event, &mut self.state.borrow_mut())
             }
-            CGEventType::MouseMoved => self.on_mouse_moved(event),
+            CGEventType::MouseMoved => self.on_mouse_moved(event, CGEvent::location(Some(event))),
             CGEventType::LeftMouseDown | CGEventType::RightMouseDown => {
                 let mut state = self.state.borrow_mut();
                 if state.hide_count > 0 {
@@ -683,7 +683,7 @@ impl Input {
     /// In particular, do not read CGEvent flags for every hardware event: the
     /// keyboard and flags-changed events already maintain modifier state, and
     /// the sampled move path below is sufficient as a recovery check.
-    fn on_mouse_moved(&self, event: &CGEvent) -> bool {
+    fn on_mouse_moved(&self, event: &CGEvent, loc: CGPoint) -> bool {
         let mut state = self.state.borrow_mut();
         if !state.event_processing_enabled && !self.mission_control_active.get() {
             return true;
@@ -691,7 +691,6 @@ impl Input {
         if state.hide_count > 0 {
             state.show_mouse();
         }
-        let loc = CGEvent::location(Some(event));
         self.mouse_location.set(loc);
         if self.mission_control_active.get() {
             self.mission_control_tx.send(super::mission_control::Event::Input(
@@ -741,43 +740,52 @@ impl Input {
             && state.focus_follows_mouse_enabled
             && !state.disable_hotkey_active
         {
-            let now = Instant::now();
-            let mut suppression = self.focus_suppression.borrow_mut();
-            if suppression.pending.is_some_and(|(_, deadline)| now >= deadline) {
-                suppression.pending = None;
-                self.reset_mouse_window();
-            }
-            if suppression.suppressed(now) {
-                return true;
-            }
-            let window = window_server::get_window_at_point(loc);
-            let previous = self.mouse_window.replace(window);
-            if previous == window {
-                return true;
-            }
-            if window.is_none() || self.mouse_window_frame.get().is_none() {
-                // Until the reactor supplies a model frame, treat any further
-                // movement as a possible transition.
-                self.mouse_window_frame
-                    .set(Some(CGRect::new(loc, CGSize::new(f64::EPSILON, f64::EPSILON))));
-            }
-            if let Some(window) = window {
-                window_server::note_windowserver_activity(window.as_u32());
-                if self.mouse_focus_publisher.publish(&self.events_tx, window).is_ok() {
-                    suppression.pending = Some((window, now + MOUSE_FOCUS_TIMEOUT));
-                }
-            }
+            // Secondary pointer consumers above do not participate in focus
+            // suppression or window resolution.
+            drop(state);
+            self.on_mouse_focus(loc);
         }
 
         true
     }
 
-    /// Admit a mouse move for full processing. This deliberately contains
-    /// only scalar `Cell` operations so it can run before the callback's
-    /// panic boundary; rejected hardware events return directly to Core
-    /// Graphics without entering the expensive Rust callback path.
+    fn on_mouse_focus(&self, loc: CGPoint) {
+        let mut suppression = self.focus_suppression.borrow_mut();
+        // Most samples have neither a pending raise nor a gesture deadline.
+        // Read the clock only when there is a deadline to inspect, or later
+        // when publishing a new candidate requires a retry deadline.
+        let now = (suppression.pending.is_some() || suppression.gesture_until.is_some())
+            .then(Instant::now);
+        if let Some(now) = now {
+            if suppression.pending.is_some_and(|(_, deadline)| now >= deadline) {
+                suppression.pending = None;
+                self.reset_mouse_window();
+            }
+            if suppression.suppressed(now) {
+                return;
+            }
+            suppression.gesture_until = None;
+        }
+        let window = window_server::get_window_at_point(loc);
+        let previous = self.mouse_window.replace(window);
+        if previous == window {
+            return;
+        }
+        if window.is_none() || self.mouse_window_frame.get().is_none() {
+            self.mouse_window_frame
+                .set(Some(CGRect::new(loc, CGSize::new(f64::EPSILON, f64::EPSILON))));
+        }
+        if let Some(window) = window {
+            window_server::note_windowserver_activity(window.as_u32());
+            if self.mouse_focus_publisher.publish(&self.events_tx, window).is_ok() {
+                suppression.pending =
+                    Some((window, now.unwrap_or_else(Instant::now) + MOUSE_FOCUS_TIMEOUT));
+            }
+        }
+    }
+
     #[inline]
-    fn admit_mouse_move(&self, event: &CGEvent) -> bool {
+    fn admit_mouse_move(&self, event: &CGEvent) -> Option<CGPoint> {
         let timestamp = CGEvent::timestamp(Some(event));
         let last_timestamp = self.mouse_move_last_timestamp.get();
         if last_timestamp.is_some_and(|last| {
@@ -795,13 +803,13 @@ impl Input {
                     || point.y >= frame.origin.y + frame.size.height
                 {
                     self.mouse_move_last_timestamp.set(Some(timestamp));
-                    return true;
+                    return Some(point);
                 }
             }
-            return false;
+            return None;
         }
         self.mouse_move_last_timestamp.set(Some(timestamp));
-        true
+        Some(CGEvent::location(Some(event)))
     }
 
     fn handle_keyboard_event(
@@ -922,15 +930,28 @@ unsafe extern "C-unwind" fn input_callback(
     // actor/state path entirely. The admission check is scalar-only and has
     // no fallible or panicking operations.
     let this = unsafe { &*ctx.this };
-    if event_type == CGEventType::MouseMoved && !this.admit_mouse_move(event) {
-        return if this.mission_control_active.get() {
-            core::ptr::null_mut()
-        } else {
-            event_ref.as_ptr()
-        };
-    }
+    let mouse_point = if event_type == CGEventType::MouseMoved {
+        match this.admit_mouse_move(event) {
+            Some(point) => Some(point),
+            None => {
+                return if this.mission_control_active.get() {
+                    core::ptr::null_mut()
+                } else {
+                    event_ref.as_ptr()
+                };
+            }
+        }
+    } else {
+        None
+    };
 
-    let result = std::panic::catch_unwind(AssertUnwindSafe(|| this.on_event(event_type, event)));
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        if let Some(point) = mouse_point {
+            this.on_mouse_moved(event, point)
+        } else {
+            this.on_event(event_type, event)
+        }
+    }));
 
     match result {
         Ok(true) => event_ref.as_ptr(),
@@ -1160,28 +1181,28 @@ mod tests {
         .unwrap();
         let start = 1_000_000_000;
         CGEvent::set_timestamp(Some(&event), start);
-        assert!(input.admit_mouse_move(&event));
+        assert_eq!(input.admit_mouse_move(&event), Some(CGPoint::new(20.0, 30.0)));
         CGEvent::set_timestamp(Some(&event), start + interval - 1);
-        assert!(!input.admit_mouse_move(&event));
+        assert!(input.admit_mouse_move(&event).is_none());
         input.mouse_window_frame.set(Some(CGRect::new(
             CGPoint::new(0.0, 0.0),
             CGSize::new(100.0, 100.0),
         )));
         CGEvent::set_location(Some(&event), CGPoint::new(150.0, 30.0));
-        assert!(input.admit_mouse_move(&event));
+        assert_eq!(input.admit_mouse_move(&event), Some(CGPoint::new(150.0, 30.0)));
         CGEvent::set_location(Some(&event), CGPoint::new(50.0, 30.0));
         CGEvent::set_timestamp(Some(&event), start + 2 * interval - 2);
-        assert!(!input.admit_mouse_move(&event));
+        assert!(input.admit_mouse_move(&event).is_none());
         CGEvent::set_timestamp(Some(&event), start + 2 * interval - 1);
-        assert!(input.admit_mouse_move(&event));
+        assert!(input.admit_mouse_move(&event).is_some());
         // An older timestamp (e.g. switching event sources) resets the gate
         // rather than rejecting hardware input until the old clock catches up.
         CGEvent::set_timestamp(Some(&event), start - interval);
-        assert!(input.admit_mouse_move(&event));
+        assert!(input.admit_mouse_move(&event).is_some());
         CGEvent::set_timestamp(Some(&event), start - 1);
-        assert!(!input.admit_mouse_move(&event));
+        assert!(input.admit_mouse_move(&event).is_none());
         CGEvent::set_timestamp(Some(&event), start);
-        assert!(input.admit_mouse_move(&event));
+        assert!(input.admit_mouse_move(&event).is_some());
     }
 
     #[test]
