@@ -15,7 +15,6 @@ use serde_json;
 use strum::VariantNames;
 use tracing::{debug, error, info, instrument, warn};
 
-use crate::actor::gesture_tap;
 use crate::common::config::WorkspaceSelector;
 use crate::sys::app::{NSRunningApplicationExt, pid_t};
 
@@ -26,7 +25,7 @@ type Receiver = actor::Receiver<WmEvent>;
 use self::WmCmd::*;
 use crate::actor::app::{AppInfo, AppThreadHandle, Request};
 use crate::actor::spaces::ForwardedSpaceState;
-use crate::actor::{self, config, event_tap, mission_control, reactor};
+use crate::actor::{self, config, input, mission_control, reactor};
 use crate::model::tx_store::WindowTxStore;
 use crate::sys::dispatch::DispatchExt;
 use crate::sys::screen::CoordinateConverter;
@@ -128,8 +127,7 @@ pub struct WmController {
     config: Config,
     config_tx: config::Sender,
     events_tx: reactor::Sender,
-    event_tap_tx: event_tap::Sender,
-    gesture_tap_tx: Option<gesture_tap::Sender>,
+    input_tx: input::Sender,
     stack_line_tx: Option<crate::actor::stack_line::Sender>,
     mission_control_tx: Option<mission_control::Sender>,
     window_tx_store: Option<WindowTxStore>,
@@ -188,10 +186,9 @@ impl WmController {
         config: Config,
         config_tx: config::Sender,
         events_tx: reactor::Sender,
-        event_tap_tx: event_tap::Sender,
+        input_tx: input::Sender,
         stack_line_tx: crate::actor::stack_line::Sender,
         mission_control_tx: crate::actor::mission_control::Sender,
-        gesture_tap_tx: Option<gesture_tap::Sender>,
         window_tx_store: Option<WindowTxStore>,
     ) -> (Self, actor::Sender<WmEvent>) {
         let (sender, receiver) = actor::channel();
@@ -203,8 +200,7 @@ impl WmController {
             config,
             config_tx,
             events_tx,
-            event_tap_tx,
-            gesture_tap_tx,
+            input_tx,
             stack_line_tx: Some(stack_line_tx),
             mission_control_tx: Some(mission_control_tx),
             window_tx_store,
@@ -246,15 +242,9 @@ impl WmController {
         match event {
             SpaceStateUpdated(space_state, converter) => {
                 self.events_tx.send(Event::SpaceStateChanged(space_state.clone()));
-                _ = self.event_tap_tx.send(event_tap::Request::SpaceStateUpdated(
-                    space_state.clone(),
-                    converter,
-                ));
-                if let Some(tx) = &self.gesture_tap_tx {
-                    tx.send(gesture_tap::GestureRequest::SpaceStateUpdated(
-                        space_state.clone(),
-                    ));
-                }
+                _ = self
+                    .input_tx
+                    .send(input::Request::SpaceStateUpdated(space_state.clone(), converter));
                 if let Some(tx) = &self.stack_line_tx {
                     _ = tx.try_send(crate::actor::stack_line::Event::SpaceStateUpdated(
                         converter,
@@ -263,7 +253,7 @@ impl WmController {
                 }
             }
             AppEventsRegistered => {
-                _ = self.event_tap_tx.send(event_tap::Request::SetEventProcessing(false));
+                _ = self.input_tx.send(input::Request::SetEventProcessing(false));
 
                 if !self.hotkeys_installed {
                     self.register_hotkeys();
@@ -271,7 +261,7 @@ impl WmController {
                 }
 
                 let sender = self.sender.clone();
-                let event_tap_tx = self.event_tap_tx.clone();
+                let input_tx = self.input_tx.clone();
                 queue::main().after_f_s(
                     Time::new_after(Time::NOW, 250 * 1000000),
                     (sender, WmEvent::DiscoverRunningApps),
@@ -280,7 +270,7 @@ impl WmController {
 
                 queue::main().after_f_s(
                     Time::new_after(Time::NOW, (250 + 350) * 1000000),
-                    (event_tap_tx, event_tap::Request::SetEventProcessing(true)),
+                    (input_tx, input::Request::SetEventProcessing(true)),
                     |(sender, event)| sender.send(event),
                 );
             }
@@ -293,7 +283,7 @@ impl WmController {
                 self.new_app(pid, info);
             }
             AppGloballyActivated(pid) => {
-                _ = self.event_tap_tx.send(event_tap::Request::EnforceHidden);
+                _ = self.input_tx.send(input::Request::EnforceHidden);
                 self.events_tx.send(Event::ApplicationGloballyActivated(pid));
             }
             AppGloballyDeactivated(pid) => {
@@ -316,14 +306,7 @@ impl WmController {
 
                 self.config.config = new_cfg;
 
-                _ = self
-                    .event_tap_tx
-                    .send(event_tap::Request::ConfigUpdated(self.config.config.clone()));
-                if let Some(tx) = &self.gesture_tap_tx {
-                    tx.send(gesture_tap::GestureRequest::ConfigUpdated(
-                        self.config.config.clone(),
-                    ));
-                }
+                _ = self.input_tx.send(input::Request::ConfigUpdated(self.config.config.clone()));
 
                 if !self.hotkeys_installed {
                     debug!(
@@ -348,10 +331,10 @@ impl WmController {
             }
             PowerStateChanged(is_low_power_mode) => {
                 info!("Power state changed: low power mode = {}", is_low_power_mode);
-                _ = self.event_tap_tx.send(event_tap::Request::SetLowPowerMode(is_low_power_mode));
+                _ = self.input_tx.send(input::Request::SetLowPowerMode(is_low_power_mode));
             }
             KeyboardLayoutChanged => {
-                _ = self.event_tap_tx.send(event_tap::Request::KeyboardLayoutChanged);
+                _ = self.input_tx.send(input::Request::KeyboardLayoutChanged);
             }
             Command(Wm(ReloadConfig)) => self.reload_config(),
             Command(Wm(crate::actor::wm_controller::WmCmd::ToggleSpaceActivated)) => {
@@ -500,7 +483,7 @@ impl WmController {
         debug!("register_hotkeys");
         let bindings: Vec<(String, WmCommand)> =
             self.config.config.key_specs.iter().cloned().collect();
-        _ = self.event_tap_tx.send(event_tap::Request::SetHotkeys(bindings));
+        _ = self.input_tx.send(input::Request::SetHotkeys(bindings));
     }
 
     fn reload_config(&self) {

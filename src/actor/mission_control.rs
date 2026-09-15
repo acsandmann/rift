@@ -1,6 +1,7 @@
 use std::rc::Rc;
 
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_core_graphics::CGEventFlags;
 use objc2_foundation::MainThreadMarker;
 use tracing::instrument;
 
@@ -17,6 +18,36 @@ pub enum Event {
     RefreshCurrentWorkspace,
     PreviewReady,
     Action(MissionControlAction),
+    Input(Input),
+}
+
+/// Semantic input for the main-thread overlay; CGEvents stay on the input thread.
+#[derive(Debug)]
+pub enum Input {
+    Dismiss,
+    Left,
+    Right,
+    Up,
+    Down,
+    Activate,
+    Cycle(bool),
+    Click(CGPoint),
+    Move(CGPoint),
+}
+
+impl Input {
+    pub(crate) fn from_keycode(keycode: u16, flags: CGEventFlags) -> Option<Self> {
+        Some(match keycode {
+            53 => Self::Dismiss,
+            123 => Self::Left,
+            124 => Self::Right,
+            125 => Self::Down,
+            126 => Self::Up,
+            36 | 76 => Self::Activate,
+            48 => Self::Cycle(!flags.contains(CGEventFlags::MaskShift)),
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +67,7 @@ pub struct MissionControlActor {
     overlay: Option<MissionControlOverlay>,
     mtm: MainThreadMarker,
     mission_control_active: bool,
+    input_tx: super::input::Sender,
     current_view_mode: Option<MissionControlViewMode>,
     workspaces: Vec<RuntimeWorkspaceData>,
 }
@@ -47,6 +79,7 @@ impl MissionControlActor {
         tx: Sender,
         reactor: reactor::ReactorHandle,
         mtm: MainThreadMarker,
+        input_tx: super::input::Sender,
     ) -> Self {
         Self {
             config,
@@ -55,6 +88,7 @@ impl MissionControlActor {
             tx,
             overlay: None,
             mtm,
+            input_tx,
             mission_control_active: false,
             current_view_mode: None,
             workspaces: Vec::new(),
@@ -83,6 +117,7 @@ impl MissionControlActor {
                 frame,
                 1.0,
                 std::sync::Arc::new(move || preview_tx.send(Event::PreviewReady)),
+                self.input_tx.clone(),
             );
             let action_tx = self.tx.clone();
             overlay.set_action_handler(Rc::new(move |action| {
@@ -148,6 +183,13 @@ impl MissionControlActor {
                 }
             }
             Event::Action(action) => self.handle_overlay_action(action),
+            Event::Input(input) => {
+                if self.mission_control_active
+                    && let Some(overlay) = &self.overlay
+                {
+                    overlay.handle_input(input);
+                }
+            }
             Event::RefreshCurrentWorkspace => {
                 self.refresh_snapshot();
                 if self.mission_control_active {

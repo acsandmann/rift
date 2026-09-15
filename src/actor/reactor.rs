@@ -66,6 +66,8 @@ mod tests;
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread;
 
 use animation::Sender as AnimationSender;
@@ -83,7 +85,7 @@ use serde_with::serde_as;
 use tracing::{debug, instrument, trace, warn};
 use transaction_manager::TransactionId;
 
-use super::{event_tap, gesture_tap};
+use super::input;
 use crate::actor::app::{
     AppInfo, AppThreadHandle, Quiet, Request, WindowId, WindowInfo, WindowInventoryToken, pid_t,
 };
@@ -120,6 +122,61 @@ pub use crate::model::reactor::{
     ReactorCommand, RefocusState, Requested, StaleCleanupState, WorkspaceSwitchOrigin,
     WorkspaceSwitchState,
 };
+
+#[doc(hidden)]
+#[derive(Clone, Debug, Default)]
+pub struct MouseFocusPublisher(Arc<MouseFocusState>);
+
+#[derive(Debug, Default)]
+struct MouseFocusState {
+    latest: AtomicU32,
+    wake_pending: AtomicBool,
+}
+
+impl MouseFocusPublisher {
+    pub(crate) fn publish(
+        &self,
+        sender: &Sender,
+        window: WindowServerId,
+    ) -> Result<(), tokio::sync::mpsc::error::SendError<(tracing::Span, Event)>> {
+        self.0.latest.store(window.as_u32(), Ordering::Release);
+        if self.0.wake_pending.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        sender.try_send(Event::MouseFocusPending(self.clone())).inspect_err(|_| {
+            self.0.wake_pending.store(false, Ordering::Release);
+        })
+    }
+
+    fn take_latest(&self) -> Option<WindowServerId> {
+        // Clear pending first. A concurrent publisher either lands before the
+        // swap below, or queues one harmless extra wake after it.
+        self.0.wake_pending.store(false, Ordering::Release);
+        WindowServerId::new(self.0.latest.swap(0, Ordering::AcqRel))
+            .as_nonzero()
+            .map(|id| WindowServerId::new(id.get()))
+    }
+}
+
+#[cfg(test)]
+mod mouse_focus_publisher_tests {
+    use super::*;
+
+    #[test]
+    fn replaces_pending_focus_candidate_and_queues_one_wake() {
+        let (sender, mut receiver) = actor::channel();
+        let publisher = MouseFocusPublisher::default();
+        for window in [123, 456, 789] {
+            publisher.publish(&sender, WindowServerId::new(window)).unwrap();
+        }
+
+        let (_, Event::MouseFocusPending(wake)) = receiver.try_recv().unwrap() else {
+            panic!("expected coalesced mouse-focus wake");
+        };
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(wake.take_latest(), Some(WindowServerId::new(789)));
+    }
+}
 
 #[derive(Clone)]
 pub struct ReactorHandle {
@@ -265,6 +322,9 @@ pub enum Event {
     /// Window resolution and transition deduplication stay on the input
     /// thread; the reactor only applies the model-dependent focus/raise work.
     MouseMoved(WindowServerId),
+    /// Coalesced wake for the latest focus candidate from the input thread.
+    #[serde(skip)]
+    MouseFocusPending(MouseFocusPublisher),
     /// Forwarded by the spaces actor after wake has been observed.
     ///
     /// The spaces actor is the authority for sleep/lock/display lifecycle.
@@ -358,12 +418,11 @@ impl Reactor {
         config: Config,
         layout_engine: LayoutEngine,
         record: Record,
-        event_tap_tx: event_tap::Sender,
+        input_tx: input::Sender,
         broadcast_tx: BroadcastSender,
         menu_tx: menu_bar::Sender,
         stack_line_tx: stack_line::Sender,
         window_notify: Option<(crate::actor::window_notify::Sender, WindowTxStore)>,
-        gesture_tap_tx: Option<gesture_tap::Sender>,
         one_space: bool,
     ) -> ReactorHandle {
         let (events_tx, events) = actor::channel();
@@ -376,10 +435,9 @@ impl Reactor {
             window_notify,
             one_space,
         );
-        reactor.communication_manager.event_tap_tx = Some(event_tap_tx);
+        reactor.communication_manager.input_tx = Some(input_tx);
         reactor.menu_manager.menu_tx = Some(menu_tx);
         reactor.communication_manager.stack_line_tx = Some(stack_line_tx);
-        reactor.communication_manager.gesture_tap_tx = gesture_tap_tx;
         reactor.communication_manager.events_tx = Some(events_tx_clone.clone());
         let query_handle = ReactorQueryHandle::new(events_tx_clone.clone());
         thread::Builder::new()
@@ -431,8 +489,7 @@ impl Reactor {
             },
             recording_manager: managers::RecordingManager { record },
             communication_manager: managers::CommunicationManager {
-                event_tap_tx: None,
-                gesture_tap_tx: None,
+                input_tx: None,
                 stack_line_tx: None,
                 raise_manager_tx,
                 event_broadcaster: broadcast_tx,
@@ -942,14 +999,14 @@ impl Reactor {
         let (raise_manager_tx, raise_manager_rx) = actor::channel();
         let (animation_tx, animation_rx) = tokio::sync::mpsc::unbounded_channel();
         let reactor = Rc::new(RefCell::new(reactor));
-        let event_tap_tx = {
+        let input_tx = {
             let mut reactor = reactor.borrow_mut();
             reactor.communication_manager.raise_manager_tx = raise_manager_tx.clone();
             reactor.animation_tx = Some(animation_tx);
-            reactor.communication_manager.event_tap_tx.clone()
+            reactor.communication_manager.input_tx.clone()
         };
         let reactor_task = Self::run_reactor_loop(reactor, events);
-        let raise_manager_task = RaiseManager::run(raise_manager_rx, events_tx, event_tap_tx);
+        let raise_manager_task = RaiseManager::run(raise_manager_rx, events_tx, input_tx);
         let animation_task = animation::AnimationManager::run(animation_rx);
         let _ = tokio::join!(reactor_task, raise_manager_task, animation_task);
     }
@@ -974,6 +1031,11 @@ impl Reactor {
     fn handle_thread_event(reactor: &Rc<RefCell<Reactor>>, event: Event) {
         match event {
             Event::InstallIpc(request) => crate::ipc::install_mach_server(reactor.clone(), request),
+            Event::MouseFocusPending(publisher) => {
+                if let Some(window) = publisher.take_latest() {
+                    reactor.borrow_mut().handle_loop_event(Event::MouseMoved(window));
+                }
+            }
             event => reactor.borrow_mut().handle_loop_event(event),
         }
     }
@@ -1120,6 +1182,7 @@ impl Reactor {
 
     #[instrument(name = "reactor::handle_event", skip(self), fields(event=?event))]
     fn handle_event(&mut self, event: Event) {
+        let was_dragging = !matches!(self.drag_manager.drag_state, DragState::Inactive);
         let previously_focused_window = self.main_window();
         match self.dispatch_workflow(event) {
             Ok(mut outcome) => {
@@ -1132,6 +1195,12 @@ impl Reactor {
                 self.apply_event_outcome(outcome);
             }
             Err(error) => warn!(%error, "reactor workflow failed"),
+        }
+        let dragging = !matches!(self.drag_manager.drag_state, DragState::Inactive);
+        if dragging != was_dragging
+            && let Some(tx) = &self.communication_manager.input_tx
+        {
+            tx.send(input::Request::SetDragActive(dragging));
         }
     }
 
@@ -1279,8 +1348,8 @@ impl Reactor {
             }
             Event::WindowServerFocusChanged(window, reported_space) => {
                 if self.layout_manager.layout_engine.focused_window() == Some(window) {
-                    if let Some(event_tap_tx) = &self.communication_manager.event_tap_tx {
-                        _ = event_tap_tx.send(crate::actor::event_tap::Request::EnforceHidden);
+                    if let Some(input_tx) = &self.communication_manager.input_tx {
+                        _ = input_tx.send(crate::actor::input::Request::EnforceHidden);
                     }
                     return Ok(EventOutcome::default());
                 }
@@ -1687,6 +1756,12 @@ impl Reactor {
             }
             Event::MouseMoved(wsid) => {
                 let window = self.state.windows.tracked_window_id(wsid);
+                let frame = window.and_then(|window| {
+                    self.state.windows.window(window).map(|state| state.frame_monotonic)
+                });
+                if let Some(input_tx) = &self.communication_manager.input_tx {
+                    input_tx.send(input::Request::MouseWindowFrame(wsid, frame));
+                }
                 let active_space = window.and_then(|window| {
                     self.state.windows.window(window).and_then(|state| {
                         self.best_space_for_window(&state.frame_monotonic, state.info.sys_id)
@@ -1704,7 +1779,7 @@ impl Reactor {
                 let needs_layout_sync = window.is_some_and(|window| {
                     self.layout_manager.layout_engine.focused_window() != Some(window)
                 });
-                return window_workflow::handle_mouse_moved_over_window(
+                let outcome = window_workflow::handle_mouse_moved_over_window(
                     &self.app_manager,
                     window_workflow::MouseMovedPayload {
                         window,
@@ -1714,7 +1789,11 @@ impl Reactor {
                         needs_layout_sync,
                         active_space,
                     },
-                );
+                )?;
+                if outcome.raise_requests.is_empty() {
+                    self.complete_mouse_focus(wsid);
+                }
+                return Ok(outcome);
             }
             Event::MissionControlNativeEntered => {
                 return topology_workflow::handle_mission_control_native_entered(
@@ -1728,6 +1807,10 @@ impl Reactor {
                 );
             }
             Event::RaiseCompleted { window_id, sequence_id } => {
+                if let Some(wsid) = self.state.windows.window(window_id).and_then(|w| w.info.sys_id)
+                {
+                    self.complete_mouse_focus(wsid);
+                }
                 return Ok(system_workflow::handle_raise_completed(
                     system_workflow::RaiseCompletedPayload {
                         window: window_id,
@@ -3481,10 +3564,10 @@ impl Reactor {
     }
 
     pub fn warp_mouse(&mut self, point: CGPoint) {
-        let Some(event_tap_tx) = self.communication_manager.event_tap_tx.clone() else {
+        let Some(input_tx) = self.communication_manager.input_tx.clone() else {
             return;
         };
-        _ = event_tap_tx.send(crate::actor::event_tap::Request::Warp(point));
+        _ = input_tx.send(crate::actor::input::Request::Warp(point));
     }
 
     fn warp_mouse_to_space_center(&mut self, space: SpaceId) -> bool {
@@ -3599,8 +3682,8 @@ impl Reactor {
                 request.window,
             );
         }
-        if focus_changed && let Some(event_tap_tx) = &self.communication_manager.event_tap_tx {
-            _ = event_tap_tx.send(crate::actor::event_tap::Request::HideOnFocus);
+        if focus_changed && let Some(input_tx) = &self.communication_manager.input_tx {
+            _ = input_tx.send(crate::actor::input::Request::HideOnFocus);
         }
         let geometry_changed = response.changed;
         self.prepare_refocus_after_layout_event(&event_clone);
@@ -4601,9 +4684,15 @@ impl Reactor {
         }
     }
 
+    fn complete_mouse_focus(&self, window: WindowServerId) {
+        if let Some(sender) = &self.communication_manager.input_tx {
+            sender.send(input::Request::MouseFocusCompleted(window));
+        }
+    }
+
     fn set_focus_follows_mouse_enabled(&self, enabled: bool) {
-        if let Some(event_tap_tx) = self.communication_manager.event_tap_tx.as_ref() {
-            event_tap_tx.send(event_tap::Request::SetFocusFollowsMouseEnabled(enabled));
+        if let Some(input_tx) = self.communication_manager.input_tx.as_ref() {
+            input_tx.send(input::Request::SetFocusFollowsMouseEnabled(enabled));
         }
     }
 
@@ -4615,7 +4704,7 @@ impl Reactor {
     }
 
     fn update_event_tap_layout_mode(&mut self) {
-        let Some(event_tap_tx) = self.communication_manager.event_tap_tx.as_ref() else {
+        let Some(input_tx) = self.communication_manager.input_tx.as_ref() else {
             return;
         };
 
@@ -4647,10 +4736,7 @@ impl Reactor {
 
         let modes_by_space = modes.iter().copied().collect();
         self.notification_manager.last_layout_modes_by_space = modes_by_space;
-        if let Some(gesture_tap_tx) = self.communication_manager.gesture_tap_tx.as_ref() {
-            gesture_tap_tx.send(gesture_tap::GestureRequest::LayoutModesChanged(modes.clone()));
-        }
-        event_tap_tx.send(crate::actor::event_tap::Request::LayoutModesChanged(modes));
+        input_tx.send(crate::actor::input::Request::LayoutModesChanged(modes));
     }
 
     fn set_mission_control_active(&mut self, active: bool) {

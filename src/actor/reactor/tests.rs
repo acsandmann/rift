@@ -834,7 +834,11 @@ fn best_space_prefers_authoritative_window_server_space_over_geometry() {
     reactor.handle_event(space_state_event(vec![frame], vec![Some(space2)]));
     reactor.insert_test_window(wid, wsid, Some(space1), frame, true);
 
-    assert_eq!(reactor.best_space_for_window_id(wid), Some(space1));
+    // The synthetic ID can collide with a real desktop window in unsandboxed tests.
+    crate::sys::window_server::set_window_spaces_override(wsid, Some(vec![space1.get()]));
+    let resolved = reactor.best_space_for_window_id(wid);
+    crate::sys::window_server::set_window_spaces_override(wsid, None);
+    assert_eq!(resolved, Some(space1));
 }
 
 #[test]
@@ -2203,7 +2207,16 @@ fn mission_control_enter_clears_active_drag_state() {
         DragState::Active { .. }
     ));
 
+    let (input_tx, mut input_rx) = actor::channel();
+    reactor.communication_manager.input_tx = Some(input_tx);
     reactor.handle_event(Event::MissionControlNativeEntered);
+    let drag_updates: Vec<_> = std::iter::from_fn(|| input_rx.try_recv().ok())
+        .filter_map(|(_, request)| match request {
+            crate::actor::input::Request::SetDragActive(active) => Some(active),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(drag_updates, vec![false]);
 
     assert!(matches!(reactor.drag_manager.drag_state, DragState::Inactive));
     assert!(reactor.drag_manager.skip_layout_for_window.is_none());
@@ -3194,25 +3207,25 @@ fn title_change_non_title_fallback_preserves_manually_moved_workspace() {
 #[test]
 fn menu_open_state_is_cleared_when_owner_deactivates() {
     let mut reactor = test_reactor();
-    let (event_tap_tx, mut event_tap_rx) = actor::channel();
-    reactor.communication_manager.event_tap_tx = Some(event_tap_tx);
+    let (input_tx, mut input_rx) = actor::channel();
+    reactor.communication_manager.input_tx = Some(input_tx);
 
     reactor.handle_event(Event::MenuOpened(1));
-    let disable = event_tap_rx.try_recv().expect("menu-open should update event tap").1;
+    let disable = input_rx.try_recv().expect("menu-open should update event tap").1;
     assert!(matches!(
         disable,
-        crate::actor::event_tap::Request::SetFocusFollowsMouseEnabled(false)
+        crate::actor::input::Request::SetFocusFollowsMouseEnabled(false)
     ));
     assert_eq!(reactor.menu_manager.menu_state, MenuState::Open(1));
 
     reactor.handle_event(Event::ApplicationDeactivated(1));
-    let enable = event_tap_rx
+    let enable = input_rx
         .try_recv()
         .expect("app deactivation should re-enable focus-follows-mouse")
         .1;
     assert!(matches!(
         enable,
-        crate::actor::event_tap::Request::SetFocusFollowsMouseEnabled(true)
+        crate::actor::input::Request::SetFocusFollowsMouseEnabled(true)
     ));
     assert_eq!(reactor.menu_manager.menu_state, MenuState::Closed);
 }
@@ -3220,21 +3233,21 @@ fn menu_open_state_is_cleared_when_owner_deactivates() {
 #[test]
 fn stale_menu_open_state_is_cleared_when_other_app_activates() {
     let mut reactor = test_reactor();
-    let (event_tap_tx, mut event_tap_rx) = actor::channel();
-    reactor.communication_manager.event_tap_tx = Some(event_tap_tx);
+    let (input_tx, mut input_rx) = actor::channel();
+    reactor.communication_manager.input_tx = Some(input_tx);
 
     reactor.handle_event(Event::MenuOpened(1));
-    let _ = event_tap_rx.try_recv().expect("menu-open should update event tap");
+    let _ = input_rx.try_recv().expect("menu-open should update event tap");
     assert_eq!(reactor.menu_manager.menu_state, MenuState::Open(1));
 
     reactor.handle_event(Event::ApplicationGloballyActivated(2));
-    let enable = event_tap_rx
+    let enable = input_rx
         .try_recv()
         .expect("activation of another app should clear stale menu state")
         .1;
     assert!(matches!(
         enable,
-        crate::actor::event_tap::Request::SetFocusFollowsMouseEnabled(true)
+        crate::actor::input::Request::SetFocusFollowsMouseEnabled(true)
     ));
     assert_eq!(reactor.menu_manager.menu_state, MenuState::Closed);
 }
@@ -3242,8 +3255,8 @@ fn stale_menu_open_state_is_cleared_when_other_app_activates() {
 #[test]
 fn same_app_focus_change_hides_mouse_and_window_server_confirmation_reasserts_it() {
     let (mut apps, mut reactor) = test_context();
-    let (event_tap_tx, mut event_tap_rx) = actor::channel();
-    reactor.communication_manager.event_tap_tx = Some(event_tap_tx);
+    let (input_tx, mut input_rx) = actor::channel();
+    reactor.communication_manager.input_tx = Some(input_tx);
 
     let space = SpaceId::new(1);
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
@@ -3253,23 +3266,20 @@ fn same_app_focus_change_hides_mouse_and_window_server_confirmation_reasserts_it
     reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
     apps.make_app_and_settle(&mut reactor, 1, make_windows(2));
     reactor.send_layout_event(LayoutEvent::WindowFocused(space, first));
-    while event_tap_rx.try_recv().is_ok() {}
+    while input_rx.try_recv().is_ok() {}
 
     reactor.send_layout_event(LayoutEvent::WindowFocused(space, second));
 
-    let request = event_tap_rx.try_recv().expect("same-app focus change should hide mouse").1;
-    assert!(matches!(request, crate::actor::event_tap::Request::HideOnFocus));
+    let request = input_rx.try_recv().expect("same-app focus change should hide mouse").1;
+    assert!(matches!(request, crate::actor::input::Request::HideOnFocus));
 
     reactor.handle_event(Event::WindowServerFocusChanged(second, space));
 
-    let request = event_tap_rx
+    let request = input_rx
         .try_recv()
         .expect("WindowServer focus confirmation should reassert hidden mouse")
         .1;
-    assert!(matches!(
-        request,
-        crate::actor::event_tap::Request::EnforceHidden
-    ));
+    assert!(matches!(request, crate::actor::input::Request::EnforceHidden));
 }
 
 #[test]

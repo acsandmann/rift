@@ -130,6 +130,11 @@ pub fn is_physical_horizontal_dock_swipe(event_type: CGEventType, event: &CGEven
             == K_CG_GESTURE_MOTION_HORIZONTAL
 }
 
+#[inline]
+pub fn phase(event: &CGEvent) -> i64 {
+    CGEvent::integer_value_field(Some(event), K_GESTURE_PHASE_FIELD)
+}
+
 /// Classify one type-29 event and decode a physical contact frame when present.
 ///
 /// `CGEventCopyIOHIDEvent` is a retained lookup (about 41 ns on the measured

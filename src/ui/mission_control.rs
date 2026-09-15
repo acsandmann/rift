@@ -14,10 +14,7 @@ use objc2::runtime::{AnyClass, AnyObject};
 use objc2::{AnyThread, msg_send};
 use objc2_app_kit::{NSApplication, NSColor, NSPopUpMenuWindowLevel, NSScreen};
 use objc2_core_foundation::{CFRetained, CFString, CGPoint, CGRect, CGSize};
-use objc2_core_graphics::{
-    CGColor, CGDisplayBounds, CGEvent, CGEventField, CGEventFlags, CGEventTapOptions,
-    CGEventTapProxy, CGEventType,
-};
+use objc2_core_graphics::{CGColor, CGDisplayBounds};
 use objc2_core_media::CMSampleBuffer;
 use objc2_core_video::CVPixelBufferGetIOSurface;
 use objc2_foundation::{MainThreadMarker, NSDictionary, NSError};
@@ -28,7 +25,6 @@ use objc2_screen_capture_kit::{
     SCStreamConfiguration,
 };
 use once_cell::sync::Lazy;
-use tracing::info;
 
 use crate::actor::app::WindowId;
 use crate::common::collections::{HashMap, HashSet};
@@ -1210,10 +1206,10 @@ pub struct MissionControlOverlay {
     root_layer: Retained<CALayer>,
     frame: CGRect,
     mtm: MainThreadMarker,
-    key_tap: RefCell<Option<crate::sys::event_tap::EventTap>>,
     fade_enabled: bool,
     fade_duration_ms: f64,
     has_shown: RefCell<bool>,
+    input_tx: crate::actor::input::Sender,
     state: RefCell<MissionControlState>,
     fade_state: RefCell<Option<FadeState>>,
     fade_counter: AtomicU64,
@@ -1230,6 +1226,7 @@ impl MissionControlOverlay {
         frame: CGRect,
         scale: f64,
         preview_ready: Arc<dyn Fn() + Send + Sync>,
+        input_tx: crate::actor::input::Sender,
     ) -> Self {
         let mut frame = frame;
         let mut scale = scale;
@@ -1280,10 +1277,10 @@ impl MissionControlOverlay {
             root_layer,
             frame,
             mtm,
-            key_tap: RefCell::new(None),
             fade_enabled: config.settings.ui.mission_control.fade_enabled,
             fade_duration_ms: config.settings.ui.mission_control.fade_duration_ms,
             has_shown: RefCell::new(false),
+            input_tx,
             state: RefCell::new(MissionControlState::default()),
             fade_state: RefCell::new(None),
             fade_counter: AtomicU64::new(0),
@@ -1419,7 +1416,7 @@ impl MissionControlOverlay {
         }
         let app = NSApplication::sharedApplication(self.mtm);
         app.activate();
-        self.ensure_key_tap();
+        self.input_tx.send(crate::actor::input::Request::SetMissionControlActive(true));
 
         self.draw_and_present();
         let _ = self.cgs_window.order_above(None);
@@ -1452,7 +1449,7 @@ impl MissionControlOverlay {
     fn finalize_hide(&self) {
         objc2::rc::autoreleasepool(|_| {
             self.stop_active_fade();
-            self.key_tap.borrow_mut().take();
+            self.input_tx.send(crate::actor::input::Request::SetMissionControlActive(false));
             self.capture.clear();
 
             {
@@ -1594,48 +1591,40 @@ impl MissionControlOverlay {
         queue::main().after_f(Time::NOW, Box::into_raw(ctx) as *mut c_void, action_callback);
     }
 
-    fn handle_keycode(&self, keycode: u16, flags: CGEventFlags) -> bool {
-        match keycode {
-            53 => {
+    pub(crate) fn handle_input(&self, input: crate::actor::mission_control::Input) {
+        use crate::actor::mission_control::Input;
+        let direction = match input {
+            Input::Left => Some(NavDirection::Left),
+            Input::Right => Some(NavDirection::Right),
+            Input::Up => Some(NavDirection::Up),
+            Input::Down => Some(NavDirection::Down),
+            Input::Dismiss => {
                 self.emit_action(MissionControlAction::Dismiss);
-                true
+                None
             }
-            123 => {
-                if self.adjust_selection(NavDirection::Left) {
-                    self.draw_and_present();
-                }
-                true
-            }
-            124 => {
-                if self.adjust_selection(NavDirection::Right) {
-                    self.draw_and_present();
-                }
-                true
-            }
-            125 => {
-                if self.adjust_selection(NavDirection::Down) {
-                    self.draw_and_present();
-                }
-                true
-            }
-            126 => {
-                if self.adjust_selection(NavDirection::Up) {
-                    self.draw_and_present();
-                }
-                true
-            }
-            36 | 76 => {
+            Input::Activate => {
                 self.activate_selection_action();
-                true
+                None
             }
-            48 => {
-                let forward = !flags.contains(CGEventFlags::MaskShift);
+            Input::Cycle(forward) => {
                 if self.cycle_selection(forward) {
                     self.draw_and_present();
                 }
-                true
+                None
             }
-            _ => false,
+            Input::Click(point) => {
+                self.handle_click_global(point);
+                None
+            }
+            Input::Move(point) => {
+                self.handle_move_global(point);
+                None
+            }
+        };
+        if let Some(direction) = direction
+            && self.adjust_selection(direction)
+        {
+            self.draw_and_present();
         }
     }
 
@@ -1717,118 +1706,6 @@ impl MissionControlOverlay {
             state.set_selection(sel);
             drop(state);
             self.draw_and_present();
-        }
-    }
-
-    fn ensure_key_tap(&self) {
-        if self.key_tap.borrow().is_some() {
-            return;
-        }
-
-        #[repr(C)]
-        struct KeyCtx {
-            overlay: *const MissionControlOverlay,
-            consumes: bool,
-        }
-
-        unsafe fn drop_ctx(ptr: *mut c_void) {
-            unsafe {
-                drop(Box::from_raw(ptr as *mut KeyCtx));
-            }
-        }
-
-        unsafe extern "C-unwind" fn key_callback(
-            _proxy: CGEventTapProxy,
-            etype: CGEventType,
-            event: core::ptr::NonNull<CGEvent>,
-            user_info: *mut c_void,
-        ) -> *mut CGEvent {
-            let ctx = unsafe { &*(user_info as *const KeyCtx) };
-            let mut handled = false;
-            if let Some(overlay) = unsafe { ctx.overlay.as_ref() } {
-                match etype {
-                    CGEventType::KeyDown => {
-                        let keycode = unsafe {
-                            CGEvent::integer_value_field(
-                                Some(event.as_ref()),
-                                CGEventField::KeyboardEventKeycode,
-                            ) as u16
-                        };
-                        let flags = unsafe { CGEvent::flags(Some(event.as_ref())) };
-                        handled = overlay.handle_keycode(keycode, flags);
-                    }
-                    CGEventType::LeftMouseDown => {
-                        let loc = unsafe { CGEvent::location(Some(event.as_ref())) };
-                        overlay.handle_click_global(loc);
-                        handled = true;
-                    }
-                    CGEventType::LeftMouseUp => {
-                        handled = true;
-                    }
-                    CGEventType::MouseMoved => {
-                        let loc = unsafe { CGEvent::location(Some(event.as_ref())) };
-                        overlay.handle_move_global(loc);
-                        handled = true;
-                    }
-                    _ => {}
-                }
-            }
-            if handled && ctx.consumes {
-                core::ptr::null_mut()
-            } else {
-                event.as_ptr()
-            }
-        }
-
-        let mask = (1u64 << CGEventType::KeyDown.0 as u64)
-            | (1u64 << CGEventType::LeftMouseDown.0 as u64)
-            | (1u64 << CGEventType::LeftMouseUp.0 as u64)
-            | (1u64 << CGEventType::MouseMoved.0 as u64);
-
-        let overlay_ptr = self as *const _;
-
-        let tap = unsafe {
-            let ctx_ptr = Box::into_raw(Box::new(KeyCtx {
-                overlay: overlay_ptr,
-                consumes: true,
-            })) as *mut c_void;
-            match crate::sys::event_tap::EventTap::new_with_options(
-                CGEventTapOptions::Default,
-                mask,
-                Some(key_callback),
-                ctx_ptr,
-                Some(drop_ctx),
-            ) {
-                Some(tap) => Some(tap),
-                None => {
-                    drop_ctx(ctx_ptr);
-                    let ctx_ptr = Box::into_raw(Box::new(KeyCtx {
-                        overlay: overlay_ptr,
-                        consumes: false,
-                    })) as *mut c_void;
-                    match crate::sys::event_tap::EventTap::new_listen_only(
-                        mask,
-                        Some(key_callback),
-                        ctx_ptr,
-                        Some(drop_ctx),
-                    ) {
-                        Some(tap) => {
-                            info!(
-                                "Falling back to listen-only event tap; Mission Control overlay input will pass through"
-                            );
-                            Some(tap)
-                        }
-                        None => {
-                            drop_ctx(ctx_ptr);
-                            None
-                        }
-                    }
-                }
-            }
-        };
-
-        if let Some(t) = tap {
-            self.key_tap.borrow_mut().replace(t);
         }
     }
 }
