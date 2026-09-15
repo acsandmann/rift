@@ -29,9 +29,9 @@ struct EventLoopStats {
 
 /// A thread-safe waker for the main Cocoa event pump.
 pub(super) struct EventLoopWaker {
+    // True while a marker is being posted or is queued and unconsumed.
     pending: AtomicBool,
     app: NonNull<NSApplication>,
-    event: Retained<NSEvent>,
     #[cfg(debug_assertions)]
     stats: EventLoopStats,
 }
@@ -44,7 +44,6 @@ impl EventLoopWaker {
         Self {
             pending: AtomicBool::new(false),
             app: NonNull::from(app),
-            event: Self::make_wake_event(),
             #[cfg(debug_assertions)]
             stats: EventLoopStats::default(),
         }
@@ -61,7 +60,10 @@ impl EventLoopWaker {
             return;
         }
 
-        unsafe { self.app.as_ref() }.postEvent_atStart(&self.event, false);
+        autoreleasepool(|_| {
+            let event = Self::make_wake_event();
+            unsafe { self.app.as_ref() }.postEvent_atStart(&event, false);
+        });
     }
 
     fn make_wake_event() -> Retained<NSEvent> {
@@ -78,7 +80,13 @@ impl EventLoopWaker {
         ).expect("unable to create Rift's Cocoa wake event")
     }
 
-    fn rearm_before_poll(&self) { self.pending.store(false, Ordering::Release); }
+    fn consume_wake(&self) {
+        // Work must be published before wake(). An AcqRel swap reads all
+        // coalesced producers' release swaps before the upcoming executor poll.
+        // A producer ordered after this reset sees false and posts a new marker.
+        // Thus its work is either visible to that poll or has another wake.
+        self.pending.swap(false, Ordering::AcqRel);
+    }
 
     fn is_rift_wake(event: &NSEvent) -> bool {
         event.r#type() == NSEventType::ApplicationDefined
@@ -118,38 +126,42 @@ impl EventLoop {
         self.waker.stats.iterations.fetch_add(1, Ordering::Relaxed);
 
         autoreleasepool(|_| {
-            let mut deadline = &*self.blocking_deadline;
-            let mut dispatched_real_event = false;
-
-            loop {
-                let event = unsafe {
-                    self.app.nextEventMatchingMask_untilDate_inMode_dequeue(
-                        NSEventMask::Any,
-                        Some(deadline),
-                        NSDefaultRunLoopMode,
-                        true,
-                    )
-                };
-                let Some(event) = event else {
+            let dispatched_real_event = drain_events(
+                |blocking| {
+                    let deadline = if blocking {
+                        &*self.blocking_deadline
+                    } else {
+                        &*self.drain_deadline
+                    };
+                    let event = unsafe {
+                        self.app.nextEventMatchingMask_untilDate_inMode_dequeue(
+                            NSEventMask::Any,
+                            Some(deadline),
+                            NSDefaultRunLoopMode,
+                            true,
+                        )
+                    };
                     #[cfg(debug_assertions)]
-                    if std::ptr::eq(deadline, &*self.blocking_deadline) {
+                    if blocking && event.is_none() {
                         self.waker.stats.empty_returns.fetch_add(1, Ordering::Relaxed);
                     }
-                    break;
-                };
-
-                deadline = &self.drain_deadline;
-                if EventLoopWaker::is_rift_wake(&event) {
+                    event
+                },
+                |event| {
+                    if !EventLoopWaker::is_rift_wake(event) {
+                        return false;
+                    }
                     #[cfg(debug_assertions)]
                     self.waker.stats.synthetic_wakes.fetch_add(1, Ordering::Relaxed);
-                    continue;
-                }
-
-                self.app.sendEvent(&event);
-                dispatched_real_event = true;
-                #[cfg(debug_assertions)]
-                self.waker.stats.real_events.fetch_add(1, Ordering::Relaxed);
-            }
+                    self.waker.consume_wake();
+                    true
+                },
+                |event| {
+                    self.app.sendEvent(event);
+                    #[cfg(debug_assertions)]
+                    self.waker.stats.real_events.fetch_add(1, Ordering::Relaxed);
+                },
+            );
 
             if dispatched_real_event {
                 self.app.updateWindows();
@@ -157,8 +169,27 @@ impl EventLoop {
                 self.waker.stats.update_windows.fetch_add(1, Ordering::Relaxed);
             }
         });
-        self.waker.rearm_before_poll();
     }
+}
+
+// Only the first retrieval blocks. A Rift marker is a scheduling boundary;
+// leave later Cocoa events queued for the next batch.
+fn drain_events<E>(
+    mut next: impl FnMut(bool) -> Option<E>,
+    mut consume_wake: impl FnMut(&E) -> bool,
+    mut dispatch: impl FnMut(&E),
+) -> bool {
+    let mut blocking = true;
+    let mut dispatched = false;
+    while let Some(event) = next(blocking) {
+        if consume_wake(&event) {
+            break;
+        }
+        dispatch(&event);
+        dispatched = true;
+        blocking = false;
+    }
+    dispatched
 }
 
 #[cfg(test)]
@@ -166,12 +197,61 @@ mod tests {
     use super::*;
 
     #[test]
-    fn requests_coalesce_until_the_next_poll() {
+    fn cocoa_batches_stop_at_the_wake_marker() {
+        use std::collections::VecDeque;
+        for (events, expected, remaining) in [
+            (vec![1, 2, 0, 3, 4], vec![1, 2], vec![3, 4]),
+            (vec![1, 2, 3], vec![1, 2, 3], vec![]),
+            (vec![0], vec![], vec![]),
+            (vec![], vec![], vec![]),
+        ] {
+            let mut queue = VecDeque::from(events);
+            let mut dispatched = Vec::new();
+            let mut retrievals = Vec::new();
+            let update_windows = drain_events(
+                |blocking| {
+                    retrievals.push(blocking);
+                    queue.pop_front()
+                },
+                |event| *event == 0,
+                |event| dispatched.push(*event),
+            );
+            assert_eq!(dispatched, expected);
+            assert_eq!(queue.into_iter().collect::<Vec<_>>(), remaining);
+            assert_eq!(update_windows, !expected.is_empty());
+            assert!(retrievals[0]);
+            assert!(retrievals[1..].iter().all(|blocking| !blocking));
+        }
+    }
+
+    #[test]
+    fn concurrent_publication_and_marker_reset_cannot_lose_work() {
+        for _ in 0..100 {
+            let pending = AtomicBool::new(true);
+            let work = AtomicBool::new(false);
+            let barrier = std::sync::Barrier::new(2);
+            std::thread::scope(|scope| {
+                let producer = scope.spawn(|| {
+                    barrier.wait();
+                    work.store(true, Ordering::Relaxed);
+                    !pending.swap(true, Ordering::AcqRel)
+                });
+                barrier.wait();
+                pending.swap(false, Ordering::AcqRel);
+                let observed_by_poll = work.load(Ordering::Relaxed);
+                let posted_new_marker = producer.join().unwrap();
+                assert!(observed_by_poll || posted_new_marker);
+                assert_eq!(pending.load(Ordering::Acquire), posted_new_marker);
+            });
+        }
+    }
+
+    #[test]
+    fn requests_coalesce_until_marker_consumption() {
         // These tests exercise only the atomic state, never posting through app.
         let waker = EventLoopWaker {
             pending: AtomicBool::new(false),
             app: NonNull::dangling(),
-            event: EventLoopWaker::make_wake_event(),
             #[cfg(debug_assertions)]
             stats: EventLoopStats::default(),
         };
@@ -179,16 +259,15 @@ mod tests {
         for _ in 1..100 {
             assert!(!waker.request_wake());
         }
-        waker.rearm_before_poll();
+        waker.consume_wake();
         assert!(waker.request_wake());
     }
 
     #[test]
-    fn published_work_survives_a_coalesced_wake_before_rearming() {
+    fn published_work_survives_a_coalesced_wake_before_consumption() {
         let waker = EventLoopWaker {
             pending: AtomicBool::new(false),
             app: NonNull::dangling(),
-            event: EventLoopWaker::make_wake_event(),
             #[cfg(debug_assertions)]
             stats: EventLoopStats::default(),
         };
@@ -206,8 +285,8 @@ mod tests {
                 });
             }
         });
-        // The batch ends before polling the queue, even if all wakes coalesced.
-        waker.rearm_before_poll();
+        // Consuming the marker precedes polling, even if all wakes coalesced.
+        waker.consume_wake();
         assert_eq!(rx.try_iter().count(), 100);
         // A producer racing the subsequent poll must post a new event.
         tx.send(()).unwrap();
