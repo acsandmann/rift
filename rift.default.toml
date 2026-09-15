@@ -108,6 +108,17 @@ new_window_placement = "master"
 # If omitted, defaults to the direction perpendicular to master_side's split
 # stack_arrangement = "vertical"
 
+# these settings only apply when layout mode == "bsp"
+[settings.layout.bsp]
+# Center the lone tiled window when a workspace has exactly one window.
+# Can also be toggled at runtime via the `toggle_center_single_window` command;
+# reloading the config resets it to this value.
+center_single_window = false
+# Size of the centered lone window as fractions of the usable screen area
+# (0.1..1.0)
+center_single_window_width_ratio = 0.7
+center_single_window_height_ratio = 0.8
+
 # these settings only apply when layout mode == "scrolling"
 [settings.layout.scrolling]
 # width of the active column (0..1 of screen width)
@@ -422,6 +433,9 @@ comb1 = "Alt + Shift"
 # - adjust_master_ratio = 0.05 / adjust_master_count = 1
 # - promote_to_master / swap_master_stack
 
+# the following commands *only* work when the bsp layout is active
+# - toggle_center_single_window (centers the lone tiled window; see [settings.layout.bsp])
+
 # the following commands *only* work when the scrolling layout is active
 # - scroll_strip = { delta = 0.5 }
 # - snap_strip / center_selection
@@ -462,6 +476,7 @@ comb1 = "Alt + Shift"
 "Alt + Shift + Down" = { join_window = "down" }
 "Alt + Comma" = "toggle_stack"
 "Alt + Slash" = "toggle_orientation"
+"Alt + Ctrl + C" = "toggle_center_single_window"
 "Alt + Ctrl + E" = "unjoin_windows"
 
 "Alt + Shift + Space" = "toggle_window_floating"
