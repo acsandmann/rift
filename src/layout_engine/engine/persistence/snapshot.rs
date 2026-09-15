@@ -69,6 +69,7 @@ impl PersistedLayout {
             layout_settings: LayoutSettings::default(),
             broadcast_tx: None,
             space_display_map: self.space_display_map,
+            space_display_external: HashMap::default(),
             display_last_space: self.display_last_space,
             persistence: self.persistence,
             startup_restore_pending: false,

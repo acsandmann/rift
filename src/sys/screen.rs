@@ -64,6 +64,8 @@ pub struct ScreenInfo {
     #[serde(with = "CGRectDef")]
     pub frame: CGRect,
     pub display_uuid: String,
+    #[serde(skip)]
+    pub is_builtin: bool,
     pub name: Option<String>,
     pub space: Option<SpaceId>,
 }
@@ -210,6 +212,7 @@ impl<S: System> ScreenCache<S> {
                     id: cg_id,
                     frame,
                     display_uuid,
+                    is_builtin: self.system.is_builtin(cg_id.as_u32()),
                     name: ns_screens.iter().find(|s| s.cg_id == cg_id).and_then(|s| s.name.clone()),
                     space: None,
                 }
@@ -425,6 +428,7 @@ pub trait System {
     fn cg_screens(&self) -> Result<Vec<CGScreenInfo>, CGError>;
     fn display_uuid(&self, screen: &CGScreenInfo) -> CFRetained<CFString>;
     fn ns_screens(&self) -> Vec<NSScreenInfo>;
+    fn is_builtin(&self, _did: u32) -> bool { false }
     fn notch_height(&self, _did: u32) -> f64 { 0.0 }
 }
 
@@ -519,10 +523,11 @@ impl System for Actual {
             .collect()
     }
 
+    fn is_builtin(&self, did: u32) -> bool { unsafe { super::skylight::CGDisplayIsBuiltin(did) } }
+
     fn notch_height(&self, did: u32) -> f64 {
         let screens = NSScreen::screens(self.mtm);
-        let builtin = unsafe { super::skylight::CGDisplayIsBuiltin(did) };
-        if !builtin {
+        if !self.is_builtin(did) {
             return 0.0;
         }
 
@@ -754,6 +759,7 @@ mod test {
     struct Stub {
         cg_screens: Vec<CGScreenInfo>,
         ns_screens: Vec<NSScreenInfo>,
+        builtin_id: Option<u32>,
     }
     impl System for Stub {
         fn cg_screens(&self) -> Result<Vec<CGScreenInfo>, CGError> { Ok(self.cg_screens.clone()) }
@@ -763,6 +769,8 @@ mod test {
         }
 
         fn ns_screens(&self) -> Vec<NSScreenInfo> { self.ns_screens.clone() }
+
+        fn is_builtin(&self, did: u32) -> bool { self.builtin_id == Some(did) }
 
         fn notch_height(&self, _did: u32) -> f64 { 0.0 }
     }
@@ -839,11 +847,15 @@ mod test {
                     name: None,
                 },
             ],
+            builtin_id: Some(1),
         };
         let mut sc = ScreenCache::new_with(stub);
         let (screens, _) = sc.refresh().unwrap();
 
         let secondary = screens.iter().find(|screen| screen.id == ScreenId(1)).unwrap();
+        let external = screens.iter().find(|screen| screen.id == ScreenId(3)).unwrap();
+        assert!(secondary.is_builtin);
+        assert!(!external.is_builtin);
         assert_eq!(
             secondary.frame,
             super::constrain_display_bounds(

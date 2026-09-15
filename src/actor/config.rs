@@ -27,6 +27,34 @@ pub struct ConfigActor {
     config_path: PathBuf,
 }
 
+fn set_json_path(
+    root: &mut serde_json::Value,
+    key: &str,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    let parts: Vec<&str> = key.split('.').collect();
+    if parts.is_empty() || parts.iter().any(|part| part.is_empty()) {
+        return Err("Empty config key provided".to_string());
+    }
+
+    let mut current = root;
+    for (index, part) in parts.iter().enumerate() {
+        if current.is_null() {
+            *current = serde_json::json!({});
+        }
+        let Some(object) = current.as_object_mut() else {
+            return Err(format!("Invalid config path: {key}"));
+        };
+        if index + 1 == parts.len() {
+            object.insert((*part).to_string(), value);
+            return Ok(());
+        }
+        current = object.entry((*part).to_string()).or_insert_with(|| serde_json::json!({}));
+    }
+
+    Ok(())
+}
+
 impl ConfigActor {
     pub fn spawn(config: Config, reactor_tx: reactor::Sender) -> Sender {
         Self::spawn_with_path(config, reactor_tx, crate::common::config::config_file())
@@ -182,50 +210,22 @@ impl ConfigActor {
             }
 
             ConfigCommand::Set { key, value } => match serde_json::to_value(&new_config) {
-                Ok(mut cfg_val) => {
-                    let parts: Vec<&str> = key.split('.').collect();
-                    if parts.is_empty() {
-                        errors.push("Empty config key provided".to_string());
-                    } else {
-                        let mut cur = &mut cfg_val;
-                        let mut failed = false;
-                        for (i, part) in parts.iter().enumerate() {
-                            if i + 1 == parts.len() {
-                                if let Some(obj) = cur.as_object_mut() {
-                                    obj.insert(part.to_string(), value.clone());
-                                } else {
-                                    errors.push(format!("Invalid config path: {}", key));
-                                    failed = true;
-                                }
-                            } else if let Some(obj) = cur.as_object_mut() {
-                                if !obj.contains_key(*part) {
-                                    obj.insert(part.to_string(), serde_json::json!({}));
-                                }
-                                cur = obj.get_mut(*part).unwrap();
-                            } else {
-                                errors.push(format!("Invalid config path: {}", key));
-                                failed = true;
-                                break;
-                            }
+                Ok(mut cfg_val) => match set_json_path(&mut cfg_val, &key, value.clone()) {
+                    Ok(()) => match serde_json::from_value::<Config>(cfg_val) {
+                        Ok(cfg2) => {
+                            new_config = cfg2;
+                            config_changed = true;
+                            info!("Updated {} to {}", key, value);
                         }
-
-                        if !failed {
-                            match serde_json::from_value::<Config>(cfg_val) {
-                                Ok(cfg2) => {
-                                    new_config = cfg2;
-                                    config_changed = true;
-                                    info!("Updated {} to {}", key, value);
-                                }
-                                Err(e) => {
-                                    errors.push(format!(
-                                        "Failed to deserialize config after setting '{}': {}",
-                                        key, e
-                                    ));
-                                }
-                            }
+                        Err(e) => {
+                            errors.push(format!(
+                                "Failed to deserialize config after setting '{}': {}",
+                                key, e
+                            ));
                         }
-                    }
-                }
+                    },
+                    Err(error) => errors.push(error),
+                },
                 Err(e) => {
                     errors.push(format!("Failed to serialize config for modification: {}", e))
                 }
@@ -294,5 +294,29 @@ impl ConfigActor {
         } else {
             Err("Config file not found".into())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::set_json_path;
+    use crate::common::config::Config;
+
+    #[test]
+    fn generic_set_initializes_optional_external_gap_objects() {
+        let mut value = serde_json::to_value(Config::default()).unwrap();
+
+        set_json_path(
+            &mut value,
+            "settings.layout.gaps.external.outer.top",
+            serde_json::json!(48.0),
+        )
+        .unwrap();
+
+        let config: Config = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            config.settings.layout.gaps.external.unwrap().outer.unwrap().top,
+            48.0
+        );
     }
 }

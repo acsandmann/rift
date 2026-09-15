@@ -1356,6 +1356,7 @@ impl MissionControlOverlay {
                 id: ScreenId::new(0),
                 frame: self.frame,
                 display_uuid: String::new(),
+                is_builtin: false,
                 name: None,
                 space: None,
             },
