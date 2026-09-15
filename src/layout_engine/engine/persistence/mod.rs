@@ -8,7 +8,7 @@ use objc2_core_foundation::CGSize;
 pub use rift_protocol::{RestoreScope, RestoreSource};
 use serde::{Deserialize, Serialize};
 
-use super::{FloatingManager, LayoutEngine, WorkspaceLayouts};
+use super::{FloatingManager, LayoutEngine, Scratchpad, WorkspaceLayouts};
 use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::{HashMap, HashSet};
 use crate::common::config::{LayoutSettings, VirtualWorkspaceSettings};

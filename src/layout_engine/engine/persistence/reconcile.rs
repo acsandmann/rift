@@ -16,6 +16,7 @@ impl LayoutEngine {
             self.remove_window_from_all_tiling_trees(*window);
             self.floating_positions.remove_window(*window);
             self.floating.remove_floating(*window);
+            self.scratchpad.remove(*window);
             self.virtual_workspace_manager.forget_window_identity(*window);
             self.window_layout_constraints.remove(window);
             if self.focused_window == Some(*window) {

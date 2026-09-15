@@ -1072,14 +1072,15 @@ impl WorkspaceStore {
             }));
         }
 
-        let (workspace, floating, position, size, focus) =
-            rule_decision.map_or((None, false, None, None, false), |decision| {
+        let (workspace, floating, position, size, focus, scratchpad) =
+            rule_decision.map_or((None, false, None, None, false, false), |decision| {
                 (
                     decision.workspace,
                     decision.floating,
                     decision.position,
                     decision.size,
                     decision.focus,
+                    decision.scratchpad,
                 )
             });
         let workspace_id = self.resolve_rule_workspace_with_policy(
@@ -1102,6 +1103,7 @@ impl WorkspaceStore {
             position,
             size,
             focus,
+            scratchpad,
             was_rule_floating,
         }))
     }
@@ -1196,6 +1198,7 @@ mod tests {
             Ok(AppRuleResult::Rejected(reason)) => {
                 panic!("Window was unexpectedly rejected: {reason:?}")
             }
+            Ok(AppRuleResult::Unchanged) => panic!("Window was unexpectedly left unchanged"),
             Err(e) => panic!("assign_window_with_app_info failed: {:?}", e),
         }
     }
@@ -1517,6 +1520,7 @@ mod tests {
             position: None,
             size: None,
             focus: false,
+            scratchpad: false,
             manage: Some(false),
             app_name: None,
             title_regex: None,
