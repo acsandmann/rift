@@ -256,7 +256,9 @@ drag_swap_fraction = 0.3
 # - enabled: if false, rift behaves like a simple tiling WM with a single space
 # - default_workspace_count: number of workspaces to create on startup (1–32)
 # - auto_assign_windows: when true, new windows can be auto-assigned using app_rules
-# - preserve_focus_per_workspace: remember last focused window per workspace
+# - preserve_focus_per_workspace: arriving on a workspace focuses the window
+#   last used there; with it off, the workspace's own selection is focused
+#   instead (the last-used window is still recorded either way)
 # - workspace_auto_back_and_forth: when enabled, if you try to switch to the same workspace
 #   that's already active, it will switch to the last workspace instead
 # - prevent_wrapping: when true, next/previous workspace switching stops at the first/last

@@ -614,7 +614,7 @@ impl LayoutEngine {
                 == Some(workspace_id)
         });
 
-        if focus_window.is_none() {
+        if focus_window.is_none() && self.virtual_workspace_manager.preserve_focus_per_workspace() {
             focus_window = self
                 .virtual_workspace_manager
                 .last_focused_window(space, workspace_id)
@@ -4631,6 +4631,68 @@ mod tests {
                 Default::default(),
             ),
             before
+        );
+    }
+
+    /// `preserve_focus_per_workspace` was declared, documented and defaulted
+    /// on, but nothing read it: arriving on a workspace always returned to the
+    /// window last used there. It is a real switch now, so turning it off has
+    /// to fall through to the workspace's own selection.
+    #[test]
+    fn preserve_focus_per_workspace_off_uses_the_selection_not_the_last_focused() {
+        fn focus_with(preserve: bool) -> Option<WindowId> {
+            let settings = VirtualWorkspaceSettings {
+                preserve_focus_per_workspace: preserve,
+                ..VirtualWorkspaceSettings::default()
+            };
+            let mut window_store = WindowStore::default();
+            let mut engine =
+                LayoutEngine::new(&settings, &LayoutSettings::default(), None);
+            let space = SpaceId::new(96);
+            let screen = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 1000.0));
+            let pid: pid_t = 5154;
+            let wid1 = WindowId::new(pid, 1);
+            let wid2 = WindowId::new(pid, 2);
+
+            let _ = engine
+                .handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen.size));
+            let _ = engine.handle_event(
+                &mut window_store,
+                LayoutEvent::windows_observed(
+                    space,
+                    pid,
+                    vec![
+                        window_layout_info(wid1, CGSize::new(500.0, 500.0)),
+                        window_layout_info(wid2, CGSize::new(500.0, 500.0)),
+                    ],
+                    None,
+                ),
+            );
+
+            // Last used is w2; the tree's selection is left on w1.
+            let workspace = engine.active_workspace(space).unwrap();
+            let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowFocused(space, wid2));
+            if let Some(layout) = engine.workspace_layouts.active(space, workspace) {
+                let _ = engine.workspace_tree_mut(workspace).select_window(layout, wid1);
+            }
+            assert_eq!(
+                engine.virtual_workspace_manager().last_focused_window(space, workspace),
+                Some(wid2),
+                "the remembered window is recorded either way"
+            );
+
+            engine.preferred_focus_for_workspace(&window_store, space, workspace, None)
+        }
+
+        assert_eq!(
+            focus_with(true),
+            Some(WindowId::new(5154, 2)),
+            "on: focus returns to the window last used on the workspace"
+        );
+        assert_eq!(
+            focus_with(false),
+            Some(WindowId::new(5154, 1)),
+            "off: the workspace's own selection is used instead"
         );
     }
 
