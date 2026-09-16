@@ -70,13 +70,19 @@ enum ServiceCommands {
 enum QueryCommands {
     /// List virtual workspaces (optionally for a specific MacOS space)
     Workspaces {
-        #[arg(long)]
+        #[arg(long, conflicts_with = "display")]
         space_id: Option<u64>,
+        /// Display UUID; queries the display's current macOS space
+        #[arg(long, value_name = "UUID", conflicts_with = "space_id")]
+        display: Option<String>,
     },
     /// List windows (optionally filtered by space)
     Windows {
-        #[arg(long)]
+        #[arg(long, conflicts_with = "display")]
         space_id: Option<u64>,
+        /// Display UUID; queries the display's current macOS space
+        #[arg(long, value_name = "UUID", conflicts_with = "space_id")]
+        display: Option<String>,
     },
     /// List connected displays
     Displays,
@@ -586,8 +592,14 @@ fn build_request(command: Commands) -> Result<RiftRequest, String> {
 
 fn build_query_request(query: QueryCommands) -> Result<RiftRequest, String> {
     match query {
-        QueryCommands::Workspaces { space_id } => Ok(RiftRequest::GetWorkspaces { space_id }),
-        QueryCommands::Windows { space_id } => Ok(RiftRequest::GetWindows { space_id }),
+        QueryCommands::Workspaces { space_id, display } => match display {
+            Some(display_uuid) => Ok(RiftRequest::GetWorkspacesForDisplay { display_uuid }),
+            None => Ok(RiftRequest::GetWorkspaces { space_id }),
+        },
+        QueryCommands::Windows { space_id, display } => match display {
+            Some(display_uuid) => Ok(RiftRequest::GetWindowsForDisplay { display_uuid }),
+            None => Ok(RiftRequest::GetWindows { space_id }),
+        },
         QueryCommands::Displays => Ok(RiftRequest::GetDisplays),
         QueryCommands::Window { window_id } => {
             let window_id = protocol_window_id(&parse_window_id(&window_id)?)?;

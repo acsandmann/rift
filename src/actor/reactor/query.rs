@@ -229,6 +229,14 @@ impl Reactor {
         self.handle_windows_query(space_id)
     }
 
+    pub fn query_space_for_display(&self, display_uuid: &str) -> Option<SpaceId> {
+        self.space_state
+            .screens
+            .iter()
+            .find(|screen| screen.display_uuid == display_uuid)
+            .and_then(|screen| screen.space)
+    }
+
     pub fn query_active_workspace(&self, space_id: Option<SpaceId>) -> Option<VirtualWorkspaceId> {
         self.handle_active_workspace_query(space_id)
     }

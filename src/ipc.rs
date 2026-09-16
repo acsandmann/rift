@@ -229,6 +229,21 @@ fn encode_reactor_response(reactor: &mut reactor::Reactor, request: RiftRequest)
             )
         }
 
+        RiftRequest::GetWorkspacesForDisplay { display_uuid } => {
+            let Some(space) = reactor.query_space_for_display(&display_uuid) else {
+                return encode_error(serde_json::json!({
+                    "message": format!("Display not found: {display_uuid}")
+                }));
+            };
+            let workspaces = reactor.query_workspaces(Some(space));
+            encode_success(
+                workspaces
+                    .into_iter()
+                    .map(rift_protocol::WorkspaceData::from)
+                    .collect::<Vec<_>>(),
+            )
+        }
+
         RiftRequest::GetDisplays => {
             let displays = reactor.query_displays();
             encode_success(
@@ -238,6 +253,18 @@ fn encode_reactor_response(reactor: &mut reactor::Reactor, request: RiftRequest)
 
         RiftRequest::GetWindows { space_id } => {
             let windows = reactor.query_windows(space_id.map(crate::sys::screen::SpaceId::new));
+            encode_success(
+                windows.into_iter().map(rift_protocol::WindowData::from).collect::<Vec<_>>(),
+            )
+        }
+
+        RiftRequest::GetWindowsForDisplay { display_uuid } => {
+            let Some(space) = reactor.query_space_for_display(&display_uuid) else {
+                return encode_error(serde_json::json!({
+                    "message": format!("Display not found: {display_uuid}")
+                }));
+            };
+            let windows = reactor.query_windows(Some(space));
             encode_success(
                 windows.into_iter().map(rift_protocol::WindowData::from).collect::<Vec<_>>(),
             )
