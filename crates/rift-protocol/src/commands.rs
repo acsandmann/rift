@@ -81,6 +81,7 @@ pub enum LayoutCommand {
     },
     PromoteToMaster,
     SwapMasterStack,
+    ToggleCenterSingleWindow,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
