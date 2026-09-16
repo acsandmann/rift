@@ -73,6 +73,28 @@ pub struct AppWorkspaceRule {
     /// Whether windows should be floating in this workspace
     #[serde(default)]
     pub floating: bool,
+    /// Apply this rule only while the app has no tiled window anywhere.
+    ///
+    /// For an app whose extra windows are documents rather than places to
+    /// work — a mail client's drafts and messages, a browser's Library and
+    /// Page Info — the window worth tiling is the one it opens for itself and
+    /// every later one is incidental. Those windows have nothing in common to
+    /// match on: they report the same role and subrole as the main window, and
+    /// their titles are whatever the user typed. Ordinality is the difference,
+    /// so this matches on that instead of on another title pattern.
+    ///
+    /// The question asked is whether the app has a *tiled* window, not whether
+    /// one has been seen before, which is what makes it survive the two cases
+    /// that matter: closing every window and reopening tiles again, because
+    /// nothing of the app's is tiled at that moment; and a splash screen
+    /// cannot steal the slot, because rift never tiles one.
+    ///
+    /// Deliberately app-wide rather than per-desktop: a draft opened from a
+    /// desktop the inbox is not on is still a draft. The cost is that the app
+    /// cannot be auto-tiled on two desktops at once, which is the trade this
+    /// key exists to make.
+    #[serde(default)]
+    pub only_first_window: bool,
     /// Initial normalized position for a floating window. `(0, 0)` is the top-left
     /// and `(1, 1)` is the bottom-right of the available screen area.
     pub position: Option<AppRulePosition>,
@@ -1715,6 +1737,7 @@ mod tests {
             title_substring: None,
             ax_role: None,
             ax_subrole: None,
+            only_first_window: false,
         });
 
         let issues = settings.validate();

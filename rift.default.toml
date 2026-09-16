@@ -315,6 +315,19 @@ workspace_names = [
 #   - manage (boolean): optional explicit management override. Set to false to ignore the
 #     matching window completely, or true to override Rift/macOS manageability heuristics
 #     for a visible window. When omitted, normal heuristics apply. Minimized windows remain unmanaged.
+#   - only_first_window (boolean): apply this rule only while the app has no tiled window
+#     anywhere. For an app whose extra windows are documents rather than places to work -- a
+#     mail client's drafts and messages, a browser's Library and Page Info -- the window worth
+#     tiling is the one the app opens for itself, and every later one is incidental. Those
+#     windows report the same role and subrole as the main window and their titles are whatever
+#     the user typed, so there is nothing to match on; this matches on ordinality instead.
+#     It asks whether the app has a *tiled* window, not whether one has been seen before, so
+#     closing every window and reopening tiles again, and a splash screen cannot take the slot
+#     because Rift never tiles one. It is app-wide, not per-desktop: a draft opened from a
+#     desktop the main window is not on is still a draft. The cost is that the app cannot be
+#     auto-tiled on two desktops at once. It does not count toward specificity, since it
+#     narrows when a rule applies rather than which window it describes, and a rule that sets
+#     it and no matcher is still ignored for having no matcher.
 #
 # Matching behavior (summary):
 #   1. All rules that match a window are evaluated.
@@ -365,6 +378,13 @@ workspace_names = [
 #   - Accessibility example: float dialog windows for a specific app:
 #       app_rules = [
 #         { app_id = "com.example.X", ax_subrole = "AXDialog", floating = true },
+#       ]
+#
+#   - Tile a mail client's main window and let its drafts and message windows float,
+#     without naming any of them (assumes a float-by-default catch-all below it):
+#       app_rules = [
+#         { app_id = "com.microsoft.Outlook", floating = false, only_first_window = true },
+#         { ax_role = "AXWindow", floating = true },
 #       ]
 #
 # By default there are no app rules; add or uncomment rules below as needed.

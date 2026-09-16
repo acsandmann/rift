@@ -15,6 +15,9 @@ pub struct WindowRuleContext<'a> {
     pub window_title: Option<&'a str>,
     pub ax_role: Option<&'a str>,
     pub ax_subrole: Option<&'a str>,
+    /// Whether this app already has a tiled window, excluding the one being
+    /// placed. Read only by rules that set `only_first_window`.
+    pub app_has_tiled_window: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -187,6 +190,7 @@ struct CompiledRule {
     title_substring: Option<String>,
     ax_role: Option<String>,
     ax_subrole: Option<String>,
+    only_first_window: bool,
     specificity: usize,
     index: usize,
 }
@@ -273,6 +277,7 @@ impl CompiledRule {
             title_substring,
             ax_role,
             ax_subrole,
+            only_first_window,
         } = rule;
         let app_id = nonempty(app_id).map(|value| value.to_ascii_lowercase());
         let app_name = nonempty(app_name).map(|value| value.to_lowercase());
@@ -319,6 +324,7 @@ impl CompiledRule {
             title_substring,
             ax_role,
             ax_subrole,
+            only_first_window,
             specificity,
             index,
         })
@@ -344,6 +350,11 @@ impl CompiledRule {
                 .is_none_or(|rule| title.is_some_and(|actual| actual.contains(rule)))
             && self.ax_role.as_deref().is_none_or(|rule| context.ax_role == Some(rule))
             && self.ax_subrole.as_deref().is_none_or(|rule| context.ax_subrole == Some(rule))
+            // Not counted in specificity: this narrows *when* the rule applies,
+            // not which window it describes, so it must not lift a rule over a
+            // more specific one. A rule that sets only this and no matcher is
+            // still rejected as having no matcher, which is correct.
+            && (!self.only_first_window || !context.app_has_tiled_window)
     }
 }
 
