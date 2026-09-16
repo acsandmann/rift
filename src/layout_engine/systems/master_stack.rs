@@ -89,16 +89,9 @@ impl MasterStackLayoutSystem {
         )
     }
 
-    fn all_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
-        let root = self.inner.root(layout);
-        root.traverse_preorder(self.inner.map())
-            .filter_map(|node| self.inner.window_at(node))
-            .collect()
-    }
-
     fn windows_in_layout_by_container(&self, layout: LayoutId) -> Vec<WindowId> {
         self.windows_in_layout_by_container_with_order(layout, self.master_first())
-            .unwrap_or_else(|| self.all_windows_in_layout(layout))
+            .unwrap_or_else(|| self.inner.all_windows_in_layout(layout))
     }
 
     fn windows_in_layout_by_container_with_order(
@@ -677,7 +670,7 @@ impl LayoutSystem for MasterStackLayoutSystem {
     }
 
     fn all_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
-        MasterStackLayoutSystem::all_windows_in_layout(self, layout)
+        self.inner.all_windows_in_layout(layout)
     }
 
     fn add_window_after_selection(&mut self, layout: LayoutId, wid: WindowId) {

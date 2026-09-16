@@ -527,7 +527,7 @@ impl LayoutSystem for TraditionalLayoutSystem {
     }
 
     fn draw_tree(&self, layout: LayoutId) -> String {
-        let tree = self.get_ascii_tree(self.root(layout));
+        let tree = self.get_ascii_tree_with_labels(self.root(layout), None);
         let mut out = String::new();
         ascii_tree::write_tree(&mut out, &tree).unwrap();
         out
@@ -1374,7 +1374,7 @@ impl TraditionalLayoutSystem {
                     stack_line_horiz,
                     stack_line_vert,
                 );
-                rect = layout_res.get_focused_frame_for_index(selected_index, selected_index);
+                rect = layout_res.get_frame_for_index(selected_index);
 
                 node = local_sel;
                 continue;
@@ -1456,7 +1456,7 @@ impl TraditionalLayoutSystem {
                     if self.tree.data.layout.is_effectively_fullscreen(child) {
                         continue;
                     }
-                    let child_rect = layout_res.get_focused_frame_for_index(i, i);
+                    let child_rect = layout_res.get_frame_for_index(i);
                     stack.push((child, child_rect));
                 }
 
@@ -1567,10 +1567,6 @@ impl TraditionalLayoutSystem {
 }
 
 impl TraditionalLayoutSystem {
-    fn get_ascii_tree(&self, node: NodeId) -> ascii_tree::Tree {
-        self.get_ascii_tree_with_labels(node, None)
-    }
-
     fn get_ascii_tree_with_labels(
         &self,
         node: NodeId,
@@ -2445,10 +2441,6 @@ impl StackLayoutResult {
         }
         .round()
     }
-
-    fn get_focused_frame_for_index(&self, index: usize, _focused_idx: usize) -> CGRect {
-        self.get_frame_for_index(index)
-    }
 }
 
 #[derive(Default, Serialize, Deserialize, Debug)]
@@ -2884,7 +2876,7 @@ impl Layout {
                 );
                 for (idx, &child) in children.iter().enumerate() {
                     let frame = if idx == focused_idx {
-                        layout.get_focused_frame_for_index(idx, focused_idx)
+                        layout.get_frame_for_index(idx)
                     } else {
                         layout.get_frame_for_index(idx)
                     };
@@ -4895,75 +4887,6 @@ mod tests {
             unconstrained_frame.size.height >= 399.0,
             "an unconstrained focused child should still be allowed to use the stack's full height"
         );
-    }
-
-    // Focused stack frames should be identical to normal stack frames.
-    #[test]
-    fn test_get_focused_frame_for_index_horizontal_index_zero() {
-        let container_rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
-        let stack_result = StackLayoutResult::new(container_rect, 3, 50.0, true);
-        let frame = stack_result.get_focused_frame_for_index(0, 0);
-        assert_eq!(frame, stack_result.get_frame_for_index(0));
-    }
-
-    #[test]
-    fn test_get_focused_frame_for_index_vertical_index_zero() {
-        let container_rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
-        let stack_result = StackLayoutResult::new(container_rect, 3, 50.0, false);
-        let frame = stack_result.get_focused_frame_for_index(0, 0);
-        assert_eq!(frame, stack_result.get_frame_for_index(0));
-    }
-
-    #[test]
-    fn test_get_focused_frame_for_index_horizontal_index_one() {
-        let container_rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
-        let stack_result = StackLayoutResult::new(container_rect, 3, 50.0, true);
-        let frame = stack_result.get_focused_frame_for_index(1, 0);
-        assert_eq!(frame, stack_result.get_frame_for_index(1));
-    }
-
-    #[test]
-    fn test_get_focused_frame_for_index_vertical_index_one() {
-        let container_rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
-        let stack_result = StackLayoutResult::new(container_rect, 3, 50.0, false);
-        let frame = stack_result.get_focused_frame_for_index(1, 0);
-        assert_eq!(frame, stack_result.get_frame_for_index(1));
-    }
-
-    #[test]
-    fn test_get_focused_frame_for_index_window_larger_than_container() {
-        let container_rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(100.0, 100.0));
-        let stack_result = StackLayoutResult::new(container_rect, 1, 0.0, true);
-        let frame = stack_result.get_focused_frame_for_index(0, 0);
-        assert_eq!(frame, stack_result.get_frame_for_index(0));
-    }
-
-    #[test]
-    fn test_get_focused_frame_for_index_zero_stack_offset() {
-        let container_rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1000.0, 800.0));
-        let stack_result = StackLayoutResult::new(container_rect, 3, 0.0, true);
-        let frame = stack_result.get_focused_frame_for_index(1, 0);
-        assert_eq!(frame, stack_result.get_frame_for_index(1));
-    }
-
-    #[test]
-    fn test_get_focused_frame_for_index_floating_point_precision() {
-        // Test case that could cause min > max due to precision
-        let container_rect = CGRect::new(
-            CGPoint::new(1726.5118132741347, 1726.5118132741347),
-            CGSize::new(1.0, 1.0),
-        );
-        let stack_result = StackLayoutResult::new(container_rect, 1, 0.0, true);
-        let frame = stack_result.get_focused_frame_for_index(0, 0);
-        assert_eq!(frame, stack_result.get_frame_for_index(0));
-    }
-
-    #[test]
-    fn test_get_focused_frame_for_index_small_container() {
-        let container_rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(10.0, 10.0));
-        let stack_result = StackLayoutResult::new(container_rect, 1, 0.0, true);
-        let frame = stack_result.get_focused_frame_for_index(0, 0);
-        assert_eq!(frame, stack_result.get_frame_for_index(0));
     }
 
     #[test]

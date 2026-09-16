@@ -484,7 +484,7 @@ impl BspLayoutSystem {
                     let mut target = if *fullscreen {
                         screen
                     } else if *fullscreen_within_gaps {
-                        Self::apply_outer_gaps(screen, gaps)
+                        compute_tiling_area(screen, gaps)
                     } else {
                         rect
                     };
@@ -713,10 +713,6 @@ impl BspLayoutSystem {
         }
     }
 
-    fn apply_outer_gaps(screen: CGRect, gaps: &crate::common::config::GapSettings) -> CGRect {
-        compute_tiling_area(screen, gaps)
-    }
-
     fn selection_window(&self, state: &LayoutState) -> Option<WindowId> {
         let sel = self.tree.data.selection.current_selection(state.root);
         match self.kind.get(sel) {
@@ -733,27 +729,21 @@ struct Components {
 
 impl crate::model::tree::Observer for Components {
     fn added_to_forest(&mut self, map: &NodeMap, node: NodeId) {
-        self.dispatch_event(map, TreeEvent::AddedToForest(node))
+        self.selection.handle_event(map, TreeEvent::AddedToForest(node))
     }
 
     fn added_to_parent(&mut self, map: &NodeMap, node: NodeId) {
-        self.dispatch_event(map, TreeEvent::AddedToParent(node))
+        self.selection.handle_event(map, TreeEvent::AddedToParent(node))
     }
 
     fn removing_from_parent(&mut self, map: &NodeMap, node: NodeId) {
-        self.dispatch_event(map, TreeEvent::RemovingFromParent(node))
+        self.selection.handle_event(map, TreeEvent::RemovingFromParent(node))
     }
 
     fn removed_child(_tree: &mut Tree<Self>, _parent: NodeId) {}
 
     fn removed_from_forest(&mut self, map: &NodeMap, node: NodeId) {
-        self.dispatch_event(map, TreeEvent::RemovedFromForest(node))
-    }
-}
-
-impl Components {
-    fn dispatch_event(&mut self, map: &NodeMap, event: TreeEvent) {
-        self.selection.handle_event(map, event);
+        self.selection.handle_event(map, TreeEvent::RemovedFromForest(node))
     }
 }
 
@@ -1148,7 +1138,7 @@ impl LayoutSystem for BspLayoutSystem {
     ) -> Vec<(WindowId, CGRect)> {
         let mut out = Vec::new();
         if let Some(state) = self.layouts.get(layout).copied() {
-            let rect = Self::apply_outer_gaps(screen, gaps);
+            let rect = compute_tiling_area(screen, gaps);
             self.calculate_layout_recursive(state.root, rect, screen, constraints, gaps, &mut out);
         }
         out
@@ -1368,7 +1358,7 @@ impl LayoutSystem for BspLayoutSystem {
                 if !self.belongs_to_layout(state, node) {
                     return;
                 }
-                let tiling = Self::apply_outer_gaps(screen, gaps);
+                let tiling = compute_tiling_area(screen, gaps);
                 let mut fullscreen_transition = false;
                 if let Some(NodeKind::Leaf {
                     window: _,

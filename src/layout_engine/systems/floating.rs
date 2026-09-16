@@ -63,7 +63,7 @@ impl FloatingLayoutSystem {
                     self.inner.local_selection(node).or_else(|| children.first().copied())?;
                 let index = children.iter().position(|child| *child == selected)?;
                 let wid = self.inner.visible_windows_in_subtree(selected).first().copied()?;
-                let window = self.window_node(layout, wid)?;
+                let window = self.inner.window_node(layout, wid)?;
                 if self.inner.fullscreen_frame(window, screen, gaps).is_some() {
                     return None;
                 }
@@ -94,10 +94,6 @@ impl FloatingLayoutSystem {
         }
     }
 
-    fn window_node(&self, layout: LayoutId, wid: WindowId) -> Option<NodeId> {
-        self.inner.window_node(layout, wid)
-    }
-
     fn members(&self, container: NodeId) -> Vec<WindowId> {
         container
             .traverse_preorder(self.inner.map())
@@ -120,7 +116,10 @@ impl FloatingLayoutSystem {
         // Restore only the affected members that were promoted to the root.
         let root = self.inner.root(layout);
         for &wid in members {
-            if self.window_node(layout, wid).and_then(|node| node.parent(self.inner.map()))
+            if self
+                .inner
+                .window_node(layout, wid)
+                .and_then(|node| node.parent(self.inner.map()))
                 == Some(root)
                 && let Some(frame) = self.independent_frames.remove(&wid)
             {
@@ -131,7 +130,7 @@ impl FloatingLayoutSystem {
 
     pub(crate) fn cycle_windows(&self, layout: LayoutId) -> Vec<WindowId> {
         if let Some(wid) = self.active_window(layout)
-            && let Some(node) = self.window_node(layout, wid)
+            && let Some(node) = self.inner.window_node(layout, wid)
             && let Some(parent) = node.parent(self.inner.map())
             && self.inner.layout(parent).is_stacked()
         {
@@ -157,7 +156,7 @@ impl FloatingLayoutSystem {
             .filter(|wid| *wid != focused)
             .filter(|wid| {
                 !exclude.is_some_and(|parent| {
-                    self.window_node(layout, *wid).is_some_and(|node| {
+                    self.inner.window_node(layout, *wid).is_some_and(|node| {
                         node.ancestors(self.inner.map()).any(|ancestor| ancestor == parent)
                     })
                 })
@@ -187,7 +186,7 @@ impl FloatingLayoutSystem {
 
     fn focus_target(&self, layout: LayoutId, direction: Direction) -> Option<WindowId> {
         let focused = self.active_window(layout)?;
-        let node = self.window_node(layout, focused)?;
+        let node = self.inner.window_node(layout, focused)?;
         let parent = node.parent(self.inner.map())?;
         let kind = self.inner.layout(parent);
         let cycles_stack = match direction {
@@ -330,7 +329,7 @@ impl FloatingLayoutSystem {
         }
         self.frames.insert(wid, frame);
         for layout in layouts {
-            let Some(node) = self.window_node(layout, wid) else {
+            let Some(node) = self.inner.window_node(layout, wid) else {
                 continue;
             };
             // The outermost stack contains all members that share this frame.
@@ -404,6 +403,7 @@ impl LayoutSystem for FloatingLayoutSystem {
             .enumerate()
             .map(|(index, wid)| {
                 let frame = self
+                    .inner
                     .window_node(layout, wid)
                     .and_then(|node| self.inner.fullscreen_frame(node, screen, gaps))
                     .or_else(|| self.frames.get(&wid).copied())
@@ -533,7 +533,7 @@ impl LayoutSystem for FloatingLayoutSystem {
         let Some(focused) = self.active_window(layout) else {
             return;
         };
-        let Some(selection) = self.window_node(layout, focused) else {
+        let Some(selection) = self.inner.window_node(layout, focused) else {
             return;
         };
         let root = self.inner.root(layout);
@@ -543,7 +543,7 @@ impl LayoutSystem for FloatingLayoutSystem {
         let Some(target) = target else {
             return;
         };
-        let Some(target_node) = self.window_node(layout, target) else {
+        let Some(target_node) = self.inner.window_node(layout, target) else {
             return;
         };
         let container = if parent == root {
@@ -635,7 +635,7 @@ impl LayoutSystem for FloatingLayoutSystem {
         let Some(wid) = self.active_window(layout) else {
             return;
         };
-        let Some(selection) = self.window_node(layout, wid) else {
+        let Some(selection) = self.inner.window_node(layout, wid) else {
             return;
         };
         let Some(parent) = selection.parent(self.inner.map()) else {

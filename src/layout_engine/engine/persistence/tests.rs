@@ -1905,10 +1905,9 @@ fn space_restore_rejects_workspace_count_mismatch_before_mutating_layouts() {
         .add_window_after_selection(target_layout, sentinel);
 
     let error = engine
-        .restore_saved_layout(
+        .restore_layout(
             path.clone(),
-            RestoreScope::Space,
-            space,
+            RestoreRequest::new(RestoreScope::Space, space),
             &mut window_store,
             &VirtualWorkspaceSettings::default(),
             &LayoutSettings::default(),
