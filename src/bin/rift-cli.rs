@@ -15,6 +15,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 #[derive(Parser)]
+#[command(version = env!("RIFT_VERSION"))]
 #[command(name = "rift-cli")]
 #[command(about = "Command-line interface for rift window manager")]
 struct Cli {

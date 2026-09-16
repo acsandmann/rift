@@ -38,6 +38,7 @@ use tokio::join;
 embed_plist::embed_info_plist!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/Info.plist"));
 
 #[derive(Parser)]
+#[command(name = "rift", version = env!("RIFT_VERSION"))]
 struct Cli {
     /// Only run the window manager on the current space.
     #[arg(long)]
