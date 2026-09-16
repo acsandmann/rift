@@ -2,6 +2,7 @@
 #![allow(non_upper_case_globals)]
 
 pub mod actor;
+pub mod cli;
 pub mod common;
 pub mod ipc;
 pub mod layout_engine;
