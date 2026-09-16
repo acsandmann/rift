@@ -1,6 +1,7 @@
 // ported from https://github.com/koekeishiya/yabai/blob/master/src/misc/service.h
 
 use std::env;
+use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::os::unix::process::ExitStatusExt;
@@ -12,6 +13,9 @@ use nix::unistd::getuid;
 
 const LAUNCHCTL_PATH: &str = "/bin/launchctl";
 const RIFT_PLIST: &str = "git.acsandmann.rift";
+/// The agent binary launchd starts. `rift-cli` has to look for it by name;
+/// `rift` is it.
+const RIFT_AGENT_BIN: &str = "rift";
 
 #[derive(Subcommand)]
 pub enum ServiceCommands {
@@ -57,7 +61,7 @@ fn plist_path() -> io::Result<PathBuf> {
 fn find_rift_executable_in_path(path_env: &std::ffi::OsStr) -> io::Result<Option<PathBuf>> {
     let mut current_dir: Option<PathBuf> = None;
     for dir in env::split_paths(path_env) {
-        let candidate = dir.join("rift");
+        let candidate = dir.join(RIFT_AGENT_BIN);
         if candidate.is_file() {
             if candidate.is_absolute() {
                 return Ok(Some(candidate));
@@ -76,28 +80,44 @@ fn find_rift_executable_in_path(path_env: &std::ffi::OsStr) -> io::Result<Option
     Ok(None)
 }
 
+/// The rift agent binary the launchd plist should point at.
+///
+/// `current_exe` comes first because `rift service` runs inside the agent: the
+/// binary to launch is this one, and searching `$PATH` instead can name a
+/// different install — running a dev build's `rift service start` would write a
+/// plist pointing at Homebrew's rift and then "restart" that. macOS reports the
+/// path the binary was invoked through rather than resolving it, so a Homebrew
+/// invocation still records the stable `bin/rift` symlink rather than the
+/// Cellar path a version bump moves out from under it.
+///
+/// `rift-cli service` is not the agent, so it falls back to looking for one.
 fn find_rift_executable() -> io::Result<PathBuf> {
-    if let Some(path_env) = env::var_os("PATH") {
-        if let Some(candidate) = find_rift_executable_in_path(&path_env)? {
-            return Ok(candidate);
-        }
-    }
-
     let exe_path = env::current_exe().map_err(|_| {
         io::Error::new(
             io::ErrorKind::Other,
             "unable to retrieve path of current executable",
         )
     })?;
-    let sibling = exe_path.with_file_name("rift");
+
+    if exe_path.file_name() == Some(OsStr::new(RIFT_AGENT_BIN)) {
+        return Ok(exe_path);
+    }
+
+    let sibling = exe_path.with_file_name(RIFT_AGENT_BIN);
     if sibling.is_file() {
         return Ok(sibling);
+    }
+
+    if let Some(path_env) = env::var_os("PATH") {
+        if let Some(candidate) = find_rift_executable_in_path(&path_env)? {
+            return Ok(candidate);
+        }
     }
 
     Err(io::Error::new(
         io::ErrorKind::NotFound,
         format!(
-            "rift agent executable not found: not present in $PATH and no sibling 'rift' next to current executable ('{}')",
+            "rift agent executable not found: no sibling 'rift' next to current executable ('{}') and none in $PATH",
             exe_path.display()
         ),
     ))
@@ -209,14 +229,38 @@ fn spawn_launchctl(args: &[&str]) -> io::Result<()> {
     Ok(())
 }
 
-fn service_is_running() -> io::Result<bool> {
-    let uid = getuid();
-    let service_target = format!("gui/{}/{}", uid, RIFT_PLIST);
-    match run_launchctl(&["print", &service_target], true) {
-        Ok(code) => Ok(code == 0),
-        Err(_) => Ok(false),
-    }
+/// Every launchd label rift is known to run under.
+///
+/// `rift service` owns the first one, but a Homebrew install is started by
+/// `brew services` under Homebrew's own label instead — so looking only at
+/// rift's label reports a perfectly healthy install as "not installed".
+const KNOWN_LABELS: &[&str] = &[RIFT_PLIST, "homebrew.mxcl.rift-plus", "homebrew.mxcl.rift"];
+
+/// What launchd is doing with rift, for `rift status`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceStatus {
+    /// The label rift is loaded under, if launchd is running it at all.
+    pub running: Option<String>,
+    /// Whether the plist `rift service` manages is installed.
+    pub own_plist_installed: bool,
 }
+
+pub fn service_state() -> io::Result<ServiceStatus> {
+    Ok(ServiceStatus {
+        running: KNOWN_LABELS
+            .iter()
+            .find(|label| job_is_running(label))
+            .map(|label| (*label).to_string()),
+        own_plist_installed: plist_path()?.is_file(),
+    })
+}
+
+fn job_is_running(label: &str) -> bool {
+    let service_target = format!("gui/{}/{}", getuid(), label);
+    run_launchctl(&["print", &service_target], true).is_ok_and(|code| code == 0)
+}
+
+fn service_is_running() -> io::Result<bool> { Ok(job_is_running(RIFT_PLIST)) }
 
 pub fn service_install_internal(plist_path: &Path) -> io::Result<()> {
     let plist = plist_contents()?;

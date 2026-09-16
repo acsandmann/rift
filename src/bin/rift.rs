@@ -18,6 +18,7 @@ use rift_wm::actor::spaces::SpacesActor;
 use rift_wm::actor::stack_line::StackLine;
 use rift_wm::actor::window_notify as window_notify_actor;
 use rift_wm::actor::wm_controller::{self, WmController};
+use rift_wm::cli::{self, ClientCommand};
 use rift_wm::common::config::{Config, config_file, restore_file};
 use rift_wm::common::log;
 use rift_wm::common::util::execute_startup_commands;
@@ -82,6 +83,8 @@ enum Commands {
         #[command(subcommand)]
         service: ServiceCommands,
     },
+    #[command(flatten)]
+    Client(ClientCommand),
 }
 
 /// Actors cannot recover after exiting; panic so the service can restart.
@@ -102,10 +105,11 @@ fn spawn_supervised<F: Future<Output = ()> + 'static>(
 
 fn main() {
     sigpipe::reset();
-    let opt = Cli::parse();
+    let mut opt = Cli::parse();
 
-    if let Some(Commands::Service { service }) = &opt.command {
-        match handle_service_command(service) {
+    match opt.command.take() {
+        Some(Commands::Client(command)) => cli::run(command),
+        Some(Commands::Service { service }) => match handle_service_command(&service) {
             Ok(msg) => {
                 println!("{}", msg);
                 process::exit(0);
@@ -114,7 +118,8 @@ fn main() {
                 eprintln!("{}", e);
                 process::exit(1);
             }
-        }
+        },
+        None => {}
     }
 
     if std::env::var_os("RUST_BACKTRACE").is_none() {
