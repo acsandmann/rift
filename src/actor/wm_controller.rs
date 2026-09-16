@@ -114,10 +114,6 @@ impl WmCmd {
     pub fn snake_case_variants() -> &'static [String] { &BUILTIN_WM_CMD_VARIANTS }
 }
 
-impl WmCommand {
-    pub fn builtin_candidates() -> &'static [String] { WmCmd::snake_case_variants() }
-}
-
 pub struct Config {
     pub restore_file: PathBuf,
     pub config: crate::common::config::Config,

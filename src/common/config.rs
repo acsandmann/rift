@@ -1529,7 +1529,7 @@ impl Config {
             }
         } else {
             // Use dynamically generated builtin candidates.
-            let builtin_candidates = crate::actor::wm_controller::WmCommand::builtin_candidates();
+            let builtin_candidates = crate::actor::wm_controller::WmCmd::snake_case_variants();
             for cand in builtin_candidates.iter() {
                 let dist = Self::levenshtein(&unknown_token, &cand.to_lowercase());
                 if best.is_none() || dist < best.as_ref().unwrap().1 {
