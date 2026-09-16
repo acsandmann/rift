@@ -286,20 +286,27 @@ impl WorkspaceStore {
     }
 
     fn resolve_layout_mode_for_workspace(&self, index: usize, name: &str) -> LayoutMode {
-        // Check workspace_rules (last matching rule wins, like app_rules)
-        for rule in self.workspace_rules.iter().rev() {
-            match &rule.workspace {
-                WorkspaceSelector::Index(idx) if *idx == index => return rule.layout,
-                WorkspaceSelector::Name(n) if n == name => return rule.layout,
-                _ => continue,
-            }
-        }
-        // Fall back to global default
-        self.default_layout_mode
+        // Fall back to the global default when no rule names this workspace.
+        self.ruled_layout_mode_for_workspace(index, name)
+            .unwrap_or(self.default_layout_mode)
     }
 
-    pub fn desired_layout_mode_for_workspace(&self, index: usize, name: &str) -> LayoutMode {
-        self.resolve_layout_mode_for_workspace(index, name)
+    /// The mode `workspace_rules` explicitly asks for, if any.
+    ///
+    /// `None` is the answer for a workspace no rule names, and it is a
+    /// different answer from the global default that such a workspace is
+    /// *created* with. Creation has to pick some mode and the default is the
+    /// right one; a workspace that already exists has a mode the user may
+    /// since have chosen at runtime, and a default is not grounds to overrule
+    /// that. Only an explicit rule is. See the hot-reload path in
+    /// `LayoutEngine::update_virtual_workspace_settings`.
+    pub fn ruled_layout_mode_for_workspace(&self, index: usize, name: &str) -> Option<LayoutMode> {
+        // Last matching rule wins, like app_rules.
+        self.workspace_rules.iter().rev().find_map(|rule| match &rule.workspace {
+            WorkspaceSelector::Index(idx) if *idx == index => Some(rule.layout),
+            WorkspaceSelector::Name(n) if n == name => Some(rule.layout),
+            _ => None,
+        })
     }
 
     pub fn initialized_spaces(&self) -> Vec<SpaceId> {
