@@ -113,7 +113,6 @@ use crate::sys::window_server::{
 
 pub type Sender = actor::Sender<Event>;
 type Receiver = actor::Receiver<Event>;
-use managers::RefreshQuarantineState;
 pub use query::ReactorQueryHandle;
 
 pub(crate) use crate::model::reactor::{AppState, WindowState};
@@ -650,8 +649,6 @@ impl Reactor {
         }
     }
 
-    fn screens_for_current_spaces(&self) -> Vec<ScreenInfo> { self.space_state.screens.clone() }
-
     fn display_uuids_for_current_screens(&self) -> Vec<Option<String>> {
         self.space_state
             .screens
@@ -1063,7 +1060,7 @@ impl Reactor {
             }
         }
         if self.should_quarantine_space_lifecycle_event(&event) {
-            trace!(?event, state = ?self.refresh_quarantine_state(), "quarantined space lifecycle event");
+            trace!(?event, state = ?self.refresh_quarantine_manager.state(), "quarantined space lifecycle event");
             return;
         }
         if self.should_quarantine_during_display_churn(&event) {
@@ -1147,10 +1144,6 @@ impl Reactor {
     fn should_quarantine_space_lifecycle_event(&self, event: &Event) -> bool {
         self.refreshes_blocked()
             && matches!(event, Event::SpaceCreated(..) | Event::SpaceDestroyed(..))
-    }
-
-    fn refresh_quarantine_state(&self) -> RefreshQuarantineState {
-        self.refresh_quarantine_manager.state()
     }
 
     fn refreshes_blocked(&self) -> bool { self.refresh_quarantine_manager.blocks_refreshes() }
@@ -2249,7 +2242,8 @@ impl Reactor {
             self.recompute_and_set_active_spaces_from_current_screens();
         }
         if outcome.recover_after_mission_control {
-            self.repair_spaces_after_mission_control();
+            // Apply any SpaceChanged that arrived while Mission Control was active.
+            self.try_apply_pending_space_change();
             self.refresh_windows_after_mission_control();
         }
         if outcome.refresh_window_inventories {
@@ -2510,13 +2504,15 @@ impl Reactor {
         #[cfg(test)]
         self.event_outcome_phase_trace.push("broadcasts");
         if outcome.arrange.passes > 0 && layout_changed {
-            self.broadcast_layout_changed(
+            self.broadcast_layout_state_changed(
                 outcome.arrange.space_scope.or_else(|| self.workspace_command_space()),
+                rift_protocol::EventKind::LayoutChanged,
             );
         }
         if outcome.broadcast_selection_changed {
-            self.broadcast_selection_changed(
+            self.broadcast_layout_state_changed(
                 outcome.arrange.space_scope.or_else(|| self.workspace_command_space()),
+                rift_protocol::EventKind::SelectionChanged,
             );
         }
         for broadcast in outcome.window_title_broadcasts {
@@ -2798,14 +2794,6 @@ impl Reactor {
         }
     }
 
-    fn broadcast_layout_changed(&self, space: Option<SpaceId>) {
-        self.broadcast_layout_state_changed(space, rift_protocol::EventKind::LayoutChanged);
-    }
-
-    fn broadcast_selection_changed(&self, space: Option<SpaceId>) {
-        self.broadcast_layout_state_changed(space, rift_protocol::EventKind::SelectionChanged);
-    }
-
     fn broadcast_layout_state_changed(
         &self,
         space: Option<SpaceId>,
@@ -2982,7 +2970,7 @@ impl Reactor {
                 .layout_engine
                 .update_space_display(space, Some(display_uuid.to_string()));
         }
-        let current_screens = self.screens_for_current_spaces();
+        let current_screens = self.space_state.screens.clone();
         self.space_activation_policy
             .on_spaces_updated(activation_config, &current_screens);
         self.recompute_and_set_active_spaces(&authoritative_spaces);
@@ -3024,11 +3012,6 @@ impl Reactor {
                 self.pending_space_change_manager.pending_space_change = Some(pending);
             }
         }
-    }
-
-    fn repair_spaces_after_mission_control(&mut self) {
-        // First, apply any SpaceChanged that arrived while MC was active.
-        self.try_apply_pending_space_change();
     }
 
     fn on_windows_discovered_with_app_info(

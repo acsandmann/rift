@@ -135,7 +135,7 @@ impl AnimationManager {
 
     fn finish_active(&mut self) {
         if let Some(active) = self.active.take() {
-            active.animation.skip_to_end_and_end();
+            active.animation.finish_all();
         }
     }
 
@@ -597,8 +597,6 @@ impl Animation {
             self.windows.push(window);
         }
     }
-
-    fn skip_to_end_and_end(self) { self.finish_all(); }
 }
 
 fn get_frame(a: CGRect, b: CGRect, t: f64) -> CGRect {

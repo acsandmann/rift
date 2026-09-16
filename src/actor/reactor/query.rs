@@ -235,10 +235,11 @@ impl Reactor {
             None => return,
         };
 
-        let active_space = match self.menu_bar_space() {
-            Some(space) => space,
-            None => return,
-        };
+        let active_space =
+            match self.resolve_menu_bar_space_with_preferred(self.space_state.menu_bar_space) {
+                Some(space) => space,
+                None => return,
+            };
 
         let workspaces = self.query_workspaces(Some(active_space));
         let active_space_is_activated = self.is_space_active(active_space);
@@ -255,10 +256,6 @@ impl Reactor {
             active_workspace,
             windows,
         }));
-    }
-
-    fn menu_bar_space(&self) -> Option<SpaceId> {
-        self.resolve_menu_bar_space_with_preferred(self.space_state.menu_bar_space)
     }
 
     fn resolve_menu_bar_space_with_preferred(

@@ -57,8 +57,7 @@ impl ConfigActor {
         while let Some((_span, event)) = events.blocking_recv() {
             match event {
                 Event::QueryConfig(resp) => {
-                    let v = self.handle_config_query();
-                    let _ = resp.send(v);
+                    let _ = resp.send(self.config.clone());
                 }
                 Event::ApplyConfig { cmd, response } => {
                     let res = self.handle_config_command(cmd);
@@ -67,8 +66,6 @@ impl ConfigActor {
             }
         }
     }
-
-    fn handle_config_query(&self) -> Config { self.config.clone() }
 
     fn handle_config_command(&mut self, cmd: ConfigCommand) -> Result<(), String> {
         debug!("Applying config command: {:?}", cmd);

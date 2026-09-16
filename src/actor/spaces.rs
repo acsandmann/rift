@@ -535,7 +535,8 @@ impl SpacesActor {
     ) {
         self.state.last_converter = converter;
         let forwarded = self.build_forwarded_state(screens);
-        self.state.last_sent_spaces = Some(Self::screen_spaces(&forwarded.screens));
+        self.state.last_sent_spaces =
+            Some(forwarded.screens.iter().map(|screen| screen.space).collect());
         self.state.awaiting_space_switch_confirmation = false;
         self.wm_tx.send(wm_controller::WmEvent::SpaceStateUpdated(
             forwarded,
@@ -696,10 +697,6 @@ impl SpacesActor {
             topology_window_delta: self.state.pending_topology_window_delta.take(),
             active_window_spaces: self.state.visible_window_spaces.clone(),
         }
-    }
-
-    fn screen_spaces(screens: &[ScreenInfo]) -> Vec<Option<SpaceId>> {
-        screens.iter().map(|screen| screen.space).collect()
     }
 
     fn preserve_user_spaces_during_fullscreen_transition(
