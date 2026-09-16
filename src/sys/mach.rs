@@ -593,14 +593,7 @@ unsafe fn create_connection_server_port() -> mach_port_t {
     let bundle = b"com.acsandmann.rift";
     let copy_len = bundle.len().min(msg.0.bundle_name.len());
     msg.0.bundle_name[..copy_len].copy_from_slice(&bundle[..copy_len]);
-    if bundle.len() > copy_len {
-        debug!(
-            bundle_len = bundle.len(),
-            max_len = msg.0.bundle_name.len(),
-            "Truncating connection server bundle name"
-        );
-    }
-    msg.0.bundle_size = msg.0.bundle_name.len() as i32;
+    msg.0.bundle_size = copy_len as i32;
 
     let header_ptr = core::ptr::addr_of_mut!(msg.0.header);
     let local_port = core::ptr::read_unaligned(core::ptr::addr_of!(msg.0.header.msgh_local_port));

@@ -41,6 +41,7 @@ thread_local! {
     static TEST_SPACE_WINDOW_LIST_OVERRIDE: RefCell<Option<Vec<u32>>> = const { RefCell::new(None) };
     static TEST_SPACE_WINDOW_LIST_BY_SPACE_OVERRIDE: RefCell<HashMap<u64, Vec<u32>>> = RefCell::new(HashMap::default());
     static TEST_WINDOW_SPACE_QUERY_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TEST_WINDOW_ORDER_QUERY_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static TEST_WINDOW_SPACES_OVERRIDE: RefCell<HashMap<u32, Vec<u64>>> = RefCell::new(HashMap::default());
     static TEST_WINDOW_ORDERED_IN_OVERRIDE: RefCell<HashMap<u32, bool>> = RefCell::new(HashMap::default());
 }
@@ -644,9 +645,9 @@ fn find_window_at_point(point: &mut CGPoint, below_window_id: Option<u32>) -> Op
 fn is_own_window(cid: i32) -> bool { *G_CONNECTION == cid }
 
 pub fn get_window_at_point(mut point: CGPoint) -> Option<WindowServerId> {
-    let (mut wid, cid) = find_window_at_point(&mut point, None)?;
-    if is_own_window(cid) {
-        wid = find_window_at_point(&mut point, Some(wid))?.0;
+    let (mut wid, mut cid) = find_window_at_point(&mut point, None)?;
+    while is_own_window(cid) {
+        (wid, cid) = find_window_at_point(&mut point, Some(wid))?;
     }
     Some(WindowServerId(wid))
 }
@@ -723,6 +724,8 @@ pub fn space_window_list_for_connection(
     owner: u32,
     include_minimized: bool,
 ) -> Vec<u32> {
+    #[cfg(test)]
+    TEST_WINDOW_ORDER_QUERY_COUNT.with(|count| count.set(count.get() + 1));
     #[cfg(test)]
     if spaces.len() == 1
         && let Some(override_ids) = TEST_SPACE_WINDOW_LIST_BY_SPACE_OVERRIDE
@@ -953,4 +956,9 @@ mod tests {
 #[cfg(test)]
 pub fn window_space_query_count() -> usize {
     TEST_WINDOW_SPACE_QUERY_COUNT.with(|count| count.get())
+}
+
+#[cfg(test)]
+pub fn window_order_query_count() -> usize {
+    TEST_WINDOW_ORDER_QUERY_COUNT.with(|count| count.get())
 }

@@ -5,7 +5,7 @@ use std::panic::AssertUnwindSafe;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
-use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_core_foundation::{CGPoint, CGRect};
 use objc2_core_graphics::{
     CGEvent, CGEventField, CGEventFlags, CGEventMask, CGEventSource, CGEventSourceStateID,
     CGEventTapLocation as CGTapLoc, CGEventTapOptions as CGTapOpt, CGEventTapProxy, CGEventType,
@@ -29,7 +29,6 @@ use crate::sys::hotkey::{
     modifiers_from_flags_with_keys,
 };
 use crate::sys::screen::{CoordinateConverter, SpaceId};
-use crate::sys::window_server::WindowServerId;
 use crate::sys::{haptics, power, window_server};
 use crate::ui::stack_line::point_hits_indicator_frame;
 
@@ -49,8 +48,6 @@ pub enum Request {
     ConfigUpdated(Config),
     LayoutModesChanged(Vec<(SpaceId, crate::common::config::LayoutMode)>),
     SetLowPowerMode(bool),
-    MouseFocusCompleted(WindowServerId),
-    MouseWindowFrame(WindowServerId, Option<CGRect>),
     SetDragActive(bool),
     SetMissionControlActive(bool),
 }
@@ -63,8 +60,6 @@ pub struct Input {
     mission_control_active: Cell<bool>,
     mouse_move_last_timestamp: Cell<Option<u64>>,
     mouse_move_min_interval_ticks: Cell<u64>,
-    mouse_window: Cell<Option<WindowServerId>>,
-    mouse_window_frame: Cell<Option<CGRect>>,
     mouse_location: Cell<CGPoint>,
     mouse_focus_publisher: reactor::MouseFocusPublisher,
     focus_suppression: RefCell<FocusSuppression>,
@@ -109,26 +104,16 @@ struct State {
     scroll: Option<ScrollHandler>,
 }
 
-const MOUSE_FOCUS_TIMEOUT: Duration = Duration::from_secs(1);
 const GESTURE_RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 const GESTURE_COOLDOWN: Duration = Duration::from_millis(1250);
 
 #[derive(Default)]
 struct FocusSuppression {
-    pending: Option<(WindowServerId, Instant)>,
     gesture_until: Option<Instant>,
 }
 
 impl FocusSuppression {
-    fn complete(&mut self, window: WindowServerId) {
-        if self.pending.is_some_and(|(pending, _)| pending == window) {
-            self.pending = None;
-        }
-    }
-
     fn suppressed(&self, now: Instant) -> bool {
-        // A pending raise must not discard a hover over a different window.
-        // Pending tracks retries only; pointer transitions remain responsive.
         self.gesture_until.is_some_and(|deadline| now < deadline)
     }
 }
@@ -320,8 +305,6 @@ impl Input {
             mission_control_active: Cell::new(false),
             mouse_move_last_timestamp: Cell::new(None),
             mouse_move_min_interval_ticks: Cell::new(mouse_move_min_interval_ticks),
-            mouse_window: Cell::new(None),
-            mouse_window_frame: Cell::new(None),
             mouse_location: Cell::new(CGPoint::new(0.0, 0.0)),
             mouse_focus_publisher: reactor::MouseFocusPublisher::default(),
             focus_suppression: RefCell::new(FocusSuppression::default()),
@@ -401,21 +384,7 @@ impl Input {
                 self.mission_control_active.set(active);
                 should_rebuild_mask = true;
             }
-            Request::MouseFocusCompleted(window) => {
-                self.focus_suppression.borrow_mut().complete(window);
-            }
-            Request::MouseWindowFrame(window, frame) => {
-                if self.mouse_window.get() == Some(window) {
-                    self.mouse_window_frame.set(frame.or_else(|| {
-                        Some(CGRect::new(
-                            self.mouse_location.get(),
-                            CGSize::new(f64::EPSILON, f64::EPSILON),
-                        ))
-                    }));
-                }
-            }
             Request::Warp(point) => {
-                self.reset_mouse_window();
                 if let Err(e) = event::warp_mouse(point) {
                     warn!("Failed to warp mouse: {e:?}");
                 }
@@ -449,7 +418,6 @@ impl Input {
                 state.reset(enabled);
                 if enabled {
                     self.reset_mouse_move_sample_gate();
-                    self.reset_mouse_window();
                 }
                 should_rebuild_mask = true;
             }
@@ -462,7 +430,6 @@ impl Input {
                 state.reset(enabled);
                 if enabled {
                     self.reset_mouse_move_sample_gate();
-                    self.reset_mouse_window();
                 }
                 should_rebuild_mask = true;
             }
@@ -512,7 +479,6 @@ impl Input {
                     if prev_active && !state.disable_hotkey_active {
                         state.reset(true);
                         self.reset_mouse_move_sample_gate();
-                        self.reset_mouse_window();
                     }
                     if prev_focus_follows_mouse_config_enabled
                         != state.focus_follows_mouse_config_enabled
@@ -521,7 +487,6 @@ impl Input {
                     {
                         state.reset_mouse_sampling();
                         self.reset_mouse_move_sample_gate();
-                        self.reset_mouse_window();
                     }
                     if prev_mouse_hides_on_focus
                         && !state.mouse_hides_on_focus
@@ -575,19 +540,12 @@ impl Input {
             if !state.disable_hotkey_active {
                 state.reset(true);
                 self.reset_mouse_move_sample_gate();
-                self.reset_mouse_window();
             }
         }
     }
 
     #[inline]
     fn reset_mouse_move_sample_gate(&self) { self.mouse_move_last_timestamp.set(None); }
-
-    #[inline]
-    fn reset_mouse_window(&self) {
-        self.mouse_window.set(None);
-        self.mouse_window_frame.set(None);
-    }
 
     fn reconcile_after_tap_reenabled(&self) {
         let mut state = self.state.borrow_mut();
@@ -674,7 +632,6 @@ impl Input {
                     GESTURE_COOLDOWN
                 },
         );
-        self.reset_mouse_window();
     }
 
     /// Handle mouse moves without running the generic mouse/keyboard path.
@@ -733,9 +690,8 @@ impl Input {
             }
         }
 
-        // Resolve and deduplicate the window on the input thread. The reactor
-        // only needs to see transitions; it must not receive a message for
-        // every sampled point while the cursor remains in one window.
+        // Publish positions only. WindowServer hit testing and focus eligibility
+        // belong on the reactor, outside the synchronous input callback.
         if state.focus_follows_mouse_config_enabled
             && state.focus_follows_mouse_enabled
             && !state.disable_hotkey_active
@@ -751,37 +707,14 @@ impl Input {
 
     fn on_mouse_focus(&self, loc: CGPoint) {
         let mut suppression = self.focus_suppression.borrow_mut();
-        // Most samples have neither a pending raise nor a gesture deadline.
-        // Read the clock only when there is a deadline to inspect, or later
-        // when publishing a new candidate requires a retry deadline.
-        let now = (suppression.pending.is_some() || suppression.gesture_until.is_some())
-            .then(Instant::now);
-        if let Some(now) = now {
-            if suppression.pending.is_some_and(|(_, deadline)| now >= deadline) {
-                suppression.pending = None;
-                self.reset_mouse_window();
-            }
-            if suppression.suppressed(now) {
+        if suppression.gesture_until.is_some() {
+            if suppression.suppressed(Instant::now()) {
                 return;
             }
             suppression.gesture_until = None;
         }
-        let window = window_server::get_window_at_point(loc);
-        let previous = self.mouse_window.replace(window);
-        if previous == window {
-            return;
-        }
-        if window.is_none() || self.mouse_window_frame.get().is_none() {
-            self.mouse_window_frame
-                .set(Some(CGRect::new(loc, CGSize::new(f64::EPSILON, f64::EPSILON))));
-        }
-        if let Some(window) = window {
-            window_server::note_windowserver_activity(window.as_u32());
-            if self.mouse_focus_publisher.publish(&self.events_tx, window).is_ok() {
-                suppression.pending =
-                    Some((window, now.unwrap_or_else(Instant::now) + MOUSE_FOCUS_TIMEOUT));
-            }
-        }
+        drop(suppression);
+        _ = self.mouse_focus_publisher.publish(&self.events_tx, loc);
     }
 
     #[inline]
@@ -793,19 +726,6 @@ impl Input {
                 .checked_sub(last)
                 .is_some_and(|elapsed| elapsed < self.mouse_move_min_interval_ticks.get())
         }) {
-            // Do not let the throttle hide a boundary crossing. The frame is
-            // Rift's cached model frame, supplied once per resolved hover.
-            if let Some(frame) = self.mouse_window_frame.get() {
-                let point = CGEvent::location(Some(event));
-                if point.x < frame.origin.x
-                    || point.x >= frame.origin.x + frame.size.width
-                    || point.y < frame.origin.y
-                    || point.y >= frame.origin.y + frame.size.height
-                {
-                    self.mouse_move_last_timestamp.set(Some(timestamp));
-                    return Some(point);
-                }
-            }
             return None;
         }
         self.mouse_move_last_timestamp.set(Some(timestamp));
@@ -1184,17 +1104,11 @@ mod tests {
         assert_eq!(input.admit_mouse_move(&event), Some(CGPoint::new(20.0, 30.0)));
         CGEvent::set_timestamp(Some(&event), start + interval - 1);
         assert!(input.admit_mouse_move(&event).is_none());
-        input.mouse_window_frame.set(Some(CGRect::new(
-            CGPoint::new(0.0, 0.0),
-            CGSize::new(100.0, 100.0),
-        )));
+        // Moving elsewhere does not bypass the time-based sample gate.
         CGEvent::set_location(Some(&event), CGPoint::new(150.0, 30.0));
-        assert_eq!(input.admit_mouse_move(&event), Some(CGPoint::new(150.0, 30.0)));
-        CGEvent::set_location(Some(&event), CGPoint::new(50.0, 30.0));
-        CGEvent::set_timestamp(Some(&event), start + 2 * interval - 2);
         assert!(input.admit_mouse_move(&event).is_none());
-        CGEvent::set_timestamp(Some(&event), start + 2 * interval - 1);
-        assert!(input.admit_mouse_move(&event).is_some());
+        CGEvent::set_timestamp(Some(&event), start + interval);
+        assert_eq!(input.admit_mouse_move(&event), Some(CGPoint::new(150.0, 30.0)));
         // An older timestamp (e.g. switching event sources) resets the gate
         // rather than rejecting hardware input until the old clock catches up.
         CGEvent::set_timestamp(Some(&event), start - interval);
@@ -1318,32 +1232,12 @@ mod tests {
     }
 
     #[test]
-    fn pending_focus_does_not_block_hover_and_only_matching_completion_releases_it() {
+    fn gesture_cooldown_expires() {
         let now = Instant::now();
-        let window = WindowServerId::new(1);
-        let mut suppression = FocusSuppression {
-            pending: Some((window, now + MOUSE_FOCUS_TIMEOUT)),
-            gesture_until: None,
-        };
-        assert!(!suppression.suppressed(now));
-        suppression.complete(WindowServerId::new(2));
-        assert!(suppression.pending.is_some());
-        assert!(!suppression.suppressed(now + MOUSE_FOCUS_TIMEOUT));
-        suppression.complete(window);
-        assert!(suppression.pending.is_none());
-        assert!(!suppression.suppressed(now));
-    }
-
-    #[test]
-    fn focus_completion_does_not_release_gesture_cooldown() {
-        let now = Instant::now();
-        let window = WindowServerId::new(1);
-        let mut suppression = FocusSuppression {
-            pending: Some((window, now + MOUSE_FOCUS_TIMEOUT)),
+        let suppression = FocusSuppression {
             gesture_until: Some(now + GESTURE_COOLDOWN),
         };
-        suppression.complete(window);
-        assert!(suppression.suppressed(now + MOUSE_FOCUS_TIMEOUT));
+        assert!(suppression.suppressed(now));
         assert!(!suppression.suppressed(now + GESTURE_COOLDOWN));
     }
 
@@ -1351,7 +1245,6 @@ mod tests {
     fn gesture_suppression_recovers_if_end_event_is_lost() {
         let now = Instant::now();
         let suppression = FocusSuppression {
-            pending: None,
             gesture_until: Some(now + GESTURE_RECOVERY_TIMEOUT),
         };
         assert!(suppression.suppressed(now));

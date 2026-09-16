@@ -2828,6 +2828,101 @@ fn focus_follows_mouse_emits_focus_without_explicit_arrange() {
 }
 
 #[test]
+fn mouse_hit_missing_from_inventory_refreshes_its_owner_once() {
+    let mut reactor = test_reactor();
+    let pid = 91;
+    let wsid = WindowServerId::new(910);
+    let (app_tx, mut app_rx) = actor::channel();
+    reactor.app_manager.apps.insert(pid, AppState {
+        info: AppInfo {
+            bundle_id: Some("com.test.mouse-discovery".into()),
+            localized_name: Some("Mouse Discovery".into()),
+        },
+        handle: AppThreadHandle::new_for_test(app_tx),
+    });
+    reactor.state.windows.track_window_server_info(WindowServerInfo {
+        id: wsid,
+        pid,
+        layer: 0,
+        frame: CGRect::new(CGPoint::ZERO, CGSize::new(800.0, 600.0)),
+        min_frame: CGSize::ZERO,
+        max_frame: CGSize::ZERO,
+    });
+    reactor.handle_event(Event::MouseMoved(wsid));
+    assert!(matches!(
+        app_rx.try_recv().unwrap().1,
+        Request::RefreshWindowInventory(_)
+    ));
+    reactor.handle_event(Event::MouseMoved(wsid));
+    assert!(app_rx.try_recv().is_err());
+    assert!(!reactor.window_inventory_manager.pending.contains(&pid));
+}
+
+#[test]
+fn mouse_over_current_focus_skips_space_queries_and_outcome_processing() {
+    let (mut reactor, window, wsid, space, _, _) = reactor_with_window_on_space1();
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space, window));
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, window));
+    let _ = reactor
+        .main_window_tracker
+        .handle_event(&Event::ApplicationGloballyActivated(window.pid));
+    let _ = reactor
+        .main_window_tracker
+        .handle_event(&Event::WindowServerFocusChanged(window, space));
+    assert_eq!(reactor.main_window(), Some(window));
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        Some(window)
+    );
+    reactor.event_outcome_phase_trace.clear();
+    let before = window_server::window_space_query_count();
+    for _ in 0..100 {
+        reactor.handle_loop_event(Event::MouseMoved(wsid));
+    }
+    assert_eq!(window_server::window_space_query_count(), before);
+    assert!(reactor.event_outcome_phase_trace.is_empty());
+
+    // Actual focus can change without the pointer changing windows.
+    let _ = reactor.main_window_tracker.handle_event(&Event::WindowServerFocusChanged(
+        WindowId::new(window.pid, 999),
+        space,
+    ));
+    window_server::set_window_spaces_override(wsid, Some(vec![space.get()]));
+    reactor.handle_loop_event(Event::MouseMoved(wsid));
+    window_server::set_window_spaces_override(wsid, None);
+    assert_eq!(window_server::window_space_query_count(), before + 1);
+    assert!(!reactor.event_outcome_phase_trace.is_empty());
+}
+
+#[test]
+fn mouse_raise_queries_order_only_when_it_could_cover_a_floating_window() {
+    let (mut reactor, window, wsid, space, _, frame) = reactor_with_window_on_space1();
+    let before = window_server::window_order_query_count();
+    assert!(reactor.should_raise_on_mouse_over(window, Some(space)));
+    assert_eq!(window_server::window_order_query_count(), before);
+
+    let floating = WindowId::new(window.pid, 2);
+    let floating_wsid = WindowServerId::new(102);
+    let smaller = CGRect::new(CGPoint::new(100.0, 100.0), CGSize::new(300.0, 300.0));
+    reactor.add_test_window(floating, floating_wsid, Some(space), smaller);
+    reactor.send_layout_event(LayoutEvent::WindowAdded(space, floating));
+    reactor.send_layout_event(LayoutEvent::WindowFocused(space, floating));
+    reactor.handle_test_layout_command(LayoutCommand::ToggleWindowFloating);
+    assert!(reactor.layout_manager.layout_engine.is_window_floating(floating));
+    reactor.state.windows.window_mut(floating).unwrap().frame_monotonic = smaller;
+    window_server::set_space_window_list_for_connection_override(Some(vec![wsid.as_u32()]));
+    assert!(reactor.should_raise_on_mouse_over(window, Some(space)));
+    window_server::set_space_window_list_for_connection_override(None);
+    assert_eq!(window_server::window_order_query_count(), before + 1);
+
+    reactor.state.windows.window_mut(floating).unwrap().frame_monotonic =
+        CGRect::new(CGPoint::new(frame.max().x + 100.0, 100.0), smaller.size);
+    let before = window_server::window_order_query_count();
+    assert!(reactor.should_raise_on_mouse_over(window, Some(space)));
+    assert_eq!(window_server::window_order_query_count(), before);
+}
+
+#[test]
 fn focus_follows_mouse_raise_is_quiet_so_stale_main_window_cannot_switch_workspace() {
     let reactor = test_reactor();
     let space = SpaceId::new(1);
