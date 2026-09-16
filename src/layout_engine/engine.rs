@@ -2998,20 +2998,157 @@ impl LayoutEngine {
             return EventResponse::default();
         };
 
-        let mut target_workspace_id = self.virtual_workspace_manager.active_workspace(target_space);
-        if target_workspace_id.is_none() {
-            if let Some((id, _)) =
-                self.virtual_workspace_manager.list_workspaces(target_space).first()
-            {
-                self.virtual_workspace_manager.set_active_workspace(target_space, *id);
-                target_workspace_id = Some(*id);
-            }
-        }
-
-        let Some(target_workspace_id) = target_workspace_id else {
+        let Some(target_workspace_id) =
+            self.virtual_workspace_manager.active_workspace(target_space)
+        else {
             return EventResponse::default();
         };
 
+        self.ensure_workspace_layouts(target_space, target_screen_size);
+        if !self.relocate_window_to_workspace(
+            window_store,
+            source_space,
+            target_space,
+            source_workspace_id,
+            target_workspace_id,
+            window_id,
+        ) {
+            return EventResponse::default();
+        }
+
+        if self.focused_window == Some(window_id) {
+            self.focused_window = None;
+        }
+
+        if self.virtual_workspace_manager.active_workspace(source_space)
+            == Some(source_workspace_id)
+        {
+            self.virtual_workspace_manager.set_last_focused_window(
+                source_space,
+                source_workspace_id,
+                None,
+            );
+        }
+        self.virtual_workspace_manager.set_last_focused_window(
+            target_space,
+            target_workspace_id,
+            Some(window_id),
+        );
+        self.focused_window = Some(window_id);
+        self.broadcast_windows_changed(window_store, source_space);
+        self.broadcast_windows_changed(window_store, target_space);
+
+        EventResponse {
+            changed: true,
+            raise_windows: vec![window_id],
+            focus_window: Some(window_id),
+            boundary_hit: None,
+        }
+    }
+
+    /// Moves the active workspace to the same workspace ordinal on another display.
+    pub fn move_active_workspace_to_space(
+        &mut self,
+        window_store: &mut WindowStore,
+        source_space: SpaceId,
+        target_space: SpaceId,
+        target_screen_size: CGSize,
+        windows: &[WindowId],
+    ) -> EventResponse {
+        if source_space == target_space {
+            return EventResponse::default();
+        }
+        let source_workspaces = self.virtual_workspace_manager.list_workspaces(source_space);
+        let target_workspaces = self.virtual_workspace_manager.list_workspaces(target_space);
+        let Some(source_workspace_id) =
+            self.virtual_workspace_manager.active_workspace(source_space)
+        else {
+            return EventResponse::default();
+        };
+        let Some(source_workspace_index) =
+            source_workspaces.iter().position(|(id, _)| *id == source_workspace_id)
+        else {
+            return EventResponse::default();
+        };
+        let Some(target_workspace_id) =
+            target_workspaces.get(source_workspace_index).map(|(id, _)| *id)
+        else {
+            return EventResponse::default();
+        };
+
+        let preferred_focus = self.preferred_focus_for_workspace(
+            window_store,
+            source_space,
+            source_workspace_id,
+            None,
+        );
+        self.ensure_workspace_layouts(target_space, target_screen_size);
+        let mut moved = Vec::with_capacity(windows.len());
+        for &window_id in windows {
+            if self.virtual_workspace_manager.workspace_for_window(
+                window_store,
+                source_space,
+                window_id,
+            ) != Some(source_workspace_id)
+            {
+                continue;
+            }
+            if self.relocate_window_to_workspace(
+                window_store,
+                source_space,
+                target_space,
+                source_workspace_id,
+                target_workspace_id,
+                window_id,
+            ) {
+                moved.push(window_id);
+            }
+        }
+        if moved.is_empty() && !windows.is_empty() {
+            return EventResponse::default();
+        }
+        let focus_window = preferred_focus
+            .filter(|window| moved.contains(window))
+            .or_else(|| moved.first().copied());
+        let workspace_changed = self.virtual_workspace_manager.active_workspace(target_space)
+            != Some(target_workspace_id);
+        if workspace_changed {
+            self.virtual_workspace_manager
+                .set_active_workspace(target_space, target_workspace_id);
+            self.broadcast_workspace_changed(target_space);
+        }
+        self.update_active_floating_windows(window_store, target_space);
+        self.broadcast_windows_changed(window_store, source_space);
+        self.broadcast_windows_changed(window_store, target_space);
+        EventResponse {
+            changed: workspace_changed || !moved.is_empty(),
+            raise_windows: moved,
+            focus_window,
+            boundary_hit: None,
+        }
+    }
+
+    fn ensure_workspace_layouts(&mut self, space: SpaceId, screen_size: CGSize) {
+        for (workspace_id, _) in self.virtual_workspace_manager.list_workspaces(space) {
+            let tree = &mut self.virtual_workspace_manager.workspaces[workspace_id].layout_system;
+            self.workspace_layouts.ensure_active_for_workspace(
+                space,
+                screen_size,
+                workspace_id,
+                tree,
+            );
+        }
+    }
+
+    fn relocate_window_to_workspace(
+        &mut self,
+        window_store: &mut WindowStore,
+        source_space: SpaceId,
+        target_space: SpaceId,
+        source_workspace_id: VirtualWorkspaceId,
+        target_workspace_id: VirtualWorkspaceId,
+        window_id: WindowId,
+    ) -> bool {
         if matches!(
             self.workspace_tree(source_workspace_id),
             LayoutSystemKind::Floating(_)
@@ -3022,50 +3159,29 @@ impl LayoutEngine {
             self.floating.remove_floating(window_id);
         }
         let was_floating = self.floating.is_floating(window_id);
-
         if was_floating {
             self.floating.remove_active_for_window(window_id);
         } else {
             self.remove_window_from_all_tiling_trees(window_id);
         }
-
-        let assigned = self.virtual_workspace_manager.assign_window_to_workspace(
+        if !self.virtual_workspace_manager.assign_window_to_workspace(
             window_store,
             target_space,
             window_id,
             target_workspace_id,
-        );
-
-        if !assigned {
+        ) {
             if was_floating {
                 self.floating.add_active(source_space, window_id.pid, window_id);
-            } else if let Some(src_layout) =
+            } else if let Some(source_layout) =
                 self.workspace_layouts.active(source_space, source_workspace_id)
             {
                 self.workspace_tree_mut(source_workspace_id)
-                    .add_window_after_selection(src_layout, window_id);
+                    .add_window_after_selection(source_layout, window_id);
             }
-            return EventResponse::default();
+            return false;
         }
-
         if was_floating {
             self.floating_positions.remove_window(window_id);
-        }
-
-        {
-            let workspace_ids = self.virtual_workspace_manager.list_workspaces(target_space);
-            for (id, _) in workspace_ids {
-                let tree = &mut self.virtual_workspace_manager.workspaces[id].layout_system;
-                self.workspace_layouts.ensure_active_for_workspace(
-                    target_space,
-                    target_screen_size,
-                    id,
-                    tree,
-                );
-            }
-        }
-
-        if was_floating {
             self.floating.add_active(target_space, window_id.pid, window_id);
             self.floating.set_last_focus(Some(window_id));
         } else if let Some(target_layout) =
@@ -3074,39 +3190,10 @@ impl LayoutEngine {
             self.workspace_tree_mut(target_workspace_id)
                 .add_window_after_selection(target_layout, window_id);
         }
-
         if self.focused_window == Some(window_id) {
             self.focused_window = None;
         }
-
-        if let Some(active_ws) = self.virtual_workspace_manager.active_workspace(source_space) {
-            if active_ws == source_workspace_id {
-                self.virtual_workspace_manager.set_last_focused_window(
-                    source_space,
-                    source_workspace_id,
-                    None,
-                );
-            }
-        }
-
-        self.virtual_workspace_manager.set_last_focused_window(
-            target_space,
-            target_workspace_id,
-            Some(window_id),
-        );
-        self.focused_window = Some(window_id);
-
-        if source_space != target_space {
-            self.broadcast_windows_changed(window_store, source_space);
-        }
-        self.broadcast_windows_changed(window_store, target_space);
-
-        EventResponse {
-            changed: true,
-            raise_windows: vec![window_id],
-            focus_window: Some(window_id),
-            boundary_hit: None,
-        }
+        true
     }
 
     pub fn workspace_name(
@@ -3785,6 +3872,47 @@ mod tests {
                 .any(|(window_id, _)| window_id == wid),
             "source workspace layout must not keep emitting the moved floating window"
         );
+    }
+
+    #[test]
+    fn moving_empty_active_workspace_to_space_still_activates_matching_slot() {
+        let mut settings = VirtualWorkspaceSettings::default();
+        settings.default_workspace_count = 2;
+        let mut engine = LayoutEngine::new(&settings, &LayoutSettings::default(), None);
+        let mut window_store = WindowStore::default();
+        let source_space = SpaceId::new(306);
+        let target_space = SpaceId::new(307);
+        let screen = CGSize::new(1000.0, 800.0);
+
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::SpaceExposed(source_space, screen),
+        );
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::SpaceExposed(target_space, screen),
+        );
+        let target_workspaces =
+            engine.virtual_workspace_manager_mut().list_workspaces(target_space);
+        let target_second = target_workspaces[1].0;
+        engine
+            .virtual_workspace_manager_mut()
+            .set_active_workspace(target_space, target_second);
+
+        let target_first = target_workspaces[0].0;
+        let source_first =
+            engine.virtual_workspace_manager_mut().list_workspaces(source_space)[0].0;
+        let response = engine.move_active_workspace_to_space(
+            &mut window_store,
+            source_space,
+            target_space,
+            screen,
+            &[],
+        );
+
+        assert!(response.changed);
+        assert_eq!(engine.active_workspace(target_space), Some(target_first));
+        assert_eq!(engine.active_workspace(source_space), Some(source_first),);
     }
 
     #[test]

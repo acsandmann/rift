@@ -455,3 +455,85 @@ pub fn handle_command_reactor_move_window_to_display(
         .with_layout_response(response, None)
         .with_pre_layout_window_frame_write(payload.window, payload.target_frame, true))
 }
+
+#[derive(Debug, Clone, Copy)]
+pub struct WorkspaceWindowMove {
+    pub window: WindowId,
+    pub window_server_id: Option<WindowServerId>,
+    pub target_frame: objc2_core_foundation::CGRect,
+}
+
+#[derive(Debug, Clone)]
+pub struct MoveWorkspaceToDisplayPayload {
+    pub windows: Vec<WorkspaceWindowMove>,
+    pub source_space: SpaceId,
+    pub target_space: SpaceId,
+    pub target_screen: objc2_core_foundation::CGRect,
+}
+
+pub fn handle_command_reactor_move_workspace_to_display(
+    state: &mut RiftState,
+    layout: &mut LayoutManager,
+    workspace_switch: &mut WorkspaceSwitchManager,
+    payload: MoveWorkspaceToDisplayPayload,
+) -> anyhow::Result<EventOutcome> {
+    let MoveWorkspaceToDisplayPayload {
+        windows,
+        source_space,
+        target_space,
+        target_screen,
+    } = payload;
+
+    let moves = windows
+        .into_iter()
+        .filter(|window_move| {
+            if state.windows.window(window_move.window).is_some() {
+                true
+            } else {
+                warn!(
+                    window = ?window_move.window,
+                    "Skipping unknown window in workspace display move"
+                );
+                false
+            }
+        })
+        .collect::<Vec<_>>();
+    let window_ids = moves.iter().map(|window_move| window_move.window).collect::<Vec<_>>();
+    let response = layout.layout_engine.move_active_workspace_to_space(
+        &mut state.windows,
+        source_space,
+        target_space,
+        target_screen.size,
+        &window_ids,
+    );
+    if !response.changed {
+        return Ok(EventOutcome::no_change());
+    }
+
+    let mut applied_moves = Vec::with_capacity(moves.len());
+    for window_move in moves {
+        if state.windows.workspace_for_window(target_space, window_move.window).is_none() {
+            continue;
+        }
+        if let Some(window) = state.windows.window_mut(window_move.window) {
+            window.frame_monotonic = window_move.target_frame;
+        }
+        if let Some(window_server_id) = window_move.window_server_id {
+            state.windows.set_window_server_space(window_server_id, Some(target_space));
+            state.windows.mark_window_visible(window_server_id);
+        }
+        applied_moves.push(window_move);
+    }
+
+    workspace_switch.start_workspace_switch(WorkspaceSwitchOrigin::Manual);
+    let mut outcome =
+        EventOutcome::layout_changed(false).with_layout_response(response, Some(target_space));
+    for window_move in applied_moves {
+        outcome = outcome.with_pre_layout_window_frame_write(
+            window_move.window,
+            window_move.target_frame,
+            true,
+        );
+    }
+    Ok(outcome)
+}

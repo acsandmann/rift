@@ -3105,6 +3105,85 @@ fn it_preserves_layout_after_login_screen() {
 }
 
 #[test]
+fn moving_workspace_to_display_preserves_workspace_ordinal_and_follows_it() {
+    let (mut apps, mut reactor) = test_context_with_workspace_count(2);
+    let left = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let right = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
+    let (source_space, target_space) = (SpaceId::new(1), SpaceId::new(2));
+    reactor.handle_event(space_state_event(vec![left, right], vec![
+        Some(source_space),
+        Some(target_space),
+    ]));
+    apps.make_app_and_settle(&mut reactor, 1, make_windows(2));
+
+    let target_workspaces = reactor.test_workspace_ids(target_space);
+    assert!(reactor.set_test_active_workspace(target_space, target_workspaces[1]));
+
+    reactor.handle_event(Event::Command(Command::Reactor(
+        ReactorCommand::MoveWorkspaceToDisplay {
+            selector: DisplaySelector::Index(1),
+            wrap_around: false,
+        },
+    )));
+
+    for index in 1..=2 {
+        let window = WindowId::new(1, index);
+        assert_eq!(reactor.assigned_space_for_window_id(window), Some(target_space));
+        assert_eq!(
+            reactor.test_workspace_for_window(target_space, window),
+            Some(target_workspaces[0]),
+            "workspace ordinal should be preserved on the destination display"
+        );
+    }
+    assert_eq!(
+        reactor.layout_manager.layout_engine.active_workspace(target_space),
+        Some(target_workspaces[0]),
+        "the moved workspace should become active on the destination display"
+    );
+    assert!(
+        reactor
+            .layout_manager
+            .layout_engine
+            .windows_in_active_workspace(&reactor.state.windows, source_space)
+            .is_empty()
+    );
+}
+#[test]
+fn moving_workspace_direction_wrap_is_opt_in() {
+    let (mut apps, mut reactor) = test_context();
+    let left = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let middle = CGRect::new(CGPoint::new(1000., 0.), CGSize::new(1000., 1000.));
+    let right = CGRect::new(CGPoint::new(2000., 0.), CGSize::new(1000., 1000.));
+    let (left_space, middle_space, right_space) =
+        (SpaceId::new(1), SpaceId::new(2), SpaceId::new(3));
+    reactor.handle_event(space_state_event(vec![right, left, middle], vec![
+        Some(right_space),
+        Some(left_space),
+        Some(middle_space),
+    ]));
+
+    let mut window = make_window(1);
+    window.frame = CGRect::new(CGPoint::new(2100., 100.), CGSize::new(400., 400.));
+    apps.make_app_and_settle(&mut reactor, 1, vec![window]);
+    let moved = WindowId::new(1, 1);
+
+    reactor.handle_event(Event::Command(Command::Reactor(
+        ReactorCommand::MoveWorkspaceToDisplay {
+            selector: DisplaySelector::Direction(Direction::Right),
+            wrap_around: false,
+        },
+    )));
+    assert_eq!(reactor.assigned_space_for_window_id(moved), Some(right_space));
+
+    reactor.handle_event(Event::Command(Command::Reactor(
+        ReactorCommand::MoveWorkspaceToDisplay {
+            selector: DisplaySelector::Direction(Direction::Right),
+            wrap_around: true,
+        },
+    )));
+    assert_eq!(reactor.assigned_space_for_window_id(moved), Some(left_space));
+}
+#[test]
 fn login_screen_refresh_preserves_manual_workspace_assignment() {
     let (mut apps, mut reactor) = test_context();
     let space = SpaceId::new(1);

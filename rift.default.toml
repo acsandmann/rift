@@ -414,6 +414,7 @@ comb1 = "Alt + Shift"
 # - exec = "command" | exec = ["cmd", "arg1", "..."]
 # - move_mouse_to_display = "left"|"right"|"up"|"down"|N|"<display_uuid>"
 # - move_window_to_display = { selector = "left"|"right"|"up"|"down"|N|"<display_uuid>", window_id = 123 }
+# - move_workspace_to_display = { selector = "left"|"right"|"up"|"down"|N|"<display_uuid>", wrap_around = true }
 # - close_window / close_window = { window_server_id = 123 } (optional window id)
 # - focus_window = { window_id = 123, window_server_id = 456 }
 # - show_mission_control_all / show_mission_control_current / dismiss_mission_control (this is rift's own mission control, not macOS's)
@@ -495,6 +496,9 @@ comb1 = "Alt + Shift"
 # "Alt + Ctrl + Left" = { move_window_to_display = { selector = "left" } }
 # "Alt + Ctrl + Right" = { move_window_to_display = { selector = "right" } }
 # "Alt + Ctrl + A" = { move_window_to_display = { selector = 0 } }
+# Move the active workspace to another display. Add `wrap_around = true` to cycle at an edge.
+# "Alt + Ctrl + Shift + Left" = { move_workspace_to_display = { selector = "left", wrap_around = true } }
+# "Alt + Ctrl + Shift + Right" = { move_workspace_to_display = { selector = "right", wrap_around = true } }
 
 # if mission control is enabled
 # this will show an exploded view of the windows in the active workspace

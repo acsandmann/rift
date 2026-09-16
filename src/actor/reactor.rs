@@ -2129,15 +2129,7 @@ impl Reactor {
                 if source_space == target_space {
                     return Ok(EventOutcome::no_change());
                 }
-                let mut target_frame = window_frame;
-                let mut origin = target_screen.frame.mid();
-                origin.x -= window_frame.size.width / 2.0;
-                origin.y -= window_frame.size.height / 2.0;
-                let min = target_screen.frame.min();
-                let max = target_screen.frame.max();
-                origin.x = origin.x.max(min.x).min(max.x - window_frame.size.width);
-                origin.y = origin.y.max(min.y).min(max.y - window_frame.size.height);
-                target_frame.origin = origin;
+                let target_frame = Self::center_frame_on_screen(window_frame, target_screen.frame);
                 return command_workflow::handle_command_reactor_move_window_to_display(
                     &mut self.state,
                     &mut self.layout_manager,
@@ -2148,6 +2140,86 @@ impl Reactor {
                         target_space,
                         target_screen: target_screen.frame,
                         target_frame,
+                    },
+                );
+            }
+            Event::Command(Command::Reactor(ReactorCommand::MoveWorkspaceToDisplay {
+                selector,
+                wrap_around,
+            })) => {
+                if self.is_in_drag() {
+                    warn!("Ignoring move-workspace-to-display while a drag is active");
+                    return Ok(EventOutcome::no_change());
+                }
+                let Some(source_space) = self.workspace_command_space() else {
+                    warn!("Move workspace to display ignored: source space unavailable");
+                    return Ok(EventOutcome::no_change());
+                };
+                let origin = self
+                    .space_state
+                    .screen_by_space(source_space)
+                    .map(|screen| screen.frame.mid())
+                    .or_else(|| self.current_screen_center());
+                let target_screen = if wrap_around {
+                    self.screen_for_selector_wrapping(&selector, origin)
+                } else {
+                    self.screen_for_selector(&selector, origin)
+                };
+                let Some(target_screen) = target_screen.cloned() else {
+                    warn!(
+                        ?selector,
+                        "Move workspace to display ignored: target display not found"
+                    );
+                    return Ok(EventOutcome::no_change());
+                };
+                let Some(target_space) =
+                    target_screen.space.filter(|space| self.is_space_active(*space))
+                else {
+                    warn!(
+                        ?selector,
+                        "Move workspace to display ignored: target space unavailable"
+                    );
+                    return Ok(EventOutcome::no_change());
+                };
+                if source_space == target_space {
+                    return Ok(EventOutcome::no_change());
+                }
+
+                let windows = self
+                    .layout_manager
+                    .layout_engine
+                    .windows_in_active_workspace(&self.state.windows, source_space);
+                if !windows.is_empty() {
+                    self.store_current_floating_positions(source_space);
+                }
+
+                let moves = windows
+                    .into_iter()
+                    .filter_map(|window| {
+                        let window_state = self.state.windows.window(window)?;
+                        Some(command_workflow::WorkspaceWindowMove {
+                            window,
+                            window_server_id: window_state.info.sys_id,
+                            target_frame: Self::center_frame_on_screen(
+                                window_state.frame_monotonic,
+                                target_screen.frame,
+                            ),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if moves.is_empty() {
+                    return Ok(EventOutcome::no_change());
+                }
+
+                return command_workflow::handle_command_reactor_move_workspace_to_display(
+                    &mut self.state,
+                    &mut self.layout_manager,
+                    &mut self.workspace_switch_manager,
+                    command_workflow::MoveWorkspaceToDisplayPayload {
+                        windows: moves,
+                        source_space,
+                        target_space,
+                        target_screen: target_screen.frame,
                     },
                 );
             }
@@ -4997,6 +5069,67 @@ impl Reactor {
                 self.space_state.screens.iter().find(|screen| screen.display_uuid == *uuid)
             }
         }
+    }
+
+    fn screen_for_selector_wrapping(
+        &self,
+        selector: &DisplaySelector,
+        origin_override: Option<CGPoint>,
+    ) -> Option<&ScreenInfo> {
+        if let Some(screen) = self.screen_for_selector(selector, origin_override) {
+            return Some(screen);
+        }
+        let DisplaySelector::Direction(direction) = selector else {
+            return None;
+        };
+        let origin = origin_override.or_else(|| self.current_screen_center())?;
+        let screens = &self.space_state.screens;
+        let wrapped_origin = match direction {
+            Direction::Right => CGPoint::new(
+                screens
+                    .iter()
+                    .map(|screen| screen.frame.min().x)
+                    .min_by(|a, b| a.total_cmp(b))?
+                    - 1.0,
+                origin.y,
+            ),
+            Direction::Left => CGPoint::new(
+                screens
+                    .iter()
+                    .map(|screen| screen.frame.max().x)
+                    .max_by(|a, b| a.total_cmp(b))?
+                    + 1.0,
+                origin.y,
+            ),
+            Direction::Down => CGPoint::new(
+                origin.x,
+                screens
+                    .iter()
+                    .map(|screen| screen.frame.min().y)
+                    .min_by(|a, b| a.total_cmp(b))?
+                    - 1.0,
+            ),
+            Direction::Up => CGPoint::new(
+                origin.x,
+                screens
+                    .iter()
+                    .map(|screen| screen.frame.max().y)
+                    .max_by(|a, b| a.total_cmp(b))?
+                    + 1.0,
+            ),
+        };
+        self.screen_for_direction_from_point(wrapped_origin, *direction)
+    }
+
+    fn center_frame_on_screen(frame: CGRect, screen: CGRect) -> CGRect {
+        let min = screen.min();
+        let max = screen.max();
+        let max_x = (max.x - frame.size.width).max(min.x);
+        let max_y = (max.y - frame.size.height).max(min.y);
+        let mut origin = screen.mid();
+        origin.x = (origin.x - frame.size.width / 2.0).clamp(min.x, max_x);
+        origin.y = (origin.y - frame.size.height / 2.0).clamp(min.y, max_y);
+        CGRect::new(origin, frame.size)
     }
 
     fn screens_in_physical_order(&self) -> Vec<&ScreenInfo> {
