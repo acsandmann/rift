@@ -123,6 +123,8 @@ struct WindowServerRecord {
     space: Option<SpaceId>,
     info: Option<WindowServerInfo>,
     pending_native_fullscreen: Option<PendingNativeFullscreenState>,
+    /// Set when inventory saw this window inside a macOS native tab group.
+    native_tabbed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -324,9 +326,63 @@ impl WindowStore {
                 && record.space.is_none()
                 && record.info.is_none()
                 && record.pending_native_fullscreen.is_none()
+                && !record.native_tabbed
         });
         if should_remove {
             self.window_servers.remove(&wsid);
+        }
+    }
+
+    pub fn set_window_server_native_tabbed(&mut self, wsid: WindowServerId, tabbed: bool) -> bool {
+        let record = self.server_record_mut(wsid);
+        let changed = record.native_tabbed != tabbed;
+        record.native_tabbed = tabbed;
+        if !tabbed {
+            self.prune_window_server_record(wsid);
+        }
+        changed
+    }
+
+    pub fn is_window_server_native_tabbed(&self, wsid: WindowServerId) -> bool {
+        self.window_servers.get(&wsid).is_some_and(|record| record.native_tabbed)
+    }
+
+    /// True while any wsid from `pid` has been observed by a WindowServer
+    /// appearance but not yet fully registered via `WindowCreated`. This is
+    /// the signal used to identify a native tab swap: the incoming tab
+    /// appears in CGS before its AX element resolves, and the outgoing
+    /// tab's destroy fires in between.
+    pub fn has_unregistered_observed_from_pid(&self, pid: i32) -> bool {
+        self.window_servers.values().any(|record| {
+            record.observed
+                && record.window_id.is_none()
+                && record.info.map_or(false, |info| info.pid == pid)
+        })
+    }
+
+    /// True when any tracked wsid from `pid` is already flagged as belonging
+    /// to a macOS native tab group. Used to identify tab-switch destroys
+    /// between two already-known wsids after the first swap has taught us
+    /// the app uses native tabs.
+    pub fn any_wsid_of_pid_native_tabbed(&self, pid: i32) -> bool {
+        self.window_servers.values().any(|record| {
+            record.native_tabbed && record.window_id.is_some_and(|wid| wid.pid == pid)
+        })
+    }
+
+    /// Flip on the tab-group flag for every tracked wsid owned by `pid`.
+    /// Called once an app has been confirmed to use native tabs so future
+    /// same-pid destroys land in the suppression path even when the
+    /// per-wsid AX round-trip on the destroyed side is too late.
+    pub fn mark_pid_native_tabbed(&mut self, pid: i32) {
+        let wsids: Vec<_> = self
+            .window_servers
+            .iter()
+            .filter(|(_, record)| record.window_id.is_some_and(|wid| wid.pid == pid))
+            .map(|(&wsid, _)| wsid)
+            .collect();
+        for wsid in wsids {
+            self.server_record_mut(wsid).native_tabbed = true;
         }
     }
 
@@ -1045,6 +1101,33 @@ mod tests {
     }
 
     #[test]
+    fn native_tabbed_flag_round_trips_and_prunes() {
+        let mut window_store = WindowStore::default();
+        let wsid = WindowServerId::new(123);
+
+        assert!(!window_store.is_window_server_native_tabbed(wsid));
+        assert!(window_store.set_window_server_native_tabbed(wsid, true));
+        assert!(window_store.is_window_server_native_tabbed(wsid));
+        assert!(!window_store.set_window_server_native_tabbed(wsid, true));
+
+        // Clearing the flag with no other state should prune the record.
+        assert!(window_store.set_window_server_native_tabbed(wsid, false));
+        assert!(!window_store.is_window_server_native_tabbed(wsid));
+        assert!(window_store.iter_window_server_ids().next().is_none());
+    }
+
+    #[test]
+    fn native_tabbed_flag_keeps_record_alive() {
+        let mut window_store = WindowStore::default();
+        let wsid = WindowServerId::new(124);
+
+        window_store.set_window_server_native_tabbed(wsid, true);
+        assert_eq!(window_store.iter_window_server_ids().collect::<Vec<_>>(), vec![
+            wsid
+        ]);
+    }
+
+    #[test]
     fn authoritative_space_record_is_pruned_when_space_is_cleared() {
         let mut window_store = WindowStore::default();
         let wsid = WindowServerId::new(78);
@@ -1188,6 +1271,7 @@ mod tests {
                 path: None,
                 ax_role: None,
                 ax_subrole: None,
+                is_tabbed: false,
             }),
         );
         let _ = window_store.suspend_window_to_native_fullscreen(

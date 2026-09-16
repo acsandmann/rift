@@ -3477,6 +3477,7 @@ fn it_retains_windows_without_server_ids_after_login_visibility_failure() {
         path: None,
         ax_role: None,
         ax_subrole: None,
+        is_tabbed: false,
     };
 
     reactor.handle_events(apps.make_app_with_opts(
