@@ -3,7 +3,7 @@
 use std::cell::{Cell, RefCell};
 use std::panic::AssertUnwindSafe;
 use std::str::FromStr;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use objc2_core_foundation::{CGPoint, CGRect};
 use objc2_core_graphics::{
@@ -62,7 +62,6 @@ pub struct Input {
     mouse_move_min_interval_ticks: Cell<u64>,
     mouse_location: Cell<CGPoint>,
     mouse_focus_publisher: reactor::MouseFocusPublisher,
-    focus_suppression: RefCell<FocusSuppression>,
     tap: RefCell<Option<crate::sys::event_tap::EventTap>>,
     tap_generation: Cell<u64>,
     disable_hotkey: RefCell<Option<Hotkey>>,
@@ -102,20 +101,6 @@ struct State {
     drag_active: bool,
     swipe: Option<SwipeHandler>,
     scroll: Option<ScrollHandler>,
-}
-
-const GESTURE_RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
-const GESTURE_COOLDOWN: Duration = Duration::from_millis(1250);
-
-#[derive(Default)]
-struct FocusSuppression {
-    gesture_until: Option<Instant>,
-}
-
-impl FocusSuppression {
-    fn suppressed(&self, now: Instant) -> bool {
-        self.gesture_until.is_some_and(|deadline| now < deadline)
-    }
 }
 
 impl Default for State {
@@ -307,7 +292,6 @@ impl Input {
             mouse_move_min_interval_ticks: Cell::new(mouse_move_min_interval_ticks),
             mouse_location: Cell::new(CGPoint::new(0.0, 0.0)),
             mouse_focus_publisher: reactor::MouseFocusPublisher::default(),
-            focus_suppression: RefCell::new(FocusSuppression::default()),
             tap: RefCell::new(None),
             tap_generation: Cell::new(0),
             disable_hotkey: RefCell::new(disable_hotkey),
@@ -623,17 +607,6 @@ impl Input {
         }
     }
 
-    fn workspace_gesture_active(&self, active: bool) {
-        self.focus_suppression.borrow_mut().gesture_until = Some(
-            Instant::now()
-                + if active {
-                    GESTURE_RECOVERY_TIMEOUT
-                } else {
-                    GESTURE_COOLDOWN
-                },
-        );
-    }
-
     /// Handle mouse moves without running the generic mouse/keyboard path.
     ///
     /// Mouse moves are usually the most frequent events delivered to this tap.
@@ -706,14 +679,6 @@ impl Input {
     }
 
     fn on_mouse_focus(&self, loc: CGPoint) {
-        let mut suppression = self.focus_suppression.borrow_mut();
-        if suppression.gesture_until.is_some() {
-            if suppression.suppressed(Instant::now()) {
-                return;
-            }
-            suppression.gesture_until = None;
-        }
-        drop(suppression);
         _ = self.mouse_focus_publisher.publish(&self.events_tx, loc);
     }
 
@@ -1232,23 +1197,39 @@ mod tests {
     }
 
     #[test]
-    fn gesture_cooldown_expires() {
-        let now = Instant::now();
-        let suppression = FocusSuppression {
-            gesture_until: Some(now + GESTURE_COOLDOWN),
-        };
-        assert!(suppression.suppressed(now));
-        assert!(!suppression.suppressed(now + GESTURE_COOLDOWN));
-    }
-
-    #[test]
-    fn gesture_suppression_recovers_if_end_event_is_lost() {
-        let now = Instant::now();
-        let suppression = FocusSuppression {
-            gesture_until: Some(now + GESTURE_RECOVERY_TIMEOUT),
-        };
-        assert!(suppression.suppressed(now));
-        assert!(!suppression.suppressed(now + GESTURE_RECOVERY_TIMEOUT));
+    fn workspace_gesture_does_not_discard_mouse_focus() {
+        let (input, _, mut events_rx) = input();
+        input.state.borrow_mut().event_processing_enabled = true;
+        input.state.borrow_mut().focus_follows_mouse_config_enabled = true;
+        let mut config = Config::default();
+        config.settings.gestures.enabled = true;
+        config.settings.gestures.distance_pct = 1.0;
+        config.settings.gestures.haptics_enabled = false;
+        let (swipe, _) = Input::build_gesture_handlers(&config);
+        let mut swipe = swipe.unwrap();
+        let contacts = swipe.cfg.fingers;
+        for centroid_x in [0.0, 0.1] {
+            input.handle_swipe(&mut swipe, TouchFrame {
+                contacts,
+                centroid_x,
+                centroid_y: 0.0,
+            });
+        }
+        assert!(swipe.state.consuming);
+        assert!(events_rx.try_recv().is_err());
+        input.state.borrow_mut().swipe = Some(swipe);
+        let event = CGEvent::new_mouse_event(
+            None,
+            CGEventType::MouseMoved,
+            CGPoint::new(20.0, 30.0),
+            objc2_core_graphics::CGMouseButton::Left,
+        )
+        .unwrap();
+        assert!(input.on_mouse_moved(&event, CGPoint::new(20.0, 30.0)));
+        assert!(matches!(
+            events_rx.try_recv().unwrap().1,
+            Event::MouseFocusPending(_)
+        ));
     }
 
     #[test]
@@ -1489,15 +1470,6 @@ impl Input {
         let scrolling_mode = matches!(mode, LayoutMode::Scrolling);
 
         if gesture::is_physical_horizontal_dock_swipe(event_type, event) {
-            match gesture::phase(event) {
-                1 => {
-                    self.workspace_gesture_active(true);
-                }
-                4 | 8 => {
-                    self.workspace_gesture_active(false);
-                }
-                _ => {}
-            }
             let consume = if scrolling_mode {
                 scroll
                     .as_ref()
@@ -1548,9 +1520,6 @@ impl Input {
         match classify_contacts(&mut state.phase, touches.contacts, cfg.fingers) {
             ContactDisposition::Ended => {
                 let consuming = state.consuming;
-                if consuming {
-                    self.workspace_gesture_active(false);
-                }
                 state.reset();
                 return cfg.consume && consuming;
             }
@@ -1573,9 +1542,6 @@ impl Input {
                 let vertical = dy.abs();
 
                 if horizontal > vertical && vertical <= cfg.vertical_tolerance {
-                    if !state.consuming {
-                        self.workspace_gesture_active(true);
-                    }
                     state.consuming = true;
                 }
 
@@ -1703,9 +1669,6 @@ impl Input {
 
     fn reset_gesture_state(&self, state: &mut State) {
         if let Some(handler) = &mut state.swipe {
-            if handler.state.consuming {
-                self.workspace_gesture_active(false);
-            }
             handler.state.reset();
         }
         if let Some(handler) = &mut state.scroll {
