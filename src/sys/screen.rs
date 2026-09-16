@@ -248,6 +248,9 @@ const DOCK_ORIENTATION_LEFT: i32 = 3;
 const DOCK_ORIENTATION_RIGHT: i32 = 4;
 
 fn menu_bar_hidden() -> bool {
+    #[cfg(test)]
+    return false;
+    #[allow(unreachable_code)]
     let mut status = 0;
     unsafe { SLSGetMenuBarAutohideEnabled(*G_CONNECTION, &mut status) };
     status != 0
@@ -274,6 +277,9 @@ fn menu_bar_inset(hidden: bool, height: f64, notch_height: f64) -> f64 {
 fn dock_hidden() -> bool { unsafe { CoreDockGetAutoHideEnabled() } }
 
 fn dock_orientation() -> i32 {
+    #[cfg(test)]
+    return DOCK_ORIENTATION_BOTTOM;
+    #[allow(unreachable_code)]
     let mut orientation = 0;
     let mut pinning = 0;
     unsafe { CoreDockGetOrientationAndPinning(&mut orientation, &mut pinning) };
@@ -281,6 +287,9 @@ fn dock_orientation() -> i32 {
 }
 
 fn dock_rect() -> CGRect {
+    #[cfg(test)]
+    return CGRect::ZERO;
+    #[allow(unreachable_code)]
     let mut rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(0.0, 0.0));
     let mut reason = 0;
     unsafe { SLSGetDockRectWithReason(*G_CONNECTION, &mut rect, &mut reason) };
@@ -288,6 +297,9 @@ fn dock_rect() -> CGRect {
 }
 
 fn dock_rect_with_reason() -> (CGRect, i32) {
+    #[cfg(test)]
+    return (CGRect::ZERO, 0);
+    #[allow(unreachable_code)]
     let mut rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(0.0, 0.0));
     let mut reason = 0;
     unsafe { SLSGetDockRectWithReason(*G_CONNECTION, &mut rect, &mut reason) };
@@ -295,6 +307,9 @@ fn dock_rect_with_reason() -> (CGRect, i32) {
 }
 
 fn dock_display_id() -> Option<u32> {
+    #[cfg(test)]
+    return None;
+    #[allow(unreachable_code)]
     unsafe {
         let dock = dock_rect();
         let uuid_ref = CGSCopyBestManagedDisplayForRect(*G_CONNECTION, dock);
@@ -592,6 +607,10 @@ pub fn current_space_for_display_uuid(display_uuid: &str) -> Option<SpaceId> {
     if display_uuid.is_empty() {
         return None;
     }
+
+    #[cfg(test)]
+    return None;
+    #[allow(unreachable_code)]
 
     let uuid = CFString::from_str(display_uuid);
     let id = unsafe {

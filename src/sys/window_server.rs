@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(unreachable_code, unused_mut, unused_variables))]
+
 #[cfg(test)]
 use std::cell::RefCell;
 use std::ffi::{CStr, c_int};
@@ -402,6 +404,9 @@ pub fn mission_control_dock_overlay_visible() -> bool {
 }
 
 pub fn window_parent(id: WindowServerId) -> Option<WindowServerId> {
+    #[cfg(test)]
+    return None;
+    #[allow(unreachable_code)]
     let query = WindowIterator::new(&[id])?;
     if query.count() == 1 {
         let p = query.advance()?.parent_id();
@@ -412,6 +417,9 @@ pub fn window_parent(id: WindowServerId) -> Option<WindowServerId> {
 }
 
 pub fn window_is_sticky(id: WindowServerId) -> bool {
+    #[cfg(test)]
+    return false;
+    #[allow(unreachable_code)]
     let cf_windows = cf_array_from_ids(&[id]);
     let space_list_ref = unsafe {
         SLSCopySpacesForWindows(*G_CONNECTION, 0x7, CFRetained::as_ptr(&cf_windows).as_ptr())
@@ -430,6 +438,10 @@ pub fn window_spaces(id: WindowServerId) -> Vec<crate::sys::screen::SpaceId> {
     {
         return override_spaces.into_iter().map(crate::sys::screen::SpaceId::new).collect();
     }
+
+    #[cfg(test)]
+    return Vec::new();
+    #[allow(unreachable_code)]
 
     let cf_windows = cf_array_from_ids(&[id]);
     let space_list_ref = unsafe {
@@ -470,6 +482,10 @@ pub fn window_ordered_in(id: WindowServerId) -> Option<bool> {
     {
         return Some(ordered);
     }
+
+    #[cfg(test)]
+    return None;
+    #[allow(unreachable_code)]
 
     let mut ordered: u8 = 0;
     if let Ok(_) = cg_ok(unsafe { SLSWindowIsOrderedIn(*G_CONNECTION, id.as_u32(), &mut ordered) })
@@ -645,6 +661,9 @@ fn find_window_at_point(point: &mut CGPoint, below_window_id: Option<u32>) -> Op
 fn is_own_window(cid: i32) -> bool { *G_CONNECTION == cid }
 
 pub fn get_window_at_point(mut point: CGPoint) -> Option<WindowServerId> {
+    #[cfg(test)]
+    return None;
+    #[allow(unreachable_code)]
     let (mut wid, mut cid) = find_window_at_point(&mut point, None)?;
     while is_own_window(cid) {
         (wid, cid) = find_window_at_point(&mut point, Some(wid))?;
@@ -677,6 +696,9 @@ pub fn is_point_occluded_by_external_window(mut point: CGPoint) -> bool {
 }
 
 pub fn current_cursor_location() -> Result<CGPoint, CGError> {
+    #[cfg(test)]
+    return Err(CGError::Failure);
+    #[allow(unreachable_code)]
     let mut point = CGPoint::new(0.0, 0.0);
     cg_ok(unsafe { SLSGetCurrentCursorLocation(*G_CONNECTION, &mut point) })?;
     Ok(point)
@@ -741,6 +763,10 @@ pub fn space_window_list_for_connection(
         return override_ids;
     }
 
+    #[cfg(test)]
+    return Vec::new();
+    #[allow(unreachable_code)]
+
     let cf_space_array = cf_array_from_u64s(spaces);
 
     let mut set_tags: u64 = 0;
@@ -801,6 +827,9 @@ pub fn space_window_list_for_connection(
 /// reactor's tracked-window state so callers can use it to trigger discovery of
 /// a newly materialized native tab.
 pub fn key_focused_window(space: SpaceId) -> Option<WindowId> {
+    #[cfg(test)]
+    return None;
+    #[allow(unreachable_code)]
     let mut psn = ProcessSerialNumber::default();
     let mut fallback = 0u8;
     if cg_ok(unsafe { SLPSGetKeyFocusProcess(&mut psn, &mut fallback) }).is_err() {
@@ -835,7 +864,12 @@ pub fn key_focused_window(space: SpaceId) -> Option<WindowId> {
 }
 
 /// The space on the display currently holding WindowServer focus.
-pub fn active_space() -> SpaceId { SpaceId::new(unsafe { CGSGetActiveSpace(*G_CONNECTION) }) }
+pub fn active_space() -> SpaceId {
+    #[cfg(test)]
+    return SpaceId::new(0);
+    #[allow(unreachable_code)]
+    SpaceId::new(unsafe { CGSGetActiveSpace(*G_CONNECTION) })
+}
 
 #[cfg(test)]
 pub fn set_space_window_list_for_connection_override(ids: Option<Vec<u32>>) {
@@ -879,6 +913,9 @@ pub fn set_window_ordered_in_override(id: WindowServerId, ordered: Option<bool>)
 }
 
 pub fn app_window_suitability(id: WindowServerId) -> Option<bool> {
+    #[cfg(test)]
+    return Some(false);
+    #[allow(unreachable_code)]
     let query = WindowIterator::new(&[id])?;
 
     if query.count() > 0 && query.advance().is_some() {
@@ -892,11 +929,24 @@ pub fn app_window_suitable(id: WindowServerId) -> bool {
     app_window_suitability(id).unwrap_or(false)
 }
 
-pub fn space_is_user(sid: u64) -> bool { unsafe { SLSSpaceGetType(*G_CONNECTION, sid) == 0 } }
-pub fn space_is_fullscreen(sid: u64) -> bool { unsafe { SLSSpaceGetType(*G_CONNECTION, sid) == 4 } }
+pub fn space_is_user(sid: u64) -> bool {
+    #[cfg(test)]
+    return true;
+    #[allow(unreachable_code)]
+    unsafe { SLSSpaceGetType(*G_CONNECTION, sid) == 0 }
+}
+pub fn space_is_fullscreen(sid: u64) -> bool {
+    #[cfg(test)]
+    return false;
+    #[allow(unreachable_code)]
+    unsafe { SLSSpaceGetType(*G_CONNECTION, sid) == 4 }
+}
 
 // credit: https://github.com/Hammerspoon/hammerspoon/issues/370#issuecomment-545545468
 pub fn make_key_window(pid: pid_t, wsid: WindowServerId) -> Result<(), CGError> {
+    #[cfg(test)]
+    return Ok(());
+    #[allow(unreachable_code)]
     #[allow(non_upper_case_globals)]
     const kCPSUserGenerated: u32 = 0x200;
 
@@ -939,6 +989,9 @@ pub fn allow_hide_mouse() -> Result<(), CGError> {
 // credit: https://gist.github.com/amaanq/6991c7054b6c9816fafa9e29814b1509
 #[allow(unsafe_op_in_unsafe_fn)]
 pub unsafe fn switch_space(direction: crate::layout_engine::Direction) {
+    #[cfg(test)]
+    return;
+    #[allow(unreachable_code)]
     unsafe { crate::sys::space_switch::switch_space(direction) };
 }
 
