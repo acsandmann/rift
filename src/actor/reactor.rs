@@ -1076,8 +1076,8 @@ impl Reactor {
         self.state.windows.debug_assert_invariants();
     }
 
-    pub(crate) fn handle_ipc_command(&mut self, command: Command) {
-        self.handle_loop_event(Event::Command(command));
+    pub(crate) fn handle_ipc_command(&mut self, command: Command) -> anyhow::Result<()> {
+        self.handle_event_result(Event::Command(command))
     }
 
     fn note_windowserver_activity(event: &Event) {
@@ -1199,26 +1199,29 @@ impl Reactor {
 
     #[instrument(name = "reactor::handle_event", skip(self), fields(event=?event))]
     fn handle_event(&mut self, event: Event) {
+        if let Err(error) = self.handle_event_result(event) {
+            warn!(%error, "reactor workflow failed");
+        }
+    }
+
+    fn handle_event_result(&mut self, event: Event) -> anyhow::Result<()> {
         let was_dragging = !matches!(self.drag_manager.drag_state, DragState::Inactive);
         let previously_focused_window = self.main_window();
-        match self.dispatch_workflow(event) {
-            Ok(mut outcome) => {
-                let focused_window = self.main_window();
-                if focused_window != previously_focused_window
-                    && let Some(focused_window) = focused_window
-                {
-                    outcome = outcome.with_focused_window_broadcast(focused_window);
-                }
-                self.apply_event_outcome(outcome);
-            }
-            Err(error) => warn!(%error, "reactor workflow failed"),
+        let mut outcome = self.dispatch_workflow(event)?;
+        let focused_window = self.main_window();
+        if focused_window != previously_focused_window
+            && let Some(focused_window) = focused_window
+        {
+            outcome = outcome.with_focused_window_broadcast(focused_window);
         }
+        self.apply_event_outcome(outcome);
         let dragging = !matches!(self.drag_manager.drag_state, DragState::Inactive);
         if dragging != was_dragging
             && let Some(tx) = &self.communication_manager.input_tx
         {
             tx.send(input::Request::SetDragActive(dragging));
         }
+        Ok(())
     }
 
     fn dispatch_workflow(&mut self, mut event: Event) -> anyhow::Result<EventOutcome> {
