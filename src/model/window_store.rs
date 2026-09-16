@@ -386,6 +386,34 @@ impl WindowStore {
         }
     }
 
+    /// Record the native-tab state discovered on `wid`/`wsid`. Sets the
+    /// per-wsid flag and, if `is_tabbed`, propagates it to every already
+    /// tracked sibling for the same pid. Called from every site that first
+    /// learns whether a window belongs to an AXTabGroup (AX WindowCreated
+    /// and each inventory refresh).
+    pub fn record_native_tab(&mut self, wid: WindowId, wsid: WindowServerId, is_tabbed: bool) {
+        self.set_window_server_native_tabbed(wsid, is_tabbed);
+        if is_tabbed {
+            self.mark_pid_native_tabbed(wid.pid);
+        }
+    }
+
+    /// Other tracked wids of the same pid whose wsid is flagged as native
+    /// tabbed. The layout tree may hold at most one native-tabbed sibling
+    /// of a pid at a time (the currently-visible tab); callers use this
+    /// list to evict the previously-visible sibling before adding a newly
+    /// visible one. Returns [] for a non-tabbed pid.
+    pub fn native_tabbed_siblings(&self, wid: WindowId) -> Vec<WindowId> {
+        self.window_ids_for_pid(wid.pid)
+            .filter(|&sib| sib != wid)
+            .filter(|&sib| {
+                self.window(sib)
+                    .and_then(|w| w.info.sys_id)
+                    .is_some_and(|s| self.is_window_server_native_tabbed(s))
+            })
+            .collect()
+    }
+
     pub fn tracked_window_id(&self, wsid: WindowServerId) -> Option<WindowId> {
         self.window_servers.get(&wsid).and_then(|record| record.window_id)
     }
@@ -1125,6 +1153,107 @@ mod tests {
         assert_eq!(window_store.iter_window_server_ids().collect::<Vec<_>>(), vec![
             wsid
         ]);
+    }
+
+    #[test]
+    fn record_native_tab_flags_incoming_and_backfills_siblings() {
+        let mut window_store = WindowStore::default();
+        let pid = 42;
+        let sibling_wid = WindowId::new(pid, 1);
+        let sibling_wsid = WindowServerId::new(200);
+        let new_wid = WindowId::new(pid, 2);
+        let new_wsid = WindowServerId::new(201);
+
+        // The sibling is tracked but not yet flagged: rift started up before
+        // the app had opened a second tab, so AX reported is_tabbed=false on
+        // the lone window at discovery time.
+        window_store.track_window_server_id(sibling_wsid, sibling_wid);
+
+        // The second tab arrives (Cmd+T). Its AX element exposes the
+        // tab group, so record_native_tab retroactively marks the
+        // pre-existing sibling too — otherwise the next tab switch's CGS
+        // destroy on the sibling wsid would be promoted rather than
+        // suppressed.
+        window_store.record_native_tab(new_wid, new_wsid, true);
+
+        assert!(window_store.is_window_server_native_tabbed(new_wsid));
+        assert!(window_store.is_window_server_native_tabbed(sibling_wsid));
+    }
+
+    #[test]
+    fn record_native_tab_with_false_clears_only_this_wsid() {
+        let mut window_store = WindowStore::default();
+        let pid = 42;
+        let a_wid = WindowId::new(pid, 1);
+        let a_wsid = WindowServerId::new(300);
+        let b_wid = WindowId::new(pid, 2);
+        let b_wsid = WindowServerId::new(301);
+
+        window_store.track_window_server_id(a_wsid, a_wid);
+        window_store.track_window_server_id(b_wsid, b_wid);
+        window_store.record_native_tab(a_wid, a_wsid, true);
+        window_store.record_native_tab(b_wid, b_wsid, true);
+
+        // A re-observation that reports is_tabbed=false must not silently
+        // strip the flag from every sibling — that would re-enable the
+        // premature-destroy path on the whole group.
+        window_store.record_native_tab(a_wid, a_wsid, false);
+        assert!(!window_store.is_window_server_native_tabbed(a_wsid));
+        assert!(window_store.is_window_server_native_tabbed(b_wsid));
+    }
+
+    #[test]
+    fn native_tabbed_siblings_returns_other_flagged_wids() {
+        let mut window_store = WindowStore::default();
+        let pid = 7;
+        let visible_wid = WindowId::new(pid, 1);
+        let visible_wsid = WindowServerId::new(400);
+        let hidden_a_wid = WindowId::new(pid, 2);
+        let hidden_a_wsid = WindowServerId::new(401);
+        let hidden_b_wid = WindowId::new(pid, 3);
+        let hidden_b_wsid = WindowServerId::new(402);
+        let other_app_wid = WindowId::new(pid + 1, 1);
+        let other_app_wsid = WindowServerId::new(500);
+
+        let mut insert = |wid: WindowId, wsid: WindowServerId| {
+            window_store.track_window_server_id(wsid, wid);
+            window_store.insert_window(
+                wid,
+                WindowState::from(crate::sys::app::WindowInfo {
+                    is_standard: true,
+                    is_root: true,
+                    is_minimized: false,
+                    is_resizable: true,
+                    min_size: None,
+                    max_size: None,
+                    title: String::new(),
+                    frame: objc2_core_foundation::CGRect::new(
+                        objc2_core_foundation::CGPoint::new(0.0, 0.0),
+                        objc2_core_foundation::CGSize::new(1.0, 1.0),
+                    ),
+                    sys_id: Some(wsid),
+                    bundle_id: None,
+                    path: None,
+                    ax_role: None,
+                    ax_subrole: None,
+                    is_tabbed: true,
+                }),
+            );
+            window_store.record_native_tab(wid, wsid, true);
+        };
+        insert(visible_wid, visible_wsid);
+        insert(hidden_a_wid, hidden_a_wsid);
+        insert(hidden_b_wid, hidden_b_wsid);
+        insert(other_app_wid, other_app_wsid);
+
+        let mut siblings = window_store.native_tabbed_siblings(visible_wid);
+        siblings.sort();
+        assert_eq!(siblings, vec![hidden_a_wid, hidden_b_wid]);
+
+        // A non-tabbed window from a different app must not be pulled in
+        // even if the pid happens to have tabbed windows: the sibling
+        // filter is keyed on the incoming wid's own pid.
+        assert!(window_store.native_tabbed_siblings(other_app_wid).is_empty());
     }
 
     #[test]

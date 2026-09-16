@@ -2288,6 +2288,11 @@ impl Reactor {
                     self.process_windows_for_app_rules(vec![window], app_info, false);
                 }
                 if self.state.windows.window(window).is_some_and(WindowState::is_admitted) {
+                    for sib in
+                        window_discovery::native_tabbed_siblings_to_evict(&self.state, window)
+                    {
+                        self.send_layout_event(LayoutEvent::WindowRemoved(sib));
+                    }
                     self.send_layout_event(LayoutEvent::WindowAdded(space, window));
                 }
             }

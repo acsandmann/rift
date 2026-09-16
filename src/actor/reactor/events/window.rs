@@ -34,13 +34,7 @@ pub fn handle_window_created(
     if let Some(wsid) = window.sys_id {
         state.windows.track_window_server_id(wsid, wid);
         state.windows.clear_window_server_observed(wsid);
-        state.windows.set_window_server_native_tabbed(wsid, window.is_tabbed);
-        // AX only exposes the tab group on the newly-created tab; propagate
-        // the flag to the app's already-registered siblings so a switch back
-        // to one of them still lands in the suppression path.
-        if window.is_tabbed {
-            state.windows.mark_pid_native_tabbed(wid.pid);
-        }
+        state.windows.record_native_tab(wid, wsid, window.is_tabbed);
     }
     if let Some(info) = ws_info {
         state.windows.clear_window_server_observed(info.id);
