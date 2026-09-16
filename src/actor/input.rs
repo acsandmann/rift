@@ -1490,7 +1490,17 @@ impl Input {
             if scroll.is_none() {
                 return true;
             }
-            let payload = gesture::scroll_payload(event);
+            // Once a scroll gesture is rejected, its paths and coordinates no
+            // longer matter. Decode contact presence only until every finger
+            // lifts, avoiding the full per-path extraction on each raw frame.
+            let payload = if scroll
+                .as_ref()
+                .is_some_and(|handler| handler.state.phase == GestureState::Rejected)
+            {
+                gesture::scroll_contact_payload(event)
+            } else {
+                gesture::scroll_payload(event)
+            };
             scroll.as_mut().is_some_and(|handler| match payload {
                 Some(ScrollGesturePayload::Touch(frame)) => self.handle_scroll(handler, frame),
                 Some(ScrollGesturePayload::Processed) | None => {
@@ -1501,7 +1511,19 @@ impl Input {
             if swipe.is_none() {
                 return true;
             }
-            let payload = gesture::payload(event);
+            // Committed and rejected workspace swipes only wait for contact
+            // lift. Skip aggregate coordinate reads for the remainder of the
+            // physical session.
+            let payload = if swipe.as_ref().is_some_and(|handler| {
+                matches!(
+                    handler.state.phase,
+                    GestureState::Committed | GestureState::Rejected
+                )
+            }) {
+                gesture::contact_payload(event)
+            } else {
+                gesture::payload(event)
+            };
             swipe.as_mut().is_some_and(|handler| match payload {
                 Some(GesturePayload::Touch(frame)) => self.handle_swipe(handler, frame),
                 Some(GesturePayload::Processed) | None => {
