@@ -18,7 +18,7 @@ use tracing::{debug, info_span, trace, warn};
 
 use super::spaces;
 use super::wm_controller::{self, WmEvent};
-use crate::sys::app::{AppInfo, NSRunningApplicationExt};
+use crate::sys::app::NSRunningApplicationExt;
 use crate::sys::dispatch::DispatchExt;
 use crate::sys::power::{init_power_state, set_low_power_mode_state};
 use crate::sys::skylight::{CGDisplayRegisterReconfigurationCallback, DisplayReconfigFlags};
@@ -193,13 +193,7 @@ impl NotificationCenterInner {
         let name = &*notif.name();
         let span = info_span!("notification_center::handle_app_event", ?name);
         let _guard = span.enter();
-        if unsafe { NSWorkspaceDidLaunchApplicationNotification } == name {
-            self.send_event(WmEvent::AppLaunch(
-                app.pid(),
-                AppInfo::from(&*app),
-                Some(app.clone()),
-            ));
-        } else if unsafe { NSWorkspaceDidDeactivateApplicationNotification } == name {
+        if unsafe { NSWorkspaceDidDeactivateApplicationNotification } == name {
             self.send_event(WmEvent::AppGloballyDeactivated(pid));
         } else if unsafe { NSWorkspaceDidActivateApplicationNotification } == name {
             // Do not forward AppGloballyActivated from NSWorkspace here.
@@ -366,12 +360,6 @@ impl NotificationCenter {
             register_unsafe(
                 sel!(recvSleepEvent:),
                 NSWorkspaceWillSleepNotification,
-                workspace_center,
-                workspace,
-            );
-            register_unsafe(
-                sel!(recvAppEvent:),
-                NSWorkspaceDidLaunchApplicationNotification,
                 workspace_center,
                 workspace,
             );

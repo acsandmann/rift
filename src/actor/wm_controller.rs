@@ -8,7 +8,6 @@ use std::path::PathBuf;
 
 use dispatchr::queue;
 use dispatchr::time::Time;
-use objc2::rc::Retained;
 use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -36,7 +35,7 @@ use crate::{layout_engine as layout, sys};
 pub enum WmEvent {
     DiscoverRunningApps,
     AppEventsRegistered,
-    AppLaunch(pid_t, AppInfo, Option<Retained<NSRunningApplication>>),
+    AppLaunch(pid_t, AppInfo),
     AppGloballyActivated(pid_t),
     AppGloballyDeactivated(pid_t),
     AppTerminated(pid_t),
@@ -191,7 +190,7 @@ impl WmController {
         let (sender, receiver) = actor::channel();
         sys::app::set_application_callback({
             let sender = sender.clone();
-            move |pid, info| sender.send(WmEvent::AppLaunch(pid, info, None))
+            move |pid, info| sender.send(WmEvent::AppLaunch(pid, info))
         });
         let this = Self {
             config,
@@ -273,11 +272,11 @@ impl WmController {
             }
             DiscoverRunningApps => {
                 for (pid, info) in sys::app::running_apps(None) {
-                    self.new_app(pid, info, None);
+                    self.new_app(pid, info);
                 }
             }
-            AppLaunch(pid, info, running_app) => {
-                self.new_app(pid, info, running_app);
+            AppLaunch(pid, info) => {
+                self.new_app(pid, info);
             }
             AppGloballyActivated(pid) => {
                 _ = self.input_tx.send(input::Request::EnforceHidden);
@@ -294,7 +293,7 @@ impl WmController {
                 if let Some(relaunch) = self.apps.exited(pid, &handle) {
                     self.events_tx.send(Event::AppActorExited(pid, handle));
                     if let Some(info) = relaunch {
-                        self.new_app(pid, info, None);
+                        self.new_app(pid, info);
                     }
                 }
             }
@@ -425,27 +424,16 @@ impl WmController {
         }
     }
 
-    fn new_app(
-        &mut self,
-        pid: pid_t,
-        info: AppInfo,
-        running_app: Option<Retained<NSRunningApplication>>,
-    ) {
-        let running_app = match running_app {
-            Some(app) => app,
-            None => {
-                let Some(app) = NSRunningApplication::with_process_id(pid) else {
-                    debug!(?pid, "Failed to resolve NSRunningApplication for new app");
-                    return;
-                };
-                app
-            }
+    fn new_app(&mut self, pid: pid_t, info: AppInfo) {
+        let Some(running_app) = NSRunningApplication::with_process_id(pid) else {
+            debug!(?pid, "Failed to resolve NSRunningApplication for new app");
+            return;
         };
 
         if running_app.activationPolicy() != NSApplicationActivationPolicy::Regular
             && info.bundle_id.as_deref() != Some("com.apple.loginwindow")
         {
-            sys::app::ensure_activation_policy_observer(running_app.clone(), info.clone());
+            sys::app::ensure_activation_policy_observer(pid, running_app.clone(), info.clone());
             debug!(
                 pid = ?pid,
                 bundle = ?info.bundle_id,
@@ -460,7 +448,7 @@ impl WmController {
         }
 
         if !running_app.isFinishedLaunching() {
-            sys::app::ensure_finished_launching_observer(running_app.clone(), info.clone());
+            sys::app::ensure_finished_launching_observer(pid, running_app.clone(), info.clone());
             debug!(
                 pid = ?pid,
                 bundle = ?info.bundle_id,
