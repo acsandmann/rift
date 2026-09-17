@@ -7,12 +7,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject};
 use objc2::{ClassType, DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAlert, NSColor, NSControlStateValueOff, NSControlStateValueOn, NSEventModifierFlags, NSFont,
-    NSFontAttributeName, NSForegroundColorAttributeName, NSGraphicsContext, NSMenu, NSMenuItem,
-    NSModalResponseOK, NSOpenPanel, NSSavePanel, NSStatusBar, NSStatusItem,
+    NSFontAttributeName, NSForegroundColorAttributeName, NSGraphicsContext, NSMenu, NSMenuDelegate,
+    NSMenuItem, NSModalResponseOK, NSOpenPanel, NSSavePanel, NSStatusBar, NSStatusItem,
     NSVariableStatusItemLength, NSView,
 };
 use objc2_core_foundation::{
@@ -27,7 +27,9 @@ use objc2_foundation::{
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::debug;
 
-use crate::actor::reactor::{Command as ReactorTopCommand, ReactorCommand};
+use crate::actor::reactor::{
+    Command as ReactorTopCommand, Event as ReactorEvent, ReactorCommand, Sender as ReactorSender,
+};
 use crate::actor::wm_controller::{WmCmd, WmCommand};
 use crate::common::config::{
     ActiveWorkspaceLabel, LayoutMode, MenuBarDisplayMode, MenuBarSettings, WorkspaceDisplayStyle,
@@ -129,12 +131,13 @@ impl MenuIcon {
     pub fn new(
         mtm: MainThreadMarker,
         action_tx: UnboundedSender<MenuAction>,
+        reactor_tx: ReactorSender,
         layout_folder: &Path,
     ) -> Self {
         let status_bar = NSStatusBar::systemStatusBar();
         let status_item = status_bar.statusItemWithLength(NSVariableStatusItemLength);
         let view = MenuIconView::new(mtm);
-        let menu_handler = MenuActionHandler::new(mtm, action_tx);
+        let menu_handler = MenuActionHandler::new(mtm, action_tx, reactor_tx);
         let built = build_static_menu(mtm, &menu_handler);
         status_item.setMenu(Some(&built.menu));
         if let Some(btn) = status_item.button(mtm) {
@@ -699,6 +702,9 @@ struct BuiltStatusMenu {
 
 fn build_static_menu(mtm: MainThreadMarker, handler: &MenuActionHandler) -> BuiltStatusMenu {
     let menu = make_menu(mtm, "Rift");
+    // Focus-follows-mouse must stand down while this menu tracks, or the
+    // pointer raises whatever window sits underneath and dismisses it.
+    menu.setDelegate(Some(ProtocolObject::from_ref(handler)));
 
     let tiling_item =
         add_action_item(&menu, mtm, handler, "Tiling", sel!(onToggleSpaceActivation:));
@@ -938,16 +944,24 @@ fn menu_hotkey_to_key_equivalent(hotkey: &Hotkey) -> Option<(&'static str, NSEve
     Some((key, flags))
 }
 
+fn own_pid() -> i32 { std::process::id() as i32 }
+
 struct MenuActionHandlerIvars {
     action_tx: UnboundedSender<MenuAction>,
+    reactor_tx: ReactorSender,
     layout_files: RefCell<Vec<PathBuf>>,
     layout_folder: RefCell<PathBuf>,
 }
 
 impl MenuActionHandler {
-    fn new(mtm: MainThreadMarker, action_tx: UnboundedSender<MenuAction>) -> Retained<Self> {
+    fn new(
+        mtm: MainThreadMarker,
+        action_tx: UnboundedSender<MenuAction>,
+        reactor_tx: ReactorSender,
+    ) -> Retained<Self> {
         let this = mtm.alloc().set_ivars(MenuActionHandlerIvars {
             action_tx,
+            reactor_tx,
             layout_files: RefCell::new(Vec::new()),
             layout_folder: RefCell::new(PathBuf::new()),
         });
@@ -1037,6 +1051,20 @@ define_class!(
     #[name = "RiftMenuBarActionHandler"]
     #[ivars = MenuActionHandlerIvars]
     struct MenuActionHandler;
+
+    unsafe impl NSObjectProtocol for MenuActionHandler {}
+
+    unsafe impl NSMenuDelegate for MenuActionHandler {
+        #[unsafe(method(menuWillOpen:))]
+        fn menu_will_open(&self, _menu: &NSMenu) {
+            self.ivars().reactor_tx.send(ReactorEvent::MenuOpened(own_pid()));
+        }
+
+        #[unsafe(method(menuDidClose:))]
+        fn menu_did_close(&self, _menu: &NSMenu) {
+            self.ivars().reactor_tx.send(ReactorEvent::MenuClosed(own_pid()));
+        }
+    }
 
     impl MenuActionHandler {
         #[unsafe(method(onSetLayoutTraditional:))]
