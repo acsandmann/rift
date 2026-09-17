@@ -28,8 +28,16 @@ pub enum RiftRequest {
         space_id: Option<u64>,
         workspace_id: Option<usize>,
     },
+    GetLayoutStateForDisplay {
+        display_uuid: String,
+        workspace_id: Option<usize>,
+    },
     GetWorkspaceLayouts {
         space_id: Option<u64>,
+        workspace_id: Option<usize>,
+    },
+    GetWorkspaceLayoutsForDisplay {
+        display_uuid: String,
         workspace_id: Option<usize>,
     },
     GetApplications,
@@ -136,6 +144,34 @@ mod tests {
             .unwrap(),
             serde_json::json!({
                 "get_workspaces_for_display": { "display_uuid": "display-a" }
+            })
+        );
+
+        assert_eq!(
+            serde_json::to_value(RiftRequest::GetLayoutStateForDisplay {
+                display_uuid: "display-a".into(),
+                workspace_id: Some(2),
+            })
+            .unwrap(),
+            serde_json::json!({
+                "get_layout_state_for_display": {
+                    "display_uuid": "display-a",
+                    "workspace_id": 2
+                }
+            })
+        );
+
+        assert_eq!(
+            serde_json::to_value(RiftRequest::GetWorkspaceLayoutsForDisplay {
+                display_uuid: "display-a".into(),
+                workspace_id: None,
+            })
+            .unwrap(),
+            serde_json::json!({
+                "get_workspace_layouts_for_display": {
+                    "display_uuid": "display-a",
+                    "workspace_id": null
+                }
             })
         );
     }

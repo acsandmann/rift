@@ -66,23 +66,28 @@ enum ServiceCommands {
     Restart,
 }
 
+#[derive(Args)]
+#[group(multiple = false)]
+struct SpaceScopeArgs {
+    /// macOS space ID; defaults to the active display space
+    #[arg(long)]
+    space_id: Option<u64>,
+    /// Display UUID; uses the display's current macOS space
+    #[arg(long, value_name = "UUID")]
+    display: Option<String>,
+}
+
 #[derive(Subcommand)]
 enum QueryCommands {
     /// List virtual workspaces (optionally for a specific MacOS space)
     Workspaces {
-        #[arg(long, conflicts_with = "display")]
-        space_id: Option<u64>,
-        /// Display UUID; queries the display's current macOS space
-        #[arg(long, value_name = "UUID", conflicts_with = "space_id")]
-        display: Option<String>,
+        #[command(flatten)]
+        scope: SpaceScopeArgs,
     },
     /// List windows (optionally filtered by space)
     Windows {
-        #[arg(long, conflicts_with = "display")]
-        space_id: Option<u64>,
-        /// Display UUID; queries the display's current macOS space
-        #[arg(long, value_name = "UUID", conflicts_with = "space_id")]
-        display: Option<String>,
+        #[command(flatten)]
+        scope: SpaceScopeArgs,
     },
     /// List connected displays
     Displays,
@@ -92,17 +97,16 @@ enum QueryCommands {
     Applications,
     /// Get layout state and normalized container tree for a space
     Layout {
-        /// macOS space ID; defaults to the active display space
-        #[arg(long)]
-        space_id: Option<u64>,
+        #[command(flatten)]
+        scope: SpaceScopeArgs,
         /// Virtual workspace index; defaults to the active workspace
         #[arg(long)]
         workspace_id: Option<usize>,
     },
     /// Get workspace layout-engine mode(s)
     WorkspaceLayout {
-        #[arg(long)]
-        space_id: Option<u64>,
+        #[command(flatten)]
+        scope: SpaceScopeArgs,
         #[arg(long)]
         workspace_id: Option<usize>,
     },
@@ -419,20 +423,50 @@ enum MissionControlCommands {
     Dismiss,
 }
 
+#[derive(Args)]
+#[group(required = true, multiple = false)]
+struct DisplaySelectionArgs {
+    /// Direction relative to the current display (left, right, up, down).
+    #[arg(long)]
+    direction: Option<String>,
+    /// Display index (0-based).
+    #[arg(long)]
+    index: Option<usize>,
+    /// Display UUID.
+    #[arg(long)]
+    uuid: Option<String>,
+}
+
+impl DisplaySelectionArgs {
+    fn into_selector(self) -> Result<DisplaySelector, String> {
+        if let Some(direction) = self.direction {
+            Ok(DisplaySelector::Direction(parse_focus_direction(&direction)?))
+        } else if let Some(index) = self.index {
+            Ok(DisplaySelector::Index(index))
+        } else if let Some(uuid) = self.uuid {
+            Ok(DisplaySelector::Uuid(uuid))
+        } else {
+            Err(
+                "display selection requires exactly one of --direction, --index, or --uuid"
+                    .to_string(),
+            )
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum DisplayCommands {
     /// Focus a display by direction, index, or UUID.
     Focus {
-        /// Direction relative to the current display (left, right, up, down).
-        #[arg(long)]
-        direction: Option<String>,
-        /// Display index (0-based).
-        #[arg(long)]
-        index: Option<usize>,
-        /// Display UUID.
-        #[arg(long)]
-        uuid: Option<String>,
+        #[command(flatten)]
+        display: DisplaySelectionArgs,
     },
+    /// Move the mouse cursor to a display by direction, index, or UUID.
+    MoveMouse {
+        #[command(flatten)]
+        display: DisplaySelectionArgs,
+    },
+    // Kept for CLI compatibility; prefer `move-mouse --index`.
     /// Move mouse cursor to a display by index (0-based)
     MoveMouseToIndex {
         /// Display index (0-based)
@@ -445,30 +479,16 @@ enum DisplayCommands {
     },
     /// Move a window to a display by direction, index, or UUID.
     MoveWindow {
-        /// Direction relative to the window's current display (left, right, up, down).
-        #[arg(long)]
-        direction: Option<String>,
-        /// Display index (0-based).
-        #[arg(long)]
-        index: Option<usize>,
-        /// Display UUID.
-        #[arg(long)]
-        uuid: Option<String>,
+        #[command(flatten)]
+        display: DisplaySelectionArgs,
         /// Optional window id (window idx); defaults to the focused window if omitted.
         #[arg(long)]
         window_id: Option<u32>,
     },
     /// Move the active workspace to a display by direction, index, or UUID.
     MoveWorkspace {
-        /// Direction relative to the workspace's current display (left, right, up, down).
-        #[arg(long)]
-        direction: Option<String>,
-        /// Display index (0-based).
-        #[arg(long)]
-        index: Option<usize>,
-        /// Display UUID.
-        #[arg(long)]
-        uuid: Option<String>,
+        #[command(flatten)]
+        display: DisplaySelectionArgs,
         /// Continue from the opposite edge for directional selectors.
         #[arg(long)]
         wrap_around: bool,
@@ -592,11 +612,15 @@ fn build_request(command: Commands) -> Result<RiftRequest, String> {
 
 fn build_query_request(query: QueryCommands) -> Result<RiftRequest, String> {
     match query {
-        QueryCommands::Workspaces { space_id, display } => match display {
+        QueryCommands::Workspaces {
+            scope: SpaceScopeArgs { space_id, display },
+        } => match display {
             Some(display_uuid) => Ok(RiftRequest::GetWorkspacesForDisplay { display_uuid }),
             None => Ok(RiftRequest::GetWorkspaces { space_id }),
         },
-        QueryCommands::Windows { space_id, display } => match display {
+        QueryCommands::Windows {
+            scope: SpaceScopeArgs { space_id, display },
+        } => match display {
             Some(display_uuid) => Ok(RiftRequest::GetWindowsForDisplay { display_uuid }),
             None => Ok(RiftRequest::GetWindows { space_id }),
         },
@@ -606,12 +630,24 @@ fn build_query_request(query: QueryCommands) -> Result<RiftRequest, String> {
             Ok(RiftRequest::GetWindowInfo { window_id })
         }
         QueryCommands::Applications => Ok(RiftRequest::GetApplications),
-        QueryCommands::Layout { space_id, workspace_id } => {
-            Ok(RiftRequest::GetLayoutState { space_id, workspace_id })
-        }
-        QueryCommands::WorkspaceLayout { space_id, workspace_id } => {
-            Ok(RiftRequest::GetWorkspaceLayouts { space_id, workspace_id })
-        }
+        QueryCommands::Layout {
+            scope: SpaceScopeArgs { space_id, display },
+            workspace_id,
+        } => match display {
+            Some(display_uuid) => {
+                Ok(RiftRequest::GetLayoutStateForDisplay { display_uuid, workspace_id })
+            }
+            None => Ok(RiftRequest::GetLayoutState { space_id, workspace_id }),
+        },
+        QueryCommands::WorkspaceLayout {
+            scope: SpaceScopeArgs { space_id, display },
+            workspace_id,
+        } => match display {
+            Some(display_uuid) => {
+                Ok(RiftRequest::GetWorkspaceLayoutsForDisplay { display_uuid, workspace_id })
+            }
+            None => Ok(RiftRequest::GetWorkspaceLayouts { space_id, workspace_id }),
+        },
         QueryCommands::Metrics => Ok(RiftRequest::GetMetrics),
     }
 }
@@ -1074,10 +1110,15 @@ fn map_space_command(cmd: SpaceCommands) -> Result<CliCommand, String> {
 
 fn map_display_command(cmd: DisplayCommands) -> Result<CliCommand, String> {
     match cmd {
-        DisplayCommands::Focus { direction, index, uuid } => {
-            let selector = build_display_selector(direction, index, uuid)?;
+        DisplayCommands::Focus { display } => {
+            let selector = display.into_selector()?;
             Ok(CliCommand::Reactor(reactor::Command::Reactor(
                 reactor::ReactorCommand::FocusDisplay(selector),
+            )))
+        }
+        DisplayCommands::MoveMouse { display } => {
+            Ok(CliCommand::Reactor(reactor::Command::Reactor(
+                reactor::ReactorCommand::MoveMouseToDisplay(display.into_selector()?),
             )))
         }
         DisplayCommands::MoveMouseToIndex { index } => {
@@ -1090,53 +1131,18 @@ fn map_display_command(cmd: DisplayCommands) -> Result<CliCommand, String> {
                 reactor::ReactorCommand::MoveMouseToDisplay(DisplaySelector::Uuid(uuid)),
             )))
         }
-        DisplayCommands::MoveWindow {
-            direction,
-            index,
-            uuid,
-            window_id,
-        } => Ok(CliCommand::Reactor(reactor::Command::Reactor(
-            reactor::ReactorCommand::MoveWindowToDisplay {
-                selector: build_display_selector(direction, index, uuid)?,
+        DisplayCommands::MoveWindow { display, window_id } => Ok(CliCommand::Reactor(
+            reactor::Command::Reactor(reactor::ReactorCommand::MoveWindowToDisplay {
+                selector: display.into_selector()?,
                 window_id,
-            },
-        ))),
-        DisplayCommands::MoveWorkspace {
-            direction,
-            index,
-            uuid,
-            wrap_around,
-        } => Ok(CliCommand::Reactor(reactor::Command::Reactor(
-            reactor::ReactorCommand::MoveWorkspaceToDisplay {
-                selector: build_display_selector(direction, index, uuid)?,
+            }),
+        )),
+        DisplayCommands::MoveWorkspace { display, wrap_around } => Ok(CliCommand::Reactor(
+            reactor::Command::Reactor(reactor::ReactorCommand::MoveWorkspaceToDisplay {
+                selector: display.into_selector()?,
                 wrap_around,
-            },
-        ))),
-    }
-}
-
-fn build_display_selector(
-    direction: Option<String>,
-    index: Option<usize>,
-    uuid: Option<String>,
-) -> Result<DisplaySelector, String> {
-    let provided =
-        direction.is_some() as usize + index.is_some() as usize + uuid.is_some() as usize;
-    if provided != 1 {
-        return Err(
-            "display selection requires exactly one of --direction, --index, or --uuid".to_string(),
-        );
-    }
-
-    if let Some(direction) = direction {
-        let parsed_direction = parse_focus_direction(&direction)?;
-        Ok(DisplaySelector::Direction(parsed_direction))
-    } else if let Some(index) = index {
-        Ok(DisplaySelector::Index(index))
-    } else if let Some(uuid) = uuid {
-        Ok(DisplaySelector::Uuid(uuid))
-    } else {
-        unreachable!("At least one selector value is guaranteed to be provided")
+            }),
+        )),
     }
 }
 

@@ -230,10 +230,9 @@ fn encode_reactor_response(reactor: &mut reactor::Reactor, request: RiftRequest)
         }
 
         RiftRequest::GetWorkspacesForDisplay { display_uuid } => {
-            let Some(space) = reactor.query_space_for_display(&display_uuid) else {
-                return encode_error(serde_json::json!({
-                    "message": format!("Display not found: {display_uuid}")
-                }));
+            let space = match query_space_for_display(reactor, &display_uuid) {
+                Ok(space) => space,
+                Err(response) => return response,
             };
             let workspaces = reactor.query_workspaces(Some(space));
             encode_success(
@@ -259,10 +258,9 @@ fn encode_reactor_response(reactor: &mut reactor::Reactor, request: RiftRequest)
         }
 
         RiftRequest::GetWindowsForDisplay { display_uuid } => {
-            let Some(space) = reactor.query_space_for_display(&display_uuid) else {
-                return encode_error(serde_json::json!({
-                    "message": format!("Display not found: {display_uuid}")
-                }));
+            let space = match query_space_for_display(reactor, &display_uuid) {
+                Ok(space) => space,
+                Err(response) => return response,
             };
             let windows = reactor.query_windows(Some(space));
             encode_success(
@@ -287,12 +285,31 @@ fn encode_reactor_response(reactor: &mut reactor::Reactor, request: RiftRequest)
             }
         }
 
+        RiftRequest::GetLayoutStateForDisplay { display_uuid, workspace_id } => {
+            let space = match query_space_for_display(reactor, &display_uuid) {
+                Ok(space) => space,
+                Err(response) => return response,
+            };
+            match reactor.query_layout_state(Some(space.get()), workspace_id) {
+                Some(layout_state) => encode_success(layout_state),
+                None => encode_error(serde_json::json!({ "message": "Workspace not found" })),
+            }
+        }
+
         RiftRequest::GetWorkspaceLayouts { space_id, workspace_id } => {
             let workspace_layouts = reactor.query_workspace_layouts(
                 space_id.map(crate::sys::screen::SpaceId::new),
                 workspace_id,
             );
             encode_success(workspace_layouts)
+        }
+
+        RiftRequest::GetWorkspaceLayoutsForDisplay { display_uuid, workspace_id } => {
+            let space = match query_space_for_display(reactor, &display_uuid) {
+                Ok(space) => space,
+                Err(response) => return response,
+            };
+            encode_success(reactor.query_workspace_layouts(Some(space), workspace_id))
         }
 
         RiftRequest::GetApplications => {
@@ -320,6 +337,17 @@ fn encode_reactor_response(reactor: &mut reactor::Reactor, request: RiftRequest)
         },
         _ => encode_error(serde_json::json!({ "message": "Unsupported request" })),
     }
+}
+
+fn query_space_for_display(
+    reactor: &reactor::Reactor,
+    display_uuid: &str,
+) -> Result<crate::sys::screen::SpaceId, Vec<u8>> {
+    reactor.query_space_for_display(display_uuid).ok_or_else(|| {
+        encode_error(serde_json::json!({
+            "message": format!("Display not found: {display_uuid}")
+        }))
+    })
 }
 
 fn handle_reactor_command(
