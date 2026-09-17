@@ -1,6 +1,7 @@
 pub mod engine;
 mod floating;
 pub(crate) mod graph;
+mod scratchpad;
 pub mod systems;
 pub mod utils;
 mod workspaces;
@@ -12,6 +13,7 @@ pub use engine::{
 };
 pub(crate) use floating::FloatingManager;
 pub use graph::{Direction, LayoutKind, Orientation, ResizeOrientation};
+pub(crate) use scratchpad::Scratchpad;
 pub(crate) use systems::LayoutId;
 pub use systems::{
     BspLayoutSystem, LayoutSystem, LayoutSystemKind, MasterStackLayoutSystem,
