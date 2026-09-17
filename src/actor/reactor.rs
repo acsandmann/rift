@@ -1678,13 +1678,17 @@ impl Reactor {
                 self.advance_window_inventory_revision_if_needed(&space_state);
                 let releases_lifecycle_refresh_quarantine =
                     space_state.releases_lifecycle_refresh_quarantine;
+                // The spaces actor marks every coherent snapshot as an
+                // acknowledgement of the display-churn gate, so releasing it is an
+                // edge and not a level: act only while the gate is actually held,
+                // or the deferred all-app refresh fires on every snapshot.
+                let display_churn_active = self.refresh_quarantine_manager.display_churn_active;
                 let releases_display_churn_refresh_quarantine =
-                    space_state.releases_display_churn_refresh_quarantine;
+                    space_state.releases_display_churn_refresh_quarantine && display_churn_active;
                 let releases_instability = (releases_lifecycle_refresh_quarantine
                     && (self.refresh_quarantine_manager.awaiting_post_wake_snapshot
                         || self.refresh_quarantine_manager.awaiting_post_session_snapshot))
-                    || (releases_display_churn_refresh_quarantine
-                        && self.refresh_quarantine_manager.display_churn_active);
+                    || releases_display_churn_refresh_quarantine;
                 if releases_instability {
                     self.abandon_window_inventories_from_instability();
                 }
