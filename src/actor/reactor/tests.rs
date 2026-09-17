@@ -5993,3 +5993,24 @@ fn floating_window_toggles_to_fullscreen_within_gaps() {
         "expected {expected:?}, got {laid_out:?}"
     );
 }
+
+#[test]
+fn display_churn_release_still_flushes_the_deferred_inventory_refresh() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(2));
+    let _ = apps.requests();
+
+    reactor.handle_event(Event::DisplayChurnBegin);
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+
+    let requests = apps.requests();
+    assert!(
+        requests
+            .iter()
+            .any(|request| matches!(request, Request::RefreshWindowInventory(_))),
+        "the first snapshot after display churn must still flush the deferred refresh: {requests:?}"
+    );
+}
