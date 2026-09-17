@@ -375,7 +375,9 @@ pub fn handle_window_server_appeared(
 
         if !app_known {
             if let Some(app_info) = running_app_info {
-                outcome.wm_events.push(WmEvent::AppLaunch(window_server_info.pid, app_info));
+                outcome
+                    .wm_events
+                    .push(WmEvent::AppLaunch(window_server_info.pid, app_info, None));
             }
         } else {
             outcome = outcome.with_window_inventory_request(window_server_info.pid);

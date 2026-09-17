@@ -95,7 +95,7 @@ impl ProcessActor {
                 K_EVENT_APP_LAUNCHED => {
                     debug!("Carbon: App launched ({pid})");
                     let info = app_info_for_pid(pid);
-                    wm_sender.send(WmEvent::AppLaunch(pid, info));
+                    wm_sender.send(WmEvent::AppLaunch(pid, info, None));
                 }
                 K_EVENT_APP_FRONT_SWITCHED => {
                     debug!("Carbon: App front switched ({pid})");

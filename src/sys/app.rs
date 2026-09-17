@@ -16,6 +16,7 @@ use objc2_foundation::{NSObject, NSObjectProtocol, NSString, ns_string};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use tracing::trace;
 
 use super::geometry::CGRectDef;
 use super::window_server::{WindowServerId, WindowServerInfo, window_parent};
@@ -93,6 +94,11 @@ impl ApplicationObserver {
             return;
         }
         ivars.observing_activation_policy.set(true);
+        trace!(
+            pid = ivars.pid,
+            policy = ?ivars.app.activationPolicy(),
+            "Installing application activation-policy KVO observer"
+        );
         unsafe {
             let _: () = msg_send![
                 &*ivars.app,
@@ -110,6 +116,11 @@ impl ApplicationObserver {
             return;
         }
         ivars.observing_finished_launching.set(true);
+        trace!(
+            pid = ivars.pid,
+            finished = ivars.app.isFinishedLaunching(),
+            "Installing application finished-launching KVO observer"
+        );
         unsafe {
             let _: () = msg_send![
                 &*ivars.app,
@@ -122,6 +133,11 @@ impl ApplicationObserver {
     }
 
     fn handle_activation_policy(&self) {
+        trace!(
+            pid = self.ivars().pid,
+            policy = ?self.ivars().app.activationPolicy(),
+            "Received application activation-policy KVO callback"
+        );
         let (callback, info, pid) = {
             let ivars = self.ivars();
             if ivars.activation_policy_notified.get() {
@@ -139,6 +155,11 @@ impl ApplicationObserver {
     }
 
     fn handle_finished_launching(&self) {
+        trace!(
+            pid = self.ivars().pid,
+            finished = self.ivars().app.isFinishedLaunching(),
+            "Received application finished-launching KVO callback"
+        );
         let (callback, info, pid) = {
             let ivars = self.ivars();
             if ivars.finished_launching_notified.get() {
@@ -160,6 +181,10 @@ impl ApplicationObserver {
         if !ivars.observing_activation_policy.replace(false) {
             return;
         }
+        trace!(
+            pid = ivars.pid,
+            "Removing application activation-policy KVO observer"
+        );
         let _ = exception::catch(AssertUnwindSafe(|| unsafe {
             let _: () = msg_send![
                 &*ivars.app,
@@ -175,6 +200,10 @@ impl ApplicationObserver {
         if !ivars.observing_finished_launching.replace(false) {
             return;
         }
+        trace!(
+            pid = ivars.pid,
+            "Removing application finished-launching KVO observer"
+        );
         let _ = exception::catch(AssertUnwindSafe(|| unsafe {
             let _: () = msg_send![
                 &*ivars.app,
@@ -204,13 +233,9 @@ where F: Fn(pid_t, AppInfo) + Send + Sync + 'static {
     *APPLICATION_CALLBACK.lock() = Some(Arc::new(callback));
 }
 
-pub fn ensure_activation_policy_observer(pid: pid_t, info: AppInfo) {
+pub fn ensure_activation_policy_observer(app: Retained<NSRunningApplication>, info: AppInfo) {
     let callback = APPLICATION_CALLBACK.lock().clone();
     let Some(callback) = callback else {
-        return;
-    };
-    let Some(app) = NSRunningApplication::with_process_id(pid) else {
-        callback(pid, info);
         return;
     };
     observe_application(app, info, callback, |observer| {
@@ -218,16 +243,13 @@ pub fn ensure_activation_policy_observer(pid: pid_t, info: AppInfo) {
     });
 }
 
-pub fn ensure_finished_launching_observer(pid: pid_t, info: AppInfo) {
+pub fn ensure_finished_launching_observer(app: Retained<NSRunningApplication>, info: AppInfo) {
     let callback = APPLICATION_CALLBACK.lock().clone();
     let Some(callback) = callback else {
         return;
     };
-    let Some(app) = NSRunningApplication::with_process_id(pid) else {
-        return;
-    };
     if app.isFinishedLaunching() {
-        callback(pid, info);
+        callback(app.pid(), info);
         return;
     };
     observe_application(app, info, callback, |observer| {
