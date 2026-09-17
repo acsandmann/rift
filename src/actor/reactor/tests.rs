@@ -6030,3 +6030,81 @@ fn display_churn_release_still_flushes_the_deferred_inventory_refresh() {
         "the first snapshot after display churn must still flush the deferred refresh: {requests:?}"
     );
 }
+
+#[test]
+fn rediscovering_an_unchanged_inventory_does_not_raise_or_refocus() {
+    // A rule with focus shows the workspace and focuses the window when the
+    // window is placed.
+    let settings = crate::common::config::VirtualWorkspaceSettings {
+        app_rules: vec![crate::common::config::AppWorkspaceRule {
+            app_id: Some("com.testapp1".into()),
+            workspace: Some(WorkspaceSelector::Index(0)),
+            focus: true,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let (mut apps, mut reactor) = (Apps::new(), test_reactor_with_workspace_settings(&settings));
+    reactor.config.virtual_workspaces = settings;
+    let (raise_manager_tx, mut raise_manager_rx) = actor::channel();
+    reactor.communication_manager.raise_manager_tx = raise_manager_tx;
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let focused = WindowId::new(1, 2);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    make_active_app(&mut apps, &mut reactor, 1, make_windows(2), Some(focused));
+    reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+        workspace: None,
+        mode: LayoutMode::Stack,
+    });
+    apps.simulate_until_quiet(&mut reactor);
+    while raise_manager_rx.try_recv().is_ok() {}
+    let _ = apps.requests();
+    assert_eq!(reactor.main_window(), Some(focused));
+    let focused_before = reactor.layout_manager.layout_engine.focused_window();
+    let windows_before = reactor.test_active_workspace_windows(space);
+
+    // A short-lived helper window of the same app (an overlay the app shows
+    // while the pointer moves) is destroyed, which schedules an inventory
+    // refresh for the app.
+    reactor.handle_event(Event::WindowInvalidated(
+        WindowId::new(1, 99),
+        WindowInvalidationSource::AxDestroyedNotification,
+    ));
+    let token = apps
+        .requests()
+        .into_iter()
+        .find_map(|request| match request {
+            Request::RefreshWindowInventory(token) => Some(token),
+            _ => None,
+        })
+        .expect("an invalidated element requests an inventory refresh");
+
+    // The refresh reports exactly the windows the reactor already tracks.
+    reactor.handle_event(Event::WindowsDiscovered {
+        pid: 1,
+        token,
+        successful: true,
+        new: vec![
+            (WindowId::new(1, 1), make_window(1)),
+            (WindowId::new(1, 2), make_window(2)),
+        ],
+        known_visible: vec![WindowId::new(1, 1), WindowId::new(1, 2)],
+    });
+    apps.simulate_until_quiet(&mut reactor);
+
+    let mut raises = vec![];
+    while let Ok(event) = raise_manager_rx.try_recv() {
+        raises.push(event);
+    }
+    assert!(
+        raises.is_empty(),
+        "an inventory that changed nothing must not raise or refocus: {raises:?}"
+    );
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        focused_before
+    );
+    assert_eq!(reactor.test_active_workspace_windows(space), windows_before);
+}

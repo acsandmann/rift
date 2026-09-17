@@ -1501,9 +1501,21 @@ impl LayoutEngine {
                 );
 
                 let target_workspace = effects.workspace_id;
-                let should_focus = effects.focus;
                 let projected_space_before = self.space_with_window(wid);
                 let was_floating = self.floating.is_floating(wid);
+                // A rule's focus belongs to the window's placement. Discovery
+                // re-observes every window of an app whenever any of its windows
+                // comes or goes, and restating a placement must not raise it.
+                let already_placed = if effects.should_float(was_floating) {
+                    self.floating.active_flat(space).contains(&wid)
+                } else {
+                    self.active_workspace_contains_window(space, target_workspace, wid)
+                };
+                let effects = AppRuleEffects {
+                    focus: effects.focus && !already_placed,
+                    ..effects
+                };
+                let should_focus = effects.focus;
                 let focus_request = self.apply_app_rule_outcome(
                     wid,
                     space,
