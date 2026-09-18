@@ -48,7 +48,9 @@ doctest = false
 
 [features]
 default = []
+experimental = ["custom-event-loop", "disable-axuielement-destroyed"]
 custom-event-loop = ["objc2-foundation/NSDate", "objc2-foundation/NSRunLoop"]
+disable-axuielement-destroyed = []
 
 [dependencies]
 anyhow = { version = "1.0.83", default-features = false }

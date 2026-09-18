@@ -1124,26 +1124,31 @@ impl State {
             AxNotificationKind::MenuOpened => self.send_event(Event::MenuOpened(self.pid)),
             AxNotificationKind::MenuClosed => self.send_event(Event::MenuClosed(self.pid)),
             AxNotificationKind::WindowDestroyed => {
-                let Ok(wid) = self.wid_for_notification(&elem, hinted_wid) else {
-                    return;
-                };
-                // A refreshed AXUIElement can reuse the same stable WindowServer-backed
-                // WindowId. Removing by the callback's encoded wid would then let a late
-                // destroy notification for the superseded element tear down the replacement.
-                // Only the element currently bound to this wid owns its lifetime.
-                if !self.is_current_window_element(wid, &elem) {
-                    trace!(?wid, "Ignoring destroy notification for superseded AX element");
-                    return;
-                }
-                if self.remove_window(wid).is_none() {
-                    return;
-                }
-                self.send_event(Event::WindowInvalidated(
-                    wid,
-                    crate::actor::reactor::WindowInvalidationSource::AxDestroyedNotification,
-                ));
+                #[cfg(feature = "disable-axuielement-destroyed")]
+                return;
+                #[cfg(not(feature = "disable-axuielement-destroyed"))]
+                {
+                    let Ok(wid) = self.wid_for_notification(&elem, hinted_wid) else {
+                        return;
+                    };
+                    // A refreshed AXUIElement can reuse the same stable WindowServer-backed
+                    // WindowId. Removing by the callback's encoded wid would then let a late
+                    // destroy notification for the superseded element tear down the replacement.
+                    // Only the element currently bound to this wid owns its lifetime.
+                    if !self.is_current_window_element(wid, &elem) {
+                        trace!(?wid, "Ignoring destroy notification for superseded AX element");
+                        return;
+                    }
+                    if self.remove_window(wid).is_none() {
+                        return;
+                    }
+                    self.send_event(Event::WindowInvalidated(
+                        wid,
+                        crate::actor::reactor::WindowInvalidationSource::AxDestroyedNotification,
+                    ));
 
-                self.on_main_window_changed(Some(wid), false);
+                    self.on_main_window_changed(Some(wid), false);
+                }
             }
             AxNotificationKind::WindowMoved | AxNotificationKind::WindowResized => {
                 let Ok(wid) = self.wid_for_notification(&elem, hinted_wid) else {
