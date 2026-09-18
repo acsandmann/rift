@@ -526,12 +526,23 @@ impl LayoutEngine {
         self.virtual_workspace_manager.update_settings(settings, &self.layout_settings);
 
         // Re-apply workspace layout rules to already-existing workspaces on hot reload.
+        //
+        // Only rules. A workspace that no rule names keeps the mode it has,
+        // because that mode is a live choice: `set_workspace_layout` and the
+        // bsp/stack toggle are runtime commands, and reloading the config is
+        // not a statement about them. This used to fall through to the global
+        // `layout.mode`, so every reload — including the one a config edit
+        // about something else entirely triggers — put every workspace back to
+        // the default and threw away the stack you had just switched to.
         let spaces = self.virtual_workspace_manager.initialized_spaces();
         for space in spaces {
             let workspaces = self.virtual_workspace_manager.list_workspaces(space).to_vec();
             for (index, (workspace_id, name)) in workspaces.iter().enumerate() {
-                let desired_mode =
-                    self.virtual_workspace_manager.desired_layout_mode_for_workspace(index, name);
+                let Some(desired_mode) =
+                    self.virtual_workspace_manager.ruled_layout_mode_for_workspace(index, name)
+                else {
+                    continue;
+                };
                 let current_mode = self
                     .virtual_workspace_manager
                     .workspace_info(space, *workspace_id)
@@ -4036,6 +4047,54 @@ mod tests {
                 .workspace_info(space, workspace_id)
                 .map(|ws| ws.layout_mode()),
             Some(LayoutMode::Scrolling)
+        );
+    }
+
+    #[test]
+    fn update_virtual_workspace_settings_keeps_a_runtime_layout_choice() {
+        // The sibling of the test above: with no rule naming the workspace, a
+        // reload must leave the mode alone. `layout.mode` is what a workspace
+        // is born with, not a standing instruction to put it back.
+        let mut window_store = WindowStore::default();
+        let mut engine = test_engine();
+        let space = SpaceId::new(7);
+        let workspace_list = engine.virtual_workspace_manager_mut().list_workspaces(space);
+        let (workspace_id, _) = workspace_list[0].clone();
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::SpaceExposed(space, CGSize::new(1920.0, 1080.0)),
+        );
+
+        let _ = engine.handle_virtual_workspace_command(
+            &mut window_store,
+            space,
+            &LayoutCommand::SetWorkspaceLayout {
+                workspace: Some(0),
+                mode: LayoutMode::Stack,
+            },
+        );
+        assert_eq!(
+            engine
+                .virtual_workspace_manager()
+                .workspace_info(space, workspace_id)
+                .map(|ws| ws.layout_mode()),
+            Some(LayoutMode::Stack),
+            "precondition: the runtime command should have switched the mode"
+        );
+
+        // A reload carrying no workspace_rules, the way editing anything else
+        // in the config arrives.
+        let settings = VirtualWorkspaceSettings::default();
+        assert!(settings.workspace_rules.is_empty());
+        engine.update_virtual_workspace_settings(&window_store, &settings);
+
+        assert_eq!(
+            engine
+                .virtual_workspace_manager()
+                .workspace_info(space, workspace_id)
+                .map(|ws| ws.layout_mode()),
+            Some(LayoutMode::Stack),
+            "a reload with no matching rule must not reset the mode to layout.mode"
         );
     }
 
