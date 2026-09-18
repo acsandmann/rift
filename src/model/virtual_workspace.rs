@@ -131,6 +131,8 @@ impl VirtualWorkspace {
     pub fn last_focused(&self) -> Option<WindowId> { self.last_focused }
 }
 
+fn preserve_focus_default() -> bool { true }
+
 /// Owns the virtual workspace topology for each native macOS space.
 ///
 /// Membership is single-source-of-truth in `WindowStore`. Any code that
@@ -158,6 +160,11 @@ pub struct WorkspaceStore {
     default_workspace: usize,
     #[serde(skip)]
     pub workspace_auto_back_and_forth: bool,
+    /// Unlike its neighbours this one defaults to on, so it cannot rely on
+    /// `Default` to rehydrate a layout snapshot: a skipped `bool` comes back
+    /// `false`, which would silently disable it until the next config load.
+    #[serde(skip, default = "preserve_focus_default")]
+    preserve_focus_per_workspace: bool,
     #[serde(skip)]
     prevent_wrapping: bool,
     #[serde(skip)]
@@ -196,6 +203,7 @@ impl WorkspaceStore {
             default_workspace_names: config.workspace_names.clone(),
             default_workspace,
             workspace_auto_back_and_forth: config.workspace_auto_back_and_forth,
+            preserve_focus_per_workspace: config.preserve_focus_per_workspace,
             prevent_wrapping: config.prevent_wrapping,
             workspace_rules: config.workspace_rules.clone(),
             default_layout_mode: layout_settings.mode,
@@ -219,6 +227,7 @@ impl WorkspaceStore {
         self.default_workspace_count = config.default_workspace_count;
         self.default_workspace_names = config.workspace_names.clone();
         self.workspace_auto_back_and_forth = config.workspace_auto_back_and_forth;
+        self.preserve_focus_per_workspace = config.preserve_focus_per_workspace;
         self.prevent_wrapping = config.prevent_wrapping;
 
         let target_count = self.default_workspace_count.max(1).min(self.max_workspaces);
@@ -485,6 +494,11 @@ impl WorkspaceStore {
     }
 
     pub fn workspace_auto_back_and_forth(&self) -> bool { self.workspace_auto_back_and_forth }
+
+    /// Whether arriving on a workspace returns focus to the window last used
+    /// there. With this off the workspace's own selection is used instead, and
+    /// the remembered window is still recorded — only not acted on.
+    pub fn preserve_focus_per_workspace(&self) -> bool { self.preserve_focus_per_workspace }
 
     pub fn set_active_workspace(
         &mut self,
