@@ -5003,6 +5003,22 @@ fn window_server_destroy_after_ax_invalidation_removes_logical_window() {
 }
 
 #[test]
+fn window_closed_removes_logical_window_without_inventory_refresh() {
+    let (mut apps, mut reactor) = test_context();
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let wid = WindowId::new(1, 1);
+
+    apps.make_app_and_settle_on_screen(&mut reactor, screen, space, 1, make_windows(1));
+    let wsid = reactor.test_window_server_id(wid);
+
+    reactor.handle_event(Event::WindowClosed(wsid));
+
+    assert!(reactor.state.windows.record(wid).is_none());
+    assert!(!has_window_in_layout(&mut reactor, space, screen, wid));
+}
+
+#[test]
 fn app_termination_after_ax_invalidation_removes_logical_windows() {
     let (mut apps, mut reactor) = test_context_with_workspace_count(2);
     let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));

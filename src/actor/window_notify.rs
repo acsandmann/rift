@@ -205,6 +205,12 @@ impl WindowNotify {
                 trace!(?event, ?evt, "got event");
 
                 match event {
+                    CGSEventType::Known(KnownCGSEvent::WindowClosed) => {
+                        let Some(window_id) = evt.window_id else {
+                            continue;
+                        };
+                        events_tx.send(Event::WindowClosed(WindowServerId::new(window_id)));
+                    }
                     CGSEventType::Known(KnownCGSEvent::SpaceDestroyed) => {
                         if let Some(space_id) = evt.space_id {
                             spaces_tx.send(spaces::Event::SpaceDestroyed(SpaceId::new(space_id)));

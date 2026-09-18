@@ -275,6 +275,9 @@ pub enum Event {
         Option<MouseState>,
     ),
     WindowDestroyed(WindowId),
+    /// this event is only for the sls windowclosed event that provides a wsid
+    #[serde(skip)]
+    WindowClosed(WindowServerId),
     /// The AXUIElement became invalid, but that is not proof that its native
     /// WindowServer window was destroyed. This commonly happens before macOS
     /// publishes sleep/session lifecycle notifications.
@@ -1085,6 +1088,7 @@ impl Reactor {
             Event::WindowMinimized(wid) => Some(wid.idx.get()),
             Event::WindowDeminiaturized(wid) => Some(wid.idx.get()),
             Event::MouseMoved(..) => None,
+            Event::WindowClosed(wsid) => Some(wsid.as_u32()),
             Event::WindowServerDestroyed(wsid, ..) => Some(wsid.as_u32()),
             Event::WindowServerAppeared(wsid, ..) => Some(wsid.as_u32()),
             _ => None,
@@ -1108,6 +1112,7 @@ impl Reactor {
             event,
             Event::WindowCreated(..)
                 | Event::WindowDestroyed(..)
+                | Event::WindowClosed(..)
                 | Event::WindowInvalidated(..)
                 | Event::WindowServerDestroyed(..)
                 | Event::WindowServerAppeared(..)
@@ -1446,6 +1451,19 @@ impl Reactor {
                     return Ok(EventOutcome::default());
                 }
 
+                let mut outcome = window_workflow::handle_window_destroyed(
+                    &mut self.state,
+                    &self.transaction_manager,
+                    &mut self.drag_manager,
+                    window_workflow::WindowDestroyedPayload { window: wid },
+                )?;
+                outcome.focused_window = raised_window;
+                return Ok(outcome);
+            }
+            Event::WindowClosed(wsid) => {
+                let Some(wid) = self.state.windows.tracked_window_id(wsid) else {
+                    return Ok(EventOutcome::default());
+                };
                 let mut outcome = window_workflow::handle_window_destroyed(
                     &mut self.state,
                     &self.transaction_manager,
