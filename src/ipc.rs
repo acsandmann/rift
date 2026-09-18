@@ -354,8 +354,10 @@ fn handle_reactor_command(
     reactor: &mut reactor::Reactor,
     command: crate::model::reactor::Command,
 ) -> Vec<u8> {
-    reactor.handle_ipc_command(command);
-    encode_success("Command executed successfully")
+    match reactor.handle_ipc_command(command) {
+        Ok(()) => encode_success("Command executed successfully"),
+        Err(error) => encode_error(serde_json::json!({ "message": error.to_string() })),
+    }
 }
 
 #[derive(Clone)]
