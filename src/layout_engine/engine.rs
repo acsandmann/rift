@@ -267,6 +267,32 @@ impl LayoutEngine {
         }
     }
 
+    /// Whether the app owning `window` already has another window tiled.
+    ///
+    /// `window` itself is excluded: by the time rules are evaluated it may
+    /// already sit in a workspace, and counting it would make the app look
+    /// occupied to the very rule meant to place it — so the first window would
+    /// never tile and `only_first_window` would mean "never".
+    ///
+    /// App-wide rather than per-desktop, and about tiled windows rather than
+    /// windows seen. See `AppWorkspaceRule::only_first_window`.
+    fn app_has_tiled_window(&self, window_store: &WindowStore, window: WindowId) -> bool {
+        self.virtual_workspace_manager.initialized_spaces().into_iter().any(|space| {
+            self.virtual_workspace_manager.existing_workspaces(space).into_iter().any(
+                |(workspace, _)| {
+                    self.virtual_workspace_manager
+                        .workspace_windows(window_store, space, workspace)
+                        .into_iter()
+                        .any(|other| {
+                            other != window
+                                && other.pid == window.pid
+                                && !self.floating.is_floating(other)
+                        })
+                },
+            )
+        })
+    }
+
     fn switch_workspace_layout_mode(
         &mut self,
         window_store: &WindowStore,
@@ -2904,12 +2930,14 @@ impl LayoutEngine {
         } else {
             false
         };
+        let app_has_tiled_window = self.app_has_tiled_window(window_store, window_id);
         let context = WindowRuleContext {
             app_bundle_id,
             app_name,
             window_title,
             ax_role,
             ax_subrole,
+            app_has_tiled_window,
         };
         let mut decision = if reapply_workspace_rule {
             self.app_rules.evaluate_for_title_change(context)
@@ -3527,6 +3555,102 @@ mod tests {
         );
     }
 
+    /// The rule that replaced chasing window titles. See
+    /// `AppWorkspaceRule::only_first_window`.
+    #[test]
+    fn only_first_window_tiles_one_window_and_floats_the_rest() {
+        let mut settings = VirtualWorkspaceSettings::default();
+        settings.app_rules = vec![
+            AppWorkspaceRule {
+                app_id: Some("com.example.Mail".into()),
+                floating: false,
+                only_first_window: true,
+                manage: Some(true),
+                ..Default::default()
+            },
+            // Stands in for a float-by-default catch-all. Both rules set one
+            // matcher, so the tie goes to the earlier one and this only gets a
+            // window the rule above declined.
+            AppWorkspaceRule {
+                ax_role: Some("AXWindow".into()),
+                floating: true,
+                manage: Some(true),
+                ..Default::default()
+            },
+        ];
+        let mut engine = LayoutEngine::new(&settings, &LayoutSettings::default(), None);
+        let mut window_store = WindowStore::default();
+        let space = SpaceId::new(91);
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::SpaceExposed(space, CGSize::new(1200.0, 800.0)),
+        );
+
+        let observe = |engine: &mut LayoutEngine, store: &mut WindowStore, window: WindowId| {
+            let _ = engine.handle_event(
+                store,
+                LayoutEvent::windows_observed(
+                    space,
+                    window.pid,
+                    vec![WindowLayoutInfo {
+                        window_id: window,
+                        title: Some("Inbox".to_string()),
+                        ax_role: Some("AXWindow".to_string()),
+                        ax_subrole: Some("AXStandardWindow".to_string()),
+                        is_resizable: true,
+                        current_size: CGSize::new(300.0, 200.0),
+                        min_size: None,
+                        max_size: None,
+                    }],
+                    Some(AppInfo {
+                        bundle_id: Some("com.example.Mail".into()),
+                        localized_name: None,
+                    }),
+                ),
+            );
+        };
+
+        // The app's first window. Nothing of its own is tiled yet, so the rule
+        // applies. If the window counted itself the rule would already have
+        // been skipped here and only_first_window would mean "never".
+        let main = WindowId::new(7, 1);
+        observe(&mut engine, &mut window_store, main);
+        assert!(
+            !engine.floating.is_floating(main),
+            "the first window should tile"
+        );
+
+        // Everything after it is a draft, a message, a Page Info.
+        let draft = WindowId::new(7, 2);
+        observe(&mut engine, &mut window_store, draft);
+        assert!(engine.floating.is_floating(draft), "a later window should float");
+        assert!(
+            !engine.floating.is_floating(main),
+            "and must not disturb the tiled one"
+        );
+
+        let second_draft = WindowId::new(7, 3);
+        observe(&mut engine, &mut window_store, second_draft);
+        assert!(
+            engine.floating.is_floating(second_draft),
+            "still floating on the third"
+        );
+
+        // Close every window and open the app again: nothing of the app's is
+        // tiled at that moment, so the next window tiles. This is the case a
+        // rule that counted appearances instead of asking about tiled windows
+        // would get wrong.
+        for window in [main, draft, second_draft] {
+            let _ = engine.handle_event(&mut window_store, LayoutEvent::WindowRemoved(window));
+        }
+        let relaunched = WindowId::new(7, 4);
+        observe(&mut engine, &mut window_store, relaunched);
+        assert!(
+            !engine.floating.is_floating(relaunched),
+            "reopening after closing every window should tile again"
+        );
+    }
+
     #[test]
     fn floating_app_rule_emits_one_shot_placement_and_switches_focus_workspace() {
         let mut settings = VirtualWorkspaceSettings::default();
@@ -3543,6 +3667,7 @@ mod tests {
             title_substring: None,
             ax_role: None,
             ax_subrole: None,
+            only_first_window: false,
         }];
         let mut engine = LayoutEngine::new(&settings, &LayoutSettings::default(), None);
         let mut window_store = WindowStore::default();
@@ -3618,6 +3743,7 @@ mod tests {
             title_substring: None,
             ax_role: None,
             ax_subrole: None,
+            only_first_window: false,
         }];
         let mut layout_settings = LayoutSettings::default();
         layout_settings.scrolling.min_column_width_ratio = 0.1;
