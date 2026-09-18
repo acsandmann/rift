@@ -41,7 +41,6 @@ const REFRESH_SPACE_SWITCH_DELAY_NS: i64 = 50_000_000;
 const REFRESH_RETRY_DELAY_NS: i64 = 100_000_000;
 const REFRESH_MAX_RETRIES: u8 = 10;
 
-// OmniWM debounces display changes at 100 ms and then rescans immediately.
 // Rift still requires two identical topology samples plus a quiet WindowServer,
 // but it should converge on the same order of magnitude rather than waiting
 // multiple seconds before even attempting stabilization.
