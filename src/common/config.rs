@@ -257,7 +257,12 @@ impl VirtualWorkspaceSettings {
             }
 
             if let Some(ref app_name) = rule.app_name {
-                if !seen_app_names.insert(app_name) {
+                let has_specific_match = rule.app_id.is_some()
+                    || rule.title_regex.is_some()
+                    || rule.title_substring.is_some()
+                    || rule.ax_role.is_some()
+                    || rule.ax_subrole.is_some();
+                if !has_specific_match && !seen_app_names.insert(app_name) {
                     issues.push(format!("Duplicate app_name '{}' in rule {}", app_name, index));
                 }
             }
