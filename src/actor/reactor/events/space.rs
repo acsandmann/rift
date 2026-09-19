@@ -179,6 +179,27 @@ pub fn handle_window_server_destroyed(
         }
 
         if let Some(wid) = state.windows.tracked_window_id(wsid) {
+            // Switching a native macOS tab hides the outgoing tab's WindowServer
+            // connection, so CGS fires SpaceWindowDestroyed with ordered_in=false
+            // even though the AX element is still alive. Detect the swap three
+            // ways: the wsid itself already flagged (learned earlier), any known
+            // sibling flagged (tab switch between two pre-existing tabs), or a
+            // pending unknown appearance from the same pid (the first swap in a
+            // fresh tab group, before AXWindowCreated for the new tab resolves).
+            // Promoting any of these to WindowDestroyed reflows the layout; keep
+            // the entry in place and let the AX destroy path clean up when the
+            // group actually closes.
+            let is_tab_swap = state.windows.is_window_server_native_tabbed(wsid)
+                || state.windows.any_wsid_of_pid_native_tabbed(wid.pid)
+                || state.windows.has_unregistered_observed_from_pid(wid.pid);
+            if is_tab_swap {
+                state.windows.mark_pid_native_tabbed(wid.pid);
+                state.windows.set_window_server_space(wsid, Some(sid));
+                state.windows.mark_window_hidden(wsid);
+                debug!(?wid, ?wsid, reported_space = ?sid, "Suppressing WindowServerDestroyed for native-tabbed window");
+                return Ok(outcome);
+            }
+
             if matches!(ordered_in, Some(false)) {
                 // since the connection has dropped it wont be shown in space_windows_list
                 // so ordered in can be authorative because it doesnt consider

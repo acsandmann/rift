@@ -34,6 +34,7 @@ pub fn handle_window_created(
     if let Some(wsid) = window.sys_id {
         state.windows.track_window_server_id(wsid, wid);
         state.windows.clear_window_server_observed(wsid);
+        state.windows.record_native_tab(wid, wsid, window.is_tabbed);
     }
     if let Some(info) = ws_info {
         state.windows.clear_window_server_observed(info.id);

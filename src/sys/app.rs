@@ -408,6 +408,9 @@ pub struct WindowInfo {
     pub path: Option<PathBuf>,
     pub ax_role: Option<String>,
     pub ax_subrole: Option<String>,
+    /// True when the window sits in a macOS native tab group with two or more tabs.
+    #[serde(default)]
+    pub is_tabbed: bool,
 }
 
 /// A successful native identity shared only while processing one owned AX element.
@@ -480,6 +483,7 @@ impl WindowInfo {
         let min_size = server_info.map(|info| info.min_frame).or_else(|| None);
         let max_size = server_info.map(|info| info.max_frame).or_else(|| None);
         let is_root = id.map(|id| window_parent(id).is_none()).unwrap_or(true);
+        let is_tabbed = is_standard && element.is_native_tabbed();
         let info = WindowInfo {
             is_standard,
             is_root,
@@ -494,6 +498,7 @@ impl WindowInfo {
             path,
             ax_role,
             ax_subrole,
+            is_tabbed,
         };
 
         Ok((info, server_info))

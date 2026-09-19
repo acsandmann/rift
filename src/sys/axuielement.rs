@@ -17,6 +17,7 @@ use crate::sys::skylight::_AXUIElementCreateWithRemoteToken;
 
 pub const AX_WINDOW_ROLE: &str = "AXWindow";
 pub const AX_STANDARD_WINDOW_SUBROLE: &str = "AXStandardWindow";
+pub const AX_TAB_GROUP_ROLE: &str = "AXTabGroup";
 
 #[derive(Clone)]
 pub struct AXUIElement {
@@ -299,6 +300,42 @@ impl AXUIElement {
         };
         let element = self.downcast::<RawAXUIElement>(value)?;
         Ok(Some(AXUIElement::new(element)))
+    }
+
+    pub fn children(&self) -> Result<Vec<AXUIElement>> {
+        let Some(value) = self.copy_attribute("AXChildren")? else {
+            return Ok(Vec::new());
+        };
+        let array = self.downcast::<CFArray>(value)?;
+        let array = unsafe { CFRetained::cast_unchecked::<CFArray<CFType>>(array) };
+        let mut out = Vec::with_capacity(array.len());
+        for entry in array.iter() {
+            let elem = self.downcast::<RawAXUIElement>(entry)?;
+            out.push(AXUIElement::new(elem));
+        }
+        Ok(out)
+    }
+
+    /// True when this window has an AXTabGroup child whose AXTabs list has ≥ 2
+    /// entries. macOS only exposes the tab group once a second tab is added.
+    pub fn is_native_tabbed(&self) -> bool {
+        let Ok(children) = self.children() else {
+            return false;
+        };
+        for child in &children {
+            let Ok(role) = child.role() else { continue };
+            if role != AX_TAB_GROUP_ROLE {
+                continue;
+            }
+            let Ok(Some(tabs)) = child.copy_attribute("AXTabs") else {
+                return false;
+            };
+            let Ok(tabs) = self.downcast::<CFArray>(tabs) else {
+                return false;
+            };
+            return tabs.len() >= 2;
+        }
+        false
     }
 
     pub fn attribute(&self, name: &'static str) -> Result<Option<CFRetained<CFType>>> {

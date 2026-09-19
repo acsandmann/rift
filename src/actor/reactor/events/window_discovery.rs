@@ -12,6 +12,25 @@ use crate::sys::window_server::WindowServerId;
 
 /// Handler for window discovery events, responsible for processing newly discovered windows
 /// and managing the lifecycle of window state in the reactor.
+
+/// Sibling wids to drop from the layout tree so that a newly-arriving
+/// native tab does not tile against the previously-visible sibling.
+///
+/// The invariant we enforce: at most one native-tabbed sibling of a pid
+/// occupies the layout tree at a time — always the currently-visible tab.
+/// Returns `[]` when `wid` is not itself native tabbed (a regular window
+/// is added normally and never displaces anything).
+pub(crate) fn native_tabbed_siblings_to_evict(
+    state: &crate::model::RiftState,
+    wid: WindowId,
+) -> Vec<WindowId> {
+    let incoming_is_tabbed = state.windows.window(wid).is_some_and(|w| w.info.is_tabbed);
+    if !incoming_is_tabbed {
+        return Vec::new();
+    }
+    state.windows.native_tabbed_siblings(wid)
+}
+
 fn sync_existing_window_state(
     state: &mut crate::model::RiftState,
     wid: WindowId,
@@ -330,6 +349,12 @@ pub(crate) fn process_window_list(
                 info.sys_id,
                 current_native_space,
             ));
+            // Re-read is_tabbed on every refresh so a window whose AXTabGroup
+            // only appeared once a sibling was added still ends up flagged
+            // even though it never re-entered handle_window_created.
+            if let Some(wsid) = info.sys_id {
+                state.windows.record_native_tab(wid, wsid, info.is_tabbed);
+            }
             if let Ok(existing_outcome) =
                 sync_existing_window_state(state, wid, &info, active_space)
             {
@@ -344,6 +369,9 @@ pub(crate) fn process_window_list(
                 info.sys_id,
                 current_native_space,
             ));
+            if let Some(wsid) = info.sys_id {
+                state.windows.record_native_tab(wid, wsid, info.is_tabbed);
+            }
             new_windows.push((wid, info));
         }
     }
@@ -512,6 +540,9 @@ pub(crate) fn emit_layout_events(
     for (space, mut windows_for_space) in app_windows {
         windows_for_space.sort_unstable();
         for wid in windows_for_space {
+            for sib in native_tabbed_siblings_to_evict(state, wid) {
+                outcome = outcome.with_layout_event(LayoutEvent::WindowRemoved(sib));
+            }
             let assignment = assign_discovered_window_to_space(state, layout, wid, space, app_info);
             let (assignment_outcome, effects) =
                 apply_assignment_result(state, layout, wid, space, assignment);
