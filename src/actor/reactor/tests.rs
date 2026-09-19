@@ -3379,6 +3379,76 @@ fn title_change_non_title_fallback_preserves_manually_moved_workspace() {
 }
 
 #[test]
+fn rediscovering_an_unchanged_inventory_does_not_raise_or_refocus() {
+    let settings = crate::common::config::VirtualWorkspaceSettings {
+        app_rules: vec![crate::common::config::AppWorkspaceRule {
+            app_id: Some("com.testapp1".into()),
+            workspace: Some(WorkspaceSelector::Index(0)),
+            focus: true,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let (mut apps, mut reactor) = (Apps::new(), test_reactor_with_workspace_settings(&settings));
+    reactor.config.virtual_workspaces = settings;
+    let (raise_manager_tx, mut raise_manager_rx) = actor::channel();
+    reactor.communication_manager.raise_manager_tx = raise_manager_tx;
+    let screen = CGRect::new(CGPoint::new(0., 0.), CGSize::new(1000., 1000.));
+    let space = SpaceId::new(1);
+    let focused = WindowId::new(1, 2);
+
+    reactor.handle_event(space_state_event(vec![screen], vec![Some(space)]));
+    make_active_app(&mut apps, &mut reactor, 1, make_windows(2), Some(focused));
+    reactor.handle_test_layout_command(LayoutCommand::SetWorkspaceLayout {
+        workspace: None,
+        mode: LayoutMode::Stack,
+    });
+    apps.simulate_until_quiet(&mut reactor);
+    while raise_manager_rx.try_recv().is_ok() {}
+    let _ = apps.requests();
+    let focused_before = reactor.layout_manager.layout_engine.focused_window();
+    let windows_before = reactor.test_active_workspace_windows(space);
+
+    reactor.handle_event(Event::WindowInvalidated(
+        WindowId::new(1, 99),
+        super::WindowInvalidationSource::AxDestroyedNotification,
+    ));
+    let token = apps
+        .requests()
+        .into_iter()
+        .find_map(|request| match request {
+            Request::RefreshWindowInventory(token) => Some(token),
+            _ => None,
+        })
+        .expect("an invalidated element requests an inventory refresh");
+
+    reactor.handle_event(Event::WindowsDiscovered {
+        pid: 1,
+        token,
+        successful: true,
+        new: vec![
+            (WindowId::new(1, 1), make_window(1)),
+            (WindowId::new(1, 2), make_window(2)),
+        ],
+        known_visible: vec![WindowId::new(1, 1), WindowId::new(1, 2)],
+    });
+    apps.simulate_until_quiet(&mut reactor);
+
+    let mut raises = vec![];
+    while let Ok(event) = raise_manager_rx.try_recv() {
+        raises.push(event);
+    }
+    assert!(
+        raises.is_empty(),
+        "an inventory that changed nothing must not raise or refocus: {raises:?}"
+    );
+    assert_eq!(
+        reactor.layout_manager.layout_engine.focused_window(),
+        focused_before
+    );
+    assert_eq!(reactor.test_active_workspace_windows(space), windows_before);
+}
+#[test]
 fn menu_open_state_is_cleared_when_owner_deactivates() {
     let mut reactor = test_reactor();
     let (input_tx, mut input_rx) = actor::channel();

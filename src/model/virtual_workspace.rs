@@ -1088,14 +1088,17 @@ impl WorkspaceStore {
             existing_assignment,
             preserve_existing,
         )?;
-        if !self.ensure_window_assignment(window_store, window_id, WindowWorkspaceInfo {
-            space,
-            workspace_id,
-        }) {
+        let assignment = WindowWorkspaceInfo { space, workspace_id };
+        let workspace_changed =
+            window_store.workspace_info_for_window(window_id) != Some(assignment);
+        if !self.ensure_window_assignment(window_store, window_id, assignment) {
             error!("Failed to apply window workspace assignment");
             return Err(WorkspaceError::AssignmentFailed);
         }
         let was_rule_floating = window_store.replace_rule_floating(window_id, floating);
+        // Focus is a placement side effect, not persistent state. Rediscovery may
+        // reapply the same rule repeatedly, so only emit it for a real transition.
+        let focus = focus && (workspace_changed || was_rule_floating != floating);
         Ok(AppRuleResult::Managed(AppRuleEffects {
             workspace_id,
             floating,

@@ -3599,6 +3599,60 @@ mod tests {
     }
 
     #[test]
+    fn app_rule_focus_does_not_refire_when_reconciling_preserved_assignment() {
+        let settings = VirtualWorkspaceSettings {
+            app_rules: vec![AppWorkspaceRule {
+                app_id: Some("com.example.Editor".into()),
+                workspace: Some(WorkspaceSelector::Index(0)),
+                focus: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut engine = LayoutEngine::new(&settings, &LayoutSettings::default(), None);
+        let mut window_store = WindowStore::default();
+        let space = SpaceId::new(91);
+        let window = WindowId::new(8, 1);
+        let screen = CGSize::new(1200.0, 800.0);
+        let app = AppInfo {
+            bundle_id: Some("com.example.Editor".into()),
+            localized_name: None,
+        };
+        let _ = engine.handle_event(&mut window_store, LayoutEvent::SpaceExposed(space, screen));
+
+        let first = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::windows_observed(
+                space,
+                window.pid,
+                vec![window_layout_info(window, CGSize::new(500.0, 500.0))],
+                Some(app.clone()),
+            ),
+        );
+        let _ = first.app_rules.into_parts();
+
+        let assignment = window_store.workspace_info_for_window(window);
+        assert!(assignment.is_some());
+        let _ = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::WindowRemovedPreserveFloating(window),
+        );
+        assert_eq!(window_store.workspace_info_for_window(window), assignment);
+
+        let reconciled = engine.handle_event(
+            &mut window_store,
+            LayoutEvent::windows_observed(
+                space,
+                window.pid,
+                vec![window_layout_info(window, CGSize::new(500.0, 500.0))],
+                Some(app),
+            ),
+        );
+        let (_, _, focus) = reconciled.app_rules.into_parts();
+        assert!(focus.is_none());
+        assert_eq!(window_store.workspace_info_for_window(window), assignment);
+    }
+    #[test]
     fn tiled_app_rule_size_sets_scrolling_column_width() {
         let mut settings = VirtualWorkspaceSettings::default();
         settings.workspace_rules = vec![WorkspaceLayoutRule {
