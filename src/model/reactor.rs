@@ -1,4 +1,3 @@
-use objc2_core_foundation::CGRect;
 pub use rift_protocol::{DisplaySelector, ReactorCommand};
 use serde::{Deserialize, Serialize};
 
@@ -29,27 +28,6 @@ pub enum Command {
     Layout(LayoutCommand),
     Metrics(MetricsCommand),
     Reactor(ReactorCommand),
-}
-
-#[derive(Debug, Clone)]
-pub struct DragSession {
-    pub(crate) window: WindowId,
-    pub(crate) last_frame: CGRect,
-    pub(crate) origin_space: Option<SpaceId>,
-    pub(crate) settled_space: Option<SpaceId>,
-    pub(crate) layout_dirty: bool,
-}
-
-#[derive(Debug, Clone)]
-pub enum DragState {
-    Inactive,
-    Active {
-        session: DragSession,
-    },
-    PendingSwap {
-        session: DragSession,
-        target: WindowId,
-    },
 }
 
 #[derive(Debug, Clone)]
@@ -192,3 +170,4 @@ mod tests {
         });
     }
 }
+use objc2_core_foundation::CGRect;

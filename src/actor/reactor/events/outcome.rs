@@ -69,7 +69,6 @@ pub(crate) struct EventOutcome {
     pub(crate) mouse_warps: Vec<CGPoint>,
     pub(crate) post_arrange_mouse_warp: Option<WindowId>,
     pub(crate) pre_layout_window_frame_writes: Vec<WindowFrameWriteRequest>,
-    pub(crate) drag_swap_evaluations: Vec<(WindowId, CGRect)>,
     pub(crate) dispatch_mouse_up: bool,
     pub(crate) close_window: Option<CloseWindowRequest>,
     pub(crate) service_config_update: Option<Config>,
@@ -123,7 +122,6 @@ impl EventOutcome {
             other.post_arrange_mouse_warp.or(self.post_arrange_mouse_warp);
         self.pre_layout_window_frame_writes
             .append(&mut other.pre_layout_window_frame_writes);
-        self.drag_swap_evaluations.append(&mut other.drag_swap_evaluations);
         self.dispatch_mouse_up |= other.dispatch_mouse_up;
         self.close_window = other.close_window.or(self.close_window);
         self.service_config_update =

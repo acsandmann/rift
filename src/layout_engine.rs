@@ -12,6 +12,20 @@ pub use engine::{
 };
 pub(crate) use floating::FloatingManager;
 pub use graph::{Direction, LayoutKind, Orientation, ResizeOrientation};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowDropAction {
+    Swap,
+    Stack,
+    Insert(Direction),
+}
+
+pub(crate) struct WindowDropRequest {
+    pub source: crate::actor::app::WindowId,
+    pub target: crate::actor::app::WindowId,
+    pub space: crate::sys::screen::SpaceId,
+    pub action: WindowDropAction,
+}
 pub(crate) use systems::LayoutId;
 pub use systems::{
     BspLayoutSystem, LayoutSystem, LayoutSystemKind, MasterStackLayoutSystem,

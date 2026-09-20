@@ -225,7 +225,7 @@ pub fn handle_config_updated(
         .layout_engine
         .update_virtual_workspace_settings(&state.windows, &config.virtual_workspaces);
 
-    drag.update_config(config.settings.window_snapping);
+    drag.update_config(config.settings.mouse);
 
     Ok(EventOutcome {
         service_config_update: Some(config.clone()),

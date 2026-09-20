@@ -521,6 +521,16 @@ impl LayoutSystem for FloatingLayoutSystem {
 
     fn move_selection(&mut self, _layout: LayoutId, _direction: Direction) -> bool { false }
 
+    fn apply_window_drop(
+        &mut self,
+        _layout: LayoutId,
+        _source: WindowId,
+        _target: WindowId,
+        _action: crate::layout_engine::WindowDropAction,
+    ) -> bool {
+        false
+    }
+
     fn move_selection_to_layout_after_selection(
         &mut self,
         from_layout: LayoutId,

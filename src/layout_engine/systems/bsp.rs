@@ -39,6 +39,9 @@ pub struct BspLayoutSystem {
     tree: Tree<Components>,
     kind: slotmap::SecondaryMap<NodeId, NodeKind>,
     window_to_node: HashMap<WindowId, NodeId>,
+    /// Ordered members for BSP leaves that have been explicitly stacked.
+    #[serde(default)]
+    stacks: HashMap<NodeId, Vec<WindowId>>,
     #[serde(skip, default)]
     window_insertion_point: WindowInsertionPoint,
 }
@@ -189,6 +192,7 @@ impl Default for BspLayoutSystem {
             tree: Tree::with_observer(Components::default()),
             kind: Default::default(),
             window_to_node: Default::default(),
+            stacks: Default::default(),
             window_insertion_point: WindowInsertionPoint::default(),
         }
     }
@@ -287,13 +291,28 @@ impl BspLayoutSystem {
     fn collect_windows_under(&self, node: NodeId, out: &mut Vec<WindowId>) {
         match self.kind.get(node) {
             Some(NodeKind::Leaf { window, .. }) => {
-                if let Some(w) = window {
+                if let Some(stack) = self.stacks.get(&node) {
+                    out.extend(stack.iter().copied());
+                } else if let Some(w) = window {
                     out.push(*w);
                 }
             }
             Some(NodeKind::Split { .. }) => {
                 for child in node.children(&self.tree.map) {
                     self.collect_windows_under(child, out);
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn collect_visible_windows_under(&self, node: NodeId, out: &mut Vec<WindowId>) {
+        match self.kind.get(node) {
+            Some(NodeKind::Leaf { window: Some(window), .. }) => out.push(*window),
+            Some(NodeKind::Leaf { .. }) => {}
+            Some(NodeKind::Split { .. }) => {
+                for child in node.children(&self.tree.map) {
+                    self.collect_visible_windows_under(child, out);
                 }
             }
             None => {}
@@ -367,6 +386,12 @@ impl BspLayoutSystem {
                 fullscreen_within_gaps,
                 preselected,
             } => {
+                if let Some(stack) = self.stacks.remove(&sibling) {
+                    for &window in &stack {
+                        self.index_window(window, parent_id);
+                    }
+                    self.stacks.insert(parent_id, stack);
+                }
                 if let Some(w) = window {
                     self.index_window(w, parent_id);
                 }
@@ -383,6 +408,8 @@ impl BspLayoutSystem {
         sibling.detach(&mut self.tree).remove();
         self.kind.remove(node);
         self.kind.remove(sibling);
+        self.stacks.remove(&node);
+        self.stacks.remove(&sibling);
         parent_id
     }
 
@@ -445,6 +472,22 @@ impl BspLayoutSystem {
                 if !self.belongs_to_layout(state, node_id) {
                     return;
                 }
+            }
+            let stacked_remainder = self.stacks.get_mut(&node_id).and_then(|stack| {
+                let index = stack.iter().position(|window| *window == wid)?;
+                stack.remove(index);
+                Some(stack.last().copied())
+            });
+            if let Some(visible) = stacked_remainder {
+                self.unindex_window(wid);
+                if let Some(visible) = visible {
+                    if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(node_id) {
+                        *window = Some(visible);
+                    }
+                    self.tree.data.selection.select(&self.tree.map, node_id);
+                    return;
+                }
+                self.stacks.remove(&node_id);
             }
             if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(node_id) {
                 *window = None;
@@ -1021,6 +1064,7 @@ impl LayoutSystem for BspLayoutSystem {
             let ids: Vec<_> = state.root.traverse_preorder(&self.tree.map).collect();
             for id in ids {
                 self.kind.remove(id);
+                self.stacks.remove(&id);
             }
             state.root.remove_root(&mut self.tree);
         }
@@ -1159,7 +1203,7 @@ impl LayoutSystem for BspLayoutSystem {
     fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
         let mut out = Vec::new();
         if let Some(state) = self.layouts.get(layout).copied() {
-            self.collect_windows_under(state.root, &mut out);
+            self.collect_visible_windows_under(state.root, &mut out);
         }
         out
     }
@@ -1169,7 +1213,7 @@ impl LayoutSystem for BspLayoutSystem {
         if let Some(sel) = self.selection_of_layout(layout) {
             if self.kind.get(sel).is_some() {
                 let leaf = self.descend_to_leaf(sel);
-                self.collect_windows_under(leaf, &mut out);
+                self.collect_visible_windows_under(leaf, &mut out);
             }
         }
 
@@ -1266,6 +1310,18 @@ impl LayoutSystem for BspLayoutSystem {
         let Some(node) = self.window_to_node.remove(&from) else {
             return;
         };
+        if let Some(stack) = self.stacks.get_mut(&node)
+            && let Some(member) = stack.iter_mut().find(|window| **window == from)
+        {
+            *member = to;
+            if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(node)
+                && *window == Some(from)
+            {
+                *window = Some(to);
+            }
+            self.window_to_node.insert(to, node);
+            return;
+        }
         if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(node)
             && *window == Some(from)
         {
@@ -1499,6 +1555,32 @@ impl LayoutSystem for BspLayoutSystem {
             return false;
         }
 
+        if self.stacks.contains_key(&node_a) || self.stacks.contains_key(&node_b) {
+            let group_a = self.stacks.remove(&node_a).unwrap_or_else(|| vec![a]);
+            let group_b = self.stacks.remove(&node_b).unwrap_or_else(|| vec![b]);
+            let visible_a = *group_a.last().unwrap();
+            let visible_b = *group_b.last().unwrap();
+            if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(node_a) {
+                *window = Some(visible_b);
+            }
+            if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(node_b) {
+                *window = Some(visible_a);
+            }
+            for &window in &group_a {
+                self.index_window(window, node_b);
+            }
+            for &window in &group_b {
+                self.index_window(window, node_a);
+            }
+            if group_b.len() > 1 {
+                self.stacks.insert(node_a, group_b);
+            }
+            if group_a.len() > 1 {
+                self.stacks.insert(node_b, group_a);
+            }
+            return true;
+        }
+
         let mut a_window = None;
         let mut b_window = None;
         if let Some(NodeKind::Leaf { window, .. }) = self.kind.get(node_a) {
@@ -1527,6 +1609,47 @@ impl LayoutSystem for BspLayoutSystem {
         }
 
         true
+    }
+
+    fn apply_window_drop(
+        &mut self,
+        layout: LayoutId,
+        source: WindowId,
+        target: WindowId,
+        action: crate::layout_engine::WindowDropAction,
+    ) -> bool {
+        if source == target
+            || !self.contains_window(layout, source)
+            || !self.contains_window(layout, target)
+        {
+            return false;
+        }
+        if action == crate::layout_engine::WindowDropAction::Swap {
+            return self.swap_windows(layout, source, target);
+        }
+
+        self.remove_window_internal(layout, source);
+        let Some(target_node) = self.node_for_window_mut(target) else {
+            return false;
+        };
+        match action {
+            crate::layout_engine::WindowDropAction::Stack => {
+                let stack = self.stacks.entry(target_node).or_insert_with(|| vec![target]);
+                stack.retain(|window| *window != source);
+                stack.push(source);
+                if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(target_node) {
+                    *window = Some(source);
+                }
+                self.index_window(source, target_node);
+                self.tree.data.selection.select(&self.tree.map, target_node);
+                true
+            }
+            crate::layout_engine::WindowDropAction::Insert(direction) => {
+                self.split_leaf_in_direction(target_node, direction, source);
+                true
+            }
+            crate::layout_engine::WindowDropAction::Swap => unreachable!(),
+        }
     }
 
     fn move_selection_to_layout_after_selection(

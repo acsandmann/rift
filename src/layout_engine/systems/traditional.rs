@@ -208,6 +208,93 @@ impl TraditionalLayoutSystem {
         self.tree.data.layout.set_kind(node, kind);
     }
 
+    /// Apply a source/target drop without using the current selection as an input.
+    pub(crate) fn apply_explicit_window_drop(
+        &mut self,
+        layout: LayoutId,
+        source: WindowId,
+        target: WindowId,
+        action: crate::layout_engine::WindowDropAction,
+    ) -> bool {
+        if source == target {
+            return false;
+        }
+        if action == crate::layout_engine::WindowDropAction::Swap {
+            return self.swap_windows(layout, source, target);
+        }
+        let Some(source_node) = self.window_node(layout, source) else {
+            return false;
+        };
+        let Some(target_node) = self.window_node(layout, target) else {
+            return false;
+        };
+
+        if action == crate::layout_engine::WindowDropAction::Stack {
+            if let Some(parent) = target_node.parent(self.map())
+                && self.layout(parent).is_group()
+            {
+                source_node.detach(&mut self.tree).insert_after(target_node);
+                self.select(source_node);
+                return true;
+            }
+            let parent_kind = target_node
+                .parent(self.map())
+                .map(|parent| self.layout(parent))
+                .unwrap_or(LayoutKind::Horizontal);
+            let stack_kind = match parent_kind.orientation() {
+                Orientation::Horizontal => LayoutKind::HorizontalStack,
+                Orientation::Vertical => LayoutKind::VerticalStack,
+            };
+            let container = self.tree.mk_node().insert_before(target_node);
+            self.tree.data.layout.assume_size_of(container, target_node, &self.tree.map);
+            target_node.detach(&mut self.tree).push_back(container);
+            source_node.detach(&mut self.tree).push_back(container);
+            self.set_layout(container, stack_kind);
+            self.select(source_node);
+            return true;
+        }
+
+        let crate::layout_engine::WindowDropAction::Insert(direction) = action else {
+            unreachable!()
+        };
+        let target_anchor = target_node
+            .parent(self.map())
+            .filter(|parent| self.layout(*parent).is_group())
+            .unwrap_or(target_node);
+        if target_anchor == source_node
+            || target_anchor.ancestors(self.map()).any(|node| node == source_node)
+        {
+            return false;
+        }
+        let before = matches!(direction, Direction::Left | Direction::Up);
+        if let Some(parent) = target_anchor.parent(self.map())
+            && !self.layout(parent).is_group()
+            && self.layout(parent).orientation() == direction.orientation()
+        {
+            if before {
+                source_node.detach(&mut self.tree).insert_before(target_anchor);
+            } else {
+                source_node.detach(&mut self.tree).insert_after(target_anchor);
+            }
+        } else {
+            let container = self.tree.mk_node().insert_before(target_anchor);
+            self.tree.data.layout.assume_size_of(container, target_anchor, &self.tree.map);
+            self.set_layout(container, match direction.orientation() {
+                Orientation::Horizontal => LayoutKind::Horizontal,
+                Orientation::Vertical => LayoutKind::Vertical,
+            });
+            if before {
+                source_node.detach(&mut self.tree).push_back(container);
+                target_anchor.detach(&mut self.tree).push_back(container);
+            } else {
+                target_anchor.detach(&mut self.tree).push_back(container);
+                source_node.detach(&mut self.tree).push_back(container);
+            }
+        }
+        self.select(source_node);
+        true
+    }
+
     pub(crate) fn calculate_layout_for_node(
         &self,
         node: NodeId,
@@ -1216,6 +1303,16 @@ impl LayoutSystem for TraditionalLayoutSystem {
         }
 
         true
+    }
+
+    fn apply_window_drop(
+        &mut self,
+        layout: LayoutId,
+        source: WindowId,
+        target: WindowId,
+        action: crate::layout_engine::WindowDropAction,
+    ) -> bool {
+        self.apply_explicit_window_drop(layout, source, target, action)
     }
 
     fn toggle_tile_orientation(&mut self, layout: LayoutId) {

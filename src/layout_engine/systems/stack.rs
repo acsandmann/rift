@@ -106,6 +106,22 @@ impl StackLayoutSystem {
         }
     }
 
+    fn rebuild_with_windows(&mut self, layout: LayoutId, windows: &[WindowId], selected: WindowId) {
+        let root = self.inner.root(layout);
+        let stack_kind = Self::stack_kind_for(self.inner.layout(root));
+        let children: Vec<_> = root.children(self.inner.map()).collect();
+        for child in children {
+            child.detach(&mut self.inner.tree).remove();
+        }
+        self.inner.set_layout(root, stack_kind);
+        for &window in windows {
+            let node = self.inner.add_window_under(layout, root, window);
+            if window == selected {
+                self.inner.select(node);
+            }
+        }
+    }
+
     fn toggle_root_stack_orientation(&mut self, layout: LayoutId) {
         self.normalize_layout(layout);
         let root = self.inner.root(layout);
@@ -254,6 +270,41 @@ impl LayoutSystem for StackLayoutSystem {
             self.normalize_layout(layout);
         }
         moved
+    }
+
+    fn apply_window_drop(
+        &mut self,
+        layout: LayoutId,
+        source: WindowId,
+        target: WindowId,
+        action: crate::layout_engine::WindowDropAction,
+    ) -> bool {
+        let mut windows = self.windows_in_layout_preorder(layout);
+        let Some(source_index) = windows.iter().position(|window| *window == source) else {
+            return false;
+        };
+        let Some(target_index) = windows.iter().position(|window| *window == target) else {
+            return false;
+        };
+        if source_index == target_index {
+            return false;
+        }
+        if action == crate::layout_engine::WindowDropAction::Swap {
+            windows.swap(source_index, target_index);
+        } else {
+            windows.remove(source_index);
+            let target_index = windows.iter().position(|window| *window == target).unwrap();
+            let after = matches!(
+                action,
+                crate::layout_engine::WindowDropAction::Stack
+                    | crate::layout_engine::WindowDropAction::Insert(
+                        Direction::Right | Direction::Down
+                    )
+            );
+            windows.insert(target_index + usize::from(after), source);
+        }
+        self.rebuild_with_windows(layout, &windows, source);
+        true
     }
 
     fn move_selection_to_layout_after_selection(

@@ -6,13 +6,12 @@ use super::replay::Record;
 use super::{AppState, Event, WorkspaceSwitchOrigin, WorkspaceSwitchState};
 use crate::actor;
 use crate::actor::app::{AppThreadHandle, WindowId, WindowInventoryToken, pid_t};
-use crate::actor::drag_swap::DragManager as DragSwapManager;
 use crate::actor::reactor::Reactor;
 use crate::actor::reactor::animation::AnimationManager;
 use crate::actor::spaces::ForwardedSpaceState;
 use crate::actor::{input, menu_bar, raise_manager, stack_line, window_notify, wm_controller};
 use crate::common::collections::{HashMap, HashSet};
-use crate::common::config::{LayoutMode, WindowSnappingSettings};
+use crate::common::config::{LayoutMode, MouseSettings};
 use crate::layout_engine::LayoutEngine;
 use crate::model::broadcast::{BroadcastEvent, BroadcastSender, protocol_workspace_id};
 use crate::sys::screen::SpaceId;
@@ -39,22 +38,21 @@ impl AppManager {
 
 /// Manages drag operations and window swapping
 pub struct DragManager {
-    pub drag_state: super::DragState,
-    pub drag_swap_manager: DragSwapManager,
-    pub skip_layout_for_window: Option<WindowId>,
+    pub actor: crate::actor::drag::DragActor,
+    pub externally_controlled_window: Option<WindowId>,
 }
 
 impl DragManager {
-    pub fn reset(&mut self) { self.drag_swap_manager.reset(); }
+    pub fn reset(&mut self) {
+        self.actor.cancel();
+        self.externally_controlled_window = None;
+    }
 
-    pub fn last_target(&self) -> Option<WindowId> { self.drag_swap_manager.last_target() }
-
-    pub fn dragged(&self) -> Option<WindowId> { self.drag_swap_manager.dragged() }
-
-    pub fn origin_frame(&self) -> Option<CGRect> { self.drag_swap_manager.origin_frame() }
-
-    pub fn update_config(&mut self, config: WindowSnappingSettings) {
-        self.drag_swap_manager.update_config(config);
+    pub fn update_config(&mut self, config: MouseSettings) {
+        self.actor.update_config(config);
+        if !config.enabled {
+            self.externally_controlled_window = None;
+        }
     }
 }
 
@@ -304,11 +302,7 @@ impl LayoutManager {
     ) -> Result<bool, crate::model::reactor::ReactorError> {
         let main_window = reactor.main_window();
         trace!(?main_window);
-        let skip_wid = reactor
-            .drag_manager
-            .skip_layout_for_window
-            .take()
-            .or(reactor.drag_manager.drag_swap_manager.dragged());
+        let skip_wid = reactor.drag_manager.externally_controlled_window;
         let mut any_frame_changed = false;
 
         let active_space = reactor.workspace_command_space();

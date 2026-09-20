@@ -123,10 +123,15 @@ impl MasterStackLayoutSystem {
             .collect()
     }
 
-    fn container_is_flat(&self, container: NodeId) -> bool {
-        container
-            .children(self.inner.map())
-            .all(|child| self.inner.window_at(child).is_some())
+    fn container_has_valid_members(&self, container: NodeId) -> bool {
+        container.children(self.inner.map()).all(|child| {
+            self.inner.window_at(child).is_some()
+                || (self.inner.layout(child).is_group()
+                    && child
+                        .traverse_preorder(self.inner.map())
+                        .skip(1)
+                        .any(|node| self.inner.window_at(node).is_some()))
+        })
     }
 
     fn has_valid_structure(&self, layout: LayoutId) -> bool {
@@ -134,7 +139,7 @@ impl MasterStackLayoutSystem {
         let children: Vec<_> = root.children(self.inner.map()).collect();
         children.len() == 2
             && children.iter().all(|&child| self.inner.window_at(child).is_none())
-            && children.iter().all(|&child| self.container_is_flat(child))
+            && children.iter().all(|&child| self.container_has_valid_members(child))
     }
 
     fn focused_container(&self, layout: LayoutId, master: NodeId, stack: NodeId) -> Option<NodeId> {
@@ -850,6 +855,45 @@ impl LayoutSystem for MasterStackLayoutSystem {
         } else {
             false
         }
+    }
+
+    fn apply_window_drop(
+        &mut self,
+        layout: LayoutId,
+        source: WindowId,
+        target: WindowId,
+        action: crate::layout_engine::WindowDropAction,
+    ) -> bool {
+        if action == crate::layout_engine::WindowDropAction::Stack {
+            return self.inner.apply_explicit_window_drop(layout, source, target, action);
+        }
+        let mut windows = self.windows_in_layout_by_container(layout);
+        let Some(source_index) = windows.iter().position(|window| *window == source) else {
+            return false;
+        };
+        let Some(target_index) = windows.iter().position(|window| *window == target) else {
+            return false;
+        };
+        if source_index == target_index {
+            return false;
+        }
+        if action == crate::layout_engine::WindowDropAction::Swap {
+            windows.swap(source_index, target_index);
+        } else {
+            windows.remove(source_index);
+            let target_index = windows.iter().position(|window| *window == target).unwrap();
+            let after = matches!(
+                action,
+                crate::layout_engine::WindowDropAction::Stack
+                    | crate::layout_engine::WindowDropAction::Insert(
+                        Direction::Right | Direction::Down
+                    )
+            );
+            windows.insert(target_index + usize::from(after), source);
+        }
+        self.rebuild_layout_with_windows(layout, &windows);
+        let _ = self.inner.select_window(layout, source);
+        true
     }
 
     fn move_selection_to_layout_after_selection(

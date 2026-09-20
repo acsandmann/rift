@@ -1411,6 +1411,73 @@ impl LayoutSystem for ScrollingLayoutSystem {
         true
     }
 
+    fn apply_window_drop(
+        &mut self,
+        layout: LayoutId,
+        source: WindowId,
+        target: WindowId,
+        action: crate::layout_engine::WindowDropAction,
+    ) -> bool {
+        if source == target {
+            return false;
+        }
+        if action == crate::layout_engine::WindowDropAction::Swap {
+            return self.swap_windows(layout, source, target);
+        }
+        let Some(state) = self.layout_state_mut(layout) else {
+            return false;
+        };
+        let Some((source_col, source_row)) = state.locate(source) else {
+            return false;
+        };
+        if state.locate(target).is_none() {
+            return false;
+        }
+
+        state.columns[source_col].ensure_height_weights();
+        let weight = state.columns[source_col].height_weights.remove(source_row);
+        state.columns[source_col].windows.remove(source_row);
+        if state.columns[source_col].windows.is_empty() {
+            state.columns.remove(source_col);
+        }
+        let Some((target_col, target_row)) = state.locate(target) else {
+            return false;
+        };
+
+        match action {
+            crate::layout_engine::WindowDropAction::Swap => unreachable!(),
+            crate::layout_engine::WindowDropAction::Stack
+            | crate::layout_engine::WindowDropAction::Insert(Direction::Up)
+            | crate::layout_engine::WindowDropAction::Insert(Direction::Down) => {
+                let insert_after = matches!(
+                    action,
+                    crate::layout_engine::WindowDropAction::Stack
+                        | crate::layout_engine::WindowDropAction::Insert(Direction::Down)
+                );
+                let row = target_row + usize::from(insert_after);
+                let column = &mut state.columns[target_col];
+                column.ensure_height_weights();
+                column.windows.insert(row, source);
+                column.height_weights.insert(row, weight);
+            }
+            crate::layout_engine::WindowDropAction::Insert(
+                direction @ (Direction::Left | Direction::Right),
+            ) => {
+                let insert_at = target_col + usize::from(direction == Direction::Right);
+                state.columns.insert(insert_at, Column {
+                    node_id: column_node_id(source),
+                    windows: vec![source],
+                    width_offset: 0.0,
+                    width_overridden: false,
+                    height_weights: vec![weight],
+                });
+            }
+        }
+        state.selected = Some(source);
+        state.reveal_selected_without_direction();
+        true
+    }
+
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool {
         let niri_navigation = matches!(
             self.settings.focus_navigation_style,
@@ -2811,5 +2878,40 @@ mod tests {
         system.set_windows_for_app(layout, 1, vec![w1, w2, w3]);
 
         assert_eq!(system.all_windows_in_layout(layout), vec![w1, w2, w3]);
+    }
+
+    #[test]
+    fn explicit_drop_preserves_scrolling_direction_semantics() {
+        let mut system = ScrollingLayoutSystem::default();
+        let layout = system.create_layout();
+        let (w1, w2, w3) = (wid(1, 1), wid(1, 2), wid(1, 3));
+        for window in [w1, w2, w3] {
+            system.add_window_after_selection(layout, window);
+        }
+
+        assert!(system.apply_window_drop(
+            layout,
+            w3,
+            w1,
+            crate::layout_engine::WindowDropAction::Insert(Direction::Left),
+        ));
+        let state = system.layouts.get(layout).unwrap();
+        assert_eq!(
+            state.columns.iter().map(|c| c.windows.clone()).collect::<Vec<_>>(),
+            vec![vec![w3], vec![w1], vec![w2],]
+        );
+
+        assert!(system.apply_window_drop(
+            layout,
+            w2,
+            w1,
+            crate::layout_engine::WindowDropAction::Insert(Direction::Down),
+        ));
+        let state = system.layouts.get(layout).unwrap();
+        assert_eq!(
+            state.columns.iter().map(|c| c.windows.clone()).collect::<Vec<_>>(),
+            vec![vec![w3], vec![w1, w2],]
+        );
+        assert_eq!(state.selected, Some(w2));
     }
 }

@@ -180,6 +180,43 @@ pub(crate) struct WorkspaceLayoutQuerySnapshot {
 impl LayoutEngine {
     pub fn focused_window(&self) -> Option<WindowId> { self.focused_window }
 
+    pub(crate) fn apply_window_drop(
+        &mut self,
+        request: crate::layout_engine::WindowDropRequest,
+    ) -> bool {
+        if self.active_layout_mode_at(request.space) == LayoutMode::Floating {
+            return false;
+        }
+        let Some(workspace) = self.active_workspace(request.space) else {
+            return false;
+        };
+        let Some(layout) = self.workspace_layouts.active(request.space, workspace) else {
+            return false;
+        };
+        self.workspace_layouts.mark_last_saved(request.space, workspace, layout);
+        self.workspace_tree_mut(workspace).apply_window_drop(
+            layout,
+            request.source,
+            request.target,
+            request.action,
+        )
+    }
+
+    /// Return the visible logical tiles eligible for drag targeting.
+    /// Hidden members of stacked/grouped containers are excluded.
+    pub(crate) fn drop_scene_windows(&self, space: SpaceId) -> Vec<WindowId> {
+        if self.active_layout_mode_at(space) == LayoutMode::Floating {
+            return Vec::new();
+        }
+        let Some(workspace) = self.active_workspace(space) else {
+            return Vec::new();
+        };
+        let Some(layout) = self.workspace_layouts.active(space, workspace) else {
+            return Vec::new();
+        };
+        self.workspace_tree(workspace).visible_windows_in_layout(layout)
+    }
+
     /// Resolve an optional workspace index and snapshot its layout for read-only consumers.
     pub(crate) fn query_workspace_layout(
         &self,
