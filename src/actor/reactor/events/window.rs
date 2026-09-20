@@ -87,7 +87,9 @@ pub fn handle_window_destroyed(
     }
     state.windows.remove_window(wid);
 
-    if drag.actor.window_removed(wid) && drag.externally_controlled_window == Some(wid) {
+    let drag_changed = drag.actor.window_removed(wid);
+    drag.sync_preview();
+    if drag_changed && drag.externally_controlled_window == Some(wid) {
         drag.externally_controlled_window = None;
     }
     Ok(EventOutcome::window_membership_changed(true, false)
@@ -335,6 +337,7 @@ pub fn handle_window_frame_changed(
                 scene,
             );
         }
+        drag.sync_preview();
         let native_resize = drag.actor.kind() == Some(crate::actor::drag::DragKind::NativeResize);
         if tiled && !native_resize {
             drag.externally_controlled_window = Some(wid);

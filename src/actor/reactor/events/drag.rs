@@ -18,6 +18,7 @@ pub fn handle_mouse_up(
     payload: MouseUpPayload,
 ) -> anyhow::Result<EventOutcome> {
     let mut outcome = EventOutcome::layout_changed(false);
+    drag.hide_preview();
     let Some(commit) = drag.actor.finish() else {
         return Ok(outcome);
     };

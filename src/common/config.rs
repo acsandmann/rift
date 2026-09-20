@@ -612,7 +612,8 @@ pub struct MouseSettings {
     /// Valid values are `0.10..=0.45`; the default is `0.25`.
     #[serde(default = "default_drop_zone_fraction")]
     pub drop_zone_fraction: f64,
-    /// Enables drop-intent preview rendering when supported by the running build.
+    /// Shows a translucent, rounded WindowServer overlay for the pending drop.
+    /// The overlay is updated only when the target tile or drop zone changes.
     #[serde(default = "yes")]
     pub preview: bool,
 }

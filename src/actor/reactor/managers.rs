@@ -43,19 +43,56 @@ pub struct DragManager {
     pub actor: crate::actor::drag::DragActor,
     pub externally_controlled_window: Option<WindowId>,
     pub resize_screens: Arc<[(crate::sys::screen::SpaceId, CGRect, Option<String>)]>,
+    pub(super) preview: Option<crate::ui::drag_preview::DragPreview>,
+    pub(super) preview_enabled: bool,
 }
 
 impl DragManager {
     pub fn reset(&mut self) {
         self.actor.cancel();
+        self.hide_preview();
         self.externally_controlled_window = None;
         self.resize_screens = Arc::from([]);
     }
 
     pub fn update_config(&mut self, config: MouseSettings) {
         self.actor.update_config(config);
+        self.preview_enabled = config.enabled && config.preview;
+        if !config.enabled || !config.preview {
+            self.hide_preview();
+        }
         if !config.enabled {
             self.externally_controlled_window = None;
+        }
+        self.sync_preview();
+    }
+
+    pub fn sync_preview(&mut self) {
+        if cfg!(test) {
+            return;
+        }
+        let Some(target) = self.actor.target().filter(|_| self.preview_enabled) else {
+            self.hide_preview();
+            return;
+        };
+        let result = if let Some(preview) = &mut self.preview {
+            preview.show(target)
+        } else {
+            crate::ui::drag_preview::DragPreview::new(target).and_then(|mut preview| {
+                preview.show(target)?;
+                self.preview = Some(preview);
+                Ok(())
+            })
+        };
+        if let Err(error) = result {
+            tracing::warn!(?error, "failed to update drag preview");
+            self.hide_preview();
+        }
+    }
+
+    pub fn hide_preview(&mut self) {
+        if let Some(preview) = &mut self.preview {
+            preview.hide();
         }
     }
 }

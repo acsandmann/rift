@@ -491,6 +491,8 @@ impl Reactor {
                 actor: crate::actor::drag::DragActor::new(config.settings.mouse),
                 externally_controlled_window: None,
                 resize_screens: std::sync::Arc::from([]),
+                preview: None,
+                preview_enabled: config.settings.mouse.enabled && config.settings.mouse.preview,
             },
             workspace_switch_manager: managers::WorkspaceSwitchManager {
                 workspace_switch_state: WorkspaceSwitchState::Inactive,
@@ -1714,6 +1716,7 @@ impl Reactor {
                         .actor
                         .constrain_resize(window.info.min_size, window.info.max_size);
                 }
+                self.drag_manager.sync_preview();
                 let Some((window, old_frame, new_frame, action, tiled)) =
                     self.drag_manager.actor.interactive_update()
                 else {
@@ -1737,6 +1740,7 @@ impl Reactor {
             }
             Event::DragCancel => {
                 let cancelled = self.drag_manager.actor.cancel();
+                self.drag_manager.hide_preview();
                 self.drag_manager.externally_controlled_window = None;
                 let mut outcome = EventOutcome::no_change();
                 if let Some(cancelled) = cancelled
@@ -1795,6 +1799,7 @@ impl Reactor {
                     }),
                     scene,
                 );
+                self.drag_manager.sync_preview();
                 self.drag_manager.resize_screens = self
                     .space_state
                     .screens
@@ -3294,6 +3299,7 @@ impl Reactor {
         let Some(space) = source.current_space else { return };
         let scene = self.drag_scene(source.window, space);
         self.drag_manager.actor.replace_scene(scene);
+        self.drag_manager.sync_preview();
     }
 
     #[cfg(test)]
