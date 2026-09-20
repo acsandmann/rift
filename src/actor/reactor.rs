@@ -490,6 +490,7 @@ impl Reactor {
             drag_manager: managers::DragManager {
                 actor: crate::actor::drag::DragActor::new(config.settings.mouse),
                 externally_controlled_window: None,
+                resize_screens: std::sync::Arc::from([]),
             },
             workspace_switch_manager: managers::WorkspaceSwitchManager {
                 workspace_switch_state: WorkspaceSwitchState::Inactive,
@@ -1719,25 +1720,20 @@ impl Reactor {
                     return Ok(EventOutcome::no_change());
                 };
                 if action == crate::common::config::MouseAction::Resize && tiled {
-                    let screens = self
-                        .space_state
-                        .screens
-                        .iter()
-                        .filter_map(|screen| {
-                            Some((screen.space?, screen.frame, screen.display_uuid_owned()))
-                        })
-                        .collect();
                     return Ok(EventOutcome::layout_changed(false).with_layout_event(
                         LayoutEvent::WindowResized {
                             wid: window,
                             old_frame,
                             new_frame,
-                            screens,
+                            screens: self.drag_manager.resize_screens.clone(),
                         },
                     ));
                 }
-                return Ok(EventOutcome::no_change()
-                    .with_pre_layout_window_frame_write(window, new_frame, true));
+                return Ok(EventOutcome::no_change().with_interactive_window_frame_write(
+                    window,
+                    new_frame,
+                    action == crate::common::config::MouseAction::Resize,
+                ));
             }
             Event::DragCancel => {
                 let cancelled = self.drag_manager.actor.cancel();
@@ -1799,6 +1795,15 @@ impl Reactor {
                     }),
                     scene,
                 );
+                self.drag_manager.resize_screens = self
+                    .space_state
+                    .screens
+                    .iter()
+                    .filter_map(|screen| {
+                        Some((screen.space?, screen.frame, screen.display_uuid_owned()))
+                    })
+                    .collect::<Vec<_>>()
+                    .into();
                 if tiled && action == crate::common::config::MouseAction::Move {
                     self.drag_manager.externally_controlled_window = Some(window);
                 }
@@ -2392,6 +2397,9 @@ impl Reactor {
         // before arranging that display. Keep these writes ahead of both layout
         // responses and the arrange pass so tiling always supplies the final frame.
         for write in outcome.pre_layout_window_frame_writes {
+            if write.coalesced && !self.drag_manager.actor.is_active() {
+                continue;
+            }
             let window_server_id =
                 self.state.windows.window(write.window).and_then(|window| window.info.sys_id);
             let transaction = if let Some(window_server_id) = window_server_id {
@@ -2401,15 +2409,22 @@ impl Reactor {
             } else {
                 TransactionId::default()
             };
-            if let Some(app) = self.app_manager.apps.get(&write.window.pid)
-                && let Err(error) = app.handle.send(Request::SetWindowFrame(
+            if let Some(app) = self.app_manager.apps.get(&write.window.pid) {
+                if write.coalesced {
+                    app.handle.send_interactive_frame(
+                        write.window,
+                        write.frame,
+                        write.set_size,
+                        transaction,
+                    );
+                } else if let Err(error) = app.handle.send(Request::SetWindowFrame(
                     write.window,
                     write.frame,
                     transaction,
                     write.requested,
-                ))
-            {
-                warn!(window = ?write.window, %error, "failed to write requested window frame");
+                )) {
+                    warn!(window = ?write.window, %error, "failed to write requested window frame");
+                }
             }
         }
 
@@ -3867,15 +3882,15 @@ impl Reactor {
         let geometry_changed = response.changed;
         self.prepare_refocus_after_layout_event(&event_clone);
         self.handle_layout_response(response, workspace_switch_space);
-        if geometry_changed && self.is_in_drag() {
-            self.refresh_active_drag_scene();
-        }
         if geometry_changed {
             self.update_layout_or_warn(
                 false,
                 workspace_switch_space.is_some(),
                 workspace_switch_space.or(event_space),
             );
+            if self.is_in_drag() {
+                self.refresh_active_drag_scene();
+            }
         }
         if focus_desktop && let Some(space) = self.workspace_command_space() {
             self.focus_desktop_if_active_workspace_empty(space);

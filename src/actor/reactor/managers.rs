@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use objc2_core_foundation::{CGPoint, CGRect};
 use rift_protocol::StackInfo;
 use tracing::trace;
@@ -40,12 +42,14 @@ impl AppManager {
 pub struct DragManager {
     pub actor: crate::actor::drag::DragActor,
     pub externally_controlled_window: Option<WindowId>,
+    pub resize_screens: Arc<[(crate::sys::screen::SpaceId, CGRect, Option<String>)]>,
 }
 
 impl DragManager {
     pub fn reset(&mut self) {
         self.actor.cancel();
         self.externally_controlled_window = None;
+        self.resize_screens = Arc::from([]);
     }
 
     pub fn update_config(&mut self, config: MouseSettings) {

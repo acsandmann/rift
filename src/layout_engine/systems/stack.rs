@@ -106,22 +106,6 @@ impl StackLayoutSystem {
         }
     }
 
-    fn rebuild_with_windows(&mut self, layout: LayoutId, windows: &[WindowId], selected: WindowId) {
-        let root = self.inner.root(layout);
-        let stack_kind = Self::stack_kind_for(self.inner.layout(root));
-        let children: Vec<_> = root.children(self.inner.map()).collect();
-        for child in children {
-            child.detach(&mut self.inner.tree).remove();
-        }
-        self.inner.set_layout(root, stack_kind);
-        for &window in windows {
-            let node = self.inner.add_window_under(layout, root, window);
-            if window == selected {
-                self.inner.select(node);
-            }
-        }
-    }
-
     fn toggle_root_stack_orientation(&mut self, layout: LayoutId) {
         self.normalize_layout(layout);
         let root = self.inner.root(layout);
@@ -279,21 +263,20 @@ impl LayoutSystem for StackLayoutSystem {
         target: WindowId,
         action: crate::layout_engine::WindowDropAction,
     ) -> bool {
-        let mut windows = self.windows_in_layout_preorder(layout);
-        let Some(source_index) = windows.iter().position(|window| *window == source) else {
+        let Some(source_node) = self.inner.window_node(layout, source) else {
             return false;
         };
-        let Some(target_index) = windows.iter().position(|window| *window == target) else {
+        let Some(target_node) = self.inner.window_node(layout, target) else {
             return false;
         };
-        if source_index == target_index {
+        if source_node == target_node {
             return false;
         }
         if action == crate::layout_engine::WindowDropAction::Swap {
-            windows.swap(source_index, target_index);
+            if !self.inner.swap_windows(layout, source, target) {
+                return false;
+            }
         } else {
-            windows.remove(source_index);
-            let target_index = windows.iter().position(|window| *window == target).unwrap();
             let after = matches!(
                 action,
                 crate::layout_engine::WindowDropAction::Stack
@@ -301,9 +284,13 @@ impl LayoutSystem for StackLayoutSystem {
                         Direction::Right | Direction::Down
                     )
             );
-            windows.insert(target_index + usize::from(after), source);
+            if after {
+                source_node.detach(&mut self.inner.tree).insert_after(target_node);
+            } else {
+                source_node.detach(&mut self.inner.tree).insert_before(target_node);
+            }
         }
-        self.rebuild_with_windows(layout, &windows, source);
+        self.inner.select(source_node);
         true
     }
 

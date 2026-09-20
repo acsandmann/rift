@@ -160,6 +160,7 @@ impl BspLayoutSystem {
         new_window: WindowId,
     ) {
         if let Some(NodeKind::Leaf { window, .. }) = self.kind.get(leaf).cloned() {
+            let existing_stack = self.stacks.remove(&leaf);
             let orientation = direction.orientation();
 
             let existing_node = self.make_leaf(window);
@@ -167,6 +168,12 @@ impl BspLayoutSystem {
 
             if let Some(w) = window {
                 self.index_window(w, existing_node);
+            }
+            if let Some(stack) = existing_stack {
+                for &member in &stack {
+                    self.index_window(member, existing_node);
+                }
+                self.stacks.insert(existing_node, stack);
             }
             self.index_window(new_window, new_node);
 
@@ -1043,13 +1050,30 @@ impl LayoutSystem for BspLayoutSystem {
 
     /// shallow
     fn clone_layout(&mut self, layout: LayoutId) -> LayoutId {
-        let mut windows = Vec::new();
+        let mut groups = Vec::new();
         if let Some(state) = self.layouts.get(layout).copied() {
-            self.collect_windows_under(state.root, &mut windows);
+            for node in state.root.traverse_preorder(&self.tree.map) {
+                if let Some(NodeKind::Leaf { window: Some(window), .. }) = self.kind.get(node) {
+                    groups.push(self.stacks.get(&node).cloned().unwrap_or_else(|| vec![*window]));
+                }
+            }
         }
         let new_layout = self.create_layout();
-        for w in windows {
-            self.add_window_after_selection(new_layout, w);
+        for group in groups {
+            let mut members = group.into_iter();
+            let Some(first) = members.next() else { continue };
+            self.add_window_after_selection(new_layout, first);
+            let mut target = first;
+            for window in members {
+                self.add_window_after_selection(new_layout, window);
+                let _ = self.apply_window_drop(
+                    new_layout,
+                    window,
+                    target,
+                    crate::layout_engine::WindowDropAction::Stack,
+                );
+                target = window;
+            }
         }
         new_layout
     }
@@ -1137,6 +1161,46 @@ impl LayoutSystem for BspLayoutSystem {
                         .map(|child| snapshot(system, child, selected))
                         .collect(),
                 },
+                Some(NodeKind::Leaf {
+                    window,
+                    fullscreen,
+                    fullscreen_within_gaps,
+                    preselected,
+                }) if system.stacks.contains_key(&node) => {
+                    let members = &system.stacks[&node];
+                    let active = *window;
+                    rift_protocol::ContainerTreeNode {
+                        node_id: node.data().as_ffi(),
+                        node_type: rift_protocol::ContainerNodeType::Container,
+                        frame: Default::default(),
+                        layout_kind: Some(rift_protocol::LayoutKind::HorizontalStack),
+                        weight,
+                        window_id: None,
+                        is_selected: node == selected,
+                        is_fullscreen: *fullscreen,
+                        is_fullscreen_within_gaps: *fullscreen_within_gaps,
+                        role: None,
+                        pending_split: preselected.map(Into::into),
+                        children: members
+                            .iter()
+                            .map(|member| rift_protocol::ContainerTreeNode {
+                                node_id: (u64::from(member.pid as u32) << 32)
+                                    | u64::from(member.idx.get()),
+                                node_type: rift_protocol::ContainerNodeType::Window,
+                                frame: Default::default(),
+                                layout_kind: None,
+                                weight: None,
+                                window_id: Some((*member).into()),
+                                is_selected: node == selected && active == Some(*member),
+                                is_fullscreen: *fullscreen,
+                                is_fullscreen_within_gaps: *fullscreen_within_gaps,
+                                role: None,
+                                pending_split: None,
+                                children: Vec::new(),
+                            })
+                            .collect(),
+                    }
+                }
                 Some(NodeKind::Leaf {
                     window,
                     fullscreen,
@@ -1392,6 +1456,15 @@ impl LayoutSystem for BspLayoutSystem {
             if let Some(state) = self.layouts.get(layout).copied() {
                 let belongs = self.belongs_to_layout(state, node);
                 if belongs {
+                    if let Some(stack) = self.stacks.get_mut(&node)
+                        && let Some(index) = stack.iter().position(|member| *member == wid)
+                    {
+                        stack.remove(index);
+                        stack.push(wid);
+                        if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(node) {
+                            *window = Some(wid);
+                        }
+                    }
                     self.tree.data.selection.select(&self.tree.map, node);
                     return true;
                 }

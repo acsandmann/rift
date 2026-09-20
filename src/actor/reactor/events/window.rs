@@ -305,6 +305,7 @@ pub fn handle_window_frame_changed(
         let tiled = !layout.layout_engine.is_window_floating(wid);
         if !drag.actor.update_native(wid, new_frame, new_space) {
             let session_id = drag.actor.await_native(wid);
+            drag.resize_screens = screens.clone().into();
             let scene = new_space.map_or_else(crate::actor::drag::DragScene::default, |space| {
                 let eligible = layout.layout_engine.drop_scene_windows(space);
                 crate::actor::drag::DragScene {
@@ -344,7 +345,7 @@ pub fn handle_window_frame_changed(
                     wid,
                     old_frame,
                     new_frame,
-                    screens,
+                    screens: drag.resize_screens.clone(),
                 });
             }
         }
@@ -385,7 +386,7 @@ pub fn handle_window_frame_changed(
                 wid,
                 old_frame,
                 new_frame,
-                screens,
+                screens: screens.into(),
             });
         }
     }

@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::sync::Arc;
 
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use rift_protocol::{FloatingWindowSize, FloatingWindowSizePreset, ToggleWindowFloatingOptions};
@@ -111,7 +112,7 @@ pub enum LayoutEvent {
         wid: WindowId,
         old_frame: CGRect,
         new_frame: CGRect,
-        screens: Vec<(SpaceId, CGRect, Option<String>)>,
+        screens: Arc<[(SpaceId, CGRect, Option<String>)]>,
     },
     SpaceExposed(SpaceId, CGSize),
 }
@@ -1717,8 +1718,8 @@ impl LayoutEngine {
                 new_frame,
                 screens,
             } => {
-                for (space, screen_frame, display_uuid) in screens {
-                    let Some((ws_id, layout)) = self.workspace_and_layout(space) else {
+                for (space, screen_frame, display_uuid) in screens.iter() {
+                    let Some((ws_id, layout)) = self.workspace_and_layout(*space) else {
                         debug!(
                             "No active workspace/layout for resized window {:?} on space {:?}; skipping",
                             wid, space
@@ -1732,11 +1733,11 @@ impl LayoutEngine {
                         wid,
                         old_frame,
                         new_frame,
-                        screen_frame,
+                        *screen_frame,
                         &gaps,
                     );
 
-                    self.workspace_layouts.mark_last_saved(space, ws_id, layout);
+                    self.workspace_layouts.mark_last_saved(*space, ws_id, layout);
                 }
             }
         }
@@ -3758,7 +3759,7 @@ mod tests {
             wid: window,
             old_frame: new_frame,
             new_frame: user_frame,
-            screens: vec![(space, screen, None)],
+            screens: vec![(space, screen, None)].into(),
         });
         let frames = engine.calculate_layout(
             space,

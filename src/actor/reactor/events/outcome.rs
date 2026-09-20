@@ -21,6 +21,8 @@ pub(crate) struct WindowFrameWriteRequest {
     pub(crate) window: WindowId,
     pub(crate) frame: CGRect,
     pub(crate) requested: bool,
+    pub(crate) coalesced: bool,
+    pub(crate) set_size: bool,
 }
 
 #[derive(Debug)]
@@ -291,6 +293,24 @@ impl EventOutcome {
             window,
             frame,
             requested,
+            coalesced: false,
+            set_size: true,
+        });
+        self
+    }
+
+    pub(crate) fn with_interactive_window_frame_write(
+        mut self,
+        window: WindowId,
+        frame: CGRect,
+        set_size: bool,
+    ) -> Self {
+        self.pre_layout_window_frame_writes.push(WindowFrameWriteRequest {
+            window,
+            frame,
+            requested: true,
+            coalesced: true,
+            set_size,
         });
         self
     }
