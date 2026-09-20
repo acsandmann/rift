@@ -171,6 +171,7 @@ impl DragActor {
                     .targets
                     .iter()
                     .find(|target| target.window == previous.window)
+                    .filter(|target| previous.zone == DropZone::Center || target.directional)
                     .map(|target| DropTarget {
                         frame: target.frame,
                         ..previous
@@ -660,16 +661,22 @@ pub fn hit_test(
             return Some(previous);
         }
     }
-    scene.targets.iter().find_map(|target| {
-        let zone = classify_zone(target.frame, point, fraction)?;
-        Some(DropTarget {
+    for target in &scene.targets {
+        let Some(zone) = classify_zone(target.frame, point, fraction) else {
+            continue;
+        };
+        if zone != DropZone::Center && !target.directional {
+            return None;
+        }
+        return Some(DropTarget {
             window: target.window,
             space: target.space,
             frame: target.frame,
             zone,
             action: resolve_action(zone, center),
-        })
-    })
+        });
+    }
+    None
 }
 
 pub fn preview_frame(target: DropTarget) -> CGRect {
@@ -795,6 +802,7 @@ mod tests {
                     window: target,
                     space,
                     frame: rect(),
+                    directional: true,
                 }],
             },
         );
@@ -810,6 +818,40 @@ mod tests {
         assert_eq!(commit.source.window, source);
         assert_eq!(commit.target.unwrap().window, target);
         assert!(actor.finish().is_none());
+    }
+
+    #[test]
+    fn layouts_without_directional_inserts_expose_only_the_center_zone() {
+        let scene = DragScene {
+            targets: vec![DragSceneTarget {
+                window: WindowId::new(1, 2),
+                space: SpaceId::new(1),
+                frame: rect(),
+                directional: false,
+            }],
+        };
+        assert!(
+            hit_test(
+                &scene,
+                CGPoint::new(1.0, 50.0),
+                0.25,
+                MouseDropAction::Swap,
+                None,
+            )
+            .is_none()
+        );
+        assert_eq!(
+            hit_test(
+                &scene,
+                CGPoint::new(100.0, 50.0),
+                0.25,
+                MouseDropAction::Swap,
+                None,
+            )
+            .unwrap()
+            .zone,
+            DropZone::Center,
+        );
     }
 
     #[test]
@@ -832,6 +874,7 @@ mod tests {
                     window: target,
                     space,
                     frame: rect(),
+                    directional: true,
                 }],
             },
         );

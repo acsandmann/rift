@@ -1026,8 +1026,12 @@ impl Reactor {
                 }
             }
             Event::DragMotionPending(publisher) => {
-                if let Some(motion) = publisher.take_latest() {
-                    reactor.borrow_mut().handle_loop_event(Event::DragMotion(motion));
+                let motion = publisher.take_latest();
+                let mut reactor = reactor.borrow_mut();
+                if reactor.drag_manager.actor.is_active()
+                    && let Some(motion) = motion
+                {
+                    reactor.handle_loop_event(Event::DragMotion(motion));
                 }
             }
             event => reactor.borrow_mut().handle_loop_event(event),
@@ -1035,6 +1039,7 @@ impl Reactor {
     }
 
     fn handle_loop_event(&mut self, event: Event) {
+        let high_frequency = matches!(&event, Event::DragMotion(..));
         if let Event::Query(req) = event {
             self.handle_query_request(req);
             return;
@@ -1061,7 +1066,9 @@ impl Reactor {
         Self::note_windowserver_activity(&event);
         self.handle_event(event);
         #[cfg(any(test, debug_assertions))]
-        self.state.windows.debug_assert_invariants();
+        if !high_frequency {
+            self.state.windows.debug_assert_invariants();
+        }
     }
 
     pub(crate) fn handle_ipc_command(&mut self, command: Command) {
@@ -1088,6 +1095,7 @@ impl Reactor {
 
     fn log_event(&self, event: &Event) {
         match event {
+            Event::DragMotion(..) => {}
             Event::WindowFrameChanged(..) | Event::MouseUp | Event::MouseMoved(..) => {
                 trace!(?event, "Event")
             }
@@ -1183,8 +1191,18 @@ impl Reactor {
         self.flush_deferred_window_inventory_refresh();
     }
 
-    #[instrument(name = "reactor::handle_event", skip(self), fields(event=?event))]
     fn handle_event(&mut self, event: Event) {
+        if matches!(event, Event::DragMotion(..)) {
+            self.handle_event_inner(event);
+        } else {
+            self.handle_event_traced(event);
+        }
+    }
+
+    #[instrument(name = "reactor::handle_event", skip(self), fields(event=?event))]
+    fn handle_event_traced(&mut self, event: Event) { self.handle_event_inner(event) }
+
+    fn handle_event_inner(&mut self, event: Event) {
         let previously_focused_window = self.main_window();
         match self.dispatch_workflow(event) {
             Ok(mut outcome) => {
@@ -3274,6 +3292,8 @@ impl Reactor {
     }
 
     fn drag_scene(&self, source: WindowId, space: SpaceId) -> crate::actor::drag::DragScene {
+        let directional =
+            self.layout_manager.layout_engine.drop_scene_supports_directional_inserts(space);
         crate::actor::drag::DragScene {
             targets: self
                 .layout_manager
@@ -3286,6 +3306,7 @@ impl Reactor {
                         window,
                         space,
                         frame: state.frame_monotonic,
+                        directional,
                     })
                 })
                 .collect(),

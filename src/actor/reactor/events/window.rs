@@ -310,6 +310,8 @@ pub fn handle_window_frame_changed(
             drag.resize_screens = screens.clone().into();
             let scene = new_space.map_or_else(crate::actor::drag::DragScene::default, |space| {
                 let eligible = layout.layout_engine.drop_scene_windows(space);
+                let directional =
+                    layout.layout_engine.drop_scene_supports_directional_inserts(space);
                 crate::actor::drag::DragScene {
                     targets: eligible
                         .into_iter()
@@ -319,6 +321,7 @@ pub fn handle_window_frame_changed(
                                 window: other,
                                 space,
                                 frame: other_state.frame_monotonic,
+                                directional,
                             })
                         })
                         .collect(),

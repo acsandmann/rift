@@ -17,6 +17,8 @@ pub struct DragSceneTarget {
     pub window: WindowId,
     pub space: SpaceId,
     pub frame: CGRect,
+    /// Whether this layout can represent directional insertion around this tile.
+    pub directional: bool,
 }
 
 #[derive(Debug, Clone, Default)]

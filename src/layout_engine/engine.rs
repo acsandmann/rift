@@ -218,6 +218,15 @@ impl LayoutEngine {
         self.workspace_tree(workspace).visible_windows_in_layout(layout)
     }
 
+    /// Stack layouts can reorder/activate members, but cannot represent a
+    /// directional half-tile insertion. Other tiled layouts support it.
+    pub(crate) fn drop_scene_supports_directional_inserts(&self, space: SpaceId) -> bool {
+        !matches!(
+            self.active_layout_mode_at(space),
+            LayoutMode::Floating | LayoutMode::Stack
+        )
+    }
+
     /// Resolve an optional workspace index and snapshot its layout for read-only consumers.
     pub(crate) fn query_workspace_layout(
         &self,
