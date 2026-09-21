@@ -26,6 +26,12 @@ impl Default for StackLayoutSystem {
 }
 
 impl StackLayoutSystem {
+    pub(crate) fn preview_clone(&self) -> Self {
+        let mut cloned: Self = super::serde_preview_clone(self);
+        cloned.window_insertion_point = self.window_insertion_point;
+        cloned
+    }
+
     pub fn new(default_orientation: StackDefaultOrientation) -> Self {
         Self::new_with_insertion_point(default_orientation, WindowInsertionPoint::default())
     }

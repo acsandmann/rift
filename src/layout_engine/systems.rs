@@ -6,6 +6,12 @@ use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
 use crate::layout_engine::{Direction, LayoutKind, ResizeOrientation};
 
+fn serde_preview_clone<T>(value: &T) -> T
+where T: Serialize + for<'de> Deserialize<'de> {
+    ron::from_str(&ron::to_string(value).expect("serialize layout preview"))
+        .expect("deserialize layout preview")
+}
+
 slotmap::new_key_type! { pub struct LayoutId; }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -160,6 +166,8 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     /// unmatchable hidden member can survive forever as a ghost.
     fn all_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId>;
     fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId>;
+    /// Members sharing the stack/group that directly contains `window`.
+    fn stack_members(&self, _layout: LayoutId, _window: WindowId) -> Vec<WindowId> { Vec::new() }
     fn visible_windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId>;
     fn ascend_selection(&mut self, layout: LayoutId) -> bool;
     fn descend_selection(&mut self, layout: LayoutId) -> bool;
@@ -259,6 +267,9 @@ macro_rules! delegate_traditional_layout_system {
         }
         fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
             self.inner.visible_windows_in_layout(layout)
+        }
+        fn stack_members(&self, layout: LayoutId, window: WindowId) -> Vec<WindowId> {
+            self.inner.stack_members(layout, window)
         }
         fn visible_windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId> {
             self.inner.visible_windows_under_selection(layout)
@@ -560,6 +571,7 @@ mod tests {
         assert!(all.contains(&w(1)) && all.contains(&w(2)) && all.contains(&w(3)));
         assert_eq!(system.selected_window(layout), Some(w(3)));
         assert!(!system.visible_windows_in_layout(layout).contains(&w(1)));
+        assert_eq!(system.stack_members(layout, w(3)), vec![w(1), w(3)]);
 
         assert!(system.apply_window_drop(
             layout,
@@ -570,6 +582,15 @@ mod tests {
         let all = system.all_windows_in_layout(layout);
         assert_eq!(all.len(), 3);
         assert_eq!(system.selected_window(layout), Some(w(2)));
+
+        assert!(system.apply_window_drop(
+            layout,
+            w(3),
+            w(2),
+            crate::layout_engine::WindowDropAction::Insert(crate::layout_engine::Direction::Right),
+        ));
+        assert!(system.stack_members(layout, w(3)).is_empty());
+        assert_eq!(system.visible_windows_in_layout(layout).len(), 3);
     }
 
     #[test]
@@ -641,4 +662,17 @@ pub enum LayoutSystemKind {
     Scrolling(ScrollingLayoutSystem),
     Stack(StackLayoutSystem),
     Floating(FloatingLayoutSystem),
+}
+
+impl LayoutSystemKind {
+    pub(crate) fn preview_clone(&self) -> Self {
+        match self {
+            Self::Traditional(system) => Self::Traditional(system.preview_clone()),
+            Self::Bsp(system) => Self::Bsp(system.preview_clone()),
+            Self::MasterStack(system) => Self::MasterStack(system.preview_clone()),
+            Self::Scrolling(system) => Self::Scrolling(system.preview_clone()),
+            Self::Stack(system) => Self::Stack(system.preview_clone()),
+            Self::Floating(system) => Self::Floating(serde_preview_clone(system)),
+        }
+    }
 }

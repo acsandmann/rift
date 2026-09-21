@@ -172,10 +172,13 @@ impl DragActor {
                     .iter()
                     .find(|target| target.window == previous.window)
                     .filter(|target| previous.zone == DropZone::Center || target.directional)
-                    .map(|target| DropTarget {
-                        frame: target.frame,
-                        tiling_area: session.scene.tiling_area.unwrap_or(target.frame),
-                        ..previous
+                    .and_then(|target| {
+                        Some(DropTarget {
+                            frame: target.frame,
+                            tiling_area: session.scene.tiling_area.unwrap_or(target.frame),
+                            preview_area: target.preview_area(previous.action)?,
+                            ..previous
+                        })
                     })
             });
             session.target = hit_test(
@@ -681,13 +684,15 @@ pub fn hit_test(
     if zone != DropZone::Center && !target.directional {
         return None;
     }
+    let action = resolve_action(zone, center);
     Some(DropTarget {
         window: target.window,
         space: target.space,
         frame: target.frame,
         tiling_area,
+        preview_area: target.preview_area(action)?,
         zone,
-        action: resolve_action(zone, center),
+        action,
     })
 }
 
@@ -701,27 +706,20 @@ fn distance_to_rect_squared(frame: CGRect, point: CGPoint) -> f64 {
     dx * dx + dy * dy
 }
 
+impl DragSceneTarget {
+    fn preview_area(self, action: WindowDropAction) -> Option<CGRect> {
+        match action {
+            WindowDropAction::Swap | WindowDropAction::Stack => self.center_frame,
+            WindowDropAction::Insert(Direction::Left) => self.west_frame,
+            WindowDropAction::Insert(Direction::Right) => self.east_frame,
+            WindowDropAction::Insert(Direction::Up) => self.north_frame,
+            WindowDropAction::Insert(Direction::Down) => self.south_frame,
+        }
+    }
+}
+
 pub fn preview_frame(target: DropTarget) -> CGRect {
-    let base = target.tiling_area;
-    let mut frame = match target.zone {
-        DropZone::Center => target.frame,
-        DropZone::West => CGRect::new(
-            base.origin,
-            objc2_core_foundation::CGSize::new(base.size.width / 2.0, base.size.height),
-        ),
-        DropZone::East => CGRect::new(
-            CGPoint::new(base.origin.x + base.size.width / 2.0, base.origin.y),
-            objc2_core_foundation::CGSize::new(base.size.width / 2.0, base.size.height),
-        ),
-        DropZone::North => CGRect::new(
-            base.origin,
-            objc2_core_foundation::CGSize::new(base.size.width, base.size.height / 2.0),
-        ),
-        DropZone::South => CGRect::new(
-            CGPoint::new(base.origin.x, base.origin.y + base.size.height / 2.0),
-            objc2_core_foundation::CGSize::new(base.size.width, base.size.height / 2.0),
-        ),
-    };
+    let mut frame = target.preview_area;
     frame.origin.x += 4.0;
     frame.origin.y += 4.0;
     frame.size.width = (frame.size.width - 8.0).max(0.0);
@@ -809,6 +807,11 @@ mod tests {
                     window: target,
                     space,
                     frame: target_frame,
+                    center_frame: Some(target_frame),
+                    west_frame: Some(target_frame),
+                    east_frame: Some(target_frame),
+                    north_frame: Some(target_frame),
+                    south_frame: Some(target_frame),
                     directional: true,
                 }],
             },
@@ -821,6 +824,9 @@ mod tests {
             actor.target().unwrap().action,
             WindowDropAction::Insert(Direction::Left)
         );
+        let preview = preview_frame(actor.target().unwrap());
+        assert_eq!(preview.origin, CGPoint::new(104.0, 4.0));
+        assert_eq!(preview.size, CGSize::new(92.0, 92.0));
         let commit = actor.finish().unwrap();
         assert_eq!(commit.source.window, source);
         assert_eq!(commit.target.unwrap().window, target);
@@ -835,6 +841,11 @@ mod tests {
                 window: WindowId::new(1, 2),
                 space: SpaceId::new(1),
                 frame: rect(),
+                center_frame: Some(rect()),
+                west_frame: Some(rect()),
+                east_frame: Some(rect()),
+                north_frame: Some(rect()),
+                south_frame: Some(rect()),
                 directional: false,
             }],
         };
@@ -883,6 +894,11 @@ mod tests {
                     window: target,
                     space,
                     frame: rect(),
+                    center_frame: Some(rect()),
+                    west_frame: Some(rect()),
+                    east_frame: Some(rect()),
+                    north_frame: Some(rect()),
+                    south_frame: Some(rect()),
                     directional: true,
                 }],
             },

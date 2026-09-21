@@ -1651,6 +1651,8 @@ impl Reactor {
                     &mut self.state,
                     &mut self.layout_manager,
                     &mut self.drag_manager,
+                    &self.config.settings.ui.stack_line,
+                    self.config.settings.mouse.drop_action,
                     window_workflow::WindowFrameChangedPayload {
                         window: wid,
                         new_frame,
@@ -3294,7 +3296,8 @@ impl Reactor {
     fn drag_scene(&self, source: WindowId, space: SpaceId) -> crate::actor::drag::DragScene {
         let directional =
             self.layout_manager.layout_engine.drop_scene_supports_directional_inserts(space);
-        let tiling_area = self.space_state.screen_by_space(space).map(|screen| {
+        let screen = self.space_state.screen_by_space(space);
+        let tiling_area = screen.map(|screen| {
             self.layout_manager
                 .layout_engine
                 .drop_scene_tiling_area(screen.frame, screen.display_uuid_opt())
@@ -3304,14 +3307,46 @@ impl Reactor {
             targets: self
                 .layout_manager
                 .layout_engine
-                .drop_scene_windows(space)
+                .drop_scene_windows(space, source)
                 .into_iter()
                 .filter_map(|window| {
                     let state = self.state.windows.window(window)?;
+                    let preview_frame = |action| {
+                        let screen = screen?;
+                        self.layout_manager.layout_engine.drop_preview_frame(
+                            space,
+                            source,
+                            window,
+                            action,
+                            screen.frame,
+                            screen.display_uuid_opt(),
+                            &self.config.settings.ui.stack_line,
+                        )
+                    };
                     (window != source).then_some(crate::actor::drag::DragSceneTarget {
                         window,
                         space,
                         frame: state.frame_monotonic,
+                        center_frame: preview_frame(match self.config.settings.mouse.drop_action {
+                            crate::common::config::MouseDropAction::Swap => {
+                                crate::layout_engine::WindowDropAction::Swap
+                            }
+                            crate::common::config::MouseDropAction::Stack => {
+                                crate::layout_engine::WindowDropAction::Stack
+                            }
+                        }),
+                        west_frame: preview_frame(crate::layout_engine::WindowDropAction::Insert(
+                            crate::layout_engine::Direction::Left,
+                        )),
+                        east_frame: preview_frame(crate::layout_engine::WindowDropAction::Insert(
+                            crate::layout_engine::Direction::Right,
+                        )),
+                        north_frame: preview_frame(crate::layout_engine::WindowDropAction::Insert(
+                            crate::layout_engine::Direction::Up,
+                        )),
+                        south_frame: preview_frame(crate::layout_engine::WindowDropAction::Insert(
+                            crate::layout_engine::Direction::Down,
+                        )),
                         directional,
                     })
                 })

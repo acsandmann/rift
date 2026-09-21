@@ -38,6 +38,8 @@ impl Default for TraditionalLayoutSystem {
 }
 
 impl TraditionalLayoutSystem {
+    pub(crate) fn preview_clone(&self) -> Self { super::serde_preview_clone(self) }
+
     pub fn new(window_insertion_point: WindowInsertionPoint, equalize_nodes: bool) -> Self {
         Self {
             tree: Tree::with_observer(Components::default()),
@@ -672,6 +674,18 @@ impl LayoutSystem for TraditionalLayoutSystem {
     fn visible_windows_in_layout(&self, layout: LayoutId) -> Vec<WindowId> {
         let root = self.root(layout);
         self.visible_windows_under_internal(root)
+    }
+
+    fn stack_members(&self, layout: LayoutId, window: WindowId) -> Vec<WindowId> {
+        let Some(parent) =
+            self.window_node(layout, window).and_then(|node| node.parent(self.map()))
+        else {
+            return Vec::new();
+        };
+        if !self.layout(parent).is_group() {
+            return Vec::new();
+        }
+        parent.children(self.map()).filter_map(|node| self.window_at(node)).collect()
     }
 
     fn visible_windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId> {

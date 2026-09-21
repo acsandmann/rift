@@ -47,6 +47,12 @@ pub struct BspLayoutSystem {
 }
 
 impl BspLayoutSystem {
+    pub(crate) fn preview_clone(&self) -> Self {
+        let mut cloned: Self = super::serde_preview_clone(self);
+        cloned.window_insertion_point = self.window_insertion_point;
+        cloned
+    }
+
     fn find_neighbor_leaf(&self, from_leaf: NodeId, direction: Direction) -> Option<NodeId> {
         let mut current = from_leaf;
 
@@ -1270,6 +1276,16 @@ impl LayoutSystem for BspLayoutSystem {
             self.collect_visible_windows_under(state.root, &mut out);
         }
         out
+    }
+
+    fn stack_members(&self, layout: LayoutId, window: WindowId) -> Vec<WindowId> {
+        if !self.contains_window(layout, window) {
+            return Vec::new();
+        }
+        self.node_for_window(window)
+            .and_then(|node| self.stacks.get(&node))
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn visible_windows_under_selection(&self, layout: LayoutId) -> Vec<WindowId> {

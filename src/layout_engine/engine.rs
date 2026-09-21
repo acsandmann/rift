@@ -205,7 +205,7 @@ impl LayoutEngine {
 
     /// Return the visible logical tiles eligible for drag targeting.
     /// Hidden members of stacked/grouped containers are excluded.
-    pub(crate) fn drop_scene_windows(&self, space: SpaceId) -> Vec<WindowId> {
+    pub(crate) fn drop_scene_windows(&self, space: SpaceId, source: WindowId) -> Vec<WindowId> {
         if self.active_layout_mode_at(space) == LayoutMode::Floating {
             return Vec::new();
         }
@@ -215,16 +215,19 @@ impl LayoutEngine {
         let Some(layout) = self.workspace_layouts.active(space, workspace) else {
             return Vec::new();
         };
-        self.workspace_tree(workspace).visible_windows_in_layout(layout)
+        let system = self.workspace_tree(workspace);
+        let mut windows = system.visible_windows_in_layout(layout);
+        for window in system.stack_members(layout, source) {
+            if !windows.contains(&window) {
+                windows.push(window);
+            }
+        }
+        windows
     }
 
-    /// Stack layouts can reorder/activate members, but cannot represent a
-    /// directional half-tile insertion. Other tiled layouts support it.
+    /// Whether this layout can represent directional insertion.
     pub(crate) fn drop_scene_supports_directional_inserts(&self, space: SpaceId) -> bool {
-        !matches!(
-            self.active_layout_mode_at(space),
-            LayoutMode::Floating | LayoutMode::Stack
-        )
+        self.active_layout_mode_at(space) != LayoutMode::Floating
     }
 
     pub(crate) fn drop_scene_tiling_area(
@@ -234,6 +237,36 @@ impl LayoutEngine {
     ) -> CGRect {
         let gaps = self.layout_settings.gaps.effective_for_display(display_uuid);
         crate::layout_engine::utils::compute_tiling_area(screen, &gaps)
+    }
+
+    pub(crate) fn drop_preview_frame(
+        &self,
+        space: SpaceId,
+        source: WindowId,
+        target: WindowId,
+        action: crate::layout_engine::WindowDropAction,
+        screen: CGRect,
+        display_uuid: Option<&str>,
+        stack_line: &crate::common::config::StackLineSettings,
+    ) -> Option<CGRect> {
+        let workspace = self.active_workspace(space)?;
+        let layout = self.workspace_layouts.active(space, workspace)?;
+        let mut system = self.workspace_tree(workspace).preview_clone();
+        system.apply_window_drop(layout, source, target, action).then_some(())?;
+        let gaps = self.layout_settings.gaps.effective_for_display(display_uuid);
+        system
+            .calculate_layout(
+                layout,
+                screen,
+                self.layout_settings.stack.stack_offset,
+                &self.window_layout_constraints,
+                &gaps,
+                stack_line.thickness(),
+                stack_line.horiz_placement,
+                stack_line.vert_placement,
+            )
+            .into_iter()
+            .find_map(|(window, frame)| (window == source).then_some(frame))
     }
 
     /// Resolve an optional workspace index and snapshot its layout for read-only consumers.

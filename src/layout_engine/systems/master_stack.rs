@@ -29,6 +29,12 @@ impl Default for MasterStackLayoutSystem {
 }
 
 impl MasterStackLayoutSystem {
+    pub(crate) fn preview_clone(&self) -> Self {
+        let mut cloned: Self = super::serde_preview_clone(self);
+        cloned.settings = self.settings.clone();
+        cloned
+    }
+
     pub fn new(settings: MasterStackSettings) -> Self {
         Self {
             inner: TraditionalLayoutSystem::default(),

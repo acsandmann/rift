@@ -17,6 +17,11 @@ pub struct DragSceneTarget {
     pub window: WindowId,
     pub space: SpaceId,
     pub frame: CGRect,
+    pub center_frame: Option<CGRect>,
+    pub west_frame: Option<CGRect>,
+    pub east_frame: Option<CGRect>,
+    pub north_frame: Option<CGRect>,
+    pub south_frame: Option<CGRect>,
     /// Whether this layout can represent directional insertion around this tile.
     pub directional: bool,
 }
@@ -43,6 +48,7 @@ pub struct DropTarget {
     pub space: SpaceId,
     pub frame: CGRect,
     pub tiling_area: CGRect,
+    pub preview_area: CGRect,
     pub zone: DropZone,
     pub action: WindowDropAction,
 }
