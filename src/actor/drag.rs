@@ -717,25 +717,26 @@ fn hit_test_available(
     previous: Option<DropIntent>,
     unavailable: &[(WindowId, DropZone, WindowDropAction)],
 ) -> Option<DropIntent> {
-    if let Some(previous) = previous {
-        if let Some(target) = scene.targets.iter().find(|target| target.window == previous.window) {
-            let retained = zone_frame(target.frame, previous.zone, fraction);
-            if contains(retained, point, HYSTERESIS_POINTS) {
-                let intent = DropIntent {
-                    frame: target.frame,
-                    action: resolve_action(previous.zone, center),
-                    ..previous
-                };
-                if !unavailable.contains(&(intent.window, intent.zone, intent.action)) {
-                    return Some(intent);
-                }
+    if let Some(previous) = previous
+        && let Some(target) = scene.targets.iter().find(|target| target.window == previous.window)
+    {
+        let retained = zone_frame(target.frame, previous.zone, fraction);
+        if contains(retained, point, HYSTERESIS_POINTS) {
+            let intent = DropIntent {
+                frame: target.frame,
+                action: resolve_action(previous.zone, center),
+                ..previous
+            };
+            if !unavailable.contains(&(intent.window, intent.zone, intent.action)) {
+                return Some(intent);
             }
         }
     }
     scene
         .targets
         .iter()
-        .filter_map(|target| {
+        .enumerate()
+        .filter_map(|(order, target)| {
             let clamped = CGPoint::new(
                 point.x.clamp(
                     target.frame.origin.x,
@@ -754,11 +755,14 @@ fn hit_test_available(
                 zone,
                 action: resolve_action(zone, center),
             };
-            (!unavailable.contains(&(intent.window, intent.zone, intent.action)))
-                .then_some((distance_to_rect_squared(target.frame, point), intent))
+            (!unavailable.contains(&(intent.window, intent.zone, intent.action))).then_some((
+                distance_to_rect_squared(target.frame, point),
+                order,
+                intent,
+            ))
         })
-        .min_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, intent)| intent)
+        .min_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)))
+        .map(|(_, _, intent)| intent)
 }
 
 fn distance_to_rect_squared(frame: CGRect, point: CGPoint) -> f64 {
@@ -929,6 +933,7 @@ mod tests {
         });
         actor.set_preview(intent, None);
         assert!(actor.target().is_none());
+        assert!(actor.finish().unwrap().target.is_none());
     }
 
     #[test]
@@ -970,6 +975,86 @@ mod tests {
         assert_eq!(intent.window, nearest);
         assert!(actor.set_preview(intent, None));
         assert_eq!(actor.intent().unwrap().window, fallback);
+    }
+
+    #[test]
+    fn overlapping_targets_prefer_scene_order() {
+        let space = SpaceId::new(1);
+        let visible = WindowId::new(1, 2);
+        let overlapping = WindowId::new(1, 3);
+        let scene = DragScene {
+            targets: vec![
+                DragSceneTarget {
+                    window: visible,
+                    space,
+                    frame: rect(),
+                },
+                DragSceneTarget {
+                    window: overlapping,
+                    space,
+                    frame: rect(),
+                },
+            ],
+        };
+        let intent = hit_test(
+            &scene,
+            CGPoint::new(100.0, 50.0),
+            0.25,
+            MouseDropAction::Swap,
+            None,
+        )
+        .unwrap();
+        assert_eq!(intent.window, visible);
+    }
+
+    #[test]
+    fn replacing_scene_invalidates_a_validated_preview() {
+        let source = WindowId::new(1, 1);
+        let target = WindowId::new(1, 2);
+        let space = SpaceId::new(1);
+        let mut actor = DragActor::new(MouseSettings::default());
+        actor.begin_native(
+            DragSource {
+                window: source,
+                origin_frame: rect(),
+                last_frame: rect(),
+                origin_space: Some(space),
+                current_space: Some(space),
+                tiled: true,
+            },
+            DragScene {
+                targets: vec![DragSceneTarget {
+                    window: target,
+                    space,
+                    frame: rect(),
+                }],
+            },
+        );
+        actor.motion(DragMotion {
+            point: CGPoint::new(100.0, 50.0),
+            button: MouseButton::Left,
+        });
+        let intent = actor.intent().unwrap();
+        actor.set_preview(intent, Some(rect()));
+        assert!(actor.target().is_some());
+
+        let moved = CGRect::new(CGPoint::new(300.0, 0.0), rect().size);
+        actor.replace_scene(DragScene {
+            targets: vec![DragSceneTarget {
+                window: target,
+                space,
+                frame: moved,
+            }],
+        });
+        assert!(actor.target().is_none());
+        let moved_intent = actor.intent().unwrap();
+        assert_eq!(moved_intent.frame, moved);
+        actor.set_preview(moved_intent, Some(moved));
+        let mut settings = MouseSettings::default();
+        settings.drop_action = MouseDropAction::Stack;
+        actor.update_config(settings);
+        assert!(actor.intent().is_none());
+        assert!(actor.target().is_none());
     }
 
     #[test]
@@ -1015,11 +1100,17 @@ mod tests {
                 last_frame: origin,
                 origin_space: Some(space),
                 current_space: Some(space),
-                tiled: false,
+                tiled: true,
             },
             CGPoint::new(10.0, 10.0),
             crate::common::config::MouseAction::Resize,
-            DragScene::default(),
+            DragScene {
+                targets: vec![DragSceneTarget {
+                    window: WindowId::new(1, 2),
+                    space,
+                    frame: rect(),
+                }],
+            },
         );
         actor.motion(DragMotion {
             point: CGPoint::new(30.0, 20.0),
@@ -1030,6 +1121,40 @@ mod tests {
         assert_eq!(resized.size, CGSize::new(180.0, 90.0));
         assert_eq!(resized.origin.x + resized.size.width, 200.0);
         assert_eq!(resized.origin.y + resized.size.height, 100.0);
+        assert!(actor.intent().is_none());
+    }
+
+    #[test]
+    fn native_resize_never_uses_drop_targets() {
+        let source = WindowId::new(1, 1);
+        let space = SpaceId::new(1);
+        let mut resized = rect();
+        resized.size.width += 10.0;
+        let mut actor = DragActor::new(MouseSettings::default());
+        actor.begin_native(
+            DragSource {
+                window: source,
+                origin_frame: rect(),
+                last_frame: resized,
+                origin_space: Some(space),
+                current_space: Some(space),
+                tiled: true,
+            },
+            DragScene {
+                targets: vec![DragSceneTarget {
+                    window: WindowId::new(1, 2),
+                    space,
+                    frame: rect(),
+                }],
+            },
+        );
+        actor.motion(DragMotion {
+            point: CGPoint::new(100.0, 50.0),
+            button: MouseButton::Left,
+        });
+        assert_eq!(actor.kind(), Some(DragKind::NativeResize));
+        assert!(actor.intent().is_none());
+        assert!(actor.target().is_none());
     }
 
     #[test]
