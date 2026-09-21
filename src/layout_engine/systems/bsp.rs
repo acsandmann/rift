@@ -1634,7 +1634,22 @@ impl LayoutSystem for BspLayoutSystem {
             return false;
         };
         if node_a == node_b {
-            return false;
+            let Some(stack) = self.stacks.get_mut(&node_a) else {
+                return false;
+            };
+            if !stack.contains(&a) || !stack.contains(&b) {
+                return false;
+            }
+            // A BSP stack has one active leaf window. Keep the dragged source active
+            // while moving the target immediately behind it in stack order.
+            stack.retain(|window| *window != a && *window != b);
+            stack.push(b);
+            stack.push(a);
+            if let Some(NodeKind::Leaf { window, .. }) = self.kind.get_mut(node_a) {
+                *window = Some(a);
+            }
+            self.tree.data.selection.select(&self.tree.map, node_a);
+            return true;
         }
 
         if let Some(state) = self.layouts.get(layout).copied() {

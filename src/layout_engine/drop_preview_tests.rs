@@ -171,6 +171,9 @@ fn bsp_previews_match_committed_frames_for_every_action() {
 
     assert!(system.apply_window_drop(layout, w(3), w(2), WindowDropAction::Stack));
     verify_actions(&system, layout, w(3), w(1), BspLayoutSystem::preview_clone);
+    assert!(system.apply_window_drop(layout, w(3), w(2), WindowDropAction::Swap));
+    assert_eq!(system.stack_members(layout, w(3)), vec![w(2), w(3)]);
+    let _ = calculated_source(&system, layout, w(3));
 
     let mut nested = BspLayoutSystem::default();
     let nested_layout = populate(&mut nested);
