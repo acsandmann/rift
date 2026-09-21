@@ -6,6 +6,29 @@ use crate::actor::reactor::{LayoutEvent, WindowState};
 use crate::model::RiftState;
 use crate::sys::screen::SpaceId;
 
+pub fn build_drag_scene(
+    state: &RiftState,
+    layout: &LayoutManager,
+    source: crate::actor::app::WindowId,
+    space: SpaceId,
+) -> crate::actor::drag::DragScene {
+    crate::actor::drag::DragScene {
+        targets: layout
+            .layout_engine
+            .drop_scene_windows(space, source)
+            .into_iter()
+            .filter(|window| *window != source)
+            .filter_map(|window| {
+                Some(crate::actor::drag::DragSceneTarget {
+                    window,
+                    space,
+                    frame: state.windows.window(window)?.frame_monotonic,
+                })
+            })
+            .collect(),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MouseUpPayload {
     pub final_space: Option<SpaceId>,

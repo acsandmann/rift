@@ -1479,7 +1479,6 @@ impl LayoutSystem for ScrollingLayoutSystem {
                     height_weights: vec![weight],
                 });
             }
-            crate::layout_engine::WindowDropAction::Move(_) => unreachable!(),
         }
         state.selected = Some(source);
         state.reveal_selected_without_direction();

@@ -1738,8 +1738,7 @@ impl LayoutSystem for BspLayoutSystem {
                 self.split_leaf_in_direction(target_node, direction, source);
                 true
             }
-            crate::layout_engine::WindowDropAction::Swap
-            | crate::layout_engine::WindowDropAction::Move(_) => unreachable!(),
+            crate::layout_engine::WindowDropAction::Swap => unreachable!(),
         }
     }
 

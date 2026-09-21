@@ -253,9 +253,7 @@ modifier = "fn"
 action1 = "move"
 action2 = "resize"
 # Dropping in the center of another tiled window: swap | stack.
-# Dropping near an edge performs the corresponding move_node direction. Corners
-# use the window on that side as a target (for example, lower-right inserts below
-# the right-side window).
+# Dropping near an edge of another tiled window inserts on that side.
 drop_action = "swap"
 # Edge-zone depth. Must be between 0.10 and 0.45; 0.25 leaves a 50% x 50% center.
 drop_zone_fraction = 0.25

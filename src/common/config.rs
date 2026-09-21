@@ -574,10 +574,9 @@ pub enum MouseDropAction {
 /// Native title-bar dragging continues to work normally. Holding [`Self::modifier`]
 /// reserves `action1` for the left button and `action2` for the right button, so
 /// a window can be moved or resized from anywhere inside it. Floating windows
-/// remain floating. Moving a tiled window exposes nine logical zones across the
-/// tiling area: the center performs [`Self::drop_action`], edges use the layout's
-/// normal `move_node` semantics, while corners insert above or below the window on
-/// that side of the pointer.
+/// remain floating. A tiled destination is divided into five local zones: its center
+/// performs [`Self::drop_action`], while its edges insert the source on that side.
+/// Preview simulation runs only when the destination or zone changes.
 ///
 /// Example:
 ///
@@ -609,7 +608,7 @@ pub struct MouseSettings {
     /// Center-zone action for tiled move drops.
     #[serde(default)]
     pub drop_action: MouseDropAction,
-    /// Depth of each edge zone as a fraction of the effective tiling area's size.
+    /// Depth of each edge zone as a fraction of the destination window's size.
     /// Valid values are `0.10..=0.45`; the default is `0.25`.
     #[serde(default = "default_drop_zone_fraction")]
     pub drop_zone_fraction: f64,

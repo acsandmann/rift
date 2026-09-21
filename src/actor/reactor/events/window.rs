@@ -254,8 +254,6 @@ pub fn handle_window_frame_changed(
     state: &mut crate::model::RiftState,
     layout: &mut crate::actor::reactor::managers::LayoutManager,
     drag: &mut DragManager,
-    stack_line: &crate::common::config::StackLineSettings,
-    center_action: crate::common::config::MouseDropAction,
     payload: WindowFrameChangedPayload,
 ) -> anyhow::Result<EventOutcome> {
     let WindowFrameChangedPayload {
@@ -310,43 +308,14 @@ pub fn handle_window_frame_changed(
         if !drag.actor.update_native(wid, new_frame, new_space) {
             let session_id = drag.actor.await_native(wid);
             drag.resize_screens = screens.clone().into();
-            let scene = new_space.map_or_else(crate::actor::drag::DragScene::default, |space| {
-                let eligible = layout.layout_engine.drop_scene_windows(space, wid);
-                let tiling_area = screens
-                    .iter()
-                    .find(|(screen_space, _, _)| *screen_space == space)
-                    .map(|(_, frame, uuid)| {
-                        layout.layout_engine.drop_scene_tiling_area(*frame, uuid.as_deref())
-                    });
-                let screen = screens.iter().find(|(screen_space, _, _)| *screen_space == space);
-                crate::actor::drag::DragScene {
-                    tiling_area,
-                    targets: eligible
-                        .into_iter()
-                        .filter_map(|other| {
-                            let other_state = state.windows.window(other)?;
-                            let previews =
-                                screen.map_or_else(Default::default, |(_, frame, uuid)| {
-                                    layout.layout_engine.drop_preview_frames(
-                                        space,
-                                        wid,
-                                        other,
-                                        center_action.into(),
-                                        *frame,
-                                        uuid.as_deref(),
-                                        stack_line,
-                                    )
-                                });
-                            (other != wid).then_some(crate::actor::drag::DragSceneTarget {
-                                window: other,
-                                space,
-                                frame: other_state.frame_monotonic,
-                                previews,
-                            })
-                        })
-                        .collect(),
-                }
-            });
+            let native_resize = !old_frame.size.same_as(new_frame.size);
+            let scene = if tiled && !native_resize {
+                new_space.map_or_else(crate::actor::drag::DragScene::default, |space| {
+                    crate::actor::reactor::events::drag::build_drag_scene(state, layout, wid, space)
+                })
+            } else {
+                Default::default()
+            };
             let _ = drag.actor.resolve_start(
                 session_id,
                 Some(crate::actor::drag::DragSource {

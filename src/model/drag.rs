@@ -17,26 +17,10 @@ pub struct DragSceneTarget {
     pub window: WindowId,
     pub space: SpaceId,
     pub frame: CGRect,
-    pub previews: DropPreviewFrames,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct DropPreviewFrames {
-    pub center: Option<CGRect>,
-    pub west: Option<CGRect>,
-    pub east: Option<CGRect>,
-    pub north: Option<CGRect>,
-    pub south: Option<CGRect>,
-    pub northwest: Option<CGRect>,
-    pub northeast: Option<CGRect>,
-    pub southwest: Option<CGRect>,
-    pub southeast: Option<CGRect>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct DragScene {
-    /// Effective screen area available to the active tiled layout.
-    pub tiling_area: Option<CGRect>,
     pub targets: Vec<DragSceneTarget>,
 }
 
@@ -47,10 +31,15 @@ pub enum DropZone {
     East,
     North,
     South,
-    Northwest,
-    Northeast,
-    Southwest,
-    Southeast,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DropIntent {
+    pub window: WindowId,
+    pub space: SpaceId,
+    pub frame: CGRect,
+    pub zone: DropZone,
+    pub action: WindowDropAction,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -58,7 +47,6 @@ pub struct DropTarget {
     pub window: WindowId,
     pub space: SpaceId,
     pub frame: CGRect,
-    pub tiling_area: CGRect,
     pub preview_area: CGRect,
     pub zone: DropZone,
     pub action: WindowDropAction,

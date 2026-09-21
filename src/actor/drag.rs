@@ -12,7 +12,8 @@ use crate::actor::app::WindowId;
 use crate::common::config::{MouseDropAction, MouseSettings};
 use crate::layout_engine::{Direction, WindowDropAction};
 pub use crate::model::drag::{
-    DragCancel, DragCommit, DragKind, DragScene, DragSceneTarget, DragSource, DropTarget, DropZone,
+    DragCancel, DragCommit, DragKind, DragScene, DragSceneTarget, DragSource, DropIntent,
+    DropTarget, DropZone,
 };
 use crate::sys::geometry::SameAs;
 use crate::sys::screen::SpaceId;
@@ -85,7 +86,9 @@ pub struct Session {
     pub pointer: CGPoint,
     pub anchor_point: CGPoint,
     pub scene: DragScene,
+    pub intent: Option<DropIntent>,
     pub target: Option<DropTarget>,
+    unavailable: Vec<(WindowId, DropZone, WindowDropAction)>,
     pub kind: DragKind,
     last_effect_frame: CGRect,
     resize_edges: Option<ResizeEdges>,
@@ -149,6 +152,13 @@ impl DragActor {
         }
     }
 
+    pub fn intent(&self) -> Option<DropIntent> {
+        match &self.state {
+            State::Idle | State::AwaitingSource(_) => None,
+            State::Dragging(session) => session.intent,
+        }
+    }
+
     pub fn kind(&self) -> Option<DragKind> {
         match &self.state {
             State::Dragging(session) => Some(session.kind),
@@ -161,41 +171,67 @@ impl DragActor {
             return;
         };
         session.scene = scene;
+        session.unavailable.clear();
         if session.source.tiled
             && matches!(session.kind, DragKind::NativeMove | DragKind::ModifierMove)
             && session.source.origin_space == session.source.current_space
         {
-            let previous = session.target.and_then(|previous| {
-                session
-                    .scene
-                    .targets
-                    .iter()
-                    .find(|target| target.window == previous.window)
-                    .and_then(|target| {
-                        Some(DropTarget {
-                            frame: target.frame,
-                            tiling_area: session.scene.tiling_area.unwrap_or(target.frame),
-                            preview_area: target.preview_area(previous.zone, previous.action)?,
-                            ..previous
-                        })
-                    })
-            });
-            session.target = hit_test(
+            session.intent = hit_test_available(
                 &session.scene,
                 session.pointer,
                 self.settings.drop_zone_fraction,
                 self.settings.drop_action,
-                previous,
+                session.intent,
+                &session.unavailable,
             );
+            session.target = None;
         } else {
+            session.intent = None;
             session.target = None;
         }
     }
 
+    pub fn set_preview(&mut self, intent: DropIntent, preview_area: Option<CGRect>) -> bool {
+        let State::Dragging(session) = &mut self.state else {
+            return false;
+        };
+        if session.intent != Some(intent) {
+            return false;
+        }
+        if let Some(preview_area) = preview_area {
+            session.target = Some(DropTarget {
+                window: intent.window,
+                space: intent.space,
+                frame: intent.frame,
+                preview_area,
+                zone: intent.zone,
+                action: intent.action,
+            });
+            return false;
+        }
+        session.unavailable.push((intent.window, intent.zone, intent.action));
+        session.intent = hit_test_available(
+            &session.scene,
+            session.pointer,
+            self.settings.drop_zone_fraction,
+            self.settings.drop_action,
+            None,
+            &session.unavailable,
+        );
+        session.target = None;
+        session.intent.is_some()
+    }
+
     pub fn update_config(&mut self, settings: MouseSettings) {
+        let semantics_changed = self.settings.drop_action != settings.drop_action
+            || self.settings.drop_zone_fraction != settings.drop_zone_fraction;
         self.settings = settings;
         if !settings.enabled {
             self.cancel();
+        } else if semantics_changed && let State::Dragging(session) = &mut self.state {
+            session.intent = None;
+            session.target = None;
+            session.unavailable.clear();
         }
     }
 
@@ -278,7 +314,9 @@ impl DragActor {
             pointer,
             anchor_point: pointer,
             scene,
+            intent: None,
             target: None,
+            unavailable: Vec::new(),
             kind,
             last_effect_frame: source.last_frame,
             resize_edges: None,
@@ -358,7 +396,9 @@ impl DragActor {
             pointer: point,
             anchor_point: point,
             scene,
+            intent: None,
             target: None,
+            unavailable: Vec::new(),
             kind,
             last_effect_frame: source.last_frame,
             resize_edges,
@@ -427,16 +467,20 @@ impl DragActor {
         {
             None
         } else {
-            hit_test(
+            hit_test_available(
                 &session.scene,
                 motion.point,
                 self.settings.drop_zone_fraction,
                 self.settings.drop_action,
-                session.target,
+                session.intent,
+                &session.unavailable,
             )
         };
-        let changed = next != session.target;
-        session.target = next;
+        let changed = next != session.intent;
+        if changed {
+            session.intent = next;
+            session.target = None;
+        }
         changed
     }
 
@@ -559,6 +603,9 @@ impl DragActor {
             return true;
         }
         session.scene.targets.retain(|target| target.window != window);
+        if session.intent.is_some_and(|intent| intent.window == window) {
+            session.intent = None;
+        }
         if session.target.is_some_and(|target| target.window == window) {
             session.target = None;
         }
@@ -567,6 +614,12 @@ impl DragActor {
 }
 
 impl PartialEq for DropTarget {
+    fn eq(&self, other: &Self) -> bool {
+        self.window == other.window && self.space == other.space && self.zone == other.zone
+    }
+}
+
+impl PartialEq for DropIntent {
     fn eq(&self, other: &Self) -> bool {
         self.window == other.window && self.space == other.space && self.zone == other.zone
     }
@@ -587,32 +640,20 @@ pub fn classify_zone(frame: CGRect, point: CGPoint, fraction: f64) -> Option<Dro
     let right = 1.0 - left;
     let top = (point.y - frame.origin.y) / frame.size.height;
     let bottom = 1.0 - top;
-    let horizontal = if left < fraction {
-        Some(Direction::Left)
-    } else if right < fraction {
-        Some(Direction::Right)
-    } else {
-        None
-    };
-    let vertical = if top < fraction {
-        Some(Direction::Up)
-    } else if bottom < fraction {
-        Some(Direction::Down)
-    } else {
-        None
-    };
-    Some(match (horizontal, vertical) {
-        (Some(Direction::Left), Some(Direction::Up)) => DropZone::Northwest,
-        (Some(Direction::Right), Some(Direction::Up)) => DropZone::Northeast,
-        (Some(Direction::Left), Some(Direction::Down)) => DropZone::Southwest,
-        (Some(Direction::Right), Some(Direction::Down)) => DropZone::Southeast,
-        (Some(Direction::Left), None) => DropZone::West,
-        (Some(Direction::Right), None) => DropZone::East,
-        (None, Some(Direction::Up)) => DropZone::North,
-        (None, Some(Direction::Down)) => DropZone::South,
-        (None, None) => DropZone::Center,
-        _ => unreachable!(),
-    })
+    if left >= fraction && right >= fraction && top >= fraction && bottom >= fraction {
+        return Some(DropZone::Center);
+    }
+    let mut nearest = (left, DropZone::West);
+    for candidate in [
+        (right, DropZone::East),
+        (top, DropZone::North),
+        (bottom, DropZone::South),
+    ] {
+        if candidate.0 < nearest.0 {
+            nearest = candidate;
+        }
+    }
+    Some(nearest.1)
 }
 
 fn zone_frame(frame: CGRect, zone: DropZone, fraction: f64) -> CGRect {
@@ -644,34 +685,16 @@ fn zone_frame(frame: CGRect, zone: DropZone, fraction: f64) -> CGRect {
             CGPoint::new(x, y + h * (1.0 - fraction)),
             objc2_core_foundation::CGSize::new(w, h * fraction),
         ),
-        DropZone::Northwest => CGRect::new(
-            CGPoint::new(x, y),
-            objc2_core_foundation::CGSize::new(w * fraction, h * fraction),
-        ),
-        DropZone::Northeast => CGRect::new(
-            CGPoint::new(x + w * (1.0 - fraction), y),
-            objc2_core_foundation::CGSize::new(w * fraction, h * fraction),
-        ),
-        DropZone::Southwest => CGRect::new(
-            CGPoint::new(x, y + h * (1.0 - fraction)),
-            objc2_core_foundation::CGSize::new(w * fraction, h * fraction),
-        ),
-        DropZone::Southeast => CGRect::new(
-            CGPoint::new(x + w * (1.0 - fraction), y + h * (1.0 - fraction)),
-            objc2_core_foundation::CGSize::new(w * fraction, h * fraction),
-        ),
     }
 }
 
 pub fn resolve_action(zone: DropZone, center: MouseDropAction) -> WindowDropAction {
     match zone {
         DropZone::Center => center.into(),
-        DropZone::West => WindowDropAction::Move(Direction::Left),
-        DropZone::East => WindowDropAction::Move(Direction::Right),
-        DropZone::North => WindowDropAction::Move(Direction::Up),
-        DropZone::South => WindowDropAction::Move(Direction::Down),
-        DropZone::Northwest | DropZone::Northeast => WindowDropAction::Insert(Direction::Up),
-        DropZone::Southwest | DropZone::Southeast => WindowDropAction::Insert(Direction::Down),
+        DropZone::West => WindowDropAction::Insert(Direction::Left),
+        DropZone::East => WindowDropAction::Insert(Direction::Right),
+        DropZone::North => WindowDropAction::Insert(Direction::Up),
+        DropZone::South => WindowDropAction::Insert(Direction::Down),
     }
 }
 
@@ -681,40 +704,61 @@ pub fn hit_test(
     point: CGPoint,
     fraction: f64,
     center: MouseDropAction,
-    previous: Option<DropTarget>,
-) -> Option<DropTarget> {
+    previous: Option<DropIntent>,
+) -> Option<DropIntent> {
+    hit_test_available(scene, point, fraction, center, previous, &[])
+}
+
+fn hit_test_available(
+    scene: &DragScene,
+    point: CGPoint,
+    fraction: f64,
+    center: MouseDropAction,
+    previous: Option<DropIntent>,
+    unavailable: &[(WindowId, DropZone, WindowDropAction)],
+) -> Option<DropIntent> {
     if let Some(previous) = previous {
-        let base = if previous.zone == DropZone::Center {
-            previous.frame
-        } else {
-            previous.tiling_area
-        };
-        let retained = zone_frame(base, previous.zone, fraction);
-        if contains(retained, point, HYSTERESIS_POINTS) {
-            return Some(previous);
+        if let Some(target) = scene.targets.iter().find(|target| target.window == previous.window) {
+            let retained = zone_frame(target.frame, previous.zone, fraction);
+            if contains(retained, point, HYSTERESIS_POINTS) {
+                let intent = DropIntent {
+                    frame: target.frame,
+                    action: resolve_action(previous.zone, center),
+                    ..previous
+                };
+                if !unavailable.contains(&(intent.window, intent.zone, intent.action)) {
+                    return Some(intent);
+                }
+            }
         }
     }
-    let tiling_area = scene.tiling_area.or_else(|| {
-        scene
-            .targets
-            .iter()
-            .find_map(|target| contains(target.frame, point, 0.0).then_some(target.frame))
-    })?;
-    let zone = classify_zone(tiling_area, point, fraction)?;
-    let target = scene.targets.iter().min_by(|a, b| {
-        distance_to_rect_squared(a.frame, point)
-            .total_cmp(&distance_to_rect_squared(b.frame, point))
-    })?;
-    let action = resolve_action(zone, center);
-    Some(DropTarget {
-        window: target.window,
-        space: target.space,
-        frame: target.frame,
-        tiling_area,
-        preview_area: target.preview_area(zone, action)?,
-        zone,
-        action,
-    })
+    scene
+        .targets
+        .iter()
+        .filter_map(|target| {
+            let clamped = CGPoint::new(
+                point.x.clamp(
+                    target.frame.origin.x,
+                    target.frame.origin.x + target.frame.size.width,
+                ),
+                point.y.clamp(
+                    target.frame.origin.y,
+                    target.frame.origin.y + target.frame.size.height,
+                ),
+            );
+            let zone = classify_zone(target.frame, clamped, fraction)?;
+            let intent = DropIntent {
+                window: target.window,
+                space: target.space,
+                frame: target.frame,
+                zone,
+                action: resolve_action(zone, center),
+            };
+            (!unavailable.contains(&(intent.window, intent.zone, intent.action)))
+                .then_some((distance_to_rect_squared(target.frame, point), intent))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, intent)| intent)
 }
 
 fn distance_to_rect_squared(frame: CGRect, point: CGPoint) -> f64 {
@@ -725,32 +769,6 @@ fn distance_to_rect_squared(frame: CGRect, point: CGPoint) -> f64 {
         .max(0.0)
         .max(point.y - (frame.origin.y + frame.size.height));
     dx * dx + dy * dy
-}
-
-impl DragSceneTarget {
-    fn preview_area(self, zone: DropZone, action: WindowDropAction) -> Option<CGRect> {
-        match zone {
-            DropZone::Northwest => return self.previews.northwest,
-            DropZone::Northeast => return self.previews.northeast,
-            DropZone::Southwest => return self.previews.southwest,
-            DropZone::Southeast => return self.previews.southeast,
-            _ => {}
-        }
-        match action {
-            WindowDropAction::Swap | WindowDropAction::Stack => self.previews.center,
-            WindowDropAction::Insert(Direction::Left) | WindowDropAction::Move(Direction::Left) => {
-                self.previews.west
-            }
-            WindowDropAction::Insert(Direction::Right)
-            | WindowDropAction::Move(Direction::Right) => self.previews.east,
-            WindowDropAction::Insert(Direction::Up) | WindowDropAction::Move(Direction::Up) => {
-                self.previews.north
-            }
-            WindowDropAction::Insert(Direction::Down) | WindowDropAction::Move(Direction::Down) => {
-                self.previews.south
-            }
-        }
-    }
 }
 
 pub fn preview_frame(target: DropTarget) -> CGRect {
@@ -771,7 +789,7 @@ mod tests {
     fn rect() -> CGRect { CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(200.0, 100.0)) }
 
     #[test]
-    fn classifies_center_edges_and_corners() {
+    fn classifies_target_local_center_and_edges() {
         assert_eq!(
             classify_zone(rect(), CGPoint::new(100.0, 50.0), 0.25),
             Some(DropZone::Center)
@@ -794,23 +812,23 @@ mod tests {
         );
         assert_eq!(
             classify_zone(rect(), CGPoint::new(0.0, 0.0), 0.25),
-            Some(DropZone::Northwest)
+            Some(DropZone::West)
         );
         assert_eq!(
             classify_zone(rect(), CGPoint::new(200.0, 0.0), 0.25),
-            Some(DropZone::Northeast)
+            Some(DropZone::East)
         );
         assert_eq!(
             classify_zone(rect(), CGPoint::new(0.0, 100.0), 0.25),
-            Some(DropZone::Southwest)
+            Some(DropZone::West)
         );
         assert_eq!(
             classify_zone(rect(), CGPoint::new(200.0, 100.0), 0.25),
-            Some(DropZone::Southeast)
+            Some(DropZone::East)
         );
         assert_eq!(
-            resolve_action(DropZone::Southeast, MouseDropAction::Swap),
-            WindowDropAction::Insert(Direction::Down)
+            resolve_action(DropZone::South, MouseDropAction::Swap),
+            WindowDropAction::Insert(Direction::Down),
         );
         assert_eq!(classify_zone(rect(), CGPoint::new(-1.0, 50.0), 0.25), None);
     }
@@ -853,19 +871,10 @@ mod tests {
                 tiled: true,
             },
             DragScene {
-                tiling_area: Some(rect()),
                 targets: vec![DragSceneTarget {
                     window: target,
                     space,
                     frame: target_frame,
-                    previews: crate::model::drag::DropPreviewFrames {
-                        center: Some(target_frame),
-                        west: Some(target_frame),
-                        east: Some(target_frame),
-                        north: Some(target_frame),
-                        south: Some(target_frame),
-                        ..Default::default()
-                    },
                 }],
             },
         );
@@ -873,10 +882,9 @@ mod tests {
             point: CGPoint::new(1.0, 50.0),
             button: MouseButton::Left,
         }));
-        assert_eq!(
-            actor.target().unwrap().action,
-            WindowDropAction::Move(Direction::Left)
-        );
+        let intent = actor.intent().unwrap();
+        assert_eq!(intent.action, WindowDropAction::Insert(Direction::Left));
+        actor.set_preview(intent, Some(target_frame));
         let preview = preview_frame(actor.target().unwrap());
         assert_eq!(preview.origin, CGPoint::new(104.0, 4.0));
         assert_eq!(preview.size, CGSize::new(92.0, 92.0));
@@ -887,45 +895,81 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_directional_preview_does_not_expose_a_target() {
+    fn unavailable_preview_does_not_expose_a_target() {
         let scene = DragScene {
-            tiling_area: Some(rect()),
             targets: vec![DragSceneTarget {
                 window: WindowId::new(1, 2),
                 space: SpaceId::new(1),
                 frame: rect(),
-                previews: crate::model::drag::DropPreviewFrames {
-                    center: Some(rect()),
-                    west: None,
-                    east: None,
-                    north: None,
-                    south: None,
-                    ..Default::default()
-                },
             }],
         };
-        assert!(
-            hit_test(
-                &scene,
-                CGPoint::new(1.0, 50.0),
-                0.25,
-                MouseDropAction::Swap,
-                None,
-            )
-            .is_none()
+        let intent = hit_test(
+            &scene,
+            CGPoint::new(1.0, 50.0),
+            0.25,
+            MouseDropAction::Swap,
+            None,
+        )
+        .unwrap();
+        let mut actor = DragActor::new(MouseSettings::default());
+        actor.begin_native(
+            DragSource {
+                window: WindowId::new(1, 1),
+                origin_frame: rect(),
+                last_frame: rect(),
+                origin_space: Some(SpaceId::new(1)),
+                current_space: Some(SpaceId::new(1)),
+                tiled: true,
+            },
+            scene,
         );
-        assert_eq!(
-            hit_test(
-                &scene,
-                CGPoint::new(100.0, 50.0),
-                0.25,
-                MouseDropAction::Swap,
-                None,
-            )
-            .unwrap()
-            .zone,
-            DropZone::Center,
+        actor.motion(DragMotion {
+            point: CGPoint::new(1.0, 50.0),
+            button: MouseButton::Left,
+        });
+        actor.set_preview(intent, None);
+        assert!(actor.target().is_none());
+    }
+
+    #[test]
+    fn unavailable_nearest_target_falls_back_to_the_next_target() {
+        let space = SpaceId::new(1);
+        let nearest = WindowId::new(1, 2);
+        let fallback = WindowId::new(1, 3);
+        let scene = DragScene {
+            targets: vec![
+                DragSceneTarget {
+                    window: nearest,
+                    space,
+                    frame: rect(),
+                },
+                DragSceneTarget {
+                    window: fallback,
+                    space,
+                    frame: CGRect::new(CGPoint::new(220.0, 0.0), rect().size),
+                },
+            ],
+        };
+        let mut actor = DragActor::new(MouseSettings::default());
+        actor.begin_native(
+            DragSource {
+                window: WindowId::new(1, 1),
+                origin_frame: rect(),
+                last_frame: rect(),
+                origin_space: Some(space),
+                current_space: Some(space),
+                tiled: true,
+            },
+            scene,
         );
+        actor.motion(DragMotion {
+            point: CGPoint::new(100.0, 50.0),
+            button: MouseButton::Left,
+        });
+        let intent = actor.intent().unwrap();
+        assert_eq!(intent.window, nearest);
+        assert!(actor.set_preview(intent, None));
+        assert_eq!(actor.intent().unwrap().window, fallback);
     }
 
     #[test]
@@ -944,19 +988,10 @@ mod tests {
                 tiled: false,
             },
             DragScene {
-                tiling_area: Some(rect()),
                 targets: vec![DragSceneTarget {
                     window: target,
                     space,
                     frame: rect(),
-                    previews: crate::model::drag::DropPreviewFrames {
-                        center: Some(rect()),
-                        west: Some(rect()),
-                        east: Some(rect()),
-                        north: Some(rect()),
-                        south: Some(rect()),
-                        ..Default::default()
-                    },
                 }],
             },
         );

@@ -195,7 +195,7 @@ impl LayoutEngine {
             return false;
         };
         self.workspace_layouts.mark_last_saved(request.space, workspace, layout);
-        self.workspace_tree_mut(workspace).apply_drag_action(
+        self.workspace_tree_mut(workspace).apply_window_drop(
             layout,
             request.source,
             request.target,
@@ -225,73 +225,38 @@ impl LayoutEngine {
         windows
     }
 
-    pub(crate) fn drop_scene_tiling_area(
-        &self,
-        screen: CGRect,
-        display_uuid: Option<&str>,
-    ) -> CGRect {
-        let gaps = self.layout_settings.gaps.effective_for_display(display_uuid);
-        crate::layout_engine::utils::compute_tiling_area(screen, &gaps)
-    }
-
-    pub(crate) fn drop_preview_frames(
+    pub(crate) fn drop_preview_frame(
         &self,
         space: SpaceId,
         source: WindowId,
         target: WindowId,
-        center_action: crate::layout_engine::WindowDropAction,
+        action: crate::layout_engine::WindowDropAction,
         screen: CGRect,
         display_uuid: Option<&str>,
         stack_line: &crate::common::config::StackLineSettings,
-    ) -> crate::model::drag::DropPreviewFrames {
+    ) -> Option<CGRect> {
         let Some(workspace) = self.active_workspace(space) else {
-            return Default::default();
+            return None;
         };
         let Some(layout) = self.workspace_layouts.active(space, workspace) else {
-            return Default::default();
+            return None;
         };
-        let actions = [
-            center_action,
-            crate::layout_engine::WindowDropAction::Move(Direction::Left),
-            crate::layout_engine::WindowDropAction::Move(Direction::Right),
-            crate::layout_engine::WindowDropAction::Move(Direction::Up),
-            crate::layout_engine::WindowDropAction::Move(Direction::Down),
-            crate::layout_engine::WindowDropAction::Insert(Direction::Up),
-            crate::layout_engine::WindowDropAction::Insert(Direction::Up),
-            crate::layout_engine::WindowDropAction::Insert(Direction::Down),
-            crate::layout_engine::WindowDropAction::Insert(Direction::Down),
-        ];
         let gaps = self.layout_settings.gaps.effective_for_display(display_uuid);
-        let Some(systems) = self.workspace_tree(workspace).preview_clones(actions.len()) else {
-            return Default::default();
-        };
-        let mut frames = actions.into_iter().zip(systems).map(|(action, mut system)| {
-            system.apply_drag_action(layout, source, target, action).then_some(())?;
-            system
-                .calculate_layout(
-                    layout,
-                    screen,
-                    self.layout_settings.stack.stack_offset,
-                    &self.window_layout_constraints,
-                    &gaps,
-                    stack_line.thickness(),
-                    stack_line.horiz_placement,
-                    stack_line.vert_placement,
-                )
-                .into_iter()
-                .find_map(|(window, frame)| (window == source).then_some(frame))
-        });
-        crate::model::drag::DropPreviewFrames {
-            center: frames.next().flatten(),
-            west: frames.next().flatten(),
-            east: frames.next().flatten(),
-            north: frames.next().flatten(),
-            south: frames.next().flatten(),
-            northwest: frames.next().flatten(),
-            northeast: frames.next().flatten(),
-            southwest: frames.next().flatten(),
-            southeast: frames.next().flatten(),
-        }
+        let mut system = self.workspace_tree(workspace).preview_clone()?;
+        system.apply_window_drop(layout, source, target, action).then_some(())?;
+        system
+            .calculate_layout(
+                layout,
+                screen,
+                self.layout_settings.stack.stack_offset,
+                &self.window_layout_constraints,
+                &gaps,
+                stack_line.thickness(),
+                stack_line.horiz_placement,
+                stack_line.vert_placement,
+            )
+            .into_iter()
+            .find_map(|(window, frame)| (window == source).then_some(frame))
     }
 
     /// Resolve an optional workspace index and snapshot its layout for read-only consumers.

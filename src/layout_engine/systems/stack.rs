@@ -297,8 +297,7 @@ impl LayoutSystem for StackLayoutSystem {
                 source_node.detach(&mut self.inner.tree).insert_before(target_node);
             }
         }
-        self.inner.select(source_node);
-        true
+        self.inner.select_window(layout, source)
     }
 
     fn move_selection_to_layout_after_selection(

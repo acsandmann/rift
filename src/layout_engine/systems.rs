@@ -217,27 +217,6 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     ) -> bool;
 
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool;
-    fn move_window(&mut self, layout: LayoutId, window: WindowId, direction: Direction) -> bool {
-        self.select_window(layout, window) && self.move_selection(layout, direction)
-    }
-    fn apply_drag_action(
-        &mut self,
-        layout: LayoutId,
-        source: WindowId,
-        target: WindowId,
-        action: crate::layout_engine::WindowDropAction,
-    ) -> bool {
-        match action {
-            crate::layout_engine::WindowDropAction::Move(direction) => {
-                self.move_window(layout, source, direction)
-            }
-            crate::layout_engine::WindowDropAction::Swap
-            | crate::layout_engine::WindowDropAction::Stack
-            | crate::layout_engine::WindowDropAction::Insert(_) => {
-                self.apply_window_drop(layout, source, target, action)
-            }
-        }
-    }
     fn move_selection_to_layout_after_selection(
         &mut self,
         from_layout: LayoutId,
@@ -687,22 +666,17 @@ pub enum LayoutSystemKind {
 }
 
 impl LayoutSystemKind {
-    pub(crate) fn preview_clones(&self, count: usize) -> Option<Vec<Self>> {
-        let encoded = ron::to_string(self).ok()?;
-        (0..count)
-            .map(|_| {
-                let mut cloned: Self = ron::from_str(&encoded).ok()?;
-                match (self, &mut cloned) {
-                    (Self::MasterStack(source), Self::MasterStack(target)) => {
-                        target.settings = source.settings.clone();
-                    }
-                    (Self::Scrolling(source), Self::Scrolling(target)) => {
-                        target.settings = source.settings.clone();
-                    }
-                    _ => {}
-                }
-                Some(cloned)
-            })
-            .collect()
+    pub(crate) fn preview_clone(&self) -> Option<Self> {
+        let mut cloned: Self = ron::from_str(&ron::to_string(self).ok()?).ok()?;
+        match (self, &mut cloned) {
+            (Self::MasterStack(source), Self::MasterStack(target)) => {
+                target.settings = source.settings.clone();
+            }
+            (Self::Scrolling(source), Self::Scrolling(target)) => {
+                target.settings = source.settings.clone();
+            }
+            _ => {}
+        }
+        Some(cloned)
     }
 }
