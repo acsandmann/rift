@@ -17,13 +17,16 @@ pub struct DragSceneTarget {
     pub window: WindowId,
     pub space: SpaceId,
     pub frame: CGRect,
-    pub center_frame: Option<CGRect>,
-    pub west_frame: Option<CGRect>,
-    pub east_frame: Option<CGRect>,
-    pub north_frame: Option<CGRect>,
-    pub south_frame: Option<CGRect>,
-    /// Whether this layout can represent directional insertion around this tile.
-    pub directional: bool,
+    pub previews: DropPreviewFrames,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DropPreviewFrames {
+    pub center: Option<CGRect>,
+    pub west: Option<CGRect>,
+    pub east: Option<CGRect>,
+    pub north: Option<CGRect>,
+    pub south: Option<CGRect>,
 }
 
 #[derive(Debug, Clone, Default)]

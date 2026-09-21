@@ -608,7 +608,7 @@ pub struct MouseSettings {
     /// Center-zone action for tiled move drops.
     #[serde(default)]
     pub drop_action: MouseDropAction,
-    /// Depth of each edge zone as a fraction of the target tile's size.
+    /// Depth of each edge zone as a fraction of the effective tiling area's size.
     /// Valid values are `0.10..=0.45`; the default is `0.25`.
     #[serde(default = "default_drop_zone_fraction")]
     pub drop_zone_fraction: f64,

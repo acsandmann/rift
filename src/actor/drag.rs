@@ -171,7 +171,6 @@ impl DragActor {
                     .targets
                     .iter()
                     .find(|target| target.window == previous.window)
-                    .filter(|target| previous.zone == DropZone::Center || target.directional)
                     .and_then(|target| {
                         Some(DropTarget {
                             frame: target.frame,
@@ -640,10 +639,7 @@ fn zone_frame(frame: CGRect, zone: DropZone, fraction: f64) -> CGRect {
 
 pub fn resolve_action(zone: DropZone, center: MouseDropAction) -> WindowDropAction {
     match zone {
-        DropZone::Center => match center {
-            MouseDropAction::Swap => WindowDropAction::Swap,
-            MouseDropAction::Stack => WindowDropAction::Stack,
-        },
+        DropZone::Center => center.into(),
         DropZone::West => WindowDropAction::Insert(Direction::Left),
         DropZone::East => WindowDropAction::Insert(Direction::Right),
         DropZone::North => WindowDropAction::Insert(Direction::Up),
@@ -681,9 +677,6 @@ pub fn hit_test(
         distance_to_rect_squared(a.frame, point)
             .total_cmp(&distance_to_rect_squared(b.frame, point))
     })?;
-    if zone != DropZone::Center && !target.directional {
-        return None;
-    }
     let action = resolve_action(zone, center);
     Some(DropTarget {
         window: target.window,
@@ -709,11 +702,11 @@ fn distance_to_rect_squared(frame: CGRect, point: CGPoint) -> f64 {
 impl DragSceneTarget {
     fn preview_area(self, action: WindowDropAction) -> Option<CGRect> {
         match action {
-            WindowDropAction::Swap | WindowDropAction::Stack => self.center_frame,
-            WindowDropAction::Insert(Direction::Left) => self.west_frame,
-            WindowDropAction::Insert(Direction::Right) => self.east_frame,
-            WindowDropAction::Insert(Direction::Up) => self.north_frame,
-            WindowDropAction::Insert(Direction::Down) => self.south_frame,
+            WindowDropAction::Swap | WindowDropAction::Stack => self.previews.center,
+            WindowDropAction::Insert(Direction::Left) => self.previews.west,
+            WindowDropAction::Insert(Direction::Right) => self.previews.east,
+            WindowDropAction::Insert(Direction::Up) => self.previews.north,
+            WindowDropAction::Insert(Direction::Down) => self.previews.south,
         }
     }
 }
@@ -807,12 +800,13 @@ mod tests {
                     window: target,
                     space,
                     frame: target_frame,
-                    center_frame: Some(target_frame),
-                    west_frame: Some(target_frame),
-                    east_frame: Some(target_frame),
-                    north_frame: Some(target_frame),
-                    south_frame: Some(target_frame),
-                    directional: true,
+                    previews: crate::model::drag::DropPreviewFrames {
+                        center: Some(target_frame),
+                        west: Some(target_frame),
+                        east: Some(target_frame),
+                        north: Some(target_frame),
+                        south: Some(target_frame),
+                    },
                 }],
             },
         );
@@ -834,19 +828,20 @@ mod tests {
     }
 
     #[test]
-    fn layouts_without_directional_inserts_expose_only_the_center_zone() {
+    fn unavailable_directional_preview_does_not_expose_a_target() {
         let scene = DragScene {
             tiling_area: Some(rect()),
             targets: vec![DragSceneTarget {
                 window: WindowId::new(1, 2),
                 space: SpaceId::new(1),
                 frame: rect(),
-                center_frame: Some(rect()),
-                west_frame: Some(rect()),
-                east_frame: Some(rect()),
-                north_frame: Some(rect()),
-                south_frame: Some(rect()),
-                directional: false,
+                previews: crate::model::drag::DropPreviewFrames {
+                    center: Some(rect()),
+                    west: None,
+                    east: None,
+                    north: None,
+                    south: None,
+                },
             }],
         };
         assert!(
@@ -894,12 +889,13 @@ mod tests {
                     window: target,
                     space,
                     frame: rect(),
-                    center_frame: Some(rect()),
-                    west_frame: Some(rect()),
-                    east_frame: Some(rect()),
-                    north_frame: Some(rect()),
-                    south_frame: Some(rect()),
-                    directional: true,
+                    previews: crate::model::drag::DropPreviewFrames {
+                        center: Some(rect()),
+                        west: Some(rect()),
+                        east: Some(rect()),
+                        north: Some(rect()),
+                        south: Some(rect()),
+                    },
                 }],
             },
         );

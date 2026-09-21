@@ -47,6 +47,7 @@ pub struct BspLayoutSystem {
 }
 
 impl BspLayoutSystem {
+    #[cfg(test)]
     pub(crate) fn preview_clone(&self) -> Self {
         let mut cloned: Self = super::serde_preview_clone(self);
         cloned.window_insertion_point = self.window_insertion_point;

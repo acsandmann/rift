@@ -20,6 +20,15 @@ pub enum WindowDropAction {
     Insert(Direction),
 }
 
+impl From<crate::common::config::MouseDropAction> for WindowDropAction {
+    fn from(action: crate::common::config::MouseDropAction) -> Self {
+        match action {
+            crate::common::config::MouseDropAction::Swap => Self::Swap,
+            crate::common::config::MouseDropAction::Stack => Self::Stack,
+        }
+    }
+}
+
 pub(crate) struct WindowDropRequest {
     pub source: crate::actor::app::WindowId,
     pub target: crate::actor::app::WindowId,

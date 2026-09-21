@@ -6,6 +6,7 @@ use crate::actor::app::{WindowId, pid_t};
 use crate::common::collections::HashMap;
 use crate::layout_engine::{Direction, LayoutKind, ResizeOrientation};
 
+#[cfg(test)]
 fn serde_preview_clone<T>(value: &T) -> T
 where T: Serialize + for<'de> Deserialize<'de> {
     ron::from_str(&ron::to_string(value).expect("serialize layout preview"))
@@ -665,14 +666,22 @@ pub enum LayoutSystemKind {
 }
 
 impl LayoutSystemKind {
-    pub(crate) fn preview_clone(&self) -> Self {
-        match self {
-            Self::Traditional(system) => Self::Traditional(system.preview_clone()),
-            Self::Bsp(system) => Self::Bsp(system.preview_clone()),
-            Self::MasterStack(system) => Self::MasterStack(system.preview_clone()),
-            Self::Scrolling(system) => Self::Scrolling(system.preview_clone()),
-            Self::Stack(system) => Self::Stack(system.preview_clone()),
-            Self::Floating(system) => Self::Floating(serde_preview_clone(system)),
-        }
+    pub(crate) fn preview_clones(&self, count: usize) -> Option<Vec<Self>> {
+        let encoded = ron::to_string(self).ok()?;
+        (0..count)
+            .map(|_| {
+                let mut cloned: Self = ron::from_str(&encoded).ok()?;
+                match (self, &mut cloned) {
+                    (Self::MasterStack(source), Self::MasterStack(target)) => {
+                        target.settings = source.settings.clone();
+                    }
+                    (Self::Scrolling(source), Self::Scrolling(target)) => {
+                        target.settings = source.settings.clone();
+                    }
+                    _ => {}
+                }
+                Some(cloned)
+            })
+            .collect()
     }
 }

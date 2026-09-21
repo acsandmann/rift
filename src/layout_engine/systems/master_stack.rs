@@ -19,7 +19,7 @@ use crate::model::tree::NodeId;
 pub struct MasterStackLayoutSystem {
     inner: TraditionalLayoutSystem,
     #[serde(skip, default = "default_master_stack_settings")]
-    settings: MasterStackSettings,
+    pub(super) settings: MasterStackSettings,
 }
 
 fn default_master_stack_settings() -> MasterStackSettings { MasterStackSettings::default() }
@@ -29,6 +29,7 @@ impl Default for MasterStackLayoutSystem {
 }
 
 impl MasterStackLayoutSystem {
+    #[cfg(test)]
     pub(crate) fn preview_clone(&self) -> Self {
         let mut cloned: Self = super::serde_preview_clone(self);
         cloned.settings = self.settings.clone();

@@ -225,11 +225,6 @@ impl LayoutEngine {
         windows
     }
 
-    /// Whether this layout can represent directional insertion.
-    pub(crate) fn drop_scene_supports_directional_inserts(&self, space: SpaceId) -> bool {
-        self.active_layout_mode_at(space) != LayoutMode::Floating
-    }
-
     pub(crate) fn drop_scene_tiling_area(
         &self,
         screen: CGRect,
@@ -239,34 +234,56 @@ impl LayoutEngine {
         crate::layout_engine::utils::compute_tiling_area(screen, &gaps)
     }
 
-    pub(crate) fn drop_preview_frame(
+    pub(crate) fn drop_preview_frames(
         &self,
         space: SpaceId,
         source: WindowId,
         target: WindowId,
-        action: crate::layout_engine::WindowDropAction,
+        center_action: crate::layout_engine::WindowDropAction,
         screen: CGRect,
         display_uuid: Option<&str>,
         stack_line: &crate::common::config::StackLineSettings,
-    ) -> Option<CGRect> {
-        let workspace = self.active_workspace(space)?;
-        let layout = self.workspace_layouts.active(space, workspace)?;
-        let mut system = self.workspace_tree(workspace).preview_clone();
-        system.apply_window_drop(layout, source, target, action).then_some(())?;
+    ) -> crate::model::drag::DropPreviewFrames {
+        let Some(workspace) = self.active_workspace(space) else {
+            return Default::default();
+        };
+        let Some(layout) = self.workspace_layouts.active(space, workspace) else {
+            return Default::default();
+        };
+        let actions = [
+            center_action,
+            crate::layout_engine::WindowDropAction::Insert(Direction::Left),
+            crate::layout_engine::WindowDropAction::Insert(Direction::Right),
+            crate::layout_engine::WindowDropAction::Insert(Direction::Up),
+            crate::layout_engine::WindowDropAction::Insert(Direction::Down),
+        ];
         let gaps = self.layout_settings.gaps.effective_for_display(display_uuid);
-        system
-            .calculate_layout(
-                layout,
-                screen,
-                self.layout_settings.stack.stack_offset,
-                &self.window_layout_constraints,
-                &gaps,
-                stack_line.thickness(),
-                stack_line.horiz_placement,
-                stack_line.vert_placement,
-            )
-            .into_iter()
-            .find_map(|(window, frame)| (window == source).then_some(frame))
+        let Some(systems) = self.workspace_tree(workspace).preview_clones(actions.len()) else {
+            return Default::default();
+        };
+        let mut frames = actions.into_iter().zip(systems).map(|(action, mut system)| {
+            system.apply_window_drop(layout, source, target, action).then_some(())?;
+            system
+                .calculate_layout(
+                    layout,
+                    screen,
+                    self.layout_settings.stack.stack_offset,
+                    &self.window_layout_constraints,
+                    &gaps,
+                    stack_line.thickness(),
+                    stack_line.horiz_placement,
+                    stack_line.vert_placement,
+                )
+                .into_iter()
+                .find_map(|(window, frame)| (window == source).then_some(frame))
+        });
+        crate::model::drag::DropPreviewFrames {
+            center: frames.next().flatten(),
+            west: frames.next().flatten(),
+            east: frames.next().flatten(),
+            north: frames.next().flatten(),
+            south: frames.next().flatten(),
+        }
     }
 
     /// Resolve an optional workspace index and snapshot its layout for read-only consumers.

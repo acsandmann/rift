@@ -366,7 +366,10 @@ impl AppThreadHandle {
         self.requests_tx.same_channel(&other.requests_tx)
     }
 
-    pub fn send(&self, req: Request) -> anyhow::Result<()> { Ok(self.requests_tx.send(req)) }
+    pub fn send(&self, req: Request) -> anyhow::Result<()> {
+        self.requests_tx.send(req);
+        Ok(())
+    }
 
     /// Publish a high-frequency interactive frame without growing the actor queue.
     /// Only the newest frame for each window is retained until the app actor drains it.
@@ -382,18 +385,17 @@ impl AppThreadHandle {
             pending.latest.insert(wid, (frame, set_size, txid));
             !std::mem::replace(&mut pending.wake_pending, true)
         };
-        if should_wake {
-            if self
+        if should_wake
+            && self
                 .requests_tx
                 .try_send(Request::InteractiveFramesPending(
                     self.interactive_frames.clone(),
                 ))
                 .is_err()
-            {
-                let mut pending = self.interactive_frames.0.lock().unwrap();
-                pending.wake_pending = false;
-                pending.latest.clear();
-            }
+        {
+            let mut pending = self.interactive_frames.0.lock().unwrap();
+            pending.wake_pending = false;
+            pending.latest.clear();
         }
     }
 }

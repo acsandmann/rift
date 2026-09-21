@@ -312,8 +312,6 @@ pub fn handle_window_frame_changed(
             drag.resize_screens = screens.clone().into();
             let scene = new_space.map_or_else(crate::actor::drag::DragScene::default, |space| {
                 let eligible = layout.layout_engine.drop_scene_windows(space, wid);
-                let directional =
-                    layout.layout_engine.drop_scene_supports_directional_inserts(space);
                 let tiling_area = screens
                     .iter()
                     .find(|(screen_space, _, _)| *screen_space == space)
@@ -327,51 +325,23 @@ pub fn handle_window_frame_changed(
                         .into_iter()
                         .filter_map(|other| {
                             let other_state = state.windows.window(other)?;
-                            let preview_frame = |action| {
-                                let (_, screen_frame, display_uuid) = screen?;
-                                layout.layout_engine.drop_preview_frame(
-                                    space,
-                                    wid,
-                                    other,
-                                    action,
-                                    *screen_frame,
-                                    display_uuid.as_deref(),
-                                    stack_line,
-                                )
-                            };
+                            let previews =
+                                screen.map_or_else(Default::default, |(_, frame, uuid)| {
+                                    layout.layout_engine.drop_preview_frames(
+                                        space,
+                                        wid,
+                                        other,
+                                        center_action.into(),
+                                        *frame,
+                                        uuid.as_deref(),
+                                        stack_line,
+                                    )
+                                });
                             (other != wid).then_some(crate::actor::drag::DragSceneTarget {
                                 window: other,
                                 space,
                                 frame: other_state.frame_monotonic,
-                                center_frame: preview_frame(match center_action {
-                                    crate::common::config::MouseDropAction::Swap => {
-                                        crate::layout_engine::WindowDropAction::Swap
-                                    }
-                                    crate::common::config::MouseDropAction::Stack => {
-                                        crate::layout_engine::WindowDropAction::Stack
-                                    }
-                                }),
-                                west_frame: preview_frame(
-                                    crate::layout_engine::WindowDropAction::Insert(
-                                        crate::layout_engine::Direction::Left,
-                                    ),
-                                ),
-                                east_frame: preview_frame(
-                                    crate::layout_engine::WindowDropAction::Insert(
-                                        crate::layout_engine::Direction::Right,
-                                    ),
-                                ),
-                                north_frame: preview_frame(
-                                    crate::layout_engine::WindowDropAction::Insert(
-                                        crate::layout_engine::Direction::Up,
-                                    ),
-                                ),
-                                south_frame: preview_frame(
-                                    crate::layout_engine::WindowDropAction::Insert(
-                                        crate::layout_engine::Direction::Down,
-                                    ),
-                                ),
-                                directional,
+                                previews,
                             })
                         })
                         .collect(),

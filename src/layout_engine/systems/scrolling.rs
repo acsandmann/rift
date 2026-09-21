@@ -329,7 +329,7 @@ fn default_atomic() -> AtomicU64 { AtomicU64::new(0.0f64.to_bits()) }
 pub struct ScrollingLayoutSystem {
     layouts: slotmap::SlotMap<LayoutId, LayoutState>,
     #[serde(skip, default = "default_scrolling_settings")]
-    settings: ScrollingLayoutSettings,
+    pub(super) settings: ScrollingLayoutSettings,
 }
 
 fn default_scrolling_settings() -> ScrollingLayoutSettings { ScrollingLayoutSettings::default() }
@@ -344,6 +344,7 @@ impl Default for ScrollingLayoutSystem {
 }
 
 impl ScrollingLayoutSystem {
+    #[cfg(test)]
     pub(crate) fn preview_clone(&self) -> Self {
         let mut cloned: Self = super::serde_preview_clone(self);
         cloned.settings = self.settings.clone();
