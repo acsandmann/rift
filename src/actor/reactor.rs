@@ -3294,7 +3294,13 @@ impl Reactor {
     fn drag_scene(&self, source: WindowId, space: SpaceId) -> crate::actor::drag::DragScene {
         let directional =
             self.layout_manager.layout_engine.drop_scene_supports_directional_inserts(space);
+        let tiling_area = self.space_state.screen_by_space(space).map(|screen| {
+            self.layout_manager
+                .layout_engine
+                .drop_scene_tiling_area(screen.frame, screen.display_uuid_opt())
+        });
         crate::actor::drag::DragScene {
+            tiling_area,
             targets: self
                 .layout_manager
                 .layout_engine

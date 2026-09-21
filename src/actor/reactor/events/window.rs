@@ -312,7 +312,14 @@ pub fn handle_window_frame_changed(
                 let eligible = layout.layout_engine.drop_scene_windows(space);
                 let directional =
                     layout.layout_engine.drop_scene_supports_directional_inserts(space);
+                let tiling_area = screens
+                    .iter()
+                    .find(|(screen_space, _, _)| *screen_space == space)
+                    .map(|(_, frame, uuid)| {
+                        layout.layout_engine.drop_scene_tiling_area(*frame, uuid.as_deref())
+                    });
                 crate::actor::drag::DragScene {
+                    tiling_area,
                     targets: eligible
                         .into_iter()
                         .filter_map(|other| {

@@ -23,6 +23,8 @@ pub struct DragSceneTarget {
 
 #[derive(Debug, Clone, Default)]
 pub struct DragScene {
+    /// Effective screen area available to the active tiled layout.
+    pub tiling_area: Option<CGRect>,
     pub targets: Vec<DragSceneTarget>,
 }
 
@@ -40,6 +42,7 @@ pub struct DropTarget {
     pub window: WindowId,
     pub space: SpaceId,
     pub frame: CGRect,
+    pub tiling_area: CGRect,
     pub zone: DropZone,
     pub action: WindowDropAction,
 }

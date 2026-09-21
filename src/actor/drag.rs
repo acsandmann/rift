@@ -174,6 +174,7 @@ impl DragActor {
                     .filter(|target| previous.zone == DropZone::Center || target.directional)
                     .map(|target| DropTarget {
                         frame: target.frame,
+                        tiling_area: session.scene.tiling_area.unwrap_or(target.frame),
                         ..previous
                     })
             });
@@ -656,65 +657,69 @@ pub fn hit_test(
     previous: Option<DropTarget>,
 ) -> Option<DropTarget> {
     if let Some(previous) = previous {
-        let retained = zone_frame(previous.frame, previous.zone, fraction);
+        let base = if previous.zone == DropZone::Center {
+            previous.frame
+        } else {
+            previous.tiling_area
+        };
+        let retained = zone_frame(base, previous.zone, fraction);
         if contains(retained, point, HYSTERESIS_POINTS) {
             return Some(previous);
         }
     }
-    for target in &scene.targets {
-        let Some(zone) = classify_zone(target.frame, point, fraction) else {
-            continue;
-        };
-        if zone != DropZone::Center && !target.directional {
-            return None;
-        }
-        return Some(DropTarget {
-            window: target.window,
-            space: target.space,
-            frame: target.frame,
-            zone,
-            action: resolve_action(zone, center),
-        });
+    let tiling_area = scene.tiling_area.or_else(|| {
+        scene
+            .targets
+            .iter()
+            .find_map(|target| contains(target.frame, point, 0.0).then_some(target.frame))
+    })?;
+    let zone = classify_zone(tiling_area, point, fraction)?;
+    let target = scene.targets.iter().min_by(|a, b| {
+        distance_to_rect_squared(a.frame, point)
+            .total_cmp(&distance_to_rect_squared(b.frame, point))
+    })?;
+    if zone != DropZone::Center && !target.directional {
+        return None;
     }
-    None
+    Some(DropTarget {
+        window: target.window,
+        space: target.space,
+        frame: target.frame,
+        tiling_area,
+        zone,
+        action: resolve_action(zone, center),
+    })
+}
+
+fn distance_to_rect_squared(frame: CGRect, point: CGPoint) -> f64 {
+    let dx = (frame.origin.x - point.x)
+        .max(0.0)
+        .max(point.x - (frame.origin.x + frame.size.width));
+    let dy = (frame.origin.y - point.y)
+        .max(0.0)
+        .max(point.y - (frame.origin.y + frame.size.height));
+    dx * dx + dy * dy
 }
 
 pub fn preview_frame(target: DropTarget) -> CGRect {
+    let base = target.tiling_area;
     let mut frame = match target.zone {
         DropZone::Center => target.frame,
         DropZone::West => CGRect::new(
-            target.frame.origin,
-            objc2_core_foundation::CGSize::new(
-                target.frame.size.width / 2.0,
-                target.frame.size.height,
-            ),
+            base.origin,
+            objc2_core_foundation::CGSize::new(base.size.width / 2.0, base.size.height),
         ),
         DropZone::East => CGRect::new(
-            CGPoint::new(
-                target.frame.origin.x + target.frame.size.width / 2.0,
-                target.frame.origin.y,
-            ),
-            objc2_core_foundation::CGSize::new(
-                target.frame.size.width / 2.0,
-                target.frame.size.height,
-            ),
+            CGPoint::new(base.origin.x + base.size.width / 2.0, base.origin.y),
+            objc2_core_foundation::CGSize::new(base.size.width / 2.0, base.size.height),
         ),
         DropZone::North => CGRect::new(
-            target.frame.origin,
-            objc2_core_foundation::CGSize::new(
-                target.frame.size.width,
-                target.frame.size.height / 2.0,
-            ),
+            base.origin,
+            objc2_core_foundation::CGSize::new(base.size.width, base.size.height / 2.0),
         ),
         DropZone::South => CGRect::new(
-            CGPoint::new(
-                target.frame.origin.x,
-                target.frame.origin.y + target.frame.size.height / 2.0,
-            ),
-            objc2_core_foundation::CGSize::new(
-                target.frame.size.width,
-                target.frame.size.height / 2.0,
-            ),
+            CGPoint::new(base.origin.x, base.origin.y + base.size.height / 2.0),
+            objc2_core_foundation::CGSize::new(base.size.width, base.size.height / 2.0),
         ),
     };
     frame.origin.x += 4.0;
@@ -787,6 +792,7 @@ mod tests {
         let source = WindowId::new(1, 1);
         let target = WindowId::new(1, 2);
         let space = SpaceId::new(1);
+        let target_frame = CGRect::new(CGPoint::new(100.0, 0.0), CGSize::new(100.0, 100.0));
         let mut actor = DragActor::new(MouseSettings::default());
         actor.begin_native(
             DragSource {
@@ -798,10 +804,11 @@ mod tests {
                 tiled: true,
             },
             DragScene {
+                tiling_area: Some(rect()),
                 targets: vec![DragSceneTarget {
                     window: target,
                     space,
-                    frame: rect(),
+                    frame: target_frame,
                     directional: true,
                 }],
             },
@@ -823,6 +830,7 @@ mod tests {
     #[test]
     fn layouts_without_directional_inserts_expose_only_the_center_zone() {
         let scene = DragScene {
+            tiling_area: Some(rect()),
             targets: vec![DragSceneTarget {
                 window: WindowId::new(1, 2),
                 space: SpaceId::new(1),
@@ -870,6 +878,7 @@ mod tests {
                 tiled: false,
             },
             DragScene {
+                tiling_area: Some(rect()),
                 targets: vec![DragSceneTarget {
                     window: target,
                     space,

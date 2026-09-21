@@ -227,6 +227,15 @@ impl LayoutEngine {
         )
     }
 
+    pub(crate) fn drop_scene_tiling_area(
+        &self,
+        screen: CGRect,
+        display_uuid: Option<&str>,
+    ) -> CGRect {
+        let gaps = self.layout_settings.gaps.effective_for_display(display_uuid);
+        crate::layout_engine::utils::compute_tiling_area(screen, &gaps)
+    }
+
     /// Resolve an optional workspace index and snapshot its layout for read-only consumers.
     pub(crate) fn query_workspace_layout(
         &self,
