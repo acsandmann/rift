@@ -449,7 +449,7 @@ pub struct Settings {
     /// Trackpad gesture settings
     #[serde(default)]
     pub gestures: GestureSettings,
-
+    /// Mouse settings
     #[serde(default)]
     pub mouse: MouseSettings,
 
@@ -574,9 +574,10 @@ pub enum MouseDropAction {
 /// Native title-bar dragging continues to work normally. Holding [`Self::modifier`]
 /// reserves `action1` for the left button and `action2` for the right button, so
 /// a window can be moved or resized from anywhere inside it. Floating windows
-/// remain floating. Moving a tiled window over another tile exposes five logical
-/// zones: the center performs [`Self::drop_action`], while the four edges insert
-/// the source to the corresponding side of the target.
+/// remain floating. Moving a tiled window exposes nine logical zones across the
+/// tiling area: the center performs [`Self::drop_action`], edges use the layout's
+/// normal `move_node` semantics, while corners insert above or below the window on
+/// that side of the pointer.
 ///
 /// Example:
 ///

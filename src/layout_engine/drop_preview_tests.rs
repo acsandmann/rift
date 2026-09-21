@@ -8,13 +8,17 @@ use crate::common::config::GapSettings;
 use crate::layout_engine::systems::WindowLayoutConstraints;
 use crate::sys::screen::SpaceId;
 
-const ACTIONS: [(WindowDropAction, DropZone); 6] = [
+const ACTIONS: [(WindowDropAction, DropZone); 10] = [
     (WindowDropAction::Swap, DropZone::Center),
     (WindowDropAction::Stack, DropZone::Center),
-    (WindowDropAction::Insert(Direction::Left), DropZone::West),
-    (WindowDropAction::Insert(Direction::Right), DropZone::East),
-    (WindowDropAction::Insert(Direction::Up), DropZone::North),
-    (WindowDropAction::Insert(Direction::Down), DropZone::South),
+    (WindowDropAction::Move(Direction::Left), DropZone::West),
+    (WindowDropAction::Move(Direction::Right), DropZone::East),
+    (WindowDropAction::Move(Direction::Up), DropZone::North),
+    (WindowDropAction::Move(Direction::Down), DropZone::South),
+    (WindowDropAction::Insert(Direction::Up), DropZone::Northwest),
+    (WindowDropAction::Insert(Direction::Up), DropZone::Northeast),
+    (WindowDropAction::Insert(Direction::Down), DropZone::Southwest),
+    (WindowDropAction::Insert(Direction::Down), DropZone::Southeast),
 ];
 
 fn w(idx: u32) -> WindowId { WindowId::new(1, idx) }
@@ -57,11 +61,17 @@ fn verify_actions<S: LayoutSystem>(
 ) {
     for (action, zone) in ACTIONS {
         let mut preview_copy = clone_system(baseline);
-        assert!(preview_copy.apply_window_drop(layout, source, target, action));
-        let advertised = calculated_source(&preview_copy, layout, source);
-
         let mut committed = clone_system(baseline);
-        assert!(committed.apply_window_drop(layout, source, target, action));
+        let preview_available = preview_copy.apply_drag_action(layout, source, target, action);
+        let committed_available = committed.apply_drag_action(layout, source, target, action);
+        assert_eq!(
+            preview_available, committed_available,
+            "availability differs for {action:?}"
+        );
+        if !preview_available {
+            continue;
+        }
+        let advertised = calculated_source(&preview_copy, layout, source);
         let actual = calculated_source(&committed, layout, source);
         assert_eq!(advertised, actual, "preview differs for {action:?}");
 
@@ -78,6 +88,43 @@ fn verify_actions<S: LayoutSystem>(
     }
 }
 
+fn verify_move_node_parity<S: LayoutSystem>(
+    baseline: &S,
+    layout: LayoutId,
+    source: WindowId,
+    clone_system: impl Fn(&S) -> S,
+) {
+    for direction in [
+        Direction::Left,
+        Direction::Right,
+        Direction::Up,
+        Direction::Down,
+    ] {
+        let mut command = clone_system(baseline);
+        assert!(command.select_window(layout, source));
+        let command_changed = command.move_selection(layout, direction);
+
+        let mut drag = clone_system(baseline);
+        let drag_changed = drag.move_window(layout, source, direction);
+        assert_eq!(
+            drag_changed, command_changed,
+            "move availability differs for {direction:?}"
+        );
+        assert_eq!(
+            drag.all_windows_in_layout(layout),
+            command.all_windows_in_layout(layout),
+            "logical order differs for {direction:?}",
+        );
+        if drag_changed {
+            assert_eq!(
+                calculated_source(&drag, layout, source),
+                calculated_source(&command, layout, source),
+                "source frame differs for {direction:?}",
+            );
+        }
+    }
+}
+
 fn populate<S: LayoutSystem>(system: &mut S) -> LayoutId {
     let layout = system.create_layout();
     for window in [w(1), w(2), w(3), w(4)] {
@@ -90,6 +137,7 @@ fn populate<S: LayoutSystem>(system: &mut S) -> LayoutId {
 fn traditional_previews_match_committed_frames_for_every_action() {
     let mut system = TraditionalLayoutSystem::default();
     let layout = populate(&mut system);
+    verify_move_node_parity(&system, layout, w(4), TraditionalLayoutSystem::preview_clone);
     verify_actions(
         &system,
         layout,
@@ -125,9 +173,50 @@ fn traditional_previews_match_committed_frames_for_every_action() {
 }
 
 #[test]
+fn traditional_lower_right_continues_down_into_the_right_container() {
+    let mut system = TraditionalLayoutSystem::default();
+    let layout = system.create_layout();
+    for window in [w(1), w(2), w(3)] {
+        system.add_window_after_selection(layout, window);
+    }
+    assert!(system.apply_window_drop(
+        layout,
+        w(3),
+        w(2),
+        WindowDropAction::Insert(Direction::Down),
+    ));
+    system.toggle_tile_orientation(layout);
+    let mut down = system.preview_clone();
+    assert!(down.move_window(layout, w(3), Direction::Down));
+    let down_frame = calculated_source(&down, layout, w(3));
+    assert_eq!(down_frame.origin, CGPoint::new(0.0, 400.0));
+    assert_eq!(down_frame.size, CGSize::new(1200.0, 400.0));
+
+    assert!(system.apply_drag_action(
+        layout,
+        w(3),
+        w(2),
+        WindowDropAction::Insert(Direction::Down),
+    ));
+    assert_eq!(
+        calculated_source(&system, layout, w(1)),
+        CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(600.0, 800.0)),
+    );
+    assert_eq!(
+        calculated_source(&system, layout, w(2)),
+        CGRect::new(CGPoint::new(600.0, 0.0), CGSize::new(600.0, 400.0)),
+    );
+    assert_eq!(
+        calculated_source(&system, layout, w(3)),
+        CGRect::new(CGPoint::new(600.0, 400.0), CGSize::new(600.0, 400.0)),
+    );
+}
+
+#[test]
 fn bsp_previews_match_committed_frames_for_every_action() {
     let mut system = BspLayoutSystem::default();
     let layout = populate(&mut system);
+    verify_move_node_parity(&system, layout, w(4), BspLayoutSystem::preview_clone);
     verify_actions(&system, layout, w(4), w(2), BspLayoutSystem::preview_clone);
 
     assert!(system.apply_window_drop(layout, w(3), w(2), WindowDropAction::Stack));
@@ -154,6 +243,7 @@ fn bsp_previews_match_committed_frames_for_every_action() {
 fn master_stack_previews_match_committed_frames_for_every_action() {
     let mut system = MasterStackLayoutSystem::default();
     let layout = populate(&mut system);
+    verify_move_node_parity(&system, layout, w(4), MasterStackLayoutSystem::preview_clone);
     verify_actions(
         &system,
         layout,
@@ -167,6 +257,7 @@ fn master_stack_previews_match_committed_frames_for_every_action() {
 fn scrolling_previews_match_committed_frames_for_every_action() {
     let mut system = ScrollingLayoutSystem::default();
     let layout = populate(&mut system);
+    verify_move_node_parity(&system, layout, w(4), ScrollingLayoutSystem::preview_clone);
     verify_actions(&system, layout, w(4), w(2), ScrollingLayoutSystem::preview_clone);
 }
 
@@ -174,5 +265,6 @@ fn scrolling_previews_match_committed_frames_for_every_action() {
 fn stack_previews_match_committed_frames_for_every_action() {
     let mut system = StackLayoutSystem::default();
     let layout = populate(&mut system);
+    verify_move_node_parity(&system, layout, w(4), StackLayoutSystem::preview_clone);
     verify_actions(&system, layout, w(4), w(2), StackLayoutSystem::preview_clone);
 }

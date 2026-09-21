@@ -217,6 +217,27 @@ pub trait LayoutSystem: Serialize + for<'de> Deserialize<'de> {
     ) -> bool;
 
     fn move_selection(&mut self, layout: LayoutId, direction: Direction) -> bool;
+    fn move_window(&mut self, layout: LayoutId, window: WindowId, direction: Direction) -> bool {
+        self.select_window(layout, window) && self.move_selection(layout, direction)
+    }
+    fn apply_drag_action(
+        &mut self,
+        layout: LayoutId,
+        source: WindowId,
+        target: WindowId,
+        action: crate::layout_engine::WindowDropAction,
+    ) -> bool {
+        match action {
+            crate::layout_engine::WindowDropAction::Move(direction) => {
+                self.move_window(layout, source, direction)
+            }
+            crate::layout_engine::WindowDropAction::Swap
+            | crate::layout_engine::WindowDropAction::Stack
+            | crate::layout_engine::WindowDropAction::Insert(_) => {
+                self.apply_window_drop(layout, source, target, action)
+            }
+        }
+    }
     fn move_selection_to_layout_after_selection(
         &mut self,
         from_layout: LayoutId,

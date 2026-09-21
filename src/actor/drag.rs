@@ -175,7 +175,7 @@ impl DragActor {
                         Some(DropTarget {
                             frame: target.frame,
                             tiling_area: session.scene.tiling_area.unwrap_or(target.frame),
-                            preview_area: target.preview_area(previous.action)?,
+                            preview_area: target.preview_area(previous.zone, previous.action)?,
                             ..previous
                         })
                     })
@@ -587,22 +587,32 @@ pub fn classify_zone(frame: CGRect, point: CGPoint, fraction: f64) -> Option<Dro
     let right = 1.0 - left;
     let top = (point.y - frame.origin.y) / frame.size.height;
     let bottom = 1.0 - top;
-    if left >= fraction && right >= fraction && top >= fraction && bottom >= fraction {
-        return Some(DropZone::Center);
-    }
-
-    // Strict comparisons preserve the specified West, East, North, South tie order.
-    let mut best = (left, DropZone::West);
-    if right < best.0 {
-        best = (right, DropZone::East);
-    }
-    if top < best.0 {
-        best = (top, DropZone::North);
-    }
-    if bottom < best.0 {
-        best = (bottom, DropZone::South);
-    }
-    Some(best.1)
+    let horizontal = if left < fraction {
+        Some(Direction::Left)
+    } else if right < fraction {
+        Some(Direction::Right)
+    } else {
+        None
+    };
+    let vertical = if top < fraction {
+        Some(Direction::Up)
+    } else if bottom < fraction {
+        Some(Direction::Down)
+    } else {
+        None
+    };
+    Some(match (horizontal, vertical) {
+        (Some(Direction::Left), Some(Direction::Up)) => DropZone::Northwest,
+        (Some(Direction::Right), Some(Direction::Up)) => DropZone::Northeast,
+        (Some(Direction::Left), Some(Direction::Down)) => DropZone::Southwest,
+        (Some(Direction::Right), Some(Direction::Down)) => DropZone::Southeast,
+        (Some(Direction::Left), None) => DropZone::West,
+        (Some(Direction::Right), None) => DropZone::East,
+        (None, Some(Direction::Up)) => DropZone::North,
+        (None, Some(Direction::Down)) => DropZone::South,
+        (None, None) => DropZone::Center,
+        _ => unreachable!(),
+    })
 }
 
 fn zone_frame(frame: CGRect, zone: DropZone, fraction: f64) -> CGRect {
@@ -634,16 +644,34 @@ fn zone_frame(frame: CGRect, zone: DropZone, fraction: f64) -> CGRect {
             CGPoint::new(x, y + h * (1.0 - fraction)),
             objc2_core_foundation::CGSize::new(w, h * fraction),
         ),
+        DropZone::Northwest => CGRect::new(
+            CGPoint::new(x, y),
+            objc2_core_foundation::CGSize::new(w * fraction, h * fraction),
+        ),
+        DropZone::Northeast => CGRect::new(
+            CGPoint::new(x + w * (1.0 - fraction), y),
+            objc2_core_foundation::CGSize::new(w * fraction, h * fraction),
+        ),
+        DropZone::Southwest => CGRect::new(
+            CGPoint::new(x, y + h * (1.0 - fraction)),
+            objc2_core_foundation::CGSize::new(w * fraction, h * fraction),
+        ),
+        DropZone::Southeast => CGRect::new(
+            CGPoint::new(x + w * (1.0 - fraction), y + h * (1.0 - fraction)),
+            objc2_core_foundation::CGSize::new(w * fraction, h * fraction),
+        ),
     }
 }
 
 pub fn resolve_action(zone: DropZone, center: MouseDropAction) -> WindowDropAction {
     match zone {
         DropZone::Center => center.into(),
-        DropZone::West => WindowDropAction::Insert(Direction::Left),
-        DropZone::East => WindowDropAction::Insert(Direction::Right),
-        DropZone::North => WindowDropAction::Insert(Direction::Up),
-        DropZone::South => WindowDropAction::Insert(Direction::Down),
+        DropZone::West => WindowDropAction::Move(Direction::Left),
+        DropZone::East => WindowDropAction::Move(Direction::Right),
+        DropZone::North => WindowDropAction::Move(Direction::Up),
+        DropZone::South => WindowDropAction::Move(Direction::Down),
+        DropZone::Northwest | DropZone::Northeast => WindowDropAction::Insert(Direction::Up),
+        DropZone::Southwest | DropZone::Southeast => WindowDropAction::Insert(Direction::Down),
     }
 }
 
@@ -683,7 +711,7 @@ pub fn hit_test(
         space: target.space,
         frame: target.frame,
         tiling_area,
-        preview_area: target.preview_area(action)?,
+        preview_area: target.preview_area(zone, action)?,
         zone,
         action,
     })
@@ -700,13 +728,27 @@ fn distance_to_rect_squared(frame: CGRect, point: CGPoint) -> f64 {
 }
 
 impl DragSceneTarget {
-    fn preview_area(self, action: WindowDropAction) -> Option<CGRect> {
+    fn preview_area(self, zone: DropZone, action: WindowDropAction) -> Option<CGRect> {
+        match zone {
+            DropZone::Northwest => return self.previews.northwest,
+            DropZone::Northeast => return self.previews.northeast,
+            DropZone::Southwest => return self.previews.southwest,
+            DropZone::Southeast => return self.previews.southeast,
+            _ => {}
+        }
         match action {
             WindowDropAction::Swap | WindowDropAction::Stack => self.previews.center,
-            WindowDropAction::Insert(Direction::Left) => self.previews.west,
-            WindowDropAction::Insert(Direction::Right) => self.previews.east,
-            WindowDropAction::Insert(Direction::Up) => self.previews.north,
-            WindowDropAction::Insert(Direction::Down) => self.previews.south,
+            WindowDropAction::Insert(Direction::Left) | WindowDropAction::Move(Direction::Left) => {
+                self.previews.west
+            }
+            WindowDropAction::Insert(Direction::Right)
+            | WindowDropAction::Move(Direction::Right) => self.previews.east,
+            WindowDropAction::Insert(Direction::Up) | WindowDropAction::Move(Direction::Up) => {
+                self.previews.north
+            }
+            WindowDropAction::Insert(Direction::Down) | WindowDropAction::Move(Direction::Down) => {
+                self.previews.south
+            }
         }
     }
 }
@@ -729,7 +771,7 @@ mod tests {
     fn rect() -> CGRect { CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(200.0, 100.0)) }
 
     #[test]
-    fn classifies_center_edges_and_corner_ties() {
+    fn classifies_center_edges_and_corners() {
         assert_eq!(
             classify_zone(rect(), CGPoint::new(100.0, 50.0), 0.25),
             Some(DropZone::Center)
@@ -752,7 +794,23 @@ mod tests {
         );
         assert_eq!(
             classify_zone(rect(), CGPoint::new(0.0, 0.0), 0.25),
-            Some(DropZone::West)
+            Some(DropZone::Northwest)
+        );
+        assert_eq!(
+            classify_zone(rect(), CGPoint::new(200.0, 0.0), 0.25),
+            Some(DropZone::Northeast)
+        );
+        assert_eq!(
+            classify_zone(rect(), CGPoint::new(0.0, 100.0), 0.25),
+            Some(DropZone::Southwest)
+        );
+        assert_eq!(
+            classify_zone(rect(), CGPoint::new(200.0, 100.0), 0.25),
+            Some(DropZone::Southeast)
+        );
+        assert_eq!(
+            resolve_action(DropZone::Southeast, MouseDropAction::Swap),
+            WindowDropAction::Insert(Direction::Down)
         );
         assert_eq!(classify_zone(rect(), CGPoint::new(-1.0, 50.0), 0.25), None);
     }
@@ -806,6 +864,7 @@ mod tests {
                         east: Some(target_frame),
                         north: Some(target_frame),
                         south: Some(target_frame),
+                        ..Default::default()
                     },
                 }],
             },
@@ -816,7 +875,7 @@ mod tests {
         }));
         assert_eq!(
             actor.target().unwrap().action,
-            WindowDropAction::Insert(Direction::Left)
+            WindowDropAction::Move(Direction::Left)
         );
         let preview = preview_frame(actor.target().unwrap());
         assert_eq!(preview.origin, CGPoint::new(104.0, 4.0));
@@ -841,6 +900,7 @@ mod tests {
                     east: None,
                     north: None,
                     south: None,
+                    ..Default::default()
                 },
             }],
         };
@@ -895,6 +955,7 @@ mod tests {
                         east: Some(rect()),
                         north: Some(rect()),
                         south: Some(rect()),
+                        ..Default::default()
                     },
                 }],
             },

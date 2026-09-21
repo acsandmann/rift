@@ -195,7 +195,7 @@ impl LayoutEngine {
             return false;
         };
         self.workspace_layouts.mark_last_saved(request.space, workspace, layout);
-        self.workspace_tree_mut(workspace).apply_window_drop(
+        self.workspace_tree_mut(workspace).apply_drag_action(
             layout,
             request.source,
             request.target,
@@ -252,9 +252,13 @@ impl LayoutEngine {
         };
         let actions = [
             center_action,
-            crate::layout_engine::WindowDropAction::Insert(Direction::Left),
-            crate::layout_engine::WindowDropAction::Insert(Direction::Right),
+            crate::layout_engine::WindowDropAction::Move(Direction::Left),
+            crate::layout_engine::WindowDropAction::Move(Direction::Right),
+            crate::layout_engine::WindowDropAction::Move(Direction::Up),
+            crate::layout_engine::WindowDropAction::Move(Direction::Down),
             crate::layout_engine::WindowDropAction::Insert(Direction::Up),
+            crate::layout_engine::WindowDropAction::Insert(Direction::Up),
+            crate::layout_engine::WindowDropAction::Insert(Direction::Down),
             crate::layout_engine::WindowDropAction::Insert(Direction::Down),
         ];
         let gaps = self.layout_settings.gaps.effective_for_display(display_uuid);
@@ -262,7 +266,7 @@ impl LayoutEngine {
             return Default::default();
         };
         let mut frames = actions.into_iter().zip(systems).map(|(action, mut system)| {
-            system.apply_window_drop(layout, source, target, action).then_some(())?;
+            system.apply_drag_action(layout, source, target, action).then_some(())?;
             system
                 .calculate_layout(
                     layout,
@@ -283,6 +287,10 @@ impl LayoutEngine {
             east: frames.next().flatten(),
             north: frames.next().flatten(),
             south: frames.next().flatten(),
+            northwest: frames.next().flatten(),
+            northeast: frames.next().flatten(),
+            southwest: frames.next().flatten(),
+            southeast: frames.next().flatten(),
         }
     }
 

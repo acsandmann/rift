@@ -27,6 +27,10 @@ pub struct DropPreviewFrames {
     pub east: Option<CGRect>,
     pub north: Option<CGRect>,
     pub south: Option<CGRect>,
+    pub northwest: Option<CGRect>,
+    pub northeast: Option<CGRect>,
+    pub southwest: Option<CGRect>,
+    pub southeast: Option<CGRect>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -43,6 +47,10 @@ pub enum DropZone {
     East,
     North,
     South,
+    Northwest,
+    Northeast,
+    Southwest,
+    Southeast,
 }
 
 #[derive(Debug, Clone, Copy)]
