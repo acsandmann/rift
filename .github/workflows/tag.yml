@@ -20,6 +20,8 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ github.sha }}
+      - name: Verify default config is present
+        run: test -s rift.default.toml
       - name: Tag changed root package version
         env:
           BEFORE: ${{ github.event.before }}
